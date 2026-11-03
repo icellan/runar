@@ -1,0 +1,1680 @@
+# Remediation progress
+
+## Baseline
+Branch: fix/v1-tri-review-r2   Base SHA: d207ee8e (origin/main)   Worktree: .worktrees/v1-remediation-r2
+Test suite: PASS at d207ee8e except ONE pre-existing test — tests/golden-provenance-gate-is-cwd-independent.test.ts
+  (fails on any tree with no golden diff vs origin/main: its non-vacuity guard assumes a non-empty diff). 13516/13517 vitest; 7 compiler, 6 SDK, 4 example suites all PASS.
+Conformance suite: PASS at d207ee8e — golden 82/82, multi-format fold-off 736/736, fold-on 736/736, parser-only clean, analyzer green (RUNAR_CONFORMANCE_STRICT=1, 7 tiers).
+Model tiers available: cheap=haiku  mid=sonnet  top=opus
+Logs: remediation-logs/baseline/
+
+## Gate decisions (2026-09-22)
+- goldens: restamp only via the golden-provenance gate (route A/B), flagged GOLDEN RESTAMP
+- D1: keep FixedArray OOB reads as v1 by-design
+- D2: SDKs + shared schema match the compiler (fixed 8-byte Rabin state fields)
+- red_baseline: fix first as F-000
+- cadence: per item: component suite + golden + targeted multi-format (both fold modes); full multi-format both modes every 10 items and at the end
+- concurrency: up to 3 items in isolated worktrees, different tiers, no shared files
+
+## Queue
+- [x] F-000 — tests/golden-provenance-gate-is-cwd-independent.test.ts fails on any tree with no golden d — MEDIUM — SINGLE — tier: top — sources: dispatcher (baseline)
+- [x] F-001 — Numeric-identity peephole rules (PUSH 0;OP_ADD / PUSH 0;OP_SUB / OP_NEGATE;OP_NEGATE) dele — CRITICAL — MAJORITY — tier: top — sources: CL-BUG-006, CL-BUG-044, CL-BUG-096, CL-BUG-116, CX-BUG-011
+- [x] F-002 — TS: `compileFromANF`'s `--ir`/ANF entry point unconditionally skips constant folding regar — CRITICAL — MAJORITY — tier: top — sources: CL-BUG-224, CX-DOC-004
+- [x] F-003 — Rust `.runar.go` parser: *= /= %= &= |= ^= <<= >>= are missing from the two-char operator  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-167
+- [x] F-004 — CompileFromProgram (the `--ir` entry point) never calls frontend.Validate, so every valida — CRITICAL — SINGLE — tier: top — sources: CL-BUG-084, CL-BUG-216, CL-BUG-217, CL-GAP-005
+- [x] F-005 — Go lowerForStatement never merges the loop body's addOutput/addRawOutput refs back into th — CRITICAL — SINGLE — tier: top — sources: CL-BUG-186
+- [x] F-006 — Zig: a failed while→for merge in parser_zig.go silently drops the increment, freezing the  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-199
+- [x] F-007 — Go: verifySP1FRI emits a verifier that checks no FRI query opening at all and then pushes  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-037
+- [x] F-008 — The SP1-FRI locking script enforces no proof property at all; the one binding it does emit — CRITICAL — SINGLE — tier: top — sources: CL-BUG-085
+- [x] F-009 — The TypeScript surface parser maps every unrecognised compound assignment to `+` — CRITICAL — SINGLE — tier: top — sources: CL-BUG-187
+- [x] F-010 — The Go-DSL parser accepts exported value-receiver methods on *unrelated* types as public s — CRITICAL — SINGLE — tier: top — sources: CL-BUG-188
+- [x] F-011 — Go's Python tokenizer lets an unterminated string literal run to EOF, silently swallowing  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-196
+- [x] F-012 — Ruby `=begin`/`=end` block comments are not lexed, so `=end` closes the class body and eve — CRITICAL — SINGLE — tier: top — sources: CL-BUG-197
+- [x] F-013 — IndexAccessExpr assignment on a non-FixedArray property is silently discarded and ships a  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-214
+- [x] F-014 — compile_from_ir / compile_from_ir_bytes skip _validate, _type_check, and _expand_fixed_arr — CRITICAL — SINGLE — tier: top — sources: CL-BUG-266
+- [x] F-015 — Python: `if`-branch lowering contexts do not inherit the parent's `renamed_params` map, so — CRITICAL — SINGLE — tier: top — sources: CX-BUG-059
+- [x] F-016 — Python's `parser_ts.py` compiles the FIRST class in a `.runar.ts` file as the contract reg — CRITICAL — SINGLE — tier: top — sources: CL-BUG-200
+- [x] F-017 — `py_convert_name` is non-injective: two distinct locals alias to one ANF binding, turning  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-201
+- [x] F-018 — Ruby `=begin`/`=end` block comments are not lexed, PROVED BY EXECUTION — CRITICAL — SINGLE — tier: top — sources: CL-BUG-257
+- [x] F-019 — Rust `.runar.go` parser: *= /= %= &= |= ^= <<= >>= are missing from the two-char operator  — CRITICAL — SINGLE — tier: top — sources: CL-BUG-167
+- [x] F-020 — - **CL-BUG-245 — Go DSL silently no-ops ALL EIGHT of `*= /= %= &= |= ^= <<= >>=`.** The co — CRITICAL — SINGLE — tier: top — sources: CL-BUG-245
+- [x] F-021 — - **CL-BUG-246 — `asm()` in a for-loop's update clause bypasses the UnsafeSmartContract ga — CRITICAL — SINGLE — tier: top — sources: CL-BUG-246
+- [x] F-022 — - **CL-BUG-247 — Solidity accepts an unknown base class and emits an unenforced mutable-st — CRITICAL — SINGLE — tier: top — sources: CL-BUG-247
+- [x] F-023 — - **CL-BUG-248 — `while` → `for` folding produces a wrong ITERATION COUNT on three surface — CRITICAL — SINGLE — tier: top — sources: CL-BUG-248
+- [x] F-024 — The auto-injected stateful continuation conserves no value: `_newAmount`/`_changeAmount`/` — CRITICAL — SINGLE — tier: top — sources: CL-BUG-079
+- [x] F-025 — Zig: `bound_is_const` is wired in only 1 of 9 format parsers, so a runtime/identifier for- — CRITICAL — SINGLE — tier: top — sources: CL-BUG-060, CL-BUG-106
+- [x] F-026 — Zig and Python: `0b…` / `0o…` literals silently evaluate to `0` — CRITICAL — SINGLE — tier: top — sources: CL-BUG-198
+- [x] F-027 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-028 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-029 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-030 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-031 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-032 — GorillaPool satoshi/BTC magnitude heuristic, shared by ≥5 SDK tiers, with tests pinning it — CRITICAL — SINGLE — tier: top — sources: CL-BUG-071
+- [x] F-033 — Zig contract-runtime percentOf divides by 100 instead of 10000 (basis points), diverging f — CRITICAL — SINGLE — tier: top — sources: CL-BUG-104
+- [x] F-034 — SLH-DSA-SHA2-256f uses FORS height a=8; FIPS 205 requires a=9 — all 7 compiler tiers + gol — HIGH — MAJORITY — tier: top — sources: CL-BUG-051, CL-BUG-077, GK-BUG-013
+- [x] F-035 — RabinSig/RabinPubKey state fields: shared schema + all 7 SDK codecs push-data-frame them w — HIGH — MAJORITY — tier: top — sources: CL-BUG-038, CL-BUG-070, CL-BUG-124, CL-BUG-133, GK-GAP-001
+- [x] F-036 — Go Groth16 MSM public-input-binding scalar ladder does not reduce the attacker-supplied sc — HIGH — MAJORITY — tier: top — sources: CL-BUG-039, GK-BUG-008
+- [x] F-037 — Java: ExpandFixedArrays rebuilds every method through the 5-arg MethodNode constructor, si — HIGH — MAJORITY — tier: top — sources: CL-BUG-243, CX-BUG-037
+- [x] F-038 — --emit-ir's _IR_EXCLUDED_FIELDS drops synthetic_array_chain (and parent_class), so FixedAr — HIGH — MAJORITY — tier: top — sources: CL-BUG-268, CX-BUG-070
+- [x] F-039 — A malformed `@sighash` directive (e.g. missing whitespace, trailing punctuation) is silent — HIGH — MAJORITY — tier: top — sources: CL-BUG-174, CX-BUG-086
+- [x] F-040 — WhatsOnChain provider's `getUtxos` returns an empty locking script (`script: ''`), which f — HIGH — MAJORITY — tier: top — sources: CL-BUG-072, GK-BUG-007
+- [x] F-041 — WhatsOnChain provider's `getUtxos` returns an empty locking script (`script: ''`), which f — HIGH — MAJORITY — tier: top — sources: CL-BUG-072, GK-BUG-007
+- [x] F-042 — Ruby WalletProvider#broadcast reports success for a rejected or unsent ARC transaction — HIGH — MAJORITY — tier: top — sources: CL-BUG-158, GK-BUG-029
+- [x] F-043 — Ruby build_p2pkh_script lacks the 66/130-char compressed/uncompressed pubkey branch Go/Pyt — HIGH — MAJORITY — tier: top — sources: CL-BUG-157, GK-BUG-030
+- [x] F-044 — WhatsOnChain provider's `getUtxos` returns an empty locking script (`script: ''`), which f — HIGH — MAJORITY — tier: top — sources: CL-BUG-072, GK-BUG-007
+- [x] F-045 — TokenWallet.transfer/.merge BIP-143-sign a preliminary throwaway transaction, then contrac — HIGH — MAJORITY — tier: top — sources: CL-BUG-137, GK-BUG-024
+- [x] F-046 — WhatsOnChain provider's `getUtxos` returns an empty locking script (`script: ''`), which f — HIGH — MAJORITY — tier: top — sources: CL-BUG-072, GK-BUG-007
+- [x] F-047 — On-chain Rabin verify compares the unreduced SHA-256 digest (off-chain reduces mod n) — al — HIGH — SINGLE — tier: top — sources: GK-BUG-021
+- [x] F-048 — On-chain SLH-DSA treeAddr8 packs idx_tree with OP_NUM2BIN 8; 256f indices in [2^63,2^64) n — HIGH — SINGLE — tier: top — sources: GK-BUG-018
+- [x] F-049 — Fold-ON conformance step reports a false PASS for single-tier fixtures because both parity — HIGH — SINGLE — tier: top — sources: CL-BUG-088
+- [x] F-050 — Unrecognised/typo compiler id in a fixture's `compilers` allowlist collapses the supported — HIGH — SINGLE — tier: top — sources: CL-BUG-089
+- [x] F-051 — `updateGoldenFiles` ignores the `compilers` allowlist and stamps Go-only-scoped goldens fr — HIGH — SINGLE — tier: top — sources: CL-BUG-100
+- [x] F-052 — Negative-fixture corpus (conformance/negatives) is TypeScript-only; 8 of 9 surface formats — HIGH — SINGLE — tier: top — sources: CL-BUG-225
+- [x] F-053 — The three strongest CI gates (cross-compiler-bytewise, differential, golden-provenance-gat — HIGH — SINGLE — tier: top — sources: CL-BUG-235
+- [x] F-054 — 37 Rust integration tests have no runner — ci.yml's `cargo test --release -- --ignored` on — HIGH — SINGLE — tier: top — sources: CL-BUG-236
+- [x] F-055 — The strongest off-chain oracle (`real-crypto-execution.ts`'s stateless-signed leg, plus `s — HIGH — SINGLE — tier: top — sources: CL-BUG-073
+- [x] F-056 — Webapp re-init handlers overwrite live keypairs with no game-phase guard, permanently bric — HIGH — SINGLE — tier: top — sources: CL-BUG-253
+- [x] F-057 — Three Rust example suites (tic-tac-toe, token-ft, token-nft) test a hand-written reimpleme — HIGH — SINGLE — tier: top — sources: CL-BUG-232
+- [x] F-058 — Shipped DSL Groth16Verifier contract skips G2 on-curve/subgroup checks before pairing — HIGH — SINGLE — tier: top — sources: CL-BUG-082
+- [x] F-059 — The published decompiler silently loses ~95% of its capability and reports success — HIGH — SINGLE — tier: top — sources: CL-BUG-110
+- [x] F-060 — Two of seven compilers reject a checked-in example contract; five have no code path for it — HIGH — SINGLE — tier: top — sources: CL-BUG-230
+- [x] F-061 — Three Python negatives swallow their own failure signal; the BUG-001 malleability gate is  — HIGH — SINGLE — tier: top — sources: CL-BUG-233
+- [x] F-062 — 5. **CL-BUG-053 (six parsers silently turn a leading-zero decimal into 0) — HIGH — SINGLE — tier: top — sources: CL-BUG-053
+- [x] F-063 — ArrayLiteralExpr is missing from four Go AST walkers (validator.go's recursion/hex-length  — HIGH — SINGLE — tier: top — sources: CL-BUG-190
+- [x] F-064 — parseStatement's default case silently returns nil for syntactically valid but unrecognize — HIGH — SINGLE — tier: top — sources: CX-BUG-026
+- [x] F-065 — ANFMethod.SigHashType is tagged json:"-", so a source-to-IR-to-artifact round-trip cannot  — HIGH — SINGLE — tier: top — sources: CX-BUG-020
+- [x] F-066 — ANFProgram.ParentClass is tagged json:"-", so a source-to-IR-to-artifact round-trip loses  — HIGH — SINGLE — tier: top — sources: CX-BUG-021
+- [x] F-067 — Go: array-literal metadata (`arrayElements`/`arrayLengths`) built before a conditional is  — HIGH — SINGLE — tier: top — sources: CX-BUG-014
+- [x] F-068 — Go: `check_preimage.sighashFlag` is a plain `int` from JSON with no range/validity check,  — HIGH — SINGLE — tier: top — sources: CL-BUG-218
+- [x] F-069 — The Move variant of the flagship nine-format end2end example compiles to a materially diff — HIGH — SINGLE — tier: top — sources: CL-BUG-251
+- [x] F-070 — `--ir` artifacts always omit parentClass, flipping the SDK's issue-#42/#44 sighash-subscri — HIGH — SINGLE — tier: top — sources: CL-BUG-008
+- [x] F-071 — Recursive private method in IR causes an unrecoverable stack overflow; checkNoRecursion is — HIGH — SINGLE — tier: top — sources: CL-BUG-009
+- [x] F-072 — Go: lowerCall's assert/exit/super paths register a stack slot no opcode produces — HIGH — SINGLE — tier: top — sources: CL-BUG-042
+- [x] F-073 — The Go-DSL parser merges the properties of *every* contract struct in a file into the last — HIGH — SINGLE — tier: top — sources: CL-BUG-189
+- [x] F-074 — `mapGoOp` returns `"+"` for any unmapped Go binary operator — HIGH — SINGLE — tier: top — sources: CL-BUG-192
+- [x] F-075 — Crit-3 and the `requireOutputP2PKH(0)` collision guard do not follow private helpers, whil — HIGH — SINGLE — tier: top — sources: CL-BUG-193
+- [x] F-076 — Go's Python tokenizer panics (uncaught, exit 2) on a file ending with a backslash inside a — HIGH — SINGLE — tier: top — sources: CL-BUG-195
+- [x] F-077 — WA G2 affine add documents a Qx≠Tx abort and does not emit it; doubling-collision accepts  — HIGH — SINGLE — tier: top — sources: GK-BUG-022
+- [x] F-078 — Constant propagation retains stale values across same-name rebindings — HIGH — SINGLE — tier: top — sources: CX-BUG-003
+- [ ] F-079 — Java's ANF-level AnfMethod record has no sighashType field at all, and the CLI never emits — HIGH — SINGLE — tier: top — sources: GK-BUG-015
+- [x] F-080 — Java: `_codePart` discovery (`methodUsesCodePart`) does not recurse into private helper me — HIGH — SINGLE — tier: top — sources: CX-BUG-029
+- [x] F-081 — Java: branch subcontexts discard outer arrayLengths/arrayElements metadata required by che — HIGH — SINGLE — tier: top — sources: CX-BUG-030
+- [x] F-082 — Java: ConstantFold's environment keeps a stale constant value after a same-name rebinding  — HIGH — SINGLE — tier: top — sources: CX-BUG-031
+- [x] F-083 — Java: state pushdata encoder/decoder omit PUSHDATA4, so values >= 65536 bytes (which input — HIGH — SINGLE — tier: top — sources: CX-BUG-040
+- [x] F-084 — Java: ANF loader silently converts missing or wrongly-typed required collections (properti — HIGH — SINGLE — tier: top — sources: CX-BUG-046
+- [x] F-085 — The tier-version drift gate cannot match the current version family — HIGH — SINGLE — tier: top — sources: CL-BUG-238
+- [x] F-086 — EC-generated fresh-constant names (__ec_opt_N) can collide with an existing body binding o — HIGH — SINGLE — tier: top — sources: CX-BUG-052
+- [x] F-087 — FixedArray expansion generates synthetic property names (e.g. board__0) without reserving  — HIGH — SINGLE — tier: top — sources: CX-BUG-067
+- [x] F-088 — The generic CLI IR serializer's _SNAKE_TO_CAMEL table has no mapping for sighash_type, so  — HIGH — SINGLE — tier: top — sources: CX-BUG-071
+- [x] F-089 — Python: `if`-branch lowering contexts do not inherit the parent's `array_elements`/`array_ — HIGH — SINGLE — tier: top — sources: CX-BUG-058
+- [x] F-090 — Python: `checkMultiSig` accepts untyped and heterogeneous array literals because `_infer_e — HIGH — SINGLE — tier: top — sources: CX-BUG-069
+- [x] F-091 — Python `bn254G1Add` returns a silently different, still on-curve point for constructible ω — HIGH — SINGLE — tier: top — sources: CL-BUG-144
+- [x] F-092 — Python: `merkleRootPoseidon2KB` discards 7 of its 8 root limbs (compilers/python/runar_com — HIGH — SINGLE — tier: top — sources: CL-BUG-145
+- [x] F-093 — `@sighash SINGLE` multi-output validation undercounts a loop body — HIGH — SINGLE — tier: top — sources: CL-BUG-205
+- [x] F-094 — Python's Zig parser does not lower `runar.hexToBytes(...)`; a checked-in in-repo contract  — HIGH — SINGLE — tier: top — sources: CL-BUG-207
+- [x] F-095 — Constant facts survive nonconstant same-name rebindings — HIGH — SINGLE — tier: top — sources: CX-BUG-054
+- [>] F-096 — `_codePart` discovery does not recurse through private helpers that build outputs — HIGH — SINGLE — tier: top — sources: CX-BUG-061
+- [x] F-097 — Ruby: a `false`-valued property initializer is treated as absent by stack lowering's truth — HIGH — SINGLE — tier: top — sources: CX-BUG-083
+- [x] F-098 — Ruby: FixedArray expansion drops @embedAlways when rebuilding PropertyNode for each array  — HIGH — SINGLE — tier: top — sources: CL-BUG-270
+- [x] F-099 — Ruby: checkMultiSig accepts bigint arrays because array literals have no inferred type, so — HIGH — SINGLE — tier: top — sources: CL-BUG-273
+- [x] F-100 — Ruby: FixedArray-generated slot/temp names (__idx_N, __val_N, property__N) can collide wit — HIGH — SINGLE — tier: top — sources: CX-BUG-077
+- [x] F-101 — Rust `constructor_args` values are baked into properties with no type or length validation — HIGH — SINGLE — tier: top — sources: CL-BUG-261, CL-GAP-038
+- [x] F-102 — Rust `--ir` path lets the script-level sighash flag diverge from the ABI's declared sigHas — HIGH — SINGLE — tier: top — sources: CL-BUG-262
+- [x] F-103 — Rust: `constructor_args` in `CompileOptions` is silently ignored by the ANF-IR and direct- — HIGH — SINGLE — tier: top — sources: CX-BUG-087
+- [x] F-104 — Rust `--ir` silently drops parentClass AND sighashType (both `#[serde(skip)]`), so the SDK — HIGH — SINGLE — tier: top — sources: CL-BUG-020
+- [x] F-105 — Hostile IR panics the compiler via an unguarded `panic!` in assemble_artifact, outside eve — HIGH — SINGLE — tier: top — sources: CL-BUG-021
+- [x] F-106 — Rust tier: issue-#130 shadow renaming is lost inside branches — HIGH — SINGLE — tier: top — sources: CL-BUG-095
+- [x] F-107 — `--ir` compiles a validator-rejected readonly-hijack to an anyone-can-spend script, and th — HIGH — SINGLE — tier: top — sources: CL-BUG-263
+- [x] F-108 — TS DCE has no "last binding is live" root: an ANF method's final (implicit-result) binding — HIGH — SINGLE — tier: top — sources: GK-BUG-019
+- [x] F-109 — TS EC optimizer's ec-add-identity-left/right rules treat O (point at infinity) as a group  — HIGH — SINGLE — tier: top — sources: GK-BUG-035
+- [x] F-110 — TS: affine-value tracking analyzes a loop body only once, missing repeated Sig/SigHashPrei — HIGH — SINGLE — tier: top — sources: CX-BUG-106
+- [x] F-111 — `requireBaked` only proves a property was referenced pre-optimization; the post-emission c — HIGH — SINGLE — tier: top — sources: CX-BUG-110
+- [x] F-112 — TS: `ConstEnv` has no delete/invalidate operation, so rebinding an ANF name previously rec — HIGH — SINGLE — tier: top — sources: CX-BUG-097
+- [x] F-113 — The Move variant of the flagship nine-format end2end example compiles to a materially diff — HIGH — SINGLE — tier: top — sources: CL-BUG-251
+- [x] F-114 — `blake3Compress`/`sha256Compress` accept mis-sized operands in all 7 tiers, enabling a sec — HIGH — SINGLE — tier: top — sources: CL-BUG-086
+- [x] F-115 — TS EC optimizer single-pass vs Go fixed-point; chained rewrites diverge — HIGH — SINGLE — tier: top — sources: CL-BUG-003
+- [x] F-116 — `@sighash SINGLE` multi-output validation undercounts a loop body — HIGH — SINGLE — tier: top — sources: CL-BUG-205
+- [x] F-117 — FixedArray expansion can collide with user-declared `name__index` properties — HIGH — SINGLE — tier: top — sources: CX-BUG-102
+- [x] F-118 — Zig's --ir path always emits parentClass:"SmartContract" (an unconditional struct default) — HIGH — SINGLE — tier: top — sources: CL-BUG-134
+- [x] F-119 — Zig Move-format `loop { }` fabricates a hardcoded 1000-iteration bound (parse_move.zig:140 — HIGH — SINGLE — tier: top — sources: CL-BUG-062
+- [x] F-120 — Zig `compileFromIR` never runs the `sighash_validate` pass (or any validate/typecheck pass — HIGH — SINGLE — tier: top — sources: CL-BUG-118
+- [x] F-121 — Zig `compile-ir` path drops `ANFMethod.sighash_type` in the IR loader, so the artifact ABI — HIGH — SINGLE — tier: top — sources: CL-BUG-119
+- [x] F-122 — Zig `expand_fixed_arrays.zig` strips `@embedAlways` (`embed_always`) from synthetic scalar — HIGH — SINGLE — tier: top — sources: CX-BUG-122
+- [x] F-123 — Zig fixed-array expansion generates `<root>__<index>` synthetic property names with no uni — HIGH — SINGLE — tier: top — sources: CX-BUG-125
+- [x] F-124 — Go ScriptVM never passes WithTx, so it cannot execute any script containing a signature-ch — HIGH — SINGLE — tier: top — sources: CL-BUG-093
+- [x] F-125 — Shipped DSL Groth16Verifier contract skips G2 on-curve/subgroup checks before pairing — HIGH — SINGLE — tier: top — sources: CL-BUG-082
+- [x] F-126 — `sp1fri.Verify` panics on a zero-query proof before any cryptographic check — HIGH — SINGLE — tier: top — sources: CL-BUG-092
+- [x] F-127 — SDK real pairing wrapper comment claims identity rejected; gnark IsOnCurve accepts (0,0) i — HIGH — SINGLE — tier: top — sources: GK-BUG-009
+- [x] F-128 — Off-chain blake3Hash silently truncates messages >64 bytes; on-chain script aborts (mock/s — HIGH — SINGLE — tier: top — sources: GK-BUG-011
+- [x] F-129 — checkPreimage is unconditionally true in all 7 tiers' mock crypto, and TS's checkMultiSig  — HIGH — SINGLE — tier: top — sources: CL-BUG-228
+- [x] F-130 — SHA2-256f tree-index mask computed as 1<<(h-hp) with h-hp=64: Java's `1L << 64` (JLS shift — HIGH — SINGLE — tier: top — sources: GK-BUG-016
+- [x] F-131 — Java analyzer opcode table omits every Chronicle opcode its own toolchain emits (Opcodes.j — HIGH — SINGLE — tier: top — sources: CL-BUG-176
+- [>] F-132 — PathAnalyzer returns zero paths on an unbalanced OP_IF/OP_ENDIF, silently disabling NO_SIG — HIGH — SINGLE — tier: top — sources: CL-BUG-177
+- [x] F-133 — Python SDK verifies SLH-DSA against a real upstream FIPS 205 library (SHA-512, a=9) while  — HIGH — SINGLE — tier: top — sources: CL-BUG-164
+- [x] F-134 — Python's runar/builtins.py (floor division) and runar/sdk/anf_interpreter.py (truncate-tow — HIGH — SINGLE — tier: top — sources: CL-BUG-127
+- [x] F-135 — Python hash160/ripemd160 calls hashlib.new('ripemd160') with no OpenSSL-3 legacy-provider  — HIGH — SINGLE — tier: top — sources: GK-BUG-034
+- [x] F-136 — Off-chain blake3Hash silently truncates messages >64 bytes; on-chain script aborts (mock/s — HIGH — SINGLE — tier: top — sources: GK-BUG-011
+- [x] F-137 — Ruby SDK's LocalSigner fallback preimage builder never received the issue-#123 non-default — HIGH — SINGLE — tier: top — sources: CL-BUG-155
+- [x] F-138 — Ruby's verify_envelope rejects high-S ECDSA signatures that TS/Go/Python/Zig/Java accept;  — HIGH — SINGLE — tier: top — sources: CL-BUG-159, CL-BUG-241
+- [x] F-139 — Off-chain blake3Hash silently truncates messages >64 bytes; on-chain script aborts (mock/s — HIGH — SINGLE — tier: top — sources: GK-BUG-011
+- [x] F-140 — SHA2-256f tree-index mask computed as 1<<(h-hp) with h-hp=64: Java's `1L << 64` (JLS shift — HIGH — SINGLE — tier: top — sources: GK-BUG-016
+- [x] F-141 — Rust BIP-143 signer always hashes ALL prevouts/sequences/outputs regardless of requested s — HIGH — SINGLE — tier: top — sources: GK-BUG-028
+- [x] F-142 — Rust `sha256_finalize` is wrong for `remaining` ∈ [64,119] and panics at exactly 64 — HIGH — SINGLE — tier: top — sources: CL-BUG-087
+- [x] F-143 — Zig's --ir path always emits parentClass:"SmartContract" (an unconditional struct default) — HIGH — SINGLE — tier: top — sources: CL-BUG-134
+- [x] F-144 — Rabin padding/sig/n pushed as unsigned little-endian bytes are consumed as signed Bitcoin  — HIGH — SINGLE — tier: top — sources: GK-BUG-036
+- [x] F-145 — TS ANF interpreter (packages/runar-sdk) fails OPEN on unknown ANF kinds/builtins and divis — HIGH — SINGLE — tier: top — sources: CL-BUG-135
+- [x] F-146 — TS WalletSigner.getAddress returns hash160 hex instead of Base58Check, violating the Signe — HIGH — SINGLE — tier: top — sources: GK-BUG-033
+- [x] F-147 — Off-chain blake3Hash silently truncates messages >64 bytes; on-chain script aborts (mock/s — HIGH — SINGLE — tier: top — sources: GK-BUG-011
+- [x] F-148 — The one contract (PriceBet) hand-written in all nine formats is not wired into the conform — HIGH — SINGLE — tier: top — sources: CL-GAP-141
+- [x] F-149 — `cargo test -- --ignored` runs ONLY the gated set; 37 Rust tests have no runner — HIGH — SINGLE — tier: top — sources: CL-GAP-100
+- [x] F-150 — No constructed small-order G2 test for Groth16/pairing; MapToCurve2 off-r-torsion is not s — HIGH — SINGLE — tier: mid — sources: GK-GAP-004
+- [x] F-151 — test_conformance_goldens.rb silently passes fixtures with no .runar.rb source and vacuousl — HIGH — SINGLE — tier: mid — sources: CL-GAP-040
+- [x] F-152 — (Appears misfiled in this bucket) Whole-area absence of Rust tests for sourceMap/code-sepa — HIGH — SINGLE — tier: mid — sources: CL-GAP-030
+- [x] F-153 — Go, Solidity and Move parsers have ZERO malformed-input rejection tests across 110 tests — HIGH — SINGLE — tier: mid — sources: CL-GAP-016
+- [x] F-154 — 13 documented builtins have no TS test at any level; sha1, ripemd160, checkSigVerify, chec — HIGH — SINGLE — tier: mid — sources: CL-GAP-017
+- [x] F-155 — Public runar-lang verifyRabinSig omits the padding-range bound; sig=0, padding=SHA256(msg) — HIGH — SINGLE — tier: mid — sources: GK-GAP-012
+- [x] F-156 — Go: lowerAddOutput silently truncates when stateValues and the mutable-property list disag — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-056
+- [x] F-157 — Ruby multi-format hex-parity test suite covers 8 of 9 formats; .runar.java has no parity t — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-049
+- [x] F-158 — `catch_refusal` swaps the process-global panic hook unsynchronized — a race under concurre — MEDIUM — MAJORITY — tier: mid — sources: CL-BUG-027, CX-BUG-094
+- [x] F-159 — TS peephole `optimizeNestedIf` unconditionally rebuilds every `if` op as a bare `{op:'if', — MEDIUM — MAJORITY — tier: top — sources: CL-BUG-117, CX-GAP-024
+- [x] F-160 — Constant-fold's `===`/`!==` on ByteString literals compares hex source text case-sensitive — MEDIUM — MAJORITY — tier: top — sources: CL-BUG-004, GK-BUG-020
+- [x] F-161 — `examples.test.ts`'s primary "compiles through the TS compiler" test tolerates compile fai — MEDIUM — MAJORITY — tier: top — sources: CL-BUG-017, GK-GAP-013
+- [x] F-162 — The flagship end2end PriceBet webapp's settle path is provably unspendable and never exerc — MEDIUM — SINGLE — tier: top — sources: CL-BUG-255
+- [x] F-163 — The golden-provenance CI gate resolves the base commit from the unpinned pull_request.base — MEDIUM — SINGLE — tier: top — sources: CL-BUG-091
+- [x] F-164 — `executeStrict` does not mock `check_preimage` despite PROTOCOL.md and two doc comments pr — MEDIUM — SINGLE — tier: top — sources: CL-BUG-055
+- [x] F-165 — (see ledger) — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-099
+- [x] F-166 — `runar test` interpolates the user pattern into a shell string (command injection) — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-111
+- [x] F-167 — `bitwise-ops` and `shift-ops` are unfalsifiable at the *contract* level, not the test leve — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-130
+- [x] F-168 — `examples/zig/state-covenant`: the tier's only real proof-verification covenant is tested  — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-131
+- [x] F-169 — `differential.ts` compares the TS CLI's human-readable chatter against six tiers' ANF JSON — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-170 — - **The `JSON.stringify(obj, Object.keys(obj).sort(), 2)` allow-list bug is still live in — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-171 — `entry.oracle` is never validated and silently downgrades — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-172 — The mutation scorecard is self-referential — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-173 — The 231-line delta-debugging shrinker is never invoked by any harness — MEDIUM — SINGLE — tier: top — sources: CL-BUG-227, CL-GAP-126
+- [x] F-174 — `lean-verify.sh` has drifted from the CI job it declares it must mirror — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-239, CL-GAP-133
+- [x] F-175 — A CI step writes hardcoded pass results into the job summary on failure — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-239, CL-GAP-133
+- [x] F-176 — Artifact statefulness is computed as `len(stateFields) > 0` instead of from the declared P — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-022
+- [x] F-177 — The documented 4 MiB source-size guard (assertSourceBytesUnderLimit) is only invoked from  — MEDIUM — SINGLE — tier: top — sources: CX-BUG-025
+- [x] F-178 — Intent-intrinsic "opcode-sequence audit" assertions are nibble-unaligned hex substring sea — MEDIUM — SINGLE — tier: top — sources: CL-BUG-010
+- [x] F-179 — Go peephole replacements and reconstructed nested `if` operations discard SourceLoc, corru — MEDIUM — SINGLE — tier: top — sources: CX-BUG-012, CX-BUG-023
+- [x] F-180 — `regroupSyntheticRuns`'s 1024-pass iteration cap panics on a ~41KB flat-array IR payload,  — MEDIUM — SINGLE — tier: top — sources: CL-BUG-014, CL-GAP-119
+- [x] F-181 — The only Go test comparing `--ir` output to source output swallows every failure as a log  — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-220
+- [x] F-182 — Stale test exclusions (LOW-MEDIUM) — MEDIUM — SINGLE — tier: top — sources: CL-BUG-221, CL-BUG-222, CL-BUG-223
+- [x] F-183 — Silent flag precedence (LOW) — MEDIUM — SINGLE — tier: top — sources: CL-BUG-221, CL-BUG-222, CL-BUG-223
+- [x] F-184 — `loadGroth16WAConfig` zero-fills IC slots — MEDIUM — SINGLE — tier: top — sources: CL-BUG-221, CL-BUG-222, CL-BUG-223
+- [x] F-185 — Java: EC-generated binding names come from a process-global AtomicInteger never reset per  — MEDIUM — SINGLE — tier: top — sources: CX-BUG-033
+- [x] F-186 — Java: recursive peephole optimization of nested `if`/`loop` reconstructs IfOp via location — MEDIUM — SINGLE — tier: top — sources: CX-BUG-034
+- [x] F-187 — Java: Validate.run's returned warnings are discarded by both CLI and daemon compilation mo — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-048
+- [x] F-188 — Java: AnfLower's branch-property-update lifting generates new bindings with sourceLoc unif — MEDIUM — SINGLE — tier: top — sources: CX-BUG-050
+- [x] F-189 — `.runar.java`'s unsuffixed `0xFFFFFFFF` parses as Java `int` -1, diverging from TS's `0xFF — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-244
+- [x] F-190 — A second, javac-invalid `PriceBet.runar.java` is the copy the playground serves — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-256
+- [x] F-191 — Process-global _fresh_counter never resets between compilations, so optimized ANF for the  — MEDIUM — SINGLE — tier: top — sources: CX-BUG-053
+- [x] F-192 — is_stateful (and therefore is_terminal / artifact.anf) is derived from len(state_fields) i — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-074
+- [x] F-193 — Python: crypto op caches (`_get_compress_ops` in sha256.py/blake3.py) return the same shar — MEDIUM — SINGLE — tier: top — sources: CL-BUG-147
+- [x] F-194 — Python: `emit_push_data_encode` has no `OP_PUSHDATA4` (0x4E) branch, silently truncating a — MEDIUM — SINGLE — tier: top — sources: CL-BUG-149
+- [x] F-195 — Python: `if`-branch lowering contexts do not inherit the parent's `const_values` map, so a — MEDIUM — SINGLE — tier: top — sources: CX-BUG-060
+- [x] F-196 — BabyBear field operations' documented non-negativity premise is not enforced; `bbFieldAdd( — MEDIUM — SINGLE — tier: top — sources: CL-BUG-150
+- [>] F-197 — `parser_go.py` uses the C ladder, not Go's — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-198 — Leading-zero decimals — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-199 — `parse_go` appends a bare `str` to a `list[Diagnostic]` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-200 — `parser_sol.py` strips the leading underscore from *method* params — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-201 — `parser_sol._rewrite_bare_props` misses `IncrementExpr`/`DecrementExpr`/`MemberExpr` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-202 — `parser_move.py` turns odd-length `0x` literals into integers — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-203 — `parser_python.py` decodes `\0` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-204 — `#[runar::unsafe_contract]` is silently downgraded — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-205 — `parser_java.py` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-206 — `parser_ruby.py` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-207 — `parser_zig.py` — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-208, CL-BUG-209, CL-BUG-210, CL-BUG-211, CL-BUG-212
+- [x] F-208 — Ruby: typecheck accepts a bound local variable used as a function call (Rúnar has no first — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-275
+- [x] F-209 — Ruby: the EC alias resolver tests the wrong ANF kind (`load_param` instead of `load_const` — MEDIUM — SINGLE — tier: top — sources: CL-BUG-274
+- [x] F-210 — The Rakefile counts a file that runs ZERO tests as a pass, and `$?` is nil-unsafe when spa — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-034
+- [x] F-211 — Rust (236) and Zig (272) emit far more source-map mappings than the other five tiers (8-10 — MEDIUM — SINGLE — tier: top — sources: CL-BUG-056
+- [x] F-212 — Rust tier's Java frontend has no hex-literal path; `0xFF` is a parse error where five othe — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-169
+- [x] F-213 — No nesting-depth bound in the Rust frontend: ~4-6 KB of deeply nested source SIGABRTs the  — MEDIUM — SINGLE — tier: top — sources: CL-BUG-172
+- [x] F-214 — `.runar.go` reinterprets `& | ^ << >>` against Go's own operator precedence, silently, in  — MEDIUM — SINGLE — tier: top — sources: CL-BUG-173
+- [x] F-215 — Stateful identity (parentClass) and terminal ABI metadata (is_terminal) diverge for a zero — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-090
+- [x] F-216 — Heterogeneous multisig array literals (e.g. [sig, 1n]) are type-checked using only their f — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-092
+- [x] F-217 — Rust: `parse_only`/`validate_only`/`typecheck_only` stop-after-pass options are honored on — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-088
+- [x] F-218 — Six Rust driver tests assert less than their names claim, including source-vs-IR hex parit — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-028
+- [x] F-219 — DCE (`eliminateDeadBindings`) only runs when the always-on EC optimizer reports a change,  — MEDIUM — SINGLE — tier: top — sources: CL-BUG-115
+- [x] F-220 — --emit-ir / --emit-ir-to discard every validator warning incl. the H2 locktime-bypass advi — MEDIUM — SINGLE — tier: top — sources: CL-BUG-024
+- [x] F-221 — Debug script failure returns process exit status 0 — MEDIUM — SINGLE — tier: top — sources: CX-BUG-093
+- [x] F-222 — TS: affine-value tracking uses one shared consumedValues set across sequential if/else arm — MEDIUM — SINGLE — tier: top — sources: CX-BUG-105
+- [x] F-223 — TS: `compileFromANF` aliases its input with `const anf = program` and writes constructor v — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-109
+- [x] F-224 — Peephole rewrites drop sourceLoc; emitter mis-attributes every fused opcode — MEDIUM — SINGLE — tier: top — sources: CL-BUG-005
+- [x] F-225 — multi-format.test.ts swallows a fixture's source.json parse failure at collection, silentl — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-015
+- [x] F-226 — Three vacuity holes: assertions inside a conditional that can never be entered, incl. the  — MEDIUM — SINGLE — tier: top — sources: CL-BUG-016
+- [x] F-227 — Interpreter `checkSig` returns `false` where the script ABORTS; branching contracts diverg — MEDIUM — SINGLE — tier: top — sources: CL-BUG-097
+- [x] F-228 — Rust (236) and Zig (272) emit far more source-map mappings than the other five tiers (8-10 — MEDIUM — SINGLE — tier: top — sources: CL-BUG-056
+- [x] F-229 — Zig CLI rejects source files above 1 MiB via a hardcoded `readFileAlloc` limit, despite th — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-127
+- [x] F-230 — Zig library API (`compiler_api.zig`) silently falls back to the Zig-format parser for unkn — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-128
+- [x] F-231 — Zig library API (`CompileResult`) has no diagnostics field and never surfaces validation w — MEDIUM — SINGLE — tier: mid — sources: CX-BUG-129
+- [x] F-232 — SLHDSA.verify (Ruby + Go off-chain verifiers) accepts trailing garbage: every length guard — MEDIUM — SINGLE — tier: top — sources: CL-BUG-165
+- [x] F-233 — A standalone `groth16-wa` UTXO is unsigned and its spend is replayable by any observer — MEDIUM — SINGLE — tier: top — sources: CL-BUG-083
+- [x] F-234 — SigAnalyzer's three signature checks are all defeated by substituting OP_2DROP for OP_DROP — MEDIUM — SINGLE — tier: top — sources: CL-BUG-178
+- [x] F-235 — STACK_UNDERFLOW check is unreachable from every production caller (all pass initialDepth=0 — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-179
+- [x] F-236 — Java analyzer diverges from TS/Python: no INEFFICIENT_PUSH finding on truncated PUSHDATA h — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-180
+- [x] F-237 — Python SDK: fixed-width state encoder/decoder (state.py:423) fails open on a wrong-sized o — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-126
+- [x] F-238 — Python SDK: `_read_script_element` raises bare `ValueError` and silently truncates on prov — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-125
+- [x] F-239 — Python SDK: generated typed wrappers raise `TypeError` on every stateful call passing opti — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-128
+- [x] F-240 — SLHDSA.verify (Ruby + Go off-chain verifiers) accepts trailing garbage: every length guard — MEDIUM — SINGLE — tier: top — sources: CL-BUG-165
+- [x] F-241 — Ruby accepts Base58Check change addresses with neither a checksum nor a version-byte check — MEDIUM — SINGLE — tier: top — sources: CL-BUG-156
+- [x] F-242 — Ruby's DER parser accepts trailing bytes inside the declared length and un-prefixed high-b — MEDIUM — SINGLE — tier: top — sources: CL-BUG-160
+- [x] F-243 — Ruby's `ec_on_curve` omits the coordinate range checks its own comment says the emitted sc — MEDIUM — SINGLE — tier: top — sources: CL-BUG-161
+- [x] F-244 — Ruby's `truncate_div` routes through a Float, losing precision above 2^53 and raising `Flo — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-162
+- [x] F-245 — Generated SDK wrappers pass intent-intrinsic witness params (_prevOutScript_<i>, _serialis — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-139
+- [x] F-246 — Published npm package runar-sdk exports ./codegen but its Mustache templates live outside  — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-138
+- [x] F-247 — `finalizeCall` broadcasts a 72-byte all-zero placeholder when a declared `sigIndices` slot — MEDIUM — SINGLE — tier: mid — sources: CL-BUG-136
+- [x] F-248 — `WalletProvider.ensureFunding` swallows both the BEEF parse failure and the funding broadc — MEDIUM — SINGLE — tier: top — sources: CL-BUG-141
+- [x] F-249 — Merkle codegen emits three consecutive OP_ROTs (an identity) per level — 6 compiler tiers  — LOW — SINGLE — tier: top — sources: CL-BUG-153
+- [x] F-250 — An empty regression corpus is a green run — LOW — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-251 — Six of 28 mutants have no baseline entry — LOW — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-252 — Nine false documentation claims across five files — LOW — SINGLE — tier: mid — sources: CL-BUG-227, CL-GAP-126
+- [x] F-253 — `pnpm test:ci`'s "green here → green CI" contract is violated in both directions — LOW — SINGLE — tier: mid — sources: CL-BUG-239, CL-GAP-133
+- [x] F-254 — Go: `lowerBindings` panics on an empty public-method body — LOW — SINGLE — tier: mid — sources: CL-BUG-045
+- [x] F-255 — --emit-ir silently ignores --emit-source-map, exiting 0 having written nothing — LOW — SINGLE — tier: top — sources: CL-BUG-013
+- [x] F-256 — mergeOptions silently discards all but the first variadic CompileOptions — LOW — SINGLE — tier: mid — sources: CL-BUG-012
+- [x] F-257 — Go: optimizeNestedIf discards the SourceLoc of every `if` op — LOW — SINGLE — tier: mid — sources: CL-BUG-046
+- [x] F-258 — Four silent-OP_0 fallbacks remain in Python stack lowering, all `--ir`-reachable (stack.py — LOW — SINGLE — tier: top — sources: CL-BUG-151
+- [x] F-259 — Python's `_lower_loop` does not set `current_source_loc` per unrolled binding — LOW — SINGLE — tier: top — sources: CL-BUG-152
+- [x] F-260 — `merkleRootPoseidon2KB`'s depth guard (1..64) is wider than its emitter accepts (1..32) — LOW — SINGLE — tier: top — sources: CL-BUG-154
+- [x] F-261 — `assert_equal 'UnsafeSmartContract', 'UnsafeSmartContract'` — a literal compared to itself — LOW — SINGLE — tier: mid — sources: CL-BUG-031
+- [x] F-262 — test_empty_contract_no_methods_yields_warning_or_error asserts neither — LOW — SINGLE — tier: mid — sources: CL-BUG-032
+- [x] F-263 — test_sighash.rb:253 asserts a strict substring of the preceding assertion — LOW — SINGLE — tier: top — sources: CL-BUG-033
+- [x] F-264 — find_ruby_source rescues StandardError (subsuming JSON::ParserError), so any failure degra — LOW — SINGLE — tier: mid — sources: CL-BUG-035
+- [x] F-265 — Two missed compile-time rejections in the Rust frontend: ByteString property initializers  — LOW — SINGLE — tier: mid — sources: CL-BUG-175
+- [x] F-266 — Nondeterministic diagnostic text from HashMap key iteration (script bytes unaffected) — LOW — SINGLE — tier: top — sources: CL-BUG-029
+- [x] F-267 — parse_const_value silently truncates JSON float constants via `f64 as i128` — LOW — SINGLE — tier: mid — sources: CL-BUG-030
+- [x] F-268 — Rust: `&s[..5]` byte-slices a UTF-8 string, panicking on a non-ASCII constant — LOW — SINGLE — tier: mid — sources: CL-BUG-049
+- [x] F-269 — EC optimizer does not resolve through its own @ref: aliases; unchecked name minting — LOW — SINGLE — tier: top — sources: CL-BUG-007
+- [x] F-270 — blake3-output.test.ts uses an it() block as a fixture; five tests depend on order — LOW — SINGLE — tier: top — sources: CL-BUG-018
+- [x] F-271 — assembler.test.ts mutates a compiled artifact in place and asserts on the value it just wr — LOW — SINGLE — tier: mid — sources: CL-BUG-019
+- [x] F-272 — Java analyzer diverges from TS on numeric rounding (Math.rint vs toFixed(1)) and whitespac — LOW — SINGLE — tier: mid — sources: CL-BUG-181
+- [x] F-273 — Python SDK: RunarContract.from_txid accepts a negative output_index, silently binding to t — LOW — SINGLE — tier: mid — sources: CL-BUG-129
+- [x] F-274 — Ruby's right(data, 0) returns the whole string, and right/left fail open out of range wher — LOW — SINGLE — tier: top — sources: CL-BUG-163
+- [x] F-275 — Java's Cli.optimizeAnf never runs standalone DCE for non-EC programs, and the pipeline's ' — HIGH — MAJORITY — tier: mid — sources: CX-DOC-001, CX-GAP-007, GK-GAP-003
+- [x] F-276 — Java (and Ruby) on-chain integration tests broadcast TypeScript-compiler artifacts, not na — HIGH — SINGLE — tier: mid — sources: GK-GAP-010
+- [x] F-277 — conformance/ is outside the pnpm workspace, so 8 of its test suites (incl. wire-primitives — HIGH — SINGLE — tier: top — sources: CL-GAP-095
+- [x] F-278 — Conformance corpus has zero BN254/Groth16 fixtures despite the Go-only policy naming BN254 — HIGH — SINGLE — tier: top — sources: GK-GAP-005
+- [x] F-279 — 28 of 540 vitest-collectable files are unreachable from any workflow, including the gates  — HIGH — SINGLE — tier: mid — sources: CL-GAP-129
+- [x] F-280 — Two of three all-conformance sweeps silently skip the golden comparison when the golden is — HIGH — SINGLE — tier: mid — sources: CL-GAP-006
+- [x] F-281 — 6. **CL-GAP-071 (Go-DSL `x += 1` compiles to `x = 1`) is REAL but currently LATENT — HIGH — SINGLE — tier: mid — sources: CL-GAP-071
+- [x] F-282 — Java TsParser silently drops a @sighash directive when the member shares a line with the p — HIGH — SINGLE — tier: mid — sources: CL-GAP-140
+- [x] F-283 — Ruby `--ir` loader bounds each loop's iteration count individually but never the product a — HIGH — SINGLE — tier: mid — sources: CL-GAP-164
+- [x] F-284 — The BUG-100 preimage blob is guarded by LENGTH ONLY, in both tiers — HIGH — SINGLE — tier: mid — sources: CL-GAP-149
+- [x] F-285 — `conformance_goldens.rs` cannot fail on a missing golden or on lost fixture coverage — HIGH — SINGLE — tier: mid — sources: CL-GAP-033, CL-GAP-154
+- [x] F-286 — TS: verifyRabinSig's RabinPubKey parameter is unconstrained (may be a method parameter, no — HIGH — SINGLE — tier: mid — sources: GK-GAP-014
+- [x] F-287 — runar-compiler README states constant folding is disabled by default; `compile()`'s `disab — HIGH — SINGLE — tier: cheap — sources: GK-DOC-001
+- [x] F-288 — The TypeScript format guide documents the exact semantics that were a fund-loss defect — HIGH — SINGLE — tier: cheap — sources: CL-DOC-013
+- [x] F-289 — ir-loader.test.ts validates a loader implemented inside the test file; 19 tests exercise z — HIGH — SINGLE — tier: mid — sources: CL-GAP-015
+- [x] F-290 — 19 of the 100 opcodes the emitter can produce appear in ZERO checked-in golden, including  — HIGH — SINGLE — tier: mid — sources: CL-GAP-109
+- [x] F-291 — Six state-serialisation shapes are guarded ONLY by `not.toThrow()`, with no byte-level gol — HIGH — SINGLE — tier: mid — sources: CL-GAP-147
+- [x] F-292 — Java compiler's committed Gradle wrapper jar is not actually Gradle 8.5, and CI bypasses t — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-150
+- [x] F-293 — Source-map anchor oracle validates each mapping independently and certifies a 30x mapping- — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-137
+- [x] F-294 — Zig example test root is a hand-maintained @import list with no completeness check — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-107
+- [x] F-295 — The golden-provenance CI gate only triggers on pull_request, so 87 of the last 100 first-p — MEDIUM — SINGLE — tier: top — sources: CL-GAP-090
+- [x] F-296 — `sdk-envelope` has no "too-large" fixture; the DoS size bound is hard-coded separately per — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-088
+- [x] F-297 — conformance/sdk-codegen suite has runners for only 3 of 7 tiers, missing Rust — MEDIUM — SINGLE — tier: top — sources: CL-GAP-087
+- [x] F-298 — `CLAUDE.md` is stale on mock crypto, and the stale belief is why the branch-blind tests lo — MEDIUM — SINGLE — tier: cheap — sources: CL-DOC-019
+- [x] F-299 — `sdk-bip143` covers ONLY SIGHASH_ALL — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-086
+- [x] F-300 — The 7-tier parity fuzzer has never compiled a countdown or closed-bound loop — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-096
+- [x] F-301 — The move surface is a copy-paste of sol, and its one content divergence drops four asserti — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-128
+- [x] F-302 — - **CL-GAP-083 — `sha1`, `checkSigVerify`, `checkMultiSigVerify`, `byteLen`, `toByteString — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-083
+- [x] F-303 — The advertised standalone EliminateDeadCode pass is not wired into any compiler entrypoint — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-001
+- [x] F-304 — EC algebraic optimization (optimizeMethodEC) only examines each method's top-level binding — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-002
+- [x] F-305 — The Go CLI exposes no flag to set Groth16WAVKey, so witness-assisted Groth16 mode is unrea — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-004
+- [x] F-306 — EmitResult.RawScriptSpans (opaque asm/raw-script byte-range and arity metadata) is compute — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-005
+- [x] F-307 — Go's TestCompile_BasicP2PKH and four siblings name the expected hex in a comment and never — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-007
+- [x] F-308 — `compilers/go` cannot be built as a standalone Go module (missing go.sum entries / no requ — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-118
+- [x] F-309 — `runar debug` (Go) ignores artifact source maps and cannot produce source-line-annotated t — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-006
+- [x] F-310 — Go README CLI docs incomplete; documented conformance command excludes the real golden tes — MEDIUM — SINGLE — tier: cheap — sources: CL-DOC-004
+- [x] F-311 — TestBranchMergeK1AndDeadArm_ConstAndRuntimeConditionsAgree discards every result it compil — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-008
+- [x] F-312 — readConformanceFormat still skips where its hardened twin was fixed to fail — the whole mu — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-010
+- [x] F-313 — integration_test.go is build-tag gated; the only CLI-level `--ir` test never runs in CI's  — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-011
+- [x] F-314 — loadGroth16WAConfig silently zero-fills IC slots for non-5-public-input VKs, emitting an o — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-012
+- [x] F-315 — `--ir` golden coverage is pinned at 27 of 72 fixtures, and a missing golden counts as a pa — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-120
+- [x] F-316 — RawBytesOp (raw `asm` spans) carries no source-location field, so opaque asm bytes get no  — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-009, CX-GAP-012
+- [x] F-317 — Java: EC optimizer's nested-call detector finds EC calls inside `if`/`loop` bodies but `op — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-008
+- [x] F-318 — Java: the advertised 12-rule EC optimizer has no rule-level tests; existing AnfOptimize te — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-011
+- [x] F-319 — Java's ANF IR is order-dependent through the compile daemon: a process-global AtomicIntege — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-139
+- [x] F-320 — Standalone DCE (_eliminate_dead_code, Pass 4.75) exists but is never invoked by any produc — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-014, CX-GAP-018
+- [x] F-321 — EC call discovery and optimization scan only top-level method bindings; a program whose EC — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-015
+- [x] F-322 — Loop-iteration cap is enforced only on the IR entry path (ir/loader.py MAX_LOOP_COUNT=10_0 — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-117, CL-GAP-159
+- [x] F-323 — The Python golden harness has **three** ways to report green on a fixture it never checked — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-160
+- [x] F-324 — `test_cli_debug.py`'s 4 tests are skipped in CI, and the skip-auditor is blind to the mech — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-161
+- [x] F-325 — Code-separator tests do not exercise placeholder-slot resolution — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-016
+- [x] F-326 — Ruby: the documented standalone dead-code-elimination safety pass (`_eliminate_dead_code`) — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-020
+- [x] F-327 — Ruby codegen test gap F-RB-T-09: five of six SLH-DSA parameter sets have no Ruby codegen g — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-047
+- [x] F-328 — `test_compiler.rb` pins a hard-coded 28-fixture list against a 72-fixture conformance corp — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-041
+- [x] F-329 — Ruby checkMultiSig hex-pin test is an unaligned 2-char substring search over a two-opcode  — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-044
+- [x] F-330 — Seven Ruby parser tests named *_does_not_crash contain ZERO assertions — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-042
+- [x] F-331 — codeSeparatorIndex test asserts respond_to? on a three-way disjunction, never the value th — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-046
+- [x] F-332 — Seven EC + seven NIST-EC builtins covered only by emitter-level goldens — a mis-wired stac — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-048
+- [x] F-333 — deserialize_state claims a 14-type allowlist, tests 7, all compile-only; cannot distinguis — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-050
+- [x] F-334 — The Ruby compiler ships no gemspec, Gemfile or lockfile — the only tier with an undeclared — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-053
+- [x] F-335 — Ruby CLI test covers 4 of 10 flags; --source + --ir together silently resolves to --source — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-054
+- [x] F-336 — The declared Rust conformance gate (`cargo test --test compiler_tests`) only exercises 27  — MEDIUM — SINGLE — tier: mid — sources: CL-DOC-008, CL-GAP-155
+- [x] F-337 — Source maps are degenerate (collapsed to a single (1,0) mapping) for 6 of 9 surfaces inclu — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-156
+- [x] F-338 — Missing op-count goldens for large Rust emitters, including the entirely ungated 453K-op e — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-158
+- [x] F-339 — Rust driver's SLH-DSA op-count canary uses the flat ops.len() metric the same file documen — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-034, CL-GAP-157
+- [x] F-340 — Rust driver: five weak parser negatives pass when the parser fails silently (contract-less — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-032
+- [x] F-341 — TypeScript source maps collapse every source statement to line 1, column 0 — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-021
+- [x] F-342 — Six of seven tiers ship a compile-from-IR entry point that TypeScript (the reference tier) — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-110
+- [x] F-343 — TS EC optimizer (anf-ec.ts): rewritten bindings and freshly generated helper-scalar bindin — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-023
+- [x] F-344 — TS EC optimizer (`optimizeMethodEC`) only walks a method's top-level binding list — it nev — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-022
+- [x] F-345 — The 'exhaustive' peephole sweep compares each documentation-table pattern directly against — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-025
+- [x] F-346 — The CHECKSIG+VERIFY peephole fusion rule is marked `skip` in the exhaustive sweep, and the — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-026
+- [x] F-347 — The CHECKMULTISIG+VERIFY peephole fusion rule is marked `skip` in the exhaustive sweep, an — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-027
+- [x] F-348 — `@sighash` directive has zero conformance coverage; independently confirmed dropped on mul — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-080
+- [x] F-349 — Seven example-contracts-compile-*.test.ts files silently generate zero test cases if disco — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-019
+- [x] F-350 — 05-stack-lower-state-types.test.ts asserts only "does not throw" for the five state types  — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-021
+- [x] F-351 — Six SHA-256 / BLAKE3 tests assert opcode presence in ASM only — no value, no execution, no — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-026
+- [x] F-352 — Four mutable-state shapes have exactly one cross-tier witness each — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-148
+- [x] F-353 — optimizer.test.ts pins a behaviour its own comment labels a POTENTIAL BUG and a cross-tier — MEDIUM — SINGLE — tier: mid — sources: CL-TODO-001
+- [x] F-354 — Mutable-state type tests assert only that compilation does not throw — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-028
+- [x] F-355 — Multiple `check_preimage`/`OP_CODESEPARATOR` interactions lack coverage — MEDIUM — SINGLE — tier: mid — sources: CX-GAP-029
+- [x] F-356 — `compileCheck` documentation promises a second typecheck that never runs — MEDIUM — SINGLE — tier: cheap — sources: CX-DOC-003
+- [x] F-357 — Zig IR loader performs no referential-integrity check; six fields (result_type, sighashFla — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-102
+- [x] F-358 — Go mock Bn254MultiPairing4/3 always return true, a false-accept oracle for native tests — MEDIUM — SINGLE — tier: mid — sources: GK-GAP-007
+- [x] F-359 — TypeScript SDK's envelope implementation has no injectable clock, so it is the one tier th — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-111
+- [x] F-360 — The docstring justifying `dryRun` default-OFF rests on a disagreement that cannot exist at — MEDIUM — SINGLE — tier: cheap — sources: CL-DOC-018
+- [x] F-361 — Go: push-data encode/decode silently misencode ByteString state fields >= 64 KiB (no OP_PU — LOW — SINGLE — tier: mid — sources: CL-GAP-058
+- [x] F-362 — Twelve test assertions check for a 2-hex-character opcode substring anywhere in the full s — LOW — SINGLE — tier: mid — sources: CL-GAP-162
+- [x] F-363 — Five `roll` emissions carry `depth = d + 1` while their paired push carries `d`, defeating — LOW — SINGLE — tier: mid — sources: CL-GAP-114
+- [x] F-364 — rule-loader.ts header still claims a four-compiler architecture; repo now has seven tiers — LOW — SINGLE — tier: mid — sources: CX-DOC-002
+- [x] F-365 — `index.ts:440-441` documents a DCE behaviour that does not exist, and is the reason the re — LOW — SINGLE — tier: cheap — sources: CL-DOC-014
+- [x] F-366 — --disable-peephole / --disable-ec-optimizer exist in API, absent from CLI — LOW — SINGLE — tier: mid — sources: CL-GAP-003
+- [x] F-367 — Python SDK: find_last_op_return actually returns the first OP_RETURN; last_pos is dead cod — LOW — SINGLE — tier: cheap — sources: CL-DOC-016
+- [x] F-368 — Rabin script never range-checks `sig < n`, so `sig + k·n` (and `-sig mod n`) is a mempool- — MEDIUM — SINGLE — tier: mid — sources: GK-GAP-015
+- [x] F-369 — `PreparedCall.opPushTxSig` is documented public surface that nothing consumes, and acting  — MEDIUM — SINGLE — tier: mid — sources: CL-GAP-112
+- [x] F-370 — Standalone Script static analyzer and generative differential fuzzing are partial: ir-diff — LOW — SINGLE — tier: mid — sources: GK-TODO-001
+- [x] F-371 — TestParseSource_DispatchesRustFormat documents a false premise and asserts nothing — LOW — SINGLE — tier: cheap — sources: CL-DOC-003
+- [x] F-372 — Stale "needs deeper work" stateful exclusions in the multi-format conformance tests — LOW — SINGLE — tier: cheap — sources: CL-DOC-005
+- [x] F-373 — TestPushDataEncoding names PUSHDATA1/2 boundaries and tests none of them — LOW — SINGLE — tier: mid — sources: CL-GAP-009
+- [x] F-374 — TestEncodeScriptNumber carries a wantAsm column it never asserts — LOW — SINGLE — tier: mid — sources: CL-GAP-013
+- [x] F-375 — TestSp1Fri_AllPresetsCompile claims byte-identity between aliases and compares sizes — LOW — SINGLE — tier: mid — sources: CL-GAP-014
+- [x] F-376 — Ruby: eight parser negatives use contract.nil? || !errors.empty?, satisfied by a silent no — LOW — SINGLE — tier: mid — sources: CL-GAP-055
+- [x] F-377 — `assert true` in the accept-branch of the Rust non-contract parser test — LOW — SINGLE — tier: mid — sources: CL-GAP-043
+- [x] F-378 — test_checksig_terminal_assert_folds_to_verify asserts the opposite of its name — LOW — SINGLE — tier: mid — sources: CL-GAP-045
+- [x] F-379 — test_bigint_literal_preserved greps the inspect() of every binding for the 2-char string ' — LOW — SINGLE — tier: mid — sources: CL-GAP-051
+- [x] F-380 — Two addDataOutput compile-only tests left in place after the comment said they were replac — LOW — SINGLE — tier: mid — sources: CL-GAP-052
+- [x] F-381 — Artifact build_timestamp is taken from datetime.now(timezone.utc) and unconditionally seri — LOW — SINGLE — tier: mid — sources: CL-DOC-011
+- [x] F-382 — `--disable-constant-folding` is a silent no-op on the `--ir` path and this is undocumented — LOW — SINGLE — tier: cheap — sources: CL-DOC-007
+- [x] F-383 — ec_optimizer_tests.rs claims "all 12 EC rules"; rules 9 and 11 have no test — LOW — SINGLE — tier: cheap — sources: CL-DOC-009
+- [x] F-384 — bsv-sdk pulled with an open version range `>=0.1, <0.3` in a published crate; no MSRV — LOW — SINGLE — tier: cheap — sources: CL-DOC-010
+- [x] F-385 — Two exact duplicate test pairs — LOW — SINGLE — tier: mid — sources: CL-GAP-037
+- [x] F-386 — debug subcommand: --script/--artifact conflict resolved silently; five untested error path — LOW — SINGLE — tier: mid — sources: CL-GAP-039
+- [x] F-387 — Rust: merkleRootPoseidon2KB is routed by lower_call but absent from the typechecker table  — LOW — SINGLE — tier: mid — sources: CL-GAP-065
+- [x] F-388 — test-vectors.json covers 11 of 28 peephole rules; one rule name has no test coverage at al — LOW — SINGLE — tier: mid — sources: CL-GAP-004
+- [x] F-389 — No TS test coverage for push-encoding.ts, parser-core.ts, codegen-emitter.ts, compiler-res — LOW — SINGLE — tier: mid — sources: CL-GAP-025
+- [x] F-390 — Duplicate describe('error handling') in 01-parse-ruby.test.ts; four Ruby tests guarantee o — LOW — SINGLE — tier: mid — sources: CL-GAP-024
+- [x] F-391 — expect.hasAssertions() vacuity guard exists in exactly 1 of 93 test files, despite a docum — LOW — SINGLE — tier: mid — sources: CL-GAP-027
+- [x] F-392 — Opcode-form ROLL/PICK sequences are knowingly excluded from simplification — LOW — SINGLE — tier: mid — sources: CX-GAP-030
+- [x] F-393 — `readonly_inference.zig`'s doc comment justifies an unguarded property-assignment case by  — LOW — SINGLE — tier: cheap — sources: CL-DOC-015
+- [x] F-394 — `frontend/readonly_inference.zig` carries no `test` block and is not imported by the Zig t — LOW — SINGLE — tier: mid — sources: CL-GAP-103
+- [x] F-395 — Three Java example-test javadocs assert facts contradicted by MockCrypto.java (claim a ver — LOW — SINGLE — tier: cheap — sources: CL-DOC-017
+
+- [x] N-002 — Index assignment to a non-FixedArray target (ByteString property, local, parameter) is sil — CRITICAL — surfaced by F-013 — tier: top
+- [x] N-003 — The conformance fuzzer's `--anf --fold-on` mode is a no-op: every tier's --ir path forces  — MEDIUM — surfaced by F-002 — tier: top
+
+- [x] N-001 — Zig alone implements peephole reassociation rules 29/30 (PUSH a OP_ADD PUSH b OP_SUB → PUS — MEDIUM — surfaced by F-001 — tier: top
+
+- [ ] N-005 — An assert() followed by a terminal asm() in an UnsafeSmartContract is never enforced: all  — HIGH — surfaced by F-004, confirmed 7/7 tiers — tier: top
+- [x] N-004 — Ruby-surface parser silently accepts stray tokens (e.g. an indented =begin lexed as = then — MEDIUM — surfaced by F-018 — tier: top
+
+- [x] N-006 — Output intrinsics inside a loop body escape the continuation hash via an array literal (`c — HIGH — surfaced by F-005 — tier: top
+
+## In-flight
+
+## Completed
+- [x] N-384 — commit 85d76f1bb — tier: top — review: dispatcher — log2 isSome re-proved vs N-103 lowering (R197/R198); asBytesNum? for OP_SIZE/SPLIT; fingerprint restamp
+- [x] N-505 — commit ecf4b332e — tier: mid — review: dispatcher — comparison operand anchors in 6 tiers; revert 17/259 red -> 284/284
+- [x] N-504 — stale on arrival, no commit — not reproducible at 9b1df961f: all 7 tiers refuse an if-expression operand on .runar.rs (Rust: unsupported token 'If'), matching docs/formats/rust.md; original observation likely a stale Rust binary
+- [x] N-503 — commit 9b1df961f — tier: mid — review: dispatcher — TS/Ruby refuse bare .runar.rs struct (R196); revert 6/17 red -> 17/17
+- [x] N-507 — commit 8d8fcea73 — tier: mid — review: dispatcher — 6 Rust surface parsers method loc at start; revert 6/7 red -> 7/7
+- [x] N-510 — commit 04c885de3 — tier: mid — review: dispatcher — Rust EC optimizer If/Loop stub; revert 53s red -> 0.32s; n264 4/4
+- [x] N-502 — commit 483c2d2c0 — tier: mid — review: dispatcher — Rust zig init param->property synth; revert 2/3 red -> 3/3
+- [x] N-508 — commit 85d542cc7 — tier: mid — review: dispatcher — Zig method-anchored validation locs; revert 5 red -> 69/69; related negatives 4112/4112
+- [x] N-499 — commit 34756cb9b — tier: mid — review: dispatcher — Rust artifact ANF sourceLoc 0-based; revert red 30 files -> 1/1; n490 15/15
+- [x] N-509 — commit ff8d5ed71 — tier: cheap — review: dispatcher — moved n498 test under negatives/ (CI-reachable); revert 1/2 red -> 2/2
+- [x] N-500 — commit 38d6e4039 — tier: mid — review: dispatcher — mutation red -> green
+- [x] N-506 — commit a10679271 — tier: cheap — review: dispatcher — revert 25 red -> 25/25; compile ok
+- [x] N-498 — commit 303215f1f — tier: mid — review: dispatcher — attempt 2 (R195); revert 67 red -> 140/140
+- [x] N-501 — commit 059caef32 — tier: high — review: dispatcher — revert 3/15 red -> 202/202
+- [x] N-497 — commit 6ebcb9d65 — tier: mid — review: dispatcher — revert 41 red -> 212/212
+- [x] N-496 — commit 7e49e3848 — tier: mid — review: dispatcher — revert 36/123 red -> 212/212
+- [x] N-495 — commit 41ea8f119 — tier: mid — review: dispatcher — revert 36/123 red -> 212/212
+- [x] N-494 — commit f52a9cb1c — tier: mid — review: dispatcher — revert 36/123 red -> 212/212; cargo 1392/0
+- [x] N-493 — commit ce0133d08 — tier: mid — review: dispatcher — revert 36/123 red -> 212/212
+- [x] N-492 — commit d358f75f9 — tier: mid — review: dispatcher — revert 61 red -> 212/212
+- [x] N-491 — commit 27d143492 — tier: high — review: dispatcher — revert 33/123 red -> 212/212
+- [x] N-490 — commit 60c95efc1 — tier: high — review: dispatcher — revert 13/15 red -> 104/104
+- [x] N-489 — commit 345f45021 — tier: mid — review: dispatcher — pins; mutation 6 red -> 64/64; divergences queued N-491..N-493
+- [x] N-488 — commit 1d4958133 — tier: mid — review: dispatcher — revert 3/50 red -> 75/75
+- [x] N-487 — commit 9b6dd62a7 — tier: mid — review: dispatcher — revert 1394/1395 -> 1395/1395
+- [x] N-472 — commit 5fd01aab2 — tier: mid — review: dispatcher — TS-anchored operand/arg diagnostics; revert 13 red
+- [x] N-481 — commit 75166c8cc — tier: mid — review: dispatcher — super_loc; revert 1 red
+- [x] N-485 — commit 337cd9cbf — tier: mid — review: dispatcher — local echo server in CI; revert 2 red
+- [x] N-486 — commit f848e23d0 — tier: cheap — review: dispatcher — README size fixed; revert red
+- [x] N-484 — commit 91da4daef — tier: mid — review: dispatcher — sentinel removed; revert red
+- [x] N-483 — commit b80e1c9a7 — tier: mid — review: dispatcher — panic on unset endpoint; revert red
+- [x] N-480 — commit 8d0112f32 — tier: high — review: dispatcher — mock wallet CI; revert 2 red; live TS+Go
+- [x] N-479 — commit f93fd3c6e — tier: mid — review: dispatcher — premise stale (fixture committed); skips -> fatal; hidden-fixture check
+- [x] N-470 — commit b5a10bc9c — tier: mid — review: dispatcher — stale per R191; regression pin; mutation go+py red
+- [x] N-473 — commit d11150d02 — tier: high — review: dispatcher — foldOnMatchesGolden opt-in; revert 7 red; mf-on 0 vacuous
+- [x] N-476 — commit aa520ddb3 — tier: mid — review: dispatcher — return loc + early-guard anchor; revert 1 red
+- [x] N-478 — commit e3b6facc1 — tier: mid — review: dispatcher — fixture helpers Fatalf; e2e hidden-fixture fails
+- [x] N-482 — commit fd4b660a3 — tier: mid — review: dispatcher — scanner masks comments/literals; mutation 3/6 red
+- [x] N-462 — commit 2f2b78f5b — tier: mid — review: dispatcher — Rust stmt-level diag anchor; revert 2/2 red; negatives 9956
+- [x] N-477 — commit 66fdb7588 — tier: mid — review: dispatcher — rb specs fail-closed on compile failure; shim revert 0->6 failures
+- [x] N-469 — commit 2d140c5d3 — tier: mid — review: dispatcher — Zig Rabin provenance self.helper + ctx alignment; revert 3 red; 2 mutants caught
+- [x] N-475 — commit 2b4f1eda6 — tier: mid — review: dispatcher — Zig artifact anf columns 0-based; revert 5 red
+- [x] N-464 — commit 366a37e26 — tier: top — review: dispatcher — Rabin pubkey refusal anchored at arg 4, 7 tiers x 9 surfaces; revert 9 red
+- [x] N-474 — commit f8bc684d1 — tier: high — review: dispatcher — slow gates removed, regtest SDK test in CI strict; revert 1/5 red
+- [x] N-467 — commit a9b8a32e9 — tier: high — review: dispatcher — Zig source maps = TS on 90 examples; revert 15/15 red
+- [x] N-471 — commit faad43a8a — tier: mid — review: dispatcher — Java lowerStatement loc rules = TS; revert 2/2 red
+- [x] N-463 — commit 6a67f9a57 — tier: top — review: dispatcher — expression locations, 6 tiers (R185)
+- [x] N-465 — commit 319f696de — tier: top — review: dispatcher — R9 shared-inner discount
+- [x] N-468 — commit 59e9b0ee6 — tier: high — review: dispatcher — emit + subContext loc rules mirror TS
+- [x] N-466 — commit 35b172bb2 — tier: mid — review: dispatcher — early-return IfStmt location
+- [x] N-453 — commit c3942072c — tier: top — review: dispatcher — R184 option (b)
+- [x] N-233 — commit 1076d8898 — tier: high — review: dispatcher — Group B only (R185); A->N-463, C->N-464
+- [x] N-460 — commit 29fefac4d — tier: top — review: dispatcher — liveness/removability guard on R9-R11, 7 tiers
+- [x] N-461 — commit 67a90ba59 — tier: mid — review: dispatcher — CI wiring for 3 conformance tests
+- [x] N-113 — commit 7f3c728b6 — tier: top — review: dispatcher — gate-witnessed dead EC post-pass; golden restamp R183; revert 24/38 red
+- [x] N-456 — commit 9c0b82fb8 — tier: mid — review: dispatcher — fixture 99; Lean 79/99; revert red
+- [x] N-459 — commit cac874519 — tier: mid — review: dispatcher — internal builtin refused at typecheck; revert red
+- [x] N-458 — commit f3e14ac47 — tier: mid — review: dispatcher — dead alias removed; revert red
+- [x] N-347 — commit 269521e95 — tier: top — review: dispatcher — byte-typedness from typecheck table; live OP_NUMEQUAL miscompile fixed; revert 60 red
+- [x] N-457 — commit d662746f9 — tier: top — review: dispatcher — Lean fuses CMSV; dump red->green; tcb ok; pg 78/98
+- [x] N-454 — commit ee28daa67 — tier: mid — review: dispatcher — lex_error with @file_name; revert red
+- [x] N-201 — commit c28d4931c — tier: top — review: dispatcher — nested arms/loops in 7 tiers; revert 26/61 red
+- [x] N-449 — commit 71d7e45ed — tier: high — review: dispatcher — 8 surfaces x 7 tiers located; revert 29/30 red
+- [x] F-302 — stale on arrival, no commit — -
+- [x] N-455 — commit 0262f911e — tier: high — review: dispatcher — re-derived 3 anchors, all fresh; revert red
+- [x] N-448 — commit fdccb6142 — tier: mid — review: dispatcher — R174/R176-R178; revert 31/69 red
+- [x] N-397 — commit 039094cf6 — tier: top — review: dispatcher — @ref alias folding 7 tiers; revert 21/114 red; route B signed off
+- [x] N-380 — commit 2f0c61b41 — tier: mid — review: dispatcher — R172; 8 verifiers; revert red
+- [x] N-452 — stale on arrival, no commit — registry anchors mutants by find-string; runner catches drain-nip 1/1 and empty-else 2/2
+- [x] N-447 — commit aed52e922 — tier: mid — review: dispatcher — 6/7 rewritten, bytes identical; private-helper -> N-453
+- [x] N-450 — commit f762808bc — tier: mid — review: dispatcher — new witnesses; mutants killed
+- [x] N-451 — commit c646db81c — tier: mid — review: dispatcher — templates regen; coverage --check red->green
+- [x] N-382 — commit f13c58e46 — tier: mid — review: dispatcher — R175 comments only; lake build touched modules ok
+- [x] N-262 — commit fe7ab074b — tier: mid — review: dispatcher — guard ported to 6 tiers after N-446; revert red all 6; fold-ON fuzz 0/300
+- [x] N-446 — commit ed80bb58b — tier: top — review: dispatcher — nested post-fold prune in 7 tiers; revert 16/30 red; fold-ON fuzz 0/300
+- [x] N-432 — commit bf78518fb — tier: top — review: dispatcher — .ts surface; revert 4/5 red; non-ts -> N-449
+- [x] N-375 — commit 22196e234 — tier: mid — review: dispatcher — gaps 1,3,4 closed; 2,5 -> N-447,N-448
+- [x] N-400 — commit f622c6726 — tier: mid — review: dispatcher — opt-in --extra-kinds; revert red; campaigns 400 clean
+- [x] N-399 — commit c71dbfb62 — tier: mid — review: dispatcher — ir-differential fold-ON; revert 4/107 red; campaign found N-446
+- [x] N-355 — stale on arrival, no commit — already fixed by 1d3991c9d (N-097)
+- [x] N-415 — commit 6fb572c5a — tier: mid — review: dispatcher — TS CLI/runner --parse-only use validateOnly per README; revert 3/26 red
+- [x] N-350 — commit 39600df70 — tier: mid — review: dispatcher — branch-lift sourceLoc ported
+- [x] N-353 — commit 56d1c1676 — tier: mid — review: dispatcher — Go EC binding-name equality
+- [x] N-445 — commit 8a6e51ef8 — tier: mid — review: dispatcher — --no-source-map per R171
+- [x] N-440 — commit 4885dab8e — tier: mid — review: dispatcher — python reads sources newline=''
+- [x] N-422 — commit 6318d57c0 — tier: mid — review: dispatcher — move while wording aligned
+- [x] N-351 — commit 144b9207b — tier: mid — review: dispatcher — cached crypto ops copied before stamping
+- [x] N-443 — commit f319c6670 — tier: mid — review: dispatcher — fold-ON pins re-stamped after execution
+- [x] N-442 — commit 9af2941bd — tier: mid — review: dispatcher — N300 control renamed out of the scan
+- [x] N-444 — commit 4acf6028b — tier: mid — review: dispatcher — test:ci lists sdk-runner-stale-tool
+- [x] N-303 — commit 0ddfc2bac — tier: mid — review: dispatcher — decorated __init__ constructor in 4 tiers; hover + re-export
+- [x] N-436 — commit 84bf77e74 — tier: mid — review: dispatcher — UTF-16 length + TS text in go/rust/py/rb; Go lexer mojibake fixed
+- [x] N-300 — commit bd96f3065 — tier: mid — review: dispatcher — go/py/rust converge on TS non-public sighash diagnostic
+- [x] N-441 — commit 30f1837af — tier: mid — review: dispatcher — runner rebuilds stale tools; zig tool accepts R100 refusal as gate-cleared
+- [x] N-138 — commit e3ac5556e — tier: mid — review: dispatcher — fold-and-prune in 7 tiers; R170 sdk-output + templates regenerated
+- [x] N-152 — commit 9cf700ac2 — tier: mid — review: dispatcher — artifact keys aligned; TS-only keys documented
+- [x] N-439 — commit a33158f5d — tier: mid — review: dispatcher — bare go literal decoded before hex check; backtick accepted
+- [x] N-186 — commit 4a23ac279 — tier: mid — review: dispatcher — Zig --hex/IR paths + TS --hex/--from-ir write source map
+- [x] N-304 — commit 2a3efec52 — tier: mid — review: dispatcher — TS zig parser drops ctx param from ABI; all-surface ABI test
+- [x] N-437 — commit 6ad1a7558 — tier: mid — review: dispatcher — Go string-literal semantics in 6 tiers; invalid escapes refused
+- [x] N-438 — commit 28f0d20ed — tier: mid — review: dispatcher — TS sol lexes *= /= %=
+- [x] N-150 — commit b734bfef2 — tier: mid — review: dispatcher — already aligned per spec/grammar.md:378; guard test only
+- [x] N-433 — commit 7176ec828 — tier: mid — review: dispatcher — dead push-tx sig removed on stateless/terminal/zero-mutable paths, bytes unchanged
+- [x] N-435 — commit 610f4e36a — tier: mid — review: dispatcher — R169 UTF-8 Go semantics; ts/python/java/rust converge
+- [x] N-094-FU — commit 7b34add74 — tier: mid — review: dispatcher — N-094 duplicate checks removed; N-055 sentence sole diagnostic
+- [x] N-434 — commit 0b1c42767 — tier: mid — review: dispatcher — Zig sdk_oppushtx double free removed; tracker-allocator test
+- [x] N-141 — commit 188e9c585 — tier: mid — review: dispatcher — TS-only: for-init leaked to outer scope, post-loop write dropped state update
+- [x] N-296 — commit ac36d3e5b — tier: mid — review: dispatcher — overwrite rule R168; Zig/Java/Ruby converge; revert red in 3
+- [x] N-094 — commit 48b1fd255 — tier: mid — review: dispatcher — IR-validation refusal of output-emitting helper calls; revert 32/43 red
+- [x] N-429 — commit db8dd4ed3 — tier: mid — review: dispatcher — zig method-body hex walker; revert 45/246 red; N-435/N-436 logged
+- [x] N-253 — commit a1d5488e0 — tier: mid — review: dispatcher — preimage-only variant on stateful paths, 7 SDKs; revert all 7 red; N-433/N-434 logged
+- [x] N-420 — commit b54d16df0 — tier: mid — review: dispatcher — fingerprints corpus + --check/--out; revert 3/7 red
+- [x] N-367 — commit ae130537a — tier: cheap — review: dispatcher — header comments only; revert 6/7 red
+- [x] N-405 — commit 97cc96eb1 — tier: mid — review: dispatcher — 5 Go-only builtin stubs in runar-lang; revert 11/12 red
+- [x] N-206 — stale on arrival, no commit — 2fb0ed291
+- [x] N-195 — stale on arrival, no commit — 1d3991c9d
+- [x] N-097 — commit 1d3991c9d — tier: top (opus) — review: dispatcher — TS fired-anywhere gate in all 7; closes N-195
+- [x] N-431 — commit 7d3b53049 — tier: mid (sonnet) — review: dispatcher — Zig wrapper init ctor args
+- [x] N-127 — commit 0babac6dd — tier: cheap (sonnet) — review: dispatcher — test-only 9-format coverage go/rust/python
+- [x] N-430 — commit 327da2dde — tier: mid (sonnet) — review: dispatcher — Java stateful outputs field (R167)
+- [x] N-428 — commit 50a8053f2 — tier: mid (sonnet) — review: dispatcher — Zig half; Java split to N-430 (R167)
+- [x] N-406 — commit 316b8c14b — tier: top (opus) — review: dispatcher — 5 tiers fixed (rust go python ruby java)
+- [x] N-419 — commit ce3643f0b — tier: mid (sonnet) — review: dispatcher — empty kind shared wording 7 tiers; public validators converged
+- [x] N-426 — commit fc376dc60 — tier: mid (sonnet) — review: dispatcher — R164 guard in 7 SDKs; R165 two Java tests rewritten; R166 route-B vector entry
+- [x] N-426 — commit 4a98e1e3b — tier: mid (sonnet) — review: dispatcher — R164 guard in 7 SDKs; R165 two Java tests rewritten
+- [x] N-423 — commit d8b23d077 — tier: * — review: dispatcher — revert check 10/233 red->green; R163
+- [x] N-427 — commit 8a8ebdafd — tier: sdk:java — review: dispatcher — revert check 2/17 red->green
+- [x] N-424 — commit feb114be8 — tier: * — review: dispatcher — revert check 2/30 red->green
+- [x] N-425 — commit 490d5aaee — tier: sdk:java — review: dispatcher — revert check 2/2 red->green
+- [x] N-418 — commit 7e3b962ec — tier: sdk:java — review: dispatcher — revert check 6/7 red->green
+- [x] N-411 — commit 3ee80b2f7 — tier: sdk:ts — review: dispatcher — revert check red->green; STRICT 98/98
+- [x] N-407 — commit c73bc5123 — tier: * — review: dispatcher — revert check 26/204 red->green
+- [x] N-421 — commit d9029584c — tier: compiler:zig — review: dispatcher — revert check 6/9 red->green
+- [x] N-341 — stale on arrival, no commit — all 7 tiers already use the synthetic iterator name _w (N-026); Move while refusals share one shape sentence quoting no name; 19-program x 7-tier matrix in remediation-logs/N-341
+- [x] N-376 — commit f84abcbbb (+ follow-up 3d9711d5c N-376-FU) — tier: * — review: dispatcher — revert check 12/21 red->green; R161 sign-off
+- [x] N-369 — stale on arrival, no commit — closed by N-368 ea1edfe58 (shared root cause; if-else/zig restamped there)
+- [x] N-368 — commit ea1edfe58 — tier: compiler:zig — review: dispatcher — revert check 2/2 red->green
+- [x] N-408 — commit 976e9a90e — tier: * — review: dispatcher — revert check 20/116 red->green
+- [x] N-402 — commit 25033b4d7 — tier: * — review: dispatcher — revert check 24/69 red->green
+- [x] N-417 — commit 08b3ae116 — tier: sdk:java — review: dispatcher — revert check 3/3 red->green
+- [x] N-416 — commit b54dc50ba — tier: mid — review: dispatcher — .rb nil expression refused 7/7; revert TS/Go/Py/Rb red
+- [x] N-410 — commit da5437f40 — tier: mid — review: dispatcher — py after-class, zig struct-body, zig init dot refused 7/7; revert TS/Go/Py/Rb red
+- [x] N-412 — commit 4914266fb — tier: top — review: dispatcher — R154 stateless witness pushes 7 SDKs; new sdk-call vector route B R155; revert TS/Go/Py/Rb red
+- [x] N-414 — commit 2fb0ed291 — tier: mid — review: dispatcher — .rb default nil refused; initializer hex validated 7/7; revert TS/Go/Py/Rb red
+- [x] N-413 — commit 6a9242165 — tier: top — review: dispatcher — .rb option trailing tokens refused 7/7; tic-tac-toe 33-byte default fixed; revert TS/Go/Py/Rb red
+- [x] N-409 — commit d6d4ecdc1 — tier: mid — review: dispatcher — .py ** and -> None accepted 7/7 (docs python.md); revert TS/Rb red
+- [x] N-031 — commit be1823034 — tier: mid — review: dispatcher — compiler gap stale (N-090); N-027 fence removed; mutation 7/194 red
+- [x] N-313 — commit 4f402f7da — tier: mid — review: dispatcher — .rb readonly/embed_always boolean-only, 7 tiers; revert TS/Go/Py/Rb red
+- [x] N-149 — commit 0b1a7f749 — tier: mid — review: dispatcher — SDK codegen keyword escaping (rs/rb), Zig+multi-contract shared filter, Zig stateless witness refusal; attempt 2
+- [x] N-033 — commit 7ff189e6b — tier: top — review: dispatcher — py class-body + zig list commas, 7 tiers; Zig .py '!' drop fixed; revert TS/Go/Py/Rb red
+- [x] N-159 — commit 9a9982f82 — tier: top — review: dispatcher — R153 provider-side origin filter, 7 SDKs; revert TS/Go/Py/Rb red
+- [x] N-095 — commit da5c48a35 — tier: mid — review: dispatcher — Py/Rb IR entry constructor_args bake; Go pin; revert red
+- [x] N-220 — commit 0b24d910c — tier: cheap — review: dispatcher — 7-tier CLI source+IR exclusion; revert TS/Py/Rb red
+- [x] N-207 — commit ca12126d5 — tier: top — review: dispatcher — 7-tier IR identifier gate; aliasing fail-open proven; revert TS/Go/Py/Rb red
+- [x] N-401 — commit 63fe2424c — tier: mid — review: dispatcher — 7-tier validator for-header walkers; revert TS/Go/Py/Rb red
+- [x] N-214 — commit 3b9808326 — tier: top (opus) — review: dispatcher — partial revert red 67/233 (go/py/rb) -> green 251/251
+- [x] N-377 — commit a34ab9641 — tier: cheap (sonnet) — review: dispatcher — mutation check red -> green
+- [x] N-036 — commit 92b1076f3 — tier: mid (sonnet) — review: dispatcher — partial revert red 6/9 -> green 9/9
+- [x] N-372 — commit 8efd617c9 — tier: cheap (sonnet) — review: dispatcher — revert check red 2/2 -> green 2/2
+- [x] N-374 — commit b8abc63de — tier: mid (sonnet) — review: dispatcher — mutation revert red 3/5 -> green 5/5
+- [x] N-373 — commit dda0d92fd — tier: cheap (sonnet) — review: dispatcher — revert check red 1/12 -> green 12/12
+- [x] N-032 — commit 11e515cdd — tier: mid (sonnet) — review: dispatcher — partial revert red 8/9 -> green 9/9
+- [x] N-020 — commit 65006874c — tier: top (opus) — review: dispatcher — revert check red 9/18 -> green 18/18
+- [x] N-403 — commit 703c2a77d — tier: cheap (sonnet) — review: dispatcher — revert check red 5/6 -> green 6/6
+- [x] N-404 — commit e8b39b7bd — tier: mid (sonnet) — review: dispatcher — revert check red 2/49 -> green 49/49
+- [x] N-019 — commit e90ce8a01 — tier: mid (sonnet) — review: dispatcher — partial revert red 36/101 (go/py/rb) -> green 101/101
+- [x] N-017 — commit 3f66a23dc — tier: mid (sonnet) — review: dispatcher — revert check red 42/52 -> green 52/52
+- [x] N-398 — commit 412595b6a — tier: mid (sonnet) — review: dispatcher — revert check red 7/8 -> green 8/8
+- [x] N-014 — commit 942664ec0 — tier: mid — review: dispatcher — unknown base refused on sol+zig all tiers, shared diag (R147); revert red->42/42
+- [x] N-012 — commit 56f6157ff — tier: mid — review: dispatcher — for-loop header slots walked in all 7 validators; revert red->green 4 tiers
+- [x] F-370 — commit c7c50737b — tier: mid — review: dispatcher — fuzz mode inventory doc + live-derived doc test; revert 5 red->7/7
+- [x] N-381 — commit 8ec3dbcb5 — tier: mid — review: dispatcher — nested go.mod for conformance/negatives; go test ./... green
+- [x] N-082 — commit d2094e6f6 — tier: mid — review: dispatcher — runar-go bn254G1Add mock refuses omega-partner pair; revert red->green
+- [x] N-395 — commit 83b0dd207 — tier: top — review: dispatcher — stateful-aware ANF fuzz generator (R146) + shrinker keeps message; nightly argv 20->0 mismatches
+- [x] N-396 — commit cb3883a8e — tier: mid — review: dispatcher — runar-lang exports bn254 pairing stubs; typecheck 2->0; full vitest 27667/0
+- [x] N-003 — commit 4fc0cb56f — tier: top — review: dispatcher — fold-on mode renders to source + folds; vacuous guard; revert 3 red->3/3; 240 programs 0 mismatches
+- [x] N-386 — commit a78b02d44 — tier: cheap — review: dispatcher — f211 header corrected + pin test
+- [x] N-393 — commit 53b1a0ddc — tier: mid — review: dispatcher — Rust sub_context loc + fixed-array dispatch loc match TS; revert 6 red->9/9; 87 examples 0 diffs
+- [x] N-390 — commit 74abcd641 — tier: mid — review: dispatcher — Go TS parser repair-and-reparse for <(-N; columns mapped back; fuzz 0 mismatches
+- [x] N-385 — commit 4b5ed21bc — tier: mid — review: dispatcher — Rust clears source loc after every binding; revert 2 red->3/3; cargo 1363/0
+- [x] N-391 — commit b5f2bcc07 — tier: cheap — review: dispatcher — CI step for zig build conformance-goldens + reachability test; revert red->green
+- [x] N-392 — commit 70b74aec2 — tier: cheap — review: dispatcher — zig/java golden harness fail closed on malformed source.json; mutation red->green
+- [x] N-389 — commit 51f890704 — tier: mid — review: dispatcher — named not-compilable skip sets in ruby/rust/zig/java golden harnesses (R145); mutation red->green; full suites green
+- [x] N-388 — commit fb67e1757 — tier: cheap — review: dispatcher — README Go-only list 5; r230 derives from disk; revert red->green
+- [x] F-301 — commit 31cce0865 — tier: mid — review: dispatcher — move example assertions restored to sol parity; mutation red->green
+- [x] N-387 — commit d16d9d75b — tier: mid — review: dispatcher — python golden harness named skip set (R145); revert red->11/11; full pytest 2908/0
+- [x] F-300 — commit 5064f31b5 — tier: mid — review: dispatcher — opt-in wide-loop IR arbitraries; revert red->7/7; Go parser bug found -> N-390
+- [x] N-314 — commit 6243172f4 — tier: top — review: dispatcher — Go-only bn254-pairing fixture + precompiled-hex witness; Java registry fix; R143/R144; STRICT vitest 27650/0; golden 98/98
+- [x] N-222 — commit f39b17e42 — tier: top — review: dispatcher — Rust branch-body source-map attribution; revert 2/2 red->green; full cargo 1357/0; STRICT vitest 27625/0; rs if-else source-map 19->13 route B (R87); N-385/N-386 logged
+- [x] N-216 — commit 1021bc444 — tier: top — review: dispatcher — R83/R140/R141; 6 reconcile sites; patch revert 112 red/135 green; closes N-231
+- [x] N-103 — commit a0fa0adee — tier: top — review: dispatcher — R86/R139/R142; exact log2; patch revert 15 red/17 green
+- [x] N-383 — commit 361002809 — tier: cheap — review: dispatcher — F-368 FU; r067 re-pin
+- [x] F-368 — commit 0e71da4f9 — tier: top — review: dispatcher — R90/R138; 7-tier sig<n gate; patch revert 14 red/16 green
+- [x] N-379 — commit bd3c9aa85 — tier: cheap — review: dispatcher — F-352 FU; R137
+- [x] F-352 — commit c435f8ca9 — tier: mid — review: dispatcher — six second witnesses; R136 java skip
+- [x] F-249 — commit 23af586e2 — tier: top — review: dispatcher — six-tier + Lean; R133/R134/R135; revert check 42 red -> 45 green
+- [x] N-371 — commit 6362536e7 — tier: mid — review: dispatcher — 33 zig example tests (16 native+negatives, 17 compile-only); mutation red
+- [x] F-295 — stale on arrival, no commit — -
+- [x] N-370 — commit 6d1b1df1a — tier: mid — review: dispatcher — run.ts live shape check; revert 5/113 red; live pin mutation red
+- [x] F-294 — commit ef2142737 — tier: mid — review: dispatcher — examples/zig import-completeness test; mutation red
+- [x] F-293 — commit acecf5620 — tier: mid — review: dispatcher — whole-map anchor-partition rule vs TS; 3 pairs pinned; mutations 3/108, 5/108 red
+- [x] F-292 — commit cd1f23007 — tier: mid — review: dispatcher — genuine Gradle 8.5 wrappers + CI ./gradlew + wrapper-validation; revert 6/16 red
+- [x] N-344 — commit 3df353f27 — tier: mid — review: dispatcher — rs let / zig const reassignment refused 7 tiers; revert 9/12 red; shadow probe clean
+- [x] N-366 — stale on arrival, no commit — -
+- [x] N-365 — commit eb95231f5 — tier: mid — review: dispatcher — Go as-number explicit refusal + canonical wording; revert 4/114 red
+- [x] N-354 — commit 9a68f6ef9 — tier: cheap — review: dispatcher — ec-unit reliance documented; r034 note fixed + 7-tier fold pin; size baseline route B; mutation 7/24 red
+- [x] N-359 — commit 219f1f009 — tier: mid — review: dispatcher — as number refused / as const accepted 7 tiers; revert 8/43 red
+- [x] N-364 — stale on arrival, no commit — -
+- [x] N-362 — commit 4174e8e66 — tier: top — review: dispatcher — inlined helper reassigned params bound as helper locals; revert 17/144 red
+- [x] N-363 — commit a2ef91d47 — tier: cheap — review: dispatcher — route-B entries for N-360 strict goldens; gate green
+- [x] N-360 — commit 3a22a351a — tier: top — review: dispatcher — R128/R130; revert check red/green on 3 suites; STRICT 91, mf off 816, on 780+36; negatives 6681
+- [x] N-361 — commit 0eb92aaf5 — tier: cheap — review: dispatcher — comment-only (R129); code identical after stripping comments; lean exit 0
+- [x] N-358 — commit fcf0e34ce — tier: cheap — review: dispatcher — comment-only (R124); lean type-check exit 0
+- [x] N-343 — commit f19ba32ff — tier: top — review: dispatcher — mutation check red/green; STRICT 91, mf off 816, on 780+36; D=127 97s->0.73s
+- [x] N-356 — commit ed1684d83 — tier: top — review: dispatcher — DCE load_param refs, 7 tiers; revert check 54/83 red; STRICT 91, mf off 816, on 780+36
+- [x] N-346 — commit d47e48d54 — tier: mid — review: dispatcher — revert check 9/64 red, green; STRICT 91, mf off 816, on 780+36 vacuous
+- [x] N-348 — commit e71e78b16 — tier: cheap — review: dispatcher — comments + README sentence (R123)
+- [x] N-357 — commit 55f411e6b — tier: cheap — review: dispatcher — test-only; mutation check red/green
+- [x] N-349 — commit 679b50680 — tier: cheap — review: dispatcher — test-only; mutation check red/green
+- [x] N-352 — stale on arrival, no commit — fixed by F-269 ad4bcea79 (rebound names get no EC identity in all 7 tiers; covered by f269-ec-alias-resolution rebound-name cases + adversarial re-review R8/R8r execution probes)
+- [x] F-269 — commit ad4bcea79 — tier: top — review: dispatcher — attempt 2 (rebound names get no identity; R7/R9 lift guards; Go never equates @ref payloads); adversarial re-review clean; battery2 39/39
+- [x] F-193 — commit d76b72912 — tier: mid — review: dispatcher — cache-boundary clone; revert check 3 red
+- [x] F-188 — commit 2449919a2 — tier: mid — review: dispatcher — java lifted bindings carry if/branch locs; revert check red
+- [x] F-182 — stale on arrival, no commit — -
+- [x] F-178 — commit 7c7ea7451 — tier: mid — review: dispatcher — test-only opcode walker; mutation check red
+- [x] F-167 — commit d239c0cec — tier: top — review: dispatcher — contracts assert results; route A witnesses; item battery 39/39
+- [x] N-345 — commit de1297b21 — tier: top — review: dispatcher — list union across 7 tiers; revert check 98 red
+- [x] F-160 — commit 9606caee35d9f6a6efdac2c4535f052dd2f9f99d — tier: top — review: dispatcher — all 7 tiers; N-345/N-346 logged
+- [x] N-342 — commit 2e950b4dd8945be95bdd4dde3b79c978db6fa267 — tier: mid — review: dispatcher — TS reference was fail-open too
+- [x] F-186 — stale on arrival, no commit — -
+- [x] F-180 — stale on arrival, no commit — -
+- [x] F-176 — stale on arrival, no commit — -
+- [x] F-159 — stale on arrival, no commit — -
+- [x] N-280 — commit 2bf6bc915ce9566e78d897c6c24afb31aa39bde4 — tier: top — review: dispatcher — RSS 1.65GB->70MB at D=8
+- [x] N-290 — commit ea309cf5fde8790e25ecf17d1aef027ca9bb4703 — tier: mid — review: dispatcher — 51/51 commands green individually
+- [x] N-055 — commit 431e8598b0eefebcef9ba9cdb9bd497564d5e482 — tier: mid — review: dispatcher — premise corrected: was fail-open, now refused
+- [x] N-054 — commit db222ee70b04192777bf166f55778fb58b4f9b37 — tier: mid — review: dispatcher — R85 accept everywhere as let
+- [x] N-026 — commit e0e605094befe0695b3a2bd42040caaae9657a41 — tier: mid — review: dispatcher — N-341 logged (Move while iterator name)
+- [x] N-305 — commit e4047d34f09f3fcca72d0eca454a6bb448aae406 — tier: mid — review: dispatcher — R120 README only
+- [x] N-340 — commit ae0936ed760de926195dbb9d40268c5f6243dcb6 — tier: mid — review: dispatcher — compile check one-off
+- [x] N-338 — commit 8fd5b4d476006494df2b58a6c9577be4547d424e — tier: mid — review: dispatcher — user decision: refuse unlisted
+- [x] N-278 — commit a5cd8b15b14b4bf188f4e05140aeb135e71ebafe — tier: mid — review: dispatcher — Zig/Ruby/Java already emitted; N-340 logged for TS generateZig template
+- [x] N-339 — commit ce873336c323a1494b39ba9ed9dfc6344f48c1ad — tier: mid — review: dispatcher — checkpoint-26 regression; test-only
+- [x] N-333 — commit f6dd56fad6f1e1078ee0a98769f192dfabd81679 — tier: sonnet — review: dispatcher — int64/bool only; rest split to N-338
+- [x] N-183 — commit 5eba481a48b112c7244b92b29ddd9c78901a892e — tier: sonnet — review: dispatcher — 
+- [x] N-098 — commit 716e53eafac3067c3b0901a86a38fba56815af9b — tier: sonnet — review: dispatcher — 
+- [x] N-332 — commit 3642770d2d273a531e79ce8a986a98b534536814 — tier: sonnet — review: dispatcher — 
+- [x] N-100 — stale on arrival, no commit — -
+- [x] N-337 — commit 3044c51745399a2a2b8ad8fbab78cab53c363f24 — tier: sonnet — review: dispatcher — 
+- [x] N-336 — commit 84732354a2b5d2cf543d31b865e647c1f6ab798d — tier: sonnet — review: dispatcher — 
+- [x] N-161 — commit 2f4913f8ae75b28322b6fc9c74ec20d34e2e9c5a — tier: sonnet — review: dispatcher — 
+- [x] N-043 — commit 61e868b55dadf038148b82bfba5a4ec2e120590f — tier: sonnet — review: dispatcher — 
+- [x] N-102 — commit 00d7d1621b6b9405a3093af3d97598c619c17601 — tier: sonnet — review: dispatcher — 
+- [x] N-335 — commit 6d10a69f571da206f3ba1b539d9b64a254ccc74d — tier: sonnet — review: dispatcher — checkpoint-25 regression
+- [x] N-334 — commit cfc63d428cd9fa6f3564959cd1ca5a5d6f9b03eb — tier: sonnet — review: dispatcher — checkpoint-25 regression
+- [x] N-331 — commit 4195ade74 — tier: sonnet — review: dispatcher — 
+- [x] N-084 — commit d4c3b8b8d — tier: sonnet — review: dispatcher — 
+- [x] N-073 — commit bd9ba4d99 — tier: sonnet — review: dispatcher — 
+- [x] N-325 — commit 60c5ce543 — tier: sonnet — review: dispatcher — params only; return types split to N-331
+- [x] N-330 — commit 4a0f84a9d — tier: sonnet — review: dispatcher — 
+- [x] N-322 — commit b3f0a1802 — tier: opus — review: dispatcher — 
+- [x] N-329 — commit ba368350f — tier: sonnet — review: dispatcher — 
+- [x] N-328 — commit e520d8daf — tier: sonnet — review: dispatcher — 
+- [x] N-326 — commit 5d504fa84 — tier: sonnet — review: dispatcher — 
+- [x] N-327 — commit 8a9e6d1fd — tier: sonnet — review: dispatcher — 
+- [x] N-324 — commit 3552001cb — tier: opus — review: dispatcher — 
+- [x] N-323 — commit 41be9b0d6 — tier: sonnet — review: dispatcher — 
+- [x] N-320 — commit 6f9ea880d — tier: opus — review: dispatcher — Zig large-bigint case split to N-324 (R119)
+- [x] N-321 — commit a8682150c — tier: sonnet — review: dispatcher — 
+- [x] N-311 — commit 84512ec07 — tier: opus — review: dispatcher — attempt 2 per R117
+- [x] N-318 — commit 15b09157f — tier: opus — review: dispatcher — 
+- [x] N-317 — commit 68197d977 — tier: opus — review: dispatcher — 
+- [x] N-316 — commit 3138de5da — tier: sonnet — review: dispatcher — 
+- [x] N-076 — commit 77c4354b1 — tier: sonnet — review: dispatcher — 
+- [x] N-319 — commit 4c282876d — tier: sonnet — review: dispatcher — 
+- [x] N-242 — commit 787b02dbb — tier: sonnet — review: dispatcher — lambda half; missing-end half split to N-319
+- [x] N-221 — stale on arrival, no commit — fixed by N-078 (c6ffe5110, ancestor): dispatcher probe at fc33b87d9 — TS compile() source map for examples/sol/arithmetic gives 11:8, examples/python/arithmetic 12:8 (0-based, = indent), 0 of 28 mappings at indent+1
+- [x] N-193 — commit fc33b87d9 — tier: sonnet — review: dispatcher — 
+- [x] N-192 — stale on arrival, no commit — duplicate of F-345 (36c731f49): peephole-exhaustive sweep now executes optimizeStackIR per rule and requires optimizeStackIR(pattern)==optimizeStackIR(replacement); mutation check red
+- [x] N-315 — commit 9f0a033ce — tier: opus — review: dispatcher — 
+- [x] N-070 — commit aff34cade — tier: opus — review: dispatcher — 
+- [x] N-075 — commit e7eb72e6a — tier: sonnet — review: dispatcher — 
+- [x] F-296 — commit 0e54ff619 — tier: sonnet — review: dispatcher — 
+- [x] N-063 — commit dc603a217 — tier: sonnet — review: dispatcher — 
+- [x] F-278 — commit 2045cbbb1 — tier: opus — review: dispatcher — 
+- [x] F-299 — commit f47c2be62 — tier: sonnet — review: dispatcher — 
+- [x] F-277 — stale on arrival, no commit — closed by F-279 (a0e72febc): ci.yml names conformance/wire-primitives.test.ts and the other suites explicitly; tests/conformance-tests-reachable-from-ci.test.ts guards every tracked conformance test file (2/2 at 8084ac5bf)
+- [x] CK23-FU1 — commit 8084ac5bf — tier: sonnet — review: dispatcher — 
+- [x] N-301 — commit 1b48d0c76 — tier: sonnet — review: dispatcher — 
+- [x] N-312 — commit a4ba82549 — tier: sonnet — review: dispatcher — 
+- [x] N-310 — commit 7afd21acb — tier: sonnet — review: dispatcher — 
+- [x] N-308 — commit 42d5d2c8b — tier: opus — review: dispatcher — 
+- [x] N-309 — commit 11b5e4776 — tier: sonnet — review: dispatcher — 
+- [x] N-302 — commit ec42dabe5 — tier: sonnet — review: dispatcher — 
+- [x] N-307 — commit 8c82ab721 — tier: opus — review: dispatcher — 
+- [x] N-181 — commit 18c99c16f — tier: opus — review: dispatcher — 
+- [x] N-285 — commit 77657ade0 — tier: sonnet — review: dispatcher — 
+- [x] PL27-FU2 — commit c24ddaa25 — tier: sonnet — review: dispatcher — 
+- [x] PL27-FU1 — commit bf981e21b — tier: sonnet — review: dispatcher — 
+- [x] N-297 — commit a0f4a3b6f — tier: sonnet — review: dispatcher — 
+- [x] N-126 — commit dccb4910f — tier: sonnet — review: dispatcher — 
+- [x] N-306 — commit 1a8af6d08 — tier: sonnet — review: dispatcher — 
+- [x] N-120 — commit 63fe42681 — tier: opus — review: dispatcher — 
+- [x] N-135 — commit d23c4ae73 — tier: opus — review: dispatcher — 
+- [x] N-284 — commit 0adf02f7a — tier: sonnet — review: dispatcher — 
+- [x] N-154 — commit ac74e304e — tier: opus — review: dispatcher — 
+- [x] CK21-FU2 — commit 9fd1a5507 — tier: sonnet — review: dispatcher — 
+- [x] CK21-FU1 — commit c4633a5b1 — tier: sonnet — review: dispatcher — 
+- [x] N-179 — commit 9d1e9ada4 — tier: opus — review: dispatcher — 
+- [x] N-093 — commit da1fb3dee — tier: opus — review: dispatcher — 
+- [x] N-298 — commit 2385f45a5 — tier: sonnet — review: dispatcher — 
+- [x] N-299 — commit 49d8c3bf1 — tier: sonnet — review: dispatcher — 
+- [x] N-287 — commit 7ad99992c — tier: sonnet — review: dispatcher — 
+- [x] N-288 — commit 552f89ade — tier: opus — review: dispatcher — 
+- [x] N-286 — commit 4301fcab2 — tier: opus — review: dispatcher — 
+- [x] N-295 — commit ff837f85b — tier: sonnet — review: dispatcher — 
+- [x] N-293 — commit e56aada6f — tier: opus — review: dispatcher — 
+- [x] N-294 — commit 46a39c3cd — tier: sonnet — review: dispatcher — 
+- [x] N-292 — commit d18d27b48 — tier: opus — review: dispatcher — 
+- [x] N-291 — commit f294030c1 — tier: opus — review: dispatcher — 
+- [x] N-177 — stale on arrival, no commit — satisfied by N-093 (d97561e2c): @sighash has a native spelling on all 8 non-TS surfaces, pinned by compiler-directives expected-ir
+- [x] N-283 — commit 63a91ebbc — tier: sonnet — review: dispatcher — 
+- [x] N-289 — commit c4e3e89a8 — tier: sonnet — review: dispatcher — 
+- [x] N-155 — commit d30d94afb — tier: sonnet — review: dispatcher — 
+- [x] N-282 — commit b6aeb780d — tier: sonnet — review: dispatcher — 
+- [x] N-281 — commit 02684515f — tier: sonnet — review: dispatcher — 
+- [x] N-109 — commit f04e6b763 — tier: opus — review: dispatcher — 
+- [x] CK20-FU1 — commit 2e3b485fc — tier: sonnet — review: dispatcher — 
+- [x] N-279 — commit 83b79218b — tier: sonnet — review: dispatcher — 
+- [x] N-277 — commit e1afeab6e — tier: sonnet — review: dispatcher — 
+- [x] N-018 — commit 5d7a404d6 — tier: sonnet — review: dispatcher — 
+- [x] N-250 — commit 0c9b37da5 — tier: sonnet — review: dispatcher — 
+- [x] F-392 — commit b0c1d993c — tier: sonnet — review: dispatcher — 
+- [x] N-243 — commit 01f09232f — tier: sonnet — review: dispatcher — 
+- [x] N-230 — commit fea4d2b8c — tier: sonnet — review: dispatcher — 
+- [x] N-190 — commit 1e3df3a8c — tier: sonnet — review: dispatcher — 
+- [x] N-226 — commit b9e37e8af — tier: sonnet — review: dispatcher — 
+- [x] N-225 — commit 95dc1ca96 — tier: sonnet — review: dispatcher — 
+- [x] PL25-FU1 — commit 1798f23ad — tier: sonnet — review: dispatcher — 
+- [x] N-264 — commit 287f12413 — tier: opus — review: dispatcher — 
+- [x] F-253 — commit 9d0f6013c — tier: sonnet — review: dispatcher — 
+- [x] N-219 — commit 0dc03a577 — tier: sonnet — review: dispatcher — 
+- [x] N-163 — commit 7f7e026ce — tier: opus — review: dispatcher — 
+- [x] N-211 — commit 8abdb5b4d — tier: opus — review: dispatcher — 
+- [x] N-217 — commit bba843c8c — tier: sonnet — review: dispatcher — 
+- [x] N-189 — commit eb8b6e082 — tier: opus — review: dispatcher — 
+- [x] N-276 — commit 45cd56748 — tier: sonnet — review: dispatcher — 
+- [x] F-297 — commit 9d0b9324e — tier: sonnet — review: dispatcher — 
+- [x] N-255 — commit 15e3d9fc4 — tier: sonnet — review: dispatcher — 
+- [x] N-247 — commit 8b7c796c8 — tier: sonnet — review: dispatcher — 
+- [x] F-276 — commit 4dcd24ad6 — tier: sonnet — review: dispatcher — 
+- [x] N-271 — commit 5f367a7e2 — tier: sonnet — review: dispatcher — 
+- [x] N-199 — commit 241d78d24 — tier: opus — review: dispatcher — 
+- [x] N-275 — commit 84771206c — tier: sonnet — review: dispatcher — 
+- [x] N-274 — commit 9d390c5a7 — tier: sonnet — review: dispatcher — 
+- [x] N-259 — commit 3c98de100 — tier: opus — review: dispatcher — 
+- [x] N-270 — commit 7454b8b75 — tier: sonnet — review: dispatcher — 
+- [x] F-298 — commit 06277fc84 — tier: sonnet — review: dispatcher — 
+- [x] F-279 — commit a0e72febc — tier: sonnet — review: dispatcher — 
+- [x] N-272 — stale on arrival, no commit — 4ac99904b
+- [x] N-273 — stale on arrival, no commit — 155bd2f7c
+- [x] N-266 — commit 5b75534ec — tier: sonnet — review: dispatcher — 
+- [x] PL23-FU1 — commit ff6c002e3 — tier: sonnet — review: dispatcher — 
+- [x] N-268 — commit 8e44b759e — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU2 — commit 8caea8633 — tier: sonnet — review: dispatcher — 
+- [x] N-258 — commit eb028acf0 — tier: opus — review: dispatcher — 
+- [x] N-269 — commit 00c097f41 — tier: sonnet — review: dispatcher — 
+- [x] N-267 — commit 81723cfea — tier: sonnet — review: dispatcher — 
+- [x] N-265 — commit 15fd6deac — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU8 — commit a85e41e99 — tier: sonnet — review: dispatcher — 
+- [x] N-009 — commit 245c33b42 — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU1 — commit 73f63a36c — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU7 — commit 386aa313e — tier: sonnet — review: dispatcher — 
+- [x] N-244 — commit 8aff167fc — tier: opus — review: dispatcher — 
+- [x] N-223 — commit 47bb1c615 — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU4 — commit a57cdcf16 — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU5 — commit 2b08f06a3 — tier: sonnet — review: dispatcher — 
+- [x] N-260 — commit a50679c7f — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU3 — commit 5de0ef207 — tier: sonnet — review: dispatcher — 
+- [x] CK18-FU6 — commit 02a42dbf2 — tier: sonnet — review: dispatcher — 
+- [x] N-261 — commit 4596a79e3 — tier: opus — review: dispatcher — 
+- [x] N-263 — commit c5d972b79 — tier: sonnet — review: dispatcher — 
+- [x] N-252 — commit 4ac99904b — tier: opus — review: dispatcher — 
+- [x] N-180 — commit c13a47c3e — tier: opus — review: dispatcher — 
+- [x] N-124 — commit 48f894737 — tier: sonnet — review: dispatcher — 
+- [x] N-072 — commit 7bbb0baa9 — tier: opus — review: dispatcher — 
+- [x] N-198 — commit ff01a809e — tier: opus — review: dispatcher — 
+- [x] N-040 — commit f88dfe7fa — tier: sonnet — review: dispatcher — 
+- [x] N-218 — commit c057193ff — tier: sonnet — review: dispatcher — 
+- [x] N-254 — commit cd0652f42 — tier: sonnet — review: dispatcher — 
+- [x] N-257 — commit 5da46692e — tier: sonnet — review: dispatcher — 
+- [x] N-116 — commit 3720e5b00 — tier: opus — review: dispatcher — 
+- [x] N-227 — commit dcf44af92 — tier: sonnet — review: dispatcher — 
+- [x] N-205 — commit b7fae3d40 — tier: opus — review: dispatcher — 
+- [x] N-191 — stale on arrival, no commit — f06e1d3ba
+- [x] N-089 — stale on arrival, no commit — f06e1d3ba
+- [x] N-251 — commit 60a7ff4bf — tier: opus — review: dispatcher — 
+- [x] N-246 — commit 75a1ffea7 — tier: sonnet — review: dispatcher — 
+- [x] N-256 — commit d08c9e302 — tier: sonnet — review: dispatcher — 
+- [x] N-197 — commit 12762655c — tier: opus — review: dispatcher — 
+- [x] N-236 — commit 0cdb8fc6b — tier: sonnet — review: dispatcher — 
+- [x] N-248 — commit f06e1d3ba — tier: sonnet — review: dispatcher — 
+- [x] N-208 — commit 2069feeef — tier: sonnet — review: dispatcher — 
+- [x] N-213 — commit 2b17d875c — tier: sonnet — review: dispatcher — 
+- [x] N-249 — stale on arrival, no commit — ac3c38ea4
+- [x] N-110 — commit cee187aa1 — tier: opus — review: dispatcher — 
+- [x] N-182 — commit c604ccd71 — tier: opus — review: dispatcher — 
+- [x] F-391 — commit 07432886d — tier: sonnet — review: dispatcher — 
+- [x] N-237 — commit f3c09ddcd — tier: opus — review: dispatcher — 
+- [x] N-228 — commit f288b4b6f — tier: sonnet — review: dispatcher — 
+- [x] N-224 — commit 07895ef8f — tier: sonnet — review: dispatcher — 
+- [x] N-210 — commit 1d0c3b10a — tier: sonnet — review: dispatcher — 
+- [x] N-209 — commit c918a80d7 — tier: sonnet — review: dispatcher — 
+- [x] N-203 — commit ba21d18cd — tier: sonnet — review: dispatcher — 
+- [x] N-200 — stale on arrival, no commit — none
+- [x] N-196 — stale on arrival, no commit — 3736d1623
+- [x] N-245 — commit f6d8def98 — tier: sonnet — review: dispatcher — 
+- [x] N-062 — commit d0b15da8b — tier: sonnet — review: dispatcher — 
+- [x] N-158 — commit d5a2d2642 — tier: sonnet — review: dispatcher — 
+- [x] N-194 — commit 7f02b632d — tier: sonnet — review: dispatcher — 
+- [x] N-188 — commit ce1697cd1 — tier: sonnet — review: dispatcher — 
+- [x] N-239 — commit fb133b159 — tier: opus — review: dispatcher — 
+- [x] CK17-FU4 — commit a2690b826 — tier: sonnet — review: dispatcher — 
+- [x] CK17-FU2 — commit 36ca035aa — tier: sonnet — review: dispatcher — 
+- [x] CK17-FU1 — commit 414e6b3c3 — tier: sonnet — review: dispatcher — 
+- [x] N-178 — commit 7e594f079 — tier: opus — review: dispatcher — 
+- [x] N-173 — commit 7d7d96a3e — tier: sonnet — review: dispatcher — 
+- [x] CK17-FU3 — commit e26f55ff0 — tier: sonnet — review: dispatcher — 
+- [x] N-039 — commit a9721f908 — tier: opus — review: dispatcher — 
+- [x] N-010 — commit 734124855 — tier: sonnet — review: CL — 
+- [x] F-390 — commit 4017d4a53 — tier: sonnet — review: CL — 
+- [x] N-187 — commit 91c58373a — tier: sonnet — review: dispatcher — 
+- [x] F-389 — commit 7edd87e22 — tier: sonnet — review: CL — 
+- [x] N-241 — commit 8b4662d8b — tier: sonnet — review: dispatcher — 
+- [x] N-175 — commit 7e5f47f3d — tier: sonnet — review: dispatcher — 
+- [x] F-388 — commit 0824e546d — tier: sonnet — review: CL — 
+- [x] N-168 — commit cf0d686ea — tier: sonnet — review: dispatcher — 
+- [x] N-240 — stale on arrival, no commit — already fixed by R-159 (f5c85215c): LoadSP1VKFromFile → VerifyingKey.Validate checks every G1/G2 VK point on-curve + G2 subgroup; both compile paths use it; probe (remediation-logs/N-240) confirms CompileGroth16WA refuses off-curve and non-subgroup GammaNegG2
+- [x] N-079 — stale on arrival, no commit — unreachable: emitWAMillerLoop3 chord steps use T=[m]Q with 4<=m<2^62, never ±1 mod r, Q1 subgroup-checked, Q2/Q3 VK constants; probe in remediation-logs/N-079; doc-comment patch kept there; VK G2 validation is N-240
+- [x] N-234 — commit dc15b9e61 — tier: sonnet — review: dispatcher — 
+- [x] N-238 — commit e8efca0e7 — tier: sonnet — review: dispatcher — 
+- [x] N-042 — commit c94574c01 — tier: opus — review: dispatcher — 
+- [x] N-121 — commit 8fbe2116e — tier: opus — review: dispatcher — 
+- [x] F-387 — commit 7ea97c331 — tier: sonnet — review: CL — 
+- [x] N-077 — commit 1d548e59d — tier: sonnet — review: dispatcher — 
+- [x] N-166 — commit 5c457ee8c — tier: opus — review: dispatcher — 
+- [x] F-366 — commit bfe10878f — tier: sonnet — review: CL — 
+- [x] N-235 — commit 1def698a7 — tier: sonnet — review: dispatcher — 
+- [x] N-123 — commit 5ebff9c33 — tier: opus — review: dispatcher — 
+- [x] N-160 — commit 335624254 — tier: sonnet — review: dispatcher — 
+- [x] N-078 — commit c6ffe5110 — tier: opus — review: dispatcher — 
+- [x] F-386 — commit e9186aeae — tier: sonnet — review: CL — 
+- [x] N-066-FU — commit 6213bf739 — tier: haiku — review: dispatcher — 
+- [x] F-364 — commit b963d86b4 — tier: sonnet — review: CX — 
+- [x] F-385 — commit 150c54c7e — tier: sonnet — review: CL — 
+- [x] F-356 — commit 8a9acd9cc — tier: sonnet — review: CX — 
+- [x] N-119 — commit 003feef35 — tier: sonnet — review: dispatcher — 
+- [x] N-172 — commit bc1b1a73a — tier: sonnet — review: dispatcher — 
+- [x] F-384 — commit ac09e26bc — tier: haiku — review: CL — 
+- [x] F-355 — commit f56bc127c — tier: sonnet — review: CX — 
+- [x] N-232 — commit 631bc25c6 — tier: sonnet — review: dispatcher — 
+- [x] N-157 — commit 5510d4a42 — tier: sonnet — review: dispatcher — 
+- [x] F-383 — commit bf64216a4 — tier: sonnet — review: CL — 
+- [x] N-066 — commit 551d18fe1 — tier: haiku — review: dispatcher — 
+- [x] F-354 — commit 9ad240dbb — tier: sonnet — review: CX — 
+- [x] F-382 — commit 8bbad7da1 — tier: haiku — review: CL — 
+- [x] N-115 — commit 4fd9fa8a2 — tier: opus — review: dispatcher — 
+- [x] N-117 — stale on arrival, no commit — not reproducible: Zig --source X --disable-constant-folding --hex prints the same non-empty hex in either flag order (dispatcher re-checked on arithmetic); parseCompileOptions is order-independent; go/rust/python/ruby agree
+- [x] N-035 — commit 6ec78592d — tier: opus — review: GK — 
+- [x] F-252 — commit e98f99f57 — tier: sonnet — review: CL — 
+- [x] CK16-FU1 — commit 71a01a940 — tier: haiku — review: dispatcher — 
+- [x] N-106 — commit d3a5707ee — tier: haiku — review: dispatcher — 
+- [x] F-341 — commit 9dda8e6e4 — tier: sonnet — review: CX — 
+- [x] F-251 — commit f0040330a — tier: sonnet — review: CL — 
+- [x] F-353 — commit 6c4926965 — tier: sonnet — review: CL — 
+- [x] CK16-FU2 — commit 6676865e4 — tier: sonnet — review: dispatcher — 
+- [x] CK16-FU3 — commit 9ba3209d6 — tier: sonnet — review: dispatcher — 
+- [x] N-229 — commit c4456598e — tier: sonnet — review: dispatcher — 
+- [x] F-250 — commit be741c2c8 — tier: sonnet — review: CL — 
+- [x] N-105 — commit 5af387eb1 — tier: sonnet — review: dispatcher — 
+- [x] N-024 — commit 5179faa38 — tier: sonnet — review: dispatcher — 
+- [x] F-175 — commit 899bca1d7 — tier: sonnet — review: CL — 
+- [x] F-171-FU — commit 7b82dad6a — tier: haiku — review: dispatcher — 
+- [x] N-086 — commit 7eb472a1d — tier: sonnet — review: dispatcher — 
+- [x] F-351 — commit 87fe2f8c9 — tier: sonnet — review: CL — 
+- [x] F-340 — commit 5fa82c67f — tier: sonnet — review: CL — 
+- [x] F-174 — commit e9ccaffc8 — tier: sonnet — review: CL — 
+- [x] F-375 — commit ee5eddbb7 — tier: sonnet — review: CL — 
+- [x] N-092 — commit 3cadb8f2e — tier: haiku — review: dispatcher — 
+- [x] F-173 — commit 65e2166ff — tier: opus — review: CL — 
+- [x] F-350 — commit c97e14228 — tier: sonnet — review: CL — 
+- [x] F-339 — commit 5a5b690f7 — tier: sonnet — review: CL — 
+- [x] F-379 — commit 2cbeb7bf8 — tier: sonnet — review: CL — 
+- [x] F-374 — commit 1be065f92 — tier: sonnet — review: CL — 
+- [x] N-085 — commit 2fdec642b — tier: sonnet — review: dispatcher — 
+- [x] F-378 — commit 9532e337d — tier: sonnet — review: CL — 
+- [x] F-338 — commit b2895b7f9 — tier: sonnet — review: CL — 
+- [x] F-381 — stale on arrival, no commit — closed by R-212 (6871de2da): every emitting tier honours SOURCE_DATE_EPOCH; Rust artifacts are byte-identical excluding buildTimestamp and fully identical when pinned; guarded by tests/r212-source-date-epoch-parity.test.ts. The anf/ir.anf duplication is a documented Rust CLI default (artifact-flag-parity.test.ts)
+- [x] F-380 — stale on arrival, no commit — no defect: test_add_data_output.rb header says coverage was 'previously' compile-only (true; never claims removal); the two test_stack_lower.rb smoke tests are redundant with the opcode-pinning test but correct, and the hard rule bars deleting tests. Drafts kept in remediation-logs/F-380/
+- [x] F-373 — commit ec65d3e47 — tier: sonnet — review: CL — 
+- [x] F-377 — commit b1d503023 — tier: sonnet — review: CL — 
+- [x] F-172 — commit 75a3c95d9 — tier: sonnet — review: CL — 
+- [x] N-068 — commit c9e4b51a0 — tier: sonnet — review: dispatcher — 
+- [x] N-081 — commit 63174fff8 — tier: sonnet — review: dispatcher — 
+- [x] F-337 — commit edb81f836 — tier: opus — review: CL — 
+- [x] F-171 — commit 02f536a26 — tier: sonnet — review: CL — 
+- [x] F-376 — commit 419557ba7 — tier: sonnet — review: CL — 
+- [x] F-348 — stale on arrival, no commit — duplicate of N-179 (R68): @sighash fixture blocked on N-177 (9-surface spelling) + N-178 (Lean reads sighashFlag); 7-tier-clean stateful draft saved at remediation-logs/N-179/f348-draft.tgz
+- [x] F-347 — stale on arrival, no commit — closed by F-226 (247e819ed): CHECKMULTISIG+VERIFY fusion swept with real signed witnesses on @bsv/sdk Spend (SIG_SWEEPS.checkmultisig); F-345 (36c731f49) adds the runtime-matcher check
+- [x] F-346 — stale on arrival, no commit — closed by F-226 (247e819ed): CHECKSIG/CHECKMULTISIG+VERIFY fusions swept with real signed witnesses on @bsv/sdk Spend; F-345 (36c731f49) adds the runtime-matcher check
+- [x] F-372 — commit be5ccd1ae — tier: sonnet — review: CL — 
+- [x] F-335 — commit e3285c376 — tier: sonnet — review: CL — 
+- [x] F-345 — commit 36c731f49 — tier: opus — review: CX — 
+- [x] F-371 — commit 9e8817684 — tier: sonnet — review: CL — 
+- [x] N-013 — commit 47891714b — tier: sonnet — review: dispatcher — 
+- [x] F-315 — commit 3736d1623 — tier: sonnet — review: CL — 
+- [x] F-343 — commit fd328607e — tier: opus — review: CX — 
+- [x] F-334 — commit fe742e92e — tier: sonnet — review: CL — 
+- [x] F-169 — commit 80206b0b0 — tier: sonnet — review: CL — 
+- [x] F-170 — stale on arrival, no commit — duplicate of F-169 (80206b0b0); repo-wide sweep found no other allow-list canonicalization
+- [x] F-394 — stale on arrival, no commit — F-393 (3097e8225) added the readonly_inference tests; registered in test_main and mutation-sensitive
+- [x] F-344 — stale on arrival, no commit — R74: TS EC optimizer top-level-only walk is the cross-tier item N-201
+- [x] F-314 — stale on arrival, no commit — duplicate of F-184 (64dda4c06): loadGroth16WAConfig refuses wrong IC arity
+- [x] F-342-FU — commit afb9f6498 — tier: opus — review: dispatcher — 
+- [x] N-215 — commit ac576b911 — tier: opus — review: dispatcher — 
+- [x] F-342 — commit 9b84d56de — tier: sonnet — review: CL — 
+- [x] F-333 — commit ffe2b705b — tier: sonnet — review: CL — 
+- [x] F-336 — commit 93052e178 — tier: sonnet — review: CL — 
+- [x] F-393 — commit 3097e8225 — tier: sonnet — review: CL — 
+- [x] F-313 — commit df34072c6 — tier: sonnet — review: CL — 
+- [x] F-285 — commit 1f50a9829 — tier: sonnet — review: CL — 
+- [x] N-212 — commit e7c5a58cb — tier: opus — review: dispatcher — 
+- [x] F-331 — commit 3c4cef2ec — tier: sonnet — review: CL — 
+- [x] F-330 — commit 45cbbf275 — tier: sonnet — review: CL — 
+- [x] F-268 — commit 1df58aefa — tier: sonnet — review: CL — 
+- [x] F-168 — commit adf5bdcd2 — tier: sonnet — review: CL — 
+- [x] F-312 — commit 345e10be3 — tier: sonnet — review: CL — 
+- [x] F-291 — commit 6f689720c — tier: sonnet — review: CL — 
+- [x] F-329 — commit 24275ce3c — tier: sonnet — review: CL — 
+- [x] F-369 — commit 4a333b2ae — tier: sonnet — review: CL — 
+- [x] F-362 — commit d1f5043ad — tier: sonnet — review: CL — 
+- [x] F-311 — commit 9e15d8b8a — tier: sonnet — review: CL — 
+- [x] F-267 — commit 16d17edac — tier: sonnet — review: CL — 
+- [x] F-325 — commit e9b53d165 — tier: sonnet — review: CX — 
+- [x] F-328 — commit 74d115e42 — tier: sonnet — review: CL — 
+- [x] F-360 — commit e23e705ec — tier: sonnet — review: CL — 
+- [x] F-310 — commit 76b47a998 — tier: sonnet — review: CL — 
+- [x] F-162 — commit f9f039a49 — tier: opus — review: CL — 
+- [x] F-290 — commit 09809d268 — tier: opus — review: CL — 
+- [x] F-266 — commit 867b583c7 — tier: opus — review: CL — 
+- [x] F-327 — commit e98355277 — tier: sonnet — review: CL — 
+- [x] F-324 — commit 83fce06e9 — tier: sonnet — review: CL — 
+- [x] F-357 — commit c0f8bd284 — tier: sonnet — review: CL — 
+- [x] F-289 — commit 9426397b4 — tier: sonnet — review: CL — 
+- [x] F-309 — commit 247e79cd5 — tier: sonnet — review: CX — 
+- [x] F-265 — commit 48100202a — tier: sonnet — review: CL — 
+- [x] F-286 — commit 5a9de3b1b — tier: opus — review: GK — 
+- [x] F-363 — superseded by N-216 (R83: cross-tier golden-moving fix)
+- [x] F-165 — stale on arrival, no commit — duplicate of F-128 (6277320106a): all 7 tiers refuse blake3Hash >64B
+- [x] F-288 — commit 7df86b38b — tier: sonnet — review: CL — 
+- [x] F-326 — commit 9913b2f90 — tier: sonnet — review: CX — 
+- [x] F-308 — commit 4ac03f1ce — tier: sonnet — review: CL — 
+- [x] F-287 — commit 67035d87b — tier: sonnet — review: GK — 
+- [x] N-202 — commit 21b239f66 — tier: opus — review: dispatcher — 
+- [x] F-323 — commit 169fa1005 — tier: sonnet — review: CL — 
+- [x] F-148 — commit 1f2160e3d — tier: opus — review: CL — 
+- [x] F-318 — commit 3157323d7 — tier: sonnet — review: CX — 
+- [x] F-307 — commit e41941427 — tier: sonnet — review: CL — 
+- [x] F-284 — commit b058caadf — tier: opus — review: CL — 
+- [x] F-271 — commit 56d13639f — tier: sonnet — review: CL — 
+- [x] F-221 — commit 59b979ab6 — tier: opus — review: CX — 
+- [x] F-270 — commit fbc983551 — tier: sonnet — review: CL — 
+- [x] F-220 — commit 166a84257 — tier: opus — review: CL — 
+- [x] F-305 — commit bbcafb16b — tier: sonnet — review: CX — 
+- [x] F-316 — commit 68daaded9 — tier: opus — review: CX — 
+- [x] F-283 — commit d14ce7aaf — tier: sonnet — review: CL — 
+- [x] F-219 — commit 1b654eb62 — tier: opus — review: CL — 
+- [x] F-282 — commit f0a3ab7e3 — tier: sonnet — review: CL — 
+- [x] F-303 — commit 41c054bc3 — tier: sonnet — review: CX — 
+- [x] F-218 — commit 976ddfcaa — tier: sonnet — review: CL — 
+- [x] F-227 — commit 132ce46bd — tier: opus — review: CL — 
+- [x] CK14-FU1 — commit cde0d70bf — tier: opus — review: dispatcher — 
+- [x] F-317 — stale on arrival, no commit — R74: Java byte-identical to TS for nested EC calls (both fold modes); superseded by N-201
+- [x] F-306 — stale on arrival, no commit — duplicate of N-151 (f2f01b704): all 7 tiers carry rawScriptSpans equal to TS
+- [x] F-322 — stale on arrival, no commit — R-009/aebb8c19 single-loop source cap already in all 7 tiers; nested product -> N-202
+- [x] F-321 — stale on arrival, no commit — R74: shared TS limitation, Python byte-identical to TS; superseded by N-201
+- [x] F-304 — stale on arrival, no commit — R74: shared TS limitation, Go byte-identical to TS; superseded by N-201
+- [x] F-320 — stale on arrival, no commit — R-240 dea1aeda7 already removed Pass 4.75 and pinned it
+- [x] F-280 — commit eeea96014 — tier: sonnet — review: CL — 
+- [x] F-259 — commit ce0c4618f — tier: opus — review: CL — R72 widened
+- [x] F-275 — commit cb3ed3b02 — tier: sonnet — review: CX,GK — comment fix; N-195 queued
+- [x] N-057 — commit 5af6487de — tier: sonnet — review: CL — 
+- [x] F-217 — commit 71fd76add — tier: sonnet — review: CX — 
+- [x] F-264 — commit 765069739 — tier: sonnet — review: CL — 
+- [x] F-226 — commit 247e819ed — tier: opus — review: CL — 
+- [x] F-260 — commit 64642fee3 — tier: opus — review: CL — 
+- [x] N-004 — commit 4c39e16f5 — tier: opus — review: CL,GK — 
+- [x] F-257 — stale on arrival, no commit — 19e67026f
+- [x] F-179 — commit 19e67026f — tier: opus — review: CX — R71 route B
+- [x] F-273 — commit e12480746 — tier: sonnet — review: CL — widened to rb/ts/go
+- [x] F-225 — commit c5ab9f6d9 — tier: sonnet — review: CL — attempt 2
+- [x] F-263 — commit 35dbd44da — tier: opus — review: CL — 
+- [x] F-216 — commit 6c74ae8a2 — tier: sonnet — review: CX — stale literal shape; Zig local-binding gap fixed
+- [x] F-262 — commit 060ad4874 — tier: sonnet — review: CL — 
+- [x] F-258 — commit 383268adf — tier: sonnet — review: CL — widened to go/rust/ruby; Rust load_const live
+- [x] F-247 — commit 6408b39a0 — tier: sonnet — review: CL — 
+- [x] F-261 — commit cec2301de — tier: sonnet — review: CL — 
+- [x] F-224 — commit 0b4096b07 — tier: opus — review: CL — R71 route B
+- [x] N-171-FU — commit b0508f4cf — tier: sonnet — review: dispatcher — regression from N-171 found by F-247 agent
+- [x] N-099 — commit 85875b06b — tier: opus — review: approved — 
+- [x] F-215 — stale on arrival, no commit — 1bdfbec4
+- [x] F-256 — stale on arrival, no commit — -
+- [x] CK13-FU3 — commit b11760419 — tier: sonnet — review: approved — 
+- [x] CK13-FU2 — commit fa7030e04 — tier: sonnet — review: approved — 
+- [x] CK13-FU1 — commit 93f017482 — tier: sonnet — review: approved — 
+- [x] F-231 — commit 156e09e4a — tier: sonnet — review: approved — 
+- [x] F-255 — commit e02c5200b — tier: sonnet — review: approved — 
+- [x] N-171 — commit 83c743d6d — tier: sonnet — review: approved — 
+- [x] F-223 — commit 1ff8431be — tier: sonnet — review: approved — 
+- [x] N-184 — commit fb01e8a9d — tier: sonnet — review: approved — 
+- [x] F-214 — stale on arrival, no commit — 475977ad
+- [x] F-207 — commit 5842e1227 — tier: sonnet — review: approved — 
+- [x] F-213 — commit bea7c542c — tier: opus — review: approved — 
+- [x] N-165 — commit 4b1bb19cc — tier: opus — review: approved — 
+- [x] F-229 — commit 4804409a0 — tier: opus — review: approved — 
+- [x] N-164 — commit 384170a0b — tier: opus — review: approved — 
+- [x] N-176 — commit d9897b5e7 — tier: sonnet — review: approved — 
+- [x] N-185 — commit 0a30b624 — tier: sonnet — review: approved — 
+- [x] N-038 — commit cbd5ab1f — tier: opus — review: approved — 
+- [x] N-170 — commit e9be0265 — tier: sonnet — review: approved — 
+- [x] N-122 — commit 981f0303 — tier: sonnet — review: approved — 
+- [x] N-111 — commit 86a7e4aa — tier: opus — review: approved — 
+- [x] F-272 — commit 44b0d9e5 — tier: sonnet — review: approved — 
+- [x] N-174 — commit 48fd2c2c — tier: sonnet — review: approved — 
+- [x] N-146 — commit ca2ae6cf — tier: sonnet — review: approved — 
+- [x] N-140 — commit 1e7c853d — tier: sonnet — review: approved — 
+- [x] F-395 — commit 07557f00 — tier: sonnet — review: approved — 
+- [x] N-091 — commit 3b162283 — tier: sonnet — review: approved — 
+- [x] N-107 — commit c0df743a — tier: sonnet — review: approved — 
+- [x] N-080 — commit dc2977f0 — tier: sonnet — review: approved — 
+- [x] N-131 — commit d64f4505 — tier: sonnet — review: approved — 
+- [x] F-274 — commit 3c2d913d — tier: sonnet — review: approved — 
+- [x] N-156 — commit 80e72302 — tier: sonnet — review: approved — 
+- [x] N-083 — commit a498842e — tier: sonnet — review: approved — 
+- [x] N-167 — commit 1a5896cf — tier: sonnet — review: approved — 
+- [x] N-088 — commit ce952213 — tier: sonnet — review: approved — 
+- [x] N-169 — commit fd7ca24f — tier: sonnet — review: approved — 
+- [x] N-108 — commit 5df35a2e — tier: opus — review: approved — 
+- [x] F-243 — commit 8cad37a5 — tier: sonnet — review: approved — 
+- [x] F-248 — commit c97e4f69 — tier: sonnet — review: approved — 
+- [x] F-359 — commit 3331419f — tier: sonnet — review: approved — 
+- [x] F-367 — commit 7f93f39e — tier: sonnet — review: approved — 
+- [x] F-230 — commit 9fe24347 — tier: sonnet — review: approved — 
+- [x] F-222 — commit 7ef94708 — tier: opus — review: approved — 
+- [x] N-061 — commit 01c5c49f — tier: sonnet — review: approved — 
+- [x] N-058 — commit 709e0ec7 — tier: sonnet — review: approved — 
+- [x] F-358 — commit 0736e0cd — tier: sonnet — review: approved — 
+- [x] F-233 — commit 6947f7d0 — tier: opus — review: approved — 
+- [x] F-236 — commit 67c845a3 — tier: sonnet — review: approved — 
+- [x] F-206 — commit 3493fefe — tier: sonnet — review: approved — 
+- [x] F-205 — commit 16167df8 — tier: sonnet — review: approved — 
+- [x] R188-FU — commit 805a481b — tier: sonnet — review: approved — 
+- [x] F-228 — stale on arrival, no commit — 909bdcc1
+- [x] N-162 — stale on arrival, no commit — 661b9519
+- [x] N-030 — commit 661b9519 — tier: opus — review: approved — 
+- [x] N-029 — commit 6e658b30 — tier: opus — review: approved — 
+- [x] F-114 — commit 7377a2f4 — tier: opus — review: approved — 
+- [x] F-048 — stale on arrival, no commit — c4e75f2c
+- [x] F-144 — commit 0ec8dbd6 — tier: opus — review: approved — 
+- [x] F-047 — commit 4f1c4249 — tier: opus — review: approved — 
+- [x] F-211 — commit 909bdcc1 — tier: opus — review: approved — 
+- [x] N-025 — commit fc9d6515 — tier: opus — review: approved — 
+- [x] F-204 — commit bee78df2 — tier: sonnet — review: approved — 
+- [x] F-164 — commit 598e6f3e — tier: sonnet — review: approved — 
+- [x] F-210 — commit 4956b0a5 — tier: sonnet — review: approved — 
+- [x] F-196 — commit 37fe06c0 — tier: opus — review: approved — 
+- [x] F-209 — stale on arrival, no commit — -
+- [x] F-208 — commit 3556e30e — tier: sonnet — review: approved — 
+- [x] F-203 — commit 22c7a19c — tier: opus — review: approved — 
+- [x] F-190 — commit fb8bf518 — tier: sonnet — review: approved — 
+- [x] F-195 — stale on arrival, no commit — R58
+- [x] F-184 — commit 64dda4c0 — tier: opus — review: approved — 
+- [x] F-183 — commit f7e5d6b6 — tier: sonnet — review: approved — 
+- [x] N-153 — commit 0bfc18c3 — tier: opus — review: approved — 
+- [x] N-136-FU — commit 9b1dcc96 — tier: sonnet — review: approved — 
+- [x] N-041 — commit 22a4a9dd — tier: opus — review: approved — 
+- [x] F-166 — commit 714d4fca — tier: opus — review: approved — 
+- [x] N-053 — commit 977907fd — tier: opus — review: approved — 
+- [x] F-238 — commit e11b83a1 — tier: sonnet — review: approved — 
+- [x] N-151 — commit f2f01b70 — tier: opus — review: approved — 
+- [x] N-147 — commit d2cf964d — tier: sonnet — review: approved — 
+- [x] N-134 — commit ec2d52c5 — tier: opus — review: approved — 
+- [x] F-246 — commit 37fef6ec — tier: opus — review: approved — 
+- [x] N-142 — commit 278adeb3 — tier: opus — review: approved — 
+- [x] F-245 — commit 60a3734a — tier: opus — review: approved — 
+- [x] N-148 — commit a8f78ebd — tier: opus — review: approved — 
+- [x] N-139 — commit 1bdfbec4 — tier: opus — review: approved — 
+- [x] F-239-FU — commit 963c494c — tier: sonnet — review: approved — R53 follow-up
+- [x] F-242 — commit aeb20285 — tier: opus — review: approved — 
+- [x] F-234 — commit 18c96521 — tier: opus — review: approved — 
+- [x] N-145 — commit 4da3e286 — tier: opus — review: approved — 
+- [x] N-144 — commit c0ef3c17 — tier: opus — review: approved — 
+- [x] N-143 — commit 60491d6f — tier: opus — review: approved — 
+- [x] F-239 — commit 033fd8ca — tier: opus — review: approved — 
+- [x] F-232 — commit 1710042f — tier: opus — review: approved — 
+- [x] N-136 — commit c1af8cdd — tier: opus — review: approved — 
+- [x] N-125 — commit 730fd278 — tier: opus — review: approved — 
+- [x] F-200 — commit d574af53 — tier: opus — review: approved — 
+- [x] N-118 — commit deea9070 — tier: opus — review: approved — 
+- [x] N-137 — commit 9f4738c3 — tier: opus — review: approved — 
+- [x] F-235 — stale on arrival, no commit — working as specified (R52): spec v1.4 §8.2 step 4 deliberately emits STACK_UNDERFLOW only when initialDepth > 0; all 7 analyzers match and pin it; spec §6.1 inconsistency queued as N-146
+- [x] F-240 — stale on arrival, no commit — covered by F-232 (same CL-BUG-165, Ruby twin fixed in the same commit, branch f232-landing)
+- [x] F-244 — stale on arrival, no commit — fixed by F-134 (851786e9): anf_interpreter.rb truncate_div is pure Integer; dispatcher re-probe truncate_div(-(2**60)-3,7) = -164703072086692425 (exact); pinned by spec/sdk/f134_math_builtins_script_parity_spec.rb
+- [x] N-056 — commit 475977ad — tier: opus — review: approved — 
+- [x] F-192 — commit 39bb5d77 — tier: sonnet — review: approved — 
+- [x] F-189 — commit b6a6dd36 — tier: opus — review: approved — 
+- [x] F-201 — commit 8f33c899 — tier: opus — review: approved — 
+- [x] F-177 — commit 039075df — tier: sonnet — review: approved — 
+- [x] N-049 — commit d0822a52 — tier: opus — review: approved — 
+- [x] N-132 — commit 598d9056 — tier: opus — review: approved — 
+- [x] N-129 — commit b85ebf0c — tier: opus — review: approved — 
+- [x] N-133 — commit 9e1b8914 — tier: opus — review: approved — 
+- [x] N-130 — commit 3591d94f — tier: opus — review: approved — 
+- [x] F-163 — commit 64d13c17 — tier: sonnet — review: approved — 
+- [x] N-114 — stale on arrival, no commit — duplicate of F-163 (same pull_request.base.sha hazard); handled under F-163
+- [x] F-149 — stale on arrival, no commit — duplicate of F-054 (da7ee070): ci.yml and package.json run integration/rust with --include-ignored; tests/f054-rust-integration-runs-offline-tests.test.ts pins it
+- [x] F-319 — stale on arrival, no commit — duplicate of F-185 (15064f86): AnfOptimize.java has no FRESH_COUNTER/AtomicInteger; F185EcFreshNameDeterminismTest pins identical daemon IR
+- [x] N-112 — commit f2df37eb — tier: opus — review: approved — 
+- [x] N-128 — commit af37f38a — tier: opus — review: approved — 
+- [x] F-137-FU 48563047 — commit sonnet — tier: approved — review: checkpoint-8 gate follow-up (R50) — 
+- [x] F-135-FU 6c993253 — commit sonnet — tier: approved — review: checkpoint-8 gate follow-up (R50) — 
+- [x] F-115-FU f91dd7ca — commit sonnet — tier: approved — review: checkpoint-8 gate follow-up (R50) — 
+- [x] F-187 — commit cdf4c873 — tier: sonnet — review: approved — 
+- [x] F-185 — commit 15064f86 — tier: opus — review: approved — 
+- [x] F-191 — commit 66de1dea — tier: opus — review: approved — 
+- [x] N-023 — commit f29fc20f — tier: opus — review: approved — 
+- [x] F-181 — commit 8228e7d6 — tier: opus — review: approved — 
+- [x] F-157 — commit b7634488 — tier: opus — review: approved — 
+- [x] F-158 — commit ada8f5fe — tier: opus — review: approved — 
+- [x] F-155 — commit d2a204c0 — tier: opus — review: approved — 
+- [x] F-161 — commit cfccbee9 — tier: opus — review: approved — 
+- [x] F-152 — commit 1ba2b1cb — tier: opus — review: approved — 
+- [x] F-150 — commit 7060b0ad — tier: opus — review: approved — 
+- [x] F-059 — commit cfd0f7a6 — tier: opus — review: approved — 
+- [x] F-061 — commit f289ab87 — tier: opus — review: approved — 
+- [x] F-151 — commit 9aa658e9 — tier: opus — review: approved — 
+- [x] N-001 — commit 6a0d6ab6 — tier: opus — review: approved — 
+- [x] F-057 — commit 90fff9de — tier: opus — review: approved — 
+- [x] N-052 — commit 22b1e976 — tier: opus — review: approved — 
+- [x] N-028 — commit 4103ed31 — tier: opus — review: approved — 
+- [x] F-056 — commit 11b3387c — tier: opus — review: approved — 
+- [x] F-060 — stale on arrival, no commit — fixed by N-090 (32bc5edb): examples/zig/tic-tac-toe/TicTacToe.runar.zig parses in Go/Rust/Python/Zig/Ruby/Java (--parse-only rc=0) and full --hex is byte-identical across go/rust/zig/java/python (sha 42e21d7b...)
+- [x] F-115 — commit b1eeabd8 — tier: opus — review: approved — 
+- [x] F-146 — commit f906d18c — tier: opus — review: approved — 
+- [x] N-008 — commit 98073e7c — tier: opus — review: approved — 
+- [x] F-053 — commit de2e2403 — tier: opus — review: approved — 
+- [x] F-054 — commit da7ee070 — tier: opus — review: approved — 
+- [x] F-145 — commit aa5ce99b — tier: opus — review: approved — 
+- [x] N-104 — commit e5e5fb7d — tier: opus — review: approved — 
+- [x] F-131 — commit 86f194aa — tier: opus — review: approved — 
+- [x] F-111 — commit a4701db4 — tier: opus — review: approved — 
+- [x] F-143 — stale on arrival, no commit — fixed by F-038 (3dbbb59b): runar-zig compile-ir conformance/tests/stateful-counter/expected-ir.json emits parentClass StatefulSmartContract; with parentClass stripped from the IR, Zig and Go omit the field (no SmartContract default), so the TS SDK falls back to isStateful
+- [x] F-142 — commit a5363d5d — tier: opus — review: approved — 
+- [x] F-110 — commit 9d3646cb — tier: opus — review: approved — 
+- [x] F-141 — stale on arrival, no commit — fixed by F-137 (e6e37dea): Rust LocalSigner/WalletSigner now use oppushtx's #123-correct builder; packages/runar-rs/tests/bip143_interop.rs matches @bsv/sdk sigHex for 0x41/42/43/c1/c2/c3 at tip
+- [x] F-140 — stale on arrival, no commit — fixed by F-130 (12595cec): Java SlhDsa.java:596/669 and Rust slh_dsa.rs:876-878/977-979 guard h-hp<64 (full-width at 64); Go uint64 1<<64==0 so mask is already all-ones; Java SlhDsaTest + Rust slh_dsa lib tests pass at tip
+- [x] F-147 — stale on arrival, no commit — duplicate of F-128 (62773201), same GK-BUG-011: refusal 'blake3Hash: message must be <= 64 bytes, got N' at ruby builtins.rb:359 / interpreter.ts:1581, pinned by blake3_spec.rb and blake3.test.ts (17 passed)
+- [x] F-139 — stale on arrival, no commit — duplicate of F-128 (62773201), same GK-BUG-011: refusal 'blake3Hash: message must be <= 64 bytes, got N' at ruby builtins.rb:359 / interpreter.ts:1581, pinned by blake3_spec.rb and blake3.test.ts (17 passed)
+- [x] F-137 — commit e6e37dea — tier: opus — review: approved — 
+- [x] F-136 — stale on arrival, no commit — duplicate of F-128 (62773201), same GK-BUG-011; dispatcher re-probe: runar-py blake3_hash(65B) raises 'blake3Hash: message must be <= 64 bytes, got 65'
+- [x] F-135 — commit a826b3be — tier: opus — review: approved — 
+- [x] F-120 — stale on arrival, no commit — fixed by N-059 (727f46fa) required_fields.zig checkSighashFlags; dispatcher re-probe: runar-zig compile-ir flag 1/256 rc=1 shared diagnostic, flag 65 rc=0; 7-tier coverage in conformance/negatives/ir-sighash-flag.test.ts
+- [x] F-121 — stale on arrival, no commit — fixed by F-038 (3dbbb59b): dispatcher compiled conformance/ir-roundtrip/SighashCounter.runar.ts with runar-zig --emit-ir then compile-ir -> sigHashType 193, equal to the source path
+- [x] N-096 — commit 3586ff3a — tier: opus — review: approved — red TS 2/4 dispatcher-reproduced; 7-tier 88/88; Go no panic; integration root vitest green after merge
+- [x] F-109 — stale on arrival, no commit — filed defect stale by execution: 92bc1583 (R-053/CL-BUG-096) added the affine-add infinity select in all 7 tiers, so ecAdd(O,q)=q at runtime and opt/noopt agree on well-formed input (remediation-logs/F-109/probe2); residual optimizer gate-elision + stale doc queued as N-104
+- [x] F-118 — stale on arrival, no commit — fixed by F-038 (3dbbb59b): dispatcher ran runar-zig compile-ir on stateful-counter golden IR -> artifact parentClass StatefulSmartContract; Zig parent_class optional, no SmartContract default; --ir-roundtrip 85 covers zig
+- [x] F-134-FU — commit a505886f — tier: opus — review: approved — regression fix; red 5 on tip (dispatcher-confirmed) / green 278; integration root vitest 18760 passed 0 failed
+- [x] N-090 — commit 32bc5edb — tier: opus — review: approved — red go 3 fail dispatcher-reproduced; fixture 9/9 both modes; witness 5/5; Lean 68/86
+- [x] N-101 — commit bc6a0110 — tier: opus — review: approved — CRITICAL R43; attacker spend ACCEPTED 14/14 pre-fix, refused 7 tiers post; TS hook mutation 16 fail; negatives + ir-parity on integration
+- [x] F-134 — commit 851786e9 — tier: opus — review: approved — red PY 21/51 dispatcher-reproduced; script oracle by execution; all SDK tiers
+- [x] N-087 — commit 197400ed — tier: opus — review: approved — CRITICAL; red TS 16/21 PY 14/20 dispatcher-reproduced; attacker spend ACCEPTED 21/21 pre-fix; goldens 85 via --ir; root vitest 0 failed
+- [x] F-138 — commit 5e593f5c — tier: opus — review: approved — red Ruby 1/10 Rust 1/9 dispatcher-reproduced; green; fixture validator OK
+- [x] F-130 — commit 12595cec — tier: opus — review: approved — red Java 1/8 dispatcher-reproduced, Rust overflow panic (agent log); green
+- [x] F-133 — commit 60b60eaf — tier: opus — review: approved — red 13/15 dispatcher-reproduced / green; merged builtins.py with F-128 re-tested 81 passed
+- [x] F-128 — commit 62773201 — tier: opus — review: approved — red TS 3 PY 1 dispatcher-reproduced; script abort by execution; green
+- [x] F-127 — commit f5ee1aef — tier: opus — review: approved — red 5 fail dispatcher-reproduced / green 9; script rule established by execution
+- [x] F-129 — commit e72f80f1 — tier: opus — review: approved — R40; red TAV on HEAD API (agent); dispatcher mutation: requireMatches off -> 2 forgery tests fail; green 11 + examples
+- [x] F-126 — commit cdf68d6d — tier: opus — review: approved — red 10 panics dispatcher-reproduced / green package
+- [x] F-124 — commit b31c7278 — tier: opus — review: approved — behavioural red in agent log (checksig needs tx, 0 ops), dispatcher compile-level red; green 11/11
+- [x] F-108 — commit a859b720 — tier: opus — review: approved — cross-tier; red TS 3/4 PY 1/2 dispatcher-reproduced; conformance/dce 37/37 executed 7 tiers
+- [x] F-107 — commit d9ab80c7 — tier: opus — review: approved — red 5/6 dispatcher-reproduced / green 6; readonly case not exploitable at tip (Spend REJECTED); v2 mutable exploit -> N-087 CRITICAL
+- [x] F-102 — commit 727f46fa — tier: opus — review: approved — cross-tier; red 30 rows (TS/PY reverted) dispatcher-reproduced; green 487; root vitest 0 failed; ir-parity/roundtrip 85
+- [x] N-059 — commit 727f46fa — tier: opus — review: approved — cross-tier; red 30 rows (TS/PY reverted) dispatcher-reproduced; green 487; root vitest 0 failed; ir-parity/roundtrip 85
+- [x] F-105 — commit 87006ca2 — tier: opus — review: approved — red 2/3 panic dispatcher-reproduced / green 3
+- [x] F-104 — stale on arrival, no commit — fixed by F-038 (3dbbb59b): compilers/rust/src/ir/mod.rs parent_class / sighash_type now serde-renamed parentClass/sigHashType (no skip); --ir-roundtrip 85/85 incl. rust (dispatcher-checked)
+- [x] F-103 — commit a8b0e1b3 — tier: opus — review: approved — red 2/10 dispatcher-reproduced / green 10; golden 85
+- [x] F-122 — commit 61238648 — tier: opus — review: approved — R35; red TS 5/18 PY 1/14 dispatcher-reproduced; 7 tiers green; golden 85; vitest-all 0 failed
+- [x] F-098 — commit 61238648 — tier: opus — review: approved — R35; red TS 5/18 PY 1/14 dispatcher-reproduced; 7 tiers green; golden 85; vitest-all 0 failed
+- [x] F-101 — commit 9f3b1116 — tier: opus — review: approved — dispatcher red/green; landed after checkpoint-6
+- [x] F-094 — commit bf0f8e0e — tier: opus — review: approved — dispatcher red/green; landed after checkpoint-6
+- [x] F-038-FU — commit 8932b89f — tier: opus — review: approved — dispatcher red/green; landed after checkpoint-6
+- [x] F-092 — commit ea8a6750 — tier: opus — review: approved — dispatcher red/green; landed after checkpoint-6
+- [x] F-051 — commit 0c0f247a — tier: opus — review: approved — dispatcher red/green; landed after checkpoint-6
+- [x] F-088 — commit 3dbbb59b — tier: opus — review: approved — F-038 family (R34); clean red 9/22 on tip; roundtrip 106; ir-roundtrip 85; golden 85; mf 763; lean 67/85; vitest-all 17366; provenance 0 fail
+- [x] F-070 — commit 3dbbb59b — tier: opus — review: approved — F-038 family (R34); clean red 9/22 on tip; roundtrip 106; ir-roundtrip 85; golden 85; mf 763; lean 67/85; vitest-all 17366; provenance 0 fail
+- [x] F-066 — commit 3dbbb59b — tier: opus — review: approved — F-038 family (R34); clean red 9/22 on tip; roundtrip 106; ir-roundtrip 85; golden 85; mf 763; lean 67/85; vitest-all 17366; provenance 0 fail
+- [x] F-065 — commit 3dbbb59b — tier: opus — review: approved — F-038 family (R34); clean red 9/22 on tip; roundtrip 106; ir-roundtrip 85; golden 85; mf 763; lean 67/85; vitest-all 17366; provenance 0 fail
+- [x] F-038 — commit 3dbbb59b — tier: opus — review: approved — F-038 family (R34); clean red 9/22 on tip; roundtrip 106; ir-roundtrip 85; golden 85; mf 763; lean 67/85; vitest-all 17366; provenance 0 fail
+- [x] F-035 — commit 7bb11993 — tier: opus — review: approved — clean red on tip 5/5; green 48; vitest-all 17228; sdk-output 7 SDKs; vertical 39/39; golden 85; provenance 0 fail
+- [x] F-034 — commit c4e75f2c — tier: opus — review: approved — G1 via F-034; clean red on tip; witness 2/2; vitest-all 17180; compiler 5538+; golden 85; SLH mf 54x2; lean 67/85 71 axioms; provenance 0 fail
+- [x] F-091 — commit 30b40169 — tier: opus — review: approved — red go test wrong on-curve point (dispatcher-reproduced) / green; go-only-parity 53/53
+- [x] F-365 — stale on arrival, no commit — -
+- [x] F-349 — stale on arrival, no commit — -
+- [x] F-332 — stale on arrival, no commit — -
+- [x] F-281 — stale on arrival, no commit — -
+- [x] F-254 — stale on arrival, no commit — -
+- [x] F-241 — stale on arrival, no commit — -
+- [x] F-212 — stale on arrival, no commit — -
+- [x] F-202 — stale on arrival, no commit — -
+- [x] F-199 — stale on arrival, no commit — -
+- [x] F-198 — stale on arrival, no commit — -
+- [x] F-156 — stale on arrival, no commit — -
+- [x] F-154 — stale on arrival, no commit — -
+- [x] F-153 — stale on arrival, no commit — -
+- [x] N-022 — stale on arrival, no commit — -
+- [x] F-125 — stale on arrival, no commit — -
+- [x] F-123 — stale on arrival, no commit — -
+- [x] F-119 — stale on arrival, no commit — -
+- [x] F-117 — stale on arrival, no commit — -
+- [x] F-116 — stale on arrival, no commit — -
+- [x] F-113 — stale on arrival, no commit — -
+- [x] F-112 — stale on arrival, no commit — -
+- [x] F-106 — stale on arrival, no commit — -
+- [x] F-100 — stale on arrival, no commit — -
+- [x] F-099 — stale on arrival, no commit — -
+- [x] F-095 — stale on arrival, no commit — -
+- [x] F-093 — stale on arrival, no commit — -
+- [x] F-062 — stale on arrival, no commit — -
+- [x] F-052 — stale on arrival, no commit — -
+- [x] F-050 — commit 3b5e7aad — tier: opus — review: approved — red 8/8 dispatcher-reproduced / green; runner tests 103
+- [x] F-097 — commit cd1c2b89 — tier: opus — review: approved — red 2/4 dispatcher-reproduced / green 4/4
+- [x] F-090 — stale on arrival, no commit — -
+- [x] F-089 — stale on arrival, no commit — -
+- [x] F-085 — commit 7b5d23ac — tier: opus — review: approved — red 52 fail dispatcher-reproduced / green 121; real tree consistent
+- [x] F-087 — stale on arrival, no commit — -
+- [x] N-074 — commit 071d0ab5 — tier: opus — review: approved — tip red (dispatcher-confirmed) / CI go test . ok 151s; neuter table 7 guards
+- [x] F-078 — stale on arrival, no commit — e0f7eec2
+- [x] F-077 — commit a59bc25f — tier: opus — review: approved — red 6/6 attacker lambdas accepted dispatcher-reproduced / green; real proofs verify
+- [x] F-076 — stale on arrival, no commit — -
+- [x] N-051 — commit 929f9ccb — tier: opus — review: approved — clean red on integration tip (poisoned committed); green 42; vitest-all 17068; compiler 5538; sdk-output 7, vertical 39/39; witnesses 275; lean 67/85, 71 axioms; provenance 0 fail; Go codepart controls red pre-existing (N-074)
+- [x] F-237 — commit a436f574 — tier: opus — review: approved — writer side subsumed by N-045
+- [x] N-045 — commit a436f574 — tier: opus — review: approved — red TS 19 fail / green 161; vitest-all 17023; compiler 5538; sdk-output 7, vertical 39/39; witnesses 273; lean 67/85, 71 axioms; provenance 0 fail
+- [x] F-361 — commit 941b7626 — tier: opus — review: approved — folded into N-044
+- [x] F-194 — commit 941b7626 — tier: opus — review: approved — folded into N-044
+- [x] F-083 — commit 941b7626 — tier: opus — review: approved — folded into N-044
+- [x] N-044 — commit 941b7626 — tier: opus — review: approved — red TS 24 fail / green 294; compiler 5538; sdk-output 7, vertical 39/39; witnesses 269; lean 67/85, 71 axioms
+- [x] N-071-FU — commit 0f8a263c — tier: sonnet — review: approved — red 38/46 on tip (dispatcher-confirmed) / green 46; full runar-compiler 5505
+- [x] N-060 — commit 4396e66f — tier: opus — review: approved — folded into N-065 (R26)
+- [x] N-065 — commit 4396e66f — tier: opus — review: approved — red TS/PY 46/83 dispatcher-reproduced; negatives+n064 2273
+- [x] N-071 — commit 61e11671 — tier: opus — review: approved — red TS 6/8 dispatcher-reproduced; negatives 1715
+- [x] N-069 — commit d44c61ac — tier: opus — review: approved — red TS/PY 27/28 dispatcher-reproduced; negatives 1640
+- [x] N-067 — commit e6ed6571 — tier: sonnet — review: approved — red go+sdk dispatcher-reproduced
+- [x] N-006-FU — commit f9824901 — tier: opus — review: approved — red = collection failure on tip (dispatcher-confirmed) / green 4/4
+- [x] F-072 — commit 5f7a7a5b — tier: opus — review: approved — red TS 1 PY 4 dispatcher-reproduced; 7-tier Spend 16/16
+- [x] F-075 — commit 107cac12 — tier: opus — review: approved — red TS 6 PY 4 dispatcher-reproduced; negatives 1467
+- [x] F-084 — commit a55fa373 — tier: opus — review: approved — red 19/20 fail dispatcher-reproduced / green
+- [x] N-064 — commit 91a6b0fc — tier: opus — review: approved — red TS 5/98 PY 4/8 dispatcher-reproduced; 7 tiers + Spend 39/39
+- [x] N-006 — commit c89eeba9 — tier: opus — review: approved — red TS 3/15 PY 2/3 dispatcher-reproduced; 6 tiers green
+- [x] F-082 — commit 4dd90993 — tier: opus — review: approved — red 3 fail / green 23, dispatcher-reproduced; TS fold-ON miscompile dispatcher-confirmed
+- [x] F-071 — commit 1d956b89 — tier: opus — review: approved — red fatal stack overflow / green ok, dispatcher-reproduced
+- [x] N-011 — commit cfb40610 — tier: opus — review: approved — red ruby 6/7 go 6 FAIL dispatcher-reproduced; 7 tiers + VM + negatives 1490 green
+- [x] F-086 — commit 25d3cae1 — tier: opus — review: approved — red TS 3/4 PY 3/4 fail dispatcher-reproduced; 7 tiers green; pnpm build ok on integration
+- [x] F-069 — commit 38155e75 — tier: opus — review: approved — red 1 fail (Move Stateful) / green 9/9, dispatcher-reproduced
+- [x] F-068 — commit 87326b4f — tier: go — review: approved — red 31 FAIL / green ok, dispatcher-reproduced
+- [x] F-067 — stale on arrival, no commit — same defect as F-081 (then-arm checkMultiSig on outer arrays), fixed in all 7 tiers incl. Go by c00c2ed0; covered by f081-multisig-array-in-branch-vm.test.ts
+- [x] F-081 — commit c00c2ed0 — tier: * — review: approved (R17 cross-tier) — VM 128 (7 tiers x 8 shapes), Java F081 8, targeted stack tests per tier, golden 84, multisig both modes; red/green re-proved
+- [x] F-074 — commit 95b88a93 — tier: go — review: approved — go frontend + examples/go, golden 84, bitwise/shift/arith/bool fixtures both modes, parser-only, negatives 1295; red/green re-proved
+- [x] N-047 — stale on arrival, no commit — fixed together with N-046 (f7eb2722) per R24 (one alpha-renaming fix; ShadowGoblin Spend proof in n046-block-scope-spend)
+- [x] N-046 — commit f7eb2722 — tier: * — review: approved (R24; rebased onto N-050 with 3 adjacency conflicts resolved) — n046+n050 tests 7 tiers, golden 84, negatives 1295, 14 fixtures both modes
+- [x] F-064 — commit d643c61a — tier: * — review: approved (R17 fail-closed; rebased onto N-050) — F-064+N-050 tests in 7 tiers, negatives 1400, parser-only 754x7, golden 84
+- [x] F-080 — stale on arrival, no commit — not a Java defect: TS/Go/Java share the same non-recursive methodUsesCodePart; unreachable from source because all 7 frontends inline output-building helpers at ANF time; 7/7 byte-identical on 4 source shapes x 2 fold modes; --ir delegation fails closed identically in all tiers
+- [x] F-073 — stale on arrival, no commit — fixed by F-010 (e437f17d): a .runar.go file with two contract structs is refused ('multiple Rúnar contract structs found in Go source'), so properties can no longer merge
+- [x] F-049 — commit e2ec6094 — tier: conformance — review: approved — runner __tests__ 95, release-script 32, conformance typecheck, full mf both modes (718+36 vacuous / 754), golden 84
+- [x] F-055 — commit 1b50a765 — tier: pkg:testing — review: approved — f055 tests 30; 4233 oracle-consumer tests, 0 verdict changes; red/green re-proved
+- [x] F-058 — stale on arrival, no commit — fixed before this run by R-060 (65fcd3ee, ancestor of d207ee8e); regression pin b094c0b5 runs the shipped contract under the go-sdk interpreter
+- [x] N-048 — commit 03fce7aa — tier: * — review: approved (R17 fail-closed) — targeted expand-fixed-arrays per tier, golden 83, fixed-array fixtures both modes, negatives 1239, 32 example sources byte-identical
+- [x] N-007 — commit 55732ba1 — tier: * — review: approved (R21 signed rows, R23 Lean port) — targeted per tier, golden 84, 5 fixtures both modes, negatives, VM tests 33, Lean pipelineGolden 66/84 + pipeline-conformance + tcb-drift 71 axioms
+- [x] F-063 — commit 71218469 — tier: * — review: approved (R17 fail-closed) — targeted validator/typecheck per tier, golden 83, multisig/fixed-array filters both modes, negatives 1218
+- [x] F-045 — commit c10ec53a — tier: sdk:* — review: approved — targeted: token/funding tests in ts/go/rs/py/rb; runar-sdk 829; red/green re-proved (ts 4 fail -> 0)
+- [x] F-043 — commit 262f91cb — tier: sdk:* — review: approved — targeted: deployment/wallet/address tests in rb/py/go/rs/zig; red/green re-proved (ruby 5 fail -> 0)
+- [x] F-044 — stale on arrival, no commit — per-SDK copy of CL-BUG-072/GK-BUG-007, fixed in all 7 SDKs by F-040 (b87319b0)
+- [x] F-041 — stale on arrival, no commit — per-SDK copy of CL-BUG-072/GK-BUG-007, fixed in all 7 SDKs by F-040 (b87319b0)
+- [x] F-040 — commit b87319b0 — tier: sdk:* — review: approved — targeted: WoC/signer tests in all 7 SDKs; post-merge F-040+F-042 tests on branch in ts/rb/go/py/rs
+- [x] F-046 — stale on arrival, no commit — per-SDK copy of CL-BUG-072/GK-BUG-007, fixed in all 7 SDKs by F-040 (b87319b0) with shared vectors + signer guards
+- [x] F-044 — stale on arrival, no commit — per-SDK copy of CL-BUG-072/GK-BUG-007, fixed in all 7 SDKs by F-040 (b87319b0) with shared vectors + signer guards
+- [x] F-041 — stale on arrival, no commit — per-SDK copy of CL-BUG-072/GK-BUG-007, fixed in all 7 SDKs by F-040 (b87319b0) with shared vectors + signer guards
+- [x] F-042 — commit efb989d7 — tier: sdk:* — review: approved — targeted: wallet/broadcast tests in rb/ts/go/rs/py (all WalletProvider-referencing files), tsc/go vet clean
+- [x] F-039 — commit 67a2f4a0 — tier: * — review: approved (R17 fail-closed) — targeted per tier (sighash/directive tests), golden 83, negatives 1332
+- [x] N-037 — commit 6673aa62 — tier: verification — review: approved (R19/R19a) — Lean pipelineGolden 65/83 exit 0 (dispatcher re-ran), run-pipeline-conformance exit 0
+- [x] N-002 — commit dd245c59 — tier: * — review: approved — 7 compiler suites, golden 83, fixed-array-index/write both modes, full mf fold-off 745, negatives 1155, repo, examples, provenance
+- [x] F-036 — commit 9e96b9e7 — tier: go — review: approved — targeted: go Groth16/BN254/MSM/SP1 tests (codegen+compiler), golden 83; red/green re-proved by dispatcher
+- [x] F-037 — stale on arrival, no commit — sighashType preserved since 1b71ea9e (R-025; ancestor of d207ee8e); all 7 tiers keep it; TS/Go/Java bytes identical for FixedArray + @sighash SINGLE|ANYONECANPAY|FORKID (0xC3); embedAlways-on-FixedArray drop is a documented cross-tier choice -> N-034
+- [x] F-026 — commit e4087cca — tier: * — review: approved (attempt 2; R15 + R15a) — 7 compiler suites, golden 83, mf 745x2, parser-only, negatives 1057, repo, examples ts/go/py/rust/java/zig, sdk-ts, skips, provenance
+- [x] N-027 — commit 664e1668 — tier: examples — review: approved (R16 signed) — 7 compiler + 7 SDK suites, golden 83, mf 745x2, parser-only, negatives 954, repo, examples ts/go/py/zig, n027 194 (1 spawn-timeout re-run green), provenance --files
+- [x] F-033 — commit 0c5849f5 — tier: sdk:zig — review: approved — sdk-zig 391, examples-zig 208, f033 on-chain 88, runar-testing 2264, skips, provenance
+- [x] F-032 — stale on arrival, no commit — per-tier copy of CL-BUG-071, fixed cross-SDK by F-027 (f996e311): getTransaction parses /tx/{txid}/raw; recorded vectors incl. a 1-sat output decode to 1 in this SDK's F-027 test
+- [x] F-031 — stale on arrival, no commit — per-tier copy of CL-BUG-071, fixed cross-SDK by F-027 (f996e311): getTransaction parses /tx/{txid}/raw; recorded vectors incl. a 1-sat output decode to 1 in this SDK's F-027 test
+- [x] F-030 — stale on arrival, no commit — per-tier copy of CL-BUG-071, fixed cross-SDK by F-027 (f996e311): getTransaction parses /tx/{txid}/raw; recorded vectors incl. a 1-sat output decode to 1 in this SDK's F-027 test
+- [x] F-029 — stale on arrival, no commit — per-tier copy of CL-BUG-071, fixed cross-SDK by F-027 (f996e311): getTransaction parses /tx/{txid}/raw; recorded vectors incl. a 1-sat output decode to 1 in this SDK's F-027 test
+- [x] F-028 — stale on arrival, no commit — duplicate of F-027 (f996e311): Java getUtxo now parses the raw tx from /tx/{txid}/raw; GorillaPoolProviderTest.getUtxoDecodesRecordedRawTxVectors asserts a 1-sat output decodes to 1
+- [x] F-024 — commit 25095825 — tier: * — review: approved (attempt 2; R14 + R14a signed) — 7 compiler + 7 SDK suites, golden 83, mf 745x2, parser-only, negatives 954, repo 1938, examples 1955 + go, allowlist 6/6, provenance --files 82/82, derived 6/6 on branch
+- [x] F-025 — commit d01c8a90 — tier: zig — review: approved — zig 1079, golden 83, mf 745x2, parser-only, negatives 940, skips, provenance
+- [x] F-027 — commit f996e311 — tier: sdk:* — review: approved (attempt 2; R13) — 7 SDK suites, repo 1938, skips, provenance
+- [x] F-023 — stale on arrival, no commit — already refused at d207ee8e by validate_for_condition_tests_iterator (b7f9b99d, f387f5f4); Rust == TS on Reassign5/NonAdj3/WhileSumArg (refused) and Start3/Collide (byte-identical)
+- [x] N-016 — commit 71fa0eeb — tier: * — review: approved (R8 + R12 fixture) — 7 tier suites, golden 83, mf 745x2, parser-only, negatives 940, testing, repo 1938, examples, derived 6/6, provenance 5/5
+- [x] N-021 — commit 666a330a — tier: * — review: approved — 5 tier suites, golden 82, mf 736x2, parser-only, negatives 943, examples 1940, skips
+- [x] F-012 — commit 9ea2a01e — tier: go — review: approved — go 5 pkgs, golden 82, 4 ruby-surface fixtures both modes, parser-only, negatives 888, skips, provenance
+- [x] F-011 — commit f12f572d — tier: * — review: approved (attempt 2; R10) — 7 tier suites, golden 82, mf 736x2, parser-only, rejection 888, examples 1940, skips
+- [x] N-015 — stale on arrival, no commit — fixed by F-010 e437f17d: Python no-contract path now emits a Diagnostic ('no Rúnar contract struct found in Go source') instead of crashing
+- [x] F-010 — commit e437f17d — tier: * — review: approved (attempt 2; R9) — 7 tier suites, golden 82, mf 736x2, parser-only, rejection 797, skips
+- [x] F-017 — commit 6a6981f4 — tier: * — review: approved (attempt 3; R7/R8/R8a) — 7 tier suites, golden 82, mf 736x2, parser-only, rejection 793, skips, provenance route B
+- [x] F-008 — stale on arrival, no commit — subsumed by F-007 16e59670: same testable assertion (garbage per-query openings must be rejected) now enforced by the fail-closed body + unconditional refusal; binding sub-claim already fixed by R-059 (84d40b38), vk absorption by R-057
+- [x] F-007 — commit 16e59670 — tier: go — review: approved (attempt 2, per user decision R6) — go 5 + sdk-go 4 pkgs, golden 82, repo 1937, state-covenant/babybear both modes, provenance; merged-branch go frontend/compiler/cli re-run
+- [x] F-022 — commit 496eaad1 — tier: rust — review: approved — rust 1041, golden 82, stateful-counter/basic-p2pkh/asm-raw-script both modes, provenance
+- [x] F-016 — commit 3e85fa96 — tier: python — review: approved — python 1544, golden 82, p2pkh/stateful/arithmetic both modes, runar-testing 1957, provenance; subagent full mf 736x2
+- [x] F-009 — commit f35cd59c — tier: go — review: approved — go 5 pkgs, golden 82, bounded-loop/arithmetic/stateful-counter both modes, provenance
+- [x] F-021 — stale on arrival, no commit — exploit closed by R-029 validate_for_update + integer-literal loop init (ancestor of d207ee8e); all 7 tiers refuse asm() in for-init/update
+- [x] F-020 — stale on arrival, no commit — duplicate of F-019, fixed by f37934cc: c.Total *= 2 emits update_prop, Rust hex == Go hex; &= refused
+- [x] F-019 — commit f37934cc — tier: rust — review: approved — rust 1038, golden 82, arithmetic/stateful/bounded-loop both modes, provenance; subagent full multi-format 736x2 + parser-only
+- [x] F-015 — commit 3d1b615f — tier: python — review: approved — python 1536, golden 82, stateful/cond-write-multi-field/state-covenant-mechanics both modes, runar-testing 1951, provenance
+- [x] F-006 — stale on arrival, no commit — fixed in passing by b7f9b99d (condition-iterator validator); Go and TS refuse identically
+- [x] F-005 — commit 218398dc — tier: go — review: approved — go codegen/compiler/frontend, golden 82, loop fixtures x4 both modes, runar-testing 1950, provenance
+- [x] F-004 — commit b4420864 — tier: top (opus) — review: approved, no revision (partial scope recorded: 2 anyone-can-spend rules ported; ~44 validator rules stay source-only) — dispatcher: rule file removed → RED 4 FAIL; go 5/5 + sdk-go 4/4 PASS; golden 82/82; asm-raw-script/stateful-counter/if-else 9/9 both modes
+- [x] F-014 — commit 2da345a7 — tier: top (opus) — review: approved, no revision — dispatcher: fix reverted → RED 6/10; python 1528 + sdk-python 880 PASS; golden 82/82; asm-raw-script 9/9 + stateful 45/45 both modes; IR-over-goldens 90/90
+- [x] F-018 — commit 4c979b8b — tier: top (opus) — review: approved, no revision — dispatcher: fix reverted → RED 3/5; ruby 107 files PASS; golden 82/82; basic-p2pkh 9/9 both fold modes
+- [x] F-003 — commit e8a4adf7 — tier: top (opus), 2 attempts — review: approved after 1 revision (narrowed to reference operator set) — dispatcher: fix reverted → 13 subtests RED; go 5/5 pkgs PASS; golden 82/82; merge-locals-prop-updates + stateful-counter 9/9 both fold modes
+- [x] F-002 — commit 58719cc5 — tier: top (opus) — review: approved, no revision — dispatcher: doc reverted → RED 2/3; ts 5000 PASS; golden 82/82; provenance clean
+- [x] F-013 — commit 4076ff98 — tier: top (opus) — review: approved, no revision — dispatcher: fix reverted → RED 5/6; python 1518 PASS; golden 82/82; fixed-array-index/-write multi-format 8/8 both fold modes; provenance clean
+- [x] F-001 — commit fb4ed932 — tier: top (opus) — review: approved, no revision — dispatcher: TS fix reverted → new test RED 4/36; 7 compiler suites PASS; golden 82/82; provenance: no goldens; 7-tier probe byte-identical both fold modes
+- [x] F-000 — commit 62173fd4 — tier: top (opus) — attempts: 1 — review: approved, no revision — dispatcher re-ran: test cold PASS 6/6; old test RED at HEAD (1/3); skip-mutated gate → new test RED (3/6); tests/ 84 files 1937 PASS
+
+## Stale on arrival (no commit)
+- [x] F-427 — TS DCE's hasSideEffect classifies `if` and `loop` as pure; an unreferenced top-l — fixed by 445e0f74 R-006: keep if/loop bindings whose nested — sources: CL-BUG-001, CL-BUG-108, CX-BUG-096, GK-GAP-003
+- [x] F-428 — Java: ExpandFixedArrays rebuilds every method through the 5-arg MethodNode const — fixed by 1b71ea9e (R-025/R-026: stop the fixed-array expans — sources: CL-BUG-243, CX-BUG-036
+- [x] F-429 — Java Emit unconditionally writes hex `00` for PushCodeSepIndexOp instead of the  — fixed by da867db9 (R-007: emit a deployable artifact from t — sources: CX-BUG-028, CX-BUG-039, GK-BUG-004
+- [x] F-430 — Java Emit unconditionally writes hex `00` for PushCodeSepIndexOp instead of the  — fixed by da867db9 (R-007: emit a deployable artifact from t — sources: GK-BUG-004
+- [x] F-431 — Java loop lowering has no maximum iteration/unroll ceiling anywhere in the pipel — fixed by aebb8c19 (R-009: bound the loop iteration count on — sources: CX-BUG-035, CX-BUG-043
+- [x] F-432 — `addOutput` arity/type checking exists in only ONE tier (TS); Go/Python/Rust/Jav — fixed by 162831dc "N-098: a ByteString in the satoshis slot — sources: CL-BUG-242
+- [x] F-433 — `addOutput` arity/type checking exists in only ONE tier (TS); Go/Python/Rust/Jav — fixed by N-105a/N-105b (5ab2aed4, be69ec2d) + N-106/N-107 ( — sources: CL-BUG-242
+- [x] F-434 — `addOutput` arity/type checking exists in only ONE tier (TS); Go/Python/Rust/Jav — fixed by be69ec2d "N-105b: port the rest of the output-intr — sources: CL-BUG-242
+- [x] F-435 — `addOutput` arity/type checking exists in only ONE tier (TS); Go/Python/Rust/Jav — fixed by be69ec2d "N-105b: port the rest of the output-intr — sources: CL-BUG-242
+- [x] F-436 — Cross-tier: the EC optimizer's fresh-constant helper never emits its binding int — fixed by 606e22a0 N-028: bind the folded EC scalar into the — sources: CL-BUG-269
+- [x] F-437 — Cross-tier: the EC optimizer's fresh-constant helper never emits its binding int — fixed by 1eaaf072 N-034 (Zig); 606e22a0 N-028 (Python + Rub — sources: CL-BUG-269
+- [x] F-438 — Python EC optimizer's _fresh_const_name() writes the generated constant only int — fixed by 606e22a0 "N-028: bind the folded EC scalar into th — sources: CL-BUG-203, CL-BUG-265, CL-BUG-269, CX-BUG-051
+- [x] F-439 — Java: no emitter test exercises deferred code-separator-index resolution — fixed by 8483d464 ("R-084: refuted as filed; the real defec — sources: CX-GAP-010
+- [x] F-440 — Java: mutable `Sig`/`SigHashPreimage` fields are deserialized as variable-length — fixed by 6dc1979b ("R-071: treat Sig and SigHashPreimage as — sources: CX-BUG-041
+- [x] F-441 — Java: mutable `RabinSig`/`RabinPubKey` fields are deserialized as fixed 8-byte v — fixed by b7e91a19 ("N-067: write mutable Rabin state at the — sources: CX-BUG-042
+- [x] F-442 — Java: for-loop updater expression is neither validated/type-checked nor semantic — fixed by 051e98f2 ("R-065: reject a non-unit loop step inst — sources: CX-BUG-044
+- [x] F-443 — Java: AnfLower's pre-scans for addOutput/addDataOutput/state-mutation don't recu — fixed by 6922c44a ("R-021: descend into sub-expressions whe — sources: CX-BUG-045
+- [x] F-444 — Java: ANF loader's `asInt` truncates arbitrary-width integer fields (loop counts — fixed by d55dac21 ("R-086: Java's IR loader truncated integ — sources: CX-BUG-047
+- [x] F-445 — Java: the locktime-finality warning is suppressed by ANY matching sequence compa — fixed by 94f5f31f ("fix(validate): locktime sequence guard  — sources: CX-BUG-049
+- [x] F-446 — Rust: private method called inside an if/else branch drops to OP_0 (private_meth — fixed by 4fcffcc5 "N-051: plumb privateMethods into branch- — sources: CL-BUG-094
+- [x] F-447 — Rust DCE's has_side_effect() omits ANFValue::If/Loop, so branch/loop bindings (a — fixed by 10beeb99 "R-005: keep if/loop bindings whose neste — sources: CL-BUG-166, CL-BUG-259, CL-BUG-260
+- [x] F-448 — Rust DCE's has_side_effect() omits ANFValue::If/Loop, so branch/loop bindings (a — fixed by 797c61ef "fix(compiler): port #113's constructorAr — sources: CL-BUG-025, CL-BUG-260
+- [x] F-449 — Rust tier's Java frontend clamps integer literals to i128 and silently substitut — fixed by 86e6777c "BUG-001: parser support for new BigInteg — sources: CL-BUG-168
+- [x] F-450 — `extractVersion` is registered, typechecked and parser-mapped, but has no StackL — fixed by 3b203195 ("R-069: close the Zig and Java builtin d — sources: CL-BUG-258
+- [x] F-451 — Rust stack-lowering's unknown-call-name fallback pushes OP_0 instead of refusing — fixed by 411c995a "R-016: refuse an unresolvable function i — sources: CL-BUG-264, GK-BUG-010
+- [x] F-452 — `unknown_anf_kind_tests.rs`: six tests, none actually drives an unknown ANF kind — fixed by 430a0f0e R-177: delete the unreachable unknown-kin — sources: CL-GAP-036
+- [x] F-453 — IR compilation accepts programs with no public methods and returns an empty, suc — fixed by 3e16266e N-113: five tiers accepted the malformed  — sources: CX-BUG-091
+- [x] F-454 — exprCallsSP1Fri's AST switch (CallExpr/BinaryExpr/UnaryExpr only) misses Ternary — fixed by 16fc35b6 "R-003: walk every expression form when r — sources: CL-BUG-103, CL-BUG-191, GK-BUG-031
+- [x] F-455 — exprCallsSP1Fri's AST switch (CallExpr/BinaryExpr/UnaryExpr only) misses Ternary — fixed by e40ee13a "R-147: the SP1-FRI acknowledgement was u — sources: CL-BUG-191, CX-BUG-024
+- [x] F-456 — Go's default-ON constant folder rebuilds loop ANF nodes with only Kind/Count/Ite — fixed by a5c09624 "N-128 go: constant folding erased a loop — sources: CL-BUG-101, CL-BUG-182, CX-BUG-002, CX-BUG-016
+- [x] F-457 — Go's default-ON constant folder's foldMethod rebuilds ANFMethod without SigHashT — fixed by 502a5757 "N-093: constant folding dropped sigHashT — sources: CL-BUG-102, CL-BUG-183, CX-BUG-001, CX-BUG-015
+- [x] F-458 — The CI missing-binary guard (assertAllCompilersAvailableInCi) protects only the  — fixed by ae7d062f "R-103 conformance: a local run can no lo — sources: CL-BUG-090
+- [x] F-459 — Go DCE neither collects `add_raw_output`'s Satoshis/ScriptBytes references nor c — fixed by aa5e35a8 "R-004: treat output and call ANF kinds a — sources: CX-BUG-004
+- [x] F-460 — Go DCE neither collects `add_data_output`'s references nor classifies the node a — fixed by aa5e35a8 "R-004: treat output and call ANF kinds a — sources: CX-BUG-005
+- [x] F-461 — Go DCE's `add_output` case collects Satoshis/StateValues but omits the optional  — fixed by 5f856e1e "R-030: collect the remaining operand ref — sources: CX-BUG-006
+- [x] F-462 — Go DCE's `deserialize_state` case is marked effectful but does not collect its P — fixed by 5f856e1e "R-030: collect the remaining operand ref — sources: CX-BUG-007
+- [x] F-463 — Go DCE collects no references from `array_literal` elements, so an EC-triggered  — fixed by 5f856e1e "R-030: collect the remaining operand ref — sources: CX-BUG-008
+- [x] F-464 — Go DCE categorically treats every `method_call` as pure without inspecting the c — fixed by aa5e35a8 "R-004: treat output and call ANF kinds a — sources: CX-BUG-009
+- [x] F-465 — EC-triggered DCE can remove the unused Groth16 verifier marker call (assertGroth — fixed by aa5e35a8 R-004: treat output and call ANF kinds as — sources: CX-BUG-010
+- [x] F-466 — CompileFromSource and the CLI read only validResult.Errors and discard validResu — fixed by f703a6ac R-061: five CLIs computed validator warni — sources: CX-BUG-018
+- [x] F-467 — Zig `reverseBytes` builtin emits zero opcodes (stack_lower.zig:2506-2514) — fixed by ff4a19b7 R-022: emit the byte reversal in the Zig  — sources: CL-BUG-061
+- [x] F-468 — Zig multi-method dispatch computes the `_codePart` prelude with a different pred — fixed by c2846d87 R-010: authenticate _codePart against the — sources: CL-BUG-120
+- [x] F-469 — Zig `compile-ir` on a zero-public-method ANF program produces an empty locking s — fixed by 3e16266e N-113: five tiers accepted the malformed  — sources: CL-BUG-121
+- [x] F-470 — Zig `@intFromFloat` roundtrip guards sit after the cast that panics, so they nev — fixed by c8c947d6 N-115: range-check every JSON float befor — sources: CL-BUG-122
+- [x] F-471 — CI's stated reason for excluding Zig from the stateful fuzz gate (`.runar.zig` m — fixed by c69101ef "R-111 fuzzer: restore Zig to the statefu — sources: CL-GAP-099
+- [x] F-472 — Zig public library API (`compiler_api.zig`'s `compileSourceWithOptions`) never c — fixed by 4b439e15 R-027: give the Zig CLI and library one p — sources: CX-BUG-120, GK-BUG-005
+- [x] F-473 — Zig `expand_fixed_arrays.zig`'s `rewriteMethod` drops `MethodNode.sighash_type`  — fixed by f1691941 N-086: rebuild IR nodes by copy-then-over — sources: CX-BUG-121
+- [x] F-474 — Zig fixed-array call-expression rewriting reconstructs `CallExpr` without `asm_r — fixed by f1691941 "N-086: rebuild IR nodes by copy-then-ove — sources: CX-BUG-123
+- [x] F-475 — Zig source for-loops have no maximum unroll-count bound and use unchecked signed — fixed by aebb8c19 "R-009: bound the loop iteration count on — sources: CX-BUG-126
+- [x] F-476 — The repo's only 7-tier fold-ON conformance gate is a no-op — every --ir entry po — fixed by 0c192829 "fix(fold): skip ANF constant-fold on --i — sources: CL-BUG-224
+- [x] F-477 — CompileFromSourceWithResult / CompileFromSourceStrWithResult never forward Compi — fixed by 079b7e59 R-162: one compile body for the Go API, s — sources: CX-BUG-017
+- [x] F-478 — ValidateIR has no 'at least one public method' rule, so hand-authored IR contain — fixed by eff90a3a R-081: IR with no public methods compiled — sources: CX-BUG-027
+- [x] F-479 — TS DCE classifies `if`/`loop` ANF nodes as side-effect-free, letting dead-code e — fixed by 445e0f74 R-006: keep if/loop bindings whose nested — sources: CL-BUG-115, GK-GAP-003
+- [x] F-480 — Go: the stateful continuation's locking script is built from a spender-supplied  — fixed by c2846d87 R-010: authenticate _codePart against the — sources: CL-BUG-036, CL-BUG-078
+- [x] F-481 — Go: `lowerCall`'s generic builtin dispatch silently pushes `OP_0` for any `call. — fixed by 6601edad R-122 go: refuse an unknown call instead  — sources: CL-BUG-219, GK-BUG-010
+- [x] F-482 — Python: unknown-builtin `call` on the `--ir` path silently pushes 0 instead of e — fixed by 428f69e4 R-124 ruby,python: refuse an unknown call — sources: CX-BUG-082, GK-BUG-010
+- [x] F-483 — Python: an unrecognized function/call name in stack lowering silently compiles t — fixed by 428f69e4 "R-124 ruby,python: refuse an unknown cal — sources: CX-BUG-056, CX-BUG-057, GK-BUG-010
+- [x] F-484 — Go: a private helper (`method_call`) invoked inside an `if`/`else` branch is not — fixed by 4fcffcc5 N-051: plumb privateMethods into branch-a — sources: CX-BUG-013
+- [x] F-485 — subContext() drops paramAliasStack, so an inlined helper's parameter silently al — fixed by 2d0011c4 N-079: carry the argument alias into bran — sources: CL-BUG-185
+- [x] F-486 — subContext() drops paramAliasStack, so an inlined helper's parameter silently al — fixed by 385b9dd7 (Go/Rust) + 2d0011c4 (ts/python/zig/ruby/ — sources: CL-BUG-185
+- [x] F-487 — subContext() drops paramAliasStack, so an inlined helper's parameter silently al — fixed by 2d0011c4 "N-079: carry the argument alias into bra — sources: CL-BUG-185
+- [x] F-488 — for i in range(0, 10, 2) silently compiles to ten unit-step iterations instead o — fixed by c6c82ed8 "feat(parse): the Python, Ruby and Rust s — sources: CL-BUG-215
+- [x] F-489 — Rule 10's test only asserts the generated name is a non-empty string, so it stru — fixed by 606e22a0 "N-028: bind the folded EC scalar into th — sources: CX-GAP-017
+- [x] F-490 — TS tier's GO_CAST_TYPES unwraps runar.Sha256/Ripemd160/etc. as a type cast befor — fixed by aca738e1 fix(parse-go): stop dropping Sha256 and R — sources: CL-GAP-116
+- [x] F-491 — artifact_to_json raises an unhandled JSONDecodeError on 30 of 72 conformance fix — fixed by 36080520 "fix(python): `--ir <file> --output <arti — sources: CL-BUG-202, CL-BUG-267
+- [x] F-492 — Artifact build_timestamp is taken from datetime.now(timezone.utc) and unconditio — fixed by 6871de2d "R-212: six of seven tiers ignored SOURCE — sources: CX-BUG-063, CX-BUG-075
+- [x] F-493 — compiler.py's private _parse_source dispatcher (used by compile_from_source, com — fixed by e5faa304 "R-024: route every Python entry point th — sources: CX-BUG-064, GK-BUG-026
+- [x] F-494 — compiler.py's private _parse_source dispatcher (used by compile_from_source, com — fixed by e5faa304 "R-024: route every Python entry point th — sources: CX-BUG-065, GK-BUG-026
+- [x] F-495 — Ordinary CLI/library compile entry points inspect only valid_result.errors (not  — fixed by f703a6ac "R-061: five CLIs computed validator warn — sources: CX-BUG-073
+- [x] F-496 — Ruby CLI `--emit-ir` ANF serializer drops the per-call `sighashFlag`, changing t — fixed by 11fa3200 N-094: derive the ANF wire format from th — sources: CL-BUG-271, CX-BUG-079
+- [x] F-497 — Ruby CLI `--emit-ir` ANF serializer drops the per-call `sighashFlag`, changing t — fixed by 11fa3200 N-094: derive the ANF wire format from th — sources: CL-BUG-271
+- [x] F-498 — `conformance/source-map/run.ts` is never invoked — the only byte-identity gate f — fixed by cb68a5e2 "test: fail derived-artifact --check when — sources: CL-GAP-084
+- [x] F-499 — Ruby validation warnings (`Severity::WARNING`) are generated by the validator bu — fixed by f703a6ac R-061: five CLIs computed validator warni — sources: CL-GAP-163, CX-GAP-019
+- [x] F-500 — Ruby source-path `for` loops accept any literal bound with no maximum, unlike th — fixed by aebb8c19 R-009: bound the loop iteration count on  — sources: CX-BUG-080
+- [x] F-501 — Ruby IR loader accepted a program with zero public methods and emitted a success — fixed by 3e16266e N-113: five tiers accepted the malformed  — sources: CX-BUG-081
+- [x] F-502 — Ruby: mutable `Sig`/`SigHashPreimage` state is parsed as length-prefixed but res — fixed by 6dc1979b R-071: treat Sig and SigHashPreimage as v — sources: CX-BUG-084
+- [x] F-503 — Go: source loops bypass the IR path's `MaxLoopCount` bound entirely, and the `bi — fixed by fcc95fb5 'R-013: range-check compile-time constant — sources: CX-BUG-019
+- [x] F-504 — Python: six crypto builtin dispatchers (`_lower_ec_builtin`, `_lower_nist_ec_bui — fixed by debcf29c "R-128,R-163,R-165 compilers: validate bu — sources: CL-GAP-113
+- [x] F-505 — Python: six crypto builtin dispatchers (`_lower_ec_builtin`, `_lower_nist_ec_bui — fixed by debcf29c "R-128,R-163,R-165 compilers: validate bu — sources: CL-GAP-113, CX-BUG-062
+- [x] F-506 — Python: an unrecognized function/call name in stack lowering silently compiles t — fixed by 4fcffcc5 "N-051: plumb privateMethods into branch- — sources: CX-BUG-056
+- [x] F-507 — Python: source-path `for` loops have no unroll cap and can exhaust compiler reso — fixed by aebb8c19 "R-009: bound the loop iteration count on — sources: CX-BUG-068
+- [x] F-508 — Ruby: FixedArray expansion rebuilds CallExpr without asm_return_type, turning as — fixed by 1b71ea9e R-025/R-026: stop the fixed-array expansi — sources: CL-BUG-272, CX-BUG-078
+- [x] F-509 — TS: typechecker's for-statement branch never visits stmt.update, letting unknown — fixed by 051e98f2 R-065: reject a non-unit loop step instea — sources: CX-BUG-104
+- [x] F-510 — TS: recursion/call-graph construction in 02-validate.ts omits for-loop init and  — fixed by 051e98f2 R-065: reject a non-unit loop step instea — sources: CX-BUG-107
+- [x] F-511 — Go SDK: mutable boolean state fields fall to push-data framing because sdk_state — fixed by 4c21ef4e "R-248: fix the mutable `boolean` state e — sources: CL-BUG-075, CL-BUG-132
+- [x] F-512 — Java SDK: mutable boolean state fields fall to push-data framing because StateSe — fixed by 4c21ef4e "R-248: fix the mutable `boolean` state e — sources: CL-BUG-075, CL-BUG-132
+- [x] F-513 — Python SDK: mutable boolean state fields serialize as constant false and never r — fixed by 4c21ef4e — R-248: fix the mutable `boolean` state  — sources: CL-BUG-075, CL-BUG-123, CL-BUG-132
+- [x] F-514 — Rust SDK: mutable boolean state fields fall to push-data framing because state.r — fixed by 4c21ef4e "R-248: fix the mutable `boolean` state e — sources: CL-BUG-075, CL-BUG-132
+- [x] F-515 — Zig SDK: mutable boolean state fields fall to push-data framing because sdk_stat — fixed by 4c21ef4ea243e8f886e98b4c590caf02b926418e — "R-248: — sources: CL-BUG-075, CL-BUG-132
+- [x] F-516 — Solidity-surface lexer (01-parse-sol.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-111
+- [x] F-517 — Move-surface lexer (01-parse-move.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-112
+- [x] F-518 — Python-surface lexer (01-parse-python.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-113
+- [x] F-519 — Go-surface lexer (01-parse-go.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-114
+- [x] F-520 — Rust-surface lexer (01-parse-rust.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-115
+- [x] F-521 — Ruby-surface lexer (01-parse-ruby.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-116
+- [x] F-522 — Zig-surface lexer (01-parse-zig.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-117
+- [x] F-523 — Java-surface lexer (01-parse-java.ts) silently discards unknown characters — fixed by 7265167d R-041: make the TypeScript format parsers — sources: CX-BUG-118
+- [x] F-524 — Rust WOTS+ on-chain codegen (compilers/rust/src/codegen/wots.rs) emits no OP_SIZ — fixed by 9ab6a29a fix(lean): emit R-135 WOTS exact signatur — sources: CL-BUG-080, CL-GAP-063
+- [x] F-525 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by f36f21a9 'fix(compilers): verifyWOTS accepted sig  — sources: CL-BUG-080, CL-BUG-146
+- [x] F-526 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by f36f21a9 fix(compilers): verifyWOTS accepted `sig  — sources: CL-BUG-080
+- [x] F-527 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by 9ab6a29a fix(lean): emit R-135 WOTS exact signatur — sources: CL-BUG-080, CL-BUG-146
+- [x] F-528 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by f36f21a9 "fix(compilers): verifyWOTS accepted `sig — sources: CL-BUG-080
+- [x] F-529 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by 9ab6a29a ("fix(lean): emit R-135 WOTS exact signat — sources: CL-BUG-080
+- [x] F-530 — TS/Go/Python/Ruby/Java/Zig WOTS+ on-chain codegen emits no OP_SIZE length gate ( — fixed by f36f21a9 fix(compilers): verifyWOTS accepted `sig  — sources: CL-BUG-080, CL-BUG-146
+- [x] F-531 — sdk-bip143 conformance generator pins one sighash mode and one locktime although — fixed by 2676af7d "R-206: cover every sighash mode, not jus — sources: CL-GAP-135
+- [x] F-532 — TS test-suite gap F-04: verifyWOTS/verifySLHDSA tested only at the raw emitter A — fixed by bd68da10 R-106 + R-193 tests: 15 example contracts — sources: CL-GAP-018
+- [x] F-533 — Python SDK's canonical_json has none of the TS reference implementation's DoS gu — fixed by 01f88ef2 — fix(sdk): give canonicalJson the same t — sources: CL-GAP-104
+- [x] F-534 — Python's BN254 inline mixed-add omits Go's `strict` (R==0) test, so accumulator  — fixed by 79992b56 R-055: bn254G1ScalarMul applied the wrong — sources: CL-BUG-143
+- [x] F-535 — TS DCE classifies `if`/`loop` ANF nodes as side-effect-free, letting dead-code e — fixed by 445e0f74 R-006: keep if/loop bindings whose nested — sources: GK-GAP-003
+- [x] F-536 — Conformance comparison gate omits sourceLoc/Stack-IR-object/source-maps and the  — fixed by bdb0ee66 (R-302: state what the byte-identical gua — sources: GK-GAP-008
+- [x] F-537 — TypeScript bn254G1ScalarMul does k+3r via three OP_ADD without reducing k mod r — fixed by 79992b56 R-055: bn254G1ScalarMul applied the wrong — sources: GK-BUG-023
+- [x] F-538 — Python bn254G1ScalarMul does k+3r via three OP_ADD without reducing k mod r; Go' — fixed by 79992b56 R-055 (same commit that fixed V262/CL-BUG — sources: CL-BUG-142, GK-BUG-023
+- [x] F-539 — Ruby bn254G1ScalarMul does k+3r via three OP_ADD without reducing k mod r — fixed by 79992b56 R-055: bn254G1ScalarMul applied the wrong — sources: GK-BUG-023
+- [x] F-540 — Rust bn254G1ScalarMul does k+3r via three OP_ADD without reducing k mod r — fixed by 79992b56 R-055: bn254G1ScalarMul applied the wrong — sources: GK-BUG-023
+- [x] F-541 — Shared peephole-rules.json still specifies the unguarded double-OP_NOT rewrite t — fixed by 1e30145d 'R-139: the shared rule file declared an  — sources: CX-GAP-003
+- [x] F-542 — TS `BYTE_RETURNING_FUNCTIONS` hand-maintained heuristic misclassifies the numeri — fixed by be3eefdb N-054: derive extractor byte-ness from th — sources: CL-BUG-109, CX-BUG-100, CX-BUG-108
+- [x] F-543 — peephole-rules.json labelled canonical but had zero consumers, hiding a stale un — fixed by 1e30145d R-139: the shared rule file declared an u — sources: CL-DOC-001
+- [x] F-544 — Script-size regression gate is a silent no-op: `pnpm --filter runar-conformance` — fixed by f52d54f9 (N-053: the script-size CI gate never ran — sources: CL-BUG-234
+- [x] F-545 — Rust `bn254G1Add` silently wrong for P + (-P); Rust `bn254G1OnCurve` lacks the G — fixed by 7bd5457e (R-035: return the point at infinity from — sources: CL-GAP-062
+- [x] F-546 — Python `bn254G1OnCurve` accepts 36 non-canonical encodings of the same point bec — fixed by 4d0a225d fix(6 tiers): bn254G1OnCurve certified an — sources: CL-BUG-148
+- [x] F-547 — Rust: the rich-result compilation path calls the location-blind peephole optimiz — fixed by 38409fc1 (R-166: the Rust source map was empty for — sources: CX-BUG-089
+- [x] F-548 — TS: the constant folder and the stack emitter implement `pow`/`sqrt`/`clamp`/`lo — fixed by a3c4c0af fix(compilers): sqrt emitted 16 unconditi — sources: CL-BUG-107, CL-BUG-114
+- [x] F-549 — Python's fixed-array expansion drops MethodNode.sighash_type, letting @sighash v — fixed by 1b71ea9e R-025/R-026: stop the fixed-array expansi — sources: CL-BUG-204, GK-BUG-025
+- [x] F-550 — Go's BN254 G1 on-curve check has no coordinate-canonicity guard, unlike secp256k — fixed by 4d0a225d fix(6 tiers): bn254G1OnCurve certified an — sources: CL-GAP-057
+- [x] F-551 — Generic BN254 pairing builtins (the recommended Groth16 path) never check G2 on- — fixed by 65fcd3ee R-060: validate G1/G2 inputs in the gener — sources: GK-BUG-006
+- [x] F-552 — `expand_fixed_arrays` has ZERO conformance coverage in any tier — fixed by 681430ad (R-094 conformance: the first FixedArray  — sources: CL-GAP-081, CL-GAP-115
+- [x] F-553 — Java-tier Sol/Zig/Ruby(Rb) parsers emit an empty else-list instead of null, so A — fixed by 7df5b4dd R-298: an empty else-list is "no else", s — sources: CL-GAP-070, GK-BUG-003
+- [x] F-554 — Python's typechecker accepts an undeclared identifier in a boolean position (`<u — fixed by d78d4fe7 GK-BUG-009: an unresolvable identifier ty — sources: CL-BUG-206
+- [x] F-555 — Go: `merkleRootPoseidon2KB` discards 7 of 8 digest limbs, reducing the Merkle ro — fixed by 19af042e R-056: merkleRootPoseidon2KB authenticate — sources: CL-BUG-041
+- [x] F-556 — Go: unknown builtin compiles to OP_0 and strands its arguments, desyncing the st — fixed by 6601edad R-122 go: refuse an unknown call instead  — sources: CL-BUG-040
+- [x] F-557 — Python `--ir` cannot emit an artifact for any stateful contract (JSONDecodeError — fixed by 36080520 (fix(python): `--ir <file> --output <arti — sources: CL-BUG-050
+- [x] F-558 — `FixedArray` has zero conformance coverage despite owning a dedicated 03b pipeli — fixed by 681430ad (R-094 conformance: the first FixedArray  — sources: CL-GAP-081
+- [x] F-559 — `subContext()` doesn't forward the side-effect summary, so nested output-produci — fixed by 2e30b536 — "R-001: forward the side-effect summary — sources: CX-BUG-098
+- [x] F-560 — `subContext()` doesn't forward `sighashFlag`, so nested manual `checkPreimage` f — fixed by f4e6c675 — "R-082: a manual checkPreimage in a bra — sources: CX-BUG-099
+- [x] F-561 — Root README states an unqualified "all formats produce identical Bitcoin Script" — fixed by eeb3af0c — R-230: the README's parity claim says w — sources: GK-DOC-003
+- [x] F-562 — Integration/regtest evidence is gathered with Chronicle opcodes activated (`chro — fixed by 6321feb4 R-014: disclose the Chronicle opcode-poli — sources: CL-GAP-092
+- [x] F-563 — WalletProvider.getTransaction returns an empty {inputs:[],outputs:[]} shell on c — fixed by 35f8e222 'R-151: WalletProvider.getTransaction sto — sources: CL-BUG-140, GK-BUG-032
+- [x] F-564 — reverseBytes has zero conformance fixtures, zero example uses, and does not comp — fixed by a5f69778 — N-056: fix Ruby's reverseBytes stack-mo — sources: CL-GAP-082
+- [x] F-565 — `runar deploy` bakes `0n` into every constructor slot — fixed by 84a6dbef — R-036: require constructor arguments on — sources: CL-BUG-076
+- [x] F-566 — `subContext()` drops `sideEffects`, so a private output-helper called inside an  — fixed by 385b9dd7 R-002: forward sideEffects and paramAlias — sources: CL-BUG-184
+- [x] F-567 — @embedAlways preservation pair destroyed by DCE's fixed-point loop — fixed by d06087d3 N-021: protect @embedAlways with a node f — sources: CL-BUG-002
+- [x] F-568 — Rust: push_json_value HEX-decodes the JS-BigInt decimal wire encoding, silently  — fixed by ba7cb0f5 (R-017: decode property initializers thro — sources: CL-BUG-047
+- [x] F-569 — The only CLI-reachable Groth16 backend emits the verifier that does not bind pub — fixed by a6f9ab5f (R-011: pin the public inputs into the de — sources: CL-BUG-081
+- [x] F-570 — Six Zig StateCovenant tests silently PASS when setup fails — fixed by 7833afcb — test(integration/zig): a swallowed depl — sources: CL-BUG-113
+- [x] F-571 — EC optimizer Rule 9 truncates the folded scalar through `i64`, turning `ecMul(ec — fixed by 41b77f1c (R-033: decode oversize load_const scalar — sources: CL-BUG-170
+- [x] F-572 — Unguarded `big.Int → int` on the loop count: a bound ≥ 2⁶³ silently runs the loo — fixed by fcc95fb5 (R-013: range-check compile-time constant — sources: CL-BUG-194
+- [x] F-573 — A full-sweep frontend run finds 6 Python and 3 Ruby failures across all 667 exam — fixed by b6e63ec9 N-122: withdrew the two invalid *.v2.runa — sources: CL-BUG-231
+- [x] F-574 — A full-sweep frontend run finds 6 Python and 3 Ruby failures across all 667 exam — fixed by d517e411 (N-020, Rust [T;N] array parsing) and 5c9 — sources: CL-BUG-231
+- [x] F-575 — `/api/compile` is a one-request process kill, and the missing cap is in the comp — fixed by 38c70b2a (R-048: bound the playground compile endp — sources: CL-BUG-254
+- [x] F-576 — TS EC optimizer applies two rules tagged supported:["ts"] that Go skips — fixed by 411d1985 R-031: gate ec-mulgen-linear on constant  — sources: CL-GAP-001
+- [x] F-577 — The release path publishes with zero tests run — fixed by bae01245 (R-045: make release.sh compose with bump — sources: CL-GAP-094
+- [x] F-578 — The loader's KNOWN_KINDS check is tautological — kind_name is exhaustive over a  — fixed by 430a0f0e R-177: delete the unreachable unknown-kin — sources: CL-BUG-022
+- [x] F-579 — compile_from_ir* silently ignores constructor_args, returning unbaked OP_0 place — fixed by 5d222a8c feat(go,rust,python): add constructorArgs — sources: CL-BUG-023
+- [x] F-580 — The two public compile APIs produce different sourceMap fidelity; the comment cl — fixed by 38409fc1 R-166: the Rust source map was empty for  — sources: CL-BUG-026
+- [x] F-581 — Go: sqrt (16 Newton iters) and pow (32 unrolled) silently return wrong values ou — fixed by a3c4c0af (fix(compilers): sqrt emitted 16 uncondit — sources: CL-BUG-043
+- [x] F-582 — Rust: 14 crypto call sites push straight into self.ops, breaking the ops/source_ — fixed by 38409fc1 R-166: the Rust source map was empty for  — sources: CL-BUG-048
+- [x] F-583 — (see ledger) — fixed by abfcf650 (fix(6 tiers): the Merkle index was unbou — sources: CL-BUG-098
+- [x] F-584 — `make_load_const_int` emits bare JSON numbers above `JS_MAX_SAFE_INTEGER`, break — fixed by 41b77f1c R-033: decode oversize load_const scalars — sources: CL-BUG-171
+- [x] F-585 — The negatives harness is stage-blind, and covers five of seven tiers — fixed by 4e74e565 (R-100: the rejection gate was scoring tw — sources: CL-BUG-226
+- [x] F-586 — The TypeScript tier has no dependency-vulnerability scanning, and a workflow com — fixed by c3353f5b (R-108 ci: the TypeScript tier had no dep — sources: CL-BUG-237
+- [x] F-587 — ec-add-negate-cancel-reversed declared in rule data, unimplemented in TS — fixed by 8cd3a0dd R-034: port the 13th EC rule to six tiers — sources: CL-GAP-002
+- [x] F-588 — `conformance/analyzer/run.ts` likewise never invoked; its missing-wrapper path s — fixed by 1cfe6dc0 R-219: the analyzer gate was not just unw — sources: CL-GAP-085
+- [x] F-589 — Two vector corpora have no executing consumer anywhere — fixed by 202644a2 R-110 ci: run the repo-root tests/ direct — sources: CL-GAP-142
+- [x] F-590 — CompileGroth16WA ignores SOURCE_DATE_EPOCH — the one artifact path that cannot b — fixed by 7efcb8ea "R-176: the Groth16 verifier was the one  — sources: CL-BUG-011
+- [x] F-591 — ec-rules.json documents ecMul with two different argument orders — fixed by 8a5b1a81 N-035: enable EC rules 9 and 11 in Go, an — sources: CL-DOC-002
+- [x] F-592 — Skip inventory: 0 .skip/.only/xit; 11 governed describe.skipIf; 1 vacuous body i — fixed by 2e7a3351 lint(test-skips): site-level audit + Rust — sources: CL-DOC-006
+- [x] F-593 — Rust: extractInputIndex returns the prevout's vout, not the spending input's ind — fixed by 7d9edb98 fix: correct 31 review findings, replace  — sources: CL-DOC-012
+- [x] F-594 — Go: big.Int -> int narrowing via Int64() happens BEFORE the range check at three — fixed by fcc95fb5 R-013: range-check compile-time constants — sources: CL-GAP-059
+- [x] F-595 — Go: loop iteration variable leaks one dead stack slot per unrolled iteration whe — fixed by 62f9f309 R-186 + R-292: the loop iteration variabl — sources: CL-GAP-061
+- [x] F-596 — 3. **CL-BUG-052 (Java compiler emits no deployable artifact) — fixed by da867db9 R-007: emit a deployable artifact from th — sources: CL-BUG-052
+- [x] F-597 — - **CL-BUG-249 — a FixedArray property flips `OP_EQUAL` to `OP_NUMEQUAL` on an u — fixed by 1b71ea9e R-025/R-026: stop the fixed-array expansi — sources: CL-BUG-249
+- [x] F-598 — check_preimage.sighashFlag is on compiler ANF but missing from ir-schema type an — fixed by 5c97628c ("R-089: the JSON Schema rejected valid I — sources: GK-BUG-001
+- [x] F-599 — Artifact JSON Schema rejects abi.methods[].sigHashType that the assembler emits — fixed by 5c97628c (same commit as V611 — it fixed both the  — sources: GK-BUG-002
+- [x] F-600 — Nested-if inherited-slot reorder remains documented OPEN (funds-safety) — fixed by 9cfd953f ("fix(stack-lower): restore inherited slo — sources: GK-GAP-006
+- [x] F-601 — SDK READMEs advertise runar.build / runar.run; in-repo playground language menu  — fixed by 5b376163 R-154: serve a real template per language — sources: GK-DOC-002
+- [x] F-602 — extractSequence/extractLocktime BIN2NUM without sign-pad; recommended sequence g — fixed by 3cecdc11 ("fix(compilers): decode the four 32-bit  — sources: GK-BUG-012
+- [x] F-603 — TS interpreter checkMultiSig always returns false; comment says unused — fixed by 3d773f37 R-112 testing: the interpreter's crypto i — sources: GK-GAP-011
+- [x] F-604 — Oversize Point (G‖extra) is on-curve as G and ecEncodeCompressed of it is −G — fixed by ea79620a ("fix(ec): a Point was never length-check — sources: GK-BUG-027
+- [x] F-605 — Fixed-array rewriting drops expression-form asm return types — fixed by 1b71ea9e R-025/R-026: stop the fixed-array expansi — sources: CX-BUG-038
+- [x] F-606 — IR compilation accepts a contract with no spending entry point and emits an empt — fixed by 3e16266e — "N-113: five tiers accepted the malform — sources: CX-BUG-072
+- [x] F-607 — Artifacts are nondeterministic because assembly always injects wall-clock time — fixed by 6871de2d ("R-212: six of seven tiers ignored SOURC — sources: CX-BUG-119
+- [x] F-608 — `CompileGroth16WA` ignores `SOURCE_DATE_EPOCH` — fixed by 7efcb8ea R-176: the Groth16 verifier was the one a — sources: CL-BUG-221, CL-BUG-222, CL-BUG-223
+- [x] F-609 — `metamorphic-fuzz.ts` has no non-vacuity guard — fixed by 4747e4e5 fuzzer(metamorphic): a run that compared  — sources: CL-BUG-227, CL-GAP-126
+- [x] F-610 — A crashed tier is laundered into agreement — fixed by 9b9eeeb8 fuzzer(canonical): a tier that DIED is no — sources: CL-BUG-227, CL-GAP-126
+- [x] F-611 — `scripts/release.sh` cannot complete — fixed by bae01245 (R-045: 'make release.sh compose with bum — sources: CL-BUG-239, CL-GAP-133
+
+## Skipped
+- [-] F-396 — Ruby: systemic <unknown>-type inference gaps make 8 subtype? call sites (includi — too large for one test
+- [-] F-397 — Seven of the ten compiler-supported state-field types (boolean, Addr, Ripemd160, — too large for one test
+- [-] F-398 — Java example test suite: 70 of 151 tests (46.4%) never falsify contract logic — too large for one test
+- [-] F-399 — Zig example test suite: 92 of 204 tests (45.1%) never falsify contract logic — too large for one test
+- [-] F-400 — sdk-output conformance suite exercises only 3 of 12 compiler-supported state fie — too large for one test
+- [-] F-401 — sdk-codegen's one mandatory requirement is met by only 1 of 3 runners, 4 of 7 ti — too large for one test
+- [-] F-402 — 100% of Bitcoin Script bytes ever executed by any conformance engine are TypeScr — too large for one test
+- [-] F-403 — The flagship end2end PriceBet webapp's settle path is provably unspendable and n — too large for one test
+- [-] F-404 — Eleven enumerated TS test sites assert strictly less than the test name or comme — too large for one test
+- [-] F-405 — `placeholder` and `push_codesep_index` peephole ops are safe only by accident —  — too large for one test
+- [-] F-406 — Altstack round-trip peephole optimization is deliberately disabled pending full  — too large for one test
+- [-] F-407 — The large majority of integration negative tests pass on any error (including th — too large for one test
+- [-] F-408 — Zig ANF interpreter: 81 of 129 builtins unimplemented, evalCall falls through to — too large for one test
+- [-] F-409 — CRITICAL (v1 claim) — too large for one test
+- [-] F-410 — 3.0% of 497 negative tests assert *why* the failure happened — too large for one test
+- [-] F-411 — The analyzer conformance goldens pin stack depths the spec makes wrong, and a co — too large for one test
+- [-] F-412 — 18 of 22 settle tests (81.8%) cannot fail if the winner-selection branch is inve — too large for one test
+- [-] F-413 — Rust IR loader does no referential-integrity, duplicate-name, cycle, loop-count- — too large for one test
+- [-] F-414 — No generator in the partition can emit an EC expression, so the DCE defect class — too large for one test
+- [-] F-415 — ANF parity goldens self-bootstrap (test writes then asserts against its own outp — too large for one test
+- [-] F-416 — 37 not.toThrow() sites plus ~30 compile-only tests assert nothing about emitted  — too large for one test
+- [-] F-417 — 01-parse-zig.test.ts covers only 5 narrow regressions; 12 tests vs 33-82 for its — too large for one test
+- [-] F-418 — Six Rust tests accept Ok OR Err on the substantive question — too large for one test
+- [-] F-419 — Enumerated malformed-IR classes with no Rust test (referential integrity, raw_sc — too large for one test
+- [-] F-420 — No op-count golden for the entire SHA-256 module plus p384 on_curve / encode_com — too large for one test
+- [-] F-421 — Rust: MAX_STACK_DEPTH is checked against a stack model that never sees the depth — too large for one test
+- [-] F-422 — Rust: fiat_shamir_kb.rs is an orphan port — 291 lines compiled, zero call sites — too large for one test
+- [-] F-423 — Lower-if contains acknowledged unproved dead/defensive code — too large for one test
+- [-] F-424 — README drift (LOW) — too large for one test
+- [-] F-425 — Coverage holes pinned by tests — too large for one test
+- [-] F-426 — The supply chain is unpinned across the board — too large for one test
+
+## Rejected at combination
+- [!] F-612 — CX-GAP-013 — Cli.java's flag dispatch (~936-960) confirms the factual claim — there is no --debug/--annotated flag, only --
+- [!] F-613 — CL-GAP-098 — conformance/runner/index.ts:466 `zig build -Doptimize=ReleaseFast` does exist inside `prebuildAllCompilers()`,
+- [!] F-614 — CX-BUG-076 — BY DESIGN — user gate decision 2026-09-22 (D1: keep documented v1 semantics; spec/grammar.md:325-334).
+- [!] F-615 — CX-BUG-103, GK-GAP-002 — Prior user decision (previous remediation run, "USER DECISIONS #2 — Length discipline → KEEP PERMISSIVE"): Byt
+- [!] F-616 — CL-GAP-136 — At BOTH the reviewed commit (2b3af765) and HEAD, all six non-TS SDK envelope interop tests already consume the
+- [!] F-617 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-618 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-619 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-620 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-621 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-622 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-623 — CL-BUG-112 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-624 — GK-BUG-016 — Tier wrong and Go is correct: Go shift wraparound yields the right all-ones mask; the Java and Rust instances 
+- [!] F-625 — CX-BUG-101 — BY DESIGN — user gate decision 2026-09-22 (D1: keep documented v1 semantics; spec/grammar.md:325-334).
+- [!] F-626 — CL-BUG-250 — docs/formats/java.md:80 (present since commit c3b18294, an ancestor of the CL review commit 8937c1ad): 'Fields
+- [!] F-627 — CL-GAP-121 — The item's narrow, literal claim (conformance/fuzzer/ir-differential.ts hard-codes '--disable-constant-folding
+- [!] F-628 — GK-GAP-009 — spec/opcodes.md documents OP_SHA1 (0xa7) explicitly as 'Not used by Rúnar (weak hash)' in its own opcode-usage
+- [!] F-629 — CL-GAP-060 — R1: Chronicle activated on BSV mainnet at 943,816 on 2026-04-07 (docs/chronicle-opcode-policy.md:10, spec/opco
+- [!] F-630 — CL-GAP-146 — R2: phantom CL ID — only a range-heading endpoint in the CL ledger, never a finding.
+- [!] F-631 — CL-GAP-153 — R2: phantom CL ID — only a range-heading endpoint in the CL ledger, never a finding.
+- [!] F-632 — CX-BUG-066 — BY DESIGN — user gate decision 2026-09-22 (D1: keep documented v1 semantics; spec/grammar.md:325-334).
+- [!] F-633 — CX-BUG-085 — BY DESIGN — user gate decision 2026-09-22 (D1: keep documented v1 semantics; spec/grammar.md:325-334).
+- [!] F-634 — CX-BUG-124 — BY DESIGN — user gate decision 2026-09-22 (D1: keep documented v1 semantics; spec/grammar.md:325-334).
+
+## Folded into cross-tier items
+- [~] F-635 → folded into cross-SDK item G6 (D2)
+- [~] F-636 → folded into cross-tier item G5
+- [~] F-637 → folded into cross-tier item G5
+- [~] F-638 → folded into cross-SDK item G6 (D2)
+- [~] F-639 → folded into cross-SDK item G6 (D2)
+- [~] F-640 → folded into cross-SDK item G6 (D2)
+- [~] F-641 → folded into cross-SDK item G6 (D2)
+- [~] F-642 → folded into cross-SDK item G6 (D2)
+- [~] F-643 → folded into cross-SDK item G6 (D2)
+- [~] F-644 → folded into cross-tier item G1
+- [~] F-645 → folded into cross-tier item G1
+- [~] F-646 → folded into cross-tier item G1
+- [~] F-647 → folded into cross-tier item G1
+- [~] F-648 → folded into cross-tier item G1
+- [~] F-649 → folded into cross-tier item G1
+- [~] F-650 → folded into cross-tier item G1
+- [~] F-651 → folded into cross-SDK item G6 (D2)
+- [~] F-652 → folded into cross-tier item G2
+- [~] F-653 → folded into cross-tier item G2
+- [~] F-654 → folded into cross-tier item G2
+- [~] F-655 → folded into cross-tier item G2
+- [~] F-656 → folded into cross-tier item G2
+- [~] F-657 → folded into cross-tier item G2
+- [~] F-658 → folded into cross-tier item G2
+- [~] F-659 → folded into cross-tier item G5
+- [~] F-660 → folded into cross-SDK item G6 (D2)
+- [~] F-661 → folded into cross-SDK item G6 (D2)
+- [~] F-662 → folded into cross-tier item G5
+- [~] F-663 → folded into cross-tier item G3
+- [~] F-664 → folded into cross-tier item G3
+- [~] F-665 → folded into cross-tier item G3
+- [~] F-666 → folded into cross-tier item G3
+- [~] F-667 → folded into cross-tier item G3
+- [~] F-668 → folded into cross-tier item G3
+- [~] F-669 → folded into cross-tier item G3
+- [~] F-670 → folded into cross-tier item G5
+- [~] F-671 → folded into cross-tier item G5
+- [~] F-672 → folded into cross-tier item G4
+- [~] F-673 → folded into cross-tier item G4
+- [~] F-674 → folded into cross-tier item G4
+- [~] F-675 → folded into cross-tier item G4
+- [~] F-676 → folded into cross-tier item G4
+- [~] F-677 → folded into cross-tier item G4
+- [~] F-678 → folded into cross-tier item G5
+
+## Deferred
+- [>] N-394 — - — tier history: mid
+- [>] N-204 — release process, needs explicit tag+push authorization (R79) — tier history: n/a
+- [>] F-197 — N-056 — tier history: opus
+- [>] F-132 — spec-intended, not a defect: spec/script-analyzer-format.md §7.2/§11 mandate paths=[] and no linear fallback on UNBALANCED_IF_ENDIF; TS (probe) and all 7 tiers implement it; the error-severity finding is emitted and an unbalanced script is consensus-invalid, so no spendable lock is hidden (R42) — tier history: opus
+- [>] N-034 — propagation fixed by F-098; fixture + surface port moved to N-093 (R38) — tier history: opus
+- [>] F-096 — fail-closed in all 7 tiers, --ir-only; clear shared diagnostic queued as N-094 (R39) — tier history: opus
+
+## Verifier-surfaced cross-tier leads (not from any reviewer — queue separately)
+- N-001 (from F-001 subagent) — CONFIRMED by dispatcher 2026-09-23 and QUEUED as N-001: Zig alone implements peephole reassociation rules 29/30 (`PUSH a OP_ADD PUSH b OP_SUB → PUSH(a-b) OP_ADD`). For `x + 5n - 3n` fold-OFF, Zig emits `7b5293009d…` while TS/Go emit `7b55935394009d…` — a cross-tier hex divergence no conformance fixture covers. Pre-existing.
+
+## Final
+
+- F-005 follow-up 72427298: docs/test-skips.md row for the F-005 skip (CI skip-audit orphan)
+- F-024-FU 35e0a7c9: decompiler strips F-024 check; 6 missed sdk-vertical pins restamped (R22)
+- N-050 cb89e714: picked after checkpoint-4
+- F-079 46dd51d6: picked after checkpoint-4
+- N-005 3067255a: picked after checkpoint-4
+- F-055-FU bce52399: unused Spend import broke pnpm build

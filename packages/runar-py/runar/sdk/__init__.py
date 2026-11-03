@@ -3,7 +3,7 @@
 from runar.sdk.types import (
     Utxo, TransactionData, Transaction, TxInput, TxOutput,
     RunarArtifact, Abi, AbiMethod, AbiParam,
-    StateField, ConstructorSlot, CodeSepIndexSlot, DeployOptions, CallOptions, OutputSpec,
+    StateField, ConstructorSlot, CodeSepIndexSlot, CodePartLenSlot, DeployOptions, CallOptions, OutputSpec,
     PreparedCall, SdkValue, TerminalOutput,
 )
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
@@ -50,7 +50,7 @@ from runar.sdk.envelope import (
 __all__ = [
     'Utxo', 'TransactionData', 'Transaction', 'TxInput', 'TxOutput',
     'RunarArtifact', 'Abi', 'AbiMethod', 'AbiParam',
-    'StateField', 'ConstructorSlot', 'CodeSepIndexSlot', 'DeployOptions', 'CallOptions', 'OutputSpec',
+    'StateField', 'ConstructorSlot', 'CodeSepIndexSlot', 'CodePartLenSlot', 'DeployOptions', 'CallOptions', 'OutputSpec',
     'PreparedCall', 'SdkValue', 'TerminalOutput',
     'Provider', 'MockProvider', 'RPCProvider', 'WhatsOnChainProvider',
     'Signer', 'MockSigner', 'ExternalSigner', 'LocalSigner',

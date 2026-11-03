@@ -24,6 +24,18 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+function goOnlyFixtures(): string[] {
+  const testsDir = join(ROOT, 'conformance', 'tests');
+  return readdirSync(testsDir)
+    .filter((d) => {
+      const src = join(testsDir, d, 'source.json');
+      if (!existsSync(src)) return false;
+      const json = JSON.parse(readFileSync(src, 'utf8')) as { compilers?: string[] };
+      return Array.isArray(json.compilers) && !json.compilers.includes('ts');
+    })
+    .sort();
+}
+
 function allowlistedFixtures(): string[] {
   const testsDir = join(ROOT, 'conformance', 'tests');
   return readdirSync(testsDir).filter((d) => {
@@ -65,5 +77,21 @@ describe('R-230: the README parity claim matches the corpus', () => {
       offenders.map((o) => `README.md:${o.n}: ${o.line}`),
       'this sentence claims unconditional byte-identity; parity is scoped',
     ).toEqual([]);
+  });
+
+  // Proves: the fixture list named in the README's "ANF-IR + hex parity" bullet
+  // equals the set of fixtures whose allowlist excludes ts, computed from disk.
+  // Does not prove: that the prose around the list is otherwise accurate.
+  it('names exactly the Go-only fixtures in the ANF-IR + hex parity bullet', () => {
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const line = readme.split('\n').find((l) => l.includes('ANF-IR + hex parity'));
+    expect(line, 'README has no "ANF-IR + hex parity" bullet').toBeDefined();
+    const m = /opt out — the (\w+) Go-only fixtures (.+?) — carry/.exec(line!);
+    expect(m, 'bullet no longer matches "the N Go-only fixtures ... — carry"').not.toBeNull();
+    const named = [...m![2].matchAll(/`([^`]+)`/g)].map((x) => x[1]).sort();
+    const onDisk = goOnlyFixtures();
+    expect(named).toEqual(onDisk);
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+    expect(m![1]).toBe(words[onDisk.length]);
   });
 });

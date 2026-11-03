@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/end2end-example/ts/PriceBet.runar.ts",
+    ".runar.sol": "../../../examples/end2end-example/sol/PriceBet.runar.sol",
+    ".runar.move": "../../../examples/end2end-example/move/PriceBet.runar.move",
+    ".runar.go": "../../../examples/end2end-example/go/PriceBet.runar.go",
+    ".runar.rs": "../../../examples/end2end-example/rust/PriceBet.runar.rs",
+    ".runar.py": "../../../examples/end2end-example/python/PriceBet.runar.py",
+    ".runar.zig": "../../../examples/end2end-example/zig/PriceBet.runar.zig",
+    ".runar.rb": "../../../examples/end2end-example/ruby/PriceBet.runar.rb",
+    ".runar.java": "../../../examples/end2end-example/java/src/main/java/runar/end2end/PriceBet.runar.java"
+  }
+}

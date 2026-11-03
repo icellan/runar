@@ -1,0 +1,47 @@
+{
+  "fixture": "state-digest-log",
+  "kind": "stateful",
+  "note": "DigestLog replace(): {Ripemd160} mutable state, the second witness for the shape state-ripemd160 pins, through a method that also takes a bigint argument and asserts on it.",
+  "signerKey": "alice",
+  "constructorArgs": [
+    "0000000000000000000000000000000000000000"
+  ],
+  "spends": [
+    {
+      "method": "replace",
+      "args": [
+        "0x1111111111111111111111111111111111111111",
+        "1n"
+      ],
+      "expect": "accept",
+      "note": "digest -> new 20-byte hash, version 1 > 0",
+      "expectedState": {
+        "digest": "0x1111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "method": "replace",
+      "args": [
+        "0x1111111111111111111111111111111111111111",
+        "0n"
+      ],
+      "expect": "reject",
+      "note": "version 0 is not > 0"
+    },
+    {
+      "method": "replace",
+      "args": [
+        "0x1111111111111111111111111111111111111111",
+        "1n"
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "c8f6d82e70f865c7690b0023f7fdf6ce90140a886d185d3cc05ed1c8932b4d39",
+    "expected-ir.json": "b1ff8df35cfc3b4afceef3656bfdb4db561d5fb7a30442af4408bdd6e70f98f7"
+  }
+}

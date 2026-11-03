@@ -9,9 +9,9 @@ pub const RawOutputTest = struct {
         return .{ .count = count };
     }
 
-    pub fn sendToScript(self: *RawOutputTest, scriptBytes: runar.ByteString) void {
-        self.addRawOutput(1000, scriptBytes);
+    pub fn sendToScript(self: *RawOutputTest, ctx: runar.StatefulContext, scriptBytes: runar.ByteString) void {
+        ctx.addRawOutput(1000, scriptBytes);
         self.count = self.count + 1;
-        self.addOutput(0, self.count);
+        ctx.addOutput(0, .{self.count});
     }
 };

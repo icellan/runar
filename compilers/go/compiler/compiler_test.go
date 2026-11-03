@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -84,36 +85,16 @@ func TestLoadIR_BasicP2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_BasicP2PKH(t *testing.T) {
-	// The conformance expected script hex for P2PKH.
-	// From the TypeScript compiler: DUP HASH160 <pubKeyHash> EQUALVERIFY CHECKSIG
-	// But since pubKeyHash has no initialValue, it's provided as a placeholder (OP_0).
-	// The actual conformance test hex is: 76a97c7e7e87a988ac
-	// Which translates to: OP_DUP OP_HASH160 OP_SWAP ... (depends on stack lowering)
-
-	irJSON := `{
-		"contractName": "P2PKH",
-		"properties": [
-			{"name": "pubKeyHash", "type": "Addr", "readonly": true}
-		],
-		"methods": [{
-			"name": "unlock",
-			"params": [
-				{"name": "sig", "type": "Sig"},
-				{"name": "pubKey", "type": "PubKey"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "sig"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "pubKey"}},
-				{"name": "t2", "value": {"kind": "load_prop", "name": "pubKeyHash"}},
-				{"name": "t3", "value": {"kind": "call", "func": "hash160", "args": ["t1"]}},
-				{"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t3", "right": "t2"}},
-				{"name": "t5", "value": {"kind": "assert", "value": "t4"}},
-				{"name": "t6", "value": {"kind": "call", "func": "checkSig", "args": ["t0", "t1"]}},
-				{"name": "t7", "value": {"kind": "assert", "value": "t6"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: this test used to compile an inline, hand-written IR literal and
+	// never compared the resulting Script against anything beyond
+	// "non-empty". A stale comment here claimed the expected hex was
+	// "76a97c7e7e87a988ac" — that was never actually true of the inline IR
+	// (which in fact compiled to "0078a97c9dac"), nor of the real
+	// conformance golden loaded below ("76a90088ac"); the comment named a
+	// value but nothing ever checked it. Load the real "basic-p2pkh"
+	// conformance fixture instead and assert the compiled Script
+	// byte-for-byte against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "basic-p2pkh"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -127,6 +108,11 @@ func TestCompile_BasicP2PKH(t *testing.T) {
 		t.Error("expected non-empty ASM")
 	}
 
+	wantHex := mustLoadConformanceHex(t, "basic-p2pkh")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/basic-p2pkh/expected-script.hex)", artifact.Script, wantHex)
+	}
+
 	t.Logf("P2PKH script hex: %s", artifact.Script)
 	t.Logf("P2PKH script asm: %s", artifact.ASM)
 }
@@ -136,34 +122,14 @@ func TestCompile_BasicP2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_Arithmetic(t *testing.T) {
-	irJSON := `{
-		"contractName": "Arithmetic",
-		"properties": [
-			{"name": "target", "type": "bigint", "readonly": true}
-		],
-		"methods": [{
-			"name": "verify",
-			"params": [
-				{"name": "a", "type": "bigint"},
-				{"name": "b", "type": "bigint"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "a"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "b"}},
-				{"name": "t2", "value": {"kind": "bin_op", "op": "+", "left": "t0", "right": "t1"}},
-				{"name": "t3", "value": {"kind": "bin_op", "op": "-", "left": "t0", "right": "t1"}},
-				{"name": "t4", "value": {"kind": "bin_op", "op": "*", "left": "t0", "right": "t1"}},
-				{"name": "t5", "value": {"kind": "bin_op", "op": "/", "left": "t0", "right": "t1"}},
-				{"name": "t6", "value": {"kind": "bin_op", "op": "+", "left": "t2", "right": "t3"}},
-				{"name": "t7", "value": {"kind": "bin_op", "op": "+", "left": "t6", "right": "t4"}},
-				{"name": "t8", "value": {"kind": "bin_op", "op": "+", "left": "t7", "right": "t5"}},
-				{"name": "t9", "value": {"kind": "load_prop", "name": "target"}},
-				{"name": "t10", "value": {"kind": "bin_op", "op": "===", "left": "t8", "right": "t9"}},
-				{"name": "t11", "value": {"kind": "assert", "value": "t10"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: previously compiled an inline, hand-written IR literal and never
+	// asserted anything about the resulting Script beyond "non-empty" plus
+	// ASM opcode-name substrings — a codegen bug that moves a byte value
+	// without touching the opcode's name string (e.g. a wrong entry in the
+	// opcode table) would pass right through. Load the real "arithmetic"
+	// conformance fixture and assert the compiled Script byte-for-byte
+	// against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "arithmetic"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -181,6 +147,11 @@ func TestCompile_Arithmetic(t *testing.T) {
 		}
 	}
 
+	wantHex := mustLoadConformanceHex(t, "arithmetic")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/arithmetic/expected-script.hex)", artifact.Script, wantHex)
+	}
+
 	t.Logf("Arithmetic script hex: %s", artifact.Script)
 	t.Logf("Arithmetic script asm: %s", artifact.ASM)
 }
@@ -190,40 +161,12 @@ func TestCompile_Arithmetic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCompile_IfElse(t *testing.T) {
-	irJSON := `{
-		"contractName": "IfElse",
-		"properties": [
-			{"name": "limit", "type": "bigint", "readonly": true}
-		],
-		"methods": [{
-			"name": "check",
-			"params": [
-				{"name": "value", "type": "bigint"},
-				{"name": "mode", "type": "boolean"}
-			],
-			"body": [
-				{"name": "t0", "value": {"kind": "load_param", "name": "value"}},
-				{"name": "t1", "value": {"kind": "load_param", "name": "mode"}},
-				{"name": "t2", "value": {"kind": "load_const", "value": 0}},
-				{"name": "t3", "value": {
-					"kind": "if",
-					"cond": "t1",
-					"then": [
-						{"name": "t4", "value": {"kind": "load_prop", "name": "limit"}},
-						{"name": "t5", "value": {"kind": "bin_op", "op": "+", "left": "t0", "right": "t4"}}
-					],
-					"else": [
-						{"name": "t6", "value": {"kind": "load_prop", "name": "limit"}},
-						{"name": "t7", "value": {"kind": "bin_op", "op": "-", "left": "t0", "right": "t6"}}
-					]
-				}},
-				{"name": "t8", "value": {"kind": "load_const", "value": 0}},
-				{"name": "t9", "value": {"kind": "bin_op", "op": ">", "left": "t3", "right": "t8"}},
-				{"name": "t10", "value": {"kind": "assert", "value": "t9"}}
-			],
-			"isPublic": true
-		}]
-	}`
+	// F-307: previously compiled an inline, hand-written IR literal and never
+	// asserted anything about the resulting Script beyond ASM opcode-name
+	// substrings, which a hex-changing but name-preserving codegen bug would
+	// not trip. Load the real "if-else" conformance fixture and assert the
+	// compiled Script byte-for-byte against its on-disk golden hex.
+	irJSON := string(mustLoadConformanceIR(t, "if-else"))
 
 	artifact := mustCompile(t, irJSON)
 
@@ -236,6 +179,11 @@ func TestCompile_IfElse(t *testing.T) {
 	}
 	if !strings.Contains(artifact.ASM, "OP_ENDIF") {
 		t.Error("expected ASM to contain OP_ENDIF")
+	}
+
+	wantHex := mustLoadConformanceHex(t, "if-else")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/if-else/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("IfElse script hex: %s", artifact.Script)
@@ -285,6 +233,24 @@ func TestCompile_BooleanLogic(t *testing.T) {
 		}
 	}
 
+	// F-307: this test's IR is hand-written above, not loaded from any
+	// conformance fixture — it is kept that way (rather than switched to the
+	// real "boolean-logic" fixture like its siblings) because that fixture's
+	// TS source lowers && via control flow and never emits OP_BOOLAND, which
+	// would force dropping the OP_BOOLAND assertion above. wantHex is
+	// therefore a regression pin on this inline IR's current, verified-
+	// correct compiled output, not a conformance golden read from disk —
+	// there is no cross-tier provenance behind it. It still closes the gap:
+	// previously nothing here checked the Script bytes at all, so a codegen
+	// bug that moves a byte value without changing an opcode's ASM name
+	// (e.g. a wrong entry in the opcode table) passed through undetected.
+	// N-376: the ROT ROT ROT -> [] peephole rule deletes the identity `7b7b7b`
+	// after the first OP_VERIFY; nothing else moves.
+	const wantHex = "767600877c51879b6900537a78a0537a7ba06e9a7b7b9b7b919a9b"
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s", artifact.Script, wantHex)
+	}
+
 	t.Logf("BooleanLogic script hex: %s", artifact.Script)
 	t.Logf("BooleanLogic script asm: %s", artifact.ASM)
 }
@@ -293,6 +259,15 @@ func TestCompile_BooleanLogic(t *testing.T) {
 // Test: Script number encoding
 // ---------------------------------------------------------------------------
 
+// TestEncodeScriptNumber proves EncodePushBigInt's asm string (its second
+// return value) actually matches the wantAsm column for every case in the
+// table, including the >16/<-1 "script-number push" cases ("seventeen",
+// "minus_two") that previously discarded gotAsm via `_ = gotAsm` and never
+// compared it (F-374). It does NOT prove the asm format itself is the right
+// one to standardize on, or that any caller depends on these exact strings:
+// production callers (frontend/parser.go) discard the asm return value today,
+// so this only pins EncodePushBigInt's current, observed behavior against
+// regression.
 func TestEncodeScriptNumber(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -304,8 +279,8 @@ func TestEncodeScriptNumber(t *testing.T) {
 		{"one", big.NewInt(1), "51", "OP_1"},
 		{"sixteen", big.NewInt(16), "60", "OP_16"},
 		{"negative_one", big.NewInt(-1), "4f", "OP_1NEGATE"},
-		{"seventeen", big.NewInt(17), "0111", "OP_17_as_push"},
-		{"minus_two", big.NewInt(-2), "0182", "OP_minus2_as_push"},
+		{"seventeen", big.NewInt(17), "0111", "<11>"},
+		{"minus_two", big.NewInt(-2), "0182", "<82>"},
 	}
 
 	for _, tt := range tests {
@@ -314,7 +289,9 @@ func TestEncodeScriptNumber(t *testing.T) {
 			if gotHex != tt.wantHex {
 				t.Errorf("hex: got %s, want %s", gotHex, tt.wantHex)
 			}
-			_ = gotAsm // ASM format varies; just ensure no panic
+			if gotAsm != tt.wantAsm {
+				t.Errorf("asm: got %s, want %s", gotAsm, tt.wantAsm)
+			}
 		})
 	}
 }
@@ -511,6 +488,58 @@ func conformanceSourcePath(testName string) (string, bool) {
 	return "", false
 }
 
+// goEligibleConformanceFixtures discovers every fixture under
+// conformance/tests/ that is NOT opted out of Go Stack-IR / hex parity via a
+// source.json "compilers" allowlist that omits "go". Mirrors
+// rust_eligible_conformance_fixtures in
+// compilers/rust/tests/compiler_tests.rs (F-336) / F-315. A fixture with no
+// source.json, or one whose source.json has no "compilers" key, is eligible
+// by default — the allowlist is opt-OUT, not opt-in.
+func goEligibleConformanceFixtures(t *testing.T) []string {
+	t.Helper()
+	dir := conformanceDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", dir, err)
+	}
+
+	var eligible, optedOut []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		configPath := filepath.Join(dir, name, "source.json")
+		allowed := true
+		if raw, err := os.ReadFile(configPath); err == nil {
+			var cfg struct {
+				Compilers []string `json:"compilers"`
+			}
+			if err := json.Unmarshal(raw, &cfg); err != nil {
+				t.Fatalf("parse %s: %v", configPath, err)
+			}
+			if cfg.Compilers != nil {
+				allowed = false
+				for _, c := range cfg.Compilers {
+					if c == "go" {
+						allowed = true
+						break
+					}
+				}
+			}
+		}
+		if allowed {
+			eligible = append(eligible, name)
+		} else {
+			optedOut = append(optedOut, name)
+		}
+	}
+	sort.Strings(eligible)
+	sort.Strings(optedOut)
+	t.Logf("goEligibleConformanceFixtures: %d eligible, %d opted out: %v", len(eligible), len(optedOut), optedOut)
+	return eligible
+}
+
 func mustLoadConformanceIR(t *testing.T, testName string) []byte {
 	t.Helper()
 	path := filepath.Join(conformanceDir(), testName, "expected-ir.json")
@@ -519,6 +548,23 @@ func mustLoadConformanceIR(t *testing.T, testName string) []byte {
 		t.Fatalf("failed to read conformance IR %s: %v", path, err)
 	}
 	return data
+}
+
+// mustLoadConformanceHex reads the conformance golden expected-script.hex for
+// testName, trimmed of trailing whitespace/newline. Used to assert the
+// compiled artifact's Script field byte-for-byte against the on-disk golden
+// (F-307): several TestCompile_* tests previously only checked that the
+// script was non-empty, or that certain opcodes appeared in the ASM, both of
+// which a hex-changing codegen bug (e.g. a wrong opcode byte value) can pass
+// right through undetected since the ASM mnemonic string is unaffected.
+func mustLoadConformanceHex(t *testing.T, testName string) string {
+	t.Helper()
+	path := filepath.Join(conformanceDir(), testName, "expected-script.hex")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read conformance script hex %s: %v", path, err)
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +586,14 @@ func TestCompile_BoundedLoop(t *testing.T) {
 	}
 	if artifact.ASM == "" {
 		t.Error("expected non-empty ASM")
+	}
+
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "bounded-loop")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/bounded-loop/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("BoundedLoop script hex: %s", artifact.Script)
@@ -567,6 +621,14 @@ func TestCompile_MultiMethod(t *testing.T) {
 	// Multi-method contracts must produce a dispatch table with OP_IF
 	if !strings.Contains(artifact.ASM, "OP_IF") {
 		t.Error("expected ASM to contain OP_IF for method dispatch")
+	}
+
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "multi-method")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/multi-method/expected-script.hex)", artifact.Script, wantHex)
 	}
 
 	t.Logf("MultiMethod script hex: %s", artifact.Script)
@@ -606,6 +668,14 @@ func TestCompile_Stateful(t *testing.T) {
 		t.Error("expected non-empty stateFields for stateful contract")
 	}
 
+	// F-307: previously nothing compared Script against the on-disk golden
+	// this IR was loaded from, so a byte-moving codegen bug (opcode name
+	// unchanged, byte value wrong) would pass undetected.
+	wantHex := mustLoadConformanceHex(t, "stateful")
+	if artifact.Script != wantHex {
+		t.Errorf("script hex mismatch: got %s, want %s (conformance/tests/stateful/expected-script.hex)", artifact.Script, wantHex)
+	}
+
 	t.Logf("Stateful script hex: %s", artifact.Script)
 	t.Logf("Stateful script asm: %s", artifact.ASM)
 }
@@ -614,36 +684,20 @@ func TestCompile_Stateful(t *testing.T) {
 // Test: All conformance tests compile successfully
 // ---------------------------------------------------------------------------
 
+// PROVES: for every go-eligible conformance fixture (discovered from
+// conformance/tests/, not a hard-coded subset — F-315, mirroring F-336),
+// compiling the fixture's checked-in expected-ir.json through the Go --ir
+// path produces script hex byte-identical to expected-script.hex, and a
+// missing golden for an eligible fixture is a hard test failure, not a
+// silently skipped check.
+// DOES NOT PROVE: --source-path parity (that's
+// TestSourceCompile_AllConformanceFromSource / TestCompilerParity_AllConformance),
+// fold-ON parity, or that the golden hex itself is correct Bitcoin Script.
 func TestCompile_AllConformanceTests(t *testing.T) {
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336):
+	// every fixture under conformance/tests/ whose source.json does not opt
+	// Go out via a "compilers" allowlist is exercised here.
+	testDirs := goEligibleConformanceFixtures(t)
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -664,14 +718,19 @@ func TestCompile_AllConformanceTests(t *testing.T) {
 				t.Errorf("expected non-empty contractName for %s", dir)
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden
+			// for an eligible fixture is a hard failure, not a silently
+			// skipped check (F-315 — the old code gated this behind
+			// `if err == nil`, so a missing golden fell through to "pass"
+			// with nothing compared).
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
-			if err == nil {
-				expected := strings.TrimSpace(string(goldenHex))
-				if artifact.Script != expected {
-					t.Errorf("%s: IR-compiled script hex does not match golden file\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
-				}
+			if err != nil {
+				t.Fatalf("%s: missing golden expected-script.hex — the conformance gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: IR-compiled script hex does not match golden file\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
 			}
 
 			t.Logf("%s: hex=%d bytes, asm=%d chars", dir, len(artifact.Script)/2, len(artifact.ASM))
@@ -683,35 +742,64 @@ func TestCompile_AllConformanceTests(t *testing.T) {
 // Test: Push data encoding for various sizes
 // ---------------------------------------------------------------------------
 
+// F-373: this table named PUSHDATA1/2 boundaries but never tested them. The
+// data it built (strings.Repeat("ab", tc.dataLen)) was discarded via `_ =
+// data`, and even wired up it would have proven nothing: `x` here is a
+// constructor-arg property, and constructor args are compiled as a 1-byte
+// OP_0 placeholder (emitPlaceholder in codegen/emit.go) spliced with the real
+// bytes only at deployment time, never as a literal push in the compiled
+// script. So no source-compile path through a constructor property can ever
+// exercise encodePushData's length-boundary branches.
+//
+// The fix drives the boundary directly: an IR literal (`load_const` with a
+// hex ConstString) always lowers through encodePushValue -> encodePushData
+// (stack.go lowerLoadConst), so a tc.dataLen-byte literal in the IR produces
+// a tc.dataLen-byte push in the script, letting the test assert on the exact
+// opcode prefix encodePushData must choose at each boundary.
 func TestPushDataEncoding(t *testing.T) {
 	tests := []struct {
-		name    string
-		dataLen int
+		name          string
+		dataLen       int
+		wantHexPrefix string // the opcode(s) that must prefix the literal push of dataLen bytes
 	}{
-		{"empty_data", 0},
-		{"1_byte", 1},
-		{"75_bytes_direct_push", 75},
-		{"76_bytes_pushdata1_boundary", 76},
-		{"255_bytes_pushdata1_max", 255},
-		{"256_bytes_pushdata2_boundary", 256},
+		{"empty_data", 0, "00"},                        // OP_0
+		{"1_byte", 1, "01"},                             // direct push: length byte 0x01
+		{"75_bytes_direct_push", 75, "4b"},              // direct push: length byte 0x4b = 75
+		{"76_bytes_pushdata1_boundary", 76, "4c4c"},     // OP_PUSHDATA1 (4c) + length byte 4c = 76
+		{"255_bytes_pushdata1_max", 255, "4cff"},        // OP_PUSHDATA1 (4c) + length byte ff = 255
+		{"256_bytes_pushdata2_boundary", 256, "4d0001"}, // OP_PUSHDATA2 (4d) + LE16 length 0001 = 256
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// 1-byte data must not land in encodePushData's MINIMALDATA
+			// special-case (OP_1..OP_16 for values 1-16, OP_1NEGATE for
+			// 0x81), so use 0xab for the single-byte case too.
 			data := strings.Repeat("ab", tc.dataLen) // hex-encoded data, 2 hex chars per byte
-			source := fmt.Sprintf(`import { SmartContract, assert, ByteString, len } from 'runar-lang';
-export class PD extends SmartContract {
-	readonly x: ByteString;
-	constructor(x: ByteString) { super(x); this.x = x; }
-	public check(): void { assert(len(this.x) == %dn); }
-}`, tc.dataLen)
-			result := CompileFromSourceStrWithResult(source, "PD.runar.ts")
-			if !result.Success {
-				t.Fatalf("compile error for %d-byte data: %v", tc.dataLen, result.Diagnostics)
-			}
-			if result.ScriptHex == "" {
+
+			irJSON := fmt.Sprintf(`{
+				"contractName": "PushDataTest",
+				"properties": [],
+				"methods": [{
+					"name": "check",
+					"params": [],
+					"body": [
+						{"name": "t0", "value": {"kind": "load_const", "value": %q}},
+						{"name": "t1", "value": {"kind": "load_const", "value": %q}},
+						{"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1", "result_type": "bytes"}},
+						{"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+					],
+					"isPublic": true
+				}]
+			}`, data, data)
+
+			artifact := mustCompile(t, irJSON)
+
+			if artifact.Script == "" {
 				t.Errorf("expected non-empty script for %d-byte data", tc.dataLen)
 			}
-			_ = data // data would be used as constructor arg at deployment time
+			if !strings.HasPrefix(artifact.Script, tc.wantHexPrefix) {
+				t.Errorf("%d-byte push: expected script to start with opcode(s) %s, got %s", tc.dataLen, tc.wantHexPrefix, artifact.Script[:min(len(artifact.Script), 12)])
+			}
 		})
 	}
 }
@@ -894,10 +982,7 @@ func TestDeterministicOutput(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSourceCompile_P2PKH(t *testing.T) {
-	source, ok := conformanceSourcePath("basic-p2pkh")
-	if !ok {
-		t.Skip("basic-p2pkh source not found")
-	}
+	source := requireConformanceSource(t, "basic-p2pkh")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -921,10 +1006,7 @@ func TestSourceCompile_P2PKH(t *testing.T) {
 }
 
 func TestSourceCompile_Arithmetic(t *testing.T) {
-	source, ok := conformanceSourcePath("arithmetic")
-	if !ok {
-		t.Skip("arithmetic source not found")
-	}
+	source := requireConformanceSource(t, "arithmetic")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -942,10 +1024,7 @@ func TestSourceCompile_Arithmetic(t *testing.T) {
 }
 
 func TestSourceCompile_BooleanLogic(t *testing.T) {
-	source, ok := conformanceSourcePath("boolean-logic")
-	if !ok {
-		t.Skip("boolean-logic source not found")
-	}
+	source := requireConformanceSource(t, "boolean-logic")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -988,10 +1067,7 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 const booleanParamGateASM = "OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY"
 
 func TestSourceCompile_IfElse(t *testing.T) {
-	source, ok := conformanceSourcePath("if-else")
-	if !ok {
-		t.Skip("if-else source not found")
-	}
+	source := requireConformanceSource(t, "if-else")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1002,10 +1078,7 @@ func TestSourceCompile_IfElse(t *testing.T) {
 }
 
 func TestSourceCompile_BoundedLoop(t *testing.T) {
-	source, ok := conformanceSourcePath("bounded-loop")
-	if !ok {
-		t.Skip("bounded-loop source not found")
-	}
+	source := requireConformanceSource(t, "bounded-loop")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1016,10 +1089,7 @@ func TestSourceCompile_BoundedLoop(t *testing.T) {
 }
 
 func TestSourceCompile_MultiMethod(t *testing.T) {
-	source, ok := conformanceSourcePath("multi-method")
-	if !ok {
-		t.Skip("multi-method source not found")
-	}
+	source := requireConformanceSource(t, "multi-method")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1030,10 +1100,7 @@ func TestSourceCompile_MultiMethod(t *testing.T) {
 }
 
 func TestSourceCompile_Stateful(t *testing.T) {
-	source, ok := conformanceSourcePath("stateful")
-	if !ok {
-		t.Skip("stateful source not found")
-	}
+	source := requireConformanceSource(t, "stateful")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1043,42 +1110,22 @@ func TestSourceCompile_Stateful(t *testing.T) {
 	}
 }
 
+// PROVES: for every go-eligible conformance fixture (same discovered set as
+// TestCompile_AllConformanceTests — F-315, mirroring F-336), compiling the
+// fixture's .runar.ts source through the Go --source path produces script
+// hex byte-identical to expected-script.hex, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently skipped check.
+// DOES NOT PROVE: .runar.go-source-path parity (that's
+// conformance_goldens_test.go's TestConformanceGoldens — F-280, untouched
+// here), fold-ON parity, or that the golden hex itself is correct Bitcoin
+// Script.
 func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336) —
+	// same discovered set as TestCompile_AllConformanceTests.
+	testDirs := goEligibleConformanceFixtures(t)
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("no .runar.ts source for %s", dir)
-			}
+			source := requireConformanceSource(t, dir)
 			// Disable constant folding to match existing golden files
 			artifact, err := CompileFromSource(source, CompileOptions{DisableConstantFolding: true})
 			if err != nil {
@@ -1094,14 +1141,19 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 				t.Errorf("%s: empty contract name", dir)
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden
+			// for an eligible fixture is a hard failure, not a silently
+			// skipped check (F-315 — the old code gated this behind
+			// `if err == nil`, so a missing golden fell through to "pass"
+			// with nothing compared).
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
-			if err == nil {
-				expected := strings.TrimSpace(string(goldenHex))
-				if artifact.Script != expected {
-					t.Errorf("%s: script hex mismatch\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
-				}
+			if err != nil {
+				t.Fatalf("%s: missing golden expected-script.hex — the conformance gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: script hex mismatch\n  expected: %s\n  got:      %s", dir, expected, artifact.Script)
 			}
 
 			t.Logf("%s: hex=%d bytes, asm=%d chars", dir, len(artifact.Script)/2, len(artifact.ASM))
@@ -1138,13 +1190,17 @@ func TestSourceCompile_ExampleEscrow(t *testing.T) {
 	}
 }
 
+// TestSourceCompile_IRvsSourceMatch proves that compiling basic-p2pkh via the
+// --ir path (CompileFromIR) produces byte-identical Script/ASM to compiling
+// the same fixture via the --source path (CompileFromSource). It does NOT
+// prove the --ir and --source paths agree on every fixture (that's
+// TestCompilerParity_AllConformance's job), and it does not prove either
+// path produces a CORRECT script, only that the two paths agree with each
+// other on this one fixture.
 func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	// Compile from IR and from source, both should produce non-empty valid output
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
-	sourcePath, ok := conformanceSourcePath("basic-p2pkh")
-	if !ok {
-		t.Skip("basic-p2pkh source not found")
-	}
+	sourcePath := requireConformanceSource(t, "basic-p2pkh")
 
 	irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
 	if err != nil {
@@ -1166,54 +1222,55 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 		t.Error("both paths should produce non-empty scripts")
 	}
 
+	// The actual parity check this test is named for: the --ir path and the
+	// --source path must emit byte-identical hex for the same fixture.
+	if irArtifact.Script != sourceArtifact.Script {
+		t.Errorf("IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
+			irArtifact.Script, sourceArtifact.Script)
+	}
+	if irArtifact.ASM != sourceArtifact.ASM {
+		t.Errorf("IR-compiled ASM differs from source-compiled ASM\n  IR:     %s\n  Source: %s",
+			irArtifact.ASM, sourceArtifact.ASM)
+	}
+
 	t.Logf("IR hex:     %s", irArtifact.Script)
 	t.Logf("Source hex: %s", sourceArtifact.Script)
 }
 
 // ---------------------------------------------------------------------------
-// Test: ALL 27 conformance tests compile and match golden hex
+// Test: all go-eligible conformance fixtures compile and match golden hex
 // ---------------------------------------------------------------------------
 
+// irRoundTripExceptions lists conformance fixtures whose --ir path is not
+// expected to produce the same script as their --source path, each with the
+// reason it's excepted. TestCompilerParity_AllConformance fails on any other
+// fixture where --ir compilation errors or diverges from --source. Do not
+// add an entry here to silence a real divergence — report it instead
+// (F-181 brief: "If you find a real divergence, report it. Do not fix it.").
+var irRoundTripExceptions = map[string]string{}
+
+// TestCompilerParity_AllConformance proves that, for every go-eligible
+// conformance fixture (discovered from conformance/tests/, not a
+// hard-coded subset — F-315, mirroring F-336), (a) compiling from --source
+// matches the checked-in golden hex, and (b) compiling the same fixture's
+// checked-in expected-ir.json via --ir either errors or diverges only for
+// fixtures explicitly listed in irRoundTripExceptions (with a reason) — any
+// other --ir failure or divergence fails the test. A missing golden
+// (expected-script.hex or expected-ir.json) for an eligible fixture is a
+// hard test failure, not a silently skipped check. It does NOT prove the
+// golden hex itself is correct Bitcoin Script — only that both compilation
+// paths reproduce it.
 func TestCompilerParity_AllConformance(t *testing.T) {
-	// All 27 conformance test directories
-	testDirs := []string{
-		"arithmetic",
-		"auction",
-		"basic-p2pkh",
-		"blake3",
-		"boolean-logic",
-		"bounded-loop",
-		"convergence-proof",
-		"covenant-vault",
-		"ec-demo",
-		"ec-primitives",
-		"escrow",
-		"function-patterns",
-		"if-else",
-		"if-without-else",
-		"math-demo",
-		"multi-method",
-		"oracle-price",
-		"post-quantum-slhdsa",
-		"post-quantum-wallet",
-		"post-quantum-wots",
-		"property-initializers",
-		"schnorr-zkp",
-		"sphincs-wallet",
-		"stateful",
-		"stateful-counter",
-		"token-ft",
-		"token-nft",
-	}
+	// Fixture list is discovered, not hard-coded (F-315, mirroring F-336):
+	// every fixture under conformance/tests/ whose source.json does not opt
+	// Go out via a "compilers" allowlist is exercised here.
+	testDirs := goEligibleConformanceFixtures(t)
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 
-			sourcePath, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("no .runar.ts source for %s", dir)
-			}
+			sourcePath := requireConformanceSource(t, dir)
 
 			// Compile from source (disable constant folding to match golden files)
 			artifact, err := CompileFromSource(sourcePath, CompileOptions{DisableConstantFolding: true})
@@ -1256,19 +1313,33 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 				t.Logf("%s: MATCH (hex=%d bytes)", dir, len(artifact.Script)/2)
 			}
 
-			// Also compile from IR and verify both paths produce the same output
+			// Also compile from IR and verify both paths produce the same output.
+			// A fixture that is NOT in irRoundTripExceptions must have its --ir
+			// path both succeed and byte-match the --source script; a total
+			// --ir regression (CompileFromIR erroring on every fixture) now
+			// fails this loop instead of being silently t.Logf'd. A missing
+			// expected-ir.json for an eligible fixture is itself a hard
+			// failure (F-315 — the old `if _, err := os.Stat(irPath); err ==
+			// nil` gate silently skipped this entire check when the golden
+			// was absent, so the fixture fell through to "pass").
 			irPath := filepath.Join(conformanceDir(), dir, "expected-ir.json")
-			if _, err := os.Stat(irPath); err == nil {
-				irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
-				if err != nil {
-					t.Logf("%s: IR compilation failed (may be expected for some tests): %v", dir, err)
-				} else {
-					// Compare IR path vs source path
-					if irArtifact.Script != artifact.Script {
-						t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
-							dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
-					}
-				}
+			if _, err := os.Stat(irPath); err != nil {
+				t.Fatalf("%s: missing golden expected-ir.json — the IR round-trip gate must not silently skip an eligible fixture: %v", dir, err)
+			}
+			irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
+			reason, excepted := irRoundTripExceptions[dir]
+			switch {
+			case excepted && err != nil:
+				t.Logf("%s: IR compilation failed as expected (%s): %v", dir, reason, err)
+			case excepted && irArtifact.Script != artifact.Script:
+				t.Logf("%s: IR script differs from source script as expected (%s)", dir, reason)
+			case excepted:
+				t.Logf("%s: IR path round-tripped despite being listed in irRoundTripExceptions (%s) — consider removing the entry", dir, reason)
+			case err != nil:
+				t.Errorf("%s: IR compilation failed: %v (if this fixture is genuinely not expected to round-trip, add it to irRoundTripExceptions with a reason)", dir, err)
+			case irArtifact.Script != artifact.Script:
+				t.Errorf("%s: IR-compiled script differs from source-compiled script\n  IR:     %s\n  Source: %s",
+					dir, truncate(irArtifact.Script, 200), truncate(artifact.Script, 200))
 			}
 		})
 	}

@@ -112,16 +112,64 @@ export function parseSighashFlags(flagsText: string): SighashParseResult {
 }
 
 /**
- * Extract and parse an `@sighash` directive from a block of comment text.
- * Returns `null` when no `@sighash` token is present, otherwise the parse
- * result (value or error). Used by the parser after it has collected a
- * method's JSDoc / leading-comment trivia.
+ * Shared diagnostics (F-039). Identical text in all seven tiers: a marker that
+ * is present but not followed by a well-formed flag list, or a second marker on
+ * the same method, is a compile error — never a silent fall-back to the
+ * default ALL|FORKID mode.
  */
-const SIGHASH_RE = /@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)/;
+export const SIGHASH_MALFORMED_ERROR =
+  '@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)';
+export const SIGHASH_MULTIPLE_ERROR =
+  '@sighash: more than one @sighash directive on this method; declare exactly one';
+
+/**
+ * N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+ * `@sighash` / `@embedAlways` marker inside the contract class body that is
+ * not in the leading comments of the member kind that reads it (`@sighash` ->
+ * a method, `@embedAlways` -> a property). Such a directive was silently
+ * ignored; it is now a compile error located at the marker's `@`.
+ */
+export function lostDirectiveMessage(directive: '@sighash' | '@embedAlways'): string {
+  const target = directive === '@sighash' ? 'method' : 'property';
+  return `${directive} directive is not attached to any ${target} and would be silently ignored; put the comment on its own line directly above the ${target} it annotates (a comment that shares a line with the preceding code belongs to that code)`;
+}
+
+const SIGHASH_MARKER = '@sighash';
+
+/**
+ * Extract and parse an `@sighash` directive from a method's leading-comment
+ * text (all of its leading comments, concatenated). Returns `null` only when
+ * no `@sighash` marker is present, otherwise the parse result (value or error).
+ *
+ * A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+ * user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a malformed
+ * directive, never prose, so a glued flag list cannot silently fall back to
+ * ALL|FORKID. Once a marker is present (fail-closed, F-039):
+ *   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
+ *   - the segment after the marker, up to `*` + `/`, a newline, CR or the end,
+ *     must be empty, or start with a space/tab and contain only
+ *     `[A-Za-z0-9_|]`, spaces and tabs — anything else is SIGHASH_MALFORMED_ERROR;
+ *   - the flag list itself is then validated by `parseSighashFlags`.
+ */
 export function extractSighashDirective(commentText: string): SighashParseResult | null {
-  const m = SIGHASH_RE.exec(commentText);
-  if (!m) return null;
-  return parseSighashFlags(m[1] ?? '');
+  const markers: number[] = [];
+  for (let i = commentText.indexOf(SIGHASH_MARKER); i !== -1; i = commentText.indexOf(SIGHASH_MARKER, i + 1)) {
+    markers.push(i);
+  }
+  if (markers.length === 0) return null;
+  if (markers.length > 1) return { error: SIGHASH_MULTIPLE_ERROR };
+
+  const after = commentText.slice(markers[0]! + SIGHASH_MARKER.length);
+  let end = after.length;
+  for (let i = 0; i < after.length; i++) {
+    const c = after[i];
+    if (c === '\n' || c === '\r' || (c === '*' && after[i + 1] === '/')) { end = i; break; }
+  }
+  const seg = after.slice(0, end);
+  if (seg.length > 0 && !/^[ \t][A-Za-z0-9_| \t]*$/.test(seg)) {
+    return { error: SIGHASH_MALFORMED_ERROR };
+  }
+  return parseSighashFlags(seg);
 }
 
 /** Human-readable rendering of a sighash value (for diagnostics). */
@@ -135,4 +183,51 @@ export function describeSighash(value: number): string {
   if (value & FLAG_ANYONECANPAY) parts.push('ANYONECANPAY');
   if (value & FLAG_FORKID) parts.push('FORKID');
   return parts.join('|');
+}
+
+/**
+ * N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+ * (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+ * `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+ * `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+ *
+ * `specs` holds one entry per spelling found on the method: the flag text, or
+ * `null` when the spelling's argument was not well formed (a non-identifier
+ * token, a non-string argument, ...). Returns `undefined` when there is no
+ * spelling, else the numeric type or the diagnostic — the SAME diagnostics the
+ * `.runar.ts` comment directive produces, checked in the same order:
+ * non-public method, then more than one spelling, then malformed, then the
+ * flag grammar of `parseSighashFlags`. Identical in all seven tiers.
+ */
+export function resolveNativeSighash(
+  methodName: string,
+  isPublic: boolean,
+  specs: ReadonlyArray<string | null>,
+): { value: number } | { error: string } | undefined {
+  if (specs.length === 0) return undefined;
+  if (!isPublic) {
+    return {
+      error: `@sighash directive on non-public method '${methodName}' has no effect — only public methods are spending entry points`,
+    };
+  }
+  if (specs.length > 1) return { error: `Method '${methodName}': ${SIGHASH_MULTIPLE_ERROR}` };
+  const spec = specs[0]!;
+  if (spec === null) return { error: `Method '${methodName}': ${SIGHASH_MALFORMED_ERROR}` };
+  const result = parseSighashFlags(spec);
+  if ('error' in result) return { error: `Method '${methodName}': ${result.error}` };
+  return result;
+}
+
+/**
+ * N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+ * exists; any other name is refused rather than ignored, so a typo such as
+ * `//runar:sighsh` cannot silently drop the declaration.
+ */
+export function unknownGoDirectiveMessage(name: string): string {
+  return `unknown Go DSL directive '//runar:${name}'; the only directive is //runar:sighash <FLAGS>`;
+}
+
+/** N-093: an attribute on the Move surface other than the two directives. */
+export function unknownMoveAttributeMessage(attr: string): string {
+  return `unsupported Move attribute #[${attr}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]`;
 }

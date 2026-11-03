@@ -331,9 +331,9 @@ test "intent: currentBlockHeight stateless contract errors" {
         \\    Deadline runar.Bigint `runar:"readonly"`
         \\}
         \\
-        \\func (c *Sl) Spend() bool {
+        \\func (c *Sl) Spend() {
         \\    h := runar.CurrentBlockHeight()
-        \\    return h > c.Deadline
+        \\    runar.Assert(h > c.Deadline)
         \\}
     ;
 
@@ -558,6 +558,117 @@ test "intent: requireOutputP2PKH(0) terminal method (no mutation) ok" {
     ;
 
     _ = try mustLowerGoSource(allocator, source);
+}
+
+// ============================================================================
+// F-075 — the requireOutputP2PKH layout guards follow private helpers
+// ============================================================================
+// ANF lowering inlines private helpers and its transitive continuation
+// predicates (methodMutatesState / methodHasAddOutput / methodHasAddDataOutput)
+// inject the continuation through the private call graph. The guards used to
+// walk only the method's own body, so moving either half of the forbidden pair
+// into a helper compiled a contract the guard itself calls permanently
+// unspendable. Proves: each guard fires with its own diagnostic, naming the
+// public method, when one half sits in a private helper. Does not prove: the
+// helper form would otherwise compile end-to-end (requireOutputP2PKH in a
+// helper also fails later in stack lowering, a separate issue).
+
+const f075_header =
+    \\package x
+    \\
+    \\import runar "github.com/icellan/runar/packages/runar-go"
+    \\
+    \\type Cov struct {
+    \\    runar.StatefulSmartContract
+    \\    BondPKH runar.ByteString `runar:"readonly"`
+    \\    Bond    runar.Bigint     `runar:"readonly"`
+    \\    Tag     runar.ByteString `runar:"readonly"`
+    \\    Count   runar.Bigint
+    \\}
+    \\
+    \\
+;
+
+const f075_assert_bond =
+    \\func (c *Cov) assertBond() {
+    \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+    \\}
+    \\
+    \\
+;
+
+test "intent F-075: requireOutputP2PKH(0) in a helper with state mutation errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = f075_header ++ f075_assert_bond ++
+        \\func (c *Cov) Go() {
+        \\    c.Count = c.Count + 1
+        \\    c.assertBond()
+        \\}
+    ;
+    try expectIntrinsicTypeError(arena.allocator(), source, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+}
+
+test "intent F-075: state mutation in a helper with requireOutputP2PKH(0) errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = f075_header ++
+        \\func (c *Cov) bump() {
+        \\    c.Count = c.Count + 1
+        \\}
+        \\
+        \\func (c *Cov) Go() {
+        \\    c.bump()
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+        \\}
+    ;
+    try expectIntrinsicTypeError(arena.allocator(), source, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+}
+
+test "intent F-075: Crit-3 requireOutputP2PKH in a helper with addDataOutput errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = f075_header ++ f075_assert_bond ++
+        \\func (c *Cov) Go() {
+        \\    c.AddDataOutput(0, c.Tag)
+        \\    c.assertBond()
+        \\}
+    ;
+    try expectIntrinsicTypeError(arena.allocator(), source, "method 'go' mixes requireOutputP2PKH() with addDataOutput()");
+}
+
+test "intent F-075: addOutput in a helper with requireOutputP2PKH errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = f075_header ++
+        \\func (c *Cov) emitNext() {
+        \\    c.AddOutput(1000, c.Count+1)
+        \\}
+        \\
+        \\func (c *Cov) Go() {
+        \\    c.emitNext()
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+        \\}
+    ;
+    try expectIntrinsicTypeError(arena.allocator(), source, "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()");
+}
+
+test "intent F-075: terminal method whose helper calls requireOutputP2PKH(0) is not flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = f075_header ++ f075_assert_bond ++
+        \\func (c *Cov) Go() {
+        \\    c.assertBond()
+        \\}
+    ;
+    const parse_result = parse_go.parseGo(allocator, source, "Test.runar.go");
+    try std.testing.expectEqual(@as(usize, 0), parse_result.errors.len);
+    const tc_result = try typecheck.typeCheck(allocator, parse_result.contract.?);
+    for (tc_result.errors) |e| {
+        try std.testing.expect(std.mem.indexOf(u8, e, "mixes requireOutputP2PKH()") == null);
+        try std.testing.expect(std.mem.indexOf(u8, e, "permanently unspendable") == null);
+    }
 }
 
 // ============================================================================

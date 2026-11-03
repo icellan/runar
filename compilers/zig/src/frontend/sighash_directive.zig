@@ -124,31 +124,119 @@ pub fn parseFlags(allocator: std.mem.Allocator, flags_text: []const u8) ParseRes
     return .{ .value = value };
 }
 
-/// Extract and parse an `@sighash` directive from a block of comment text.
-/// Returns null when no `@sighash` token is present; otherwise the parse
-/// result (which may itself be an error). Mirrors the TS SIGHASH_RE
-/// `@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)`.
+/// Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+/// that is present but not followed by a well-formed flag list, or a second
+/// marker on the same method, is a compile error, never a silent fall-back to
+/// the default ALL|FORKID mode.
+pub const SIGHASH_MALFORMED_ERROR = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+pub const SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one";
+
+/// N-199 (R75): shared diagnostics, identical in all seven tiers (TS:
+/// lostDirectiveMessage in sighash-directive.ts), for a `@sighash` /
+/// `@embedAlways` marker inside the contract class body that is not in the
+/// leading comments of the member kind that reads it.
+pub const LOST_SIGHASH_ERROR = "@sighash directive is not attached to any method and would be silently ignored; put the comment on its own line directly above the method it annotates (a comment that shares a line with the preceding code belongs to that code)";
+pub const LOST_EMBED_ALWAYS_ERROR = "@embedAlways directive is not attached to any property and would be silently ignored; put the comment on its own line directly above the property it annotates (a comment that shares a line with the preceding code belongs to that code)";
+
+fn isWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// Extract and parse an `@sighash` directive from a method's leading-comment
+/// text (all of its leading comments). Returns null only when no `@sighash`
+/// marker is present; otherwise the parse result (which may itself be an
+/// error). Mirrors the TS reference extractSighashDirective.
+///
+/// A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+/// user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a
+/// malformed directive, never prose. Once a marker is present (fail-closed,
+/// F-039):
+///   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
+///   - the segment after the marker, up to `*/`, a newline, CR or the end,
+///     must be empty, or start with a space/tab and contain only
+///     `[A-Za-z0-9_|]`, spaces and tabs — anything else is
+///     SIGHASH_MALFORMED_ERROR;
+///   - the flag list itself is then validated by parseFlags.
 pub fn extractDirective(allocator: std.mem.Allocator, comment_text: []const u8) ?ParseResult {
     const marker = "@sighash";
-    const pos = std.mem.indexOf(u8, comment_text, marker) orelse return null;
-    const after = pos + marker.len;
-    // Match the TS `@sighash\s+`: at least one whitespace must follow the
-    // marker, otherwise `@sighashType`-style identifiers are NOT directives.
-    if (after >= comment_text.len or !(comment_text[after] == ' ' or comment_text[after] == '\t' or comment_text[after] == '\n' or comment_text[after] == '\r')) {
-        return null;
+    var first: ?usize = null;
+    var count: usize = 0;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, comment_text, from, marker)) |pos| {
+        if (first == null) first = pos;
+        count += 1;
+        from = pos + 1;
     }
-    // Collect the flag text up to `*/`, newline, carriage return, EOF, or any
-    // char outside the [A-Za-z0-9_| \t] flag alphabet (so trailing prose ends
-    // the capture). Leading/trailing whitespace is trimmed by parseFlags.
-    const rest = comment_text[after..];
-    var end: usize = 0;
-    while (end < rest.len) : (end += 1) {
-        const c = rest[end];
-        if (c == '\n' or c == '\r') break;
-        if (c == '*' and end + 1 < rest.len and rest[end + 1] == '/') break;
-        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '|' or c == ' ' or c == '\t')) break;
+    const start = first orelse return null;
+    if (count > 1) return .{ .err = SIGHASH_MULTIPLE_ERROR };
+
+    const rest = comment_text[start + marker.len ..];
+    var end: usize = rest.len;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const c = rest[i];
+        if (c == '\n' or c == '\r' or (c == '*' and i + 1 < rest.len and rest[i + 1] == '/')) {
+            end = i;
+            break;
+        }
     }
-    return parseFlags(allocator, rest[0..end]);
+    const seg = rest[0..end];
+    if (seg.len > 0) {
+        var ok = seg[0] == ' ' or seg[0] == '\t';
+        for (seg) |c| {
+            if (!(isWordByte(c) or c == '|' or c == ' ' or c == '\t')) ok = false;
+        }
+        if (!ok) return .{ .err = SIGHASH_MALFORMED_ERROR };
+    }
+    return parseFlags(allocator, seg);
+}
+
+/// N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+/// (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+/// `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+/// `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+///
+/// `specs` holds one entry per spelling found on the method: the flag text, or
+/// null when the spelling's argument was not well formed (a non-identifier
+/// token, a non-string argument, ...). Returns null when there is no spelling,
+/// else the numeric type or the diagnostic — the SAME diagnostics the
+/// `.runar.ts` comment directive produces, checked in the same order:
+/// non-public method, then more than one spelling, then malformed, then the
+/// flag grammar of `parseFlags`. Mirrors resolveNativeSighash in the TS
+/// reference (sighash-directive.ts); identical in all seven tiers. Error
+/// messages are allocated with `allocator`.
+pub fn resolveNativeSighash(
+    allocator: std.mem.Allocator,
+    method_name: []const u8,
+    is_public: bool,
+    specs: []const ?[]const u8,
+) ?ParseResult {
+    if (specs.len == 0) return null;
+    if (!is_public) {
+        return .{ .err = std.fmt.allocPrint(allocator, "@sighash directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{method_name}) catch "@sighash directive on non-public method has no effect — only public methods are spending entry points" };
+    }
+    if (specs.len > 1) return .{ .err = methodError(allocator, method_name, SIGHASH_MULTIPLE_ERROR) };
+    const spec = specs[0] orelse return .{ .err = methodError(allocator, method_name, SIGHASH_MALFORMED_ERROR) };
+    return switch (parseFlags(allocator, spec)) {
+        .value => |v| .{ .value = v },
+        .err => |e| .{ .err = methodError(allocator, method_name, e) },
+    };
+}
+
+fn methodError(allocator: std.mem.Allocator, method_name: []const u8, msg: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "Method '{s}': {s}", .{ method_name, msg }) catch msg;
+}
+
+/// N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+/// exists; any other name is refused rather than ignored, so a typo such as
+/// `//runar:sighsh` cannot silently drop the declaration.
+pub fn unknownGoDirectiveMessage(allocator: std.mem.Allocator, name: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "unknown Go DSL directive '//runar:{s}'; the only directive is //runar:sighash <FLAGS>", .{name}) catch "unknown Go DSL directive; the only directive is //runar:sighash <FLAGS>";
+}
+
+/// N-093: an attribute on the Move surface other than the two directives.
+pub fn unknownMoveAttributeMessage(allocator: std.mem.Allocator, attr: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "unsupported Move attribute #[{s}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]", .{attr}) catch "unsupported Move attribute; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]";
 }
 
 /// Render a sighash value as a human-readable flag string (for diagnostics).

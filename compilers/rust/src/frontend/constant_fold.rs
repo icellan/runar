@@ -23,8 +23,29 @@ type ConstEnv = HashMap<String, ConstValue>;
 /// OP_VERIFY`) and with the reference interpreter.
 const POW_FOLD_EXPONENT_LIMIT: u32 = 32;
 
+/// Unroll count of the emitted `gcd` loop (`codegen/stack.rs`). Past it the
+/// script returns a partial value, not the mathematical one, so the folder
+/// declines there (N-029). `log2` is exact for every n > 0 since N-103.
+const GCD_FOLD_ITERATIONS: usize = 256;
+
 fn env_clone(env: &ConstEnv) -> ConstEnv {
     env.clone()
+}
+
+/// Every name bound in `bindings`, including inside nested if arms and loop
+/// bodies.
+fn bound_names(bindings: &[ANFBinding], out: &mut Vec<String>) {
+    for b in bindings {
+        out.push(b.name.clone());
+        match &b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                bound_names(then, out);
+                bound_names(else_branch, out);
+            }
+            ANFValue::Loop { body, .. } => bound_names(body, out),
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +113,10 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
                     Some(ConstValue::Str(format!("{}{}", a, b)))
                 }
             }
-            "===" => Some(ConstValue::Bool(a == b)),
-            "!==" => Some(ConstValue::Bool(a != b)),
+            // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+            // ignores case, so 'aa' === 'AA' is true on-chain.
+            "===" => Some(ConstValue::Bool(hex_equal(a, b))),
+            "!==" => Some(ConstValue::Bool(!hex_equal(a, b))),
             _ => None,
         };
     }
@@ -111,6 +134,16 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
 
 fn is_valid_hex(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Compares two ByteString literals as bytes: case-insensitively when both
+/// are hex, by exact text otherwise.
+fn hex_equal(a: &str, b: &str) -> bool {
+    if is_valid_hex(a) && is_valid_hex(b) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,10 +301,18 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             }
             let mut a = int_args[0].abs();
             let mut b = int_args[1].abs();
-            while !b.is_zero() {
+            // The script runs at most GCD_FOLD_ITERATIONS Euclid steps
+            // (`codegen/stack.rs` gcd lowering); if that is not enough it
+            // returns a partial remainder, not the gcd. Decline there (N-029).
+            let mut i = 0;
+            while i < GCD_FOLD_ITERATIONS && !b.is_zero() {
                 let t = b.clone();
                 b = &a % &b;
                 a = t;
+                i += 1;
+            }
+            if !b.is_zero() {
+                return None;
             }
             Some(ConstValue::Int(a))
         }
@@ -286,8 +327,9 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
                 return None;
             }
             let n = int_args[0];
+            // The script aborts for n <= 0 (N-103): decline, so the abort survives.
             if !n.is_positive() {
-                return Some(ConstValue::Int(BigInt::from(0)));
+                return None;
             }
             // bits() returns the minimum number of bits to represent |n|;
             // floor(log2(n)) = bits - 1 for n > 0.
@@ -360,9 +402,27 @@ fn fold_bindings(bindings: &[ANFBinding], env: &mut ConstEnv) -> Vec<ANFBinding>
 fn fold_binding(binding: &ANFBinding, env: &mut ConstEnv) -> ANFBinding {
     let folded_value = fold_value(&binding.value, env);
 
-    // If the folded value is a load_const, register in the environment
+    // If the folded value is a load_const, register in the environment.
+    //
+    // A name may be bound more than once (reassignment, or a user local that
+    // shares a compiler temp's name). The env must track the LATEST binding:
+    // a rebinding to a non-constant drops the old constant, or later uses
+    // would fold with a value the name no longer holds (N-064).
+    //
+    // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+    // constant, but when its target currently holds one the alias holds the
+    // same value, so later uses of the alias fold too. The binding stays an
+    // alias; the prune removes it if the fold orphaned it.
+    let alias_target = match &folded_value {
+        ANFValue::LoadConst { value: serde_json::Value::String(s) } => s.strip_prefix("@ref:"),
+        _ => None,
+    };
     if let Some(cv) = anf_value_to_const(&folded_value) {
         env.insert(binding.name.clone(), cv);
+    } else if let Some(cv) = alias_target.and_then(|t| env.get(t)).cloned() {
+        env.insert(binding.name.clone(), cv);
+    } else {
+        env.remove(&binding.name);
     }
 
     ANFBinding {
@@ -464,6 +524,15 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
             let mut else_env = env_clone(env);
             let folded_then = fold_bindings(then, &mut then_env);
             let folded_else = fold_bindings(else_branch, &mut else_env);
+            // N-064: a name either arm rebinds may hold the arm's value after
+            // the if (that is how a branch reassigns a local), so the enclosing
+            // env's constant for it is stale past this point.
+            let mut rebound = Vec::new();
+            bound_names(then, &mut rebound);
+            bound_names(else_branch, &mut rebound);
+            for n in &rebound {
+                env.remove(n);
+            }
             ANFValue::If {
                 cond: cond.clone(),
                 then: folded_then,
@@ -483,8 +552,19 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
             start,
             step,
         } => {
+            // N-064: the body runs once per iteration, so a name it rebinds
+            // holds the entry constant only in iteration 0 — it is not a
+            // constant inside the body, nor after the loop.
+            let mut rebound = Vec::new();
+            bound_names(body, &mut rebound);
             let mut body_env = env_clone(env);
+            for n in &rebound {
+                body_env.remove(n);
+            }
             let folded_body = fold_bindings(body, &mut body_env);
+            for n in &rebound {
+                env.remove(n);
+            }
             ANFValue::Loop {
                 count: *count,
                 body: folded_body,
@@ -539,6 +619,31 @@ pub fn fold_constants(program: &ANFProgram) -> ANFProgram {
         methods: program.methods.iter().map(|m| fold_method(m)).collect(),
         parent_class: program.parent_class.clone(),
     }
+}
+
+/// `fold_constants` followed by removal of the operand bindings the fold
+/// orphaned (N-138).
+///
+/// `fold_constants` rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+/// `t0 = 1` in place, and stack lowering then pushes it and drops it again
+/// (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding referenced
+/// BEFORE folding are removal candidates, so a binding that was already dead is
+/// left exactly as it was. `fold_constants` itself stays a pure rewrite.
+pub fn fold_constants_and_prune(program: &ANFProgram) -> ANFProgram {
+    let mut folded = fold_constants(program);
+    folded.methods = program
+        .methods
+        .iter()
+        .zip(folded.methods.iter())
+        .map(|(before, after)| {
+            let mut candidates = std::collections::HashSet::new();
+            for b in &before.body {
+                super::dce::collect_refs_from_value(&b.value, &mut candidates);
+            }
+            super::dce::eliminate_dead_bindings_among(after, &candidates)
+        })
+        .collect();
+    folded
 }
 
 /// Apply constant folding without dead binding elimination.
@@ -898,6 +1003,23 @@ mod tests {
         ])]);
         let r = fold_constants_only(&p);
         assert_load_const_bool(&r.methods[0].body[2].value, true);
+    }
+
+    /// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+    /// on-chain and the fold must say so. Proves the Rust folder's verdict on
+    /// mixed-case hex; not the emitted script (conformance/negatives/
+    /// f160-bytestring-case-fold-parity pins every tier's bytes).
+    #[test]
+    fn test_fold_string_equality_ignores_hex_case() {
+        for (op, want) in [("===", true), ("!==", false)] {
+            let p = make_program(vec![make_method("m", vec![
+                b("t0", mk_str("aa")),
+                b("t1", mk_str("AA")),
+                b("t2", bin_op(op, "t0", "t1")),
+            ])]);
+            let r = fold_constants_only(&p);
+            assert_load_const_bool(&r.methods[0].body[2].value, want);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1296,6 +1418,65 @@ mod tests {
         ])]);
         let r = fold_constants_only(&p);
         assert_load_const_bool(&r.methods[0].body[1].value, false);
+    }
+
+    // N-029: every folded value must be what the emitted script computes.
+    // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi);
+    // gcd unrolls 256 Euclid steps, so past those the script returns a partial
+    // value and the folder must decline. log2 is exact for every n > 0 since
+    // N-103 and aborts for n <= 0: the folder folds every positive operand and
+    // declines the rest.
+    // Expected values were executed on @bsv/sdk Spend.validate by
+    // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+    // Proves the Rust folder's value/decline decisions; not the script itself.
+    fn n029_fib(n: u32) -> BigInt {
+        let (mut a, mut c) = (BigInt::from(0), BigInt::from(1));
+        for _ in 0..n {
+            let t = &a + &c;
+            a = c;
+            c = t;
+        }
+        a
+    }
+
+    fn n029_fold(args: Vec<BigInt>, func: &str) -> ANFValue {
+        let mut body = Vec::new();
+        let names: Vec<String> = (0..args.len()).map(|i| format!("t{}", i)).collect();
+        for (n, a) in names.iter().zip(args.iter()) {
+            body.push(b(n, ANFValue::LoadConst { value: bigint_to_json(a) }));
+        }
+        body.push(b("r", call_func(func, names.iter().map(|s| s.as_str()).collect())));
+        let r = fold_constants_only(&make_program(vec![make_method("m", body)]));
+        r.methods[0].body.last().unwrap().value.clone()
+    }
+
+    #[test]
+    fn test_n029_clamp_lo_above_hi_matches_script() {
+        let i = |v: i64| BigInt::from(v);
+        assert_load_const_int(&n029_fold(vec![i(5), i(10), i(0)], "clamp"), 0);
+        assert_load_const_int(&n029_fold(vec![i(0), i(3), i(-3)], "clamp"), -3);
+        assert_load_const_int(&n029_fold(vec![i(-20), i(10), i(0)], "clamp"), 0);
+    }
+
+    // N-103 (user decision R86): this used to pin the decline past 64 halvings
+    // (2^65 and 2^70 not folded). The script is now exact with no cap, and
+    // n <= 0 (which it aborts on) is declined instead of folded to 0.
+    #[test]
+    fn test_n103_log2_exact_and_declines_non_positive() {
+        let one = BigInt::from(1);
+        assert_load_const_int(&n029_fold(vec![&one << 64], "log2"), 64);
+        assert_load_const_int(&n029_fold(vec![(&one << 65) - &one], "log2"), 64);
+        assert_load_const_int(&n029_fold(vec![&one << 65], "log2"), 65);
+        assert_load_const_int(&n029_fold(vec![&one << 70], "log2"), 70);
+        assert_not_folded(&n029_fold(vec![BigInt::from(0)], "log2"), "call");
+        assert_not_folded(&n029_fold(vec![BigInt::from(-1)], "log2"), "call");
+    }
+
+    #[test]
+    fn test_n029_gcd_declines_past_256_steps() {
+        assert_load_const_int(&n029_fold(vec![n029_fib(258), n029_fib(257)], "gcd"), 1);
+        assert_not_folded(&n029_fold(vec![n029_fib(259), n029_fib(258)], "gcd"), "call");
+        assert_not_folded(&n029_fold(vec![n029_fib(300), n029_fib(299)], "gcd"), "call");
     }
 
     // -----------------------------------------------------------------------

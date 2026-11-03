@@ -23,7 +23,6 @@ class TestParserSol < Minitest::Test
       // SPDX-License-Identifier: MIT
       pragma runar ^1.0.0;
 
-      import "runar-lang";
 
       contract P2PKH is SmartContract {
           Addr immutable pubKeyHash;
@@ -58,7 +57,6 @@ class TestParserSol < Minitest::Test
   def test_methods_and_params
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Adder is SmartContract {
           int immutable target;
@@ -92,7 +90,6 @@ class TestParserSol < Minitest::Test
   def test_stateful_contract
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Counter is StatefulSmartContract {
           int count;
@@ -128,8 +125,8 @@ class TestParserSol < Minitest::Test
     SOL
 
     result = parse(source, 'bad.runar.sol')
-    invalid = result.contract.nil? || !result.errors.empty?
-    assert invalid, 'expected errors for invalid Solidity-like syntax'
+    # F-376: require a diagnostic, not a silent nil-contract/empty-errors pass.
+    refute_empty result.errors, 'expected errors for invalid Solidity-like syntax'
   end
 
   # ---------------------------------------------------------------------------
@@ -139,7 +136,6 @@ class TestParserSol < Minitest::Test
   def test_multiple_properties_preserve_order
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract TwoProps is SmartContract {
           Addr immutable addr;

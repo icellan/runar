@@ -28,12 +28,15 @@
 //! - Move builtins mapped: `check_sig` -> `checkSig`, `hash160` -> `hash160`, etc.
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash, unknown_move_attribute_message};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -42,19 +45,44 @@ use super::parser::ParseResult;
 
 /// Parse a Move-format Rúnar contract source.
 pub fn parse_move(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_move_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_move`], on the parse stack segment.
+fn parse_move_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.move");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
-    let mut parser = MoveParser::new(tokens, file, &mut errors);
+    let (tokens, positions) = tokenize(source, file, &mut errors);
+    let mut parser = MoveParser::new(tokens, positions, file, &mut errors);
 
     let contract = parser.parse_module();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
+    let collision = parser.idents.collision_diagnostic();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
-    ParseResult {
+    enforce_ast_nesting(ParseResult {
         contract,
         errors,
         source_size_err: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -220,21 +248,39 @@ enum Token {
     Colon,
     ColonColon, // ::
     Question,
+    /// N-093: `#` directly before `[`, opening an attribute (`#[embed_always]`,
+    /// `#[sighash(...)]`).
+    Hash,
 
     // Special
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    // F-337: char index where each token starts.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0usize;
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
+        // Tokens pushed by the previous iteration started at `at`.
+        starts.resize(tokens.len(), at);
+        at = i;
         let ch = chars[i];
 
-        if ch.is_whitespace() {
+        // N-424: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             i += 1;
             continue;
         }
@@ -352,6 +398,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             '>' => { tokens.push(Token::Gt); i += 1; continue; }
             '!' => { tokens.push(Token::Bang); i += 1; continue; }
             '~' => { tokens.push(Token::Tilde); i += 1; continue; }
+            '#' if i + 1 < len && chars[i + 1] == '[' => { tokens.push(Token::Hash); i += 1; continue; }
             '&' => { tokens.push(Token::Amp); i += 1; continue; }
             '|' => { tokens.push(Token::Pipe); i += 1; continue; }
             '^' => { tokens.push(Token::Caret); i += 1; continue; }
@@ -377,18 +424,30 @@ fn tokenize(source: &str) -> Vec<Token> {
                 i += 1;
             }
             let quote = chars[i];
+            let open = i;
             i += 1;
             let start = i;
-            while i < len && chars[i] != quote {
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while i < len && chars[i] != quote && chars[i] != '\n' && chars[i] != '\r' {
                 if chars[i] == '\\' {
+                    if i + 1 >= len || chars[i + 1] == '\n' || chars[i + 1] == '\r' {
+                        break;
+                    }
                     i += 1;
                 }
                 i += 1;
             }
             let val: String = chars[start..i].iter().collect();
             tokens.push(Token::StringLit(val));
-            if i < len {
+            if i < len && chars[i] == quote {
                 i += 1;
+                // N-019: this surface has no quoted literal; a terminated one
+                // is refused as an unexpected character (as the TS reference).
+                errors.push(lex_error_at_index(&format!("Unexpected character '{}'", quote), file, &chars, open));
+            } else {
+                errors.push(lex_error_at_index(UNTERMINATED_STRING_LITERAL, file, &chars, open));
             }
             continue;
         }
@@ -405,18 +464,18 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Numbers
+        // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Move literal.
         if ch.is_ascii_digit() {
             let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '_' || chars[i] == 'n') {
-                i += 1;
-            }
-            let num_str: String = chars[start..i]
-                .iter()
-                .filter(|c| **c != '_' && **c != 'n')
-                .collect();
-            let val = <BigInt as Num>::from_str_radix(&num_str, 10)
-                .unwrap_or_else(|_| BigInt::from(0));
+            i = scan_number_end(&chars, i);
+            let text: String = chars[start..i].iter().collect();
+            let val = match parse_int_literal("move", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error_at_index(&invalid_integer_literal("move", &text), file, &chars, start));
+                    BigInt::from(0)
+                }
+            };
             tokens.push(Token::NumberLit(val));
             continue;
         }
@@ -463,35 +522,97 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Skip unrecognized
+        // N-214: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error_at_index(&format!("Unexpected character '{}'", ch), file, &chars, i));
         i += 1;
     }
 
     tokens.push(Token::Eof);
-    tokens
+    starts.resize(tokens.len(), at);
+    let positions = char_index_positions(&chars, &starts);
+    (tokens, positions)
 }
 
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
 
+/// N-093: one parsed `#[...]` attribute (see `parse_attributes`).
+#[derive(Clone)]
+enum MoveAttrKind {
+    EmbedAlways,
+    Sighash,
+}
+
+#[derive(Clone)]
+struct MoveAttr {
+    kind: MoveAttrKind,
+    flags: Option<String>,
+    loc: SourceLocation,
+}
+
 struct MoveParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
     struct_name: String,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: super::identifier_collision::DeclaredIdents,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> MoveParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<Diagnostic>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
             struct_name: String::new(),
+            idents: Default::default(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn peek(&self) -> &Token {
@@ -550,11 +671,18 @@ impl<'a> MoveParser<'a> {
         }
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -572,7 +700,8 @@ impl<'a> MoveParser<'a> {
         while *self.peek() != Token::Module && *self.peek() != Token::Eof {
             // Also allow struct at top level without module wrapper
             if *self.peek() == Token::Struct || *self.peek() == Token::Resource || *self.peek() == Token::Public {
-                return self.parse_top_level_without_module(is_unsafe);
+                let loc = self.loc();
+                return self.parse_top_level_without_module(is_unsafe, loc);
             }
             // `unsafe` immediately before `module` marks an UnsafeSmartContract.
             if matches!(self.peek(), Token::Ident(n) if n == "unsafe") {
@@ -586,6 +715,7 @@ impl<'a> MoveParser<'a> {
             return None;
         }
 
+        let module_loc = self.loc();
         self.advance(); // consume 'module'
         let module_name = self.expect_ident();
 
@@ -597,18 +727,22 @@ impl<'a> MoveParser<'a> {
 
         self.expect(&Token::LBrace);
 
-        let result = self.parse_module_body(is_unsafe, Some(module_name));
+        let result = self.parse_module_body(is_unsafe, Some(module_name), module_loc);
 
         self.expect(&Token::RBrace);
 
         result
     }
 
-    fn parse_top_level_without_module(&mut self, is_unsafe: bool) -> Option<ContractNode> {
-        self.parse_module_body(is_unsafe, None)
+    fn parse_top_level_without_module(&mut self, is_unsafe: bool, loc: SourceLocation) -> Option<ContractNode> {
+        self.parse_module_body(is_unsafe, None, loc)
     }
 
-    fn parse_module_body(&mut self, is_unsafe: bool, module_name: Option<String>) -> Option<ContractNode> {
+    /// `module_loc` is the `module` keyword; N-490 anchors the synthesized
+    /// constructor there unless a struct is declared, in which case it is
+    /// the first struct's `struct` keyword (`resource` when it stands alone).
+    fn parse_module_body(&mut self, is_unsafe: bool, module_name: Option<String>, module_loc: SourceLocation) -> Option<ContractNode> {
+        let mut ctor_loc: Option<SourceLocation> = None;
         let mut contract_name: Option<String> = None;
         let mut parent_class = if is_unsafe {
             "UnsafeSmartContract".to_string()
@@ -630,6 +764,13 @@ impl<'a> MoveParser<'a> {
         }
 
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            // N-093: attributes before a function (`#[sighash(...)]`). Anything
+            // else they precede reads neither directive, so each one is refused.
+            let attrs = self.parse_attributes();
+            let item_loc = self.loc();
+            if !attrs.is_empty() && !matches!(self.peek(), Token::Public | Token::Fun) {
+                self.report_lost_attributes(&attrs);
+            }
             match self.peek().clone() {
                 Token::Use => {
                     // Skip use declarations that appear after other items
@@ -643,7 +784,11 @@ impl<'a> MoveParser<'a> {
                 Token::Resource => {
                     // "resource struct Name { ... }"
                     is_resource = true;
+                    let resource_loc = self.loc();
                     self.advance(); // consume 'resource'
+                    if ctor_loc.is_none() {
+                        ctor_loc = Some(if *self.peek() == Token::Struct { self.loc() } else { resource_loc });
+                    }
                     if *self.peek() == Token::Struct {
                         let (name, pc, props) = self.parse_struct();
                         contract_name = Some(name.clone());
@@ -660,6 +805,9 @@ impl<'a> MoveParser<'a> {
                     }
                 }
                 Token::Struct => {
+                    if ctor_loc.is_none() {
+                        ctor_loc = Some(self.loc());
+                    }
                     let (name, pc, props) = self.parse_struct();
                     contract_name = Some(name.clone());
                     self.struct_name = name;
@@ -672,7 +820,7 @@ impl<'a> MoveParser<'a> {
                     // public fun name(...)
                     self.advance(); // consume 'public'
                     if *self.peek() == Token::Fun {
-                        methods.push(self.parse_fun(Visibility::Public));
+                        methods.push(self.parse_fun(Visibility::Public, &attrs, item_loc));
                     } else {
                         self.errors.push(Diagnostic::error(format!(
                             "Expected 'fun' after 'public', got {:?}",
@@ -682,7 +830,7 @@ impl<'a> MoveParser<'a> {
                     }
                 }
                 Token::Fun => {
-                    methods.push(self.parse_fun(Visibility::Private));
+                    methods.push(self.parse_fun(Visibility::Private, &attrs, item_loc));
                 }
                 _ => {
                     self.advance();
@@ -738,7 +886,7 @@ impl<'a> MoveParser<'a> {
         }
 
         // Build constructor from properties
-        let constructor = build_constructor(&properties, self.file);
+        let constructor = build_constructor(&properties, ctor_loc.unwrap_or(module_loc));
 
         Some(ContractNode {
             name: contract_name,
@@ -783,6 +931,16 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_struct_field(&mut self) -> PropertyNode {
+        // N-093: `#[embed_always]` before a field is the native spelling of
+        // `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+        let mut embed_always = false;
+        for attr in self.parse_attributes() {
+            if matches!(attr.kind, MoveAttrKind::EmbedAlways) {
+                embed_always = true;
+            } else {
+                self.report_lost_attributes(std::slice::from_ref(&attr));
+            }
+        }
         let field_name = self.expect_ident();
         self.expect(&Token::Colon);
 
@@ -809,13 +967,13 @@ impl<'a> MoveParser<'a> {
         };
 
         PropertyNode {
-            name: map_builtin_name(&field_name),
+            name: self.idents.declare(&field_name, map_builtin_name(&field_name)),
             prop_type: type_node,
             readonly,
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         }
     }
 
@@ -841,7 +999,7 @@ impl<'a> MoveParser<'a> {
         if mapped == "FixedArray" || name == "FixedArray" {
             if *self.peek() == Token::Lt {
                 self.advance();
-                let element = self.parse_type();
+                let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
                 self.expect(&Token::Comma);
                 let length = match self.advance() {
                     Token::NumberLit(n) => n.to_usize().unwrap_or(0),
@@ -870,10 +1028,81 @@ impl<'a> MoveParser<'a> {
     // Functions
     // -----------------------------------------------------------------------
 
-    fn parse_fun(&mut self, visibility: Visibility) -> MethodNode {
+    /// N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+    /// `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+    /// otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+    /// identifier list, or `None` when the parentheses hold anything else or
+    /// are missing. Mirrors `parseAttributes` (01-parse-move.ts).
+    fn parse_attributes(&mut self) -> Vec<MoveAttr> {
+        let mut attrs = Vec::new();
+        while *self.peek() == Token::Hash {
+            let loc = self.loc();
+            self.advance();
+            self.expect(&Token::LBracket);
+            let name = match self.peek().clone() {
+                Token::Ident(n) => {
+                    self.advance();
+                    n
+                }
+                _ => String::new(),
+            };
+            let mut flags: Option<String> = None;
+            let mut has_args = false;
+            if *self.peek() == Token::LParen {
+                has_args = true;
+                self.advance();
+                let mut text = String::new();
+                let mut ok = true;
+                let mut depth = 1;
+                while *self.peek() != Token::Eof {
+                    match self.peek().clone() {
+                        Token::LParen => {
+                            depth += 1;
+                            ok = false;
+                        }
+                        Token::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            ok = false;
+                        }
+                        Token::Ident(n) => text.push_str(&n),
+                        Token::Pipe => text.push('|'),
+                        _ => ok = false,
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RParen);
+                flags = if ok { Some(text) } else { None };
+            }
+            while *self.peek() != Token::RBracket && *self.peek() != Token::Eof {
+                self.advance();
+            }
+            self.expect(&Token::RBracket);
+            if name == "embed_always" && !has_args {
+                attrs.push(MoveAttr { kind: MoveAttrKind::EmbedAlways, flags: None, loc });
+            } else if name == "sighash" {
+                attrs.push(MoveAttr { kind: MoveAttrKind::Sighash, flags, loc });
+            } else {
+                let shown = if has_args { format!("{name}(...)") } else { name };
+                self.errors.push(Diagnostic::error(unknown_move_attribute_message(&shown), Some(loc)));
+            }
+        }
+        attrs
+    }
+
+    fn report_lost_attributes(&mut self, attrs: &[MoveAttr]) {
+        for attr in attrs {
+            let directive = if matches!(attr.kind, MoveAttrKind::Sighash) { "@sighash" } else { "@embedAlways" };
+            self.errors.push(Diagnostic::error(lost_directive_message(directive), Some(attr.loc.clone())));
+        }
+    }
+
+    fn parse_fun(&mut self, visibility: Visibility, attrs: &[MoveAttr], location: SourceLocation) -> MethodNode {
         self.advance(); // consume 'fun'
         let raw_name = self.expect_ident();
-        let name = map_builtin_name(&raw_name);
+        let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
 
         self.expect(&Token::LParen);
         let params = self.parse_param_list();
@@ -883,7 +1112,11 @@ impl<'a> MoveParser<'a> {
         let mut has_return_type = false;
         if *self.peek() == Token::Colon {
             self.advance();
-            let _ret_type = self.parse_type();
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            let ret_type = self.parse_type();
+            if let Some(msg) = unknown_return_type_message(&ret_type, &name, visibility == Visibility::Public) {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+            }
             has_return_type = true;
         }
 
@@ -919,13 +1152,31 @@ impl<'a> MoveParser<'a> {
             }
         }
 
+        // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        // annotates nothing.
+        let lost: Vec<MoveAttr> = attrs.iter().filter(|a| !matches!(a.kind, MoveAttrKind::Sighash)).cloned().collect();
+        self.report_lost_attributes(&lost);
+        let specs: Vec<Option<String>> = attrs
+            .iter()
+            .filter(|a| matches!(a.kind, MoveAttrKind::Sighash))
+            .map(|a| a.flags.clone())
+            .collect();
+        let sighash_type = match resolve_native_sighash(&name, visibility == Visibility::Public, &specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+                None
+            }
+            None => None,
+        };
+
         MethodNode {
             name,
             params,
             body,
             visibility,
-            source_location: self.loc(),
-            sighash_type: None,
+            source_location: location,
+            sighash_type,
         }
     }
 
@@ -959,6 +1210,10 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::Colon);
         let param_type = self.parse_type();
         let name = map_builtin_name(&raw_name);
+        // The receiver (`self` / `contract`) is not a parameter (F-017).
+        if raw_name != "self" && raw_name != "contract" {
+            self.idents.declare(&raw_name, name.clone());
+        }
         ParamNode { name, param_type }
     }
 
@@ -970,6 +1225,12 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::LBrace);
         let mut stmts = Vec::new();
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            // N-153: a stray `;` (an empty statement, or `};` after an
+            // if/while block) is a no-op, as in the TS reference.
+            if *self.peek() == Token::Semicolon {
+                self.advance();
+                continue;
+            }
             if let Some(stmt) = self.parse_statement() {
                 stmts.push(stmt);
             }
@@ -979,6 +1240,17 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         match self.peek().clone() {
             Token::Let => Some(self.parse_let()),
             Token::If => {
@@ -995,6 +1267,14 @@ impl<'a> MoveParser<'a> {
             Token::While => {
                 let stmt = self.parse_while_as_for();
                 // Optional trailing semicolon after while block
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                }
+                Some(stmt)
+            }
+            Token::Loop => {
+                let stmt = self.parse_loop_as_for();
+                // Optional trailing semicolon after loop block
                 if *self.peek() == Token::Semicolon {
                     self.advance();
                 }
@@ -1023,6 +1303,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Add,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1039,6 +1320,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Sub,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1055,6 +1337,7 @@ impl<'a> MoveParser<'a> {
                             op: BinaryOp::Mul,
                             left: Box::new(target.clone()),
                             right: Box::new(self.convert_self_to_this(rhs)),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1091,10 +1374,11 @@ impl<'a> MoveParser<'a> {
     fn convert_self_to_this(&self, expr: Expression) -> Expression {
         match expr {
             Expression::MemberExpr { object, property } => {
-                if matches!(object.as_ref(), Expression::Identifier { name } if name == "self" || name == "contract") {
+                if matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "self" || name == "contract") {
                     // self.x or contract.x -> PropertyAccess { property: camelCase(x) }
                     Expression::PropertyAccess {
                         property: map_builtin_name(&property),
+                        source_location: None,
                     }
                 } else {
                     Expression::MemberExpr {
@@ -1103,14 +1387,16 @@ impl<'a> MoveParser<'a> {
                     }
                 }
             }
-            Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+            Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
                 op,
                 left: Box::new(self.convert_self_to_this(*left)),
                 right: Box::new(self.convert_self_to_this(*right)),
+                source_location: source_location,
             },
-            Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+            Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
                 op,
                 operand: Box::new(self.convert_self_to_this(*operand)),
+                source_location: source_location,
             },
             Expression::CallExpr { callee, args, .. } => {
                 let new_callee = self.convert_self_to_this(*callee);
@@ -1150,8 +1436,9 @@ impl<'a> MoveParser<'a> {
                 prefix,
             },
             // Rename `self` identifier to `this`
-            Expression::Identifier { ref name } if name == "self" => Expression::Identifier {
+            Expression::Identifier { ref name, .. } if name == "self" => Expression::Identifier {
                 name: "this".to_string(),
+                source_location: None,
             },
             other => other,
         }
@@ -1167,7 +1454,7 @@ impl<'a> MoveParser<'a> {
         };
 
         let raw_name = self.expect_ident();
-        let name = map_builtin_name(&raw_name);
+        let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
 
         // Optional type annotation: ": Type"
         let var_type = if *self.peek() == Token::Colon {
@@ -1208,6 +1495,7 @@ impl<'a> MoveParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1232,11 +1520,13 @@ impl<'a> MoveParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![Expression::BinaryExpr {
                     op: BinaryOp::StrictEq,
                     left: Box::new(left),
                     right: Box::new(right),
+                    source_location: None,
                 }],
                 asm_return_type: None,
             },
@@ -1245,6 +1535,9 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_if(&mut self) -> Statement {
+        // F-337: located at the `if` token (an `else if` never passes
+        // through parse_statement).
+        let loc = self.loc();
         self.advance(); // consume 'if'
 
         // Move uses `if (cond) { ... }` or `if cond { ... }`
@@ -1263,8 +1556,8 @@ impl<'a> MoveParser<'a> {
         let else_branch = if *self.peek() == Token::Else {
             self.advance();
             if *self.peek() == Token::If {
-                let nested = self.parse_if();
-                Some(vec![nested])
+                // F-213: the nested `if` is a statement of the else branch (+1).
+                self.nested(Some(Vec::new()), |p| Some(vec![p.parse_if()]))
             } else {
                 Some(self.parse_block_converting_self())
             }
@@ -1276,7 +1569,7 @@ impl<'a> MoveParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 
@@ -1319,6 +1612,33 @@ impl<'a> MoveParser<'a> {
         }
     }
 
+    /// N-026: `loop { ... }` has no bound the unrolled loop model can
+    /// represent. It is lowered exactly as the reference tier lowers it -- a
+    /// `for` whose condition is the literal `true` -- so the validator refuses
+    /// it with the reference's sentence ("For loop condition must compare the
+    /// loop variable '_l' ...") instead of the parser dying on the `loop`
+    /// keyword.
+    fn parse_loop_as_for(&mut self) -> Statement {
+        self.advance(); // consume 'loop'
+        let body = self.parse_block_converting_self();
+        Statement::ForStatement {
+            init: Box::new(Statement::VariableDecl {
+                name: "_l".to_string(),
+                var_type: None,
+                mutable: true,
+                init: Expression::BigIntLiteral { value: BigInt::from(0) },
+                source_location: self.loc(),
+            }),
+            condition: Expression::BoolLiteral { value: true },
+            update: Box::new(Statement::ExpressionStatement {
+                expression: Expression::BigIntLiteral { value: BigInt::from(0) },
+                source_location: self.loc(),
+            }),
+            body,
+            source_location: self.loc(),
+        }
+    }
+
     fn parse_return(&mut self) -> Statement {
         self.advance(); // consume 'return'
         if *self.peek() == Token::Semicolon {
@@ -1342,16 +1662,17 @@ impl<'a> MoveParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     fn parse_ternary(&mut self) -> Expression {
         let cond = self.parse_or();
         if *self.peek() == Token::Question {
             self.advance();
-            let cons = self.parse_ternary();
+            // F-213: the arms recurse into the ternary parser directly (+1 each).
+            let cons = self.nested(zero(), |p| p.parse_ternary());
             self.expect(&Token::Colon);
-            let alt = self.parse_ternary();
+            let alt = self.nested(zero(), |p| p.parse_ternary());
             Expression::TernaryExpr {
                 condition: Box::new(cond),
                 consequent: Box::new(cons),
@@ -1363,97 +1684,123 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::And {
             self.advance();
             let right = self.parse_bit_or();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Pipe {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Caret {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Amp {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1463,43 +1810,53 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1509,25 +1866,31 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Shl => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Shr => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1537,25 +1900,31 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1565,34 +1934,42 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1602,29 +1979,33 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::PlusPlus => {
@@ -1649,6 +2030,7 @@ impl<'a> MoveParser<'a> {
 
     fn parse_postfix(&mut self) -> Expression {
         let mut expr = self.parse_primary();
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.peek().clone() {
@@ -1657,6 +2039,7 @@ impl<'a> MoveParser<'a> {
                     let raw_prop = self.expect_ident();
                     let prop = map_builtin_name(&raw_prop);
                     // Note: self.x conversion happens in convert_self_to_this
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::MemberExpr {
                         object: Box::new(expr),
                         property: prop,
@@ -1667,7 +2050,8 @@ impl<'a> MoveParser<'a> {
                     self.advance();
                     let raw_name = self.expect_ident();
                     let name = map_builtin_name(&raw_name);
-                    expr = Expression::Identifier { name };
+                    expr = Expression::Identifier { name, source_location: None };
+                    dt = DepthTracker::new();
                 }
                 Token::LParen => {
                     self.advance();
@@ -1687,13 +2071,15 @@ impl<'a> MoveParser<'a> {
                     // matching `contract`/`self` identifier as the first
                     // argument at call sites too.
                     if let Expression::Identifier { .. } = &expr {
-                        if let Some(Expression::Identifier { name }) = args.first() {
+                        if let Some(Expression::Identifier { name, .. }) = args.first() {
                             if name == "contract" || name == "self" {
                                 args.remove(0);
                             }
                         }
                     }
 
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1704,6 +2090,7 @@ impl<'a> MoveParser<'a> {
                     self.advance();
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -1711,6 +2098,7 @@ impl<'a> MoveParser<'a> {
                 }
                 Token::PlusPlus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::IncrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1718,6 +2106,7 @@ impl<'a> MoveParser<'a> {
                 }
                 Token::MinusMinus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::DecrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1731,12 +2120,13 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name) },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
+            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name), source_location: Some(lit_loc) },
             Token::LParen => {
                 let expr = self.parse_expression();
                 self.expect(&Token::RParen);
@@ -1764,11 +2154,16 @@ impl<'a> MoveParser<'a> {
     }
 }
 
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor builder
 // ---------------------------------------------------------------------------
 
-fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
+fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> MethodNode {
     // Only include properties without initializers as constructor params
     let uninit_props: Vec<&PropertyNode> = properties
         .iter()
@@ -1790,21 +2185,19 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
         },
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc.clone(),
     });
 
     // this.x = x for each non-initialized property
@@ -1812,15 +2205,13 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
-            source_location: SourceLocation {
-                file: file.to_string(),
-                line: 1,
-                column: 0,
-            },
+            source_location: loc.clone(),
         });
     }
 
@@ -1829,11 +2220,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         params,
         body,
         visibility: Visibility::Public,
-        source_location: SourceLocation {
-            file: file.to_string(),
-            line: 1,
-            column: 0,
-        },
+        source_location: loc,
         sighash_type: None,
     }
 }
@@ -1922,12 +2309,14 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
 
+    // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+    let condition = &super::loop_condition::normalize_loop_condition(condition, iter_name);
     let (cond_left, cond_op) = match condition {
         Expression::BinaryExpr { left, op, .. } => (left.as_ref(), op),
         _ => return None,
     };
     match cond_left {
-        Expression::Identifier { name } if name == iter_name => {}
+        Expression::Identifier { name, .. } if name == iter_name => {}
         _ => return None,
     }
 
@@ -1946,11 +2335,11 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
     match target {
-        Expression::Identifier { name } if name == iter_name => {}
+        Expression::Identifier { name, .. } if name == iter_name => {}
         _ => return None,
     }
     let (step_op, step_left, step_right) = match value {
-        Expression::BinaryExpr { op, left, right } => (op, left.as_ref(), right.as_ref()),
+        Expression::BinaryExpr { op, left, right, .. } => (op, left.as_ref(), right.as_ref()),
         _ => return None,
     };
     let step_is_add = match step_op {
@@ -1959,7 +2348,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         _ => return None,
     };
 
-    let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name } if name == iter_name);
+    let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name, .. } if name == iter_name);
     let is_one = |e: &Expression| matches!(e, Expression::BigIntLiteral { value } if *value == BigInt::from(1));
     // Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
     let unit_step = if step_is_add {
@@ -1975,7 +2364,7 @@ fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statem
         return None;
     }
 
-    let operand = Box::new(Expression::Identifier { name: iter_name.clone() });
+    let operand = Box::new(Expression::Identifier { name: iter_name.clone(), source_location: None });
     let update_expr = if ascending {
         Expression::IncrementExpr { operand, prefix: false }
     } else {
@@ -2124,7 +2513,7 @@ module test {
         // Should be assert(self.x === y)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, args, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
                 if let Expression::BinaryExpr { op, .. } = &args[0] {
@@ -2159,7 +2548,7 @@ module example {
         // Should be this.value = newValue (with PropertyAccess)
         if let Statement::Assignment { target, .. } = &body[0] {
             match target {
-                Expression::PropertyAccess { property } => {
+                Expression::PropertyAccess { property, .. } => {
                     assert_eq!(property, "value");
                 }
                 _ => panic!("Expected PropertyAccess, got {:?}", target),

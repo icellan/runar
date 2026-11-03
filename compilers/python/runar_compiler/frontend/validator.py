@@ -42,11 +42,21 @@ from runar_compiler.frontend.ast_nodes import (
     VariableDeclStmt,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import MAX_CALL_DEPTH, call_depth_message
+from runar_compiler.frontend.typecheck import _expr_loc
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+#: The cross-tier loop-START sentence (shared verbatim with the other six
+#: tiers, which raise it from ANF lowering).
+LOOP_START_DIAGNOSTIC = (
+    "Cannot determine loop start at compile time. "
+    "For-loop iterators must start at an integer literal."
+)
+
 
 @dataclass
 class ValidationResult:
@@ -74,7 +84,14 @@ def validate(contract: ContractNode) -> ValidationResult:
     ctx.validate_properties()
     ctx.validate_constructor()
     ctx.validate_methods()
-    ctx.check_no_recursion()
+    call_depth_exceeded = ctx.check_no_recursion()
+    ctx.check_reserved_names()
+    # N-180: the Rabin-provenance and sighash passes walk the private-method
+    # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    # refuses, so stop here.
+    if call_depth_exceeded:
+        return ValidationResult(errors=ctx.errors, warnings=ctx.warnings)
+    _check_rabin_pubkey_provenance(ctx)
 
     # Issue #123: reject preimage-field reads / output bindings that are unsound
     # under a method's declared @sighash mode (security core). This pass emits
@@ -114,6 +131,41 @@ _VALID_PROP_TYPES: frozenset[str] = frozenset({
 # Validation context
 # ---------------------------------------------------------------------------
 
+def loop_output_intrinsic_msg(intrinsic: str, via: str | None = None) -> str:
+    """Build the R-127 rejection.
+
+    Shared verbatim with the other six tiers and with the pass-4 backstop in
+    ``anf_lower._lower_for_statement`` (N-006).
+    """
+    via_clause = f" (reached through private method '{via}')" if via else ""
+    return (
+        f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
+        "body. A loop body lowers into its own scope whose declared outputs never "
+        "reach the method's output list, so the continuation hash would commit to "
+        "fewer outputs than the transaction actually creates: the spend is rejected "
+        "by every shipped SDK and any successor it produces is unspendable. Move the "
+        "call out of the loop."
+    )
+
+
+def ternary_output_intrinsic_msg(intrinsic: str, via: str | None = None) -> str:
+    """Build the N-049 rejection.
+
+    Shared verbatim with the other six tiers (TS reference:
+    ``ternaryOutputIntrinsicDiagnostic`` in 02-validate.ts) and with the pass-4
+    backstop in ``anf_lower._lower_ternary_expr``.
+    """
+    via_clause = f" (reached through private method '{via}')" if via else ""
+    return (
+        f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a "
+        "conditional (ternary) expression arm. A ternary arm lowers into its own "
+        "scope whose declared outputs never reach the method's output list, so the "
+        "continuation hash would commit to fewer outputs than the transaction "
+        "actually creates: a spender can drop the output and the honest spend is "
+        "rejected. Use an if/else statement instead."
+    )
+
+
 @dataclass
 class _ValidationContext:
     contract: ContractNode
@@ -137,6 +189,50 @@ class _ValidationContext:
         self.errors.append(
             Diagnostic(message=msg, severity=Severity.ERROR, loc=loc or self.current_stmt_loc)
         )
+
+    # -------------------------------------------------------------------
+    # N-065 / N-060: compiler-reserved names
+    # -------------------------------------------------------------------
+
+    def check_reserved_names(self) -> None:
+        """Refuse a declared identifier spelled like a name a compiler pass
+        mints (see reserved_names.py). Checks properties, method names,
+        constructor and method parameters, locals and loop variables. A
+        stateful ``txPreimage`` PROPERTY keeps its older, dedicated diagnostic.
+        """
+        from runar_compiler.frontend.reserved_names import (
+            is_reserved_source_name,
+            reserved_name_message,
+        )
+
+        stateful = self.contract.parent_class == "StatefulSmartContract"
+
+        def check(name: str, loc: SourceLocation | None) -> None:
+            if is_reserved_source_name(name, stateful):
+                self._add_error(reserved_name_message(name), loc=loc)
+
+        def walk(stmts: list[Statement]) -> None:
+            for s in stmts:
+                if isinstance(s, VariableDeclStmt):
+                    check(s.name, s.source_location)
+                elif isinstance(s, IfStmt):
+                    walk(s.then)
+                    walk(s.else_ or [])
+                elif isinstance(s, ForStmt):
+                    if s.init is not None:
+                        check(s.init.name, s.init.source_location)
+                    walk(s.body)
+
+        for prop in self.contract.properties:
+            if stateful and prop.name == "txPreimage":
+                continue
+            check(prop.name, prop.source_location)
+        for method in [self.contract.constructor, *self.contract.methods]:
+            if method.name != "constructor":
+                check(method.name, method.source_location)
+            for p in method.params:
+                check(p.name, method.source_location)
+            walk(method.body)
 
     # -------------------------------------------------------------------
     # Property validation
@@ -172,6 +268,13 @@ class _ValidationContext:
                         f"property '{prop.name}' initializer must be a literal value",
                         loc=prop.source_location,
                     )
+
+                # N-414 (peer of TS F-265): the shape checks above never validate
+                # a ByteStringLiteral's HEX FORMAT; that lives in
+                # _validate_expression, which a property initializer never
+                # reached. An odd-length literal used to surface two passes later
+                # as an opaque stack-lowering error.
+                self._validate_expression(prop.initializer)
 
         # SmartContract (and the asm-escape-hatch UnsafeSmartContract) require
         # all properties to be readonly.
@@ -233,6 +336,19 @@ class _ValidationContext:
                 loc=loc,
             )
 
+    def _reject_unknown_param_type(self, param, where: str, loc) -> None:
+        # N-325: a parameter whose type is a name that is not a Rúnar type.
+        # "unknown" is the missing-annotation case, diagnosed by the parser;
+        # StatefulContext is the explicit context parameter of the Zig/Go/Move
+        # stateful surfaces, dropped by ANF lowering.
+        t = param.type
+        if isinstance(t, CustomType) and t.name not in ("unknown", "StatefulContext"):
+            self._add_error(
+                f"type '{t.name}' of parameter '{param.name}' in {where} "
+                "is not a Rúnar type",
+                loc=loc,
+            )
+
     # -------------------------------------------------------------------
     # Constructor validation
     # -------------------------------------------------------------------
@@ -249,6 +365,7 @@ class _ValidationContext:
                     "Use initialized properties or pass each element as a separate parameter.",
                     loc=ctor.source_location,
                 )
+            self._reject_unknown_param_type(param, "constructor", ctor.source_location)
 
         # Check super() as first statement
         if len(ctor.body) == 0:
@@ -445,6 +562,9 @@ class _ValidationContext:
                     "Arrays are only allowed as contract properties.",
                     loc=method.source_location,
                 )
+            self._reject_unknown_param_type(
+                param, f"method '{method.name}'", method.source_location
+            )
 
         # `return` is a PRIVATE-helper construct only (NEW-012).
         if method.visibility == "public":
@@ -721,6 +841,29 @@ class _ValidationContext:
                 )
             self._validate_expression(stmt.init)
         elif isinstance(stmt, AssignmentStmt):
+            # F-013: only a FixedArray property is index-writable. Any other
+            # index target (a ByteString property, a local, a parameter) is
+            # left alone by expand_fixed_arrays and anf_lower lowers it as a
+            # READ, dropping the write -- a deployable script whose state
+            # never changes. Reject it here with a location instead.
+            if isinstance(stmt.target, IndexAccessExpr):
+                root = stmt.target
+                while isinstance(root, IndexAccessExpr):
+                    root = root.object
+                fixed_array_props = {
+                    p.name for p in self.contract.properties
+                    if isinstance(p.type, FixedArrayType)
+                }
+                if not (
+                    isinstance(root, PropertyAccessExpr)
+                    and root.property in fixed_array_props
+                ):
+                    self._add_error(
+                        "index assignment is only supported on FixedArray "
+                        "contract properties; the target here is not a "
+                        "FixedArray property",
+                        loc=stmt.source_location,
+                    )
             self._validate_expression(stmt.target)
             self._validate_expression(stmt.value)
         elif isinstance(stmt, IfStmt):
@@ -746,7 +889,7 @@ class _ValidationContext:
         # binds ``iterVar = start + i*step`` on each unrolled iteration.
         if isinstance(stmt.condition, BinaryExpr):
             if not _is_compile_time_constant(stmt.condition.right):
-                self._add_error("for loop bound must be a compile-time constant")
+                self._add_error(_for_loop_bound_diagnostic(stmt.condition.right))
 
         # R-148: the START, checked the same way and for the same reason. Until
         # now only the BOUND was validated here; a non-literal start reached
@@ -762,11 +905,7 @@ class _ValidationContext:
         # in ``_extract_loop_shape`` stays as the backstop for ``--ir`` inputs,
         # which run no frontend at all.
         if stmt.init is not None and not _is_compile_time_constant(stmt.init.init):
-            self._add_error(
-                "Cannot determine loop start at compile time. "
-                "For-loop iterators must start at an integer literal.",
-                stmt.source_location,
-            )
+            self._add_error(LOOP_START_DIAGNOSTIC, stmt.source_location)
 
         self._validate_for_condition_tests_iterator(stmt)
 
@@ -829,15 +968,7 @@ class _ValidationContext:
 
         Shared verbatim with the other six tiers.
         """
-        via_clause = f" (reached through private method '{via}')" if via else ""
-        return (
-            f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
-            "body. A loop body lowers into its own scope whose declared outputs never "
-            "reach the method's output list, so the continuation hash would commit to "
-            "fewer outputs than the transaction actually creates: the spend is rejected "
-            "by every shipped SDK and any successor it produces is unspendable. Move the "
-            "call out of the loop."
-        )
+        return loop_output_intrinsic_msg(intrinsic, via)
 
     def _validate_no_output_intrinsic_in_loop(self, stmt: ForStmt) -> None:
         """Reject an output intrinsic called inside a loop body (R-127).
@@ -929,6 +1060,19 @@ class _ValidationContext:
                 return found
             return self._find_output_intrinsic(list(stmt.then) + list(stmt.else_), seen)
         if isinstance(stmt, ForStmt):
+            if stmt.init is not None:
+                found = self._find_output_intrinsic_in_statement(stmt.init, seen)
+                if found is not None:
+                    return found
+            found = self._find_output_intrinsic_in_expr(
+                stmt.condition, stmt.source_location, seen
+            )
+            if found is not None:
+                return found
+            if stmt.update is not None:
+                found = self._find_output_intrinsic_in_statement(stmt.update, seen)
+                if found is not None:
+                    return found
             return self._find_output_intrinsic(stmt.body, seen)
         return None
 
@@ -950,6 +1094,24 @@ class _ValidationContext:
             if found is not None:
                 return found
         return None
+
+    def _validate_no_output_intrinsic_in_ternary_arm(self, expr: TernaryExpr) -> None:
+        """Reject an output intrinsic in either arm of a ternary (N-049).
+
+        ``anf_lower._lower_ternary_expr`` lowers each arm into a sub-context
+        whose output refs are dropped -- unlike the if-statement lowering, which
+        merges each arm's refs into the parent -- so the continuation hash would
+        omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout
+        was accepted on every tier). Private helpers are followed because they
+        are inlined into the arm. A ternary that only selects values is
+        untouched.
+        """
+        for arm in (expr.consequent, expr.alternate):
+            found = self._find_output_intrinsic_in_expr(arm, None, set())
+            if found is not None:
+                intrinsic, via, _ = found
+                self._add_error(ternary_output_intrinsic_msg(intrinsic, via))
+                return
 
     def _validate_for_update(self, stmt: ForStmt) -> None:
         """Reject any for-loop update clause the loop model cannot represent
@@ -982,7 +1144,11 @@ class _ValidationContext:
         ``i = i + 1`` / ``i = i - 1`` / ``i = 1 + i`` that ``i += 1`` becomes in
         the Solidity, Zig and Java parsers; and the effect-free no-op sentinel
         (a literal or a bare identifier) that the while-shaped parsers
-        synthesize when the source has no continue expression at all.
+        synthesize when the source has no continue expression at all -- but
+        only on a loop whose condition does not test its declared iterator
+        (already refused by the condition rule). On a real iterator a no-op
+        update never advances it: ``var i = 3; while (i < 5) : (i)`` compiled
+        two laps over i = 3, 4 (N-116).
 
         The advanced variable must be the declared iterator or the identifier
         the condition tests. Both are needed: the Zig parser only folds
@@ -999,7 +1165,17 @@ class _ValidationContext:
         ):
             allowed.append(stmt.condition.left.name)
 
-        if _is_representable_for_update(allowed, stmt.update):
+        # N-116: the no-op sentinel is tolerated only on a loop the condition
+        # rule already refuses (placeholder iterator). On a real iterator it
+        # never advances, yet the unrolled loop would still step by one.
+        cond_tests_iter = (
+            stmt.init is not None
+            and isinstance(stmt.condition, BinaryExpr)
+            and isinstance(stmt.condition.left, Identifier)
+            and stmt.condition.left.name == stmt.init.name
+        )
+
+        if _is_representable_for_update(allowed, stmt.update, not cond_tests_iter):
             return
 
         self._add_error(LOOP_UPDATE_DIAGNOSTIC, stmt.source_location)
@@ -1027,6 +1203,7 @@ class _ValidationContext:
         elif isinstance(expr, MemberExpr):
             self._validate_expression(expr.object)
         elif isinstance(expr, TernaryExpr):
+            self._validate_no_output_intrinsic_in_ternary_arm(expr)
             self._validate_expression(expr.condition)
             self._validate_expression(expr.consequent)
             self._validate_expression(expr.alternate)
@@ -1037,44 +1214,69 @@ class _ValidationContext:
             self._validate_expression(expr.operand)
         elif isinstance(expr, DecrementExpr):
             self._validate_expression(expr.operand)
+        elif isinstance(expr, ArrayLiteralExpr):
+            for el in expr.elements:
+                self._validate_expression(el)
         elif isinstance(expr, ByteStringLiteral):
             val = expr.value
             if len(val) > 0:
-                if len(val) % 2 != 0:
-                    self._add_error(
-                        f"ByteString literal '{val}' has odd length ({len(val)}) "
-                        f"\u2014 hex strings must have an even number of characters"
-                    )
+                # N-436: TS counts UTF-16 code units; len(val) counts code points.
+                units = len(val.encode("utf-16-le", "surrogatepass")) // 2
+                # N-449: located at the literal itself, never at the enclosing
+                # statement -- so these bypass `_add_error`'s R-149 fallback.
+                # A literal without a location prints bare, as in TS.
+                if units % 2 != 0:
+                    self.errors.append(Diagnostic(
+                        message=f"ByteString literal '{val}' has odd length ({units}) "
+                        f"\u2014 hex strings must have an even number of characters",
+                        severity=Severity.ERROR,
+                        loc=expr.source_location,
+                    ))
                 elif not re.fullmatch(r'[0-9a-fA-F]*', val):
-                    self._add_error(
-                        f"ByteString literal '{val}' contains non-hex characters "
-                        f"\u2014 only 0-9, a-f, A-F are allowed"
-                    )
+                    self.errors.append(Diagnostic(
+                        message=f"ByteString literal '{val}' contains non-hex characters "
+                        f"\u2014 only 0-9, a-f, A-F are allowed",
+                        severity=Severity.ERROR,
+                        loc=expr.source_location,
+                    ))
 
     # -------------------------------------------------------------------
     # Recursion detection
     # -------------------------------------------------------------------
 
-    def check_no_recursion(self) -> None:
+    def check_no_recursion(self) -> bool:
+        """Report recursion and the N-180 call depth; True iff MAX_CALL_DEPTH was exceeded."""
         call_graph: dict[str, set[str]] = {}
         method_names: set[str] = set()
 
         for method in self.contract.methods:
             method_names.add(method.name)
             calls: set[str] = set()
-            _collect_method_calls(method.body, calls)
+            _collect_method_calls(method.body, calls, bare=True)
             call_graph[method.name] = calls
 
-        # Check for cycles using DFS
+        # N-180: one iterative pass answers, for every method, whether it
+        # reaches a cycle and how deep its call chain is, in O(methods + calls).
+        # The old per-method DFS restarted for each method (quadratic on a
+        # chain) and recursed once per link.
+        reaches_cycle, depth = _analyze_call_graph(self.contract.methods, call_graph, method_names)
+
         for method in self.contract.methods:
-            visited: set[str] = set()
-            stack: set[str] = set()
-            if _has_cycle(method.name, call_graph, method_names, visited, stack):
+            if reaches_cycle[method.name]:
                 self._add_error(
                     f"recursion detected: method '{method.name}' calls itself "
                     f"directly or indirectly",
                     loc=method.source_location,
                 )
+
+        # N-180: private methods are inlined at every call site, so the call
+        # depth is the inlining depth. Report the first method (declaration
+        # order) past it.
+        for method in self.contract.methods:
+            if not reaches_cycle[method.name] and depth[method.name] > MAX_CALL_DEPTH:
+                self._add_error(call_depth_message(method.name), loc=method.source_location)
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1412,9 @@ def _is_literal_one(expr: Expression | None) -> bool:
     return isinstance(expr, BigIntLiteral) and expr.value == 1
 
 
-def _is_representable_for_update(allowed: list[str], update: Statement | None) -> bool:
+def _is_representable_for_update(
+    allowed: list[str], update: Statement | None, accept_no_op_sentinel: bool
+) -> bool:
     if isinstance(update, ExpressionStmt):
         e = update.expr
         if isinstance(e, (IncrementExpr, DecrementExpr)):
@@ -1218,8 +1422,11 @@ def _is_representable_for_update(allowed: list[str], update: Statement | None) -
         # The no-op sentinel a while-shaped frontend synthesizes when the source
         # carries no continue expression: zig's ``while (c) {}``, move's
         # ``while (c) {}``, go's ``for c {}``. Reading a literal or a bare
-        # identifier has no effect, so discarding it loses nothing.
-        return isinstance(e, (BigIntLiteral, BoolLiteral, Identifier))
+        # identifier has no effect, so discarding it loses nothing -- on a loop
+        # the condition rule already refuses (N-116).
+        return accept_no_op_sentinel and isinstance(
+            e, (BigIntLiteral, BoolLiteral, Identifier)
+        )
 
     if isinstance(update, AssignmentStmt):
         # ``i += 1`` / ``i -= 1`` arrive here as ``i = i + 1`` / ``i = i - 1``.
@@ -1237,6 +1444,24 @@ def _is_representable_for_update(allowed: list[str], update: Statement | None) -
         return False
 
     return False
+
+
+def _for_loop_bound_diagnostic(bound: Expression | None) -> str:
+    # The reference (TypeScript) tier's sentence for a for-loop bound that is not
+    # an integer literal. The reference's validator trusts a bare identifier (or
+    # boolean literal, or a negation of one) as "could be a const" and lets ANF
+    # lowering refuse it with the "Cannot determine" sentence; every other
+    # non-literal shape (``this.x``, an expression) is refused by its validator
+    # with the "must be a compile-time constant" sentence. Both sentences are
+    # shared verbatim by all seven tiers (N-026).
+    while isinstance(bound, UnaryExpr) and bound.op == "-":
+        bound = bound.operand
+    if isinstance(bound, (Identifier, BoolLiteral)):
+        return (
+            "Cannot determine loop bound at compile time. "
+            "For-loop bounds must be integer literals."
+        )
+    return "For loop bound must be a compile-time constant (literal or const variable)"
 
 
 def _is_compile_time_constant(expr: Expression | None) -> bool:
@@ -1543,7 +1768,11 @@ def _walk_expressions_in_stmt(stmt: Statement, visitor) -> None:
         _walk_expressions_in_body(stmt.then, visitor)
         _walk_expressions_in_body(stmt.else_, visitor)
     elif isinstance(stmt, ForStmt):
+        if stmt.init is not None:
+            _walk_expressions_in_stmt(stmt.init, visitor)
         _walk_expr(stmt.condition, visitor)
+        if stmt.update is not None:
+            _walk_expressions_in_stmt(stmt.update, visitor)
         _walk_expressions_in_body(stmt.body, visitor)
     elif isinstance(stmt, ReturnStmt):
         if stmt.value is not None:
@@ -1576,38 +1805,369 @@ def _walk_expr(expr: Expression | None, visitor) -> None:
         _walk_expr(expr.operand, visitor)
     elif isinstance(expr, DecrementExpr):
         _walk_expr(expr.operand, visitor)
+    elif isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            _walk_expr(el, visitor)
+
+
+# ---------------------------------------------------------------------------
+# F-286: verifyRabinSig's public key must not be chosen by the spender
+# ---------------------------------------------------------------------------
+
+#: The one diagnostic every tier emits for F-286 (user decision R78).
+RABIN_PUBKEY_PROVENANCE_MESSAGE = (
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; "
+    "a spender-supplied Rabin modulus lets anyone forge a signature"
+)
+
+
+def rabin_key_write_message(prop: str) -> str:
+    """N-205 (a): the diagnostic every tier emits when a mutable key property is
+    written, outside the constructor, with a value the F-286 rule does not trust."""
+    return (
+        f"verifyRabinSig public key property '{prop}' may only be assigned a contract property or a literal "
+        "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
+    )
+
+
+class _RabinScope:
+    """Per-method view: params, every value bound to each local, ++/-- names."""
+
+    def __init__(self, method: MethodNode) -> None:
+        self.method = method
+        self.params: list[str] = [p.name for p in method.params]
+        self.bindings: dict[str, list[Expression]] = {}
+        self.mutated: set[str] = set()
+        # N-205: names declared as locals (a bare property write also lands in
+        # ``bindings``).
+        self.declared: set[str] = set()
+        self._visit(method.body)
+
+    def _bind(self, name: str, value: Expression | None) -> None:
+        # A missing value cannot be shown trusted: record it as untrusted.
+        self.bindings.setdefault(name, []).append(value)  # type: ignore[arg-type]
+
+    def _visit_expr(self, expr: Expression | None) -> None:
+        def visitor(e: Expression) -> None:
+            if isinstance(e, (IncrementExpr, DecrementExpr)) and isinstance(e.operand, Identifier):
+                self.mutated.add(e.operand.name)
+        _walk_expr(expr, visitor)
+
+    def _visit(self, stmts: list[Statement]) -> None:
+        for stmt in stmts:
+            if stmt is None:
+                continue
+            if isinstance(stmt, VariableDeclStmt):
+                self.declared.add(stmt.name)
+                self._bind(stmt.name, stmt.init)
+                self._visit_expr(stmt.init)
+            elif isinstance(stmt, AssignmentStmt):
+                if isinstance(stmt.target, Identifier):
+                    self._bind(stmt.target.name, stmt.value)
+                self._visit_expr(stmt.target)
+                self._visit_expr(stmt.value)
+            elif isinstance(stmt, ExpressionStmt):
+                self._visit_expr(stmt.expr)
+            elif isinstance(stmt, IfStmt):
+                self._visit_expr(stmt.condition)
+                self._visit(stmt.then)
+                self._visit(stmt.else_)
+            elif isinstance(stmt, ForStmt):
+                self._visit([stmt.init] if stmt.init is not None else [])
+                self._visit_expr(stmt.condition)
+                self._visit([stmt.update] if stmt.update is not None else [])
+                self._visit(stmt.body)
+            elif isinstance(stmt, ReturnStmt):
+                self._visit_expr(stmt.value)
+
+
+def _walk_expressions_in_body_deep(stmts: list[Statement], visitor) -> None:
+    """Like ``_walk_expressions_in_body``, but also visits every ``for`` loop's
+    init and update, at any nesting depth."""
+    for stmt in stmts:
+        if stmt is None:
+            continue
+        if isinstance(stmt, IfStmt):
+            _walk_expr(stmt.condition, visitor)
+            _walk_expressions_in_body_deep(stmt.then, visitor)
+            _walk_expressions_in_body_deep(stmt.else_, visitor)
+        elif isinstance(stmt, ForStmt):
+            _walk_expressions_in_body_deep([stmt.init] if stmt.init is not None else [], visitor)
+            _walk_expr(stmt.condition, visitor)
+            _walk_expressions_in_body_deep([stmt.update] if stmt.update is not None else [], visitor)
+            _walk_expressions_in_body_deep(stmt.body, visitor)
+        else:
+            _walk_expressions_in_stmt(stmt, visitor)
+
+
+def _check_rabin_pubkey_provenance(ctx: "_ValidationContext") -> None:
+    """F-286: the 4th argument of ``verifyRabinSig`` must be fixed by the deployer.
+
+    Port of ``checkRabinPubKeyProvenance`` (TS 02-validate.ts). Trusted: a
+    property read (``this.x`` / member on ``this``, or a bare identifier naming
+    a property no param/local shadows); a bigint literal; a local whose init AND
+    every assignment are trusted (never if ++/--); a PRIVATE method's parameter
+    that every call site (at least one) binds to a trusted value -- least fixed
+    point. Public and constructor parameters, arithmetic, ternaries and calls
+    are refused.
+    """
+    contract = ctx.contract
+    property_names = {p.name for p in contract.properties}
+    private_methods: dict[str, MethodNode] = {
+        m.name: m for m in contract.methods if m.visibility == "private"
+    }
+    all_methods = [contract.constructor, *contract.methods]
+    scopes = [_RabinScope(m) for m in all_methods]
+    trusted_params: dict[str, set[int]] = {name: set() for name in private_methods}
+
+    def is_trusted(expr: Expression | None, scope: _RabinScope, visiting: set[str]) -> bool:
+        if isinstance(expr, PropertyAccessExpr):
+            return True
+        if isinstance(expr, MemberExpr):
+            return isinstance(expr.object, Identifier) and expr.object.name == "this"
+        if isinstance(expr, BigIntLiteral):
+            return True
+        if isinstance(expr, Identifier):
+            name = expr.name
+            is_param = name in scope.params
+            local_values = scope.bindings.get(name)
+            if not is_param and local_values is None:
+                return name in property_names
+            if name in scope.mutated:
+                return False
+            if is_param:
+                method = scope.method
+                if method.visibility != "private" or method is contract.constructor:
+                    return False
+                idx = scope.params.index(name)
+                if idx not in trusted_params.get(method.name, set()):
+                    return False
+            if local_values is not None:
+                if name in visiting:
+                    return False
+                visiting.add(name)
+                ok = all(is_trusted(v, scope, visiting) for v in local_values)
+                visiting.discard(name)
+                if not ok:
+                    return False
+            return True
+        return False
+
+    def private_callee(expr: Expression) -> str | None:
+        if not isinstance(expr, CallExpr):
+            return None
+        c = expr.callee
+        name: str | None = None
+        if isinstance(c, PropertyAccessExpr):
+            name = c.property
+        elif isinstance(c, MemberExpr) and isinstance(c.object, Identifier) and c.object.name == "this":
+            name = c.property
+        return name if name is not None and name in private_methods else None
+
+    call_sites: dict[str, list[tuple[list[Expression], _RabinScope]]] = {
+        name: [] for name in private_methods
+    }
+    for scope in scopes:
+        def collect(e: Expression, scope: _RabinScope = scope) -> None:
+            callee = private_callee(e)
+            if callee is not None:
+                call_sites[callee].append((e.args, scope))
+        _walk_expressions_in_body_deep(scope.method.body, collect)
+
+    # Least fixed point: monotone, so it terminates.
+    changed = True
+    while changed:
+        changed = False
+        for name, method in private_methods.items():
+            sites = call_sites[name]
+            if not sites:
+                continue
+            trusted = trusted_params[name]
+            for i in range(len(method.params)):
+                if i in trusted:
+                    continue
+                if all(i < len(args) and is_trusted(args[i], sc, set()) for args, sc in sites):
+                    trusted.add(i)
+                    changed = True
+
+    for scope in scopes:
+        def check(e: Expression, scope: _RabinScope = scope) -> None:
+            if (
+                isinstance(e, CallExpr)
+                and isinstance(e.callee, Identifier)
+                and e.callee.name == "verifyRabinSig"
+                and len(e.args) >= 4
+                and not is_trusted(e.args[3], scope, set())
+            ):
+                # N-464 (user decision R186): anchored at the 4th argument
+                # itself; the method only when the argument has no location.
+                ctx._add_error(
+                    RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                    _expr_loc(e.args[3]) or scope.method.source_location,
+                )
+        _walk_expressions_in_body_deep(scope.method.body, check)
+
+    # N-205 (a): a MUTABLE property used as the key is state the previous spend
+    # chose, so outside the constructor it may only be written with a value
+    # ``is_trusted`` accepts. KEY properties: those whose value reaches a 4th
+    # argument, closed under "is written into a key property".
+    def sources_of(expr: Expression | None, scope: _RabinScope, out: set[str], visiting: set[str]) -> None:
+        if isinstance(expr, PropertyAccessExpr):
+            out.add(expr.property)
+            return
+        if isinstance(expr, MemberExpr):
+            if isinstance(expr.object, Identifier) and expr.object.name == "this":
+                out.add(expr.property)
+            return
+        if not isinstance(expr, Identifier):
+            return
+        name = expr.name
+        is_param = name in scope.params
+        local_values = scope.bindings.get(name)
+        if not is_param and local_values is None:
+            if name in property_names:
+                out.add(name)
+            return
+        key = f"{scope.method.name}\0{name}"
+        if key in visiting:
+            return
+        visiting.add(key)
+        for v in local_values or []:
+            sources_of(v, scope, out, visiting)
+        method = scope.method
+        if is_param and method.visibility == "private" and method is not contract.constructor:
+            idx = scope.params.index(name)
+            for args, site_scope in call_sites.get(method.name, []):
+                if idx < len(args):
+                    sources_of(args[idx], site_scope, out, visiting)
+
+    key_props: set[str] = set()
+    for scope in scopes:
+        def collect_key(e: Expression, scope: _RabinScope = scope) -> None:
+            if (
+                isinstance(e, CallExpr)
+                and isinstance(e.callee, Identifier)
+                and e.callee.name == "verifyRabinSig"
+                and len(e.args) >= 4
+            ):
+                sources_of(e.args[3], scope, key_props, set())
+        _walk_expressions_in_body_deep(scope.method.body, collect_key)
+
+    # Every write to a property outside the constructor: (prop, value, scope,
+    # loc). ``value`` is None for ++/--, which no value makes trusted.
+    mutable_props = [p.name for p in contract.properties if not p.readonly]
+    writes: list[tuple[str, Expression | None, _RabinScope, object]] = []
+
+    def written_prop(target: Expression | None, scope: _RabinScope) -> str | None:
+        if isinstance(target, PropertyAccessExpr):
+            return target.property
+        if isinstance(target, MemberExpr) and isinstance(target.object, Identifier) and target.object.name == "this":
+            return target.property
+        if (
+            isinstance(target, Identifier)
+            and target.name in property_names
+            and target.name not in scope.params
+            and target.name not in scope.declared
+        ):
+            return target.name
+        return None
+
+    def collect_assignments(stmts: list[Statement], scope: _RabinScope) -> None:
+        for stmt in stmts:
+            if stmt is None:
+                continue
+            if isinstance(stmt, AssignmentStmt):
+                prop = written_prop(stmt.target, scope)
+                if prop is not None:
+                    writes.append((prop, stmt.value, scope, stmt.source_location))
+            elif isinstance(stmt, IfStmt):
+                collect_assignments(stmt.then, scope)
+                collect_assignments(stmt.else_, scope)
+            elif isinstance(stmt, ForStmt):
+                collect_assignments([s for s in (stmt.init, stmt.update) if s is not None], scope)
+                collect_assignments(stmt.body, scope)
+
+    def output_callee(expr: Expression) -> str | None:
+        if not isinstance(expr, CallExpr):
+            return None
+        c = expr.callee
+        if isinstance(c, (PropertyAccessExpr, MemberExpr)):
+            return c.property
+        return None
+
+    for scope in scopes:
+        if scope.method is contract.constructor:
+            continue
+        collect_assignments(scope.method.body, scope)
+
+        def collect_writes(e: Expression, scope: _RabinScope = scope) -> None:
+            loc = scope.method.source_location
+            if isinstance(e, (IncrementExpr, DecrementExpr)):
+                prop = written_prop(e.operand, scope)
+                if prop is not None:
+                    writes.append((prop, None, scope, loc))
+            elif output_callee(e) == "addOutput":
+                # addOutput(satoshis, ...values): values are positional over
+                # the mutable properties in declaration order. A single
+                # array-literal value list (the Zig tuple form) is unpacked,
+                # as ANF lowering's _flatten_add_output_args does.
+                values = e.args[1].elements if len(e.args) == 2 and isinstance(e.args[1], ArrayLiteralExpr) else e.args[1:]
+                for i, value in enumerate(values):
+                    if i < len(mutable_props):
+                        writes.append((mutable_props[i], value, scope, loc))
+        _walk_expressions_in_body_deep(scope.method.body, collect_writes)
+
+    grew = True
+    while grew:
+        before = len(key_props)
+        for prop, value, sc, _loc in writes:
+            if prop in key_props and value is not None and is_trusted(value, sc, set()):
+                sources_of(value, sc, key_props, set())
+        grew = len(key_props) != before
+
+    mutable = set(mutable_props)
+    for prop, value, sc, loc in writes:
+        if prop not in key_props or prop not in mutable:
+            continue
+        if value is not None and is_trusted(value, sc, set()):
+            continue
+        ctx._add_error(rabin_key_write_message(prop), loc)
 
 
 # ---------------------------------------------------------------------------
 # Recursion detection helpers
 # ---------------------------------------------------------------------------
 
-def _collect_method_calls(stmts: list[Statement], calls: set[str]) -> None:
+def _collect_method_calls(stmts: list[Statement], calls: set[str], bare: bool = False) -> None:
     for stmt in stmts:
-        _collect_method_calls_in_stmt(stmt, calls)
+        _collect_method_calls_in_stmt(stmt, calls, bare)
 
 
-def _collect_method_calls_in_stmt(stmt: Statement, calls: set[str]) -> None:
+def _collect_method_calls_in_stmt(stmt: Statement, calls: set[str], bare: bool = False) -> None:
     if isinstance(stmt, ExpressionStmt):
-        _collect_method_calls_in_expr(stmt.expr, calls)
+        _collect_method_calls_in_expr(stmt.expr, calls, bare)
     elif isinstance(stmt, VariableDeclStmt):
-        _collect_method_calls_in_expr(stmt.init, calls)
+        _collect_method_calls_in_expr(stmt.init, calls, bare)
     elif isinstance(stmt, AssignmentStmt):
-        _collect_method_calls_in_expr(stmt.target, calls)
-        _collect_method_calls_in_expr(stmt.value, calls)
+        _collect_method_calls_in_expr(stmt.target, calls, bare)
+        _collect_method_calls_in_expr(stmt.value, calls, bare)
     elif isinstance(stmt, IfStmt):
-        _collect_method_calls_in_expr(stmt.condition, calls)
-        _collect_method_calls(stmt.then, calls)
-        _collect_method_calls(stmt.else_, calls)
+        _collect_method_calls_in_expr(stmt.condition, calls, bare)
+        _collect_method_calls(stmt.then, calls, bare)
+        _collect_method_calls(stmt.else_, calls, bare)
     elif isinstance(stmt, ForStmt):
-        _collect_method_calls_in_expr(stmt.condition, calls)
-        _collect_method_calls(stmt.body, calls)
+        if stmt.init is not None:
+            _collect_method_calls_in_stmt(stmt.init, calls, bare)
+        _collect_method_calls_in_expr(stmt.condition, calls, bare)
+        if stmt.update is not None:
+            _collect_method_calls_in_stmt(stmt.update, calls, bare)
+        _collect_method_calls(stmt.body, calls, bare)
     elif isinstance(stmt, ReturnStmt):
         if stmt.value is not None:
-            _collect_method_calls_in_expr(stmt.value, calls)
+            _collect_method_calls_in_expr(stmt.value, calls, bare)
 
 
-def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str]) -> None:
+def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str], bare: bool = False) -> None:
     if expr is None:
         return
     if isinstance(expr, CallExpr):
@@ -1616,50 +2176,89 @@ def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str]) -> N
         if isinstance(expr.callee, MemberExpr):
             if isinstance(expr.callee.object, Identifier) and expr.callee.object.name == "this":
                 calls.add(expr.callee.property)
-        _collect_method_calls_in_expr(expr.callee, calls)
+        # N-180: the Solidity, Move and Java surfaces may call a helper as a
+        # bare ``m(...)``. Counted only for the recursion / call-depth graph
+        # (``bare``), and only names of contract methods count there
+        # (_analyze_call_graph filters by method_names), so builtins are
+        # unaffected.
+        if bare and isinstance(expr.callee, Identifier):
+            calls.add(expr.callee.name)
+        _collect_method_calls_in_expr(expr.callee, calls, bare)
         for arg in expr.args:
-            _collect_method_calls_in_expr(arg, calls)
+            _collect_method_calls_in_expr(arg, calls, bare)
     elif isinstance(expr, BinaryExpr):
-        _collect_method_calls_in_expr(expr.left, calls)
-        _collect_method_calls_in_expr(expr.right, calls)
+        _collect_method_calls_in_expr(expr.left, calls, bare)
+        _collect_method_calls_in_expr(expr.right, calls, bare)
     elif isinstance(expr, UnaryExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
     elif isinstance(expr, MemberExpr):
-        _collect_method_calls_in_expr(expr.object, calls)
+        _collect_method_calls_in_expr(expr.object, calls, bare)
     elif isinstance(expr, TernaryExpr):
-        _collect_method_calls_in_expr(expr.condition, calls)
-        _collect_method_calls_in_expr(expr.consequent, calls)
-        _collect_method_calls_in_expr(expr.alternate, calls)
+        _collect_method_calls_in_expr(expr.condition, calls, bare)
+        _collect_method_calls_in_expr(expr.consequent, calls, bare)
+        _collect_method_calls_in_expr(expr.alternate, calls, bare)
     elif isinstance(expr, IndexAccessExpr):
-        _collect_method_calls_in_expr(expr.object, calls)
-        _collect_method_calls_in_expr(expr.index, calls)
+        _collect_method_calls_in_expr(expr.object, calls, bare)
+        _collect_method_calls_in_expr(expr.index, calls, bare)
     elif isinstance(expr, IncrementExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
     elif isinstance(expr, DecrementExpr):
-        _collect_method_calls_in_expr(expr.operand, calls)
+        _collect_method_calls_in_expr(expr.operand, calls, bare)
+    elif isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            _collect_method_calls_in_expr(el, calls, bare)
 
 
-def _has_cycle(
-    name: str,
+def _analyze_call_graph(
+    methods: list,
     call_graph: dict[str, set[str]],
     method_names: set[str],
-    visited: set[str],
-    stack: set[str],
-) -> bool:
-    if name in stack:
-        return True
-    if name in visited:
-        return False
-    visited.add(name)
-    stack.add(name)
+) -> tuple[dict[str, bool], dict[str, int]]:
+    """N-180: for every method, whether it reaches a call cycle, and (when it
+    does not) its call depth: 0 if it calls no contract method, else 1 + the
+    largest call depth among the contract methods it calls. Iterative
+    three-colour DFS with memoisation: O(methods + calls), no recursion.
+    ``reaches_cycle`` matches what a fresh DFS from each method reports."""
+    reaches_cycle: dict[str, bool] = {}
+    depth: dict[str, int] = {}
+    on_stack: set[str] = set()
 
-    for callee in call_graph.get(name, set()):
-        if callee in method_names:
-            if _has_cycle(callee, call_graph, method_names, visited, stack):
-                return True
-
-    stack.discard(name)
-    return False
+    for root in methods:
+        if root.name in reaches_cycle:
+            continue
+        # frame: [name, callees, next, cyc, depth]
+        stack: list[list] = [[root.name, list(call_graph.get(root.name, ())), 0, False, 0]]
+        on_stack.add(root.name)
+        while stack:
+            top = stack[-1]
+            if top[2] < len(top[1]):
+                callee = top[1][top[2]]
+                top[2] += 1
+                if callee not in method_names:
+                    continue
+                if callee in on_stack:
+                    top[3] = True
+                elif callee in reaches_cycle:
+                    if reaches_cycle[callee]:
+                        top[3] = True
+                    else:
+                        top[4] = max(top[4], 1 + depth[callee])
+                else:
+                    on_stack.add(callee)
+                    stack.append([callee, list(call_graph.get(callee, ())), 0, False, 0])
+                continue
+            stack.pop()
+            name, _, _, cyc, d = top
+            on_stack.discard(name)
+            reaches_cycle[name] = cyc
+            depth[name] = d
+            if stack:
+                parent = stack[-1]
+                if cyc:
+                    parent[3] = True
+                else:
+                    parent[4] = max(parent[4], 1 + d)
+    return reaches_cycle, depth
 
 
 def _sub_expressions(expr):
@@ -1678,4 +2277,6 @@ def _sub_expressions(expr):
         return [expr.condition, expr.consequent, expr.alternate]
     if isinstance(expr, IndexAccessExpr):
         return [expr.object, expr.index]
+    if isinstance(expr, ArrayLiteralExpr):
+        return list(expr.elements)
     return []

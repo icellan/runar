@@ -18,15 +18,21 @@ import runar.lang.types.Sig;
  * TypeScript reference runtime. Hash functions use real
  * {@link MessageDigest} implementations (SHA-256 via JDK, RIPEMD-160 via
  * BouncyCastle when available, falling back to a pure-Java port otherwise).
- * Signature verification is mocked (always returns success) since genuine
- * verification would require a full Bitcoin transaction context; that is
- * the Script VM's job, not the simulator's.
+ *
+ * <p>Signature verification is a MIXTURE, not a blanket mock. {@link #checkSig}
+ * is a null check (true whenever both arguments are non-null; no ECDSA math
+ * is performed, since genuine verification would require a full Bitcoin
+ * transaction context -- that is the Script VM's job, not the simulator's),
+ * and {@link #checkMultiSig} only compares array lengths. By contrast
+ * {@link #verifyRabinSig}, {@link #verifyWOTS}, the six
+ * {@code verifySLHDSA_SHA2_*} methods, and {@link #verifyECDSA_P256} /
+ * {@link #verifyECDSA_P384} are REAL verifiers that reject a malformed or
+ * forged signature rather than returning a constant.
  *
  * <p>Math and ByteString operations are real. EC operations use
  * BouncyCastle's secp256k1 curve if the BC provider is on the classpath.
- * Post-quantum verifications (WOTS, SLH-DSA SHA-2 variants), Blake3,
- * NIST P-256 / P-384 ECDSA verification, and SHA-256 partial compression
- * (sha256Compress / sha256Finalize) are real implementations.
+ * Blake3 and SHA-256 partial compression (sha256Compress / sha256Finalize)
+ * are real implementations.
  *
  * <p>BabyBear and KoalaBear field arithmetic remain real (small primes,
  * trivial BigInteger ports). BN254 and Poseidon2 are intentionally Go-only
@@ -142,6 +148,10 @@ public final class MockCrypto {
         // Padding range check: 0 <= padding < 65536. Mirrors the on-chain
         // OP_WITHIN bound and blocks the sig=0 / padding=SHA256(msg) forgery.
         if (padBN.signum() < 0 || padBN.compareTo(RABIN_PADDING_LIMIT) >= 0) return false;
+
+        // Signature range: sig < n, mirroring the on-chain F-368 gate. sig + k*n
+        // squares to the same residue but the deployed script aborts on it.
+        if (sig.compareTo(pubKey) >= 0) return false;
 
         BigInteger hashBN = bytesToUnsignedLE(sha256(msg.toByteArray()));
 
@@ -522,7 +532,7 @@ public final class MockCrypto {
     public static ByteString blake3Hash(ByteString data) {
         byte[] msg = data.toByteArray();
         if (msg.length > 64) {
-            throw new IllegalArgumentException("blake3Hash: simulator supports messages ≤ 64 bytes, got " + msg.length);
+            throw new IllegalArgumentException("blake3Hash: message must be <= 64 bytes, got " + msg.length);
         }
         byte[] padded = new byte[64];
         System.arraycopy(msg, 0, padded, 0, msg.length);
@@ -552,9 +562,9 @@ public final class MockCrypto {
     }
 
     public static BigInteger clamp(BigInteger value, BigInteger lo, BigInteger hi) {
-        if (value.compareTo(lo) < 0) return lo;
-        if (value.compareTo(hi) > 0) return hi;
-        return value;
+        // The compiled script is `<value> <lo> OP_MAX <hi> OP_MIN`, i.e.
+        // min(max(value, lo), hi): with lo > hi, hi wins (N-030).
+        return min(max(value, lo), hi);
     }
 
     public static BigInteger sign(BigInteger x) {
@@ -563,6 +573,11 @@ public final class MockCrypto {
 
     public static BigInteger pow(BigInteger base, BigInteger exp) {
         if (exp.signum() < 0) throw new ArithmeticException("pow: negative exponent");
+        // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and
+        // ABORTS for any exponent above 32, even where the power is trivial (F-134).
+        if (exp.compareTo(BigInteger.valueOf(32)) > 0) {
+            throw new ArithmeticException("pow: exponent outside the supported domain (exp > 32)");
+        }
         BigInteger result = BigInteger.ONE;
         BigInteger b = base;
         BigInteger e = exp;
@@ -584,11 +599,24 @@ public final class MockCrypto {
 
     public static BigInteger sqrt(BigInteger n) {
         if (n.signum() < 0) throw new ArithmeticException("sqrt: negative input");
+        // The compiled script VERIFYs OP_SIZE(n) < 63, i.e. n < 2^495 (F-134).
+        if (n.bitLength() > 495) {
+            throw new ArithmeticException("sqrt: input outside the supported domain (n >= 2^495)");
+        }
         return n.sqrt();
     }
 
     public static BigInteger gcd(BigInteger a, BigInteger b) {
-        return a.abs().gcd(b.abs());
+        // The compiled script unrolls exactly 256 Euclid steps and returns the
+        // partial remainder when they are not enough (N-030).
+        BigInteger x = a.abs();
+        BigInteger y = b.abs();
+        for (int i = 0; i < 256 && y.signum() != 0; i++) {
+            BigInteger t = y;
+            y = x.mod(y);
+            x = t;
+        }
+        return x;
     }
 
     public static BigInteger divmod(BigInteger a, BigInteger b) {
@@ -596,6 +624,7 @@ public final class MockCrypto {
     }
 
     public static BigInteger log2(BigInteger n) {
+        // The compiled script is exact for every n > 0 and aborts for n <= 0 (N-103).
         if (n.signum() <= 0) throw new ArithmeticException("log2: non-positive input");
         return BigInteger.valueOf(n.bitLength() - 1);
     }
@@ -621,16 +650,43 @@ public final class MockCrypto {
         return new ByteString(out);
     }
 
+    /**
+     * N-171 (sibling of F-274): {@code substr} compiles to {@code <data>
+     * <start> OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP} -- TWO chained
+     * OP_SPLITs, the second against the REMAINDER {@code size(data) -
+     * start}. It ABORTS whenever {@code start} is outside
+     * {@code [0, size(data)]} or {@code length} is outside
+     * {@code [0, size(data) - start]}, which collapses to: start &lt; 0,
+     * length &lt; 0, or start + length &gt; size(data). {@code
+     * Arrays.copyOfRange} does not enforce the upper bound: a {@code to}
+     * past the array's end is silently zero-padded instead of thrown (the
+     * same failure mode {@code left} had before F-274), so the bound is
+     * checked explicitly here.
+     */
     public static ByteString substr(ByteString bs, BigInteger start, BigInteger length) {
         int s = start.intValueExact();
         int l = length.intValueExact();
         byte[] all = bs.toByteArray();
+        if (s < 0 || l < 0 || s + l > all.length) {
+            throw new ArithmeticException("substr: start " + s + ", length " + l + " is outside a " + all.length + "-byte value");
+        }
         return new ByteString(Arrays.copyOfRange(all, s, s + l));
     }
 
+    /**
+     * F-274: {@code left}/{@code right} compile to an OP_SPLIT-based script
+     * that ABORTS whenever the split position is outside
+     * {@code [0, size(data)]}. {@code Arrays.copyOfRange} does not: a {@code
+     * to} past the array's end is silently zero-padded instead of thrown, so
+     * the bound is checked explicitly here rather than left to that method.
+     */
     public static ByteString left(ByteString bs, BigInteger length) {
         int l = length.intValueExact();
-        return new ByteString(Arrays.copyOfRange(bs.toByteArray(), 0, l));
+        byte[] all = bs.toByteArray();
+        if (l < 0 || l > all.length) {
+            throw new ArithmeticException("left: length " + l + " is outside a " + all.length + "-byte value");
+        }
+        return new ByteString(Arrays.copyOfRange(all, 0, l));
     }
 
     public static ByteString right(ByteString bs, BigInteger length) {
@@ -827,9 +883,27 @@ public final class MockCrypto {
 
     public static final Point EC_G = new Point(GX, GY);
 
-    /** Modular inverse mod EC_P. */
+    /**
+     * Modular inverse mod EC_P; inv(0) = 0, as the compiled script's Fermat
+     * inverse gives (N-111). An off-curve (x, 0) doubling no longer reaches
+     * it: the script aborts (N-110).
+     */
     private static BigInteger modInvP(BigInteger a) {
-        return a.modInverse(EC_P);
+        BigInteger r = mod(a, EC_P);
+        return r.signum() == 0 ? BigInteger.ZERO : r.modInverse(EC_P);
+    }
+
+    /**
+     * R-117 (N-111): the compiled ecAdd / ecNegate OP_VERIFY x &lt; p and
+     * y &lt; p before any field arithmetic, so a non-canonical coordinate
+     * aborts. The identity O (all-zero) is canonical.
+     */
+    private static void requireCanonical(String fn, Point p) {
+        if (p.infinity) return;
+        if (p.x.compareTo(EC_P) >= 0 || p.y.compareTo(EC_P) >= 0) {
+            throw new IllegalArgumentException(
+                fn + ": point coordinate is not a canonical field element (x and y must be < p)");
+        }
     }
 
     private static BigInteger mod(BigInteger a, BigInteger m) {
@@ -837,12 +911,24 @@ public final class MockCrypto {
         return r.signum() < 0 ? r.add(m) : r;
     }
 
-    /** Add two secp256k1 points using affine formulas. */
+    /** Add two secp256k1 points using affine formulas, with the script's gates. */
     public static Point ecAdd(Point a, Point b) {
+        requireCanonical("ecAdd", a);
+        requireCanonical("ecAdd", b);
+        return addAffine(a, b);
+    }
+
+    private static Point addAffine(Point a, Point b) {
         if (a.infinity) return b;
         if (b.infinity) return a;
         if (a.x.equals(b.x)) {
             if (a.y.equals(b.y)) {
+                // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O
+                // returned above).
+                if (a.y.signum() == 0) {
+                    throw new IllegalArgumentException(
+                        "ecAdd: cannot double a point with y = 0 (the tangent is vertical)");
+                }
                 // Doubling.
                 BigInteger s = a.x.pow(2).multiply(BigInteger.valueOf(3))
                     .multiply(modInvP(a.y.multiply(BigInteger.valueOf(2))));
@@ -861,12 +947,17 @@ public final class MockCrypto {
 
     /** Scalar multiplication via double-and-add. */
     public static Point ecMul(Point p, BigInteger k) {
+        // R-157 (N-111): the compiled ecMul OP_VERIFYs `onCurve(P) OR P == O`
+        // before its ladder, whose +3n trick is sound only for points of order n.
+        if (!p.infinity && !ecOnCurve(p)) {
+            throw new IllegalArgumentException("ecMul: point is neither on secp256k1 nor the point at infinity");
+        }
         BigInteger scalar = mod(k, EC_N);
         Point result = Point.INFINITY;
         Point addend = p;
         while (scalar.signum() > 0) {
-            if (scalar.testBit(0)) result = ecAdd(result, addend);
-            addend = ecAdd(addend, addend);
+            if (scalar.testBit(0)) result = addAffine(result, addend);
+            addend = addAffine(addend, addend);
             scalar = scalar.shiftRight(1);
         }
         return result;
@@ -877,8 +968,9 @@ public final class MockCrypto {
     }
 
     public static Point ecNegate(Point p) {
+        requireCanonical("ecNegate", p);
         if (p.infinity) return p;
-        return new Point(p.x, EC_P.subtract(p.y));
+        return new Point(p.x, mod(EC_P.subtract(p.y), EC_P));
     }
 
     public static boolean ecOnCurve(Point p) {
@@ -890,9 +982,34 @@ public final class MockCrypto {
         // failed on-chain for r = O -- an unspendable output found only after
         // deploy. O is now reachable from ecAdd(P, -P), so this matters.
         if (p.infinity) return false;
+        // CL-BUG-161 / F-243: coordinate canonicity. Point.fromRaw64 parses
+        // each half as an unsigned BigInteger with no range check, so a
+        // coordinate written as x0 + EC_P (still exactly 32 bytes) reaches
+        // the field arithmetic below, which reduces it mod EC_P and accepts
+        // it as if it were x0. The compiled script range-checks x < p AND
+        // y < p BEFORE the curve-equation check (GAP-301), so this mock must
+        // reject what the script rejects.
+        if (p.x.compareTo(EC_P) >= 0 || p.y.compareTo(EC_P) >= 0) return false;
         BigInteger lhs = mod(p.y.pow(2), EC_P);
         BigInteger rhs = mod(p.x.pow(3).add(BigInteger.valueOf(7)), EC_P);
         return lhs.equals(rhs);
+    }
+
+    /**
+     * N-184: a byte-level overload for untrusted, possibly wrong-width input.
+     * {@code Point#fromRaw64} is the only bytes-to-Point path and throws on
+     * anything but 64 bytes -- correct for ecAdd / ecMul / ecNegate, whose
+     * compiled scripts abort on the wrong width too. ecOnCurve is a
+     * PREDICATE and must stay total: the compiled emitPointLengthGate ANDs a
+     * width flag into the result instead of aborting, so a 63- or 65-byte
+     * blob is false, not a thrown exception (packages/runar-testing's
+     * r052-point-length-gate.test.ts pins this on @bsv/sdk Spend). This
+     * overload answers that question directly, without going through the
+     * strict {@code fromRaw64} gate.
+     */
+    public static boolean ecOnCurve(byte[] raw) {
+        if (raw.length != 64) return false;
+        return ecOnCurve(Point.fromRaw64(raw));
     }
 
     public static BigInteger ecModReduce(BigInteger value, BigInteger modulus) {
@@ -900,6 +1017,12 @@ public final class MockCrypto {
     }
 
     public static ByteString ecEncodeCompressed(Point p) {
+        // N-111: the script checks the width only, so O encodes as 02||0^32.
+        if (p.infinity) {
+            byte[] o = new byte[33];
+            o[0] = 0x02;
+            return new ByteString(o);
+        }
         byte[] out = new byte[33];
         out[0] = (byte) (p.y.testBit(0) ? 0x03 : 0x02);
         System.arraycopy(to32(p.x), 0, out, 1, 32);
@@ -907,11 +1030,17 @@ public final class MockCrypto {
     }
 
     public static Point ecMakePoint(BigInteger x, BigInteger y) {
+        // N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+        if (x.signum() < 0 || x.compareTo(EC_P) >= 0 || y.signum() < 0 || y.compareTo(EC_P) >= 0) {
+            throw new IllegalArgumentException(
+                "ecMakePoint: coordinate is not a field element (0 <= v < p)");
+        }
         return new Point(x, y);
     }
 
-    public static BigInteger ecPointX(Point p) { return p.x; }
-    public static BigInteger ecPointY(Point p) { return p.y; }
+    // N-111: the script reads O's coordinates as 0, not as "no value".
+    public static BigInteger ecPointX(Point p) { return p.infinity ? BigInteger.ZERO : p.x; }
+    public static BigInteger ecPointY(Point p) { return p.infinity ? BigInteger.ZERO : p.y; }
 
     // =======================================================================
     // Field arithmetic — stubbed

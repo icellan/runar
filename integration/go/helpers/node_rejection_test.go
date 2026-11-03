@@ -15,7 +15,7 @@ func oldShape(err error) bool { return err != nil }
 //
 // RunarContract.FinalizeCall returns "parsing tx: ..." before it ever reaches
 // provider.Broadcast, and the BUG-100 guard hand-mutates a PreparedCall
-// (TxHex, OpPushTxSig, a swapped preimage). Any SDK change that makes a
+// (TxHex, a swapped preimage). Any SDK change that makes a
 // hand-modified PreparedCall fail assembly therefore turns that guard
 // permanently green while proving nothing about consensus.
 func TestCheckNodeRejected_AssemblyFailureIsNotANodeRejection(t *testing.T) {

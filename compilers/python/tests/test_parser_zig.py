@@ -290,6 +290,43 @@ class TestZigParserBasic:
 
 
 # ---------------------------------------------------------------------------
+# runar.BigintBig (N-182 / R93)
+# ---------------------------------------------------------------------------
+
+ZIG_BIGINT_BIG_SOURCE = """\
+const runar = @import("runar");
+
+pub const BigCoord = struct {
+    pub const Contract = runar.SmartContract;
+
+    x: runar.BigintBig,
+
+    pub fn init(x: runar.BigintBig) BigCoord {
+        return .{ .x = x };
+    }
+
+    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        runar.assert(self.x == y);
+    }
+};
+"""
+
+
+class TestZigParserBigintBig:
+    # Proves: the 256-bit native spelling runar.BigintBig (u256 in
+    # packages/runar-zig, used for EC coordinates) lowers to the same AST
+    # bigint as runar.Bigint, for a property and a parameter. Does NOT prove
+    # the native u256 runtime or any codegen.
+    def test_bigint_big_maps_to_bigint(self):
+        result = parse_source(ZIG_BIGINT_BIG_SOURCE, "BigCoord.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="bigint")
+        check = next(m for m in result.contract.methods if m.name == "check")
+        assert [p.type for p in check.params] == [PrimitiveType(name="bigint")]
+
+
+# ---------------------------------------------------------------------------
 # Stateful contracts
 # ---------------------------------------------------------------------------
 
@@ -306,14 +343,21 @@ class TestZigParserStateful:
         assert count_prop.name == "count"
         assert count_prop.readonly is False
 
-    def test_stateful_counter_strips_initializer_for_ctor_param(self):
-        # `count: i64 = 0` collides with `pub fn init(count: i64)`: the ctor
-        # param always overrides the default so the parser strips the
-        # initializer to match the Zig compiler reference IR.
+    def test_stateful_counter_keeps_initializer_at_parse_time(self):
+        # F-207: `count: i64 = 0` collides with `pub fn init(count: i64)`,
+        # and the constructor assigns that param to `count` (`.count =
+        # count`). The PARSER no longer strips the initializer for this --
+        # that decision now belongs exclusively to
+        # anf_lower.py's `_constructor_assigned_properties`, which is keyed
+        # on the actual constructor assignment rather than a name
+        # coincidence, matching the TS reference's explicit architecture
+        # (01-parse-zig.ts:424-434: "no longer stripped here"). The parser
+        # keeps the original initializer; it is anf_lower, not the parser,
+        # that omits `initial_value` for this property in the compiled IR.
         result = parse_source(ZIG_COUNTER_SOURCE, "Counter.runar.zig")
         assert result.contract is not None
         count_prop = result.contract.properties[0]
-        assert count_prop.initializer is None
+        assert count_prop.initializer is not None
 
     def test_stateful_no_arg_method(self):
         result = parse_source(ZIG_COUNTER_SOURCE, "Counter.runar.zig")
@@ -883,6 +927,69 @@ pub const Test = struct {
 
 
 # ---------------------------------------------------------------------------
+# F-094: runar.hexToBytes("...") lowers to a ByteString literal
+# ---------------------------------------------------------------------------
+#
+# Proves: the Python Zig-surface parser lowers `runar.hexToBytes("<hex>")` to a
+# ByteStringLiteral carrying the hex verbatim (as the TS and Zig parsers do), so
+# it is accepted as a property initializer and the checked-in
+# examples/zig/tic-tac-toe/TicTacToe.runar.zig compiles; a non-literal argument
+# is a parse error rather than an ordinary call.
+# Does NOT prove: byte-identity with the TS tier (checked by the remediation
+# sweep, not pinned here), or that the hex payload is well-formed (TS does not
+# check that in the parser either).
+
+ZIG_HEX_TO_BYTES_SOURCE = """\
+const runar = @import("runar");
+
+pub const H = struct {
+    pub const Contract = runar.SmartContract;
+
+    prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    x: runar.ByteString,
+
+    pub fn init(x: runar.ByteString) H {
+        return .{ .x = x };
+    }
+
+    pub fn verify(self: *const H, b: runar.ByteString) void {
+        runar.assert(runar.bytesEq(runar.cat(self.prefix, self.x), b));
+    }
+};
+"""
+
+
+class TestZigHexToBytes:
+    def test_hex_to_bytes_initializer_is_bytestring_literal(self):
+        result = parse_source(ZIG_HEX_TO_BYTES_SOURCE, "H.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        prefix = next(p for p in result.contract.properties if p.name == "prefix")
+        assert isinstance(prefix.initializer, ByteStringLiteral)
+        assert prefix.initializer.value == "1976a914"
+
+    def test_hex_to_bytes_non_literal_argument_is_error(self):
+        source = ZIG_HEX_TO_BYTES_SOURCE.replace(
+            'runar.hexToBytes("1976a914")', "runar.hexToBytes(x)"
+        )
+        result = parse_source(source, "H.runar.zig")
+        assert any(
+            "runar.hexToBytes expects a string literal argument" in e
+            for e in result.error_strings()
+        )
+
+    def test_tic_tac_toe_example_compiles(self):
+        from pathlib import Path
+        from runar_compiler.compiler import compile_from_source
+
+        repo_root = Path(__file__).resolve().parents[3]
+        src = repo_root / "examples" / "zig" / "tic-tac-toe" / "TicTacToe.runar.zig"
+        artifact = compile_from_source(str(src))
+        assert artifact.contract_name == "TicTacToe"
+        assert artifact.script
+
+
+# ---------------------------------------------------------------------------
 # Array type and array literal
 # ---------------------------------------------------------------------------
 
@@ -1077,3 +1184,129 @@ pub const P2PKH = struct {
         result = parse_source(source, "P2PKH.runar.zig")
         assert len(result.errors) == 0
         assert result.contract is not None
+
+
+# ---------------------------------------------------------------------------
+# F-207: bare `&`, `[_]T{...}`, and the stale property-initializer strip
+# ---------------------------------------------------------------------------
+
+class TestZigParserAmpersandAndInferredArray:
+    def test_bare_ampersand_strips_to_operand(self):
+        """F-207: a bare `&` (not part of `&.{...}`) is Zig's address-of
+        operator used for slice coercion. It must be stripped and the real
+        operand parsed -- exactly like `&.{...}`, like the TS reference, and
+        like parse_zig.zig -- never manufacture a garbage
+        `Identifier(name='&')` or desync the token stream.
+        Proves: `&x` parses to the SAME AST shape as plain `x` (no stray
+        '&' token, no leftover unconsumed 'x').
+        Does not prove: codegen byte-parity -- see the N210 conformance
+        parity test, which pins the compiled bytes against the TS reference.
+        """
+        source = """\
+const runar = @import("runar");
+
+pub const AmpPrefix = struct {
+    pub const Contract = runar.SmartContract;
+
+    t: i64,
+
+    pub fn init(t: i64) AmpPrefix {
+        return .{ .t = t };
+    }
+
+    pub fn unlock(self: AmpPrefix, x: i64) void {
+        runar.assert(&x == self.t);
+    }
+};
+"""
+        result = parse_source(source, "AmpPrefix.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        call = unlock.body[0].expr
+        assert isinstance(call, CallExpr)
+        cond = call.args[0]
+        assert isinstance(cond, BinaryExpr)
+        assert isinstance(cond.left, Identifier)
+        assert cond.left.name == "x"
+
+    def test_inferred_length_array_literal(self):
+        """F-207: `[_]T{...}` is Zig's typed array literal with inferred
+        length. It must parse as a single ArrayLiteralExpr with the given
+        elements -- not decompose into unrelated garbage statements (the
+        original bug turned `const arr = [_]i64{1, 2, 3};` into 8 stray
+        statements with `errors == []`)."""
+        source = """\
+const runar = @import("runar");
+
+pub const InferredArray = struct {
+    pub const Contract = runar.SmartContract;
+
+    pk1: runar.PubKey,
+    pk2: runar.PubKey,
+    pk3: runar.PubKey,
+
+    pub fn init(pk1: runar.PubKey, pk2: runar.PubKey, pk3: runar.PubKey) InferredArray {
+        return .{ .pk1 = pk1, .pk2 = pk2, .pk3 = pk3 };
+    }
+
+    pub fn unlock(self: *const InferredArray, sig1: runar.Sig, sig2: runar.Sig) void {
+        runar.assert(runar.checkMultiSig(
+            &[_]runar.Sig{ sig1, sig2 },
+            &.{ self.pk1, self.pk2, self.pk3 },
+        ));
+    }
+};
+"""
+        result = parse_source(source, "InferredArray.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        assert len(unlock.body) == 1
+        call = unlock.body[0].expr
+        assert isinstance(call, CallExpr)
+        multisig_call = call.args[0]
+        assert isinstance(multisig_call, CallExpr)
+        sig_array = multisig_call.args[0]
+        assert isinstance(sig_array, ArrayLiteralExpr)
+        assert len(sig_array.elements) == 2
+
+    def test_ctor_param_name_collision_does_not_strip_unrelated_property(self):
+        """F-207: the parser must not strip a property's initializer merely
+        because its NAME matches some constructor PARAMETER name. The
+        centralized rule (anf_lower.py's `_constructor_assigned_properties`)
+        is keyed on the actual constructor ASSIGNMENT, not a name
+        coincidence -- matching the TS reference, which removed this
+        parser-level strip for exactly this reason (01-parse-zig.ts:424-434).
+        Here ctor param `lo` is assigned to the DIFFERENT property
+        `renamed`; the `lo` PROPERTY is never touched by the constructor at
+        all and must keep its own literal initializer. Before the fix this
+        was not just a byte-level divergence: the stale strip made the
+        constructor-param-count validator reject this legal contract
+        outright ('Property lo must be assigned in the constructor')."""
+        source = """\
+const runar = @import("runar");
+
+pub const InitSurvives = struct {
+    pub const Contract = runar.StatefulSmartContract;
+
+    lo: i64 = 99,
+    renamed: i64 = 0,
+
+    pub fn init(lo: i64) InitSurvives {
+        return .{ .renamed = lo };
+    }
+
+    pub fn bump(self: *InitSurvives, delta: i64) void {
+        self.renamed = self.renamed + delta;
+        self.addOutput(1000, self.lo, self.renamed);
+    }
+};
+"""
+        result = parse_source(source, "InitSurvives.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        lo_prop = next(p for p in result.contract.properties if p.name == "lo")
+        assert lo_prop.initializer is not None
+        assert isinstance(lo_prop.initializer, BigIntLiteral)
+        assert lo_prop.initializer.value == 99

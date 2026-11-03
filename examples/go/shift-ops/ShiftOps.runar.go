@@ -8,10 +8,10 @@ type ShiftOps struct {
 	A runar.Bigint `runar:"readonly"`
 }
 
-// TestShift applies left shift and right shift, then sanity-checks the results.
-func (c *ShiftOps) TestShift() {
+// TestShift applies left shift and right shift, then checks the caller-supplied results.
+func (c *ShiftOps) TestShift(expectedLeft runar.Bigint, expectedRight runar.Bigint) {
 	left := c.A << 3
 	right := c.A >> 2
-	runar.Assert(left >= 0 || left < 0)
-	runar.Assert(right >= 0 || right < 0)
+	runar.Assert(left == expectedLeft)
+	runar.Assert(right == expectedRight)
 }

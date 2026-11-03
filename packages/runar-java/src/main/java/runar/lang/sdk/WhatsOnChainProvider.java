@@ -1,6 +1,7 @@
 package runar.lang.sdk;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,8 +17,8 @@ import java.util.Map;
  * </ul>
  *
  * <p>{@link #listUtxos(String)} hits {@code /address/{addr}/unspent} (returns
- * outpoints + values; the locking script is not in the listing — fetch via
- * {@link #getUtxo(String, int)} when needed). {@link #broadcastRaw(String)}
+ * outpoints + values; the locking script is not in the listing, so each UTXO's
+ * script is read from the verified {@code /tx/{txid}/hex}). {@link #broadcastRaw(String)}
  * POSTs to {@code /tx/raw} with a {@code {"txhex":"..."}} body. WoC returns
  * the txid as a JSON-encoded string.
  */
@@ -66,6 +67,18 @@ public final class WhatsOnChainProvider implements Provider {
     // Provider
     // ------------------------------------------------------------------
 
+    /**
+     * WoC's GET /address/{address}/unspent listing carries outpoints and
+     * values but no locking script. The script is the BIP-143 scriptCode a
+     * signer commits to, so an empty one yields signatures no OP_CHECKSIG
+     * accepts (F-040). Each distinct txid is therefore fetched via
+     * GET /tx/{txid}/hex, its double-SHA256 must equal the txid, and tx_pos
+     * must be an output whose value equals the listed value. Any failure
+     * throws; no UTXO is returned with an empty script.
+     *
+     * <p>Note: WoC caps this legacy listing at about 1000 entries, so an
+     * address holding more UTXOs is returned truncated.
+     */
     @Override
     public List<UTXO> listUtxos(String address) {
         HttpTransport.Response resp = transport.send(
@@ -77,25 +90,57 @@ public final class WhatsOnChainProvider implements Provider {
         if (!(parsed instanceof List<?> entries)) {
             throw new ProviderException("WoC getUtxos: expected JSON array, got " + typeName(parsed));
         }
+        Map<String, RawTx> txs = new HashMap<>();
         List<UTXO> utxos = new ArrayList<>(entries.size());
         for (Object e : entries) {
             Map<String, Object> u = Json.asObject(e);
             String txid = Json.asString(u.get("tx_hash"));
             int pos = Json.asInt(u.get("tx_pos"));
             long value = Json.asLong(u.get("value"));
-            // WoC's UTXO listing does not include the locking script.
-            utxos.add(new UTXO(txid, pos, value, ""));
-        }
-        // DoS-bound: defensive — WoC currently returns empty scripts but a
-        // future enriched response must not bypass MAX_SCRIPT_BYTES.
-        for (UTXO u : utxos) {
-            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            RawTx tx = txs.get(txid);
+            if (tx == null) {
+                tx = fetchVerifiedTx(txid, "getUtxos");
+                txs.put(txid, tx);
+            }
+            if (pos < 0 || pos >= tx.outputs.size()) {
+                throw new ProviderException("WoC getUtxos: no output " + pos + " in tx " + txid
+                    + " (" + tx.outputs.size() + " outputs)");
+            }
+            RawTx.Output out = tx.outputs.get(pos);
+            if (out.satoshis != value) {
+                throw new ProviderException("WoC getUtxos: value mismatch for " + txid + ":" + pos
+                    + ": listing says " + value + ", tx says " + out.satoshis);
+            }
+            String script = out.scriptPubKeyHex == null ? "" : out.scriptPubKeyHex;
+            if (script.isEmpty()) {
+                throw new ProviderException("WoC getUtxos: empty locking script for " + txid + ":" + pos);
+            }
             ScriptSizeExceededError.assertScriptHexUnderLimit(
-                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                script, InputLimits.MAX_SCRIPT_BYTES,
                 "WhatsOnChainProvider.listUtxos(" + address + ")"
             );
+            utxos.add(new UTXO(txid, pos, value, script));
         }
         return utxos;
+    }
+
+    /** GET /tx/{txid}/hex, required to hash to {@code txid} (F-040 / N-041). */
+    private RawTx fetchVerifiedTx(String txid, String context) {
+        String rawHex = getRawTransaction(txid);
+        if (!rawHex.matches("(?:[0-9a-fA-F]{2})*")) {
+            throw new ProviderException("WoC " + context + ": /tx/" + txid + "/hex body is not hex");
+        }
+        byte[] raw = ScriptUtils.hexToBytes(rawHex);
+        String bodyTxid = ScriptUtils.reverseHex(ScriptUtils.bytesToHex(Hash160.doubleSha256(raw)));
+        if (!bodyTxid.equals(txid.toLowerCase(java.util.Locale.ROOT))) {
+            throw new ProviderException("WoC " + context + ": txid mismatch: /tx/" + txid
+                + "/hex body hashes to " + bodyTxid);
+        }
+        try {
+            return RawTxParser.parse(rawHex.toLowerCase(java.util.Locale.ROOT));
+        } catch (RuntimeException re) {
+            throw new ProviderException("WoC " + context + ": parsing tx " + txid + ": " + re.getMessage(), re);
+        }
     }
 
     @Override
@@ -119,40 +164,34 @@ public final class WhatsOnChainProvider implements Provider {
         return txid;
     }
 
+    /**
+     * N-041: GET /tx/hash/{txid} has no {@code hex} field and reports values
+     * as float BSV, and its script is unverifiable. The serialized tx is
+     * fetched via GET /tx/{txid}/hex instead, its double-SHA256 must equal the
+     * txid, and the output's script and exact satoshis are read from those
+     * bytes. A 404 or an out-of-range {@code vout} returns {@code null}; an
+     * empty locking script throws.
+     */
     @Override
     public UTXO getUtxo(String txid, int vout) {
-        HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/tx/hash/" + txid, null, null);
-        if (resp.statusCode() == 404) return null;
-        requireOk(resp, "WoC getTransaction");
-
-        Map<String, Object> data = Json.asObject(parseJson(resp.body(), "WoC getTransaction"));
-        Object voutArr = data.get("vout");
-        if (!(voutArr instanceof List<?> outs) || vout < 0 || vout >= outs.size()) return null;
-        Map<String, Object> out = Json.asObject(outs.get(vout));
-        Object value = out.get("value");
-        long sats;
-        if (value instanceof Double d) {
-            sats = Math.round(d * 1e8);
-        } else if (value instanceof Long l) {
-            sats = l;
-        } else if (value instanceof Integer i) {
-            sats = i;
-        } else {
-            throw new ProviderException("WoC getTransaction: unexpected vout.value type " + typeName(value));
+        RawTx tx;
+        try {
+            tx = fetchVerifiedTx(txid, "getTransaction");
+        } catch (ProviderException pe) {
+            if (pe.statusCode() == 404) return null;
+            throw pe;
         }
-        String script = "";
-        if (out.get("scriptPubKey") instanceof Map<?, ?> sp) {
-            Object hex = ((Map<?, ?>) sp).get("hex");
-            if (hex instanceof String s) script = s;
+        if (vout < 0 || vout >= tx.outputs.size()) return null;
+        RawTx.Output out = tx.outputs.get(vout);
+        String script = out.scriptPubKeyHex == null ? "" : out.scriptPubKeyHex;
+        if (script.isEmpty()) {
+            throw new ProviderException("WoC getTransaction: empty locking script for " + txid + ":" + vout);
         }
-        if (!script.isEmpty()) {
-            ScriptSizeExceededError.assertScriptHexUnderLimit(
-                script, InputLimits.MAX_SCRIPT_BYTES,
-                "WhatsOnChainProvider.getUtxo(" + txid + ":" + vout + ")"
-            );
-        }
-        return new UTXO(txid, vout, sats, script);
+        ScriptSizeExceededError.assertScriptHexUnderLimit(
+            script, InputLimits.MAX_SCRIPT_BYTES,
+            "WhatsOnChainProvider.getUtxo(" + txid + ":" + vout + ")"
+        );
+        return new UTXO(txid, vout, out.satoshis, script);
     }
 
     /**

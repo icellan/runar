@@ -248,3 +248,51 @@ class TestBuildP2pkhScript:
         script = build_p2pkh_script(pkh)
         assert script.startswith('76a914')
         assert script.endswith('88ac')
+
+
+# F-043: every SDK must accept the same inputs with the same result, using a
+# real key: the secp256k1 generator G.
+#
+# PROVES: a compressed / uncompressed pubkey is hashed with HASH160 (values
+# match Go BuildP2PKHScript and TS buildP2PKHScript); a Base58Check address has
+# its SHA256d checksum verified (the Genesis address with its last character
+# flipped still decodes to 25 bytes and must raise) and its version byte
+# checked (P2SH 0x05 refused, testnet 0x6f accepted); a non-Base58 character
+# raises ValueError.
+# DOES NOT PROVE: that a pubkey is a valid curve point (no SDK checks it).
+_G_PUB = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+_G_PUB_UNCOMPRESSED = (
+    '0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+    '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8'
+)
+_G_PKH = '751e76e8199196d454941c45d1b3a323f1433bd6'
+
+
+class TestBuildP2pkhScriptF043:
+    def test_pubkey_hash_and_pubkeys(self):
+        assert build_p2pkh_script(_G_PKH) == '76a914' + _G_PKH + '88ac'
+        assert build_p2pkh_script(_G_PUB) == '76a914' + _G_PKH + '88ac'
+        assert build_p2pkh_script(_G_PUB_UNCOMPRESSED) == (
+            '76a91491b24bf9f5288532960ac687abb035127b1d28a588ac'
+        )
+
+    def test_addresses(self):
+        assert build_p2pkh_script('1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH') == '76a914' + _G_PKH + '88ac'
+        assert build_p2pkh_script('mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r') == '76a914' + _G_PKH + '88ac'
+        assert build_p2pkh_script('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa') == (
+            '76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac'
+        )
+
+    def test_flipped_last_char_bad_checksum_raises(self):
+        with pytest.raises(ValueError, match='checksum'):
+            build_p2pkh_script('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb')
+
+    def test_p2sh_version_raises(self):
+        with pytest.raises(ValueError, match='version byte'):
+            build_p2pkh_script('3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy')
+
+    def test_invalid_char_and_length_raise(self):
+        with pytest.raises(ValueError, match='invalid Base58 character'):
+            build_p2pkh_script('1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf0a')
+        with pytest.raises(ValueError, match='invalid address length'):
+            build_p2pkh_script('1Badx')

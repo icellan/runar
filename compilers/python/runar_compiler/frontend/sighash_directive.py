@@ -17,7 +17,6 @@ Port of packages/runar-compiler/src/passes/sighash-directive.ts.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 # Numeric value of each sighash flag name.
@@ -124,21 +123,71 @@ def parse_sighash_flags(flags_text: str) -> SighashParseResult:
     return SighashParseResult(value=value)
 
 
-# Extract the flag list following ``@sighash`` in a block of comment text.
-_SIGHASH_RE = re.compile(r"@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*/|\n|\r|$)")
+# Shared diagnostics (F-039) — identical text in all seven tiers. A marker that
+# is present but not followed by a well-formed flag list, or a second marker on
+# the same method, is a compile error, never a silent fall-back to the default
+# ALL|FORKID mode.
+SIGHASH_MALFORMED_ERROR = (
+    "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a "
+    "|-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)"
+)
+SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one"
+
+_SIGHASH_MARKER = "@sighash"
+_WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
+_SEGMENT_CHARS = _WORD_CHARS | frozenset("| \t")
 
 
 def extract_sighash_directive(comment_text: str) -> SighashParseResult | None:
-    """Extract and parse an ``@sighash`` directive from a block of comment text.
+    """Extract and parse an ``@sighash`` directive from a method's leading-comment
+    text (all of its leading comments, concatenated).
 
-    Returns ``None`` when no ``@sighash`` token is present, otherwise the parse
-    result (value or error). Used by the parser after it has collected a
-    method's JSDoc / leading-comment trivia.
+    Returns ``None`` only when no ``@sighash`` marker is present, otherwise the
+    parse result (value or error). Mirrors the TS reference.
+
+    A marker is every occurrence of ``@sighash``, whatever follows it (N-039,
+    user decision R85): ``@sighashSINGLE|FORKID`` or ``@sighashType`` is a
+    malformed directive, never prose. Once a marker is present (fail-closed,
+    F-039): more than one marker is
+    ``SIGHASH_MULTIPLE_ERROR``; the segment after the marker, up to ``*/``, a
+    newline, CR or the end, must be empty, or start with a space/tab and contain
+    only ``[A-Za-z0-9_|]``, spaces and tabs, else ``SIGHASH_MALFORMED_ERROR``;
+    the flag list itself is then validated by ``parse_sighash_flags``.
     """
-    m = _SIGHASH_RE.search(comment_text)
-    if m is None:
+    markers: list[int] = []
+    i = comment_text.find(_SIGHASH_MARKER)
+    while i != -1:
+        markers.append(i)
+        i = comment_text.find(_SIGHASH_MARKER, i + 1)
+    if not markers:
         return None
-    return parse_sighash_flags(m.group(1) or "")
+    if len(markers) > 1:
+        return SighashParseResult(error=SIGHASH_MULTIPLE_ERROR)
+
+    after = comment_text[markers[0] + len(_SIGHASH_MARKER):]
+    end = len(after)
+    for j, c in enumerate(after):
+        if c in "\n\r" or (c == "*" and after[j + 1:j + 2] == "/"):
+            end = j
+            break
+    seg = after[:end]
+    if seg and not (seg[0] in " \t" and all(c in _SEGMENT_CHARS for c in seg)):
+        return SighashParseResult(error=SIGHASH_MALFORMED_ERROR)
+    return parse_sighash_flags(seg)
+
+
+def lost_directive_message(directive: str) -> str:
+    """N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+    ``@sighash`` / ``@embedAlways`` marker inside the contract class body that
+    is not in the leading comments of the member kind that reads it
+    (``@sighash`` -> a method, ``@embedAlways`` -> a property). Mirrors the TS
+    reference's ``lostDirectiveMessage`` (sighash-directive.ts)."""
+    target = "method" if directive == "@sighash" else "property"
+    return (
+        f"{directive} directive is not attached to any {target} and would be silently ignored; "
+        f"put the comment on its own line directly above the {target} it annotates "
+        f"(a comment that shares a line with the preceding code belongs to that code)"
+    )
 
 
 def describe_sighash(value: int) -> str:
@@ -158,3 +207,54 @@ def describe_sighash(value: int) -> str:
     if value & FLAG_FORKID:
         parts.append("FORKID")
     return "|".join(parts)
+
+
+def resolve_native_sighash(
+    method_name: str,
+    is_public: bool,
+    specs: list[str | None],
+) -> SighashParseResult | None:
+    """N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+    (Solidity ``sighash(...)``, Move/Rust ``#[sighash(...)]``, Go
+    ``//runar:sighash ...``, Python ``@public(sighash="...")``, Zig
+    ``runar.Sighash("...")``, Ruby ``runar_sighash '...'``, Java
+    ``@Sighash("...")``).
+
+    ``specs`` holds one entry per spelling found on the method: the flag text,
+    or ``None`` when the spelling's argument was not well formed. Returns
+    ``None`` when there is no spelling, else the numeric type or the diagnostic
+    -- the SAME diagnostics the ``.runar.ts`` comment directive produces,
+    checked in the same order: non-public method, then more than one spelling,
+    then malformed, then the flag grammar of ``parse_sighash_flags``. Mirrors
+    the TS reference's ``resolveNativeSighash``.
+    """
+    if not specs:
+        return None
+    if not is_public:
+        return SighashParseResult(
+            error=f"@sighash directive on non-public method '{method_name}' has no effect "
+                  "— only public methods are spending entry points"
+        )
+    if len(specs) > 1:
+        return SighashParseResult(error=f"Method '{method_name}': {SIGHASH_MULTIPLE_ERROR}")
+    spec = specs[0]
+    if spec is None:
+        return SighashParseResult(error=f"Method '{method_name}': {SIGHASH_MALFORMED_ERROR}")
+    result = parse_sighash_flags(spec)
+    if result.error is not None:
+        return SighashParseResult(error=f"Method '{method_name}': {result.error}")
+    return result
+
+
+def unknown_go_directive_message(name: str) -> str:
+    """N-093: the Go DSL directive comment ``//runar:<name> ...``. Only
+    ``sighash`` exists; any other name is refused rather than ignored."""
+    return f"unknown Go DSL directive '//runar:{name}'; the only directive is //runar:sighash <FLAGS>"
+
+
+def unknown_move_attribute_message(attr: str) -> str:
+    """N-093: an attribute on the Move surface other than the two directives."""
+    return (
+        f"unsupported Move attribute #[{attr}]; the supported attributes are "
+        "#[embed_always] and #[sighash(<FLAGS>)]"
+    )

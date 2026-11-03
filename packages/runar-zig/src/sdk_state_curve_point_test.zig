@@ -55,12 +55,11 @@ fn crossSdkGolden(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(p2);
     const ee = try rep(allocator, "ee", 66); //  Sig        framed <len><data>
     defer allocator.free(ee);
-    const ff = try rep(allocator, "ff", 8); //   RabinSig   framed <len><data>
-    defer allocator.free(ff);
+    // RabinSig: NUM2BIN 8 of 2^63-1 (F-035; was framed "08" + ff*8).
     return std.fmt.allocPrint(
         allocator,
-        "0100000000000000" ++ "01" ++ "02{s}{s}{s}{s}{s}{s}" ++ "443044{s}" ++ "08{s}" ++ "020011",
-        .{ aa, bb, cc, dd, p1, p2, ee, ff },
+        "0100000000000000" ++ "01" ++ "02{s}{s}{s}{s}{s}{s}" ++ "443044{s}" ++ "ffffffffffffff7f" ++ "020011",
+        .{ aa, bb, cc, dd, p1, p2, ee },
     );
 }
 
@@ -85,8 +84,6 @@ test "curve point: cross-SDK golden state record serializes byte for byte" {
     defer allocator.free(ee);
     const sig = try std.fmt.allocPrint(allocator, "3044{s}", .{ee});
     defer allocator.free(sig);
-    const rab = try rep(allocator, "ff", 8);
-    defer allocator.free(rab);
 
     const values = [_]types.StateValue{
         .{ .int = 1 },
@@ -98,13 +95,13 @@ test "curve point: cross-SDK golden state record serializes byte for byte" {
         .{ .bytes = p256 },
         .{ .bytes = p384 },
         .{ .bytes = sig },
-        .{ .bytes = rab },
+        .{ .int = 9223372036854775807 }, // F-035: RabinSig is a bigint alias
         .{ .bytes = "0011" },
     };
 
     const want = try crossSdkGolden(allocator);
     defer allocator.free(want);
-    try std.testing.expectEqual(@as(usize, 399), want.len / 2);
+    try std.testing.expectEqual(@as(usize, 398), want.len / 2);
 
     const got = try state_mod.serializeState(allocator, &CURVE_POINT_FIELDS, &values);
     defer allocator.free(got);
@@ -129,7 +126,7 @@ test "curve point: cross-SDK golden state record serializes byte for byte" {
     try std.testing.expectEqualStrings(p256, back[6].bytes);
     try std.testing.expectEqualStrings(p384, back[7].bytes);
     try std.testing.expectEqualStrings(sig, back[8].bytes);
-    try std.testing.expectEqualStrings(rab, back[9].bytes);
+    try std.testing.expectEqual(@as(i64, 9223372036854775807), back[9].int);
     try std.testing.expectEqualStrings("0011", back[10].bytes);
 }
 
@@ -177,7 +174,16 @@ test "curve point: raw and framed controls stay byte-unchanged" {
         try std.testing.expectEqualStrings(v, got);
     }
 
-    for ([_][]const u8{ "ByteString", "Sig", "RabinSig" }) |type_name| {
+    // F-035: RabinSig left this list — it is a bigint alias, NUM2BIN 8.
+    {
+        const fields = [_]types.StateField{.{ .name = "v", .type_name = "RabinSig", .index = 0 }};
+        const values = [_]types.StateValue{.{ .int = 1 }};
+        const got = try state_mod.serializeState(allocator, &fields, &values);
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings("0100000000000000", got);
+    }
+
+    for ([_][]const u8{ "ByteString", "Sig" }) |type_name| {
         const fields = [_]types.StateField{.{ .name = "v", .type_name = type_name, .index = 0 }};
         const v = try rep(allocator, "ab", 64);
         defer allocator.free(v);

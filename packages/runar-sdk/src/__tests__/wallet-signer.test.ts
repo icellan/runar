@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { WalletSigner } from '../signers/wallet.js';
-import { Hash, Utils, type SecurityLevel } from '@bsv/sdk';
+import { Hash, Utils, PrivateKey, ECDSA, BigNumber, type SecurityLevel } from '@bsv/sdk';
+import type { RunarArtifact } from 'runar-ir-schema';
+import { LocalSigner } from '../signers/local.js';
+import { RunarContract } from '../contract.js';
+import { MockProvider } from '../providers/mock.js';
+import { buildP2PKHScript } from '../script-utils.js';
 
 // ---------------------------------------------------------------------------
 // Mock WalletClient
@@ -90,19 +95,67 @@ describe('WalletSigner.getPublicKey', () => {
 // ---------------------------------------------------------------------------
 
 describe('WalletSigner.getAddress', () => {
-  it('returns hash160 of the public key as 40-char hex', async () => {
+  // F-146: Signer.getAddress is specified as a Base58Check P2PKH address
+  // (signer.ts). WalletSigner used to return the 40-char hex hash160, which a
+  // provider keying UTXOs by address (WhatsOnChain /address/{address}/unspent,
+  // MockProvider) never matches.
+  // Proves: for the same key WalletSigner yields byte-for-byte LocalSigner's
+  // mainnet Base58Check address, and RunarContract.deploy finds a UTXO keyed
+  // by that address. Does not prove: anything about a real WalletClient or a
+  // live WhatsOnChain query (both stubbed here).
+  it("returns the same Base58Check P2PKH address as LocalSigner for the same key", async () => {
     const wallet = createMockWallet();
     const signer = new WalletSigner({ ...DEFAULT_OPTS, wallet: wallet as any });
 
     const address = await signer.getAddress();
 
-    // Compute expected hash160
-    const pubKeyBytes = Utils.toArray(MOCK_PUB_KEY, 'hex');
-    const expectedHash = Utils.toHex(Hash.hash160(pubKeyBytes));
+    // MOCK_PUB_KEY is the generator point G, i.e. private key 1.
+    const local = new LocalSigner('00'.repeat(31) + '01');
+    expect(await local.getPublicKey()).toBe(MOCK_PUB_KEY);
+    expect(address).toBe(await local.getAddress());
+    expect(address).toBe('1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH');
+    expect(address).not.toMatch(/^[0-9a-f]{40}$/);
 
-    expect(address).toBe(expectedHash);
-    expect(address.length).toBe(40);
-    expect(/^[0-9a-f]+$/.test(address)).toBe(true);
+    // The Base58 payload is still the key's hash160.
+    const pkh = Utils.toHex(Hash.hash160(Utils.toArray(MOCK_PUB_KEY, 'hex')));
+    expect(buildP2PKHScript(address)).toBe('76a914' + pkh + '88ac');
+  });
+
+  it('lets RunarContract.deploy find a funding UTXO keyed by the address', async () => {
+    // A stub wallet that really signs the digest with key 1, as ProtoWallet
+    // does for hashToDirectlySign, so MockProvider's script check passes.
+    const key = PrivateKey.fromHex('00'.repeat(31) + '01');
+    const wallet = {
+      getPublicKey: vi.fn().mockResolvedValue({ publicKey: MOCK_PUB_KEY }),
+      createSignature: vi.fn(async ({ hashToDirectlySign }: { hashToDirectlySign: number[] }) => ({
+        signature: ECDSA.sign(new BigNumber(hashToDirectlySign), key, true).toDER() as number[],
+      })),
+    };
+    const signer = new WalletSigner({ ...DEFAULT_OPTS, wallet: wallet as any });
+    const local = new LocalSigner('00'.repeat(31) + '01');
+
+    const provider = new MockProvider('mainnet');
+    provider.addUtxo(await local.getAddress(), {
+      txid: 'aa'.repeat(32),
+      outputIndex: 0,
+      satoshis: 100_000,
+      script: buildP2PKHScript(MOCK_PUB_KEY),
+    });
+
+    const artifact: RunarArtifact = {
+      version: 'runar-v0.1.0',
+      compilerVersion: '0.1.0',
+      contractName: 'Test',
+      asm: '',
+      buildTimestamp: '2026-03-02T00:00:00.000Z',
+      script: '51',
+      abi: { constructor: { params: [] }, methods: [] },
+    };
+    const contract = new RunarContract(artifact, []);
+    const { txid } = await contract.deploy(provider, signer, { satoshis: 1000 });
+
+    expect(txid).toMatch(/^[0-9a-f]{64}$/);
+    expect(provider.getBroadcastedTxs().length).toBe(1);
   });
 });
 

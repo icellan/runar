@@ -17,7 +17,7 @@ conformance/source-map/
 └── .gitignore                   # ignores .tmp/ scratch dirs
 ```
 
-## Fixtures (5)
+## Fixtures (6)
 
 - `basic-p2pkh`
 - `stateful-counter`
@@ -28,6 +28,9 @@ conformance/source-map/
   repo is not OK. `arithmetic` is structurally similar (computation-dense,
   multi-method) and stays sub-kilobyte per tier.
 - `if-else`
+- `bounded-loop` — the one looping fixture (F-259): each unrolled body
+  op maps to the body statement's line, and only the per-iteration
+  iteration-variable pushes map to the loop header's line.
 
 ## Tiers (7)
 
@@ -73,9 +76,10 @@ committed golden:
 **Column convention: 1-based line, 0-based column.** The TypeScript tier is
 the reference (e.g. `P2PKH.runar.ts` line 43 column 4 = the `a` of `assert`,
 where `'    assert(...)'[4] === 'a'`), and `independent-oracle.ts` indexes
-`lineText[column]` directly. Tiers whose parsers/tokenizers carry 1-based
-columns for diagnostics (`file:line:column`) convert at the source-map
-emission point only, so diagnostics keep their conventional 1-based columns.
+`lineText[column]` directly. Diagnostics (`file:line:column`) print the
+same 0-based column in every tier (N-078, user decision R88a). Tiers whose
+AST carries 1-based columns internally (Rust, Zig) convert at the
+source-map emission point and at the diagnostic formatter.
 6. `opcodeIndex` values lie in `[0, opcodeCount)`.
 
 ## Independent source-anchor oracle (audit finding #22)
@@ -160,6 +164,23 @@ file via `evaluateAgainstKnownIssues`:
   to fully-untracked) is also a hard failure, forcing a deliberate,
   reviewed allowlist update rather than a silent pass-through.
 
+### Whole-map check against the TS reference (F-293)
+
+`checkSourceAnchors` is per-mapping, so N identical valid positions pass as
+well as one. `checkAgainstReference` adds two exact, tier-independent
+whole-map rules relative to the TS tier (hex parity makes opcode N the same
+opcode in every tier, so only the partition of opcodes into anchors is
+compared, never coordinates): **mergedAnchors** (a tier anchor must not
+swallow several anchors the reference keeps apart) and **extraMappings** (an
+opcode the reference leaves unmapped is compiler-synthesized and must not be
+mapped onto a user line). Finer tiers are allowed. Current non-zero
+signatures are pinned in `anchor-known-issues.json` (Rust `if-else` ->
+N-222; Zig `if-else` and `stateful-counter` -> new). `run.ts` applies the
+same rule to every LIVE compile against the live TS map of the same fixture
+(`decideLiveShape`, N-370), with the same pins; the live TS map is compiled
+even under `--tier=<other>`, and a non-TS tier fails closed if it cannot be
+produced. The TS reference cannot flag itself.
+
 ### Residual limitations (things this oracle cannot independently validate)
 
 - It confirms a mapped position is a *plausible* token anchor, not that
@@ -169,10 +190,9 @@ file via `evaluateAgainstKnownIssues`:
   statement-boundary derivation (re-parsing each of the 7 surface syntaxes
   outside the Rúnar frontend), which is out of scope here.
 - It does not check that mapped positions are monotonically non-decreasing
-  in `opcodeIndex` order — true of every current fixture (none use `for`
-  loops, whose unrolled bodies would legitimately revisit earlier lines),
-  but not asserted as a general invariant to avoid a false positive once a
-  looping fixture is added.
+  in `opcodeIndex` order — `bounded-loop`'s unrolled body legitimately
+  revisits earlier lines (loop header, body, loop header, …), so this is
+  deliberately not asserted as a general invariant.
 - Comment detection is a simple same-line scanner (tracks quote state, not
   a full lexer) — sufficient for the small hand-written contract fixtures
   here, not general-purpose.

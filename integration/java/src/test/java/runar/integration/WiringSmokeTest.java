@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import runar.integration.helpers.ContractCompiler;
 import runar.integration.helpers.RpcClient;
 import runar.lang.sdk.LocalSigner;
+import runar.lang.sdk.RunarArtifact;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -59,5 +60,51 @@ class WiringSmokeTest {
         assertNotNull(s.pubKey());
         assertEquals(33, s.pubKey().length, "compressed pubkey is 33 bytes");
         assertNotNull(s.address());
+    }
+
+    /**
+     * F-276: a {@code .runar.java} source compiled through
+     * {@link ContractCompiler} must be built by the native Java compiler
+     * (compilers/java), not shelled out to the TypeScript reference
+     * compiler. The Java CLI stamps {@code compilerVersion} as
+     * {@code <version>-java} (see {@code Cli#SCHEMA_VERSION} /
+     * {@code Cli.writeArtifact}); the TS compiler stamps a bare semver with
+     * no {@code -java} suffix. This test proves provenance, not bytes: the
+     * two compilers already agree byte-for-byte on this fixture (conformance
+     * fixture {@code stateful-counter} has no tier allowlist), so a hex
+     * comparison would not have gone red for this defect.
+     */
+    @Test
+    @DisplayName("a .runar.java source is compiled by the native Java compiler, not the TS reference compiler")
+    void javaSourceCompiledByNativeJavaCompiler() {
+        RunarArtifact artifact = ContractCompiler.compileRelative(
+            "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java"
+        );
+        assertTrue(
+            artifact.compilerVersion() != null && artifact.compilerVersion().endsWith("-java"),
+            "expected a Java-tagged compilerVersion (native compilers/java), got: "
+                + artifact.compilerVersion()
+        );
+    }
+
+    /**
+     * F-276: {@code StateCovenant} is the one documented exception to the
+     * native-compiler default (see {@code ContractCompiler.TS_REFERENCE_ONLY}):
+     * it calls {@code bbFieldMul}, a BabyBear builtin the Java compiler
+     * deliberately refuses (Go-only by project policy). It must still
+     * compile — via the TS reference compiler — rather than throw.
+     */
+    @Test
+    @DisplayName("StateCovenant (Go-only BabyBear builtin) still compiles via the named TS-reference exception")
+    void stateCovenantCompilesViaDocumentedException() {
+        RunarArtifact artifact = ContractCompiler.compileRelative(
+            "examples/ts/state-covenant/StateCovenant.runar.ts"
+        );
+        assertNotNull(artifact.scriptHex());
+        assertTrue(
+            !artifact.compilerVersion().endsWith("-java"),
+            "StateCovenant must compile via the TS reference compiler (Java refuses bbFieldMul), got: "
+                + artifact.compilerVersion()
+        );
     }
 }

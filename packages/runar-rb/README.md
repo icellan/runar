@@ -457,7 +457,7 @@ txid, tx = contract.finalize_call(prepared, external_signatures, provider)
 
 The `signatures` hash maps user-arg index → hex DER-with-sighash signature.
 
-`Runar::SDK::PreparedCall` is the canonical multi-signer hand-off shape — mirrors the `PreparedCall` types in the Go, Rust, Python, and Java SDKs. Public fields (`sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, `sig_indices`) are stable across SDKs; the rest are internal to `finalize_call`.
+`Runar::SDK::PreparedCall` is the canonical multi-signer hand-off shape — mirrors the `PreparedCall` types in the Go, Rust, Python, and Java SDKs. Public fields (`sighash`, `preimage`, `tx_hex`, `sig_indices`) are stable across SDKs; the rest are internal to `finalize_call`. There is no `op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived ON-CHAIN, so there is no spender-supplied signature to expose.
 
 #### Sig parameter substitution at a glance
 
@@ -1051,7 +1051,7 @@ provider.get_utxos('1A1zP1eP...')
 provider.broadcast(raw_tx_hex)
 ```
 
-Note: WhatsOnChain does not return locking scripts in UTXO lists, so `get_utxos` returns `Utxo` rows with `script: ''`. Implementation: [`lib/runar/sdk/woc_provider.rb`](lib/runar/sdk/woc_provider.rb). The other six SDKs use the same class name, `WhatsOnChainProvider`; the Ruby file is named `woc_provider.rb` for historical reasons but the public class name matches.
+Note: WhatsOnChain does not return locking scripts in UTXO lists, so `get_utxos` reads each script from the verified `/tx/{txid}/hex` and raises rather than return `script: ''` (F-040). Implementation: [`lib/runar/sdk/woc_provider.rb`](lib/runar/sdk/woc_provider.rb). The other six SDKs use the same class name, `WhatsOnChainProvider`; the Ruby file is named `woc_provider.rb` for historical reasons but the public class name matches.
 
 ### 12.4 `GorillaPoolProvider`
 
@@ -1265,7 +1265,7 @@ Keyword-init struct: `:satoshis`, `:state` (a `Hash`). Used in `CallOptions#outp
 
 #### `Runar::SDK::PreparedCall`
 
-Keyword-init struct returned by `RunarContract#prepare_call`. Public fields: `:sighash`, `:preimage`, `:op_push_tx_sig`, `:tx_hex`, `:sig_indices`. Internal fields (consumed by `finalize_call`): `:method_name`, `:resolved_args`, `:method_selector_hex`, `:is_stateful`, `:is_terminal`, `:needs_op_push_tx`, `:method_needs_change`, `:change_pkh_hex`, `:change_amount`, `:method_needs_new_amount`, `:new_amount`, `:preimage_index`, `:contract_utxo`, `:new_locking_script`, `:new_satoshis`, `:has_multi_output`, `:contract_outputs`, `:code_sep_idx`.
+Keyword-init struct returned by `RunarContract#prepare_call`. Public fields: `:sighash`, `:preimage`, `:tx_hex`, `:sig_indices`. There is no `:op_push_tx_sig` field (post-BUG-100 the OP_PUSH_TX signature is derived on-chain). Internal fields (consumed by `finalize_call`): `:method_name`, `:resolved_args`, `:method_selector_hex`, `:is_stateful`, `:is_terminal`, `:needs_op_push_tx`, `:method_needs_change`, `:change_pkh_hex`, `:change_amount`, `:method_needs_new_amount`, `:new_amount`, `:preimage_index`, `:contract_utxo`, `:new_locking_script`, `:new_satoshis`, `:has_multi_output`, `:contract_outputs`, `:code_sep_idx`.
 
 #### `Runar::SDK::Provider`
 
@@ -1354,6 +1354,8 @@ Higher-level wrapper for fungible-token contracts (artifacts with a `transfer` p
 - `get_utxos -> Array<Utxo>` — token UTXOs belonging to the signer's address.
 
 Implementation: [`lib/runar/sdk/token_wallet.rb`](lib/runar/sdk/token_wallet.rb).
+
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/ruby/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
 
 #### `Runar::SDK::TransactionData` / `Runar::SDK::Transaction`
 

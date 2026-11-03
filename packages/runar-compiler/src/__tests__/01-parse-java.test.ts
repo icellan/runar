@@ -725,6 +725,96 @@ class C extends SmartContract {
 });
 
 // ---------------------------------------------------------------------------
+// N-023 (R49): a bare assignment to a property name is refused
+// ---------------------------------------------------------------------------
+//
+// In Java a bare name inside a method that no local or parameter shadows IS the
+// field, so `count = count.plus(Bigint.ONE)` writes state. The parser used to
+// lower it as a local rebind, so a stateful contract compiled with no
+// update_prop and its state never changed on-chain. Every tier now refuses the
+// bare form with one diagnostic; shadowed names keep their local meaning.
+//
+// Proves: the TS reference parser refuses each assignment spelling (=, op=,
+// ++/--, prefix and postfix, statement or nested in an expression, in any
+// method including the constructor) when the bare name is an unshadowed
+// property, and accepts this.x writes plus local, parameter and for-loop
+// shadowing. Java block scope is honoured: a local declared inside an if-arm
+// does not shadow the property after that arm.
+// Does not prove: the other six tiers (conformance/negatives N166 and each
+// tier's own test do), or anything about bare READS, which R49 leaves alone.
+
+function bareCounter(body: string, params = '', ctorBody = 'super(count);\n        this.count = count;'): string {
+  return `
+package p;
+import runar.lang.StatefulSmartContract;
+import runar.lang.annotations.Public;
+import runar.lang.types.Bigint;
+import static runar.lang.Builtins.assertThat;
+
+class BareCounter extends StatefulSmartContract {
+    Bigint count;
+
+    BareCounter(Bigint count) {
+        ${ctorBody}
+    }
+
+    @Public
+    void increment(${params}) {
+        ${body}
+    }
+}
+`;
+}
+
+const BARE_MSG = "bare assignment to property 'count' is not allowed; write `this.count = ...`";
+
+function errorsOf(src: string): string[] {
+  return parseJavaSource(src, 'BareCounter.runar.java')
+    .errors.filter(e => e.severity === 'error')
+    .map(e => e.message);
+}
+
+describe('N-023: bare property assignment on the Java surface', () => {
+  const refused: Array<[string, string]> = [
+    ['plain =', 'count = count.plus(Bigint.ONE);'],
+    ['compound +=', 'count += Bigint.ONE;'],
+    ['postfix ++', 'count++;'],
+    ['prefix --', '--count;'],
+    ['inside an if arm', 'if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }'],
+    ['in a for update', 'for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }'],
+    ['nested in an expression', 'assertThat((count++).gt(Bigint.ZERO));'],
+    ['after a local that was scoped to an if arm',
+      'if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;'],
+    ['before the local that would shadow it', 'count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;'],
+  ];
+  for (const [label, body] of refused) {
+    it(`refuses a bare property write: ${label}`, () => {
+      expect(errorsOf(bareCounter(body))).toContain(BARE_MSG);
+    });
+  }
+
+  it('refuses a bare property write in the constructor', () => {
+    const src = bareCounter('this.count = this.count.plus(Bigint.ONE);', '',
+      'super(c);\n        count = c;').replace('BareCounter(Bigint count)', 'BareCounter(Bigint c)');
+    expect(errorsOf(src)).toContain(BARE_MSG);
+  });
+
+  const accepted: Array<[string, string, string?]> = [
+    ['this.count = ...', 'this.count = this.count.plus(Bigint.ONE);'],
+    ['a local named like the property', 'Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;'],
+    ['a parameter named like the property', 'count = count.plus(Bigint.ONE);\n        this.count = count;', 'Bigint count'],
+    ['a for-loop variable named like the property',
+      'for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n        this.count = this.count.plus(Bigint.ONE);'],
+    ['a bare read of the property', 'this.count = count.plus(Bigint.ONE);'],
+  ];
+  for (const [label, body, params] of accepted) {
+    it(`accepts ${label}`, () => {
+      expect(errorsOf(bareCounter(body, params ?? ''))).toEqual([]);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

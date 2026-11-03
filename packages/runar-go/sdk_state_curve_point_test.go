@@ -47,7 +47,7 @@ func curvePointValues() map[string]interface{} {
 		"p256": rep("11", 64),
 		"p384": rep("22", 96),
 		"sig":  "3044" + rep("ee", 66),
-		"rab":  rep("ff", 8),
+		"rab":  int64(9223372036854775807), // F-035: RabinSig is a bigint alias
 		"bs":   "0011",
 	}
 }
@@ -63,14 +63,14 @@ func crossSdkGolden() string {
 		rep("11", 64) + //         P256Point 64 raw   <- was framed "40" + 64
 		rep("22", 96) + //         P384Point 96 raw   <- was framed "4c60" + 96
 		"44" + "3044" + rep("ee", 66) + // Sig        framed <len><data>
-		"08" + rep("ff", 8) + //           RabinSig   framed <len><data>
+		"ffffffffffffff7f" + //            RabinSig   NUM2BIN 8 (F-035; was framed "08" + ff*8)
 		"02" + "0011" //                   ByteString framed <len><data>
 }
 
 func TestCurvePointCrossSdkGoldenSerialize(t *testing.T) {
 	want := crossSdkGolden()
-	if len(want)/2 != 399 {
-		t.Fatalf("golden is %d bytes, want 399", len(want)/2)
+	if len(want)/2 != 398 {
+		t.Fatalf("golden is %d bytes, want 398", len(want)/2)
 	}
 	if got := SerializeState(curvePointFields(), curvePointValues()); got != want {
 		t.Errorf("cross-SDK state record mismatch:\n got %s\nwant %s", got, want)
@@ -85,8 +85,11 @@ func TestCurvePointCrossSdkGoldenDeserialize(t *testing.T) {
 	if b, _ := back["flag"].(bool); !b {
 		t.Errorf("flag: got %v, want true", back["flag"])
 	}
+	if r, _ := back["rab"].(int64); r != 9223372036854775807 {
+		t.Errorf("rab: got %v, want 2^63-1", back["rab"])
+	}
 	in := curvePointValues()
-	for _, k := range []string{"pk", "h", "ad", "pt", "p256", "p384", "sig", "rab", "bs"} {
+	for _, k := range []string{"pk", "h", "ad", "pt", "p256", "p384", "sig", "bs"} {
 		if got, _ := back[k].(string); got != in[k] {
 			t.Errorf("%s: got %q, want %q", k, got, in[k])
 		}
@@ -131,7 +134,12 @@ func TestCurvePointControlsUnchanged(t *testing.T) {
 			t.Errorf("%s control: got %q, want raw %q", c.fieldType, got, v)
 		}
 	}
-	for _, ft := range []string{"ByteString", "Sig", "RabinSig"} {
+	// F-035: RabinSig left this list — it is a bigint alias, NUM2BIN 8.
+	if got := SerializeState([]StateField{{Name: "v", Type: "RabinSig", Index: 0}},
+		map[string]interface{}{"v": int64(1)}); got != "0100000000000000" {
+		t.Errorf("RabinSig control: got %q, want NUM2BIN 8 %q", got, "0100000000000000")
+	}
+	for _, ft := range []string{"ByteString", "Sig"} {
 		v := rep("ab", 64)
 		got := SerializeState([]StateField{{Name: "v", Type: ft, Index: 0}},
 			map[string]interface{}{"v": v})

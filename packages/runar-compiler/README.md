@@ -68,6 +68,9 @@ interface CompileOptions {
 
   /** Bake property values into the locking script (replaces placeholders). */
   constructorArgs?: Record<string, bigint | boolean | string>;
+
+  /** If true, skip the constant folding pass. Default: false (folding enabled). */
+  disableConstantFolding?: boolean;
 }
 ```
 
@@ -225,7 +228,7 @@ interface TypeCheckResult {
                      + RunarArtifact
 ```
 
-The peephole optimizer runs on Stack IR between passes 5 and 6 (always enabled). The constant folding optimizer is available between passes 4 and 5 but disabled by default to preserve ANF conformance.
+The peephole optimizer runs on Stack IR between passes 5 and 6 (always enabled). The constant folding optimizer runs between passes 4 and 5 and is **enabled by default**; pass `disableConstantFolding: true` to `compile()` to turn it off (the checked-in conformance goldens are generated with it off, to preserve cross-tier ANF byte-identity).
 
 ### Dedicated Codegen Modules
 

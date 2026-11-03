@@ -28,6 +28,47 @@ import {
  */
 const MAINNET_ARC_URL = 'https://arc.gorillapool.io';
 
+/**
+ * ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+ * accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+ * containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+ */
+const ARC_REJECTED_TX_STATUSES = [
+  'DOUBLE_SPEND_ATTEMPTED', 'REJECTED', 'INVALID', 'MALFORMED', 'MINED_IN_STALE_BLOCK',
+];
+
+/**
+ * F-042: validate a parsed 2xx ARC `/v1/tx` body. Returns ARC's txid only when ARC
+ * accepted the transaction and that txid is `localTxid`; throws otherwise.
+ */
+function checkArcAccepted(json: unknown, localTxid: string): string {
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('WalletProvider: ARC broadcast returned a non-JSON-object body');
+  }
+  const r = json as Record<string, unknown>;
+  if (typeof r.status === 'number' && (r.status < 200 || r.status > 299)) {
+    throw new Error(
+      `WalletProvider: ARC broadcast failed (status ${r.status}): ${r.title ?? ''} ${r.detail ?? ''}`.trimEnd(),
+    );
+  }
+  const txStatus = typeof r.txStatus === 'string' ? r.txStatus.toUpperCase() : '';
+  const extraInfo = typeof r.extraInfo === 'string' ? r.extraInfo : '';
+  if (
+    ARC_REJECTED_TX_STATUSES.includes(txStatus) ||
+    txStatus.includes('ORPHAN') ||
+    extraInfo.toUpperCase().includes('ORPHAN')
+  ) {
+    throw new Error(`WalletProvider: ARC did not accept the transaction (txStatus ${String(r.txStatus)}): ${extraInfo}`);
+  }
+  if (typeof r.txid !== 'string' || r.txid === '') {
+    throw new Error(`WalletProvider: ARC broadcast response carries no txid: ${JSON.stringify(r)}`);
+  }
+  if (r.txid.toLowerCase() !== localTxid) {
+    throw new Error(`WalletProvider: ARC reported txid ${r.txid} but the transaction sent has txid ${localTxid}`);
+  }
+  return localTxid;
+}
+
 export interface WalletProviderOptions {
   /** BRC-100 WalletClient instance. */
   wallet: WalletClient;
@@ -60,6 +101,12 @@ export interface WalletProviderOptions {
    * ARC path.
    */
   broadcaster?: Broadcaster;
+  /**
+   * N-040: timeout in milliseconds for the ARC `/v1/tx` broadcast request.
+   * Without a bound, a hung ARC deployment (accepts the connection, never
+   * responds) blocks `broadcast()` forever. Default: 30000 (30s).
+   */
+  arcTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +124,7 @@ export class WalletProvider implements Provider {
   protected readonly _network: 'mainnet' | 'testnet';
   protected readonly _feeRate: number;
   protected readonly broadcaster: Broadcaster | undefined;
+  protected readonly arcTimeoutMs: number;
   protected readonly txCache = new Map<string, string>();
 
   constructor(options: WalletProviderOptions) {
@@ -106,6 +154,7 @@ export class WalletProvider implements Provider {
     this.overlayTopics = options.overlayTopics;
     this._feeRate = options.feeRate ?? 100;
     this.broadcaster = options.broadcaster;
+    this.arcTimeoutMs = options.arcTimeoutMs ?? 30_000;
   }
 
   // -------------------------------------------------------------------------
@@ -191,6 +240,15 @@ export class WalletProvider implements Provider {
         );
       }
       const txid = result.txid;
+      // N-040: same rule as F-042's checkArcAccepted — an injected broadcaster
+      // answering with a different transaction's txid must not be treated as
+      // having broadcast THIS transaction.
+      const localTxid = tx.id('hex');
+      if (txid.toLowerCase() !== localTxid) {
+        throw new Error(
+          `WalletProvider: injected broadcaster reported txid ${txid} but the transaction sent has txid ${localTxid}`,
+        );
+      }
       this.txCache.set(txid, tx.toHex());
       if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
         this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
@@ -200,17 +258,28 @@ export class WalletProvider implements Provider {
 
     const efBytes = tx.toEFUint8Array();
 
-    const resp = await fetch(`${this.arcUrl}/v1/tx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: efBytes.buffer as ArrayBuffer,
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.arcUrl}/v1/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: efBytes.buffer as ArrayBuffer,
+        // N-040: bound the request so a hung ARC deployment (accepts the
+        // connection, never responds) fails closed instead of blocking
+        // broadcast() forever.
+        signal: AbortSignal.timeout(this.arcTimeoutMs),
+      });
+    } catch (e) {
+      throw new Error(
+        `WalletProvider: ARC broadcast to ${this.arcUrl}/v1/tx failed, the transaction was NOT broadcast: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     if (!resp.ok) {
       const body = await resp.text();
       throw new Error(`WalletProvider: ARC broadcast failed (${resp.status}): ${body}`);
     }
-    const result = (await resp.json()) as { txid: string };
-    const txid = result.txid;
+    const txid = checkArcAccepted(await resp.json().catch(() => undefined), tx.id('hex'));
 
     // Cache for future EF lookups
     this.txCache.set(txid, tx.toHex());
@@ -363,20 +432,38 @@ export class WalletProvider implements Provider {
       }],
     });
 
-    // Cache the funding tx so child txs can build EF
+    // F-248: this used to swallow both a BEEF parse failure and a funding
+    // broadcast failure (routing each through warnNonFatal — a console.warn
+    // — while still resolving normally). A method whose purpose is to
+    // *guarantee* spendable funding must not report success when the funding
+    // tx could not be parsed, or was not actually accepted onto the network;
+    // the caller would otherwise deploy against a funding UTXO that may not
+    // exist. Unlike the overlay submissions above (genuinely fire-and-forget
+    // indexing after a transaction already broadcast elsewhere), this
+    // broadcastTx call is the only attempt this method makes to get the
+    // funding tx onto the network, so its failure is fatal to the guarantee.
     if (result.tx) {
+      let tx: Transaction;
       try {
-        const tx = Transaction.fromAtomicBEEF(result.tx);
-        const rawHex = tx.toHex();
-        const txid = result.txid || '';
-        if (txid) this.txCache.set(txid, rawHex);
-
-        // Broadcast to ARC (may already be known — non-fatal)
-        await this.broadcastTx(Transaction.fromHex(rawHex)).catch((e) =>
-          warnNonFatal('funding-tx broadcast', e),
-        );
+        tx = Transaction.fromAtomicBEEF(result.tx);
       } catch (e) {
-        warnNonFatal('funding-tx parse', e);
+        throw new Error(
+          `WalletProvider.ensureFunding: funding tx BEEF returned by the wallet did not ` +
+            `parse: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      const rawHex = tx.toHex();
+      const txid = result.txid || '';
+      if (txid) this.txCache.set(txid, rawHex);
+
+      try {
+        await this.broadcastTx(Transaction.fromHex(rawHex));
+      } catch (e) {
+        throw new Error(
+          `WalletProvider.ensureFunding: funding tx broadcast failed, the funding UTXO ` +
+            `may not exist on-chain: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     }
   }

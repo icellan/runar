@@ -3,8 +3,8 @@
 // The Go-DSL fixture exercises Go-only surface features (`runar.BigintBig`
 // property type, `runar.ByteString("\x00\x6a")` literal). In Zig the
 // equivalent surface is plain `Bigint` / `ByteString` plus a bare string
-// literal `"006a"` (the Zig parser maps string literals directly to
-// ByteStringLiteral). Both lower to the same primitives in the AST.
+// `runar.hexToBytes("006a")` (the Zig parser maps it to a
+// ByteStringLiteral; a bare `"006a"` is refused, N-448). Both lower to the same primitives in the AST.
 const runar = @import("runar");
 
 pub const GoDslBytestringLiteral = struct {
@@ -19,6 +19,6 @@ pub const GoDslBytestringLiteral = struct {
 
     pub fn check(self: *const GoDslBytestringLiteral, a: runar.Bigint, b: runar.Bigint) void {
         runar.assert(a + b == self.target);
-        runar.assert(runar.bytesEq("006a", self.expected));
+        runar.assert(runar.bytesEq(runar.hexToBytes("006a"), self.expected));
     }
 };

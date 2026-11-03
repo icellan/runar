@@ -1,64 +1,27 @@
 package frontend
 
-// Compile-time disclosure for the SP1 FRI verifier's on-chain soundness gap.
+// Compile-time refusal of the SP1 FRI verifier (F-007 / CL-BUG-037).
 //
-// `EmitFullSP1FriVerifierBody` samples each FRI query index and immediately
-// drops it — its own Step 10 comment says "For the deployable verifier we
-// sample-and-drop". The input-batch MMCS verify, the FRI fold chain and the
-// final-poly Horner equality are therefore NEVER EMITTED into the locking
-// script. Replaying the corruption fixtures through the compiled covenant
-// shows `bad_merkle`, `bad_folding` and `bad_final_poly` are ACCEPTED on-chain
-// while the off-chain reference verifier rejects all three: a spender can
-// supply forged Merkle openings — arbitrary opened values with arbitrary
-// authentication paths — and the covenant accepts. On-chain soundness
-// currently rests on the Fiat-Shamir transcript, not on the proof.
+// `EmitFullSP1FriVerifierBody` binds only the Fiat-Shamir transcript and the
+// grinding witnesses. It never emits the per-query MMCS openings, the FRI fold
+// / colinearity chain, the final-poly equality, or the Steps 6/7 out-of-domain
+// constraint check, so it cannot tell a valid proof from a forged one. It used
+// to end in OP_1 and ACCEPT a proof whose every per-query opening was garbage.
 //
-// That is written up in docs/sp1-fri-verifier.md and pinned by
-// compilers/go/compiler/sp1_fri_negative_test.go, but a developer who simply
-// calls the built-in would read neither. A gap this size must be impossible to
-// miss, so the compiler says it every time the built-in is used.
-//
-// Remove this warning when the per-query verification chain lands.
+// For v1 the verifier is not implemented: the emitted body is fail-closed
+// (OP_0 OP_VERIFY, it can never accept) and every compile that reaches
+// verifySP1FRI is refused, on the source path here and on the --ir path in
+// compiler/sp1_fri_ir_guard.go. There is no override: the old
+// `@acknowledgeUnsoundSP1FriVerifier` directive and
+// `--acknowledge-unsound-sp1-fri` flag were removed. The post-v1 plan is in
+// docs/sp1-fri-verifier.md.
 
-// sp1FriSoundnessRefusal is the shared body of the refusal. The two entry
-// points into the compiler reach it by different routes and offer different
-// escape hatches, so only the closing remedy sentence differs.
-const sp1FriSoundnessRefusal = "verifySP1FRI: REFUSING to emit a known-unsound proof verifier. " +
-	"The per-query chain (input-batch MMCS verify, FRI fold, final-poly equality) is not emitted, so " +
-	"the locking script ACCEPTS forged Merkle openings — an attacker spends with a fabricated proof. " +
-	"Replaying the corruption fixtures through the compiled covenant shows bad_merkle, bad_folding and " +
-	"bad_final_poly all ACCEPTED on-chain while the off-chain reference rejects them. This is NOT usable " +
-	"for a value-bearing covenant. "
-
-const sp1FriSoundnessError = sp1FriSoundnessRefusal +
-	"If you are working on the verifier itself, add the comment directive " +
-	"@acknowledgeUnsoundSP1FriVerifier to the contract source to compile it anyway. See " +
-	"docs/sp1-fri-verifier.md."
-
-// SP1FriSoundnessIRError is the same refusal for the `--ir` /
-// CompileFromProgram entry points, which never run Validate and have no source
-// to carry the comment directive.
-//
-// The acknowledgement cannot live in the ANF IR. `ir.ANFProgram` carries no
-// representation of the directive — it is a frontend-AST field stripped by
-// lowering, and the emitted IR JSON is compared byte-for-byte across all seven
-// tiers, so a new field there would break parity. More importantly, IR handed
-// to `--ir` is untrusted input: a flag inside it would be written by whoever
-// authored the verifier call and would authorise nothing. So the acknowledgement
-// has to come from the invoker. See compiler/sp1_fri_ir_guard.go (R-012).
-const SP1FriSoundnessIRError = sp1FriSoundnessRefusal +
-	"This IR reaches the verifier without going through the frontend, so the " +
-	"@acknowledgeUnsoundSP1FriVerifier source directive was never consulted — the ANF IR carries no " +
-	"representation of it, and a flag inside attacker-supplied IR would authorise nothing anyway. " +
-	"If you are working on the verifier itself, acknowledge it on the invocation instead: pass " +
-	"--acknowledge-unsound-sp1-fri on the command line (or CompileOptions.AcknowledgeUnsoundSP1Fri). " +
-	"See docs/sp1-fri-verifier.md."
-
-const sp1FriSoundnessWarning = "verifySP1FRI: the emitted locking script is NOT a sound proof " +
-	"verifier at the PoC parameter set. The per-query chain (input-batch MMCS verify, FRI fold, " +
-	"final-poly equality) is not emitted, so FORGED Merkle openings are ACCEPTED on-chain — only " +
-	"the Fiat-Shamir transcript binding is enforced. Do not use this for a value-bearing " +
-	"covenant. See docs/sp1-fri-verifier.md."
+// SP1FriNotImplementedError is the refusal both entry points return.
+const SP1FriNotImplementedError = "verifySP1FRI: REFUSING to compile — the SP1 FRI verifier is not " +
+	"implemented for v1. The emitted body checks only the Fiat-Shamir transcript and grinding " +
+	"witnesses; the per-query MMCS openings, the FRI fold/colinearity chain, the final-poly equality " +
+	"and the Steps 6/7 out-of-domain constraint check are not emitted, so the body is fail-closed " +
+	"and can never accept a spend. There is no override. See docs/sp1-fri-verifier.md."
 
 // contractCallsSP1FriVerifier reports whether any method body calls
 // `verifySP1FRI`, at any nesting depth.

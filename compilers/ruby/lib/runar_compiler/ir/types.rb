@@ -42,14 +42,12 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     # +parent_class+ is the base class the source contract extends
-    # ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract"). It is
-    # an in-memory carrier ONLY -- it is never written into the emitted ANF IR
-    # JSON that the conformance suite compares cross-tier (see
-    # +_serialize_anf_program+ in compiler.rb, which omits it). The artifact
-    # assembler copies it to the top-level artifact field so SDKs can gate the
-    # issue-#42/#44 terminal sighash subscript trim on the authoritative parent
-    # class (a StatefulSmartContract with zero mutable fields still needs the
-    # trim even though stateFields is empty).
+    # ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract"), or
+    # "" when unknown (IR written before F-038). F-038: it is WIRE data
+    # (+parentClass+), so an --emit-ir -> --ir round trip keeps the artifact's
+    # top-level parentClass, which SDKs read to gate the issue-#42/#44 terminal
+    # sighash subscript trim (a StatefulSmartContract with zero mutable fields
+    # still needs the trim even though stateFields is empty).
     ANFProgram = Struct.new(:contract_name, :properties, :methods, :parent_class, keyword_init: true) do
       def initialize(contract_name: "", properties: [], methods: [], parent_class: "")
         super(contract_name: contract_name, properties: properties, methods: methods, parent_class: parent_class)
@@ -70,10 +68,9 @@ module RunarCompiler
 
     # +sighash_type+ carries the declared +@sighash+ mode (issue #123) from the
     # AST MethodNode so the artifact assembler can stamp a non-default mode into
-    # the ABI +sigHashType+. Like +ANFProgram#parent_class+ it is an in-memory
-    # carrier ONLY — it is never written into the emitted ANF IR JSON that the
-    # conformance suite compares cross-tier (the ANF carries the mode instead on
-    # the +check_preimage+ node's +sighash_flag+; see +_serialize_anf_program+).
+    # the ABI +sigHashType+. F-065: it is WIRE data (+sigHashType+, omitted for
+    # the default ALL|FORKID), so an --emit-ir -> --ir round trip keeps the ABI
+    # field; the script bytes ride on the +check_preimage+ node's +sighash_flag+.
     ANFMethod = Struct.new(:name, :params, :body, :is_public, :sighash_type, keyword_init: true) do
       def initialize(name: "", params: [], body: [], is_public: false, sighash_type: nil)
         super(name: name, params: params, body: body, is_public: is_public, sighash_type: sighash_type)
@@ -483,7 +480,9 @@ module RunarCompiler
         name: d.fetch("name", ""),
         params: d.fetch("params", []).map { |p| _anf_param_from_hash(p) },
         body: d.fetch("body", []).map { |b| _anf_binding_from_hash(b) },
-        is_public: d.fetch("isPublic", false)
+        is_public: d.fetch("isPublic", false),
+        # F-065: validated by RequiredFields; absent/null = default mode.
+        sighash_type: d["sigHashType"]
       )
     end
     private_class_method :_anf_method_from_hash
@@ -493,7 +492,9 @@ module RunarCompiler
       ANFProgram.new(
         contract_name: d.fetch("contractName", ""),
         properties: d.fetch("properties", []).map { |p| _anf_property_from_hash(p) },
-        methods: d.fetch("methods", []).map { |m| _anf_method_from_hash(m) }
+        methods: d.fetch("methods", []).map { |m| _anf_method_from_hash(m) },
+        # F-038: validated by RequiredFields; absent/null = unknown ("").
+        parent_class: d["parentClass"] || ""
       )
     end
 

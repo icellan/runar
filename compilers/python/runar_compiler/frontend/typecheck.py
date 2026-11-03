@@ -40,6 +40,10 @@ from runar_compiler.frontend.ast_nodes import (
     VariableDeclStmt,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.side_effect_summary import (
+    MethodEffects,
+    compute_side_effect_summary,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +62,15 @@ class TypeCheckResult:
         return [d.format_message() for d in self.errors]
 
 
+# N-321: cap on a typecheck message; mirrored in every tier.
+MAX_DIAGNOSTIC_CHARS = 1024
+
+
 def type_check(contract: ContractNode) -> TypeCheckResult:
     """Type-check a Runar AST. Returns the same AST plus any errors."""
     checker = _TypeChecker(contract)
 
+    checker.check_property_initializers()
     checker.check_constructor()
     for method in contract.methods:
         checker.check_method(method)
@@ -239,7 +248,13 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "extractPrevOutputScript": FuncSig(params=["bigint", "ByteString"], return_type="ByteString"),
     "requireOutputP2PKH":      FuncSig(params=["bigint", "ByteString", "bigint"], return_type="void"),
     "currentBlockHeight":      FuncSig(params=[], return_type="bigint"),
+    # F-024 (R14): read-only view of the auto-injected ``_newAmount`` -- the
+    # satoshis of the default single-output state continuation.
+    "continuationAmount":      FuncSig(params=[], return_type="bigint"),
 }
+
+# F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned"
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +414,51 @@ class _TypeEnv:
                 return scope[name], True
         return "", False
 
+    def scope_index_of(self, name: str) -> int:
+        """Index of the innermost scope binding ``name``, or -1 if none does."""
+        for i in range(len(self._scopes) - 1, -1, -1):
+            if name in self._scopes[i]:
+                return i
+        return -1
+
+    @property
+    def depth(self) -> int:
+        """Index the next ``push_scope()`` will occupy."""
+        return len(self._scopes)
+
+
+def _loop_may_run_twice(stmt: ForStmt) -> bool:
+    """F-110: whether a for-statement may execute its body two or more times.
+    Mirrors the trip count ``_extract_loop_shape`` (anf_lower) unrolls; a shape
+    it cannot resolve is refused elsewhere and is treated as repeating here."""
+    def literal(e) -> int | None:
+        if isinstance(e, BigIntLiteral):
+            return e.value
+        if isinstance(e, UnaryExpr) and e.op == "-":
+            inner = literal(e.operand)
+            return None if inner is None else -inner
+        return None
+
+    init = stmt.init.init if isinstance(stmt.init, VariableDeclStmt) else None
+    start = literal(init) if init is not None else None
+    cond = stmt.condition
+    if start is None or not isinstance(cond, BinaryExpr):
+        return True
+    bound = literal(cond.right)
+    if bound is None:
+        return True
+    if cond.op == "<":
+        count = bound - start
+    elif cond.op == "<=":
+        count = bound - start + 1
+    elif cond.op == ">":
+        count = start - bound
+    elif cond.op == ">=":
+        count = start - bound + 1
+    else:
+        return True
+    return count >= 2
+
 
 # ---------------------------------------------------------------------------
 # Affine types
@@ -417,6 +477,33 @@ _CONSUMING_FUNCTIONS: dict[str, list[int]] = {
 # Type checker
 # ---------------------------------------------------------------------------
 
+def _consumed_param_summary(
+    contract: ContractNode,
+) -> dict[str, tuple[list[int], list[str]]]:
+    """N-109: run the affine checker over each method body with throwaway
+    diagnostics and record which parameters (and, N-288, which ``prop:<name>``
+    property origins) end up consumed. Reusing the
+    checker inherits alias, if-arm and loop handling. Consumption only grows as
+    summaries grow, so iterating until no entry changes terminates, also for
+    recursive call graphs (refused separately by the validator). Mirrors
+    ``consumedParamSummary`` in the TS reference 03-typecheck.ts."""
+    summary: dict[str, tuple[list[int], list[str]]] = {
+        m.name: ([], []) for m in contract.methods
+    }
+    changed = True
+    while changed:
+        changed = False
+        for method in contract.methods:
+            scratch = _TypeChecker(contract)
+            scratch._consumed_params = summary
+            consumed = scratch._consumed_param_indices(method)
+            prev = summary[method.name]
+            if len(consumed[0]) != len(prev[0]) or len(consumed[1]) != len(prev[1]):
+                summary[method.name] = consumed
+                changed = True
+    return summary
+
+
 class _TypeChecker:
     def __init__(self, contract: ContractNode) -> None:
         self.contract = contract
@@ -430,8 +517,22 @@ class _TypeChecker:
         # it aliases. Populated when a VariableDeclStmt of affine
         # type is initialized from another affine origin.
         self.affine_aliases: dict[str, str] = {}
+        # F-110: for every enclosing loop that may run two or more times, the
+        # env scope index its init/body bindings live at (innermost last). A
+        # bounded loop is unrolled ``count`` times, so consuming an affine
+        # value bound below the innermost index happens once per iteration.
+        self._repeating_loop_scopes: list[int] = []
         self._current_method_loc: SourceLocation | None = None
         self._current_stmt_loc: SourceLocation | None = None
+        # Lazily computed side-effect summary (F-075).
+        self._side_effects: dict[str, MethodEffects] | None = None
+        # N-109: for every contract method, the indices of the parameters it
+        # consumes (directly or through further helper calls). Private helpers
+        # are inlined, so a call consumes the arguments at those positions.
+        # N-288: each entry also carries the ``prop:<name>`` origins the
+        # method consumes, which a call consumes in the caller.
+        # Computed lazily by _consumed_param_summary.
+        self._consumed_params: dict[str, tuple[list[int], list[str]]] | None = None
 
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
@@ -447,9 +548,67 @@ class _TypeChecker:
                 ret_type = _infer_method_return_type(method)
             self.method_sigs[method.name] = FuncSig(params=params, return_type=ret_type)
 
-    def _add_error(self, msg: str) -> None:
-        loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
+    def _refuse_continuation_amount_write(self, target) -> None:
+        """F-024 (R14): ``continuationAmount()`` is a read-only view of the
+        auto-injected ``_newAmount``. Without this check an assignment to it
+        would lower as a plain read and silently drop the write."""
+        if (isinstance(target, CallExpr) and isinstance(target.callee, Identifier)
+                and target.callee.name == "continuationAmount"):
+            self._add_error(CONTINUATION_AMOUNT_READ_ONLY)
+
+    def _add_error(self, msg: str, at: Expression | None = None) -> None:
+        # N-321: a message may echo user-written type text of any length; cap it.
+        if len(msg) > MAX_DIAGNOSTIC_CHARS:
+            msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+        # N-463: an error about an expression is anchored at that expression,
+        # as in TS, when its position is known (every surface parser records
+        # it); otherwise at the statement, then the method, as before.
+        loc = _expr_loc(at) if at is not None else None
+        if loc is None:
+            loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
+
+    def _add_operand_error(self, msg: str, operand: Expression) -> None:
+        # N-472: an operand type error is anchored at the operand with no
+        # fallback, as TS does with ``operand.sourceLocation``. A bigint or
+        # boolean literal carries no location in any TS parser, so the
+        # diagnostic prints none rather than the statement. Any other operand
+        # without a recorded position (a surface that does not record it)
+        # keeps ``_add_error``'s statement anchor.
+        if _expr_loc(operand) is None and isinstance(operand, (BigIntLiteral, BoolLiteral)):
+            if len(msg) > MAX_DIAGNOSTIC_CHARS:
+                msg = f"{msg[:MAX_DIAGNOSTIC_CHARS]}...({len(msg) - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+            self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=None))
+            return
+        self._add_error(msg, operand)
+
+    def check_property_initializers(self) -> None:
+        """N-234: a scalar property initializer whose literal type does not
+        match the declared property type compiled without complaint on
+        every tier (``readonly x: bigint = toByteString('ab')`` emitted a
+        locking script that pushes a byte string where the contract's own
+        arithmetic expects a script NUMBER). The validator only checks that
+        an initializer IS a literal of one of the three families, never
+        that it is a literal OF THE DECLARED TYPE. FixedArray properties
+        are skipped here: their element-type check already lives in
+        expand_fixed_arrays.py (N-133), which runs on the expanded array
+        elements, not the whole-array initializer this pass sees. Mirrors
+        the TS reference's method of the same name in 03-typecheck.ts.
+        """
+        for prop in self.contract.properties:
+            if prop.initializer is None:
+                continue
+            if isinstance(prop.type, FixedArrayType):
+                continue
+            init_type = _infer_expr_type_static(prop.initializer)
+            if init_type == "<unknown>":
+                continue
+            declared_type = _type_node_to_string(prop.type)
+            if not is_subtype(init_type, declared_type):
+                self._current_method_loc = prop.source_location
+                self._add_error(
+                    f"type '{init_type}' is not assignable to type '{declared_type}'"
+                )
 
     def check_constructor(self) -> None:
         ctor = self.contract.constructor
@@ -468,6 +627,12 @@ class _TypeChecker:
             env.define(prop.name, _type_node_to_string(prop.type))
 
         self._check_statements(ctor.body, env)
+
+    def _method_effects(self, name: str) -> MethodEffects:
+        """The named method's effects, following private helpers (F-075)."""
+        if self._side_effects is None:
+            self._side_effects = compute_side_effect_summary(self.contract)
+        return self._side_effects.get(name) or MethodEffects()
 
     def check_method(self, method: MethodNode) -> None:
         env = _TypeEnv()
@@ -493,8 +658,16 @@ class _TypeChecker:
         # exercised — attackers could route the bond P2PKH through an
         # unmatched index. v1 forbids the mix; v2 may relax with a
         # variable-stride decoder.
-        has_require_p2pkh = _body_calls_builtin(method.body, "requireOutputP2PKH")
-        has_add_data_output = _body_calls_add_data_output(method.body)
+        #
+        # F-075: all three guards here read the method's effects from
+        # compute_side_effect_summary, which follows the private-helper call
+        # graph — the same analysis ANF lowering injects the continuation from,
+        # and ANF lowering inlines private helpers. A body-local walk let a
+        # developer disable every guard by moving the triggering call into a
+        # helper.
+        effects = self._method_effects(method.name)
+        has_require_p2pkh = effects.calls_require_output_p2pkh
+        has_add_data_output = effects.has_data_output
         if has_require_p2pkh and has_add_data_output:
             self._add_error(
                 f"method '{method.name}' mixes requireOutputP2PKH() with addDataOutput() — "
@@ -522,11 +695,7 @@ class _TypeChecker:
         # proven there either. See
         # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         if self.contract.parent_class == "StatefulSmartContract":
-            mutable_props = {
-                p.name for p in self.contract.properties if not p.readonly
-            }
-            sig = _analyze_method_output_signals(method.body, mutable_props)
-            if has_require_p2pkh and sig.has_state_output:
+            if has_require_p2pkh and effects.has_state_output:
                 self._add_error(
                     f"method '{method.name}' mixes requireOutputP2PKH() with "
                     "this.addOutput()/addRawOutput() — the intrinsic reads output i at byte "
@@ -538,9 +707,9 @@ class _TypeChecker:
                     "output of its own"
                 )
             if (
-                sig.requires_output_p2pkh_zero
-                and sig.mutates_state
-                and not sig.has_state_output
+                effects.requires_output_p2pkh_zero
+                and effects.mutates_state
+                and not effects.has_state_output
             ):
                 self._add_error(
                     f"method '{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state "
@@ -585,6 +754,7 @@ class _TypeChecker:
                     self.affine_aliases[stmt.name] = origin
 
         elif isinstance(stmt, AssignmentStmt):
+            self._refuse_continuation_amount_write(stmt.target)
             target_type = self._infer_expr_type(stmt.target, env)
             value_type = self._infer_expr_type(stmt.value, env)
             if not is_subtype(value_type, target_type):
@@ -596,15 +766,24 @@ class _TypeChecker:
             cond_type = self._infer_expr_type(stmt.condition, env)
             if cond_type != "boolean":
                 self._add_error(f"if condition must be boolean, got '{cond_type}'")
+            # F-222: the arms are mutually exclusive, so each is checked
+            # against the consumed set as it stood before the if; afterwards a
+            # value consumed in either arm counts as consumed.
+            consumed_before = dict(self.consumed_values)
             env.push_scope()
             self._check_statements(stmt.then, env)
             env.pop_scope()
+            consumed_after_then = self.consumed_values
+            self.consumed_values = consumed_before
             if stmt.else_:
                 env.push_scope()
                 self._check_statements(stmt.else_, env)
                 env.pop_scope()
+            self.consumed_values.update(consumed_after_then)
 
         elif isinstance(stmt, ForStmt):
+            loop_scope = env.depth
+            repeats = _loop_may_run_twice(stmt)
             env.push_scope()
             self._check_statement(stmt.init, env)
             cond_type = self._infer_expr_type(stmt.condition, env)
@@ -619,7 +798,13 @@ class _TypeChecker:
             # validator.py separately restricts the clause to a unit-step
             # advance; this is the type-level half of the same guard.
             self._check_statement(stmt.update, env)
+            # F-110: the body runs once per iteration; see
+            # ``_repeating_loop_scopes``.
+            if repeats:
+                self._repeating_loop_scopes.append(loop_scope)
             self._check_statements(stmt.body, env)
+            if repeats:
+                self._repeating_loop_scopes.pop()
             env.pop_scope()
 
         elif isinstance(stmt, ExpressionStmt):
@@ -759,7 +944,8 @@ class _TypeChecker:
                 # everything, exactly as in TS.
                 self._add_error(
                     f"Ternary branches have incompatible types: "
-                    f"'{cons_type}' and '{alt_type}'"
+                    f"'{cons_type}' and '{alt_type}'",
+                    expr,
                 )
             return cons_type
 
@@ -773,16 +959,36 @@ class _TypeChecker:
             return "<unknown>"
 
         if isinstance(expr, IncrementExpr):
+            self._refuse_continuation_amount_write(expr.operand)
             operand_type = self._infer_expr_type(expr.operand, env)
             if not is_bigint_family(operand_type):
                 self._add_error(f"++ operator requires bigint, got '{operand_type}'")
             return "bigint"
 
         if isinstance(expr, DecrementExpr):
+            self._refuse_continuation_amount_write(expr.operand)
             operand_type = self._infer_expr_type(expr.operand, env)
             if not is_bigint_family(operand_type):
                 self._add_error(f"-- operator requires bigint, got '{operand_type}'")
             return "bigint"
+
+        if isinstance(expr, ArrayLiteralExpr):
+            # F-063: without this arm every array literal typed as "<unknown>"
+            # -- which is_subtype accepts against anything, making
+            # checkMultiSig's argument check vacuous -- and its elements were
+            # never visited, so a call nested in one never reached the
+            # unknown-function rule. Ported from the TS reference, wording
+            # included.
+            if not expr.elements:
+                return "<unknown>[]"
+            elem_type = self._infer_expr_type(expr.elements[0], env)
+            for el in expr.elements[1:]:
+                et = self._infer_expr_type(el, env)
+                if not is_subtype(et, elem_type) and et != "<unknown>":
+                    self._add_error(
+                        f"Array element type mismatch: expected '{elem_type}', got '{et}'"
+                    )
+            return elem_type + "[]"
 
         return "<unknown>"
 
@@ -801,23 +1007,27 @@ class _TypeChecker:
         # Arithmetic: bigint x bigint -> bigint
         if e.op in ("+", "-", "*", "/", "%"):
             if not is_bigint_family(left_type):
-                self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
         if e.op in ("<", "<=", ">", ">="):
             if not is_bigint_family(left_type):
-                self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "boolean"
 
@@ -834,29 +1044,34 @@ class _TypeChecker:
             if not compatible:
                 if left_type != "<unknown>" and right_type != "<unknown>":
                     self._add_error(
-                        f"cannot compare '{left_type}' and '{right_type}' with '{e.op}'"
+                        f"cannot compare '{left_type}' and '{right_type}' with '{e.op}'",
+                        e,
                     )
             return "boolean"
 
         if e.op in ("&&", "||"):
             if left_type != "boolean" and left_type != "<unknown>":
-                self._add_error(
-                    f"left operand of '{e.op}' must be boolean, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be boolean, got '{left_type}'",
+                    e.left,
                 )
             if right_type != "boolean" and right_type != "<unknown>":
-                self._add_error(
-                    f"right operand of '{e.op}' must be boolean, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be boolean, got '{right_type}'",
+                    e.right,
                 )
             return "boolean"
 
         if e.op in ("<<", ">>"):
             if not is_bigint_family(left_type):
-                self._add_error(
-                    f"left operand of '{e.op}' must be bigint, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be bigint, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
-                    f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be bigint, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
@@ -865,12 +1080,14 @@ class _TypeChecker:
             if is_byte_family(left_type) and is_byte_family(right_type):
                 return "ByteString"
             if not is_bigint_family(left_type):
-                self._add_error(
-                    f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'"
+                self._add_operand_error(
+                    f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'",
+                    e.left,
                 )
             if not is_bigint_family(right_type):
-                self._add_error(
-                    f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'"
+                self._add_operand_error(
+                    f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'",
+                    e.right,
                 )
             return "bigint"
 
@@ -886,14 +1103,16 @@ class _TypeChecker:
         if e.op == "!":
             if operand_type != "boolean" and operand_type != "<unknown>":
                 self._add_error(
-                    f"operand of '!' must be boolean, got '{operand_type}'"
+                    f"operand of '!' must be boolean, got '{operand_type}'",
+                    e,
                 )
             return "boolean"
 
         if e.op == "-":
             if not is_bigint_family(operand_type):
                 self._add_error(
-                    f"operand of unary '-' must be bigint, got '{operand_type}'"
+                    f"operand of unary '-' must be bigint, got '{operand_type}'",
+                    e,
                 )
             return "bigint"
 
@@ -902,7 +1121,8 @@ class _TypeChecker:
                 return "ByteString"
             if not is_bigint_family(operand_type):
                 self._add_error(
-                    f"operand of '~' must be bigint or ByteString, got '{operand_type}'"
+                    f"operand of '~' must be bigint or ByteString, got '{operand_type}'",
+                    e,
                 )
             return "bigint"
 
@@ -939,9 +1159,17 @@ class _TypeChecker:
             # Check if it's a known contract method
             if name in self.method_sigs:
                 return self._check_call_args(name, self.method_sigs[name], e.args, env)
-            # Check if it's a local variable
+            # Check if it's a local variable -- F-208: Rúnar has no
+            # first-class functions, so a bound local can never be called.
+            # This used to return "<unknown>" with no diagnostic, silently
+            # accepting `const f: bigint = a; const r = f(a, a, a);`.
             _, found = env.lookup(name)
             if found:
+                self._add_error(
+                    f"local variable '{name}' is not callable -- Runar has "
+                    f"no first-class functions; only built-in functions and "
+                    f"contract methods can be called"
+                )
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "<unknown>"
@@ -1134,7 +1362,8 @@ class _TypeChecker:
                 if not is_bigint_family(sat_type) and sat_type != "<unknown>":
                     self._add_error(
                         "addOutput() first argument (satoshis) must be bigint, "
-                        f"got '{sat_type}'"
+                        f"got '{sat_type}'",
+                        args[0],
                     )
             i = 0
             while i < len(mutable_props) and i + 1 < len(normalized):
@@ -1143,7 +1372,8 @@ class _TypeChecker:
                 if not is_subtype(arg_type, prop_type) and arg_type != "<unknown>":
                     self._add_error(
                         f"addOutput() argument {i + 2} ({mutable_props[i][0]}) "
-                        f"must be '{prop_type}', got '{arg_type}'"
+                        f"must be '{prop_type}', got '{arg_type}'",
+                        normalized[i + 1],
                     )
                 i += 1
             # Surplus arguments are still inferred, so a type error inside one
@@ -1163,7 +1393,8 @@ class _TypeChecker:
             if not is_bigint_family(sat_type) and sat_type != "<unknown>":
                 self._add_error(
                     f"{name}() first argument (satoshis) must be bigint, "
-                    f"got '{sat_type}'"
+                    f"got '{sat_type}'",
+                    args[0],
                 )
         if len(args) >= 2:
             # TS uses is_subtype against ByteString, not equality, so every
@@ -1172,7 +1403,8 @@ class _TypeChecker:
             if not is_subtype(script_type, "ByteString") and script_type != "<unknown>":
                 self._add_error(
                     f"{name}() second argument (scriptBytes) must be ByteString, "
-                    f"got '{script_type}'"
+                    f"got '{script_type}'",
+                    args[1],
                 )
         return "void"
 
@@ -1304,12 +1536,38 @@ class _TypeChecker:
                 self._infer_expr_type(args[2], env)
             return sig.return_type
 
-        # requireOutputP2PKH and currentBlockHeight need the auto-injected
-        # txPreimage -- only available in StatefulSmartContract methods.
-        if func_name in ("requireOutputP2PKH", "currentBlockHeight"):
+        # requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        # the auto-injected txPreimage / _newAmount -- only available in
+        # StatefulSmartContract methods.
+        if func_name in ("requireOutputP2PKH", "currentBlockHeight", "continuationAmount"):
             if self.contract is not None and self.contract.parent_class != "StatefulSmartContract":
                 self._add_error(
                     f"{func_name}() is only available in StatefulSmartContract methods"
+                )
+
+        # F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        # argument. A literal negative start used to type-check as plain
+        # 'bigint' (the standard subtype loop below never inspects a
+        # literal's VALUE) and compile to a script that aborts at runtime
+        # -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        # the literal case (bare or unary-negated BigIntLiteral) at compile
+        # time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        # "must be >= 0" pattern above. A non-literal start (a variable or
+        # computed expression) has no static value to check and is
+        # unaffected.
+        if func_name == "substr" and len(args) >= 2:
+            start_lit: BigIntLiteral | None = None
+            if isinstance(args[1], BigIntLiteral):
+                start_lit = args[1]
+            elif (
+                isinstance(args[1], UnaryExpr)
+                and args[1].op == "-"
+                and isinstance(args[1].operand, BigIntLiteral)
+            ):
+                start_lit = BigIntLiteral(value=-args[1].operand.value)
+            if start_lit is not None and start_lit.value < 0:
+                self._add_error(
+                    f"substr() argument 2 (start) must be >= 0; got {start_lit.value}"
                 )
 
         # Standard arg count check
@@ -1352,8 +1610,15 @@ class _TypeChecker:
         launder a double-consumption past the affine check.
         2026-04-30 audit finding F6."""
         consumed_indices = _CONSUMING_FUNCTIONS.get(func_name)
+        consumed_props: list[str] = []
         if consumed_indices is None:
-            return
+            # N-109: a call to a contract method consumes the arguments at the
+            # parameter positions that method consumes.
+            if func_name in BUILTIN_FUNCTIONS or func_name not in self.method_sigs:
+                return
+            if self._consumed_params is None:
+                self._consumed_params = _consumed_param_summary(self.contract)
+            consumed_indices, consumed_props = self._consumed_params.get(func_name, ([], []))
 
         for param_index in consumed_indices:
             if param_index >= len(args):
@@ -1376,12 +1641,48 @@ class _TypeChecker:
             else:
                 label = origin
 
-            if self.consumed_values.get(origin, False):
+            if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
                 self._add_error(
-                    f"affine value '{label}' has already been consumed"
+                    f"affine value '{label}' has already been consumed",
+                    arg,
                 )
             else:
                 self.consumed_values[origin] = True
+
+        # N-288: the call also consumes every property the method consumes.
+        for origin in consumed_props:
+            if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
+                self._add_error(
+                    f"affine value 'this.{origin[len('prop:'):]}' has already been consumed",
+                    args[0] if args else None,
+                )
+            else:
+                self.consumed_values[origin] = True
+
+    def _consumed_param_indices(self, method: MethodNode) -> tuple[list[int], list[str]]:
+        """N-109: the indices of ``method``'s parameters its body consumes,
+        and (N-288) the ``prop:<name>`` property origins it consumes."""
+        env = _TypeEnv()
+        self._current_method_loc = method.source_location
+        self.consumed_values = {}
+        self.affine_aliases = {}
+        for param in method.params:
+            env.define(param.name, _type_node_to_string(param.type))
+        self._check_statements(method.body, env)
+        indices = [i for i, p in enumerate(method.params) if self.consumed_values.get(p.name, False)]
+        props = sorted(o for o, used in self.consumed_values.items() if used and o.startswith("prop:"))
+        return indices, props
+
+    def _consumed_per_loop_iteration(self, origin: str, env: _TypeEnv) -> bool:
+        """F-110: true when ``origin`` is bound outside the innermost enclosing
+        loop that may run two or more times, so this one syntactic consumption
+        is executed once per iteration -- a double use. A property, or a name
+        the env does not bind (a bare-identifier property), is always outside."""
+        if not self._repeating_loop_scopes:
+            return False
+        if origin.startswith("prop:"):
+            return True
+        return env.scope_index_of(origin) < self._repeating_loop_scopes[-1]
 
     def _affine_origin_of_expr(self, expr: Expression) -> str | None:
         """Resolve the canonical affine origin for an expression.
@@ -1503,6 +1804,9 @@ def _infer_expr_type_static(expr: Expression | None) -> str:
     if isinstance(expr, (IncrementExpr, DecrementExpr)):
         return "bigint"
 
+    if isinstance(expr, ArrayLiteralExpr):
+        return "<unknown>[]"
+
     return "<unknown>"
 
 
@@ -1523,296 +1827,39 @@ def _type_node_to_string(node: TypeNode | None) -> str:
     return "<unknown>"
 
 
+def _expr_loc(expr: Expression) -> SourceLocation | None:
+    """N-463: the position of ``expr``'s first token, or None when unknown.
+
+    Only identifiers (``this`` included), ``this.x`` and ByteString literals
+    record a position, and only on .runar.ts. A composite expression starts
+    where its leftmost child starts, which is the position TS reports for it
+    (a parenthesised leftmost child is the exception: TS points at the ``(``).
+    """
+    while True:
+        if isinstance(expr, (Identifier, PropertyAccessExpr, ByteStringLiteral)):
+            return expr.source_location
+        if isinstance(expr, BinaryExpr):
+            # N-472: the parser records where the whole expression
+            # starts, which a leading ``(`` moves left of the leftmost leaf.
+            if expr.source_location is not None:
+                return expr.source_location
+            expr = expr.left
+        elif isinstance(expr, UnaryExpr):
+            # N-472: the operator token; the other surfaces record none.
+            return expr.source_location
+        elif isinstance(expr, CallExpr):
+            expr = expr.callee
+        elif isinstance(expr, (MemberExpr, IndexAccessExpr)):
+            expr = expr.object
+        elif isinstance(expr, TernaryExpr):
+            expr = expr.condition
+        else:
+            return None
+
+
 def _stmt_source_location(stmt: Statement) -> SourceLocation | None:
     """Extract the SourceLocation from a statement node, if it has a meaningful value."""
     loc = getattr(stmt, "source_location", None)
     if loc is not None and (loc.file or loc.line > 0):
         return loc
     return None
-
-
-# ---------------------------------------------------------------------------
-# Recursive call-site walkers (Crit-3: requireOutputP2PKH + addDataOutput mix)
-# ---------------------------------------------------------------------------
-
-def _body_calls_builtin(body: list[Statement], name: str) -> bool:
-    """Return True if any statement in *body* (recursively) contains a
-    top-level call expression to a builtin identifier named *name*."""
-    for stmt in body:
-        if _stmt_contains_call_to(stmt, name):
-            return True
-    return False
-
-
-def _body_calls_add_data_output(body: list[Statement]) -> bool:
-    """Return True if any statement in *body* (recursively) contains a call
-    to ``this.addDataOutput(...)`` or ``c.addDataOutput(...)`` — matched by
-    the ``addDataOutput`` property on a PropertyAccessExpr or MemberExpr
-    callee."""
-    for stmt in body:
-        if _stmt_contains_add_data_output(stmt):
-            return True
-    return False
-
-
-def _stmt_contains_call_to(stmt: Statement, name: str) -> bool:
-    if isinstance(stmt, ExpressionStmt):
-        return _expr_contains_call_to(stmt.expr, name)
-    if isinstance(stmt, VariableDeclStmt):
-        return _expr_contains_call_to(stmt.init, name)
-    if isinstance(stmt, AssignmentStmt):
-        return (
-            _expr_contains_call_to(stmt.value, name)
-            or _expr_contains_call_to(stmt.target, name)
-        )
-    if isinstance(stmt, IfStmt):
-        if _expr_contains_call_to(stmt.condition, name):
-            return True
-        for t in stmt.then:
-            if _stmt_contains_call_to(t, name):
-                return True
-        for e in stmt.else_:
-            if _stmt_contains_call_to(e, name):
-                return True
-        return False
-    if isinstance(stmt, ForStmt):
-        for t in stmt.body:
-            if _stmt_contains_call_to(t, name):
-                return True
-        return False
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            return _expr_contains_call_to(stmt.value, name)
-    return False
-
-
-def _expr_contains_call_to(expr: Expression | None, name: str) -> bool:
-    if expr is None:
-        return False
-    if isinstance(expr, CallExpr):
-        if isinstance(expr.callee, Identifier) and expr.callee.name == name:
-            return True
-        for a in expr.args:
-            if _expr_contains_call_to(a, name):
-                return True
-        return False
-    if isinstance(expr, BinaryExpr):
-        return (
-            _expr_contains_call_to(expr.left, name)
-            or _expr_contains_call_to(expr.right, name)
-        )
-    if isinstance(expr, UnaryExpr):
-        return _expr_contains_call_to(expr.operand, name)
-    if isinstance(expr, TernaryExpr):
-        return (
-            _expr_contains_call_to(expr.condition, name)
-            or _expr_contains_call_to(expr.consequent, name)
-            or _expr_contains_call_to(expr.alternate, name)
-        )
-    if isinstance(expr, IndexAccessExpr):
-        return (
-            _expr_contains_call_to(expr.object, name)
-            or _expr_contains_call_to(expr.index, name)
-        )
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            if _expr_contains_call_to(el, name):
-                return True
-    return False
-
-
-def _stmt_contains_add_data_output(stmt: Statement) -> bool:
-    if isinstance(stmt, ExpressionStmt):
-        return _expr_contains_add_data_output(stmt.expr)
-    if isinstance(stmt, VariableDeclStmt):
-        return _expr_contains_add_data_output(stmt.init)
-    if isinstance(stmt, AssignmentStmt):
-        return (
-            _expr_contains_add_data_output(stmt.value)
-            or _expr_contains_add_data_output(stmt.target)
-        )
-    if isinstance(stmt, IfStmt):
-        if _expr_contains_add_data_output(stmt.condition):
-            return True
-        for t in stmt.then:
-            if _stmt_contains_add_data_output(t):
-                return True
-        for e in stmt.else_:
-            if _stmt_contains_add_data_output(e):
-                return True
-        return False
-    if isinstance(stmt, ForStmt):
-        for t in stmt.body:
-            if _stmt_contains_add_data_output(t):
-                return True
-        return False
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            return _expr_contains_add_data_output(stmt.value)
-    return False
-
-
-def _expr_contains_add_data_output(expr: Expression | None) -> bool:
-    if expr is None:
-        return False
-    if isinstance(expr, CallExpr):
-        callee = expr.callee
-        if isinstance(callee, PropertyAccessExpr) and callee.property == "addDataOutput":
-            return True
-        if isinstance(callee, MemberExpr) and callee.property == "addDataOutput":
-            return True
-        for a in expr.args:
-            if _expr_contains_add_data_output(a):
-                return True
-        return False
-    if isinstance(expr, BinaryExpr):
-        return (
-            _expr_contains_add_data_output(expr.left)
-            or _expr_contains_add_data_output(expr.right)
-        )
-    if isinstance(expr, UnaryExpr):
-        return _expr_contains_add_data_output(expr.operand)
-    if isinstance(expr, TernaryExpr):
-        return (
-            _expr_contains_add_data_output(expr.condition)
-            or _expr_contains_add_data_output(expr.consequent)
-            or _expr_contains_add_data_output(expr.alternate)
-        )
-    if isinstance(expr, IndexAccessExpr):
-        return (
-            _expr_contains_add_data_output(expr.object)
-            or _expr_contains_add_data_output(expr.index)
-        )
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            if _expr_contains_add_data_output(el):
-                return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-# ---------------------------------------------------------------------------
-# A StatefulSmartContract method that mutates state but calls no
-# this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-# path: the compiler re-creates the contract's own (large codePart) script at
-# output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-# 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-# permanently unspendable. Detect the three signals in one walk. Mirrors
-# analyzeMethodOutputSignals in
-# packages/runar-compiler/src/passes/03-typecheck.ts.
-
-_STATE_OUTPUT_METHOD_NAMES = frozenset({"addOutput", "addRawOutput"})
-
-
-@dataclass
-class _MethodOutputSignals:
-    """Three signals detected in a single method-body walk."""
-
-    mutates_state: bool = False  # assigns to / ++/-- a non-readonly property
-    has_state_output: bool = False  # calls this.addOutput()/this.addRawOutput()
-    requires_output_p2pkh_zero: bool = False  # calls requireOutputP2PKH(0, ...)
-
-
-def _analyze_method_output_signals(
-    body: list[Statement], mutable_props: set[str]
-) -> _MethodOutputSignals:
-    sig = _MethodOutputSignals()
-    for stmt in body:
-        _walk_stmt_for_output_signals(stmt, mutable_props, sig)
-    return sig
-
-
-def _walk_stmt_for_output_signals(
-    stmt: Statement, mutable_props: set[str], sig: _MethodOutputSignals
-) -> None:
-    if isinstance(stmt, AssignmentStmt):
-        if (
-            isinstance(stmt.target, PropertyAccessExpr)
-            and stmt.target.property in mutable_props
-        ):
-            sig.mutates_state = True
-        _walk_expr_for_output_signals(stmt.target, mutable_props, sig)
-        _walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        return
-    if isinstance(stmt, ExpressionStmt):
-        _walk_expr_for_output_signals(stmt.expr, mutable_props, sig)
-        return
-    if isinstance(stmt, VariableDeclStmt):
-        _walk_expr_for_output_signals(stmt.init, mutable_props, sig)
-        return
-    if isinstance(stmt, IfStmt):
-        _walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-        for t in stmt.then:
-            _walk_stmt_for_output_signals(t, mutable_props, sig)
-        for e in stmt.else_:
-            _walk_stmt_for_output_signals(e, mutable_props, sig)
-        return
-    if isinstance(stmt, ForStmt):
-        if stmt.init is not None:
-            _walk_stmt_for_output_signals(stmt.init, mutable_props, sig)
-        _walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-        if stmt.update is not None:
-            _walk_stmt_for_output_signals(stmt.update, mutable_props, sig)
-        for b in stmt.body:
-            _walk_stmt_for_output_signals(b, mutable_props, sig)
-        return
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            _walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        return
-
-
-def _walk_expr_for_output_signals(
-    expr: Expression | None, mutable_props: set[str], sig: _MethodOutputSignals
-) -> None:
-    if expr is None:
-        return
-    if isinstance(expr, (IncrementExpr, DecrementExpr)):
-        if (
-            isinstance(expr.operand, PropertyAccessExpr)
-            and expr.operand.property in mutable_props
-        ):
-            sig.mutates_state = True
-        _walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        return
-    if isinstance(expr, CallExpr):
-        callee = expr.callee
-        if (
-            isinstance(callee, (PropertyAccessExpr, MemberExpr))
-            and callee.property in _STATE_OUTPUT_METHOD_NAMES
-        ):
-            sig.has_state_output = True
-        if isinstance(callee, Identifier) and callee.name == "requireOutputP2PKH":
-            if expr.args:
-                idx = expr.args[0]
-                if isinstance(idx, BigIntLiteral) and idx.value == 0:
-                    sig.requires_output_p2pkh_zero = True
-        for arg in expr.args:
-            _walk_expr_for_output_signals(arg, mutable_props, sig)
-        if not isinstance(callee, Identifier):
-            _walk_expr_for_output_signals(callee, mutable_props, sig)
-        return
-    if isinstance(expr, BinaryExpr):
-        _walk_expr_for_output_signals(expr.left, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.right, mutable_props, sig)
-        return
-    if isinstance(expr, UnaryExpr):
-        _walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        return
-    if isinstance(expr, TernaryExpr):
-        _walk_expr_for_output_signals(expr.condition, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.consequent, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.alternate, mutable_props, sig)
-        return
-    if isinstance(expr, IndexAccessExpr):
-        _walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.index, mutable_props, sig)
-        return
-    if isinstance(expr, MemberExpr):
-        _walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        return
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            _walk_expr_for_output_signals(el, mutable_props, sig)
-        return

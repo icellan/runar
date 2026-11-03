@@ -30,6 +30,14 @@ final class OpPushTx {
     /** Default BSV BIP-143 sighash flag: {@code SIGHASH_ALL | SIGHASH_FORKID}. */
     static final int SIGHASH_ALL_FORKID = 0x41;
 
+    /**
+     * Number of OP_PUSH_TX signatures computed by {@link #computePushTxSig} in
+     * this JVM (N-253). A test observability hook: it lets a test assert that a
+     * code path which only needs the preimage does not sign.
+     */
+    static final java.util.concurrent.atomic.AtomicInteger PUSH_TX_SIG_COUNT =
+        new java.util.concurrent.atomic.AtomicInteger();
+
     private OpPushTx() {}
 
     /**
@@ -50,6 +58,13 @@ final class OpPushTx {
     static byte[] preimage(RawTx tx, int inputIndex, byte[] scriptCode, long satoshis, int sigHashFlag) {
         if (tx == null) throw new IllegalArgumentException("OpPushTx.preimage: tx is null");
         if (scriptCode == null) throw new IllegalArgumentException("OpPushTx.preimage: scriptCode is null");
+        // N-041: the scriptCode is what the preimage commits to. An empty one can
+        // never match the script the node executes, so refuse it.
+        if (scriptCode.length == 0) {
+            throw new IllegalArgumentException(
+                "OpPushTx.preimage: refusing to build a preimage for input " + inputIndex
+                    + " with an empty subscript (scriptCode)");
+        }
         if (inputIndex < 0 || inputIndex >= tx.inputs.size()) {
             throw new IllegalArgumentException(
                 "OpPushTx.preimage: inputIndex " + inputIndex
@@ -223,6 +238,7 @@ final class OpPushTx {
      */
     static byte[] computePushTxSig(RawTx tx, int inputIndex, byte[] scriptCode, long satoshis,
                                    int sigHashFlag) {
+        PUSH_TX_SIG_COUNT.incrementAndGet();
         byte[] preimageBytes = preimage(tx, inputIndex, scriptCode, satoshis, sigHashFlag);
         byte[] sighash = Hash160.doubleSha256(preimageBytes);
         BigInteger z = new BigInteger(1, sighash);

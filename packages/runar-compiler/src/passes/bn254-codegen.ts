@@ -647,10 +647,11 @@ export function bn254ComposePoint(
  * P == Q; the unified form is algebraically equivalent for distinct points
  * and collapses to 3*px^2 / (2*py) when P == Q — the correct doubling slope.
  *
- * The remaining zero-denominator input (py + qy == 0) is handled by the
- * caller, not here: emitBn254G1Add masks P == -Q to the all-zero point at
- * infinity (see bn254G1InfinityFlag); the Groth16 MSM path shares this helper
- * unmasked and stays fail-closed.
+ * Every zero-denominator input (py + qy == 0) still fails here: P == -Q, and
+ * the omega-partner pairs Q = (w*px, -py), (w^2*px, -py) with px != qx, where
+ * the slope is 0/0 and the result is a wrong but ON-CURVE point (F-091).
+ * emitBn254G1Add handles both in the builtin (infinity mask, omega abort); the
+ * Groth16 MSM path shares this helper unguarded and its bytes must not move.
  */
 export function bn254G1AffineAdd(t: BN254Tracker): void {
   // s_num = px^2 + px*qx + qx^2
@@ -758,6 +759,35 @@ export function bn254G1InfinityFlag(t: BN254Tracker): void {
   t.rawBlock(['_xeq', '_cond'], '_notinf', (e) => {
     e({ op: 'opcode', code: 'OP_SUB' });
     e({ op: 'opcode', code: 'OP_NOT' });
+  });
+}
+
+/**
+ * bn254G1OmegaCollisionVerify -- F-091: abort when py + qy == 0 mod p while
+ * px != qx, reading px/py/qx/qy WITHOUT consuming them.
+ *
+ * That input is not P == -Q: it is the omega-partner pair Q = (w*px, -py) or
+ * (w^2*px, -py), w a primitive cube root of unity. The unified slope is 0/0,
+ * Fermat gives inv(0) = 0, and bn254G1AffineAdd returns (-(px+qx), -py) -- ON
+ * the curve and NOT P + Q, so assert(bn254G1OnCurve(r)) cannot catch it. Fail
+ * closed instead. The condition is (py + qy mod p != 0) OR (px == qx), so
+ * general addition, doubling, P == -Q and all-zero operands keep their
+ * answers. Builtin entry point only: the Groth16 MSM path keeps its bytes.
+ *
+ * Byte-identical to `bn254G1OmegaCollisionVerify` in compilers/go/codegen/bn254.go.
+ */
+export function bn254G1OmegaCollisionVerify(t: BN254Tracker): void {
+  t.copyToTop('px', '_om_px');
+  t.copyToTop('qx', '_om_qx');
+  t.rawBlock(['_om_px', '_om_qx'], '_om_xeq', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.copyToTop('py', '_om_py');
+  t.copyToTop('qy', '_om_qy');
+  bn254FieldAdd(t, '_om_py', '_om_qy', '_om_den');
+  t.rawBlock(['_om_xeq', '_om_den'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLOR' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
   });
 }
 
@@ -1082,12 +1112,32 @@ export function bn254G1Negate(
 // ===========================================================================
 
 /**
+ * bn254EmitFieldCanonVerify — F-196: every operand of the five public BN254
+ * scalar-field entry points must BE a field element, aborting form. Port of
+ * Go's bn254EmitFieldCanonVerify (the R-119 gate for this field): before it,
+ * bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD reduction, and p
+ * was accepted as a second spelling of 0. Emitted before pushPrimeCache.
+ */
+function bn254EmitFieldCanonVerify(t: BN254Tracker, ...names: string[]): void {
+  for (const n of names) {
+    t.copyToTop(n, '_bn_fcv');
+    t.rawBlock(['_bn_fcv'], null, (e) => {
+      e({ op: 'push', value: 0n });
+      e({ op: 'push', value: BN254_P });
+      e({ op: 'opcode', code: 'OP_WITHIN' });
+      e({ op: 'opcode', code: 'OP_VERIFY' });
+    });
+  }
+}
+
+/**
  * emitBn254FieldAdd: BN254 field addition.
  * Stack in:  [..., a, b] (b on top)
  * Stack out: [..., (a + b) mod p]
  */
 export function emitBn254FieldAdd(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldAdd(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1100,6 +1150,7 @@ export function emitBn254FieldAdd(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldSub(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldSub(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1112,6 +1163,7 @@ export function emitBn254FieldSub(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldMul(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldMul(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1124,6 +1176,7 @@ export function emitBn254FieldMul(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldInv(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a'], emit);
+  bn254EmitFieldCanonVerify(t, 'a');
   t.pushPrimeCache();
   bn254FieldInv(t, 'a', 'result');
   t.popPrimeCache();
@@ -1136,6 +1189,7 @@ export function emitBn254FieldInv(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldNeg(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a'], emit);
+  bn254EmitFieldCanonVerify(t, 'a');
   t.pushPrimeCache();
   bn254FieldNeg(t, 'a', 'result');
   t.popPrimeCache();
@@ -1226,6 +1280,8 @@ export function emitBn254G1Add(emit: (op: StackOp) => void): void {
   // R-141: both points must be canonical before anything consumes them.
   bn254EmitCoordCanonVerify(t, 'px', 'py');
   bn254EmitCoordCanonVerify(t, 'qx', 'qy');
+  // F-091: the omega-partner 0/0 slope fails closed.
+  bn254G1OmegaCollisionVerify(t);
   // The flag must be computed BEFORE the add: bn254G1AffineAdd consumes
   // px/py/qx/qy.
   bn254G1InfinityFlag(t);

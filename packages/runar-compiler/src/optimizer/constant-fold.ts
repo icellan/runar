@@ -14,6 +14,7 @@ import type {
   ANFValue,
 } from '../ir/index.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
+import { collectRefsFromValue, eliminateDeadBindingsAmong } from './dce.js';
 
 // ---------------------------------------------------------------------------
 // Constant value type
@@ -36,6 +37,14 @@ const SQRT_DOMAIN_LIMIT = 1n << 495n;
  * `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`.
  */
 const POW_EXPONENT_LIMIT = 32n;
+
+/**
+ * Unroll count of the emitted `gcd` loop (`passes/05-stack-lower.ts#lowerGcd`).
+ * Past it the script returns a partial value, not the mathematical one, so the
+ * folder declines there and leaves the script to compute it (N-029). `log2` is
+ * exact for every n > 0 since N-103 and needs no such bound.
+ */
+const GCD_ITERATIONS = 256;
 
 // ---------------------------------------------------------------------------
 // Binary operation evaluation
@@ -95,8 +104,11 @@ function evalBinOp(op: string, left: ConstValue, right: ConstValue): ConstValue 
         // Validate both operands are valid hex before concatenating
         if (!/^[0-9a-fA-F]*$/.test(left) || !/^[0-9a-fA-F]*$/.test(right)) return null;
         return left + right; // concatenation
-      case '===': return left === right;
-      case '!==': return left !== right;
+      // F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+      // case, so 'aa' === 'AA' is true on-chain. Compare hex case-insensitively;
+      // anything that is not hex keeps the exact text comparison.
+      case '===': return hexEqual(left, right);
+      case '!==': return !hexEqual(left, right);
       default: return null;
     }
   }
@@ -106,6 +118,13 @@ function evalBinOp(op: string, left: ConstValue, right: ConstValue): ConstValue 
   if (op === '!==') return true;
 
   return null;
+}
+
+function hexEqual(left: string, right: string): boolean {
+  if (/^[0-9a-fA-F]*$/.test(left) && /^[0-9a-fA-F]*$/.test(right)) {
+    return left.toLowerCase() === right.toLowerCase();
+  }
+  return left === right;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +181,10 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'clamp': {
       if (bigintArgs.length !== 3) return null;
       const [val, lo, hi] = bigintArgs as [bigint, bigint, bigint];
-      return val < lo ? lo : val > hi ? hi : val;
+      // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+      // That differs from `val < lo ? lo : ...` once lo > hi (N-029).
+      const m = val > lo ? val : lo;
+      return m < hi ? m : hi;
     }
     case 'sign': {
       if (bigintArgs.length !== 1) return null;
@@ -217,7 +239,10 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
       if (bigintArgs.length !== 2) return null;
       let a = bigintArgs[0]! < 0n ? -bigintArgs[0]! : bigintArgs[0]!;
       let b = bigintArgs[1]! < 0n ? -bigintArgs[1]! : bigintArgs[1]!;
-      while (b !== 0n) { const t = b; b = a % b; a = t; }
+      // The script runs at most GCD_ITERATIONS Euclid steps; if that is not
+      // enough it returns a partial remainder. Decline there (N-029).
+      for (let i = 0; i < GCD_ITERATIONS && b !== 0n; i++) { const t = b; b = a % b; a = t; }
+      if (b !== 0n) return null;
       return a;
     }
     case 'divmod': {
@@ -227,11 +252,9 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'log2': {
       if (bigintArgs.length !== 1) return null;
       const n = bigintArgs[0]!;
-      if (n <= 0n) return 0n;
-      let bits = 0n;
-      let val = n;
-      while (val > 1n) { val >>= 1n; bits++; }
-      return bits;
+      // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+      if (n <= 0n) return null;
+      return BigInt(n.toString(2).length - 1);
     }
     case 'bool': {
       if (bigintArgs.length !== 1) return null;
@@ -259,6 +282,10 @@ class ConstEnv {
 
   has(name: string): boolean {
     return this.constants.has(name);
+  }
+
+  delete(name: string): void {
+    this.constants.delete(name);
   }
 
   /** Clone the environment (for if-branch isolation). */
@@ -292,16 +319,42 @@ function foldBinding(binding: ANFBinding, env: ConstEnv): ANFBinding {
 
   // If the folded value is a load_const, register in the environment.
   // Skip @ref: prefixed strings — they are binding aliases, not real constants.
-  if (foldedValue.kind === 'load_const') {
-    const v = foldedValue.value;
-    if (!(typeof v === 'string' && v.startsWith('@ref:'))) {
-      env.set(name, v);
-    }
+  //
+  // A name may be bound more than once (reassignment, or a user local that
+  // shares a compiler temp's name). The env must track the LATEST binding:
+  // a rebinding to a non-constant drops the old constant, or later uses
+  // would fold with a value the name no longer holds (N-064).
+  //
+  // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+  // constant, but when its target currently holds one the alias holds the
+  // same value, so later uses of the alias fold too. The binding stays an
+  // alias; the prune removes it if the fold orphaned it.
+  const v = foldedValue.kind === 'load_const' ? foldedValue.value : undefined;
+  if (v !== undefined && !(typeof v === 'string' && v.startsWith('@ref:'))) {
+    env.set(name, v);
+  } else if (typeof v === 'string' && v.startsWith('@ref:') && env.has(v.slice(5))) {
+    env.set(name, env.get(v.slice(5))!);
+  } else {
+    env.delete(name);
   }
 
   const result: ANFBinding = { name, value: foldedValue };
   if (binding.sourceLoc) result.sourceLoc = binding.sourceLoc;
   return result;
+}
+
+/** Every name bound in `bindings`, including inside nested if arms and loop bodies. */
+function boundNames(bindings: ANFBinding[], out: Set<string> = new Set()): Set<string> {
+  for (const b of bindings) {
+    out.add(b.name);
+    if (b.value.kind === 'if') {
+      boundNames(b.value.then, out);
+      boundNames(b.value.else, out);
+    } else if (b.value.kind === 'loop') {
+      boundNames(b.value.body, out);
+    }
+  }
+  return out;
 }
 
 function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
@@ -395,13 +448,24 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
       const foldedThen = foldBindings(value.then, thenEnv);
       const foldedElse = foldBindings(value.else, elseEnv);
 
+      // N-064: a name either arm rebinds may hold the arm's value after the
+      // if (that is how a branch reassigns a local), so the enclosing env's
+      // constant for it is stale past this point.
+      for (const n of boundNames(value.then)) env.delete(n);
+      for (const n of boundNames(value.else)) env.delete(n);
+
       return { ...value, then: foldedThen, else: foldedElse };
     }
 
     case 'loop': {
-      // Fold loop body
+      // Fold loop body. N-064: the body runs once per iteration, so a name it
+      // rebinds holds the entry constant only in iteration 0 — it is not a
+      // constant inside the body, nor after the loop.
+      const rebound = boundNames(value.body);
       const bodyEnv = env.clone();
+      for (const n of rebound) bodyEnv.delete(n);
       const foldedBody = foldBindings(value.body, bodyEnv);
+      for (const n of rebound) env.delete(n);
       return { ...value, body: foldedBody };
     }
 
@@ -489,6 +553,26 @@ export function foldConstants(program: ANFProgram): ANFProgram {
     ...program,
     methods: foldedMethods,
   };
+}
+
+/**
+ * N-138: `foldConstants`, then removal of the operand bindings the fold orphaned.
+ *
+ * `foldConstants` rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+ * `t0 = 1` in place, and stack lowering then pushes it and drops it again
+ * (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding referenced
+ * BEFORE folding are removal candidates, so a binding that was already dead is
+ * left exactly as it was and output for a program the fold did not touch is
+ * unchanged. `foldConstants` itself stays a pure rewrite (the IR path relies
+ * on that, see compileFromANF).
+ */
+export function foldConstantsAndPrune(program: ANFProgram): ANFProgram {
+  const candidates = program.methods.map((m) => {
+    const refs = new Set<string>();
+    for (const b of m.body) collectRefsFromValue(b.value, refs);
+    return refs;
+  });
+  return eliminateDeadBindingsAmong(foldConstants(program), candidates);
 }
 
 // ---------------------------------------------------------------------------

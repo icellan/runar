@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+// zigWhileNoInitPlaceholder is the `while (cond) : (upd) { ... }` desugaring's
+// merge placeholder (N-009). parseWhileStatement always synthesizes this name
+// as the ForStmt's init; parseBlockStatements replaces it with the real
+// preceding declaration when one matches the update target. A LEADING SPACE
+// makes the name unspellable in `.runar.zig` source (no surface's identifier
+// lexer produces a token containing whitespace), so a developer local can
+// never collide with it -- a plain-identifier placeholder would let a local
+// literally named "__while_no_init" that is not adjacent to its while alias
+// the placeholder by string equality, and the ANF lowerer's condition-iterator
+// check would then compare equal and silently unroll from this placeholder's
+// start of 0 instead of the developer's real start.
+const zigWhileNoInitPlaceholder = " __while_no_init"
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -14,10 +27,20 @@ import (
 // ParseZig parses a Zig-syntax Rúnar contract (.runar.zig) and produces
 // the standard AST.
 func ParseZig(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseZigSurface(source, fileName) })
+}
+
+func parseZigSurface(source []byte, fileName string) *ParseResult {
 	p := &zigParser{
 		fileName:             fileName,
 		selfNames:            make(map[string]bool),
 		statefulContextNames: make(map[string]bool),
+		bareLiteralOK:        make(map[int]bool),
 	}
 
 	tokens := p.tokenize(string(source))
@@ -26,7 +49,9 @@ func ParseZig(source []byte, fileName string) *ParseResult {
 
 	contract, err := p.parseContract()
 	if err != nil {
-		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
+		// Keep the tokenizer's diagnostics (F-011: an unterminated literal
+		// is the real cause of most structural errors that follow it).
+		return &ParseResult{Errors: append(p.errors, Diagnostic{Message: err.Error(), Severity: SeverityError})}
 	}
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
@@ -121,6 +146,17 @@ type zigParser struct {
 	parentClass          string
 	selfNames            map[string]bool
 	statefulContextNames map[string]bool
+
+	// ctorLoc (N-490) anchors the constructor statements the source does not
+	// write (the implied super() and property assignments): the contract
+	// struct's `struct` keyword.
+	ctorLoc SourceLocation
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
+
+	// N-448: token indexes of string literals whose bare use is legal.
+	bareLiteralOK map[int]bool
 }
 
 func (p *zigParser) addError(msg string) {
@@ -330,42 +366,45 @@ func (p *zigParser) tokenize(source string) []zigToken {
 		// String literals: "..."
 		if ch == '"' {
 			advance() // skip opening quote
-			val := ""
-			for pos < len(source) && peek() != '"' {
-				if peek() == '\\' && pos+1 < len(source) {
+			// N-181: a Builder, not `val += …`, which copied the whole
+			// literal per byte (quadratic on a 4 MiB unterminated string).
+			// WriteByte keeps the source bytes (UTF-8 intact); WriteRune(rune(b)) re-encoded each byte as Latin-1 (N-436).
+			var val strings.Builder
+			// F-011: a Zig string literal cannot span lines; one that reaches
+			// a line break (escaped or not) or end of file is unterminated.
+			for pos < len(source) && peek() != '"' && peek() != '\n' && peek() != '\r' {
+				if peek() == '\\' {
 					advance() // skip backslash
-					val += string(advance())
+					if pos >= len(source) || peek() == '\n' || peek() == '\r' {
+						break
+					}
+					val.WriteByte(advance())
 				} else {
-					val += string(advance())
+					val.WriteByte(advance())
 				}
 			}
-			if pos < len(source) {
+			if peek() == '"' {
 				advance() // skip closing quote
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, tokenLine, tokenCol))
 			}
-			add(zigTokString, val, tokenLine, tokenCol)
+			add(zigTokString, val.String(), tokenLine, tokenCol)
 			continue
 		}
 
-		// Numbers (decimal and hex)
+		// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Zig
+		// integer literal; `0x` is an integer here, not a ByteString.
 		if ch >= '0' && ch <= '9' {
-			num := ""
-			if ch == '0' && pos+1 < len(source) && (source[pos+1] == 'x' || source[pos+1] == 'X') {
-				num = "0x"
-				advance() // '0'
-				advance() // 'x'
-				for pos < len(source) && (isHexDigit(peek()) || peek() == '_') {
-					if peek() != '_' {
-						num += string(peek())
-					}
-					advance()
-				}
+			end := scanNumberEnd(source, pos)
+			text := source[pos:end]
+			for pos < end {
+				advance()
+			}
+			num := "0"
+			if lit := parseIntLiteral("zig", text); lit != nil {
+				num = lit.Value.String()
 			} else {
-				for pos < len(source) && ((peek() >= '0' && peek() <= '9') || peek() == '_') {
-					if peek() != '_' {
-						num += string(peek())
-					}
-					advance()
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("zig", text), p.fileName, tokenLine, tokenCol))
 			}
 			add(zigTokNumber, num, tokenLine, tokenCol)
 			continue
@@ -373,10 +412,11 @@ func (p *zigParser) tokenize(source string) []zigToken {
 
 		// Identifiers and keywords
 		if zigIsIdentStart(ch) {
-			val := ""
+			start := pos
 			for pos < len(source) && zigIsIdentPart(peek()) {
-				val += string(advance())
+				advance()
 			}
+			val := source[start:pos]
 			if kw, ok := zigKeywords[val]; ok {
 				add(kw, val, tokenLine, tokenCol)
 			} else {
@@ -385,8 +425,12 @@ func (p *zigParser) tokenize(source string) []zigToken {
 			continue
 		}
 
-		// Skip unknown characters
-		advance()
+		// N-214: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, pos, p.fileName, tokenLine, tokenCol)
+		p.errors = append(p.errors, d)
+		pos += size
+		col++
 	}
 
 	tokens = append(tokens, zigToken{kind: zigTokEOF, value: "", line: line, col: col})
@@ -420,6 +464,7 @@ var zigTypeMap = map[string]string{
 	"usize":        "bigint",
 	"comptime_int": "bigint",
 	"Bigint":       "bigint",
+	"BigintBig":    "bigint",
 	"bool":         "boolean",
 	"void":         "void",
 	"ByteString":   "ByteString",
@@ -516,6 +561,9 @@ type zigParsedType struct {
 	typeNode TypeNode
 	rawName  string
 	readonly bool
+	// embedAlways: `runar.EmbedAlways(T)`, the native spelling of
+	// `@embedAlways` (N-093).
+	embedAlways bool
 }
 
 func (p *zigParser) parseType() zigParsedType {
@@ -529,7 +577,7 @@ func (p *zigParser) parseType() zigParsedType {
 			length = 0
 		}
 		p.expect(zigTokRBracket)
-		elem := p.parseType()
+		elem := nested(&p.nest, p.loc(), p.parseType)
 		return zigParsedType{
 			typeNode: FixedArrayType{Element: elem.typeNode, Length: length},
 			rawName:  elem.rawName,
@@ -543,9 +591,16 @@ func (p *zigParser) parseType() zigParsedType {
 		name := p.expect(zigTokIdent).value
 		if name == "Readonly" && p.check(zigTokLParen) {
 			p.expect(zigTokLParen)
-			inner := p.parseType()
+			inner := nested(&p.nest, p.loc(), p.parseType)
 			p.expect(zigTokRParen)
 			inner.readonly = true
+			return inner
+		}
+		if name == "EmbedAlways" && p.check(zigTokLParen) {
+			p.expect(zigTokLParen)
+			inner := nested(&p.nest, p.loc(), p.parseType)
+			p.expect(zigTokRParen)
+			inner.embedAlways = true
 			return inner
 		}
 		mapped := zigMapType(name)
@@ -654,6 +709,7 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 	p.contractName = nameTok.value
 	p.parentClass = "SmartContract"
 
+	p.ctorLoc = p.loc()
 	p.expect(zigTokStruct)
 	p.expect(zigTokLBrace)
 
@@ -704,7 +760,9 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 			continue
 		}
 
-		p.advance()
+		// N-410: any other token is refused, never skipped.
+		stray := p.advance()
+		p.errors = append(p.errors, lexDiag(UnexpectedStructBodyTokenMsg(stray.value), p.fileName, stray.line, stray.col))
 	}
 
 	p.expect(zigTokRBrace)
@@ -722,20 +780,16 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 		constructor = &ctor
 	}
 
-	// Strip initializers for properties that are also constructor params
-	// (the constructor param overrides the default; the Zig compiler reference
-	// omits `initialValue` in this case) and finalize readonly flags.
-	ctorParamSet := make(map[string]bool)
-	if constructor != nil {
-		for _, param := range constructor.Params {
-			ctorParamSet[param.Name] = true
-		}
-	}
+	// The initializer of a property the constructor assigns is no longer
+	// stripped here. anf_lower.go now applies that rule to EVERY surface
+	// (see constructorAssignedProperties), keyed on the constructor
+	// assignment rather than on a name match, so the Zig surface no longer
+	// needs -- and must not keep -- a private copy that only fired when the
+	// struct field and the `init` parameter happened to share a name.
+	// readonly inference still reads the ORIGINAL initializer, exactly as
+	// it did when the strip ran in the same expression.
 	for i := range properties {
 		hadInitializer := properties[i].Initializer != nil
-		if ctorParamSet[properties[i].Name] {
-			properties[i].Initializer = nil
-		}
 		if p.parentClass == "SmartContract" || p.parentClass == "UnsafeSmartContract" {
 			properties[i].Readonly = true
 		} else if !properties[i].Readonly && !hadInitializer && !mutatedProps[properties[i].Name] {
@@ -778,13 +832,18 @@ func (p *zigParser) parseContractMarker() {
 	if p.checkIdent("runar") {
 		p.advance()
 		p.expect(zigTokDot)
-		parent := p.expect(zigTokIdent).value
+		parentTok := p.expect(zigTokIdent)
+		parent := parentTok.value
 		if parent == "StatefulSmartContract" {
 			p.parentClass = "StatefulSmartContract"
 		} else if parent == "UnsafeSmartContract" {
 			p.parentClass = "UnsafeSmartContract"
 		} else {
 			p.parentClass = "SmartContract"
+			if parent != "SmartContract" {
+				// N-014: an unknown base is refused, never folded to SmartContract.
+				p.errors = append(p.errors, lexDiag(fmt.Sprintf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parent), p.fileName, parentTok.line, parentTok.col))
+			}
 		}
 	}
 
@@ -802,13 +861,15 @@ func (p *zigParser) parseField() PropertyNode {
 		initializer = p.parseExpression()
 	}
 
-	p.match(zigTokComma)
+	// N-033: fields are separated by `,`; only the last before `}` may omit it.
+	p.expectListSeparator(zigTokRBrace)
 
 	return PropertyNode{
 		Name:           name,
 		Type:           parsedType.typeNode,
 		Readonly:       parsedType.readonly,
 		Initializer:    initializer,
+		EmbedAlways:    parsedType.embedAlways,
 		SourceLocation: loc,
 	}
 }
@@ -827,9 +888,55 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 
 	params, receiverName, statefulCtxNames := p.parseParamList()
 
-	// Skip return type if present (anything before '{')
-	if !p.check(zigTokLBrace) {
-		p.parseType()
+	// N-050: a `pub fn` without a receiver of the contract type is a
+	// namespace (static) function, not a contract method. A private one stays
+	// a helper (the multi-method golden's computeThreshold), like R9.
+	if isPublic && receiverName == "" && name != "init" {
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+	}
+
+	// Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+	// native spelling of the `@sighash` directive (natively it is `void`).
+	var sighashSpecs []*string
+	if p.checkIdent("runar") && p.peekAt(1).kind == zigTokDot &&
+		p.peekAt(2).kind == zigTokIdent && p.peekAt(2).value == "Sighash" {
+		p.advance()
+		p.advance()
+		p.advance()
+		p.expect(zigTokLParen)
+		arg := p.peek()
+		count := 0
+		depth := 0
+		for !p.check(zigTokEOF) {
+			k := p.peek().kind
+			if k == zigTokRParen && depth == 0 {
+				break
+			}
+			if k == zigTokLParen {
+				depth++
+			}
+			if k == zigTokRParen {
+				depth--
+			}
+			p.advance()
+			count++
+		}
+		p.expect(zigTokRParen)
+		if count == 1 && arg.kind == zigTokString {
+			sighashSpecs = append(sighashSpecs, nativeSighashSpec(arg.value))
+		} else {
+			sighashSpecs = append(sighashSpecs, nil)
+		}
+	} else if !p.check(zigTokLBrace) {
+		// The AST keeps no return type (anything before '{'); N-331 refuses an
+		// unknown name. `init` returns the contract struct itself, which is
+		// not a type to check.
+		rt := p.parseType()
+		if name != "init" {
+			if d := UnknownReturnTypeDiagnostic(rt.typeNode, name, loc, isPublic); d != nil {
+				p.errors = append(p.errors, *d)
+			}
+		}
 	}
 
 	// Set up self names for this method scope
@@ -845,6 +952,11 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 	}
 
 	if name == "init" {
+		// N-093: the constructor is not a spending entry point.
+		if len(sighashSpecs) > 0 {
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+		}
 		ctor := p.parseConstructorMethod(loc, params, properties)
 		p.selfNames = prevSelfNames
 		p.statefulContextNames = prevStatefulCtx
@@ -860,11 +972,18 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 		visibility = "public"
 	}
 
+	sighashType, sighashErr := resolveNativeSighash(name, isPublic, sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
+
 	return &MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}
 }
@@ -901,7 +1020,10 @@ func (p *zigParser) parseParamList() (params []ParamNode, receiverName string, s
 		}
 
 		index++
-		p.match(zigTokComma)
+		// N-033: parameters are separated by `,` (a trailing one is allowed).
+		if !p.expectListSeparator(zigTokRParen) {
+			break
+		}
 	}
 
 	p.expect(zigTokRParen)
@@ -958,7 +1080,7 @@ func (p *zigParser) parseConstructorBody(params []ParamNode, properties *[]Prope
 				body = append(body, AssignmentStmt{
 					Target:         PropertyAccessExpr{Property: prop.Name},
 					Value:          Identifier{Name: prop.Name},
-					SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+					SourceLocation: p.ctorLoc,
 				})
 			}
 		}
@@ -973,16 +1095,23 @@ func (p *zigParser) parseStructReturnAssignments() []Statement {
 	p.expect(zigTokLBrace)
 
 	for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-		p.match(zigTokDot)
+		// N-410: Zig requires the leading `.` of a struct-init field.
+		if !p.match(zigTokDot) {
+			t := p.peek()
+			p.errors = append(p.errors, lexDiag(ZigStructInitDotMsg, p.fileName, t.line, t.col))
+		}
 		field := p.expect(zigTokIdent).value
 		p.expect(zigTokAssign)
 		value := p.parseExpression()
 		assignments = append(assignments, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: field},
 			Value:          value,
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: p.ctorLoc,
 		})
-		p.match(zigTokComma)
+		// N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+		if !p.expectListSeparator(zigTokRBrace) {
+			break
+		}
 	}
 
 	p.expect(zigTokRBrace)
@@ -1019,7 +1148,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 			Callee: Identifier{Name: "super"},
 			Args:   superArgs,
 		},
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 
 	var body []Statement
@@ -1029,7 +1158,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 		body = append(body, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: p.ctorLoc,
 		})
 	}
 
@@ -1038,7 +1167,7 @@ func (p *zigParser) autoGenerateConstructor(properties []PropertyNode) MethodNod
 		Params:         params,
 		Body:           body,
 		Visibility:     "public",
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 }
 
@@ -1052,7 +1181,7 @@ func (p *zigParser) createSuperCall(params []ParamNode) Statement {
 			Callee: Identifier{Name: "super"},
 			Args:   args,
 		},
-		SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		SourceLocation: p.ctorLoc,
 	}
 }
 
@@ -1068,7 +1197,7 @@ func (p *zigParser) parseBlockStatements() []Statement {
 		if stmt != nil {
 			// Merge `var i = 0; while (i < N) : (i += 1) { ... }` into ForStmt
 			if forStmt, ok := stmt.(ForStmt); ok {
-				if forStmt.Init.Name == "__while_no_init" {
+				if forStmt.Init.Name == zigWhileNoInitPlaceholder {
 					loopTarget := zigGetLoopUpdateTargetName(forStmt)
 					if loopTarget != "" && len(body) > 0 {
 						if lastDecl, ok3 := body[len(body)-1].(VariableDeclStmt); ok3 && lastDecl.Name == loopTarget {
@@ -1101,6 +1230,10 @@ func zigGetLoopUpdateTargetName(stmt ForStmt) string {
 }
 
 func (p *zigParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *zigParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// return statement
@@ -1124,13 +1257,20 @@ func (p *zigParser) parseStatement() Statement {
 		return p.parseVariableDecl(loc)
 	}
 
-	// Discard pattern: `_ = expr;`
+	// Discard pattern: `_ = expr;`. N-053: Zig's discard drops the VALUE, not
+	// the evaluation — a helper called for its asserts must keep them, so
+	// `expr` lowers as an expression statement. Only a bare name (the
+	// unused-binding idiom `_ = self;` / `_ = param;`) is dropped: reading a
+	// name has no effect.
 	if p.checkIdent("_") && p.peekAt(1).kind == zigTokAssign {
 		p.advance() // '_'
 		p.advance() // '='
-		p.parseExpression()
+		expr := p.parseExpression()
 		p.match(zigTokSemicolon)
-		return nil
+		if _, ok := expr.(Identifier); ok {
+			return nil
+		}
+		return ExpressionStmt{Expr: expr, SourceLocation: loc}
 	}
 
 	// while statement
@@ -1205,7 +1345,8 @@ func (p *zigParser) parseIfStatement(loc SourceLocation) Statement {
 	var elseBranch []Statement
 	if p.match(zigTokElse) {
 		if p.check(zigTokIf) {
-			elseBranch = []Statement{p.parseIfStatement(p.loc())}
+			elseLoc := p.loc()
+			elseBranch = []Statement{nested(&p.nest, elseLoc, func() Statement { return p.parseIfStatement(elseLoc) })}
 		} else {
 			elseBranch = p.parseBlockStatements()
 		}
@@ -1258,7 +1399,7 @@ func (p *zigParser) parseWhileStatement(loc SourceLocation) Statement {
 
 	return ForStmt{
 		Init: VariableDeclStmt{
-			Name:           "__while_no_init",
+			Name:           zigWhileNoInitPlaceholder,
 			Mutable:        true,
 			Init:           BigIntLiteral{Value: big.NewInt(0)},
 			SourceLocation: loc,
@@ -1321,63 +1462,69 @@ func (p *zigParser) skipUnsupportedBlock() {
 // ---------------------------------------------------------------------------
 
 func (p *zigParser) parseExpression() Expression {
-	return p.parseOr()
+	return nested(&p.nest, p.loc(), p.parseOr)
 }
 
 func (p *zigParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.match(zigTokPipePipe) {
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitwiseOr()
 	for p.match(zigTokAmpAmp) {
 		right := p.parseBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseBitwiseXor()
 	for p.match(zigTokPipe) {
 		right := p.parseBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseBitwiseAnd()
 	for p.match(zigTokCaret) {
 		right := p.parseBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.match(zigTokAmp) {
 		right := p.parseEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *zigParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		if p.match(zigTokEqEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // == -> ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // == -> ===
 		} else if p.match(zigTokNotEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // != -> !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // != -> !==
 		} else {
 			break
 		}
@@ -1386,20 +1533,21 @@ func (p *zigParser) parseEquality() Expression {
 }
 
 func (p *zigParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		if p.match(zigTokLt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokLtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokGt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokGtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1408,14 +1556,15 @@ func (p *zigParser) parseComparison() Expression {
 }
 
 func (p *zigParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAdditive()
 	for {
 		if p.match(zigTokLShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokRShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1424,14 +1573,15 @@ func (p *zigParser) parseShift() Expression {
 }
 
 func (p *zigParser) parseAdditive() Expression {
+	start := p.loc()
 	left := p.parseMultiplicative()
 	for {
 		if p.match(zigTokPlus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokMinus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1440,17 +1590,18 @@ func (p *zigParser) parseAdditive() Expression {
 }
 
 func (p *zigParser) parseMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		if p.match(zigTokStar) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokSlash) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(zigTokPercent) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1459,17 +1610,28 @@ func (p *zigParser) parseMultiplicative() Expression {
 }
 
 func (p *zigParser) parseUnary() Expression {
+	opLoc := p.loc()
 	if p.match(zigTokBang) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(zigTokMinus) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "-", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(zigTokTilde) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "~", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
+	}
+	// Zig's `&` is the address-of operator used for slice coercion at call
+	// sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a
+	// slice) and typed forms like `&[_]T{...}`. Slices have no Rúnar IR
+	// analogue -- the inner array literal IS the IR node -- so we simply
+	// skip the `&` and parse the operand. Recurse into parsePrimary
+	// directly, mirroring 01-parse-zig.ts and parse_zig.zig: `&.foo()` is
+	// not legal Zig and `&` never pairs with a postfix chain in practice.
+	if p.match(zigTokAmp) {
+		return p.parsePrimary()
 	}
 	expr := p.parsePrimary()
 	return p.parsePostfixChain(expr)
@@ -1491,11 +1653,7 @@ func (p *zigParser) parsePrimary() Expression {
 		p.advance() // '&'
 		p.advance() // '.'
 		p.advance() // '{'
-		var elements []Expression
-		for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBrace)
 		p.expect(zigTokRBrace)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1504,11 +1662,7 @@ func (p *zigParser) parsePrimary() Expression {
 	if tok.kind == zigTokDot && p.peekAt(1).kind == zigTokLBrace {
 		p.advance() // '.'
 		p.advance() // '{'
-		var elements []Expression
-		for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBrace)
 		p.expect(zigTokRBrace)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1521,8 +1675,16 @@ func (p *zigParser) parsePrimary() Expression {
 
 	// String literal -> ByteStringLiteral
 	if tok.kind == zigTokString {
+		idx := p.pos
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		// N-448: a bare non-empty literal is refused (natively ASCII text, to
+		// the compiler hex). Exempt: "", the argument of runar.hexToBytes and
+		// the body of runar.asm.
+		if tok.value != "" && !p.bareLiteralOK[idx] {
+			loc := SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}
+			p.errors = append(p.errors, MakeDiagnostic(ZigBareStringLiteralMsg(tok.value), SeverityError, &loc))
+		}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// Boolean literals
@@ -1543,14 +1705,26 @@ func (p *zigParser) parsePrimary() Expression {
 		return expr
 	}
 
+	// `[_]T{...}` — typed array literal with inferred length. The element
+	// type is parsed and discarded; Rúnar infers element types from the
+	// literal contents. The element list is the same `{...}` form used by
+	// `.{...}` anon-struct literals. Mirrors 01-parse-zig.ts and
+	// parse_zig.zig.
+	if tok.kind == zigTokLBracket && p.peekAt(1).kind == zigTokIdent && p.peekAt(1).value == "_" && p.peekAt(2).kind == zigTokRBracket {
+		p.advance() // '['
+		p.advance() // '_'
+		p.advance() // ']'
+		p.parseType() // discard element type
+		p.expect(zigTokLBrace)
+		elements := p.parseListElements(zigTokRBrace)
+		p.expect(zigTokRBrace)
+		return ArrayLiteralExpr{Elements: elements}
+	}
+
 	// Array literal: [elem, ...]
 	if tok.kind == zigTokLBracket {
 		p.advance()
-		var elements []Expression
-		for !p.check(zigTokRBracket) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBracket)
 		p.expect(zigTokRBracket)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1581,10 +1755,31 @@ func (p *zigParser) parsePrimary() Expression {
 				return BinaryExpr{Op: "===", Left: left, Right: right}
 			}
 
+			// runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+			// Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+			if builtin == "hexToBytes" && p.check(zigTokLParen) {
+				p.advance() // '('
+				if p.check(zigTokString) {
+					p.bareLiteralOK[p.pos] = true // N-448: the explicit hex spelling
+				}
+				arg := p.parseExpression()
+				p.expect(zigTokRParen)
+				if lit, ok := arg.(ByteStringLiteral); ok {
+					return ByteStringLiteral{Value: lit.Value, SourceLocation: lit.SourceLocation}
+				}
+				p.addError(fmt.Sprintf("line %d: runar.hexToBytes expects a string literal argument", tok.line))
+				return ByteStringLiteral{Value: ""}
+			}
+
+			// N-448: the first argument of runar.asm(...) is an opcode body.
+			if builtin == "asm" && p.check(zigTokLParen) && p.peekAt(1).kind == zigTokString {
+				p.bareLiteralOK[p.pos+1] = true
+			}
+
 			return Identifier{Name: builtin}
 		}
 
-		return Identifier{Name: tok.value}
+		return Identifier{Name: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// Fallback
@@ -1667,17 +1862,67 @@ func (p *zigParser) parseZigBuiltin(name string, tokLine, tokCol int) Expression
 // Postfix chain: calls, member access, indexing
 // ---------------------------------------------------------------------------
 
+// parseListElements parses the elements of a call argument list or array
+// literal up to (not including) close. F-026: Zig requires `,` between
+// elements (a trailing one is allowed); without it a stray token after a
+// literal used to become an extra element.
+func (p *zigParser) parseListElements(close zigTokenKind) []Expression {
+	var elements []Expression
+	for !p.check(close) && !p.check(zigTokEOF) {
+		elements = append(elements, p.parseExpression())
+		if p.match(zigTokComma) {
+			continue
+		}
+		if !p.check(close) {
+			t := p.peek()
+			p.errors = append(p.errors, lexDiag(ZigListCommaMsg, p.fileName, t.line, t.col))
+		}
+		break
+	}
+	return elements
+}
+
+// expectListSeparator is N-033: after a field, parameter or struct-init
+// entry, consume the `,` that separates it from the next one. It reports
+// ZigListCommaMsg at the current token and returns false when that token is
+// neither `,` nor close; it never consumes close.
+func (p *zigParser) expectListSeparator(close zigTokenKind) bool {
+	if p.match(zigTokComma) || p.check(close) {
+		return true
+	}
+	t := p.peek()
+	p.errors = append(p.errors, lexDiag(ZigListCommaMsg, p.fileName, t.line, t.col))
+	return false
+}
+
+// zigStatefulContextMembers are the `ctx.<member>` intrinsics a
+// StatefulContext handle exposes.
+var zigStatefulContextMembers = map[string]bool{
+	"txPreimage": true, "getStateScript": true, "addOutput": true, "addRawOutput": true, "addDataOutput": true,
+}
+
 func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 	for {
 		// Function call: expr(args...)
 		if p.check(zigTokLParen) {
 			p.advance() // '('
-			var args []Expression
-			for !p.check(zigTokRParen) && !p.check(zigTokEOF) {
-				args = append(args, p.parseExpression())
-				p.match(zigTokComma)
-			}
+			args := p.parseListElements(zigTokRParen)
 			p.expect(zigTokRParen)
+			// N-453: the StatefulContext parameter is elided from every
+			// method's parameter list, so a `self.helper(ctx, ...)` call
+			// drops the bare handle too and the arities agree. Anywhere else
+			// (including the output intrinsics) a bare `ctx` stays an
+			// identifier and is refused as an undefined variable.
+			if pa, ok := expr.(PropertyAccessExpr); ok && !zigStatefulContextMembers[pa.Property] {
+				kept := args[:0]
+				for _, a := range args {
+					if id, ok := a.(Identifier); ok && p.statefulContextNames[id.Name] {
+						continue
+					}
+					kept = append(kept, a)
+				}
+				args = kept
+			}
 			expr = CallExpr{Callee: expr, Args: args}
 			continue
 		}
@@ -1722,16 +1967,8 @@ func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 // ---------------------------------------------------------------------------
 
 func (p *zigParser) parseZigNumber(s string) Expression {
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		// Hex literal -> ByteStringLiteral
-		hex := s[2:]
-		// Ensure even length
-		if len(hex)%2 != 0 {
-			hex = "0" + hex
-		}
-		return ByteStringLiteral{Value: hex}
-	}
-
+	// F-026: the tokenizer already validated the literal and wrote its
+	// decimal value (a Zig `0x` literal is an integer, not a ByteString).
 	bi := new(big.Int)
 	if _, ok := bi.SetString(s, 10); !ok {
 		p.addError(fmt.Sprintf("line %d: invalid number literal %q", p.peek().line, s))

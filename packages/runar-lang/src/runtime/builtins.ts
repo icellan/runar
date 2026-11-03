@@ -6,7 +6,7 @@
 // math uses native bigint; byte ops use hex string manipulation.
 // ---------------------------------------------------------------------------
 
-import { Hash, Point as BsvPoint, BigNumber, Signature, PublicKey } from '@bsv/sdk';
+import { Hash, Signature, PublicKey } from '@bsv/sdk';
 import type {
   ByteString,
   PubKey,
@@ -141,18 +141,47 @@ export function cat(a: ByteString, b: ByteString): ByteString {
   return (a + b) as ByteString;
 }
 
+/**
+ * N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+ * OP_NIP <length> OP_SPLIT OP_DROP` (lowerSubstr, 05-stack-lower.ts) — TWO
+ * chained OP_SPLITs, the second against the REMAINDER `size(data) - start`.
+ * It ABORTS whenever `start` is outside `[0, size(data)]` or `length` is
+ * outside `[0, size(data) - start]`, which collapses to: `start < 0`,
+ * `length < 0`, or `start + length > size(data)`. `.slice()` clamps instead
+ * of aborting, so the bound is checked explicitly here.
+ */
 export function substr(data: ByteString, start: bigint, length: bigint): ByteString {
   const s = Number(start) * 2;
   const l = Number(length) * 2;
+  if (start < 0n || length < 0n || s + l > data.length) {
+    throw new Error(
+      `substr: start ${start}, length ${length} is outside a ${data.length / 2}-byte value — ` +
+        'OP_SPLIT aborts on a position below zero or past the end of the element, it does not clamp',
+    );
+  }
   return data.slice(s, s + l) as ByteString;
 }
 
 export function left(data: ByteString, length: bigint): ByteString {
-  return data.slice(0, Number(length) * 2) as ByteString;
+  const n = Number(length) * 2;
+  if (length < 0n || n > data.length) {
+    throw new Error(
+      `left: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(0, n) as ByteString;
 }
 
 export function right(data: ByteString, length: bigint): ByteString {
-  return data.slice(data.length - Number(length) * 2) as ByteString;
+  const n = Number(length) * 2;
+  if (length < 0n || n > data.length) {
+    throw new Error(
+      `right: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(data.length - n) as ByteString;
 }
 
 /**
@@ -160,9 +189,21 @@ export function right(data: ByteString, length: bigint): ByteString {
  * Rúnar builtin binds (`OP_SPLIT OP_NIP`). `left(data, index)` is the other
  * side. This used to return the `[left, right]` pair; nothing could name the
  * pair from contract source, and the signature disagreed with the frontend.
+ *
+ * N-171 (sibling of F-274): `split` is a bare `OP_SPLIT`, which ABORTS
+ * whenever `index` is outside `[0, size(data)]`. `.slice()` clamps a
+ * negative or past-the-end index instead of aborting, so the bound is
+ * checked explicitly here.
  */
 export function split(data: ByteString, index: bigint): ByteString {
-  return data.slice(Number(index) * 2) as ByteString;
+  const n = Number(index) * 2;
+  if (index < 0n || n > data.length) {
+    throw new Error(
+      `split: index ${index} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on a ` +
+        'position below zero or past the end of the element, it does not clamp',
+    );
+  }
+  return data.slice(n) as ByteString;
 }
 
 export function reverseBytes(data: ByteString): ByteString {
@@ -269,9 +310,10 @@ export function safemod(a: bigint, b: bigint): bigint {
 }
 
 export function clamp(value: bigint, lo: bigint, hi: bigint): bigint {
-  if (value < lo) return lo;
-  if (value > hi) return hi;
-  return value;
+  // The compiled script is `<value> <lo> OP_MAX <hi> OP_MIN`, i.e.
+  // min(max(value, lo), hi): with lo > hi, hi wins (N-030).
+  const m = value > lo ? value : lo;
+  return m < hi ? m : hi;
 }
 
 export function sign(value: bigint): bigint {
@@ -281,6 +323,9 @@ export function sign(value: bigint): bigint {
 
 export function pow(base: bigint, exp: bigint): bigint {
   if (exp < 0n) throw new Error('pow: negative exponent');
+  // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+  // for any exponent above 32, even where the power is trivial (F-134).
+  if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
   let result = 1n;
   let b = base;
   let e = exp;
@@ -302,6 +347,8 @@ export function percentOf(amount: bigint, bps: bigint): bigint {
 
 export function sqrt(n: bigint): bigint {
   if (n < 0n) throw new Error('sqrt: negative input');
+  // The compiled script VERIFYs OP_SIZE(n) < 63, i.e. n < 2^495 (F-134).
+  if (n >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
   if (n === 0n) return 0n;
   let x = n;
   let y = (x + 1n) / 2n;
@@ -315,7 +362,9 @@ export function sqrt(n: bigint): bigint {
 export function gcd(a: bigint, b: bigint): bigint {
   let x = a < 0n ? -a : a;
   let y = b < 0n ? -b : b;
-  while (y !== 0n) {
+  // The compiled script unrolls exactly 256 Euclid steps and returns the
+  // partial remainder when they are not enough (N-030).
+  for (let i = 0; i < 256 && y !== 0n; i++) {
     const t = y;
     y = x % y;
     x = t;
@@ -328,14 +377,9 @@ export function divmod(a: bigint, b: bigint): bigint {
 }
 
 export function log2(n: bigint): bigint {
+  // The compiled script is exact for every n > 0 and aborts for n <= 0 (N-103).
   if (n <= 0n) throw new Error('log2: non-positive input');
-  let result = 0n;
-  let v = n;
-  while (v > 1n) {
-    v >>= 1n;
-    result++;
-  }
-  return result;
+  return BigInt(n.toString(2).length - 1);
 }
 
 export function bool(value: bigint): boolean {
@@ -354,6 +398,17 @@ function rabinBytesToUnsignedLE(bytes: number[]): bigint {
   return result;
 }
 
+/**
+ * Upper bound (exclusive) on the Rabin `padding` parameter.
+ *
+ * Mirrors the on-chain `RABIN_PADDING_LIMIT` emitted by `EmitVerifyRabinSig`
+ * (asserted via OP_WITHIN/OP_VERIFY) and the same bound already enforced by
+ * packages/runar-testing's `rabinVerify` and the Go SDK's `rabin.go`. Without
+ * it, sig=0 with padding=SHA256(msg) is a universal forgery: for ANY n,
+ * (0^2 + SHA256(msg)) mod n == SHA256(msg) mod n trivially.
+ */
+const RABIN_PADDING_LIMIT = 65536n;
+
 export function verifyRabinSig(
   msg: ByteString,
   sig: RabinSig,
@@ -366,6 +421,9 @@ export function verifyRabinSig(
   const hashBN = rabinBytesToUnsignedLE(hashArr);
   const padBytes = hexToBytes(padding as string);
   const padBN = rabinBytesToUnsignedLE(padBytes);
+  if (padBN >= RABIN_PADDING_LIMIT) return false;
+  // Mirrors the on-chain `sig < n` gate (F-368): `sig + k*n` aborts in the script.
+  if (sig >= pubkey) return false;
   const lhs = ((sig * sig + padBN) % pubkey + pubkey) % pubkey;
   const rhs = (hashBN % pubkey + pubkey) % pubkey;
   return lhs === rhs;
@@ -407,45 +465,130 @@ export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubk
 // Elliptic curve operations (secp256k1 via @bsv/sdk)
 // ---------------------------------------------------------------------------
 
-function toBsvPoint(p: Point): BsvPoint {
-  const xHex = (p as string).slice(0, 64);
-  const yHex = (p as string).slice(64, 128);
-  return new BsvPoint(xHex, yHex);
-}
-
-function fromBsvPoint(p: BsvPoint): Point {
-  return (p.getX().toHex(32) + p.getY().toHex(32)) as unknown as Point;
-}
+// N-111: these mirror the COMPILED script (ec-codegen.ts), gates included,
+// rather than delegating to @bsv/sdk's Point, which has its own infinity
+// object and never sees the all-zero blob as the identity. Vectors:
+// packages/runar-zig/src/fixtures/n111-ec-operand-gates-onchain.json.
 
 const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const EC_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+const EC_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+
+function ecFieldMod(a: bigint, m: bigint): bigint {
+  return ((a % m) + m) % m;
+}
+
+/** Modular inverse; inv(0) = 0, as the script's Fermat inverse gives. */
+function ecFieldInv(a: bigint, m: bigint): bigint {
+  let [r0, r1] = [ecFieldMod(a, m), m];
+  let [s0, s1] = [1n, 0n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1] = [r1, r0 - q * r1];
+    [s0, s1] = [s1, s0 - q * s1];
+  }
+  return ecFieldMod(s0, m);
+}
+
+/** CL-BUG-095: a Point is exactly 64 bytes, or the script aborts. */
+function ecDecode(p: Point, fn: string): [bigint, bigint] {
+  const h = p as string;
+  if (h.length !== 128) {
+    throw new Error(`${fn}: EC point must be 64 bytes, got ${h.length / 2}`);
+  }
+  return [BigInt('0x' + h.slice(0, 64)), BigInt('0x' + h.slice(64, 128))];
+}
+
+function ecEncode(x: bigint, y: bigint): Point {
+  return (x.toString(16).padStart(64, '0') + y.toString(16).padStart(64, '0')) as unknown as Point;
+}
+
+/** R-117: ecAdd / ecNegate OP_VERIFY x < p and y < p. */
+function ecRequireCanonical(x: bigint, y: bigint, fn: string): void {
+  if (x >= EC_P || y >= EC_P) {
+    throw new Error(`${fn}: point coordinate is not a canonical field element (x and y must be < p)`);
+  }
+}
+
+/** The script's affineAdd: O selects, P + (-P) = O, tangent, chord. */
+function ecAffineAdd(x1: bigint, y1: bigint, x2: bigint, y2: bigint): [bigint, bigint] {
+  if (x1 === 0n && y1 === 0n) return [x2, y2];
+  if (x2 === 0n && y2 === 0n) return [x1, y1];
+  if (x1 === x2 && y1 !== y2) return [0n, 0n];
+  // N-110: the script's tangent OP_VERIFYs py != 0 (O + O returned above).
+  if (x1 === x2 && y1 === 0n) {
+    throw new Error('ecAdd: cannot double a point with y = 0 (the tangent is vertical)');
+  }
+  const s = x1 === x2
+    ? ecFieldMod(3n * x1 * x1 * ecFieldInv(2n * y1, EC_P), EC_P)
+    : ecFieldMod((y2 - y1) * ecFieldInv(x2 - x1, EC_P), EC_P);
+  const rx = ecFieldMod(s * s - x1 - x2, EC_P);
+  const ry = ecFieldMod(s * (x1 - rx) - y1, EC_P);
+  return [rx, ry];
+}
+
+function ecScalarMulCoords(x: bigint, y: bigint, k: bigint): [bigint, bigint] {
+  let kr = ecFieldMod(k, EC_N);
+  let rx = 0n;
+  let ry = 0n;
+  let ax = x;
+  let ay = y;
+  while (kr > 0n) {
+    if (kr & 1n) [rx, ry] = ecAffineAdd(rx, ry, ax, ay);
+    [ax, ay] = ecAffineAdd(ax, ay, ax, ay);
+    kr >>= 1n;
+  }
+  return [rx, ry];
+}
+
+function ecOnCurveCoords(x: bigint, y: bigint): boolean {
+  if (x >= EC_P || y >= EC_P) return false;
+  return ecFieldMod(y * y, EC_P) === ecFieldMod(x * x * x + 7n, EC_P);
+}
 
 export function ecAdd(a: Point, b: Point): Point {
-  return fromBsvPoint(toBsvPoint(a).add(toBsvPoint(b)));
+  const [ax, ay] = ecDecode(a, 'ecAdd');
+  const [bx, by] = ecDecode(b, 'ecAdd');
+  ecRequireCanonical(ax, ay, 'ecAdd');
+  ecRequireCanonical(bx, by, 'ecAdd');
+  const [rx, ry] = ecAffineAdd(ax, ay, bx, by);
+  return ecEncode(rx, ry);
 }
 
 export function ecMul(p: Point, k: bigint): Point {
-  return fromBsvPoint(toBsvPoint(p).mul(new BigNumber(k.toString())));
+  const [x, y] = ecDecode(p, 'ecMul');
+  // R-157: the script OP_VERIFYs `onCurve(P) OR P == O` before the ladder.
+  if (!(x === 0n && y === 0n) && !ecOnCurveCoords(x, y)) {
+    throw new Error('ecMul: point is neither on secp256k1 nor the point at infinity');
+  }
+  const [rx, ry] = ecScalarMulCoords(x, y, k);
+  return ecEncode(rx, ry);
 }
 
 export function ecMulGen(k: bigint): Point {
-  const G = new BsvPoint(
-    '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
-    '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8',
-  );
-  return fromBsvPoint(G.mul(new BigNumber(k.toString())));
+  const [rx, ry] = ecScalarMulCoords(EC_GX, EC_GY, k);
+  return ecEncode(rx, ry);
 }
 
 export function ecNegate(p: Point): Point {
-  const bsv = toBsvPoint(p);
-  const yBig = BigInt('0x' + bsv.getY().toHex(32));
-  const negY = EC_P - yBig;
-  const negYHex = negY.toString(16).padStart(64, '0');
-  return (bsv.getX().toHex(32) + negYHex) as unknown as Point;
+  const [x, y] = ecDecode(p, 'ecNegate');
+  ecRequireCanonical(x, y, 'ecNegate');
+  return ecEncode(x, ecFieldMod(EC_P - y, EC_P));
 }
 
 export function ecOnCurve(p: Point): boolean {
-  const x = BigInt('0x' + (p as string).slice(0, 64));
-  const y = BigInt('0x' + (p as string).slice(64, 128));
+  const h = p as string;
+  // N-184: a predicate over untrusted bytes must stay total. The compiled
+  // emitPointLengthGate ANDs a width flag into the result instead of
+  // aborting, so a 63- or 65-byte blob is false, not computed on whatever
+  // `slice` happens to return (a 65-byte blob used to re-slice the real
+  // x, y out of the first 64 bytes and silently accept it — fail-open,
+  // worse than a raise). ecAdd/ecMul/ecNegate still abort on the wrong
+  // width via ecDecode; only this predicate stays total.
+  if (h.length !== 128) return false;
+  const x = BigInt('0x' + h.slice(0, 64));
+  const y = BigInt('0x' + h.slice(64, 128));
   // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p). The
   // compiled script range-checks the coordinates before the field arithmetic
   // reduces them mod p, so the interpreter must too or it would accept a point
@@ -461,23 +604,27 @@ export function ecModReduce(value: bigint, mod: bigint): bigint {
 }
 
 export function ecEncodeCompressed(p: Point): ByteString {
-  const yBig = BigInt('0x' + (p as string).slice(64, 128));
+  const [, yBig] = ecDecode(p, 'ecEncodeCompressed');
   const prefix = yBig % 2n === 0n ? '02' : '03';
   return (prefix + (p as string).slice(0, 64)) as ByteString;
 }
 
 export function ecMakePoint(x: bigint, y: bigint): Point {
+  // N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+  if (x < 0n || x >= EC_P || y < 0n || y >= EC_P) {
+    throw new Error('ecMakePoint: coordinate is not a field element (0 <= v < p)');
+  }
   const xHex = x.toString(16).padStart(64, '0');
   const yHex = y.toString(16).padStart(64, '0');
   return (xHex + yHex) as unknown as Point;
 }
 
 export function ecPointX(p: Point): bigint {
-  return BigInt('0x' + (p as string).slice(0, 64));
+  return ecDecode(p, 'ecPointX')[0];
 }
 
 export function ecPointY(p: Point): bigint {
-  return BigInt('0x' + (p as string).slice(64, 128));
+  return ecDecode(p, 'ecPointY')[1];
 }
 
 // ---------------------------------------------------------------------------

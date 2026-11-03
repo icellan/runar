@@ -24,9 +24,9 @@ type TicTacToeV2 struct {
 }
 
 func (c *TicTacToeV2) init() {
-	c.P2pkhPrefix = "1976a914"
-	c.P2pkhSuffix = "88ac"
-	c.PlayerO = "000000000000000000000000000000000000000000000000000000000000000000"
+	c.P2pkhPrefix = runar.HexToBytes("1976a914")
+	c.P2pkhSuffix = runar.HexToBytes("88ac")
+	c.PlayerO = runar.HexToBytes("000000000000000000000000000000000000000000000000000000000000000000")
 	c.Board = [9]runar.Bigint{0, 0, 0, 0, 0, 0, 0, 0, 0}
 	c.Turn = 0
 	c.Status = 0
@@ -36,6 +36,11 @@ func (c *TicTacToeV2) init() {
 func (c *TicTacToeV2) Join(opponentPK runar.PubKey, sig runar.Sig) {
 	runar.Assert(c.Status == 0)
 	runar.Assert(runar.CheckSig(sig, opponentPK))
+	// Player O must pay exactly the bet (N-027): the continuation holds the
+	// input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+	// payout methods pay out. The compiler's own `>= input` floor alone would
+	// let O join for free.
+	runar.Assert(runar.ContinuationAmount() == runar.ExtractAmount(c.TxPreimage)+c.BetAmount)
 	c.PlayerO = opponentPK
 	c.Status = 1
 	c.Turn = 1

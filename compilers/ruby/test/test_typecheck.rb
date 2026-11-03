@@ -707,4 +707,288 @@ class TestTypecheck < Minitest::Test
 
     assert_typecheck_error(source, "assert")
   end
+
+  # ---------------------------------------------------------------------------
+  # F-063: infer_expr_type walks array-literal elements
+  # ---------------------------------------------------------------------------
+  #
+  # infer_expr_type had no ArrayLiteralExpr arm, so every array literal typed
+  # as "<unknown>" (accepted by subtype? against anything) and its elements
+  # were never visited: checkMultiSig's argument check was vacuous and a call
+  # nested in an element never reached the unknown-function rule. Pre-fix the
+  # mismatch shapes compiled to a locking script.
+  #
+  # Proves: type_check refuses each shape (TS reference wording for the
+  # element mismatch). Does not prove: CLI exit status or cross-tier parity.
+
+  F063_TC_HEADER = <<~TS
+    class C extends SmartContract {
+      readonly pk: PubKey;
+      constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  TS
+
+  def f063_type_errors(body)
+    typecheck_source(F063_TC_HEADER + body + "\n}\n").errors.map(&:message)
+  end
+
+  def test_f063_unknown_function_inside_array_literal_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }")
+    assert errs.any? { |m| m.include?("unknown function 'totallyBogusFunction'") }, errs.inspect
+  end
+
+  def test_f063_array_element_type_mismatch_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }")
+    assert errs.any? { |m| m.include?("Array element type mismatch: expected 'PubKey', got 'bigint'") }, errs.inspect
+  end
+
+  def test_f063_check_multisig_wrong_array_types_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }")
+    assert errs.any? { |m| m.include?("expected 'Sig[]', got 'bigint[]'") }, errs.inspect
+    assert errs.any? { |m| m.include?("expected 'PubKey[]', got 'bigint[]'") }, errs.inspect
+  end
+
+  def test_f063_well_typed_check_multisig_accepted
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk])); }")
+    assert_empty errs
+  end
+
+  # F-110: a bounded loop is unrolled `count` times, so an affine value bound
+  # outside a loop that runs two or more times and consumed in its body is
+  # consumed once per iteration and must get the same diagnostic as a
+  # sequential double use. Single-iteration loops stay legal. Proves the type
+  # checker's verdict only; consumption inside private helpers is out of scope
+  # (the affine check is intra-method).
+  F110_CASES = [
+    ["sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"],
+    ["preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"],
+    ["sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", nil],
+    ["sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", nil],
+  ].freeze
+
+  def test_f110_affine_consumption_in_repeating_loop
+    F110_CASES.each do |params, body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
+  # F-222: the then and else arms of an if are mutually exclusive, so a Sig
+  # consumed once in each arm is consumed once on every path and must
+  # typecheck. Every shape where some path consumes twice (an arm plus after
+  # the if, before plus an arm, twice in one arm, once per arm inside a
+  # 2-iteration loop) must still be refused. Proves the type checker's verdict
+  # only; the ternary form is not an if statement and is untouched.
+  F222_DOUBLE = "affine value 'sig' has already been consumed"
+  F222_CASES = [
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", nil],
+    ["if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", nil],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", nil],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", F222_DOUBLE],
+    ["assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", F222_DOUBLE],
+    ["if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", F222_DOUBLE],
+    ["if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", F222_DOUBLE],
+    ["for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", F222_DOUBLE],
+  ].freeze
+
+  def test_f222_affine_consumption_across_if_else_arms
+    F222_CASES.each do |body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  public m(sig: Sig, flag: boolean) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
+  # N-109: private helpers are inlined, so a call consumes the arguments at the
+  # parameter positions the helper consumes (directly, through an alias, or
+  # transitively through another helper). `this.h(sig)` twice, or once in a
+  # 2-iteration loop, must get the same diagnostic as a sequential double use;
+  # a single call, one call per if/else arm, and a helper that takes a Sig
+  # without consuming it stay legal. Proves the type checker's verdict only; a
+  # helper consuming a PROPERTY is not covered.
+  N109_H = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }"
+  N109_DOUBLE = "affine value 'sig' has already been consumed"
+  N109_CASES = [
+    [N109_H, "sig: Sig", "this.h(sig); this.h(sig);", N109_DOUBLE],
+    [N109_H, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", N109_DOUBLE],
+    [N109_H, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", N109_DOUBLE],
+    ["#{N109_H} private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }", "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", N109_DOUBLE],
+    ["private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", N109_DOUBLE],
+    ["private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"],
+    [N109_H, "sig: Sig", "this.h(sig);", nil],
+    [N109_H, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", nil],
+    [N109_H, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", nil],
+    ["private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", nil],
+  ].freeze
+
+  def test_n109_affine_consumption_through_helpers
+    N109_CASES.each do |helpers, params, body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  #{helpers}\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
+  # N-288: the N-109 summary covered parameters only. A helper that consumes a
+  # PROPERTY (`checkSig(this.sig, ..)`, `checkPreimage(this.txPreimage)`) is
+  # inlined at every call site, so calling it twice must get the diagnostic a
+  # direct double use of the property gets, also per loop iteration, after a
+  # direct consume, through an alias and transitively; a single call, one call
+  # per if/else arm, and a helper that only reads the property stay legal.
+  # Proves the type checker's verdict only, not the emitted script.
+  N288_H = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+  N288_DOUBLE = "affine value 'this.sig' has already been consumed"
+  N288_STATELESS = "class C extends SmartContract {\n  readonly pk: PubKey;\n  readonly sig: Sig;\n" \
+                   "  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n"
+  N288_STATEFUL = "class C extends StatefulSmartContract {\n  count: bigint;\n" \
+                  "  constructor(count: bigint) { super(count); this.count = count; }\n"
+  N288_CASES = [
+    [N288_STATELESS, N288_H, "", "this.h(); this.h();", N288_DOUBLE],
+    [N288_STATELESS, N288_H, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", N288_DOUBLE],
+    [N288_STATELESS, N288_H, "", "assert(checkSig(this.sig, this.pk)); this.h();", N288_DOUBLE],
+    [N288_STATELESS, "#{N288_H} private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", N288_DOUBLE],
+    [N288_STATELESS, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", N288_DOUBLE],
+    [N288_STATEFUL, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"],
+    [N288_STATELESS, N288_H, "", "this.h();", nil],
+    [N288_STATELESS, N288_H, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", nil],
+    [N288_STATELESS, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", nil],
+  ].freeze
+
+  def test_n288_affine_property_consumption_through_helpers
+    N288_CASES.each do |header, helpers, params, body, want|
+      source = "#{header}  #{helpers}\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # F-265: substr() literal negative start is a compile-time error
+  #
+  # substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+  # enforced start >= 0: a literal negative start (`substr(a, -5n, 3n)`)
+  # type-checked as plain 'bigint' (the standard subtype loop never inspects
+  # a literal's VALUE) and compiled to a script that aborts at runtime --
+  # `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects as out of range.
+  #
+  # Mirrors the existing extractPrevOutputScript/requireOutputP2PKH
+  # "must be >= 0" literal-bound pattern above.
+  #
+  # Proves: a literal (bare or unary-negated BigIntLiteral) negative start is
+  # now a typecheck-time diagnostic. Does not prove: anything about a
+  # NON-literal negative start (a variable or computed expression) -- that
+  # remains a runtime abort, unchanged, because the stack model has no
+  # static value range for a non-literal.
+  # ---------------------------------------------------------------------------
+
+  def test_f265_substr_literal_negative_start_rejected
+    source = <<~TS
+      class C extends SmartContract {
+        readonly a: ByteString;
+        constructor(a: ByteString) { super(a); this.a = a; }
+        public unlock() {
+          assert(substr(this.a, -5n, 3n) === this.a);
+        }
+      }
+    TS
+    errs = typecheck_source(source).errors.map(&:message)
+    assert errs.any? { |m| m.include?("substr() argument 2 (start) must be >= 0; got -5") },
+           "expected a substr() start-bound error, got: #{errs.inspect}"
+  end
+
+  def test_f265_substr_literal_non_negative_start_accepted
+    source = <<~TS
+      class C extends SmartContract {
+        readonly a: ByteString;
+        constructor(a: ByteString) { super(a); this.a = a; }
+        public unlock() {
+          assert(substr(this.a, 0n, 3n) === this.a);
+        }
+      }
+    TS
+    assert_typecheck_clean source
+  end
+
+  def test_f265_substr_non_literal_start_unchanged
+    source = <<~TS
+      class C extends SmartContract {
+        readonly a: ByteString;
+        constructor(a: ByteString) { super(a); this.a = a; }
+        public unlock(n: bigint) {
+          assert(substr(this.a, n, 3n) === this.a);
+        }
+      }
+    TS
+    assert_typecheck_clean source
+  end
+
+  # ---------------------------------------------------------------------------
+  # N-234: a property initializer of the wrong literal family compiled
+  # without complaint. Proves only the Ruby tier's check_property_initializers;
+  # the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+  # ---------------------------------------------------------------------------
+
+  def test_n234_rejects_bytestring_initializer_for_bigint_property
+    source = <<~TS
+      class BadScalarInit extends SmartContract {
+        readonly x: bigint = 'ab';
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_error source, "type 'ByteString' is not assignable to type 'bigint'"
+  end
+
+  def test_n234_rejects_to_bytestring_call_initializer_for_bigint_property
+    source = <<~TS
+      class BadScalarInit extends SmartContract {
+        readonly x: bigint = toByteString('ab');
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_error source, "type 'ByteString' is not assignable to type 'bigint'"
+  end
+
+  def test_n234_still_accepts_well_typed_scalar_initializer
+    source = <<~TS
+      class GoodScalarInit extends SmartContract {
+        readonly x: bigint = 1n;
+        constructor() { super(); }
+        public check() { assert(this.x === 1n); }
+      }
+    TS
+    assert_typecheck_clean source
+  end
 end

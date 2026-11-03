@@ -15,23 +15,23 @@ class BitwiseOps(SmartContract):
         self.b = b
 
     @public
-    def test_shift(self):
-        """Verify shift operators compile and run."""
+    def test_shift(self, expected_left: Bigint, expected_right: Bigint):
+        """Check the caller-supplied shift results."""
         left = self.a << 2
         right = self.a >> 1
-        assert_(left >= 0 or left < 0)
-        assert_(right >= 0 or right < 0)
-        assert_(True)
+        assert_(left == expected_left)
+        assert_(right == expected_right)
 
     @public
-    def test_bitwise(self):
-        """Verify bitwise operators compile and run."""
+    def test_bitwise(self, expected_and: Bigint, expected_or: Bigint, expected_xor: Bigint):
+        """Check the caller-supplied AND/OR/XOR results; ``~`` is checked by
+        double inversion and De Morgan's law (see the TS source for why)."""
         and_result = self.a & self.b
         or_result = self.a | self.b
         xor_result = self.a ^ self.b
         not_result = ~self.a
-        assert_(and_result >= 0 or and_result < 0)
-        assert_(or_result >= 0 or or_result < 0)
-        assert_(xor_result >= 0 or xor_result < 0)
-        assert_(not_result >= 0 or not_result < 0)
-        assert_(True)
+        assert_(and_result == expected_and)
+        assert_(or_result == expected_or)
+        assert_(xor_result == expected_xor)
+        assert_(~not_result == self.a)
+        assert_(~(self.a | self.b) == (not_result & ~self.b))

@@ -38,6 +38,9 @@ use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFSyn
 // ---------------------------------------------------------------------------
 
 /// Lower a type-checked Rúnar AST to ANF IR.
+/// F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+pub const CONTINUATION_AMOUNT_UNAVAILABLE: &str = "continuationAmount() is only available in a public StatefulSmartContract method whose state continues through the default single-output continuation (it mutates state or emits a data output, and does not call addOutput/addRawOutput)";
+
 pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     let properties = lower_properties(contract);
     let mut methods = lower_methods(contract);
@@ -47,6 +50,9 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     // liftBranchUpdateProps transformation (04-anf-lower.ts line 50).
     for method in &mut methods {
         method.body = lift_branch_update_props(method.body.clone());
+        if method.is_public {
+            drop_terminal_if_results(&mut method.body);
+        }
     }
 
     ANFProgram {
@@ -107,11 +113,11 @@ fn constructor_assigned_properties(contract: &ContractNode) -> HashSet<String> {
         let Statement::Assignment { target, value, .. } = stmt else {
             continue;
         };
-        let Expression::PropertyAccess { property } = target else {
+        let Expression::PropertyAccess { property, .. } = target else {
             continue;
         };
         match value {
-            Expression::Identifier { name } if params.contains(name.as_str()) => {
+            Expression::Identifier { name, .. } if params.contains(name.as_str()) => {
                 prop_to_params
                     .entry(property.clone())
                     .or_default()
@@ -223,6 +229,7 @@ fn literal_bigint(expr: &Expression) -> Option<num_bigint::BigInt> {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => match operand.as_ref() {
             Expression::BigIntLiteral { value } => Some(-value),
             _ => None,
@@ -290,12 +297,13 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
     match expr {
         Expression::BigIntLiteral { value } => Some(bigint_to_json(value)),
         Expression::BoolLiteral { value } => Some(serde_json::Value::Bool(*value)),
-        Expression::ByteStringLiteral { value } => {
+        Expression::ByteStringLiteral { value, .. } => {
             Some(serde_json::Value::String(value.clone()))
         }
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
                 Some(bigint_to_json(&(-value)))
@@ -314,7 +322,7 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
             if super::validator::is_to_byte_string_literal(expr) =>
         {
             match &args[0] {
-                Expression::ByteStringLiteral { value } => {
+                Expression::ByteStringLiteral { value, .. } => {
                     Some(serde_json::Value::String(value.clone()))
                 }
                 _ => None,
@@ -394,6 +402,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
         // is_property before is_param (see PropertyAccess / lower_member_expr).
         for p in &method.params {
             method_ctx.add_param(&p.name);
+            // N-016: a private helper's parameter is not part of any ABI, so
+            // one that shadows a property is bound under the collision-proof
+            // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
+            // public one the body REASSIGNS is renamed too — its rebinding is
+            // merged out of an if by name, where a property result of the same
+            // name would capture it. The ABI keeps the source name either way.
+            if method_ctx.is_property(&p.name)
+                && (method.visibility == Visibility::Private
+                    || statements_reassign(&method.body, &p.name))
+            {
+                let slot = method_ctx.local_name(&p.name);
+                method_ctx.renamed_private_params.insert(p.name.clone(), slot);
+            }
         }
 
         if contract.parent_class == "StatefulSmartContract"
@@ -409,12 +430,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 .get(&method.name)
                 .copied()
                 .unwrap_or_default();
-            let shape = ContinuationShape::for_effects(&eff);
+            // N-038: under a SINGLE base the change output is not committed,
+            // so the method takes no `_changePKH` / `_changeAmount` and the
+            // continuation hash carries no change segment.
+            let shape = ContinuationShape::for_effects_sighash(
+                &eff,
+                method.sighash_type.unwrap_or(SIGHASH_DEFAULT),
+            );
             let needs_change_output = shape.needs_change;
+            let includes_change = shape.includes_change;
             let needs_new_amount = shape.needs_new_amount;
 
             // Register implicit parameters
-            if needs_change_output {
+            if includes_change {
                 method_ctx.add_param("_changePKH");
                 method_ctx.register_param_type("_changePKH", "Ripemd160");
                 method_ctx.add_param("_changeAmount");
@@ -528,6 +556,38 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // locking script will not match the auto-injected
             // parameter list.
             if needs_change_output {
+                // F-024 (R14): the default single-output continuation carries
+                // the spender-chosen `_newAmount` into the new state UTXO.
+                // Without this check a spender sets `_newAmount = 1` and pays
+                // the rest of the input value to their own change output — the
+                // committed outputs then match the covenant's hash exactly.
+                // Value may grow (a deposit) but never shrink below the input
+                // amount. addOutput/addRawOutput methods size their outputs
+                // explicitly and terminal methods have no continuation.
+                // Mirrors 04-anf-lower.ts binding for binding.
+                if add_output_refs.is_empty() {
+                    let amount_preimage_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let input_amount_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractAmount".to_string(),
+                        args: vec![amount_preimage_ref],
+                    });
+                    let new_amount_check_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_newAmount".to_string(),
+                    });
+                    let amount_ok_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: ">=".to_string(),
+                        left: new_amount_check_ref,
+                        right: input_amount_ref,
+                        result_type: None,
+                    });
+                    method_ctx.emit(ANFValue::Assert {
+                        value: amount_ok_ref,
+                        is_auto_injected_state_check: false,
+                    });
+                }
+
                 // Build the P2PKH change output for hashOutputs verification.
                 //
                 // Issue #116: the SDK's build_call_transaction OMITS the change
@@ -539,38 +599,47 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 // with empty is a no-op) when zero, reproducing the omission.
                 // For any change > 0 the hashed bytes are unchanged; only the
                 // emitted script gains the guard.
-                let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
-                    name: "_changePKH".to_string(),
-                });
-                let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
-                    name: "_changeAmount".to_string(),
-                });
-                let zero_ref = method_ctx.emit(ANFValue::LoadConst {
-                    value: bigint_to_json(&BigInt::from(0)),
-                });
-                let change_nonzero_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "!==".to_string(),
-                    left: change_amount_ref.clone(),
-                    right: zero_ref,
-                    result_type: None,
-                });
-                let mut change_then_ctx = method_ctx.sub_context();
-                change_then_ctx.emit(ANFValue::Call {
-                    func: "buildChangeOutput".to_string(),
-                    args: vec![change_pkh_ref, change_amount_ref],
-                });
-                method_ctx.sync_counter(&change_then_ctx);
-                let mut change_else_ctx = method_ctx.sub_context();
-                change_else_ctx.emit(ANFValue::LoadConst {
-                    value: serde_json::Value::String(String::new()),
-                });
-                method_ctx.sync_counter(&change_else_ctx);
-                let change_output_ref = method_ctx.emit(ANFValue::If {
-                    cond: change_nonzero_ref,
-                    then: change_then_ctx.bindings,
-                    else_branch: change_else_ctx.bindings,
-                    results: Vec::new(),
-                });
+                //
+                // N-038: under a SIGHASH_SINGLE base (`includes_change` false)
+                // the change output is not committed — hashOutputs =
+                // hash256(output[inputIndex]) — so no change segment is built and
+                // the hash covers the method's own output(s) only.
+                let change_output_ref: Option<String> = if includes_change {
+                    let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_changePKH".to_string(),
+                    });
+                    let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_changeAmount".to_string(),
+                    });
+                    let zero_ref = method_ctx.emit(ANFValue::LoadConst {
+                        value: bigint_to_json(&BigInt::from(0)),
+                    });
+                    let change_nonzero_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "!==".to_string(),
+                        left: change_amount_ref.clone(),
+                        right: zero_ref,
+                        result_type: None,
+                    });
+                    let mut change_then_ctx = method_ctx.sub_context();
+                    change_then_ctx.emit(ANFValue::Call {
+                        func: "buildChangeOutput".to_string(),
+                        args: vec![change_pkh_ref, change_amount_ref],
+                    });
+                    method_ctx.sync_counter(&change_then_ctx);
+                    let mut change_else_ctx = method_ctx.sub_context();
+                    change_else_ctx.emit(ANFValue::LoadConst {
+                        value: serde_json::Value::String(String::new()),
+                    });
+                    method_ctx.sync_counter(&change_else_ctx);
+                    Some(method_ctx.emit(ANFValue::If {
+                        cond: change_nonzero_ref,
+                        then: change_then_ctx.bindings,
+                        else_branch: change_else_ctx.bindings,
+                        results: Vec::new(),
+                    }))
+                } else {
+                    None
+                };
 
                 if !add_output_refs.is_empty() {
                     // Multi-output continuation: concat all state outputs, then
@@ -588,10 +657,12 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                             args: vec![accumulated, data_ref.clone()],
                         });
                     }
-                    accumulated = method_ctx.emit(ANFValue::Call {
-                        func: "cat".to_string(),
-                        args: vec![accumulated, change_output_ref],
-                    });
+                    if let Some(change) = change_output_ref {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, change],
+                        });
+                    }
                     let hash_ref = method_ctx.emit(ANFValue::Call {
                         func: "hash256".to_string(),
                         args: vec![accumulated],
@@ -632,10 +703,13 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                             args: vec![accumulated, data_ref.clone()],
                         });
                     }
-                    let all_outputs = method_ctx.emit(ANFValue::Call {
-                        func: "cat".to_string(),
-                        args: vec![accumulated, change_output_ref],
-                    });
+                    let all_outputs = match change_output_ref {
+                        Some(change) => method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, change],
+                        }),
+                        None => accumulated,
+                    };
                     let hash_ref = method_ctx.emit(ANFValue::Call {
                         func: "hash256".to_string(),
                         args: vec![all_outputs],
@@ -659,7 +733,10 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
             // Build augmented params list for ABI
             let mut augmented_params = lower_params(&method.params);
-            if needs_change_output {
+            for p in augmented_params.iter_mut() {
+                p.name = method_ctx.param_slot(&p.name);
+            }
+            if includes_change {
                 augmented_params.push(ANFParam {
                     name: "_changePKH".to_string(),
                     param_type: "Ripemd160".to_string(),
@@ -719,6 +796,9 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // public's method_scope, so the auto-injection registers at
             // the public method's ABI augmentation step above.)
             let mut augmented = lower_params(&method.params);
+            for p in augmented.iter_mut() {
+                p.name = method_ctx.param_slot(&p.name);
+            }
             for p in method_ctx.method_scope.borrow().auto_injected_params.iter() {
                 augmented.push(p.clone());
             }
@@ -794,9 +874,18 @@ struct MethodScope {
     auto_injected_params: Vec<ANFParam>,
     /// Dedup set for `auto_injected_params`.
     auto_injected_set: HashSet<String>,
+    /// N-046 / N-047: the last `<name>@<n>` suffix handed out in this method,
+    /// shared by every sub-context and inlined helper body.
+    shadow_seq: usize,
 }
 
 impl MethodScope {
+    /// N-046: a method-unique `<name>@<n>` binding name.
+    fn next_shadow_name(&mut self, name: &str) -> String {
+        self.shadow_seq += 1;
+        format!("{}@{}", name, self.shadow_seq)
+    }
+
     /// Record a witness param needed by an intrinsic call. Idempotent —
     /// the second call with the same name is a no-op.
     fn record_auto_injected_param(&mut self, name: &str, ty: &str) {
@@ -809,6 +898,15 @@ impl MethodScope {
             param_type: ty.to_string(),
         });
     }
+}
+
+/// N-047: the caller scope saved around an inlined helper body.
+struct InlinedScopeState {
+    scope_renames: HashMap<String, String>,
+    local_names: HashSet<String>,
+    local_byte_vars: HashSet<String>,
+    local_aliases: HashMap<String, String>,
+    loop_vars: HashSet<String>,
 }
 
 struct LoweringContext<'a> {
@@ -827,6 +925,17 @@ struct LoweringContext<'a> {
     /// Maps local variable names to their current ANF binding name.
     /// Updated after if-statements that reassign locals in both branches.
     local_aliases: HashMap<String, String>,
+    /// N-016: private-helper params renamed because they shadow a property.
+    renamed_private_params: HashMap<String, String>,
+    /// N-016: loop variables in scope whose name is a property's.
+    shadowing_loop_vars: HashSet<String>,
+    /// N-046 / N-047: source name -> binding name of a declaration that reused
+    /// a name already bound in an enclosing scope (an outer local, a parameter,
+    /// a loop variable, or, inside an inlined helper, a caller local). Copied
+    /// by value into sub-contexts, so the rename ends with the declaring block.
+    scope_renames: HashMap<String, String>,
+    /// N-046: source names of the loop variables in scope.
+    loop_vars: HashSet<String>,
     /// Tracks local variables known to be byte-typed.
     local_byte_vars: HashSet<String>,
     /// Maps the CURRENT method's (or constructor's) parameter names to their
@@ -881,6 +990,12 @@ struct LoweringContext<'a> {
     /// own commitment constrains nothing about the transaction's real outputs,
     /// and the bond it claims to enforce can be satisfied with invented bytes.
     did_emit_hash_outputs_check: bool,
+    /// N-202: the product of the counts of every for-loop enclosing the block
+    /// this context lowers (1 at method top level). Copied unchanged into if /
+    /// ternary arms; a loop body gets `enclosing * count`. The per-loop
+    /// MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work
+    /// along a nesting path, the rule the --ir loader applies (F-283).
+    enclosing_loop_count: usize,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -898,6 +1013,10 @@ impl<'a> LoweringContext<'a> {
             add_output_refs: Vec::new(),
             add_data_output_refs: Vec::new(),
             local_aliases: HashMap::new(),
+            renamed_private_params: HashMap::new(),
+            shadowing_loop_vars: HashSet::new(),
+            scope_renames: HashMap::new(),
+            loop_vars: HashSet::new(),
             local_byte_vars: HashSet::new(),
             param_types: HashMap::new(),
             current_source_loc: None,
@@ -907,6 +1026,7 @@ impl<'a> LoweringContext<'a> {
             sighash_flag: None,
             nested: false,
             did_emit_hash_outputs_check: false,
+            enclosing_loop_count: 1,
         }
     }
 
@@ -959,7 +1079,15 @@ impl<'a> LoweringContext<'a> {
             return false;
         }
         match summary.get(name) {
-            Some(eff) => eff.has_state_output || eff.has_data_output,
+            // N-070: a helper that calls requireOutputP2PKH is inlined too,
+            // so the _serialisedOutputs witness lands on the public method.
+            // N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
+            Some(eff) => {
+                eff.has_state_output
+                    || eff.has_data_output
+                    || eff.calls_require_output_p2pkh
+                    || eff.calls_extract_prev_output_script
+            }
             None => false,
         }
     }
@@ -1076,6 +1204,99 @@ impl<'a> LoweringContext<'a> {
         self.contract.properties.iter().any(|p| p.name == name)
     }
 
+    /// N-016: the ANF binding name for a source-level local (or loop variable,
+    /// or private-helper parameter) called `name`. Binding names and property
+    /// names share one namespace downstream — stack lowering resolves
+    /// `load_prop` / `update_prop` / the state continuation / an `if`'s
+    /// `results` by name — so a local bound as `x` next to a property `x` made
+    /// `this.x` read the local. A property-named local is bound under
+    /// `<name>@local` (`@` is in no surface's identifiers, so it cannot collide
+    /// with a property, another local or a temp); every other name is
+    /// unchanged, keeping non-shadowing ANF byte-identical.
+    fn local_name(&self, name: &str) -> String {
+        if let Some(renamed) = self.scope_renames.get(name) {
+            return renamed.clone();
+        }
+        if self.is_property(name) {
+            format!("{}{}", name, SHADOW_LOCAL_SUFFIX)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// N-046 / N-047: the binding name of a block-scoped declaration of `name`.
+    /// A declaration that reuses a name already bound in an enclosing scope (an
+    /// outer local, a parameter, a loop variable, an inlined helper's
+    /// parameter) is bound under the fresh `<name>@<n>` and recorded in this
+    /// scope, so it can never be mistaken for a reassignment of the outer
+    /// binding (if-arm reconciliation matches arm bindings to outer locals BY
+    /// NAME). A declaration that collides with nothing keeps `local_name(name)`,
+    /// which keeps non-shadowing ANF byte-identical.
+    fn declare_local(&mut self, name: &str) -> String {
+        let in_scope = self.scope_renames.contains_key(name)
+            || self.is_local(&self.local_name(name))
+            || self.is_param(name)
+            || self.get_param_alias(name).is_some()
+            || self.loop_vars.contains(name);
+        if !in_scope {
+            return self.local_name(name);
+        }
+        let fresh = self.method_scope.borrow_mut().next_shadow_name(name);
+        self.scope_renames.insert(name.to_string(), fresh.clone());
+        fresh
+    }
+
+    /// N-047: enter an inlined private helper's body. The helper is its own
+    /// lexical scope: none of the caller's renames apply inside it, and none of
+    /// its locals outlive it. Returns the state `leave_inlined_scope` restores.
+    fn enter_inlined_scope(&mut self) -> InlinedScopeState {
+        InlinedScopeState {
+            scope_renames: std::mem::take(&mut self.scope_renames),
+            local_names: self.local_names.clone(),
+            local_byte_vars: self.local_byte_vars.clone(),
+            local_aliases: self.local_aliases.clone(),
+            loop_vars: self.loop_vars.clone(),
+        }
+    }
+
+    fn leave_inlined_scope(&mut self, saved: InlinedScopeState) {
+        self.scope_renames = saved.scope_renames;
+        self.local_names = saved.local_names;
+        self.local_byte_vars = saved.local_byte_vars;
+        self.local_aliases = saved.local_aliases;
+        self.loop_vars = saved.loop_vars;
+    }
+
+    /// N-016: the binding a write to the bare identifier `name` rebinds — the
+    /// local's (possibly renamed) binding when a local of that name is in
+    /// scope, otherwise the name itself, exactly as before.
+    fn local_target(&self, name: &str) -> String {
+        let local = self.local_name(name);
+        if self.is_local(&local) {
+            local
+        } else if self.is_param(name) {
+            // N-360: a renamed parameter is read from its slot, so it is
+            // rebound there.
+            self.param_slot(name)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// N-360: whether `name` is the `load_param` slot of one of this method's
+    /// parameters.
+    fn is_param_slot(&self, name: &str) -> bool {
+        self.param_names.iter().any(|p| self.param_slot(p) == name)
+    }
+
+    /// N-016: the `load_param` name a source parameter resolves to.
+    fn param_slot(&self, name: &str) -> String {
+        self.renamed_private_params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// Report whether `name` is a private (non-public) method on the contract.
     /// Used to route bare-identifier calls (e.g. Move's `require_owner(sig)`
     /// after `contract` stripping) through the method_call inlining path.
@@ -1095,12 +1316,21 @@ impl<'a> LoweringContext<'a> {
         sub.param_names = self.param_names.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();
+        sub.renamed_private_params = self.renamed_private_params.clone();
+        sub.shadowing_loop_vars = self.shadowing_loop_vars.clone();
+        // N-046: the block inherits the enclosing renames and loop variables
+        // by value, so a rename made inside it ends with it.
+        sub.scope_renames = self.scope_renames.clone();
+        sub.loop_vars = self.loop_vars.clone();
         sub.local_byte_vars = self.local_byte_vars.clone();
         // Share the current method's parameter types so byte-type analysis
         // inside nested blocks resolves params against the SAME method scope
         // the parent reads from (issue #34).
         sub.param_types = self.param_types.clone();
-        sub.current_source_loc = self.current_source_loc.clone();
+        // N-393: `current_source_loc` is deliberately NOT copied from the parent.
+        // A nested block starts with none, as TS's `subContext()` does; each statement inside sets its own. Inheriting the parent's
+        // stamped the arms of a lowered `&&` / `||` / ternary (bindings emitted
+        // outside any statement) where TS leaves them unmapped.
         sub.param_alias_stack = self.param_alias_stack.clone();
         // Share the per-method scope so intrinsic auto-injection from
         // inside a nested block (if/else, ternary) registers on the
@@ -1117,6 +1347,8 @@ impl<'a> LoweringContext<'a> {
         // top level. `lower_if_statement` needs the same distinction before it
         // defers to that pass.
         sub.nested = true;
+        // N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = self.enclosing_loop_count;
         // Note: add_output_refs is NOT propagated to sub-contexts
         // because addOutput calls in sub-blocks should flow up to
         // the parent context via explicit tracking.
@@ -1256,10 +1488,86 @@ fn collect_statement_reads(stmt: &Statement, out: &mut HashSet<String>) {
     }
 }
 
+/// N-360: whether any statement writes the bare identifier `name` — an
+/// assignment to it, or a `++` / `--` of it — anywhere, nested blocks included.
+fn statements_reassign(stmts: &[Statement], name: &str) -> bool {
+    stmts.iter().any(|s| statement_reassigns(s, name))
+}
+
+fn statement_reassigns(stmt: &Statement, name: &str) -> bool {
+    match stmt {
+        Statement::VariableDecl { init, .. } => expression_reassigns(init, name),
+        Statement::Assignment { target, value, .. } => {
+            matches!(target, Expression::Identifier { name: n, .. } if n == name)
+                || expression_reassigns(target, name)
+                || expression_reassigns(value, name)
+        }
+        Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_reassigns(condition, name)
+                || statements_reassign(then_branch, name)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| statements_reassign(e, name))
+        }
+        Statement::ForStatement {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            statement_reassigns(init, name)
+                || expression_reassigns(condition, name)
+                || statement_reassigns(update, name)
+                || statements_reassign(body, name)
+        }
+        Statement::ReturnStatement { value, .. } => {
+            value.as_ref().is_some_and(|v| expression_reassigns(v, name))
+        }
+        Statement::ExpressionStatement { expression, .. } => expression_reassigns(expression, name),
+    }
+}
+
+fn expression_reassigns(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::BinaryExpr { left, right, .. } => {
+            expression_reassigns(left, name) || expression_reassigns(right, name)
+        }
+        Expression::UnaryExpr { operand, .. } => expression_reassigns(operand, name),
+        Expression::CallExpr { callee, args, .. } => {
+            expression_reassigns(callee, name) || args.iter().any(|a| expression_reassigns(a, name))
+        }
+        Expression::MemberExpr { object, .. } => expression_reassigns(object, name),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            expression_reassigns(condition, name)
+                || expression_reassigns(consequent, name)
+                || expression_reassigns(alternate, name)
+        }
+        Expression::IndexAccess { object, index } => {
+            expression_reassigns(object, name) || expression_reassigns(index, name)
+        }
+        Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+            matches!(operand.as_ref(), Expression::Identifier { name: n, .. } if n == name)
+                || expression_reassigns(operand, name)
+        }
+        Expression::ArrayLiteral { elements } => elements.iter().any(|e| expression_reassigns(e, name)),
+        _ => false,
+    }
+}
+
 /// Collect every identifier an expression reads.
 fn collect_expression_reads(expr: &Expression, out: &mut HashSet<String>) {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             out.insert(name.clone());
         }
         Expression::BinaryExpr { left, right, .. } => {
@@ -1400,6 +1708,24 @@ fn lower_statement_with_reads(
             }
         }
     }
+
+    // F-211: clear after the statement, as the TS reference does
+    // (04-anf-lower.ts `lowerStatement`), so bindings the compiler appends
+    // after the body (the stateful continuation) are not attributed to the
+    // last user statement.
+    ctx.current_source_loc = None;
+}
+
+/// N-016: suffix of the binding name of a local that shadows a property.
+const SHADOW_LOCAL_SUFFIX: &str = "@local";
+
+/// N-016 / N-046: the source spelling of a local's binding name (undoes
+/// `local_name` and `declare_local`: everything before the first `@`).
+fn source_local_name(binding_name: &str) -> &str {
+    match binding_name.find('@') {
+        Some(at) => &binding_name[..at],
+        None => binding_name,
+    }
 }
 
 /// Lower a variable declaration. Matches the TS reference:
@@ -1407,12 +1733,18 @@ fn lower_statement_with_reads(
 /// a named binding that aliases the variable to the computed value via @ref.
 fn lower_variable_decl(name: &str, init: &Expression, ctx: &mut LoweringContext) {
     let value_ref = lower_expr_to_ref(init, ctx);
-    ctx.add_local(name);
-    if is_byte_typed_expr(init, ctx) {
-        ctx.local_byte_vars.insert(name.to_string());
+    // Byte-typedness of the initialiser is judged before the new name is in
+    // scope (the initialiser reads the OUTER binding of a shadowed name).
+    let is_bytes = is_byte_typed_expr(init, ctx);
+    // N-046 / N-047: a declaration reusing an enclosing binding's name is
+    // alpha-renamed (see `declare_local`).
+    let binding_name = ctx.declare_local(name);
+    ctx.add_local(&binding_name);
+    if is_bytes {
+        ctx.local_byte_vars.insert(binding_name.clone());
     }
     ctx.emit_named(
-        name,
+        &binding_name,
         ANFValue::LoadConst {
             value: serde_json::Value::String(format!("@ref:{}", value_ref)),
         },
@@ -1426,7 +1758,7 @@ fn lower_assignment(target: &Expression, value: &Expression, ctx: &mut LoweringC
     let value_ref = lower_expr_to_ref(value, ctx);
 
     // this.x = expr -> update_prop
-    if let Expression::PropertyAccess { property } = target {
+    if let Expression::PropertyAccess { property, .. } = target {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: value_ref,
@@ -1435,9 +1767,10 @@ fn lower_assignment(target: &Expression, value: &Expression, ctx: &mut LoweringC
     }
 
     // local = expr -> re-bind (emit a new named binding with @ref)
-    if let Expression::Identifier { name } = target {
+    if let Expression::Identifier { name, .. } = target {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", value_ref)),
             },
@@ -1680,7 +2013,8 @@ fn collect_branch_merged_locals(
     let last_rebind_order = |branch: &LoweringContext| -> Vec<String> {
         let mut order: Vec<(String, usize)> = Vec::new();
         for (i, b) in branch.bindings.iter().enumerate() {
-            if !ctx.is_local(&b.name) {
+            // N-360: a reassigned parameter merges like a local (by its slot name).
+            if !ctx.is_local(&b.name) && !ctx.is_param_slot(&b.name) {
                 continue;
             }
             match order.iter_mut().find(|(n, _)| *n == b.name) {
@@ -1862,7 +2196,7 @@ fn branch_output_rejection_reason(
     //    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
     let live_merged: Vec<String> = merged_locals
         .iter()
-        .filter(|name| reads_after.contains(*name))
+        .filter(|name| reads_after.contains(source_local_name(name)))
         .cloned()
         .collect();
     if !live_merged.is_empty() {
@@ -1911,6 +2245,19 @@ fn lower_for_statement(
     // statically determinable (issue #121).
     let (start, step, count) = extract_loop_shape(init, condition, update);
 
+    // N-202: bound the PRODUCT along the nesting path, not just this loop.
+    // extract_loop_shape already capped `count` at MAX_LOOP_COUNT, and the
+    // enclosing product was capped the same way one level up, so this cannot
+    // overflow.
+    let max_loop_count = crate::ir::loader::MAX_LOOP_COUNT as usize;
+    let total_loop_count = ctx.enclosing_loop_count * count;
+    if total_loop_count > max_loop_count {
+        panic!(
+            "For loop unrolls to {} iterations nested inside an enclosing loop of total count {}, producing {} total iterations, exceeding the maximum loop count of {}.",
+            count, ctx.enclosing_loop_count, total_loop_count, max_loop_count
+        );
+    }
+
     // Extract the iterator variable name
     let iter_var = if let Statement::VariableDecl { name, .. } = init {
         name.clone()
@@ -1926,9 +2273,28 @@ fn lower_for_statement(
     }
 
     let mut body_ctx = ctx.sub_context();
+    body_ctx.enclosing_loop_count = total_loop_count;
+    if ctx.is_property(&iter_var) {
+        body_ctx.shadowing_loop_vars.insert(iter_var.clone());
+    }
+    // N-046: a loop variable reusing an enclosing binding's name is
+    // alpha-renamed in the body's scope (see `declare_local`).
+    let iter_binding = body_ctx.declare_local(&iter_var);
+    body_ctx.loop_vars.insert(iter_var.clone());
     lower_statements_with_reads(body, &mut body_ctx, &body_reads);
     ctx.sync_counter(&body_ctx);
 
+    // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output intrinsic in
+    // the body registered its ref on body_ctx, which is dropped here, so the
+    // continuation hash would not commit to that output. Merging the refs cannot
+    // work (one body name denotes N unrolled slots), so refuse. `lower_to_anf`
+    // is public, so this cannot rely on the validator having run.
+    if !body_ctx.add_output_refs.is_empty() || !body_ctx.add_data_output_refs.is_empty() {
+        let intrinsic = first_output_intrinsic(&body_ctx.bindings).unwrap_or("addOutput");
+        panic!("{}", super::validator::loop_output_intrinsic_msg(intrinsic, None));
+    }
+
+    let iter_var = iter_binding;
     ctx.emit(ANFValue::Loop {
         count,
         body: body_ctx.bindings,
@@ -1936,6 +2302,27 @@ fn lower_for_statement(
         start: bigint_to_json(&start),
         step,
     });
+}
+
+/// Name the source intrinsic of the first output node in `bindings`, searching
+/// nested if/loop bodies, for the N-006 refusal.
+fn first_output_intrinsic(bindings: &[ANFBinding]) -> Option<&'static str> {
+    for b in bindings {
+        let found = match &b.value {
+            ANFValue::AddOutput { .. } => Some("addOutput"),
+            ANFValue::AddRawOutput { .. } => Some("addRawOutput"),
+            ANFValue::AddDataOutput { .. } => Some("addDataOutput"),
+            ANFValue::If { then, else_branch, .. } => {
+                first_output_intrinsic(then).or_else(|| first_output_intrinsic(else_branch))
+            }
+            ANFValue::Loop { body, .. } => first_output_intrinsic(body),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 /// Resolve a for-statement's compile-time loop shape (issue #121).
@@ -1979,7 +2366,7 @@ fn extract_loop_shape(
     let left_is_iter = matches!(
         condition,
         Expression::BinaryExpr { left, .. }
-            if matches!(left.as_ref(), Expression::Identifier { name } if name == iter_name)
+            if matches!(left.as_ref(), Expression::Identifier { name, .. } if name == iter_name)
     );
     if !left_is_iter {
         panic!(
@@ -2077,7 +2464,7 @@ fn extract_loop_step(condition: &Expression, update: &Statement) -> i64 {
 fn extract_bigint_value(expr: &Expression) -> Option<i128> {
     match expr {
         Expression::BigIntLiteral { value } => value.to_i128(),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             extract_bigint_value(operand).map(|v| -v)
         }
         _ => None,
@@ -2102,13 +2489,13 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             value: serde_json::Value::Bool(*value),
         }),
 
-        Expression::ByteStringLiteral { value } => ctx.emit(ANFValue::LoadConst {
+        Expression::ByteStringLiteral { value, .. } => ctx.emit(ANFValue::LoadConst {
             value: serde_json::Value::String(value.clone()),
         }),
 
-        Expression::Identifier { name } => lower_identifier(name, ctx),
+        Expression::Identifier { name, .. } => lower_identifier(name, ctx),
 
-        Expression::PropertyAccess { property } => {
+        Expression::PropertyAccess { property, .. } => {
             // Explicit `this.x`: a real contract property always wins, even when
             // a method param shares the name (issue #130). Now that declared
             // params are registered, the is_param branch below must not shadow a
@@ -2135,9 +2522,9 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
 
         Expression::MemberExpr { object, property } => lower_member_expr(object, property, ctx),
 
-        Expression::BinaryExpr { op, left, right } => lower_binary_expr(op, left, right, ctx),
+        Expression::BinaryExpr { op, left, right, .. } => lower_binary_expr(op, left, right, ctx),
 
-        Expression::UnaryExpr { op, operand } => lower_unary_expr(op, operand, ctx),
+        Expression::UnaryExpr { op, operand, .. } => lower_unary_expr(op, operand, ctx),
 
         Expression::CallExpr { callee, args, .. } => lower_call_expr(callee, args, ctx),
 
@@ -2184,6 +2571,17 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
         });
     }
 
+    // N-046 / N-047: a declaration that shadowed an enclosing binding is the
+    // innermost binding of its name, ahead of params and param aliases. A
+    // renamed loop variable is not a local; it is read with load_param like
+    // every loop variable.
+    if let Some(renamed) = ctx.scope_renames.get(name).cloned() {
+        if ctx.is_local(&renamed) {
+            return ctx.get_local_alias(&renamed).cloned().unwrap_or(renamed);
+        }
+        return ctx.emit(ANFValue::LoadParam { name: renamed });
+    }
+
     // Param alias takes precedence over normal param lookup. Set when
     // a private method's body is being inlined into this context —
     // the private's param names map to the caller's arg refs.
@@ -2193,18 +2591,21 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
 
     // Check if it's a registered parameter (e.g. txPreimage for StatefulSmartContract)
     if ctx.is_param(name) {
-        return ctx.emit(ANFValue::LoadParam {
-            name: name.to_string(),
-        });
+        let slot = ctx.param_slot(name);
+        return ctx.emit(ANFValue::LoadParam { name: slot });
     }
 
     // Check if it's a local variable -- reference it directly
     // (or use its alias if reassigned by an if-statement)
-    if ctx.is_local(name) {
-        return ctx
-            .get_local_alias(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
+    let local = ctx.local_name(name);
+    if ctx.is_local(&local) {
+        return ctx.get_local_alias(&local).cloned().unwrap_or(local);
+    }
+
+    // N-016: a loop variable named like a property is the loop variable, not
+    // the property (it used to fall through to load_prop below).
+    if ctx.shadowing_loop_vars.contains(name) {
+        return ctx.emit(ANFValue::LoadParam { name: local });
     }
 
     // Check if it's a contract property
@@ -2228,7 +2629,7 @@ fn lower_member_expr(
     ctx: &mut LoweringContext,
 ) -> String {
     // this.x -> load_prop (or load_param for implicit params like txPreimage)
-    if let Expression::Identifier { name } = object {
+    if let Expression::Identifier { name, .. } = object {
         if name == "this" {
             // Explicit `this.x`: a real contract property always wins, even
             // when a method param shares the name (issue #130). Only fall
@@ -2253,7 +2654,7 @@ fn lower_member_expr(
     }
 
     // SigHash.ALL etc. -> load constant
-    if let Expression::Identifier { name } = object {
+    if let Expression::Identifier { name, .. } = object {
         if name == "SigHash" {
             // R-190: the match used to close with `_ => 0`, so `SigHash.All`
             // — the real member in the wrong case — lowered to `load_const 0`.
@@ -2406,7 +2807,7 @@ fn lower_call_expr(
     // production; it stays an identity-cast call node (the typechecker types it
     // ByteString -> ByteString and stack lowering already treats it as a no-op),
     // so its behaviour is unchanged.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "toByteString" && args.len() == 1 {
             if let Expression::ByteStringLiteral { .. } = &args[0] {
                 return lower_expr_to_ref(&args[0], ctx);
@@ -2415,7 +2816,7 @@ fn lower_call_expr(
     }
 
     // super(...) call
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "super" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             return ctx.emit(ANFValue::Call {
@@ -2426,7 +2827,7 @@ fn lower_call_expr(
     }
 
     // assert(expr) -> assert value
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "assert" {
             if !args.is_empty() {
                 let value_ref = lower_expr_to_ref(&args[0], ctx);
@@ -2440,7 +2841,7 @@ fn lower_call_expr(
     }
 
     // checkPreimage(preimage) -> special node
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "checkPreimage" {
             if !args.is_empty() {
                 let preimage_ref = lower_expr_to_ref(&args[0], ctx);
@@ -2468,7 +2869,7 @@ fn lower_call_expr(
     //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
     //   pushdata tail free to vary. Required for intent-template matching
     //   (BSVM Mode 3 permissionless step-in).
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "extractPrevOutputScript" {
             if args.len() != 2 && args.len() != 3 {
                 return ctx.emit(ANFValue::LoadConst {
@@ -2564,7 +2965,7 @@ fn lower_call_expr(
     // v1 assumes all outputs in the serialised set are exactly 34 bytes
     // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
     // of output i is i*34.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "requireOutputP2PKH" {
             if args.len() != 3 {
                 return ctx.emit(ANFValue::LoadConst {
@@ -2694,10 +3095,26 @@ fn lower_call_expr(
         }
     }
 
+    // continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+    // auto-injected `_newAmount` witness. It exists only in a public
+    // StatefulSmartContract method that continues through the default
+    // single-output continuation; anywhere else (private helpers, terminal
+    // methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+    if let Expression::Identifier { name, .. } = callee {
+        if name == "continuationAmount" {
+            if !ctx.is_param("_newAmount") {
+                panic!("{}", CONTINUATION_AMOUNT_UNAVAILABLE);
+            }
+            return ctx.emit(ANFValue::LoadParam {
+                name: "_newAmount".to_string(),
+            });
+        }
+    }
+
     // currentBlockHeight() -> bigint. Pure source-level desugar to
     // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
     // methods (typecheck enforces). No new ANF kind or stack codegen needed.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "currentBlockHeight" {
             let preimage_ref = ctx.emit(ANFValue::LoadParam {
                 name: "txPreimage".to_string(),
@@ -2714,7 +3131,7 @@ fn lower_call_expr(
     // called as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface
     // form Zig / Move tuple syntax produce), unwrap the trailing array
     // literal so each element becomes an individual state value.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addOutput" {
             let flat_args = flatten_add_output_args(args);
             let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -2727,7 +3144,7 @@ fn lower_call_expr(
     }
     // this.addOutput(satoshis, val1, val2, ...) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addOutput" {
                 let flat_args = flatten_add_output_args(args);
                 let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -2741,7 +3158,7 @@ fn lower_call_expr(
     }
 
     // this.addRawOutput(satoshis, scriptBytes) -> special node (via PropertyAccess)
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addRawOutput" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -2753,7 +3170,7 @@ fn lower_call_expr(
     }
     // this.addRawOutput(satoshis, scriptBytes) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addRawOutput" {
                 let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -2769,7 +3186,7 @@ fn lower_call_expr(
     // Same wire shape as addRawOutput, but tracked separately so that the
     // continuation-hash composition can place data outputs AFTER state outputs
     // and BEFORE the change output.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "addDataOutput" {
             let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -2781,7 +3198,7 @@ fn lower_call_expr(
     }
     // this.addDataOutput(satoshis, scriptBytes) -> special node (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "addDataOutput" {
                 let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
@@ -2794,14 +3211,14 @@ fn lower_call_expr(
     }
 
     // this.getStateScript() -> special node (via PropertyAccess)
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         if property == "getStateScript" {
             return ctx.emit(ANFValue::GetStateScript {});
         }
     }
     // this.getStateScript() -> special node (via MemberExpr)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" && property == "getStateScript" {
                 return ctx.emit(ANFValue::GetStateScript {});
             }
@@ -2811,7 +3228,7 @@ fn lower_call_expr(
     // this.method(...) -> method_call (via PropertyAccess), or inlined
     // if the target is a private method with continuation-relevant
     // side effects.
-    if let Expression::PropertyAccess { property } = callee {
+    if let Expression::PropertyAccess { property, .. } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
         ctx.check_private_call_arity(property, &arg_refs);
         if ctx.should_inline_private(property) {
@@ -2829,7 +3246,7 @@ fn lower_call_expr(
 
     // this.method(...) -> method_call (via MemberExpr with this)
     if let Expression::MemberExpr { object, property } = callee {
-        if let Expression::Identifier { name } = object.as_ref() {
+        if let Expression::Identifier { name, .. } = object.as_ref() {
             if name == "this" {
                 let arg_refs: Vec<String> =
                     args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -2855,12 +3272,12 @@ fn lower_call_expr(
     // binding; the hex body passes through unchanged. Diagnostics for
     // malformed args were already pushed by the validator — here we
     // defensively coerce missing values to safe defaults.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         if name == "asm" {
             let mut bytes = String::new();
             let mut in_arity: usize = 0;
             let mut out_arity: usize = 1;
-            if let Some(Expression::ByteStringLiteral { value }) = args.get(0) {
+            if let Some(Expression::ByteStringLiteral { value, .. }) = args.get(0) {
                 bytes = value.clone();
             }
             if let Some(Expression::BigIntLiteral { value }) = args.get(1) {
@@ -2878,7 +3295,7 @@ fn lower_call_expr(
     }
 
     // Direct function call: sha256(x), checkSig(sig, pk), etc.
-    if let Expression::Identifier { name } = callee {
+    if let Expression::Identifier { name, .. } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
         // Bare identifier calls that match a private method on the contract
         // (e.g. Move's `require_owner(contract, sig)` which the parser strips
@@ -2964,6 +3381,17 @@ fn lower_ternary_expr(
     lower_ternary_arm(alternate, &mut else_ctx);
     ctx.sync_counter(&else_ctx);
 
+    // N-049 backstop: an output intrinsic in an arm registered its ref on the
+    // arm's sub-context, which is dropped here, so the continuation hash would
+    // not commit to that output. `lower_to_anf` is public, so this cannot rely
+    // on the validator having run.
+    for arm_ctx in [&then_ctx, &else_ctx] {
+        if !arm_ctx.add_output_refs.is_empty() || !arm_ctx.add_data_output_refs.is_empty() {
+            let intrinsic = first_output_intrinsic(&arm_ctx.bindings).unwrap_or("addOutput");
+            panic!("{}", super::validator::ternary_output_intrinsic_msg(intrinsic, None));
+        }
+    }
+
     ctx.emit(ANFValue::If {
         cond: cond_ref,
         then: then_ctx.bindings,
@@ -3003,15 +3431,16 @@ fn lower_increment_expr(
     });
 
     // If the operand is a named variable, update it
-    if let Expression::Identifier { name } = operand {
+    if let Expression::Identifier { name, .. } = operand {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", result)),
             },
         );
     }
-    if let Expression::PropertyAccess { property } = operand {
+    if let Expression::PropertyAccess { property, .. } = operand {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: result.clone(),
@@ -3042,15 +3471,16 @@ fn lower_decrement_expr(
     });
 
     // If the operand is a named variable, update it
-    if let Expression::Identifier { name } = operand {
+    if let Expression::Identifier { name, .. } = operand {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", result)),
             },
         );
     }
-    if let Expression::PropertyAccess { property } = operand {
+    if let Expression::PropertyAccess { property, .. } = operand {
         ctx.emit(ANFValue::UpdateProp {
             name: property.clone(),
             value: result.clone(),
@@ -3083,49 +3513,18 @@ fn is_byte_type(type_name: &str) -> bool {
     super::typecheck::is_bytestring_subtype(type_name)
 }
 
-/// Builtin functions that return byte-typed values.
-const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
-    "sha256", "ripemd160", "hash160", "hash256", "cat", "num2bin", "int2str",
-    "reverseBytes", "substr", "left", "right",
-    "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
-    "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
-    "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",
-    "p384Add", "p384Mul", "p384MulGen", "p384Negate", "p384EncodeCompressed",
-];
-
-/// Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
-///
-/// N-054: this list is a transcription of the `return_type` the type checker
-/// already records for these builtins in `typecheck.rs`, and the stack lowerer
-/// agrees with it byte for byte: `lower_extractor` ends the split sequence with
-/// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
-/// none of the ones that are.
-///
-/// So an extractor listed here leaves a byte string on the stack and must be
-/// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-/// leaves a minimally-encoded script NUMBER and must be compared with
-/// OP_NUMEQUAL and added with OP_ADD.
-///
-/// Getting it backwards is a correctness defect in both directions. OP_EQUAL
-/// on a number is over-strict — it rejects a witness that encodes the same
-/// value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
-/// OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
-/// zero bytes and negative zero compare equal to values they are not
-/// byte-equal to, i.e. a covenant bypass. This tier had NO extractor entry at
-/// all, so every byte extractor compared numerically.
-const BYTE_RETURNING_EXTRACTORS: &[&str] = &[
-    "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
-    "extractScriptCode", "extractOutputHash", "extractOutputs",
-    "extractPrevOutputScript",
-];
-
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
 /// This is a best-effort heuristic used to annotate equality operators.
 fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
     match expr {
         Expression::ByteStringLiteral { .. } => true,
 
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
+            // N-046 / N-047: a renamed (shadowing) declaration is judged by its
+            // own binding, never by the parameter or property it shadows.
+            if let Some(renamed) = ctx.scope_renames.get(name.as_str()) {
+                return ctx.local_byte_vars.contains(renamed.as_str());
+            }
             // Check if it's a parameter or property with a byte type
             if let Some(t) = get_param_type(name, ctx) {
                 if is_byte_type(&t) {
@@ -3137,13 +3536,13 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
                     return true;
                 }
             }
-            if ctx.local_byte_vars.contains(name.as_str()) {
+            if ctx.local_byte_vars.contains(ctx.local_name(name).as_str()) {
                 return true;
             }
             false
         }
 
-        Expression::PropertyAccess { property } => {
+        Expression::PropertyAccess { property, .. } => {
             if let Some(t) = get_property_type(property, ctx) {
                 if is_byte_type(&t) {
                     return true;
@@ -3153,7 +3552,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
         }
 
         Expression::MemberExpr { object, property } => {
-            if let Expression::Identifier { name } = object.as_ref() {
+            if let Expression::Identifier { name, .. } = object.as_ref() {
                 if name == "this" {
                     if let Some(t) = get_property_type(property, ctx) {
                         if is_byte_type(&t) {
@@ -3170,15 +3569,16 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             asm_return_type,
             ..
         } => {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 // Expression-form asm<ByteString>({...}) yields a byte value.
                 if name == "asm" {
                     return asm_return_type.as_deref() == Some("ByteString");
                 }
-                if BYTE_RETURNING_FUNCTIONS.contains(&name.as_str()) {
-                    return true;
-                }
-                if BYTE_RETURNING_EXTRACTORS.contains(&name.as_str()) {
+                // N-347: the type checker's return table decides, NOT a second
+                // hand-written list here (two such lists drifted: N-054 swept
+                // numeric extractors in, N-345 / N-347 left byte-returning
+                // builtins out, so `===` on them compiled to OP_NUMEQUAL).
+                if super::typecheck::builtin_returns_bytes(name) {
                     return true;
                 }
             }
@@ -3248,8 +3648,12 @@ fn inline_private_method_call(
     // Snapshot the method body + param names before mutating the
     // context (Rust's borrow checker won't let us hold a &MethodNode
     // and mutate ctx simultaneously).
-    let (params, body): (Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
-        Some(m) => (m.params.iter().map(|p| p.name.clone()).collect(), m.body.clone()),
+    let (params, param_types, body): (Vec<String>, Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
+        Some(m) => (
+            m.params.iter().map(|p| p.name.clone()).collect(),
+            m.params.iter().map(|p| type_node_to_string(&p.param_type)).collect(),
+            m.body.clone(),
+        ),
         None => {
             // Should not happen — caller checked should_inline_private,
             // which requires the method to exist. Fall back to a
@@ -3266,18 +3670,45 @@ fn inline_private_method_call(
         }
     };
 
-    // Bind caller arg refs to the private's parameter names.
+    // Bind caller arg refs to the private's parameter names. N-362: a parameter
+    // the body reassigns is not aliased — a write cannot rebind an alias, so the
+    // helper read the caller's argument after it and the write landed on the
+    // caller's same-named variable. It is bound as a local of the helper below.
     let mut aliased: Vec<String> = Vec::new();
+    let mut reassigned: Vec<usize> = Vec::new();
     for (i, param_name) in params.iter().enumerate() {
         if i >= arg_refs.len() {
             break;
+        }
+        if statements_reassign(&body, param_name) {
+            reassigned.push(i);
+            continue;
         }
         ctx.push_param_alias(param_name, &arg_refs[i]);
         aliased.push(param_name.clone());
     }
 
+    // N-047: the helper body is its own lexical scope. Its locals are declared
+    // against the caller's (a collision is alpha-renamed by `declare_local`)
+    // and go out of scope when it returns.
+    let caller_scope = ctx.enter_inlined_scope();
+    // N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+    for &i in &reassigned {
+        let binding_name = ctx.declare_local(&params[i]);
+        ctx.add_local(&binding_name);
+        if is_byte_type(&param_types[i]) {
+            ctx.local_byte_vars.insert(binding_name.clone());
+        }
+        ctx.emit_named(
+            &binding_name,
+            ANFValue::LoadConst {
+                value: serde_json::Value::String(format!("@ref:{}", arg_refs[i])),
+            },
+        );
+    }
     let start_index = ctx.bindings.len();
     lower_statements(&body, ctx);
+    ctx.leave_inlined_scope(caller_scope);
     let end_index = ctx.bindings.len();
 
     // Pop aliases in reverse order so nested inlines compose
@@ -3336,6 +3767,8 @@ struct UpdateBranch {
     value_bindings: Vec<ANFBinding>,
     #[allow(dead_code)]
     value_ref: String,
+    /// N-350: location of the branch's original update_prop statement.
+    update_loc: Option<SourceLocation>,
 }
 
 /// Find the max temp index (e.g. t47 → 47) in a binding tree.
@@ -3383,9 +3816,12 @@ fn all_bindings_side_effect_free(bindings: &[ANFBinding]) -> bool {
 }
 
 /// Extract the update_prop target from a branch's bindings.
-/// Returns (prop_name, value_bindings_before_update, value_ref) if the last
-/// binding is update_prop and all preceding bindings are side-effect-free.
-fn extract_branch_update(bindings: &[ANFBinding]) -> Option<(String, Vec<ANFBinding>, String)> {
+/// Returns (prop_name, value_bindings_before_update, value_ref, update_loc) if
+/// the last binding is update_prop and all preceding bindings are
+/// side-effect-free.
+fn extract_branch_update(
+    bindings: &[ANFBinding],
+) -> Option<(String, Vec<ANFBinding>, String, Option<SourceLocation>)> {
     if bindings.is_empty() {
         return None;
     }
@@ -3395,7 +3831,7 @@ fn extract_branch_update(bindings: &[ANFBinding]) -> Option<(String, Vec<ANFBind
         if !all_bindings_side_effect_free(&value_bindings) {
             return None;
         }
-        Some((prop_name.clone(), value_bindings, val_ref.clone()))
+        Some((prop_name.clone(), value_bindings, val_ref.clone(), last.source_loc.clone()))
     } else {
         None
     }
@@ -3454,6 +3890,7 @@ fn collect_update_branches(
         prop_name: then_update.0,
         value_bindings: then_update.1,
         value_ref: then_update.2,
+        update_loc: then_update.3,
     }];
 
     if else_bindings.is_empty() {
@@ -3492,6 +3929,7 @@ fn collect_update_branches(
             prop_name: else_update.0,
             value_bindings: else_update.1,
             value_ref: else_update.2,
+            update_loc: else_update.3,
         });
         return Some(branches);
     }
@@ -3591,6 +4029,46 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
     }
 }
 
+/// N-261: mirrors the TS reference's `dropTerminalIfResults`. A TERMINAL `if`
+/// (the last binding of a public method body, or recursively of an arm of a
+/// terminal `if` -- the rule stack lowering uses for `terminal_assert`) carries
+/// no results. Its arms' final asserts are the script's verdict, so nothing
+/// reads a merged local afterwards, but the `append_branch_results` block sat
+/// AFTER the assert and every tier refused the legal
+/// `let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }`.
+/// Strips exactly that block (N `__merge$i` copies then N rebinds of LOCAL
+/// results) and the results list; any other shape is left alone. In place.
+fn drop_terminal_if_results(bindings: &mut [ANFBinding]) {
+    let Some(last) = bindings.last_mut() else { return };
+    let ANFValue::If { then, else_branch, results, .. } = &mut last.value else { return };
+    let n = results.len();
+    if n > 0 {
+        let const_ref = |v: &ANFValue, want: &str| -> bool {
+            matches!(v, ANFValue::LoadConst { value: serde_json::Value::String(s) } if s == want)
+        };
+        let is_block = |arm: &[ANFBinding]| -> bool {
+            if arm.len() < 2 * n {
+                return false;
+            }
+            let block = &arm[arm.len() - 2 * n..];
+            results.iter().enumerate().all(|(i, name)| {
+                let temp = format!("{}{}", MERGED_LOCAL_TEMP_PREFIX, i);
+                block[i].name == temp
+                    && const_ref(&block[i].value, &format!("@ref:{}", name))
+                    && block[n + i].name == *name
+                    && const_ref(&block[n + i].value, &format!("@ref:{}", temp))
+            })
+        };
+        if is_block(then) && is_block(else_branch) {
+            then.truncate(then.len() - 2 * n);
+            else_branch.truncate(else_branch.len() - 2 * n);
+            results.clear();
+        }
+    }
+    drop_terminal_if_results(then);
+    drop_terminal_if_results(else_branch);
+}
+
 /// Transform if-bindings whose branches all end with update_prop into
 /// flat conditional assignments. Mirrors TS liftBranchUpdateProps.
 fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
@@ -3619,6 +4097,10 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
         let (cond, then_bindings, else_bindings, own_results) = if_val.unwrap();
 
         let own_results = own_results.clone();
+        // N-350: the rewrite replaces this located `if`; keep its location on
+        // the shared condition temporaries, and each branch's own update
+        // statement location on that branch's synthesized bindings (Java F-188).
+        let if_loc = binding.source_loc.clone();
         let branches = collect_update_branches(
             cond,
             strip_declared_results(then_bindings, &own_results),
@@ -3645,7 +4127,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 result.push(ANFBinding {
                     name: new_name,
                     value: remap_value_refs(&csb.value, &name_map),
-                    source_loc: None,
+                    source_loc: csb.source_loc.clone().or_else(|| if_loc.clone()),
                 });
             }
             cond_refs.push(
@@ -3678,7 +4160,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         operand: cond_refs[j].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 negated_conds.push(neg_name);
             }
@@ -3695,7 +4177,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: negated_conds[j].clone(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 and_ref = and_name;
             }
@@ -3711,7 +4193,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: cond_refs[i].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 effective_conds.push(final_name);
             } else {
@@ -3755,7 +4237,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                         right: cond_refs[i].clone().unwrap(),
                         result_type: None,
                     },
-                    source_loc: None,
+                    source_loc: if_loc.clone(),
                 });
                 or_ref = or_name;
             }
@@ -3765,12 +4247,14 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     value: or_ref,
                     is_auto_injected_state_check: false,
                 },
-                source_loc: None,
+                source_loc: if_loc.clone(),
             });
         }
 
         // 3. For each branch, emit: load_old, conditional if-expression, update_prop
         for (i, branch) in branches.iter().enumerate() {
+            let branch_loc = branch.update_loc.clone().or_else(|| if_loc.clone());
+
             // Load old property value
             let old_prop_ref = fresh();
             result.push(ANFBinding {
@@ -3779,7 +4263,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     name: branch.prop_name.clone(),
                     preserve: false,
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
 
             // Remap value bindings for the then-branch
@@ -3791,7 +4275,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 then_bindings.push(ANFBinding {
                     name: new_name,
                     value: remap_value_refs(&vb.value, &branch_map),
-                    source_loc: None,
+                    source_loc: vb.source_loc.clone().or_else(|| branch_loc.clone()),
                 });
             }
 
@@ -3824,7 +4308,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     value: ANFValue::LoadConst {
                         value: serde_json::Value::String(format!("@ref:{}", mapped_value_ref)),
                     },
-                    source_loc: None,
+                    source_loc: branch_loc.clone(),
                 });
             }
 
@@ -3835,7 +4319,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 value: ANFValue::LoadConst {
                     value: serde_json::Value::String(format!("@ref:{}", old_prop_ref)),
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             }];
 
             // Emit conditional if-expression
@@ -3848,7 +4332,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     else_branch: else_bindings,
                     results: Vec::new(),
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
 
             // Emit update_prop
@@ -3858,7 +4342,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                     name: branch.prop_name.clone(),
                     value: cond_if_ref,
                 },
-                source_loc: None,
+                source_loc: branch_loc.clone(),
             });
         }
     }

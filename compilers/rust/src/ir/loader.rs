@@ -4,8 +4,10 @@ use std::fs;
 use std::path::Path;
 
 use super::{ANFBinding, ANFProgram, ANFValue};
+use super::required_fields::assert_required_ir_fields;
 use super::input_limits::{
     assert_ir_bytes_under_limit, assert_ir_nesting_under_limit, assert_no_json_floats,
+    quote_wide_integer_constants,
 };
 
 /// Load an ANF IR program from a JSON file on disk.
@@ -39,10 +41,114 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
     if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
         return Err(e.to_string());
     }
-    let program: ANFProgram = serde_json::from_str(json_str)
+    // N-069: required fields present and correctly typed, named by path.
+    assert_required_ir_fields(json_str)?;
+    // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+    assert_no_reserved_ir_names(json_str)?;
+    // N-212: keep every digit of a wide bare integer constant (see
+    // quote_wide_integer_constants); serde would round it to an f64.
+    let quoted = quote_wide_integer_constants(json_str);
+    let program: ANFProgram = serde_json::from_str(quoted.as_deref().unwrap_or(json_str))
         .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
     Ok(program)
+}
+
+/// N-060 / N-065 — `--ir` names that alias a name the compiler mints.
+///
+/// Stack lowering keeps its own slots (`_codePart`, `__param_<name>`,
+/// `__shadowed_<n>_<name>`, `_pub_<n>`) in the same name map as the program's
+/// parameters and bindings and resolves every reference by name, so an IR that
+/// declares or references one aliases a compiler slot. A parameter, property,
+/// method or loop variable named like an ANF temp (`t<digits>`,
+/// `__merge$<digits>`) aliases the bindings that ARE spelled that way; binding
+/// names in those families are the normal IR spelling and stay legal.
+///
+/// Same walk as the reference tier's `assertNoReservedIrNames`
+/// (packages/runar-compiler/src/index.ts), over the raw JSON so it runs before
+/// any other structural check, as there. Runs after the N-069 field check, so
+/// every array / string it reads has the right JSON type.
+fn assert_no_reserved_ir_names(json_str: &str) -> Result<(), String> {
+    use crate::frontend::reserved_names::{is_reserved_ir_name, reserved_name_message};
+    use serde_json::Value;
+
+    fn check(name: Option<&Value>, declaration: bool) -> Result<(), String> {
+        if let Some(Value::String(n)) = name {
+            if is_reserved_ir_name(n, declaration) {
+                return Err(reserved_name_message(n));
+            }
+        }
+        Ok(())
+    }
+
+    fn walk(bindings: &[Value]) -> Result<(), String> {
+        for binding in bindings {
+            check(binding.get("name"), false)?;
+            let v = match binding.get("value") {
+                Some(v) => v,
+                None => continue,
+            };
+            match v.get("kind").and_then(Value::as_str).unwrap_or("") {
+                "load_param" | "load_prop" => check(v.get("name"), true)?,
+                "update_prop" => {
+                    check(v.get("name"), true)?;
+                    check(v.get("value"), false)?;
+                }
+                "load_const" => {
+                    if let Some(r) = v.get("value").and_then(Value::as_str).and_then(|s| s.strip_prefix("@ref:")) {
+                        check(Some(&Value::String(r.to_string())), false)?;
+                    }
+                }
+                "loop" => check(v.get("iterVar"), true)?,
+                kind => {
+                    for key in ["left", "right", "operand", "cond", "object", "preimage", "satoshis", "scriptBytes"] {
+                        check(v.get(key), false)?;
+                    }
+                    if kind == "assert" {
+                        check(v.get("value"), false)?;
+                    }
+                    for key in ["args", "stateValues", "elements"] {
+                        if let Some(Value::Array(list)) = v.get(key) {
+                            for r in list {
+                                check(Some(r), false)?;
+                            }
+                        }
+                    }
+                }
+            }
+            for key in ["body", "then", "else"] {
+                if let Some(Value::Array(nested)) = v.get(key) {
+                    walk(nested)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let program: Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        // Malformed JSON is reported by the typed parse that follows.
+        Err(_) => return Ok(()),
+    };
+    if let Some(Value::Array(props)) = program.get("properties") {
+        for p in props {
+            check(p.get("name"), true)?;
+        }
+    }
+    if let Some(Value::Array(methods)) = program.get("methods") {
+        for m in methods {
+            check(m.get("name"), true)?;
+            if let Some(Value::Array(params)) = m.get("params") {
+                for p in params {
+                    check(p.get("name"), true)?;
+                }
+            }
+            if let Some(Value::Array(body)) = m.get("body") {
+                walk(body)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load an ANF IR program from a JSON string, returning typed errors on
@@ -63,7 +169,13 @@ pub fn load_ir_from_str_typed(
     if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
         return Err(IRLoaderError::Float(e));
     }
-    serde_json::from_str::<ANFProgram>(json_str)
+    // N-069 — see load_ir_from_str.
+    assert_required_ir_fields(json_str).map_err(IRLoaderError::Other)?;
+    // N-060 / N-065 — see load_ir_from_str.
+    assert_no_reserved_ir_names(json_str).map_err(IRLoaderError::Other)?;
+    // N-212 — see load_ir_from_str.
+    let quoted = quote_wide_integer_constants(json_str);
+    serde_json::from_str::<ANFProgram>(quoted.as_deref().unwrap_or(json_str))
         .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {
             validate_ir(&p).map_err(IRLoaderError::Other)?;
@@ -180,45 +292,30 @@ fn is_hex_string(s: &str) -> bool {
 }
 
 fn validate_ir(program: &ANFProgram) -> Result<(), String> {
-    if program.contract_name.is_empty() {
-        return Err("IR validation: contractName is required".into());
-    }
-
-    for (i, prop) in program.properties.iter().enumerate() {
-        if prop.name.is_empty() {
-            return Err(format!("IR validation: property[{}] has empty name", i));
-        }
-        if prop.prop_type.is_empty() {
-            return Err(format!(
-                "IR validation: property {} has empty type",
-                prop.name
-            ));
-        }
-    }
+    // N-207 / N-408: empty contractName, property / method / param names and
+    // types and binding names are refused by assert_required_ir_fields
+    // (required_fields.rs) with one shared diagnostic, before this runs.
 
     // R-126 / CL-BUG-164: an add_output must name exactly one state value per
     // MUTABLE property. Counted once, up front.
     let mutable_count = program.properties.iter().filter(|p| !p.readonly).count();
 
-    for (i, method) in program.methods.iter().enumerate() {
-        if method.name.is_empty() {
-            return Err(format!("IR validation: method[{}] has empty name", i));
+    for method in program.methods.iter() {
+        validate_bindings(&method.body, &method.name, mutable_count, 1)?;
+    }
+
+    // N-071: --ir skips frontend/validator.rs, whose ends-with-assert rule is
+    // what makes a public method's script a covenant. Stack lowering leaves
+    // the method's last binding as the script result, so `"body": []`
+    // compiled to an EMPTY (anyone-can-spend) script. Same rule and words as
+    // Go's F-004 check; see ends_with_terminal_assert.
+    for method in &program.methods {
+        if method.is_public && method.name != "constructor" && !ends_with_terminal_assert(&method.body) {
+            return Err(format!(
+                "IR validation: public method '{}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                method.name
+            ));
         }
-        for (j, param) in method.params.iter().enumerate() {
-            if param.name.is_empty() {
-                return Err(format!(
-                    "IR validation: method {} param[{}] has empty name",
-                    method.name, j
-                ));
-            }
-            if param.param_type.is_empty() {
-                return Err(format!(
-                    "IR validation: method {} param {} has empty type",
-                    method.name, param.name
-                ));
-            }
-        }
-        validate_bindings(&method.body, &method.name, mutable_count)?;
     }
 
     // N-113 / R-081: a contract with no public method has no spending entry
@@ -254,22 +351,49 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
         ));
     }
 
+    // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+    // written (shared rule and diagnostic, 7 tiers).
+    super::synthetic_array_chain::assert_synthetic_array_chains(program)?;
+
+    // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+    // mutable key property (shared rule and diagnostics, 7 tiers).
+    super::rabin_key_provenance::assert_rabin_key_provenance(program)?;
+
     Ok(())
 }
 
+/// N-071: ANF form of the source validator's ends-with-assert rule — the last
+/// binding is an `assert`, or an `if` whose then AND else arms both end that
+/// way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+/// `asm()` terminal) is also accepted, because ANF carries no parentClass.
+fn ends_with_terminal_assert(bindings: &[ANFBinding]) -> bool {
+    match bindings.last().map(|b| &b.value) {
+        Some(ANFValue::Assert { .. }) => true,
+        Some(ANFValue::If { then, else_branch, .. }) => {
+            ends_with_terminal_assert(then) && ends_with_terminal_assert(else_branch)
+        }
+        Some(ANFValue::RawScript { out_arity, .. }) => *out_arity == 1,
+        _ => false,
+    }
+}
+
+// `enclosing_loop_count` is the product of every loop count already entered
+// on the path from the method body down to `bindings` (1 at the top). F-283
+// / CL-GAP-164: the per-binding MAX_LOOP_COUNT check below bounds a single
+// loop's own count but never the PRODUCT across nesting -- two loops of
+// 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000. By the time
+// this function is called with a non-default `enclosing_loop_count`, every
+// level above it has already returned early if its own count failed the
+// per-binding check, so `enclosing_loop_count` is always <= MAX_LOOP_COUNT
+// here and the multiplication below cannot overflow `usize`.
 fn validate_bindings(
     bindings: &[ANFBinding],
     method_name: &str,
     mutable_count: usize,
+    enclosing_loop_count: usize,
 ) -> Result<(), String> {
-    for (i, binding) in bindings.iter().enumerate() {
-        if binding.name.is_empty() {
-            return Err(format!(
-                "IR validation: method {} binding[{}] has empty name",
-                method_name, i
-            ));
-        }
-
+    for binding in bindings.iter() {
         // R-177: a `!KNOWN_KINDS.contains(kind_name(&binding.value))` check
         // used to sit here. It could not fire for two independent reasons:
         // `kind_name` maps an ALREADY-DESERIALISED ANFValue to its name, so it
@@ -372,8 +496,8 @@ fn validate_bindings(
             ANFValue::If {
                 then, else_branch, ..
             } => {
-                validate_bindings(then, method_name, mutable_count)?;
-                validate_bindings(else_branch, method_name, mutable_count)?;
+                validate_bindings(then, method_name, mutable_count, enclosing_loop_count)?;
+                validate_bindings(else_branch, method_name, mutable_count, enclosing_loop_count)?;
             }
             ANFValue::Loop { count, body, start, .. } => {
                 // N-133: `start` is `integer | "<decimal>n"`, and anything
@@ -461,7 +585,18 @@ fn validate_bindings(
                         method_name, binding.name, count, MAX_LOOP_COUNT
                     ));
                 }
-                validate_bindings(body, method_name, mutable_count)?;
+                // F-283 / CL-GAP-164: the product check. Reached only once the
+                // binding's own count is within MAX_LOOP_COUNT, so both
+                // operands are <= MAX_LOOP_COUNT and the multiplication
+                // cannot overflow `usize`.
+                let total_loop_count = enclosing_loop_count * count;
+                if total_loop_count > MAX_LOOP_COUNT as usize {
+                    return Err(format!(
+                        "IR validation: method {} binding {} has loop count {} nested inside an enclosing loop of total count {}, producing {} total iterations, exceeding maximum {}",
+                        method_name, binding.name, count, enclosing_loop_count, total_loop_count, MAX_LOOP_COUNT
+                    ));
+                }
+                validate_bindings(body, method_name, mutable_count, total_loop_count)?;
             }
             ANFValue::RawScript {
                 bytes,
@@ -521,6 +656,23 @@ fn validate_bindings(
 mod tests {
     use super::*;
     use crate::ir::{ANFMethod, ANFParam, ANFProgram, ANFProperty};
+
+    /// N-071: a public method must end with an assert, so fixtures whose
+    /// subject is something else append `_ok = true; assert(_ok)`.
+    fn terminal_assert() -> Vec<ANFBinding> {
+        vec![
+            ANFBinding {
+                name: "_ok".to_string(),
+                value: ANFValue::LoadConst { value: serde_json::json!(true) },
+                source_loc: None,
+            },
+            ANFBinding {
+                name: "_ok_assert".to_string(),
+                value: ANFValue::Assert { value: "_ok".to_string(), is_auto_injected_state_check: false },
+                source_loc: None,
+            },
+        ]
+    }
 
     // -----------------------------------------------------------------------
     // Valid minimal JSON
@@ -636,7 +788,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("contractName is required"),
+            err.contains("IR validation: contractName must be a non-empty string"),
             "expected contractName error, got: {}",
             err
         );
@@ -653,7 +805,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: properties[0].name must be a non-empty string"),
             "expected empty name error, got: {}",
             err
         );
@@ -670,7 +822,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty type"),
+            err.contains("IR validation: properties[0].type must be a non-empty string"),
             "expected empty type error, got: {}",
             err
         );
@@ -687,7 +839,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].name must be a non-empty string"),
             "expected empty method name error, got: {}",
             err
         );
@@ -709,7 +861,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].params[0].name must be a non-empty string"),
             "expected empty param name error, got: {}",
             err
         );
@@ -731,7 +883,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty type"),
+            err.contains("IR validation: methods[0].params[0].type must be a non-empty string"),
             "expected empty param type error, got: {}",
             err
         );
@@ -755,7 +907,7 @@ mod tests {
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
         assert!(
-            err.contains("empty name"),
+            err.contains("IR validation: methods[0].body[0].name must be a non-empty string"),
             "expected empty binding name error, got: {}",
             err
         );
@@ -866,7 +1018,10 @@ mod tests {
                         },
                         source_loc: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],
@@ -882,7 +1037,7 @@ mod tests {
         assert_eq!(loaded.methods.len(), 1);
         assert_eq!(loaded.methods[0].name, "increment");
         assert_eq!(loaded.methods[0].params.len(), 1);
-        assert_eq!(loaded.methods[0].body.len(), 4);
+        assert_eq!(loaded.methods[0].body.len(), 4 + terminal_assert().len());
 
         // Verify specific binding kinds survived the round-trip
         assert!(matches!(&loaded.methods[0].body[0].value, ANFValue::LoadParam { name } if name == "amount"));
@@ -975,7 +1130,10 @@ mod tests {
                         step: 1,
                     },
                     source_loc: None,
-                }],
+                }]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],
@@ -997,6 +1155,94 @@ mod tests {
         assert!(
             err.contains("loop count 10001 exceeding maximum 10000"),
             "diagnostic must name the count and the limit, as Go's does: {err}"
+        );
+    }
+
+    /// F-283 / CL-GAP-164 — the product across nested loops.
+    ///
+    /// `rejects_loop_count_over_max` above proves the per-binding ceiling.
+    /// That ceiling is checked independently for each `loop` binding, never
+    /// against the PRODUCT of counts along a nesting path, so two loops of
+    /// `MAX_LOOP_COUNT` each, one inside the other, each individually satisfy
+    /// it while the real unrolled work is `MAX_LOOP_COUNT x MAX_LOOP_COUNT` =
+    /// 100,000,000. Measured upstream (same shape, Ruby tier): a 1,175-byte
+    /// payload loaded instantly and then drove `compile_from_ir` to 5m07s /
+    /// 3.7GB RSS and climbing.
+    fn nested_loop_count_program(outer_count: usize, inner_count: usize) -> String {
+        let program = ANFProgram {
+            contract_name: "Bounded".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![],
+                body: vec![ANFBinding {
+                    name: "_outer".to_string(),
+                    value: ANFValue::Loop {
+                        count: outer_count,
+                        body: vec![ANFBinding {
+                            name: "_inner".to_string(),
+                            value: ANFValue::Loop {
+                                count: inner_count,
+                                body: vec![ANFBinding {
+                                    name: "_lb".to_string(),
+                                    value: ANFValue::LoadConst {
+                                        value: serde_json::json!(0),
+                                    },
+                                    source_loc: None,
+                                }],
+                                iter_var: "j".to_string(),
+                                start: serde_json::json!(0),
+                                step: 1,
+                            },
+                            source_loc: None,
+                        }],
+                        iter_var: "i".to_string(),
+                        start: serde_json::json!(0),
+                        step: 1,
+                    },
+                    source_loc: None,
+                }]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
+                is_public: true,
+                sighash_type: None,
+            }],
+        };
+        serde_json::to_string(&program).expect("serialization should succeed")
+    }
+
+    #[test]
+    fn control_nested_loop_product_within_max_still_loads() {
+        let loaded = load_ir_from_str(&nested_loop_count_program(10, 10))
+            .expect("a nested loop product of 100 (well within MAX_LOOP_COUNT) must still load");
+        assert_eq!(loaded.contract_name, "Bounded");
+    }
+
+    #[test]
+    fn rejects_nested_loop_product_over_max() {
+        let err = load_ir_from_str(&nested_loop_count_program(
+            MAX_LOOP_COUNT as usize,
+            MAX_LOOP_COUNT as usize,
+        ))
+        .expect_err("a nested loop product above MAX_LOOP_COUNT must be refused on the --ir path");
+        assert!(
+            err.contains("100000000"),
+            "diagnostic must name the total iteration count: {err}"
+        );
+    }
+
+    /// Neither 101 nor 100 alone trips the per-binding ceiling (both are far
+    /// below MAX_LOOP_COUNT), but their product (10,100) does. Proves the new
+    /// rule is the product, not a disguised re-check of the single bound.
+    #[test]
+    fn rejects_small_nested_counts_whose_product_exceeds_max() {
+        let err = load_ir_from_str(&nested_loop_count_program(101, 100))
+            .expect_err("a nested loop product above MAX_LOOP_COUNT must be refused on the --ir path");
+        assert!(
+            err.contains("10100"),
+            "diagnostic must name the total iteration count: {err}"
         );
     }
 
@@ -1056,7 +1302,10 @@ mod tests {
                         },
                         source_loc: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],

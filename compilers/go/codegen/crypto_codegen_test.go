@@ -42,9 +42,9 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		emit func(func(StackOp))
 		want int
 	}{
-		{"Sha256Compress", EmitSha256Compress, 21292},
-		{"Sha256Finalize", EmitSha256Finalize, 63941},
-		{"Blake3Compress", EmitBlake3Compress, 10373},
+		{"Sha256Compress", EmitSha256Compress, 21298},
+		{"Sha256Finalize", EmitSha256Finalize, 63946},
+		{"Blake3Compress", EmitBlake3Compress, 10379},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
 		// CL-BUG-095 (Point-length validation) deltas below: a Point/pubkey
 		// blob was never checked against its defined width, so surplus bytes
@@ -86,7 +86,9 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// verifyCanonical flag that is FALSE on the ECDSA path, because
 		// decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
 		// bytes must return false from a total boolean builtin rather than abort.
-		{"EcAdd", EmitEcAdd, 8297},
+		// N-110: ecAdd 8297 -> 8309 (+12), the tangent y = 0 guard: three deep picks
+		// (push <n>, OP_PICK) + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY.
+		{"EcAdd", EmitEcAdd, 8309},
 		// R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
 		// ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
 		// the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd
@@ -109,7 +111,8 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"EcMulGen", EmitEcMulGen, 131075},
 		{"EcNegate", EmitEcNegate, 956},
 		{"EcOnCurve", EmitEcOnCurve, 548},
-		{"P256Add", EmitP256Add, 6737},
+		// N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+		{"P256Add", EmitP256Add, 6749},
 		{"P256Mul", EmitP256Mul, 140620},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
@@ -119,11 +122,30 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// has no golden entry in this table.
 		// +12 more from CL-BUG-095 (Point-length validation, see above).
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
-		{"P384Add", EmitP384Add, 11543},
+		{"P384Add", EmitP384Add, 11555},
 		{"P384Mul", EmitP384Mul, 211986},
+		// N-226: Go had no op-count golden for EmitVerifyECDSA_P384,
+		// EmitP384MulGen or EmitP384Negate, pinning only P384Add/P384Mul above.
+		// P384MulGen is P384Mul's `push G; swap; mul` wrapper, +2 ops for the
+		// same reason EcMulGen is EcMul+2 and P256MulGen is P256Mul+2 (Rust's
+		// p384_mul_gen golden takes the identical +2 over its p384_mul).
+		{"P384MulGen", EmitP384MulGen, 211988},
+		// Matches Rust's p384_negate golden (1404) exactly, the same as
+		// P256Negate matching Rust's p256_negate at 956 -- Negate has no
+		// per-tier StackOp-granularity divergence, unlike the Mul/MulGen
+		// ladder (Rust emits 4 fewer raw ops there; see compilers/rust
+		// tests/crypto_codegen_tests.rs's P384Mul comment).
+		{"P384Negate", EmitP384Negate, 1404},
 		// R-135: +3 ops for the exact-signature-length gate
 		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
 		{"VerifyWOTS", EmitVerifyWOTS, 15491},
+		// Rust's verify_ecdsa_p384 golden is 453361; Go runs +8 ops higher,
+		// the same Δ8 the Go/Rust P-256 verifier pair carries (VerifyECDSA_P256
+		// 297393 vs Rust's verify_ecdsa_p256 297385) -- a documented, stable
+		// per-tier StackOp-counting difference, not a behavioural divergence
+		// (the emitted hex is byte-identical across all 7 tiers; see
+		// conformance/tests/p384-wallet).
+		{"VerifyECDSA_P384", EmitVerifyECDSA_P384, 453369},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,6 +193,47 @@ func TestSlhdsaEmitOpCountGoldens(t *testing.T) {
 			if got := countOpTree(ops); got != tc.want {
 				t.Fatalf("SLHDSA %s: emitted %d ops, want %d (deliberate codegen change? update the golden)", tc.param, got, tc.want)
 			}
+		})
+	}
+}
+
+// F-034: every SLH-DSA parameter set must match FIPS 205 Table 2. SHA2_256f
+// shipped FORS height a=8 (48,736-byte signature) in all 7 tiers; FIPS 205
+// says a=9 (49,856 bytes), so the compiled verifier rejected every honest 256f
+// signature at its OP_SIZE gate. Proves the table and the emitted exact-length
+// gate; does NOT prove a real signature verifies (that is the real-crypto
+// witness conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+func TestSlhdsaParamsMatchFIPS205Table2(t *testing.T) {
+	cases := []struct {
+		param                     string
+		n, h, d, hp, a, k, sigLen int
+	}{
+		{"SHA2_128s", 16, 63, 7, 9, 12, 14, 7856},
+		{"SHA2_128f", 16, 66, 22, 3, 6, 33, 17088},
+		{"SHA2_192s", 24, 63, 7, 9, 14, 17, 16224},
+		{"SHA2_192f", 24, 66, 22, 3, 8, 33, 35664},
+		{"SHA2_256s", 32, 64, 8, 8, 14, 22, 29792},
+		{"SHA2_256f", 32, 68, 17, 4, 9, 35, 49856},
+	}
+	for _, tc := range cases {
+		t.Run(tc.param, func(t *testing.T) {
+			p := SLHParams[tc.param]
+			got := [6]int{p.N, p.H, p.D, p.HP, p.A, p.K}
+			want := [6]int{tc.n, tc.h, tc.d, tc.hp, tc.a, tc.k}
+			if got != want {
+				t.Fatalf("SLHParams[%s] (n,h,d,h',a,k) = %v, FIPS 205 Table 2 = %v", tc.param, got, want)
+			}
+			ops := gatherOps(func(e func(StackOp)) { EmitVerifySLHDSA(e, tc.param) })
+			for i, op := range ops {
+				if op.Op == "opcode" && op.Code == "OP_SIZE" {
+					nx := ops[i+1]
+					if nx.Op != "push" || nx.Value.BigInt == nil || nx.Value.BigInt.Int64() != int64(tc.sigLen) {
+						t.Fatalf("%s: OP_SIZE gate pushes %+v, want the FIPS %d-byte signature", tc.param, nx.Value, tc.sigLen)
+					}
+					return
+				}
+			}
+			t.Fatalf("%s: no OP_SIZE gate emitted", tc.param)
 		})
 	}
 }

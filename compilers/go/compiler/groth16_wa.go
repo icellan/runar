@@ -31,6 +31,11 @@ const (
 	// defaultGroth16WAContractName is the contract name used when
 	// Groth16WAOpts.ContractName is empty.
 	defaultGroth16WAContractName = "Groth16Verifier"
+
+	// groth16WAOwnerParam names the single constructor parameter of a
+	// standalone groth16-wa artifact: the compressed secp256k1 public key
+	// whose signature every spend must carry (F-233).
+	groth16WAOwnerParam = "ownerPubKey"
 )
 
 // Groth16WAOpts configures a `runarc groth16-wa` compile run.
@@ -43,7 +48,10 @@ type Groth16WAOpts struct {
 	// field arithmetic. It is forwarded verbatim to codegen.Groth16Config.
 	//
 	// Default: 0 (strict — every intermediate is reduced mod p). This
-	// produces a LARGER script (~718 KB for SP1) but is dramatically
+	// produces a LARGER script (~1.4 MB for SP1's MSM-bound verifier,
+	// which pins the public inputs; an earlier unbound variant measured
+	// ~718 KB here, but that number is stale — see
+	// TestCompileGroth16WA_DefaultsToThreshold0) but is dramatically
 	// faster on the go-sdk interpreter because Bitcoin Script bignum
 	// multiplication is O(n²) in the schoolbook sense. The 2048-byte
 	// threshold from the nChain paper is NOT recommended for real
@@ -88,12 +96,8 @@ func validateGroth16PublicInputs(pubs []*big.Int, numPubInputs int) error {
 				"scalars this output is meant to attest to",
 			numPubInputs, numPubInputs)
 	}
-	if numPubInputs != groth16MSMArity {
-		return fmt.Errorf(
-			"verifying key declares %d public inputs, but the on-chain MSM binding supports "+
-				"exactly %d (the SP1 Groth16 arity). Binding a different arity requires extending "+
-				"codegen.EmitGroth16VerifierWitnessAssistedWithMSM",
-			numPubInputs, groth16MSMArity)
+	if err := checkGroth16MSMArity(numPubInputs); err != nil {
+		return err
 	}
 	if len(pubs) != numPubInputs {
 		return fmt.Errorf("pinned %d public inputs but the verifying key declares %d", len(pubs), numPubInputs)
@@ -105,6 +109,22 @@ func validateGroth16PublicInputs(pubs []*big.Int, numPubInputs int) error {
 		if p.Sign() < 0 || p.Cmp(bn254ScalarR) >= 0 {
 			return fmt.Errorf("public input %d is outside the BN254 scalar field [0, r)", i)
 		}
+	}
+	return nil
+}
+
+// checkGroth16MSMArity refuses a verifying key whose public-input count is not
+// the arity the MSM binding supports. loadGroth16WAConfig calls it, so every
+// entry point (CompileGroth16WA and the CompileOptions.Groth16WAVKey library
+// path) shares the gate; validateGroth16PublicInputs calls it too, ahead of the
+// pinned-count comparison, so the arity is what gets reported.
+func checkGroth16MSMArity(numPubInputs int) error {
+	if numPubInputs != groth16MSMArity {
+		return fmt.Errorf(
+			"verifying key declares %d public inputs, but the on-chain MSM binding supports "+
+				"exactly %d (the SP1 Groth16 arity). Binding a different arity requires extending "+
+				"codegen.EmitGroth16VerifierWitnessAssistedWithMSM",
+			numPubInputs, groth16MSMArity)
 	}
 	return nil
 }
@@ -158,6 +178,11 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 	if err != nil {
 		return codegen.Groth16Config{}, fmt.Errorf("parse %s: %w", vkPath, err)
 	}
+	// F-184: cfg.IC has exactly 1+groth16MSMArity slots. Refuse any other
+	// arity rather than zero-filling missing points or dropping extra ones.
+	if err := checkGroth16MSMArity(len(vk.IC) - 1); err != nil {
+		return codegen.Groth16Config{}, err
+	}
 
 	alphaNegBetaFp12, err := bn254witness.PrecomputeAlphaNegBeta(vk.AlphaG1, vk.BetaNegG2)
 	if err != nil {
@@ -180,9 +205,8 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 
 	// Populate IC for the MSM-binding verifier variant. The raw variant
 	// ignores IC; the MSM variant requires exactly 6 points (IC[0] plus
-	// IC[1..5] for the 5 SP1 public inputs). When the VK carries fewer
-	// entries (non-SP1 circuits) or more, the unused slots default to
-	// (0, 0) — the MSM variant is only sound for 5-public-input circuits.
+	// IC[1..5] for the 5 SP1 public inputs). Any other count was refused
+	// by checkGroth16MSMArity above.
 	for i := 0; i < 6; i++ {
 		if i < len(vk.IC) && vk.IC[i] != nil {
 			cfg.IC[i] = [2]*big.Int{
@@ -224,6 +248,13 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 // build it with `bn254witness.BuildFromProofWithInputs`, which emits the
 // MSM layout. It does not fit the standard Rúnar ABI-param model, which is
 // why Params is empty.
+//
+// The SPENDER is fixed at deploy time (F-233). The artifact has one
+// constructor parameter, `ownerPubKey` (PubKey), and the locking script opens
+// with `<ownerPubKey> OP_CHECKSIGVERIFY`, so the unlock is the witness bundle
+// followed by the owner's signature over the spending transaction. Without it
+// a valid spend's witness, once public, could be replayed by anyone into a
+// transaction paying themselves.
 func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	// 1. Load the raw VK JSON bytes — we need them for the digest AND
 	//    for the typed parse. Reading twice would risk a TOCTOU mismatch.
@@ -280,6 +311,26 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	ops = codegen.OptimizeStackOps(ops)
 	ops = codegen.OptimizeBN254Ops(ops)
 
+	// 6a. F-233: bind the spend to an owner key chosen at deploy time.
+	//     A Groth16 witness proves a statement, not who may spend: without
+	//     this, the honest spend's unlocking script is public once it hits
+	//     the mempool and any observer can replay it into a transaction
+	//     paying themselves. The script therefore OPENS with
+	//
+	//         <ownerPubKey> OP_CHECKSIGVERIFY
+	//
+	//     where <ownerPubKey> is constructor slot 0 (an OP_0 placeholder the
+	//     SDK splices at deploy). The unlock is `witness ‖ <ownerSig>`: the
+	//     signature sits on top of the stack, is consumed here, and leaves
+	//     the witness layout the verifier expects untouched. It is prepended
+	//     AFTER the optimizers so the verifier body is byte-identical to the
+	//     unbound one, and it runs first so an unsigned spend is refused
+	//     before the ~700 KB verifier executes.
+	ops = append([]codegen.StackOp{
+		{Op: "placeholder", ParamIndex: 0, ParamName: groth16WAOwnerParam},
+		{Op: "opcode", Code: "OP_CHECKSIGVERIFY"},
+	}, ops...)
+
 	// 7. Emit to hex. We pass a single StackMethod named "verify" — it
 	//    corresponds to the single public entry point on the ABI.
 	method := codegen.StackMethod{Name: "verify", Ops: ops}
@@ -290,9 +341,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 
 	// 8. Assemble the artifact. This path is independent from
 	//    assembleArtifact() above because we don't have an ANF program
-	//    (no Rúnar source was compiled). All the derived metadata —
-	//    ConstructorSlots, StateFields, ANF, IR, SourceMap — is
-	//    deliberately absent.
+	//    (no Rúnar source was compiled). The derived metadata — StateFields,
+	//    ANF, IR, SourceMap — is deliberately absent. ConstructorSlots
+	//    carries the single owner-pubkey slot (F-233).
 	contractName := opts.ContractName
 	if contractName == "" {
 		contractName = defaultGroth16WAContractName
@@ -311,7 +362,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 		CompilerVersion: compilerVersion,
 		ContractName:    contractName,
 		ABI: ABI{
-			Constructor: ABIConstructor{Params: []ABIParam{}},
+			Constructor: ABIConstructor{Params: []ABIParam{
+				{Name: groth16WAOwnerParam, Type: "PubKey"},
+			}},
 			Methods: []ABIMethod{
 				{
 					Name:     "verify",
@@ -320,8 +373,9 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 				},
 			},
 		},
-		Script: emitResult.ScriptHex,
-		ASM:    emitResult.ScriptAsm,
+		Script:           emitResult.ScriptHex,
+		ASM:              emitResult.ScriptAsm,
+		ConstructorSlots: emitResult.ConstructorSlots,
 		// buildTimestamp(), not time.Now(): this path used to stamp the clock
 		// directly, so SOURCE_DATE_EPOCH was honoured by every artifact except
 		// the one whose entire purpose is to be reproduced from the same

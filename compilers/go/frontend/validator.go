@@ -5,6 +5,9 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"unicode/utf16"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,7 +52,15 @@ func Validate(contract *ContractNode) *ValidationResult {
 	ctx.validateProperties()
 	ctx.validateConstructor()
 	ctx.validateMethods()
-	ctx.checkNoRecursion()
+	callDepthExceeded := ctx.checkNoRecursion()
+	ctx.checkReservedNames()
+	// N-180: the Rabin-provenance and sighash passes walk the private-method
+	// call graph; past MaxCallDepth that walk is the very depth the limit
+	// refuses, so stop here.
+	if callDepthExceeded {
+		return &ValidationResult{Errors: ctx.errors, Warnings: ctx.warnings}
+	}
+	ctx.checkRabinPubKeyProvenance()
 
 	// Issue #123: reject preimage-field reads / output bindings that are
 	// unsound under a method's declared @sighash mode (security core). This
@@ -64,19 +75,10 @@ func Validate(contract *ContractNode) *ValidationResult {
 		}
 	}
 
-	// See sp1_fri_soundness_warning.go: the deployable SP1 FRI verifier accepts
-	// forged Merkle openings at the PoC parameter set. Say so at compile time,
-	// not only in a doc a caller of the built-in would never open.
+	// See sp1_fri_soundness_warning.go: the SP1 FRI verifier is not
+	// implemented for v1 (F-007). Always refuse; there is no override.
 	if contractCallsSP1FriVerifier(contract) {
-		if contract.AckUnsoundSP1Fri {
-			// Explicitly opted in (verifier development / the PoC contract):
-			// still say it, loudly, on every compile.
-			ctx.addWarning(sp1FriSoundnessWarning)
-		} else {
-			// Default: REFUSE. Documenting an unsound verifier is not the same
-			// as preventing its deployment, and this one accepts forged proofs.
-			ctx.addError(sp1FriSoundnessError)
-		}
+		ctx.addError(SP1FriNotImplementedError)
 	}
 
 	return &ValidationResult{
@@ -91,6 +93,61 @@ func (ctx *validationContext) addWarning(msg string) {
 
 func (ctx *validationContext) addWarningWithLoc(msg string, loc *SourceLocation) {
 	ctx.warnings = append(ctx.warnings, Diagnostic{Message: msg, Severity: SeverityWarning, Loc: loc})
+}
+
+// checkReservedNames is N-065 / N-060: refuse a declared identifier spelled
+// like a name a compiler pass mints (see ir/reserved_names.go). Checks
+// properties, method names, constructor and method parameters, locals and loop
+// variables. A stateful `txPreimage` PROPERTY keeps its older diagnostic.
+// Runs before fixed-array expansion, which mints __idx_/__val_/<root>__<i>.
+func (ctx *validationContext) checkReservedNames() {
+	stateful := ctx.contract.ParentClass == "StatefulSmartContract"
+	check := func(name string, loc SourceLocation) {
+		if ir.IsReservedSourceName(name, stateful) {
+			l := loc
+			ctx.addErrorWithLoc(ir.ReservedNameMessage(name), &l)
+		}
+	}
+	var walk func(stmts []Statement)
+	walk = func(stmts []Statement) {
+		for _, s := range stmts {
+			switch st := s.(type) {
+			case VariableDeclStmt:
+				check(st.Name, st.SourceLocation)
+			case *VariableDeclStmt:
+				check(st.Name, st.SourceLocation)
+			case IfStmt:
+				walk(st.Then)
+				walk(st.Else)
+			case *IfStmt:
+				walk(st.Then)
+				walk(st.Else)
+			case ForStmt:
+				check(st.Init.Name, st.Init.SourceLocation)
+				walk(st.Body)
+			case *ForStmt:
+				check(st.Init.Name, st.Init.SourceLocation)
+				walk(st.Body)
+			}
+		}
+	}
+
+	for _, prop := range ctx.contract.Properties {
+		if stateful && prop.Name == "txPreimage" {
+			continue
+		}
+		check(prop.Name, prop.SourceLocation)
+	}
+	methods := append([]MethodNode{ctx.contract.Constructor}, ctx.contract.Methods...)
+	for _, m := range methods {
+		if m.Name != "constructor" {
+			check(m.Name, m.SourceLocation)
+		}
+		for _, p := range m.Params {
+			check(p.Name, m.SourceLocation)
+		}
+		walk(m.Body)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +216,12 @@ func (ctx *validationContext) validateProperties() {
 					&prop.SourceLocation,
 				)
 			}
+
+			// N-414 (peer of TS F-265): the shape checks above never validate
+			// a ByteStringLiteral's HEX FORMAT; that lives in validateExpression,
+			// which a property initializer never reached. An odd-length literal
+			// used to surface two passes later as an opaque stack-lowering error.
+			ctx.validateExpression(prop.Initializer)
 		}
 	}
 
@@ -283,6 +346,18 @@ func (ctx *validationContext) validatePropertyType(t TypeNode, loc SourceLocatio
 	}
 }
 
+// rejectUnknownParamType refuses a parameter whose type is a name that is not
+// a Rúnar type (N-325). "unknown" is the missing-annotation case, already
+// diagnosed by the parser; StatefulContext is the explicit context parameter of
+// the Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+func (ctx *validationContext) rejectUnknownParamType(param ParamNode, where string, loc *SourceLocation) {
+	ct, ok := param.Type.(CustomType)
+	if !ok || ct.Name == "unknown" || ct.Name == "StatefulContext" {
+		return
+	}
+	ctx.addErrorWithLoc(fmt.Sprintf("type '%s' of parameter '%s' in %s is not a Rúnar type", ct.Name, param.Name, where), loc)
+}
+
 // ---------------------------------------------------------------------------
 // Constructor validation
 // ---------------------------------------------------------------------------
@@ -335,6 +410,7 @@ func (ctx *validationContext) validateConstructor() {
 				&ctor.SourceLocation,
 			)
 		}
+		ctx.rejectUnknownParamType(param, "constructor", &ctor.SourceLocation)
 	}
 
 	// Validate constructor body
@@ -555,6 +631,7 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 				&method.SourceLocation,
 			)
 		}
+		ctx.rejectUnknownParamType(param, fmt.Sprintf("method '%s'", method.Name), &method.SourceLocation)
 	}
 
 	// `return` is a PRIVATE-helper construct only (NEW-012).
@@ -930,6 +1007,7 @@ func (ctx *validationContext) validateStatement(stmt Statement) {
 		}
 		ctx.validateExpression(s.Init)
 	case AssignmentStmt:
+		ctx.validateIndexAssignmentTarget(s)
 		ctx.validateExpression(s.Target)
 		ctx.validateExpression(s.Value)
 	case IfStmt:
@@ -951,6 +1029,43 @@ func (ctx *validationContext) validateStatement(stmt Statement) {
 	}
 }
 
+// validateIndexAssignmentTarget is N-002 (F-013's rule, shared verbatim by all
+// seven tiers): only a FixedArray property is index-writable. Any other index
+// target (a ByteString property, a local, a parameter, a member-chained root)
+// is left alone by ExpandFixedArrays and ANF lowering lowers it as a READ,
+// dropping the write -- a deployable script whose state never changes. Reject
+// it here with a location instead.
+func (ctx *validationContext) validateIndexAssignmentTarget(s AssignmentStmt) {
+	idx, ok := s.Target.(IndexAccessExpr)
+	if !ok {
+		return
+	}
+	var root Expression = idx
+	for {
+		ia, isIdx := root.(IndexAccessExpr)
+		if !isIdx {
+			break
+		}
+		root = ia.Object
+	}
+	if pa, isProp := root.(PropertyAccessExpr); isProp {
+		for _, p := range ctx.contract.Properties {
+			if p.Name != pa.Property {
+				continue
+			}
+			if _, isFixed := p.Type.(FixedArrayType); isFixed {
+				return
+			}
+		}
+	}
+	loc := s.SourceLocation
+	ctx.addErrorWithLoc(
+		"index assignment is only supported on FixedArray contract properties; "+
+			"the target here is not a FixedArray property",
+		&loc,
+	)
+}
+
 func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 	ctx.validateExpression(stmt.Condition)
 
@@ -960,7 +1075,7 @@ func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 	// i*step` on each unrolled iteration.
 	if bin, ok := stmt.Condition.(BinaryExpr); ok {
 		if !isCompileTimeConstant(bin.Right) {
-			ctx.addError("for loop bound must be a compile-time constant")
+			ctx.addError(forLoopBoundDiagnostic(bin.Right))
 		}
 	}
 
@@ -1024,6 +1139,37 @@ func loopOutputIntrinsicMsg(intrinsic, via string) string {
 		"declared outputs never reach the method's output list, so the continuation hash would " +
 		"commit to fewer outputs than the transaction actually creates: the spend is rejected by " +
 		"every shipped SDK and any successor it produces is unspendable. Move the call out of the loop."
+}
+
+// ternaryOutputIntrinsicMsg builds the N-049 rejection. Shared verbatim with
+// the other six tiers (TS reference: ternaryOutputIntrinsicDiagnostic in
+// packages/runar-compiler/src/passes/02-validate.ts).
+func ternaryOutputIntrinsicMsg(intrinsic, via string) string {
+	viaClause := ""
+	if via != "" {
+		viaClause = " (reached through private method '" + via + "')"
+	}
+	return "Output intrinsic '" + intrinsic + "'" + viaClause +
+		" cannot be called inside a conditional (ternary) expression arm. A ternary arm lowers " +
+		"into its own scope whose declared outputs never reach the method's output list, so the " +
+		"continuation hash would commit to fewer outputs than the transaction actually creates: " +
+		"a spender can drop the output and the honest spend is rejected. Use an if/else statement instead."
+}
+
+// validateNoOutputIntrinsicInTernaryArm rejects an output intrinsic in either
+// arm of a ternary expression (N-049). lowerTernaryExpr lowers each arm into a
+// sub-context whose output refs are dropped, unlike the if-statement lowering,
+// which merges each arm's refs into the parent — so the continuation hash would
+// omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout was
+// accepted on every tier). Private helpers are followed because they are
+// inlined into the arm. A ternary that only selects values is untouched.
+func (ctx *validationContext) validateNoOutputIntrinsicInTernaryArm(e TernaryExpr) {
+	for _, arm := range []Expression{e.Consequent, e.Alternate} {
+		if intrinsic, via, _, found := ctx.findOutputIntrinsicInExpr(arm, nil, map[string]bool{}); found {
+			ctx.addError(ternaryOutputIntrinsicMsg(intrinsic, via))
+			return
+		}
+	}
 }
 
 // outputIntrinsicNames are the three intrinsics that register an output ref.
@@ -1143,6 +1289,17 @@ func (ctx *validationContext) findOutputIntrinsicInStatement(
 		body := append(append([]Statement{}, s.Then...), s.Else...)
 		return ctx.findOutputIntrinsic(body, seen)
 	case ForStmt:
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInStatement(s.Init, seen); found {
+			return intrinsic, via, l, true
+		}
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(s.Condition, &s.SourceLocation, seen); found {
+			return intrinsic, via, l, true
+		}
+		if s.Update != nil {
+			if intrinsic, via, l, found := ctx.findOutputIntrinsicInStatement(s.Update, seen); found {
+				return intrinsic, via, l, true
+			}
+		}
 		return ctx.findOutputIntrinsic(s.Body, seen)
 	default:
 		return "", "", nil, false
@@ -1190,6 +1347,8 @@ func subExpressions(expr Expression) []Expression {
 		return []Expression{e.Condition, e.Consequent, e.Alternate}
 	case IndexAccessExpr:
 		return []Expression{e.Object, e.Index}
+	case ArrayLiteralExpr:
+		return e.Elements
 	}
 	return nil
 }
@@ -1236,7 +1395,10 @@ const loopUpdateDiagnosticMsg = "For loop update must advance the loop variable 
 // `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
 // the effect-free no-op sentinel (a literal or a bare identifier) that the
 // while-shaped parsers synthesize when the source has no continue expression at
-// all.
+// all -- but only on a loop whose condition does not test its declared
+// iterator (already refused by the condition rule). On a real iterator a no-op
+// update never advances it: `var i = 3; while (i < 5) : (i)` compiled two laps
+// over i = 3, 4 (N-116).
 //
 // The advanced variable must be the declared iterator or the identifier the
 // condition tests. Both are needed: the Zig parser only folds
@@ -1254,7 +1416,17 @@ func (ctx *validationContext) validateForUpdate(stmt ForStmt) {
 		}
 	}
 
-	if isRepresentableForUpdate(allowed, stmt.Update) {
+	// N-116: the no-op sentinel is tolerated only on a loop the condition rule
+	// already refuses (placeholder iterator). On a real iterator it never
+	// advances, yet the unrolled loop would still step by one.
+	condTestsIter := false
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok && id.Name == stmt.Init.Name {
+			condTestsIter = true
+		}
+	}
+
+	if isRepresentableForUpdate(allowed, stmt.Update, !condTestsIter) {
 		return
 	}
 
@@ -1283,7 +1455,7 @@ func isLiteralOne(expr Expression) bool {
 	return ok && lit.Value != nil && lit.Value.IsInt64() && lit.Value.Int64() == 1
 }
 
-func isRepresentableForUpdate(allowed []string, update Statement) bool {
+func isRepresentableForUpdate(allowed []string, update Statement, acceptNoOpSentinel bool) bool {
 	switch u := update.(type) {
 	case ExpressionStmt:
 		switch e := u.Expr.(type) {
@@ -1295,8 +1467,9 @@ func isRepresentableForUpdate(allowed []string, update Statement) bool {
 			// The no-op sentinel a while-shaped frontend synthesizes when the
 			// source carries no continue expression: zig's `while (c) {}`,
 			// move's `while (c) {}`, go's `for c {}`. Reading a literal or a
-			// bare identifier has no effect, so discarding it loses nothing.
-			return true
+			// bare identifier has no effect, so discarding it loses nothing --
+			// on a loop the condition rule already refuses (N-116).
+			return acceptNoOpSentinel
 		}
 		return false
 
@@ -1328,6 +1501,28 @@ func isRepresentableForUpdate(allowed []string, update Statement) bool {
 // is NOT resolvable and must be rejected here with a graceful diagnostic —
 // anf-lower's extractLoopShape would otherwise panic. Mirrors the reference TS
 // compiler's observable behavior: only literal loop bounds compile.
+// forLoopBoundDiagnostic returns the reference (TypeScript) tier's sentence for
+// a for-loop bound that is not an integer literal. The reference's validator
+// trusts a bare identifier (or boolean literal, or a negation of one) as "could
+// be a const" and lets ANF lowering refuse it with the "Cannot determine"
+// sentence; every other non-literal shape (`this.x`, an expression) is refused
+// by its validator with the "must be a compile-time constant" sentence. Both
+// sentences are shared verbatim by all seven tiers (N-026).
+func forLoopBoundDiagnostic(bound Expression) string {
+	for {
+		u, ok := bound.(UnaryExpr)
+		if !ok || u.Op != "-" {
+			break
+		}
+		bound = u.Operand
+	}
+	switch bound.(type) {
+	case Identifier, BoolLiteral:
+		return "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
+	}
+	return "For loop bound must be a compile-time constant (literal or const variable)"
+}
+
 func isCompileTimeConstant(expr Expression) bool {
 	switch e := expr.(type) {
 	case BigIntLiteral:
@@ -1367,6 +1562,7 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 	case MemberExpr:
 		ctx.validateExpression(e.Object)
 	case TernaryExpr:
+		ctx.validateNoOutputIntrinsicInTernaryArm(e)
 		ctx.validateExpression(e.Condition)
 		ctx.validateExpression(e.Consequent)
 		ctx.validateExpression(e.Alternate)
@@ -1377,13 +1573,18 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 		ctx.validateExpression(e.Operand)
 	case DecrementExpr:
 		ctx.validateExpression(e.Operand)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			ctx.validateExpression(el)
+		}
 	case ByteStringLiteral:
 		val := e.Value
 		if len(val) > 0 {
-			if len(val)%2 != 0 {
-				ctx.addError(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, len(val)))
+			// N-436: TS counts UTF-16 code units; len(val) would count UTF-8 bytes.
+			if n := len(utf16.Encode([]rune(val))); n%2 != 0 {
+				ctx.addErrorWithLoc(fmt.Sprintf("ByteString literal '%s' has odd length (%d) — hex strings must have an even number of characters", val, n), &e.SourceLocation)
 			} else if !isHexString(val) {
-				ctx.addError(fmt.Sprintf("ByteString literal '%s' contains non-hex characters — only 0-9, a-f, A-F are allowed", val))
+				ctx.addErrorWithLoc(fmt.Sprintf("ByteString literal '%s' contains non-hex characters — only 0-9, a-f, A-F are allowed", val), &e.SourceLocation)
 			}
 		}
 	}
@@ -1551,7 +1752,7 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 		// Follow calls into private helpers so a guard (or locktime read) supplied
 		// by an inlined helper is seen by the public entry point.
 		calls := make(map[string]bool)
-		collectMethodCalls(current.Body, calls)
+		collectMethodCalls(current.Body, calls, false)
 		for callee := range calls {
 			if visited[callee] {
 				continue
@@ -1610,7 +1811,9 @@ func walkExpressionsInStatementWithLoc(stmt Statement, visitor func(Expression, 
 		walkExpressionsInBodyWithLoc(s.Else, visitor)
 	case ForStmt:
 		loc := s.SourceLocation
+		walkExpressionsInStatementWithLoc(s.Init, visitor)
 		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInStatementWithLoc(s.Update, visitor)
 		walkExpressionsInBodyWithLoc(s.Body, visitor)
 	case ReturnStmt:
 		if s.Value != nil {
@@ -1638,7 +1841,9 @@ func walkExpressionsInStatement(stmt Statement, visitor func(Expression)) {
 		walkExpressionsInBody(s.Then, visitor)
 		walkExpressionsInBody(s.Else, visitor)
 	case ForStmt:
+		walkExpressionsInStatement(s.Init, visitor)
 		walkExpr(s.Condition, visitor)
+		walkExpressionsInStatement(s.Update, visitor)
 		walkExpressionsInBody(s.Body, visitor)
 	case ReturnStmt:
 		if s.Value != nil {
@@ -1673,6 +1878,459 @@ func walkExpr(expr Expression, visitor func(Expression)) {
 		walkExpr(e.Operand, visitor)
 	case DecrementExpr:
 		walkExpr(e.Operand, visitor)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			walkExpr(el, visitor)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
+
+// RabinPubKeyProvenanceMessage is the one diagnostic every tier emits for
+// F-286 (user decision R78).
+const RabinPubKeyProvenanceMessage = "verifyRabinSig public key (4th argument) must be a contract property or a literal; " +
+	"a spender-supplied Rabin modulus lets anyone forge a signature"
+
+type rabinScope struct {
+	method    *MethodNode
+	isPrivate bool
+	params    map[string]int
+	bindings  map[string][]Expression
+	mutated   map[string]bool
+	// N-205: names declared as locals (a bare property write also lands in
+	// bindings).
+	declared map[string]bool
+}
+
+type rabinCallSite struct {
+	args  []Expression
+	scope *rabinScope
+}
+
+// checkRabinPubKeyProvenance ports packages/runar-compiler/src/passes/
+// 02-validate.ts checkRabinPubKeyProvenance. verifyRabinSig(msg, sig,
+// padding, n) checks (sig^2 + padding) mod n == SHA256(msg) mod n; a spender
+// who chooses n forges any message, so n must be fixed by the deployer.
+//
+// Trusted 4th arguments: a property read (this.x, or a bare identifier naming
+// a property no parameter or local shadows); a bigint literal; a local whose
+// initialiser and every assignment are trusted; a parameter of a PRIVATE
+// method that every call site (at least one) binds to a trusted value (least
+// fixed point). Everything else is refused.
+func (ctx *validationContext) checkRabinPubKeyProvenance() {
+	contract := ctx.contract
+	props := map[string]bool{}
+	for _, p := range contract.Properties {
+		props[p.Name] = true
+	}
+	private := map[string]*MethodNode{}
+	for i := range contract.Methods {
+		if contract.Methods[i].Visibility == "private" {
+			private[contract.Methods[i].Name] = &contract.Methods[i]
+		}
+	}
+
+	newScope := func(m *MethodNode, isPrivate bool) *rabinScope {
+		sc := &rabinScope{method: m, isPrivate: isPrivate, params: map[string]int{},
+			bindings: map[string][]Expression{}, mutated: map[string]bool{}, declared: map[string]bool{}}
+		for i, p := range m.Params {
+			sc.params[p.Name] = i
+		}
+		visitExpr := func(e Expression) {
+			walkExpr(e, func(x Expression) {
+				switch v := x.(type) {
+				case IncrementExpr:
+					if id, ok := v.Operand.(Identifier); ok {
+						sc.mutated[id.Name] = true
+					}
+				case DecrementExpr:
+					if id, ok := v.Operand.(Identifier); ok {
+						sc.mutated[id.Name] = true
+					}
+				}
+			})
+		}
+		var visit func(stmts []Statement)
+		visit = func(stmts []Statement) {
+			for _, stmt := range stmts {
+				switch st := stmt.(type) {
+				case VariableDeclStmt:
+					sc.declared[st.Name] = true
+					sc.bindings[st.Name] = append(sc.bindings[st.Name], st.Init)
+					visitExpr(st.Init)
+				case AssignmentStmt:
+					if id, ok := st.Target.(Identifier); ok {
+						sc.bindings[id.Name] = append(sc.bindings[id.Name], st.Value)
+					}
+					visitExpr(st.Target)
+					visitExpr(st.Value)
+				case ExpressionStmt:
+					visitExpr(st.Expr)
+				case IfStmt:
+					visitExpr(st.Condition)
+					visit(st.Then)
+					visit(st.Else)
+				case ForStmt:
+					visit([]Statement{st.Init})
+					visitExpr(st.Condition)
+					if st.Update != nil {
+						visit([]Statement{st.Update})
+					}
+					visit(st.Body)
+				case ReturnStmt:
+					if st.Value != nil {
+						visitExpr(st.Value)
+					}
+				}
+			}
+		}
+		visit(m.Body)
+		return sc
+	}
+
+	scopes := []*rabinScope{newScope(&contract.Constructor, false)}
+	for i := range contract.Methods {
+		scopes = append(scopes, newScope(&contract.Methods[i], contract.Methods[i].Visibility == "private"))
+	}
+
+	trusted := map[string]map[int]bool{}
+	for name := range private {
+		trusted[name] = map[int]bool{}
+	}
+
+	var isTrusted func(e Expression, sc *rabinScope, visiting map[string]bool) bool
+	isTrusted = func(e Expression, sc *rabinScope, visiting map[string]bool) bool {
+		switch v := e.(type) {
+		case PropertyAccessExpr:
+			return true
+		case MemberExpr:
+			id, ok := v.Object.(Identifier)
+			return ok && id.Name == "this"
+		case BigIntLiteral:
+			return true
+		case Identifier:
+			name := v.Name
+			idx, isParam := sc.params[name]
+			locals, isLocal := sc.bindings[name]
+			if !isParam && !isLocal {
+				return props[name]
+			}
+			if sc.mutated[name] {
+				return false
+			}
+			if isParam {
+				if !sc.isPrivate || !trusted[sc.method.Name][idx] {
+					return false
+				}
+			}
+			if isLocal {
+				if visiting[name] {
+					return false
+				}
+				visiting[name] = true
+				defer delete(visiting, name)
+				for _, b := range locals {
+					if !isTrusted(b, sc, visiting) {
+						return false
+					}
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+
+	privateCallee := func(e Expression) (string, []Expression, bool) {
+		call, ok := e.(CallExpr)
+		if !ok {
+			return "", nil, false
+		}
+		name := ""
+		switch c := call.Callee.(type) {
+		case PropertyAccessExpr:
+			name = c.Property
+		case MemberExpr:
+			if id, ok := c.Object.(Identifier); ok && id.Name == "this" {
+				name = c.Property
+			}
+		}
+		if _, ok := private[name]; name == "" || !ok {
+			return "", nil, false
+		}
+		return name, call.Args, true
+	}
+
+	sites := map[string][]rabinCallSite{}
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, _ SourceLocation) {
+			if name, args, ok := privateCallee(e); ok {
+				sites[name] = append(sites[name], rabinCallSite{args: args, scope: sc})
+			}
+		})
+	}
+
+	// Least fixed point; monotone, so it terminates.
+	for changed := true; changed; {
+		changed = false
+		for name, m := range private {
+			ss := sites[name]
+			if len(ss) == 0 {
+				continue
+			}
+			for i := range m.Params {
+				if trusted[name][i] {
+					continue
+				}
+				all := true
+				for _, site := range ss {
+					if i >= len(site.args) || !isTrusted(site.args[i], site.scope, map[string]bool{}) {
+						all = false
+						break
+					}
+				}
+				if all {
+					trusted[name][i] = true
+					changed = true
+				}
+			}
+		}
+	}
+
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, loc SourceLocation) {
+			call, ok := e.(CallExpr)
+			if !ok {
+				return
+			}
+			id, ok := call.Callee.(Identifier)
+			if !ok || id.Name != "verifyRabinSig" || len(call.Args) < 4 {
+				return
+			}
+			if !isTrusted(call.Args[3], sc, map[string]bool{}) {
+				// N-464 (user decision R186): anchored at the 4th argument
+				// itself; the statement only when the argument has no location.
+				l := loc
+				if al := exprLoc(call.Args[3]); al != nil {
+					l = *al
+				}
+				ctx.addErrorWithLoc(RabinPubKeyProvenanceMessage, &l)
+			}
+		})
+	}
+
+	// N-205 (a): a MUTABLE property used as the key is state the previous
+	// spend chose, so outside the constructor it may only be written with a
+	// value isTrusted accepts. KEY properties: those whose value reaches a 4th
+	// argument, closed under "is written into a key property".
+	var sourcesOf func(e Expression, sc *rabinScope, out map[string]bool, visiting map[string]bool)
+	sourcesOf = func(e Expression, sc *rabinScope, out map[string]bool, visiting map[string]bool) {
+		switch v := e.(type) {
+		case PropertyAccessExpr:
+			out[v.Property] = true
+		case MemberExpr:
+			if id, ok := v.Object.(Identifier); ok && id.Name == "this" {
+				out[v.Property] = true
+			}
+		case Identifier:
+			name := v.Name
+			idx, isParam := sc.params[name]
+			locals, isLocal := sc.bindings[name]
+			if !isParam && !isLocal {
+				if props[name] {
+					out[name] = true
+				}
+				return
+			}
+			key := sc.method.Name + "\x00" + name
+			if visiting[key] {
+				return
+			}
+			visiting[key] = true
+			for _, b := range locals {
+				sourcesOf(b, sc, out, visiting)
+			}
+			if isParam && sc.isPrivate {
+				for _, site := range sites[sc.method.Name] {
+					if idx < len(site.args) {
+						sourcesOf(site.args[idx], site.scope, out, visiting)
+					}
+				}
+			}
+		}
+	}
+
+	keyProps := map[string]bool{}
+	for _, sc := range scopes {
+		sc := sc
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, _ SourceLocation) {
+			call, ok := e.(CallExpr)
+			if !ok {
+				return
+			}
+			if id, ok := call.Callee.(Identifier); ok && id.Name == "verifyRabinSig" && len(call.Args) >= 4 {
+				sourcesOf(call.Args[3], sc, keyProps, map[string]bool{})
+			}
+		})
+	}
+
+	// Every write to a property outside the constructor; value is nil for
+	// ++/--, which no value makes trusted.
+	type propWrite struct {
+		prop  string
+		value Expression
+		scope *rabinScope
+		loc   SourceLocation
+	}
+	var writes []propWrite
+	var mutableProps []string
+	mutable := map[string]bool{}
+	for _, p := range contract.Properties {
+		if !p.Readonly {
+			mutableProps = append(mutableProps, p.Name)
+			mutable[p.Name] = true
+		}
+	}
+	writtenProp := func(target Expression, sc *rabinScope) (string, bool) {
+		switch v := target.(type) {
+		case PropertyAccessExpr:
+			return v.Property, true
+		case MemberExpr:
+			if id, ok := v.Object.(Identifier); ok && id.Name == "this" {
+				return v.Property, true
+			}
+		case Identifier:
+			_, isParam := sc.params[v.Name]
+			if props[v.Name] && !isParam && !sc.declared[v.Name] {
+				return v.Name, true
+			}
+		}
+		return "", false
+	}
+	var collectAssignments func(stmts []Statement, sc *rabinScope)
+	collectAssignments = func(stmts []Statement, sc *rabinScope) {
+		for _, stmt := range stmts {
+			switch st := stmt.(type) {
+			case AssignmentStmt:
+				if prop, ok := writtenProp(st.Target, sc); ok {
+					writes = append(writes, propWrite{prop, st.Value, sc, st.SourceLocation})
+				}
+			case IfStmt:
+				collectAssignments(st.Then, sc)
+				collectAssignments(st.Else, sc)
+			case ForStmt:
+				collectAssignments([]Statement{st.Init}, sc)
+				if st.Update != nil {
+					collectAssignments([]Statement{st.Update}, sc)
+				}
+				collectAssignments(st.Body, sc)
+			}
+		}
+	}
+	for _, sc := range scopes {
+		sc := sc
+		if sc.method == &contract.Constructor {
+			continue
+		}
+		collectAssignments(sc.method.Body, sc)
+		walkRabinBodyDeep(sc.method.Body, sc.method.SourceLocation, func(e Expression, loc SourceLocation) {
+			switch v := e.(type) {
+			case IncrementExpr:
+				if prop, ok := writtenProp(v.Operand, sc); ok {
+					writes = append(writes, propWrite{prop, nil, sc, loc})
+				}
+			case DecrementExpr:
+				if prop, ok := writtenProp(v.Operand, sc); ok {
+					writes = append(writes, propWrite{prop, nil, sc, loc})
+				}
+			case CallExpr:
+				name := ""
+				switch c := v.Callee.(type) {
+				case PropertyAccessExpr:
+					name = c.Property
+				case MemberExpr:
+					name = c.Property
+				}
+				if name != "addOutput" {
+					return
+				}
+				// addOutput(satoshis, ...values): values are positional over
+				// the mutable properties in declaration order. A single
+				// array-literal value list (the Zig tuple form) is unpacked,
+				// as ANF lowering's flattenAddOutputArgs does.
+				args := flattenAddOutputArgs(v.Args)
+				for i := 1; i < len(args); i++ {
+					if i-1 < len(mutableProps) {
+						writes = append(writes, propWrite{mutableProps[i-1], args[i], sc, loc})
+					}
+				}
+			}
+		})
+	}
+
+	for grew := true; grew; {
+		before := len(keyProps)
+		for _, w := range writes {
+			if keyProps[w.prop] && w.value != nil && isTrusted(w.value, w.scope, map[string]bool{}) {
+				sourcesOf(w.value, w.scope, keyProps, map[string]bool{})
+			}
+		}
+		grew = len(keyProps) != before
+	}
+
+	for _, w := range writes {
+		if !keyProps[w.prop] || !mutable[w.prop] {
+			continue
+		}
+		if w.value != nil && isTrusted(w.value, w.scope, map[string]bool{}) {
+			continue
+		}
+		l := w.loc
+		ctx.addErrorWithLoc(RabinKeyWriteMessage(w.prop), &l)
+	}
+}
+
+// RabinKeyWriteMessage is the N-205 (a) diagnostic every tier emits when a
+// mutable key property is written, outside the constructor, with a value the
+// F-286 rule does not trust.
+func RabinKeyWriteMessage(prop string) string {
+	return "verifyRabinSig public key property '" + prop + "' may only be assigned a contract property or a literal " +
+		"outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
+}
+
+// walkRabinBodyDeep visits every expression in stmts, including every for
+// loop's init and update at any depth, with the enclosing statement's location.
+func walkRabinBodyDeep(stmts []Statement, fallback SourceLocation, visitor func(Expression, SourceLocation)) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case ExpressionStmt:
+			walkExpr(s.Expr, func(e Expression) { visitor(e, s.SourceLocation) })
+		case VariableDeclStmt:
+			walkExpr(s.Init, func(e Expression) { visitor(e, s.SourceLocation) })
+		case AssignmentStmt:
+			walkExpr(s.Target, func(e Expression) { visitor(e, s.SourceLocation) })
+			walkExpr(s.Value, func(e Expression) { visitor(e, s.SourceLocation) })
+		case IfStmt:
+			walkExpr(s.Condition, func(e Expression) { visitor(e, s.SourceLocation) })
+			walkRabinBodyDeep(s.Then, fallback, visitor)
+			walkRabinBodyDeep(s.Else, fallback, visitor)
+		case ForStmt:
+			walkRabinBodyDeep([]Statement{s.Init}, fallback, visitor)
+			walkExpr(s.Condition, func(e Expression) { visitor(e, s.SourceLocation) })
+			if s.Update != nil {
+				walkRabinBodyDeep([]Statement{s.Update}, fallback, visitor)
+			}
+			walkRabinBodyDeep(s.Body, fallback, visitor)
+		case ReturnStmt:
+			if s.Value != nil {
+				walkExpr(s.Value, func(e Expression) { visitor(e, s.SourceLocation) })
+			}
+		}
 	}
 }
 
@@ -1680,57 +2338,145 @@ func walkExpr(expr Expression, visitor func(Expression)) {
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-func (ctx *validationContext) checkNoRecursion() {
+// checkNoRecursion reports recursion and the N-180 call depth; it returns true
+// iff MaxCallDepth was exceeded.
+func (ctx *validationContext) checkNoRecursion() bool {
 	callGraph := make(map[string]map[string]bool)
 	methodNames := make(map[string]bool)
 
 	for _, method := range ctx.contract.Methods {
 		methodNames[method.Name] = true
 		calls := make(map[string]bool)
-		collectMethodCalls(method.Body, calls)
+		collectMethodCalls(method.Body, calls, true)
 		callGraph[method.Name] = calls
 	}
 
-	// Check for cycles using DFS
+	// N-180: one iterative pass answers, for every method, whether it reaches
+	// a cycle and how deep its call chain is, in O(methods + calls). The old
+	// per-method DFS restarted for each method (quadratic on a chain).
+	reachesCycle, depth := analyzeCallGraph(ctx.contract.Methods, callGraph, methodNames)
+
 	for _, method := range ctx.contract.Methods {
-		visited := make(map[string]bool)
-		stack := make(map[string]bool)
-		if hasCycle(method.Name, callGraph, methodNames, visited, stack) {
+		if reachesCycle[method.Name] {
 			ctx.addErrorWithLoc(fmt.Sprintf("recursion detected: method '%s' calls itself directly or indirectly", method.Name), &method.SourceLocation)
 		}
 	}
+
+	// N-180: private methods are inlined at every call site, so the call depth
+	// is the inlining depth. Report the first method (declaration order) past it.
+	for _, method := range ctx.contract.Methods {
+		if !reachesCycle[method.Name] && depth[method.Name] > MaxCallDepth {
+			ctx.addErrorWithLoc(CallDepthMessage(method.Name), &method.SourceLocation)
+			return true
+		}
+	}
+	return false
 }
 
-func collectMethodCalls(stmts []Statement, calls map[string]bool) {
+// analyzeCallGraph (N-180) returns, for every method, whether it reaches a
+// call cycle, and (when it does not) its call depth: 0 if it calls no contract
+// method, else 1 + the largest call depth among the contract methods it calls.
+// Iterative three-colour DFS with memoisation: O(methods + calls), no
+// recursion. reachesCycle matches what a fresh DFS from each method reports.
+func analyzeCallGraph(methods []MethodNode, callGraph map[string]map[string]bool, methodNames map[string]bool) (map[string]bool, map[string]int) {
+	type frame struct {
+		name    string
+		callees []string
+		next    int
+		cyc     bool
+		depth   int
+	}
+	reachesCycle := make(map[string]bool, len(methodNames))
+	depth := make(map[string]int, len(methodNames))
+	done := make(map[string]bool, len(methodNames))
+	onStack := make(map[string]bool)
+
+	for _, root := range methods {
+		if done[root.Name] {
+			continue
+		}
+		var stack []*frame
+		push := func(name string) {
+			onStack[name] = true
+			callees := make([]string, 0, len(callGraph[name]))
+			for c := range callGraph[name] {
+				callees = append(callees, c)
+			}
+			stack = append(stack, &frame{name: name, callees: callees})
+		}
+		push(root.Name)
+		for len(stack) > 0 {
+			top := stack[len(stack)-1]
+			if top.next < len(top.callees) {
+				callee := top.callees[top.next]
+				top.next++
+				switch {
+				case !methodNames[callee]:
+				case onStack[callee]:
+					top.cyc = true
+				case done[callee]:
+					if reachesCycle[callee] {
+						top.cyc = true
+					} else if d := 1 + depth[callee]; d > top.depth {
+						top.depth = d
+					}
+				default:
+					push(callee)
+				}
+				continue
+			}
+			stack = stack[:len(stack)-1]
+			delete(onStack, top.name)
+			done[top.name] = true
+			reachesCycle[top.name] = top.cyc
+			depth[top.name] = top.depth
+			if len(stack) > 0 {
+				parent := stack[len(stack)-1]
+				if top.cyc {
+					parent.cyc = true
+				} else if d := 1 + top.depth; d > parent.depth {
+					parent.depth = d
+				}
+			}
+		}
+	}
+	return reachesCycle, depth
+}
+
+func collectMethodCalls(stmts []Statement, calls map[string]bool, bare bool) {
 	for _, stmt := range stmts {
-		collectMethodCallsInStmt(stmt, calls)
+		collectMethodCallsInStmt(stmt, calls, bare)
 	}
 }
 
-func collectMethodCallsInStmt(stmt Statement, calls map[string]bool) {
+func collectMethodCallsInStmt(stmt Statement, calls map[string]bool, bare bool) {
 	switch s := stmt.(type) {
 	case ExpressionStmt:
-		collectMethodCallsInExpr(s.Expr, calls)
+		collectMethodCallsInExpr(s.Expr, calls, bare)
 	case VariableDeclStmt:
-		collectMethodCallsInExpr(s.Init, calls)
+		collectMethodCallsInExpr(s.Init, calls, bare)
 	case AssignmentStmt:
-		collectMethodCallsInExpr(s.Target, calls)
-		collectMethodCallsInExpr(s.Value, calls)
+		collectMethodCallsInExpr(s.Target, calls, bare)
+		collectMethodCallsInExpr(s.Value, calls, bare)
 	case IfStmt:
-		collectMethodCallsInExpr(s.Condition, calls)
-		collectMethodCalls(s.Then, calls)
-		collectMethodCalls(s.Else, calls)
+		collectMethodCallsInExpr(s.Condition, calls, bare)
+		collectMethodCalls(s.Then, calls, bare)
+		collectMethodCalls(s.Else, calls, bare)
 	case ForStmt:
-		collectMethodCallsInExpr(s.Condition, calls)
-		collectMethodCalls(s.Body, calls)
+		collectMethodCallsInStmt(s.Init, calls, bare)
+		collectMethodCallsInExpr(s.Condition, calls, bare)
+		if s.Update != nil {
+			collectMethodCallsInStmt(s.Update, calls, bare)
+		}
+		collectMethodCalls(s.Body, calls, bare)
 	case ReturnStmt:
 		if s.Value != nil {
-			collectMethodCallsInExpr(s.Value, calls)
+			collectMethodCallsInExpr(s.Value, calls, bare)
 		}
 	}
 }
 
-func collectMethodCallsInExpr(expr Expression, calls map[string]bool) {
+func collectMethodCallsInExpr(expr Expression, calls map[string]bool, bare bool) {
 	switch e := expr.(type) {
 	case CallExpr:
 		if pa, ok := e.Callee.(PropertyAccessExpr); ok {
@@ -1741,49 +2487,38 @@ func collectMethodCallsInExpr(expr Expression, calls map[string]bool) {
 				calls[me.Property] = true
 			}
 		}
-		collectMethodCallsInExpr(e.Callee, calls)
+		// N-180: the Solidity, Move and Java surfaces may call a helper as a
+		// bare `m(...)`. Counted only for the recursion / call-depth graph
+		// (bare), and only names of contract methods count there
+		// (analyzeCallGraph filters by methodNames), so builtins are unaffected.
+		if id, ok := e.Callee.(Identifier); ok && bare {
+			calls[id.Name] = true
+		}
+		collectMethodCallsInExpr(e.Callee, calls, bare)
 		for _, arg := range e.Args {
-			collectMethodCallsInExpr(arg, calls)
+			collectMethodCallsInExpr(arg, calls, bare)
 		}
 	case BinaryExpr:
-		collectMethodCallsInExpr(e.Left, calls)
-		collectMethodCallsInExpr(e.Right, calls)
+		collectMethodCallsInExpr(e.Left, calls, bare)
+		collectMethodCallsInExpr(e.Right, calls, bare)
 	case UnaryExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
+		collectMethodCallsInExpr(e.Operand, calls, bare)
 	case MemberExpr:
-		collectMethodCallsInExpr(e.Object, calls)
+		collectMethodCallsInExpr(e.Object, calls, bare)
 	case TernaryExpr:
-		collectMethodCallsInExpr(e.Condition, calls)
-		collectMethodCallsInExpr(e.Consequent, calls)
-		collectMethodCallsInExpr(e.Alternate, calls)
+		collectMethodCallsInExpr(e.Condition, calls, bare)
+		collectMethodCallsInExpr(e.Consequent, calls, bare)
+		collectMethodCallsInExpr(e.Alternate, calls, bare)
 	case IndexAccessExpr:
-		collectMethodCallsInExpr(e.Object, calls)
-		collectMethodCallsInExpr(e.Index, calls)
+		collectMethodCallsInExpr(e.Object, calls, bare)
+		collectMethodCallsInExpr(e.Index, calls, bare)
 	case IncrementExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
+		collectMethodCallsInExpr(e.Operand, calls, bare)
 	case DecrementExpr:
-		collectMethodCallsInExpr(e.Operand, calls)
-	}
-}
-
-func hasCycle(name string, callGraph map[string]map[string]bool, methodNames map[string]bool, visited, stack map[string]bool) bool {
-	if stack[name] {
-		return true
-	}
-	if visited[name] {
-		return false
-	}
-	visited[name] = true
-	stack[name] = true
-
-	for callee := range callGraph[name] {
-		if methodNames[callee] {
-			if hasCycle(callee, callGraph, methodNames, visited, stack) {
-				return true
-			}
+		collectMethodCallsInExpr(e.Operand, calls, bare)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			collectMethodCallsInExpr(el, calls, bare)
 		}
 	}
-
-	delete(stack, name)
-	return false
 }

@@ -67,6 +67,11 @@ export class LocalSigner implements Signer {
     satoshis: number,
     sigHashType: number = SIGHASH_ALL_FORKID,
   ): Promise<string> {
+    // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+    // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+    if (!subscript) {
+      throw new Error(`LocalSigner.sign: refusing to sign input ${inputIndex} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent`);
+    }
     const scope = sigHashType;
 
     // Parse the raw transaction using @bsv/sdk's built-in parser.

@@ -65,24 +65,23 @@ func readPublicValuesBytes(t *testing.T, path string) ([]byte, []uint32) {
 	return bs, vals
 }
 
-// compilePocLockingScript compiles the PoC covenant once and returns its
+// compilePocLockingScript lowers the PoC covenant once and returns its
 // locking script. SP1VKeyHashByteSize == 0 for the PoC parameter set, so the
 // single ByteString constructor slot's OP_0 placeholder already equals
 // EncodePushData("") — no constructor splicing is required.
+//
+// F-007: CompileFromSource now always refuses verifySP1FRI, so the script is
+// produced by the test-only lowerSP1FriPocBypassingRefusal (byte-identical to
+// what CompileFromSource emitted before the refusal became unconditional).
 func compilePocLockingScript(t *testing.T) *script.Script {
 	t.Helper()
 	path := sp1PocContractPath(t)
-	if _, err := os.Stat(path); err != nil {
-		t.Skipf("PoC contract not found at %s: %v", path, err)
+	requireFixtureFile(t, path)
+	res := lowerSP1FriPocBypassingRefusal(t, nil)
+	if res.ScriptHex == "" {
+		t.Fatal("lowering produced no locking script")
 	}
-	artifact, err := CompileFromSource(path)
-	if err != nil {
-		t.Fatalf("compile PoC contract: %v", err)
-	}
-	if artifact == nil || artifact.Script == "" {
-		t.Fatal("compile produced no locking script")
-	}
-	s, err := script.NewFromHex(artifact.Script)
+	s, err := script.NewFromHex(res.ScriptHex)
 	if err != nil {
 		t.Fatalf("parse locking script: %v", err)
 	}
@@ -109,7 +108,8 @@ type sp1OnChainCase struct {
 	// proof with a different program's public values.
 	proofDir string
 	pubDir   string
-	// wantAccept is true only for the canonical control.
+	// wantAccept was true only for the canonical control. F-007: no case
+	// sets it any more — the emitted body is fail-closed and accepts nothing.
 	wantAccept bool
 	docPoint   string
 
@@ -133,9 +133,11 @@ const onChainMerkleGap = "the emitted verifier body derives each query index and
 // TestSp1FriVerifier_OnChainRejectsCorruptions is the on-chain counterpart to
 // TestSp1FriVerifier_RejectsCorruptionFixtures.
 //
-// The first case is the NON-VACUITY control: the canonical fixture must be
-// ACCEPTED by the very same compiled covenant. Without it, a covenant that
-// rejected every spend would pass all the negative cases.
+// The first case WAS the non-vacuity control (canonical fixture ACCEPTED).
+// F-007: the v1 body is fail-closed, so it now expects the canonical fixture
+// to be REJECTED too. Consequence, stated plainly: every rejection below is
+// now produced by the fail-closed abort, so this test no longer shows that
+// any individual check works — only that nothing is accepted.
 //
 // ---------------------------------------------------------------------------
 // KNOWN GAP — the emitted script is NOT yet a sound proof verifier.
@@ -163,11 +165,12 @@ func TestSp1FriVerifier_OnChainRejectsCorruptions(t *testing.T) {
 	params := sp1fri.MinimalGuestParams()
 
 	cases := []sp1OnChainCase{
+		// F-007: rewritten to expect rejection — the emitted body is fail-closed for v1 (was canonical_control_accepts).
 		{
-			name:       "canonical_control_accepts",
-			proofDir:   "minimal-guest",
-			pubDir:     "minimal-guest",
-			wantAccept: true,
+			name:     "canonical_control_rejected_fail_closed",
+			proofDir: "minimal-guest",
+			pubDir:   "minimal-guest",
+			docPoint: "F-007 fail-closed abort (OP_0 OP_VERIFY)",
 		},
 		{
 			name:     "bad_merkle",
@@ -235,6 +238,18 @@ func TestSp1FriVerifier_OnChainRejectsCorruptions(t *testing.T) {
 			refErr := sp1fri.Verify(proof, pubVals)
 			execErr := runSpend(lock, unlocking)
 
+			if tc.name == "canonical_control_rejected_fail_closed" {
+				// F-007: rewritten to expect rejection — the honest proof is refused because the body is fail-closed.
+				if refErr != nil {
+					t.Fatalf("reference verifier rejected the canonical fixture: %v", refErr)
+				}
+				if execErr == nil {
+					t.Fatal("F-007: the compiled covenant ACCEPTED the canonical fixture; the v1 body must be fail-closed")
+				}
+				t.Logf("canonical fixture rejected on-chain (fail-closed): %v", execErr)
+				return
+			}
+
 			if tc.wantAccept {
 				if refErr != nil {
 					t.Fatalf("reference verifier rejected the canonical fixture: %v", refErr)
@@ -253,16 +268,15 @@ func TestSp1FriVerifier_OnChainRejectsCorruptions(t *testing.T) {
 			}
 
 			if tc.knownGap != "" {
-				if execErr != nil {
-					t.Fatalf("GOOD NEWS, ACTION REQUIRED: the compiled covenant now REJECTS "+
-						"corruption %s (%v).\nThe per-query verification chain appears to have "+
-						"landed. Clear the `knownGap` field on this case, re-check the other "+
-						"knownGap cases, and update docs/sp1-fri-verifier.md §6 plus "+
-						"tests/vectors/sp1/fri/corruptions/README.md.", tc.name, execErr)
+				// F-007: rewritten to expect rejection — these were ACCEPTED (known gap) and are now rejected,
+				// but only by the fail-closed abort: the per-query chain is still not emitted.
+				if execErr == nil {
+					t.Fatalf("F-007: compiled covenant ACCEPTS corruption %s; the v1 body must be "+
+						"fail-closed.\n  off-chain reference rejects it: %v\n  gap: %s",
+						tc.name, refErr, tc.knownGap)
 				}
-				t.Logf("KNOWN GAP — compiled covenant ACCEPTS corruption %s.\n"+
-					"  off-chain reference rejects it: %v\n"+
-					"  cause: %s", tc.name, refErr, tc.knownGap)
+				t.Logf("corruption %s rejected ONLY by the F-007 fail-closed abort (%v); "+
+					"the underlying gap remains: %s", tc.name, execErr, tc.knownGap)
 				return
 			}
 

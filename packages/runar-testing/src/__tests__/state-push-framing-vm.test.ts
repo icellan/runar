@@ -191,6 +191,25 @@ describe('state-section framing — SDK serializer vs on-chain reader/writer', (
         expect(deserializeState(fields, blob)).toEqual({ b: hex });
       }
     });
+
+    // N-299: the round-trip test above can NEVER exercise decodePushData's
+    // rejection of OP_N-range framing, because it only ever hands
+    // deserializeState a blob serializeState just produced correctly
+    // (<len><data>) -- the correct encoder never emits OP_1..OP_16 /
+    // OP_1NEGATE for the state section. This is a direct, hand-written-bytes
+    // decode case per P3 ("round-trip alone is never sufficient for a listed
+    // wire primitive") so this file itself detects the PALMER-2 READ-face
+    // regression (c28-state-strict.test.ts's `deserializeState(fields, '55')`
+    // pin already catches it; this gives state-push-framing-vm the same
+    // coverage across the whole OP_N range it was nominated, but not
+    // measured, to catch).
+    it('decodePushData rejects OP_N-range opcodes directly, independent of what the encoder would ever produce', () => {
+      for (let n = 1; n <= 16; n++) {
+        const opHex = (0x50 + n).toString(16); // OP_1 (0x51) .. OP_16 (0x60)
+        expect(() => deserializeState(fields, opHex)).toThrow(/is not a push opcode/);
+      }
+      expect(() => deserializeState(fields, '4f')).toThrow(/is not a push opcode/); // OP_1NEGATE
+    });
   });
 });
 

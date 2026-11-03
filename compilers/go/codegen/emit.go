@@ -138,6 +138,16 @@ type CodeSepIndexSlot struct {
 	CodeSepIndex int `json:"codeSepIndex"`
 }
 
+// CodePartLenSlot (N-051) records a `verify_code_part_len` length field whose
+// value is only known at deploy time: a readonly constructor arg of variable
+// width is baked into the code part. The SDK overwrites the 4 bytes at
+// ByteOffset with the deployed code-part length, little-endian.
+type CodePartLenSlot struct {
+	// ByteOffset is the offset, in the TEMPLATE script, of the first of the 4
+	// little-endian length bytes (the byte after the `04` push opcode).
+	ByteOffset int `json:"byteOffset"`
+}
+
 // ---------------------------------------------------------------------------
 // SourceMapping
 // ---------------------------------------------------------------------------
@@ -176,6 +186,7 @@ type EmitResult struct {
 	ScriptAsm            string
 	ConstructorSlots     []ConstructorSlot
 	CodeSepIndexSlots    []CodeSepIndexSlot
+	CodePartLenSlots     []CodePartLenSlot
 	CodeSeparatorIndex   int   // -1 if no OP_CODESEPARATOR was emitted
 	CodeSeparatorIndices []int // per-method byte offsets
 	SourceMap            []SourceMapping
@@ -200,6 +211,8 @@ type emitContext struct {
 	rawScriptSpans       []RawScriptSpan
 	// R-095 — verify_code_part_len length fields awaiting back-patch.
 	codePartLenFixups []codePartLenFixup
+	// N-051 — pin length fields the SDK patches at deploy time.
+	codePartLenSlots []CodePartLenSlot
 }
 
 // codePartLenFixup records one fixed-width length field reserved by
@@ -651,13 +664,24 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		// R-095: pin SIZE(_codePart) against the code part's own deployed byte
 		// length.
 		//
-		//   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+		//   OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
 		//
 		// LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
 		// Script number push: the value being patched IS the length of the
 		// script that contains it, so a width that varied with the value would
 		// be self-referential. OP_BIN2NUM normalises it back to a minimal
 		// Script number so the comparison is numeric.
+		//
+		// N-051 — the comparison is ALWAYS an equality. It used to degrade to
+		// OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+		// deployed length unknown here, and a lower bound lets a spender claim
+		// a TRUNCATED _codePart that ends at any 0x6a byte inside the baked
+		// value, planting attacker-chosen code in the continuation. When the
+		// length is not exact at compile time the field is recorded as a
+		// codePartLenSlots entry and the SDK writes the real deployed code-part
+		// length into it. The template keeps the compile-time lower bound, so
+		// an SDK that does not patch produces a contract whose honest spends
+		// fail (funds stuck), never one that accepts a truncated code part.
 		if err := ctx.emitOpcode("OP_DUP"); err != nil {
 			return err
 		}
@@ -668,11 +692,7 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		if err := ctx.emitOpcode("OP_BIN2NUM"); err != nil {
 			return err
 		}
-		cmp := "OP_GREATERTHANOREQUAL"
-		if op.CodePartLenExact {
-			cmp = "OP_NUMEQUAL"
-		}
-		if err := ctx.emitOpcode(cmp); err != nil {
+		if err := ctx.emitOpcode("OP_NUMEQUAL"); err != nil {
 			return err
 		}
 		if err := ctx.emitOpcode("OP_VERIFY"); err != nil {
@@ -683,6 +703,9 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 			asmIndex:        asmIndex,
 			delta:           op.CodePartLenDelta,
 		})
+		if !op.CodePartLenExact {
+			ctx.codePartLenSlots = append(ctx.codePartLenSlots, CodePartLenSlot{ByteOffset: valueByteOffset})
+		}
 	case "push_codesep_index":
 		// Emit an OP_0 placeholder that the SDK will replace with the adjusted
 		// codeSeparatorIndex at runtime.
@@ -814,6 +837,7 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 		ScriptAsm:            ctx.getAsm(),
 		ConstructorSlots:     ctx.constructorSlots,
 		CodeSepIndexSlots:    ctx.codeSepIndexSlots,
+		CodePartLenSlots:     ctx.codePartLenSlots,
 		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
 		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 		SourceMap:            ctx.sourceMap,
@@ -884,6 +908,7 @@ func EmitMethod(method *StackMethod) (*EmitResult, error) {
 		ScriptAsm:            ctx.getAsm(),
 		ConstructorSlots:     ctx.constructorSlots,
 		CodeSepIndexSlots:    ctx.codeSepIndexSlots,
+		CodePartLenSlots:     ctx.codePartLenSlots,
 		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
 		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 		SourceMap:            ctx.sourceMap,

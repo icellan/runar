@@ -294,6 +294,11 @@ We write `<S, env, sigma> ==> <env', sigma'>` for statement evaluation.
     <x = e, env, sigma>  ==>  <env[x -> v], sigma>
 
     <e, env, sigma> -->* v
+    x is a parameter of the enclosing method
+    ──────────────────────────────────────────────
+    <x = e, env, sigma>  ==>  <env[x -> v], sigma>
+
+    <e, env, sigma> -->* v
     p is a mutable property
     ──────────────────────────────────────────────
     <this.p = e, env, sigma>  ==>  <env, sigma[p -> v]>
@@ -303,6 +308,8 @@ We write `<S, env, sigma> ==> <env', sigma'>` for statement evaluation.
     ──────────────────────────────────────────────
     <this.p = e, env, sigma>  ==>  ERROR: cannot assign to readonly property
 ```
+
+Method parameters (of public and private methods alike) are assignable locals: `x = e` and compound forms such as `x += e` rebind the parameter for the rest of the method body, including after an `if` or loop whose body reassigns it, and never change the caller's argument or any property.
 
 ### 4.3 If Statement
 

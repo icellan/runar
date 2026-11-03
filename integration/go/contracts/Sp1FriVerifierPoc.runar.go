@@ -2,17 +2,15 @@ package contracts
 
 import runar "github.com/icellan/runar/packages/runar-go"
 
-// @acknowledgeUnsoundSP1FriVerifier
+// THIS CONTRACT DOES NOT COMPILE IN V1 (F-007).
 //
-// THIS CONTRACT COMPILES TO AN UNSOUND VERIFIER AND MUST NOT HOLD VALUE.
-//
-// The directive above is required as of 2026-08-17: without it the compiler
-// REFUSES to emit `verifySP1FRI`, because the per-query chain (input-batch MMCS
-// verify, FRI fold, final-poly equality) is never emitted and the locking
-// script therefore ACCEPTS forged Merkle openings. This file carries the
-// directive because it exists to develop and pin that very gap — the
-// corruption fixtures in tests/vectors/sp1/fri/corruptions are replayed through
-// the script it produces. It is not an example to copy.
+// The SP1 FRI verifier is not implemented for v1: the emitted body checks only
+// the Fiat-Shamir transcript and grinding witnesses, never the per-query MMCS
+// openings, FRI fold chain, final-poly equality or Steps 6/7 out-of-domain
+// constraint check. The body is therefore fail-closed (it can never accept) and
+// the compiler refuses every contract that calls verifySP1FRI, with no
+// override. This file is kept as the ABI reference and test input for that
+// refusal and for the post-v1 verifier. See docs/sp1-fri-verifier.md.
 //
 // Sp1FriVerifierPoc exercises the `runar.VerifySP1FRI` intrinsic at the
 // frontend level so covenant authors can write ABIs against it before the
@@ -31,18 +29,7 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //
 // # Status
 //
-// Compilation now succeeds end-to-end through the full pipeline
-// (parse → validate → typecheck → ANF → stack → emit). The
-// `EmitFullSP1FriVerifierBody` orchestrator (compilers/go/codegen/sp1_fri.go)
-// is wired into the Go compiler's `lowerVerifySP1FRI` dispatch, and the PoC
-// contract produces a deployable hex-encoded locking script (~280 KB of
-// opcodes for the PoC param tuple). End-to-end script-VM acceptance against
-// the canonical Plonky3 minimal-guest FRI fixture is exercised by
-// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture`.
-//
-// The remaining follow-up is the per-query unlocking-script encoder for the
-// Sp1VKeyHash constructor-slot mechanism plus the structured field-push
-// prelude — see docs/sp1-fri-verifier.md §10 for the per-query layout.
+// Refused at compile time in v1 (F-007); see the header above.
 type Sp1FriVerifierPoc struct {
 	runar.SmartContract
 	// Sp1VKeyHash is the 32-byte keccak256 digest of the SP1 verifying key.

@@ -296,6 +296,59 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '0' },
     ],
   },
+  // N-179 (N-038): a stateful method declared `@sighash SINGLE|FORKID`, whose
+  // ABI carries no change params. The deploy locking script is pinned here;
+  // the call-time behaviour all seven SDKs must share is pinned by
+  // conformance/sdk-call/.
+  {
+    name: 'sighash-single-stateful',
+    source: 'examples/ts/sighash-single-stateful/SingleCounter.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  // F-352 (CL-GAP-148): the second witness for six mutable-state shapes that
+  // had exactly one. Each pins the deploy-time state layout of its shape at
+  // the SDK layer; the fixtures themselves live under conformance/tests/.
+  {
+    name: 'state-leaderboard',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'bigint', value: '10' },
+    ],
+  },
+  {
+    name: 'state-digest-log',
+    constructorArgs: [
+      { type: 'Ripemd160', value: ADDR },
+    ],
+  },
+  {
+    name: 'state-ledger',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'bigint', value: '100' },
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  {
+    name: 'state-owner-box',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+    ],
+  },
+  {
+    name: 'state-notary',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+      { type: 'ByteString', value: 'aabb' },
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  {
+    name: 'state-array-set',
+    constructorArgs: [],
+  },
   // R-248: the corpus's only MUTABLE `boolean` state field. The compiler
   // spells the type `boolean` (never `bool`) and annotates it
   // `encoding: "bool1", byteLength: 1`; five of the seven SDKs matched only
@@ -319,15 +372,32 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'boolean', value: 'false' },
     ],
   },
+  // F-035: the corpus's only MUTABLE RabinPubKey / RabinSig state fields.
+  // Every compiler stores both as a bare 8-byte OP_NUM2BIN word (they are
+  // bigint aliases); the SDKs used to push-data frame them. The values are
+  // multi-byte and the second is negative, so byte order and the sign bit are
+  // pinned too. The tool `type` is the arg CONVERSION (bigint -> integer); the
+  // field type the codec sees comes from the artifact's stateFields.
+  {
+    name: 'state-rabin',
+    source: 'conformance/sdk-output/contracts/RabinState.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '1311768467294899695' },
+      { type: 'bigint', value: '-1000000007' },
+      { type: 'bigint', value: '3' },
+    ],
+  },
   // N-043: the three verdicts every SDK must agree on when a 1sat-ordinals
   // envelope meets a `SIZE(_codePart)` pin. The envelope is concatenated INTO
   // the code part, and its length is a deploy-time value the compiler never
   // sees, so the combination is only decidable here — in the SDK.
   //
   // MessageBoard has a ByteString state field, so its pin is an EQUALITY pin
-  // (9c) on the deployed code-part length: 1310 bytes (1304 before W1's
-  // unsigned 32-bit extractor zero-pad grew MessageBoard by 6). Attaching a
-  // 23-byte envelope makes the real code part 1333, every honest spend fails OP_VERIFY,
+  // (9c) on the deployed code-part length: 1360 bytes (1304 before W1's
+  // unsigned 32-bit extractor zero-pad grew MessageBoard by 6, 1310 before
+  // F-024's continuation value check grew its `post` method by 16, 1326 before
+  // N-044's unsigned PUSHDATA reader + PUSHDATA4 writer grew it by 34). Attaching a
+  // 23-byte envelope makes the real code part 1383, every honest spend fails OP_VERIFY,
   // and the funds are locked. Both escape routes are closed (the truncated code
   // part dies on clause 8b), so refusal is the only safe verdict.
   {
@@ -339,18 +409,21 @@ const TEST_SPECS: TestSpec[] = [
     ],
     inscription: { contentType: 'text/plain', data: '6869' },
     expectRefusal: {
-      pattern: 'pins SIZE\\(_codePart\\) == 1310',
+      pattern: 'pins SIZE\\(_codePart\\) == 1360',
       reason:
         'MessageBoard pins its deployed code-part length exactly; a 23-byte ' +
         'ordinals envelope lands inside the code part and breaks the pin, so ' +
         'every spend would fail OP_VERIFY with the funds already committed.',
     },
   },
-  // Control 1: StateCovenant's readonly params are variable-width, so the
-  // compiler degrades the pin to a LOWER bound (a2 = OP_GREATERTHANOREQUAL).
-  // Extra envelope bytes SATISFY a lower bound. Guarding `a2` would turn the
-  // N-043 fix into an outage for every contract of this shape, so this fixture
-  // must stay ACCEPTED by all seven tiers.
+  // Control 1: StateCovenant's readonly params are variable-width. This used
+  // to degrade the pin to a LOWER bound (a2), which the envelope satisfied.
+  // Since N-051 the pin is an equality whose 4-byte value is an artifact
+  // `codePartLenSlots` entry each SDK writes at deploy time — the INSCRIBED
+  // code-part length here, since the envelope is part of `_codePart`. Refusing
+  // would turn the N-043 fix into an outage for every contract of this shape,
+  // so this fixture must stay ACCEPTED by all seven tiers, with byte-identical
+  // patched lengths. (The case name predates N-051.)
   {
     name: 'inscription-pin-lower-bound',
     source: 'examples/ts/state-covenant/StateCovenant.runar.ts',
@@ -533,6 +606,30 @@ const TEST_SPECS: TestSpec[] = [
     // a `__N` state field at all.
     name: 'fixed-array-write',
     constructorArgs: [],
+  },
+  {
+    // CK21-FU2 (checkpoint-21 red): N-093's `@embedAlways` / `@sighash`
+    // directives fixture. readonly pubKeyHash: Addr, readonly deployTag:
+    // ByteString (the latter kept alive only by `@embedAlways` — without
+    // the directive it would be dead-code-eliminated and never reach the
+    // locking script, since neither spendAll nor spendSingle reads it).
+    name: 'compiler-directives',
+    constructorArgs: [
+      { type: 'Addr', value: ADDR },
+      { type: 'ByteString', value: HASH32 },
+    ],
+  },
+  {
+    // CK21-FU2: N-093's companion fixture — `@embedAlways` applied to EVERY
+    // scalar slot a FixedArray<bigint, 3> expands into (tags__0..tags__2),
+    // keeping tags__0 and tags__2 alive even though unlock() reads only
+    // tags[1]. `tags` carries a literal initializer ([7n, 9n, 11n]), so per
+    // the property-initializer rule it is excluded from the auto-generated
+    // constructor — the only constructor arg is pubKeyHash: Addr.
+    name: 'embed-always-fixed-array',
+    constructorArgs: [
+      { type: 'Addr', value: ADDR },
+    ],
   },
 ];
 

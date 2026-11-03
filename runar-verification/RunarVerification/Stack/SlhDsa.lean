@@ -68,7 +68,7 @@ def paramsSHA2_128f : Params := mkParams 16 66 22 6  33
 def paramsSHA2_192s : Params := mkParams 24 63 7  14 17
 def paramsSHA2_192f : Params := mkParams 24 66 22 8  33
 def paramsSHA2_256s : Params := mkParams 32 64 8  14 22
-def paramsSHA2_256f : Params := mkParams 32 68 17 8  35
+def paramsSHA2_256f : Params := mkParams 32 68 17 9  35
 
 /-- Look up params by parameter-set key. -/
 def paramsByKey : String → Option Params
@@ -936,10 +936,19 @@ private def parseLeafIdx (t : Tracker) (leafIdxLen hp : Nat) : Tracker :=
        , .push (.bigint (1 <<< hp)), .opcode "OP_MOD" ]
   t.rawBlock 1 (some "leafIdx") body
 
-private def computeTreeAddr8 (t : Tracker) : Tracker :=
+/-- F-034: when the tree index has `h - h' ≥ 64` bits (SLH-DSA-SHA2-256f),
+about half of all indices are `≥ 2^63` and their minimal script-number
+encoding needs a 9th (sign) byte, so `8 OP_NUM2BIN` fails. `wide` encodes
+in 9 bytes and drops the trailing (little-endian) `0x00` sign byte. Mirrors
+TS `emitVerifySLHDSA` §4b. -/
+private def computeTreeAddr8 (t : Tracker) (wide : Bool := false) : Tracker :=
   let t := t.copyToTop "treeIdx" (some "_ti8")
-  let body : List StackOp :=
-    [.push (.bigint 8), .opcode "OP_NUM2BIN"] ++ emitReverseN 8
+  let toBin : List StackOp :=
+    if wide then
+      [.push (.bigint 9), .opcode "OP_NUM2BIN", .push (.bigint 8), .opcode "OP_SPLIT", .drop]
+    else
+      [.push (.bigint 8), .opcode "OP_NUM2BIN"]
+  let body : List StackOp := toBin ++ emitReverseN 8
   t.rawBlock 1 (some "treeAddr8") body
 
 private def computeKeypair4 (t : Tracker) : Tracker :=
@@ -1079,7 +1088,7 @@ def emitVerifySLHDSABody (paramKey : String) : List StackOp :=
     let t := parseTreeIdx t treeIdxLen (h - hp)
     let t := parseLeafIdx t leafIdxLen hp
     -- §4b. treeAddr8 (8B BE) + keypair4 (4B BE).
-    let t := computeTreeAddr8 t
+    let t := computeTreeAddr8 t (decide (h - hp ≥ 64))
     let t := computeKeypair4 t
     -- §5. Parse FORS sig.
     let t := t.toTop "sigRest"
@@ -1133,7 +1142,7 @@ with each `SLH-DSA-SHA2-{128,192,256}{s,f}` parameter set
 | `SLH-DSA-SHA2-192s` |  24 |  63 |   7 |   9 |  14 |  17 |       4 |
 | `SLH-DSA-SHA2-192f` |  24 |  66 |  22 |   3 |   8 |  33 |       4 |
 | `SLH-DSA-SHA2-256s` |  32 |  64 |   8 |   8 |  14 |  22 |       4 |
-| `SLH-DSA-SHA2-256f` |  32 |  68 |  17 |   4 |   8 |  35 |       4 |
+| `SLH-DSA-SHA2-256f` |  32 |  68 |  17 |   4 |   9 |  35 |       4 |
 
 These vectors are mirrored exactly by `paramsSHA2_*` above (`mkParams n
 h d a k`, with `len₁ = 2n`, `len₂ = 3`, `len = len₁ + len₂`, `w = 16`,
@@ -1235,7 +1244,7 @@ axiom runOps_emitVerifySLHDSABody_SHA2_256s_eq :
                 msg sig pubkey) :: rest }
 
 /-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-256f
-(FIPS 205, Table 2; `n=32, h=68, d=17, a=8, k=35`). -/
+(FIPS 205, Table 2; `n=32, h=68, d=17, a=9, k=35`). -/
 axiom runOps_emitVerifySLHDSABody_SHA2_256f_eq :
     ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
       stkSt.stack

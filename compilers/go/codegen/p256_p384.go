@@ -465,7 +465,7 @@ func cEmitCoordCanonVerify(t *ECTracker, xName, yName string, c *nistCurveParams
 	})
 }
 
-func cAffineAdd(t *ECTracker, c *nistCurveParams) {
+func cAffineAdd(t *ECTracker, c *nistCurveParams, abortOnY0Tangent bool) {
 	// The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
 	// denominator is zero and the correct slope is the TANGENT, (3px^2 + a)/(2py)
 	// — and a = -3 on both NIST curves, so the numerator is 3px^2 - 3.
@@ -523,6 +523,29 @@ func cAffineAdd(t *ECTracker, c *nistCurveParams) {
 		e(StackOp{Op: "opcode", Code: "OP_SUB"})
 		e(StackOp{Op: "opcode", Code: "OP_NOT"})
 	})
+
+	// N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+	// when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+	// silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+	// order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+	//   ok = NOT(cond AND px != 0 AND py == 0)
+	// px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+	// Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+	// total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+	// cond = 1 with py == 0 there already means px == 0, the exempt case.
+	if abortOnY0Tangent {
+		t.copyToTop("px", "_px_g")
+		t.copyToTop("py", "_py_g")
+		t.copyToTop("_cond", "_cond_g")
+		t.rawBlock([]string{"_px_g", "_py_g", "_cond_g"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_SWAP"})
+			e(StackOp{Op: "opcode", Code: "OP_NOT"})
+			e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+			e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+			e(StackOp{Op: "opcode", Code: "OP_NOT"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
 
 	// chord numerator / denominator
 	t.copyToTop("qy", "_qy1")
@@ -1496,7 +1519,7 @@ func cEmitVerifyECDSA(
 		}
 	}
 
-	cAffineAdd(t, c)
+	cAffineAdd(t, c, false)
 
 	// Step 8: x_R mod n == r
 	t.toTop("ry")
@@ -1554,7 +1577,7 @@ func EmitP256Add(emit func(StackOp)) {
 	// R-117: cAffineAdd's selectors compare these four values RAW.
 	cEmitCoordCanonVerify(t, "px", "py", p256CurveParams)
 	cEmitCoordCanonVerify(t, "qx", "qy", p256CurveParams)
-	cAffineAdd(t, p256CurveParams)
+	cAffineAdd(t, p256CurveParams, true)
 	cComposePoint(t, "rx", "ry", "_result", p256CurveParams)
 }
 
@@ -1672,7 +1695,7 @@ func EmitP384Add(emit func(StackOp)) {
 	// R-117: cAffineAdd's selectors compare these four values RAW.
 	cEmitCoordCanonVerify(t, "px", "py", p384CurveParams)
 	cEmitCoordCanonVerify(t, "qx", "qy", p384CurveParams)
-	cAffineAdd(t, p384CurveParams)
+	cAffineAdd(t, p384CurveParams, true)
 	cComposePoint(t, "rx", "ry", "_result", p384CurveParams)
 }
 

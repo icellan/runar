@@ -60,6 +60,10 @@ module Runar
       # documents the lower bound that the on-chain check also enforces.
       return false if pad_int < 0 || pad_int >= RABIN_PADDING_LIMIT
 
+      # Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+      # the same residue but the deployed script aborts on it.
+      return false if sig_int >= n
+
       msg_bytes = [msg_hex].pack('H*')
       hash_bytes = Digest::SHA256.digest(msg_bytes)
       hash_int = bytes_to_unsigned_le(hash_bytes)

@@ -258,13 +258,13 @@ pub fn encode_point(x_hex: &str, y_hex: &str) -> String {
 /// For integration tests we just need a few known points. We hardcode
 /// the generator and use the k256 crate to compute multiples.
 pub fn ec_mul_gen(k: u64) -> (String, String) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::sec1::ToSec1Point;
     use k256::{ProjectivePoint, Scalar};
 
     let scalar = Scalar::from(k);
     let point = ProjectivePoint::GENERATOR * scalar;
     let affine = point.to_affine();
-    let encoded = affine.to_encoded_point(false); // uncompressed: 04 || x || y
+    let encoded = affine.to_sec1_point(false); // uncompressed: 04 || x || y
 
     let x_bytes = encoded.x().expect("point at infinity");
     let y_bytes = encoded.y().expect("point at infinity");
@@ -300,7 +300,7 @@ pub fn ec_mul_gen_scalar(k: u64) -> (k256::Scalar, k256::ProjectivePoint) {
 /// where the proof satisfies s*G = R + e*P.
 #[allow(dead_code)]
 pub fn generate_schnorr_proof(k: u64, r_nonce: u64, e_challenge: u64) -> (String, String, String, String) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::sec1::ToSec1Point;
     use k256::{ProjectivePoint, Scalar};
 
     let k_scalar = Scalar::from(k);
@@ -309,14 +309,14 @@ pub fn generate_schnorr_proof(k: u64, r_nonce: u64, e_challenge: u64) -> (String
 
     // P = k*G (public key)
     let p_point = (ProjectivePoint::GENERATOR * k_scalar).to_affine();
-    let p_enc = p_point.to_encoded_point(false);
+    let p_enc = p_point.to_sec1_point(false);
     let px: String = p_enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let py: String = p_enc.y().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let pub_key_hex = format!("{}{}", pad64(&px), pad64(&py));
 
     // R = r*G (nonce commitment)
     let r_point = (ProjectivePoint::GENERATOR * r_scalar).to_affine();
-    let r_enc = r_point.to_encoded_point(false);
+    let r_enc = r_point.to_sec1_point(false);
     let rx: String = r_enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let ry: String = r_enc.y().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let r_point_hex = format!("{}{}", pad64(&rx), pad64(&ry));
@@ -343,7 +343,7 @@ pub fn generate_schnorr_proof(k: u64, r_nonce: u64, e_challenge: u64) -> (String
 /// a Bitcoin Script number (LE signed magnitude) for use with SdkValue::Bytes.
 #[allow(dead_code)]
 pub fn generate_schnorr_proof_fs(k: u64, r_nonce: u64) -> (String, String, String) {
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::sec1::ToSec1Point;
     use k256::{FieldBytes, ProjectivePoint, Scalar};
 
     let k_scalar = Scalar::from(k);
@@ -351,14 +351,14 @@ pub fn generate_schnorr_proof_fs(k: u64, r_nonce: u64) -> (String, String, Strin
 
     // P = k*G (public key)
     let p_affine = (ProjectivePoint::GENERATOR * k_scalar).to_affine();
-    let p_enc = p_affine.to_encoded_point(false);
+    let p_enc = p_affine.to_sec1_point(false);
     let px: String = p_enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let py: String = p_enc.y().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let pub_key_hex = format!("{}{}", pad64(&px), pad64(&py));
 
     // R = r*G (nonce commitment)
     let r_affine = (ProjectivePoint::GENERATOR * r_scalar).to_affine();
-    let r_enc = r_affine.to_encoded_point(false);
+    let r_enc = r_affine.to_sec1_point(false);
     let rx: String = r_enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let ry: String = r_enc.y().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let r_point_hex = format!("{}{}", pad64(&rx), pad64(&ry));

@@ -65,6 +65,8 @@ fn emit_wots_one_chain(emit: &mut dyn FnMut(StackOp), chain_index: usize) {
                 StackOp::Opcode("OP_SHA256".into()),           // F result
                 StackOp::Swap,                                  // pubSeed new_X digit(=0)
             ],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
     emit(StackOp::Drop); // drop digit (now 0)

@@ -78,6 +78,10 @@ class ByteStringLiteral:
     """A hex-encoded byte string literal."""
 
     value: str  # hex-encoded
+    # The literal's opening quote (N-432). Only the .runar.ts parser sets it,
+    # as the TS reference does. Not part of equality: two literals with the
+    # same value are the same literal wherever they were written.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -85,6 +89,11 @@ class Identifier:
     """A variable or name reference."""
 
     name: str
+    # The identifier's token (N-463). Every surface parser sets it, as the TS
+    # reference does; typecheck derives a composite expression's
+    # position from its leftmost child (see typecheck._expr_loc). Not part of
+    # equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -92,6 +101,8 @@ class PropertyAccessExpr:
     """``this.x`` -- property access on the contract."""
 
     property: str
+    # The ``this`` token (N-463); .runar.ts parser only. Not part of equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -109,6 +120,11 @@ class BinaryExpr:
     op: str  # "+", "-", "*", "/", "%", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "&", "|", "^", "<<", ">>"
     left: Expression
     right: Expression
+    # Where the expression starts, including a leading ``(`` (N-472). Every
+    # surface parser sets it, as the TS reference does; for a synthesized node
+    # typecheck falls back to the leftmost leaf (see typecheck._expr_loc). Not part of
+    # equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -117,6 +133,8 @@ class UnaryExpr:
 
     op: str  # "!", "-", "~"
     operand: Expression
+    # The operator token (N-472); every surface parser sets it. Not part of equality.
+    source_location: SourceLocation | None = field(default=None, compare=False)
 
 
 @dataclass

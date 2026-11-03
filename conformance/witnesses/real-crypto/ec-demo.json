@@ -1,0 +1,130 @@
+{
+  "fixture": "ec-demo",
+  "kind": "stateless-signed",
+  "note": "N-104 / R30 route A. ECDemo.checkMulIdentity() computes ecMul(this.pt, 1n), which the always-on EC optimizer rewrites to this.pt (ec-mul-one). The rewrite used to drop the operand validation ecMul performs first (R-157: on the curve, or exactly O), so a deployer-supplied off-curve or non-canonical pt made checkMulIdentity() SUCCEED with the optimizer on and ABORT with it off: one source, two meanings. The rewrite now keeps that gate (assert(pt === O || ecOnCurve(pt))) ahead of the alias, in all seven tiers, which is what moved this fixture's golden. Every spend below executes the fixture's actual compiled locking script on @bsv/sdk Spend. The two 'attack' rejects are the forced near-misses: both were ACCEPTED by the pre-fix compiler (measured, remediation-logs/N-104/witness-prefix.txt) and are rejected now, exactly as the unoptimized ecMul rejects them. The O accept pins that O is exempt from the gate, as it is inside ecMul.",
+  "constructorArgs": {
+    "pt": "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+  },
+  "spends": [
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "expect": "accept",
+      "note": "pt = G: on the curve, so ecMul's gate passes and 1*G = G"
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": "accept",
+      "note": "pt = O (the all-zero point): exempt from the R-157 gate inside ecMul, and so from the kept gate; 1*O = O"
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): off-curve canonical pt = (5, 7). Pre-fix the rewrite returned pt unchecked and this spend was ACCEPTED; the unoptimized ecMul aborts on it. Now rejected by the kept on-curve-or-O gate. cryptoNearMiss: the TestContract source interpreter models ecMul as bare curve arithmetic with no R-157 operand gate, so it cannot model this script-only rejection (a pre-existing interpreter gap, reported with N-104); the row instead asserts the rejection reached the Spend engine",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "checkMulIdentity",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc300000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): non-canonical pt = (p+1, 2), x >= p. Pre-fix ACCEPTED; ecOnCurve rejects a non-canonical coordinate, so the kept gate rejects it as ecMul does. cryptoNearMiss: the TestContract source interpreter models ecMul as bare curve arithmetic with no R-157 operand gate, so it cannot model this script-only rejection (a pre-existing interpreter gap, reported with N-104); the row instead asserts the rejection reached the Spend engine",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "checkOnCurve",
+      "args": [],
+      "expect": "accept",
+      "note": "control on another method of the same script: G is on the curve"
+    },
+    {
+      "method": "checkX",
+      "args": [
+        "55066263022277343669578718895168534326250603453777594175500187360389116729240n"
+      ],
+      "expect": "accept",
+      "note": "control: ecPointX(G) == Gx"
+    },
+    {
+      "method": "checkX",
+      "args": [
+        "55066263022277343669578718895168534326250603453777594175500187360389116729241n"
+      ],
+      "expect": "reject",
+      "note": "control: ecPointX(G) != Gx + 1, so the accepts are not vacuous"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+        "89565891926547004231252920425935692360644145829622209833684329913297188986597n",
+        "12158399299693830322967808612713398636155367887041628176798871954788371653930n"
+      ],
+      "expect": "accept",
+      "note": "N-110 honest doubling: pt = other = G takes the tangent path (py != 0), 2G = (c6047f..., 1ae168...), coordinates computed independently in Python from the curve parameters"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+        "89565891926547004231252920425935692360644145829622209833684329913297188986597n",
+        "12158399299693830322967808612713398636155367887041628176798871954788371653931n"
+      ],
+      "expect": "reject",
+      "note": "N-110 control: the doubling accept is not vacuous, 2G's y + 1 is rejected"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee51ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a",
+        "112711660439710606056748659173929673102114977341539408544630613555209775888121n",
+        "25583027980570883691656905877401976406448868254816295069919888960541586679410n"
+      ],
+      "expect": "accept",
+      "note": "N-110 honest chord: G + 2G = 3G, independently computed; the new tangent guard is inert when the points differ"
+    },
+    {
+      "method": "checkAdd",
+      "args": [
+        "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000",
+        "115792089237316195423570985008687907853269984665640564039457584007908834671653n",
+        "0n"
+      ],
+      "constructorArgs": {
+        "pt": "0x00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss): pt = other = (5, 0), an off-curve point with y = 0. The tangent 3x^2 / 2y has no denominator; before N-110 inv(0) = 0 made the script return (p - 10, 0) and this exact spend was ACCEPTED. Now the adder OP_VERIFYs NOT(cond AND px != 0 AND py == 0) and the script aborts. The TestContract interpreter models the same abort (N-110), so source and script agree"
+    },
+    {
+      "method": "checkNegateRoundtrip",
+      "args": [],
+      "expect": "accept",
+      "note": "F-269: pt = G. checkNegateRoundtrip's ecNegate(neg1) is now rewritten by R7 (ec-negate-negate) THROUGH the pass-04 alias neg1 = @ref:t1 to an alias of this.pt; the inner ecNegate(this.pt) stays (calls are never dead-code-eliminated). This spend executes that rewritten method on the real Spend engine: -(-G) = G"
+    },
+    {
+      "method": "checkNegateRoundtrip",
+      "args": [],
+      "constructorArgs": {
+        "pt": "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc300000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "expect": "reject",
+      "note": "ATTACK (forced near-miss), F-269: non-canonical pt = (p+1, 2), x >= p. R7 elides the OUTER ecNegate only; the inner ecNegate(this.pt) that checks width and canonicity is kept, so the rewritten script must still abort here exactly as the unoptimized one does (an elided operand check would accept: -(-pt) has the same bytes as pt)"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "d80b28d0018f3ad00a5ebaed2973affa1e0fbac8368942ad04c97d2b228b2a20",
+    "expected-ir.json": "5630a2f7b9d5a0d7d8e58201815c38151419ab7686ef6c50d2f03f15693f6d32"
+  },
+  "goldenHashesNote": "F-269 (user decision R77) moved both goldens: the EC optimizer now resolves operands through @ref: aliases (through names bound once in the method only), so in checkNegateRoundtrip `neg2 = ecNegate(neg1)` with `neg1 = @ref:t1`, `t1 = ecNegate(this.pt)` is rewritten by R7 to `t2 = @ref:t0` (-1091 script bytes: one ecNegate expansion; no other method changes). The two checkNegateRoundtrip spends above execute the rewritten method on @bsv/sdk Spend: -(-G) = G accepts, and a non-canonical pt is still rejected because the inner ecNegate's width/canonicity check is kept. The script compiled fold-ON (what this oracle runs) is byte-identical to the fold-OFF golden for this fixture, so these spends run the golden's own bytes. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous pins: expected-script.hex eaba19061fd2896d8a9a2fca5359bb3bd926ba58360d3fb19afcbb88c6984731, expected-ir.json 9ec2a00b5110348007801efc6986ceb64db8c26026667bffd5e728a5fe37f2fa. Previous note: N-110 moved expected-script.hex only (+24 bytes: 12 per ecAdd call, two calls): affineAdd now aborts when it doubles a point with y = 0 other than O, instead of returning (p - 2x, 0) through inv(0) = 0. expected-ir.json is unmoved. The checkAdd spends above re-execute the new bytes on @bsv/sdk Spend: honest doubling and chord accept with independently computed coordinates, the y = 0 doubling that the previous script accepted is rejected. All seven tiers produce these bytes (conformance golden STRICT and multi-format, both fold modes). Previous note: N-104 moved both goldens: checkMulIdentity's ecMul(pt, 1n) rewrite now carries ecMul's operand gate (t2_inf, t2_isinf, t2_oncurve, t2_ok, t2_gate in expected-ir.json; +877 bytes of script). Nothing else in the fixture changed. The pin is self-invalidating: any later change to either golden must come back through this witness, whose spends re-execute the fixture's compiled locking script on the real @bsv/sdk Spend engine. All seven tiers produce these bytes (conformance multi-format, both fold modes)."
+}

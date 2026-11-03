@@ -18,7 +18,22 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
+from runar_compiler.frontend.sighash_directive import (
+    lost_directive_message,
+    resolve_native_sighash,
+    unknown_move_attribute_message,
+)
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.loop_condition import normalize_loop_condition  # N-115
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +85,8 @@ TOK_QUESTION = 41
 TOK_ARROW = 42
 TOK_SHL = 43
 TOK_SHR = 44
+# N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+TOK_HASH = 45
 
 
 class Token:
@@ -211,19 +228,22 @@ def _is_hex_digit(ch: str) -> bool:
 
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-424: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
 # ---------------------------------------------------------------------------
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -277,55 +297,63 @@ def _tokenize(source: str) -> list[Token]:
 
         start_col = col
 
+        # N-093: `#[` opens an attribute. A `#` not followed by `[` stays an
+        # unknown character below.
+        if ch == "#" and i + 1 < n and source[i + 1] == "[":
+            tokens.append(Token(TOK_HASH, "#", line, start_col))
+            i += 1
+            col += 1
+            continue
+
         # String literals
         if ch == '"' or ch == "'":
             quote = ch
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1  # skip closing quote
                 col += 1
+                # N-019: this surface has no quoted literal; a terminated one
+                # is refused as an unexpected character (as the TS reference).
+                lex.append(lex_error("Unexpected character '%s'" % quote, file_name, line, start_col))
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
         # Numbers
         if "0" <= ch <= "9":
-            start = i
-            is_hex = False
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                is_hex = True
+            if ch == "0" and i + 1 < n and source[i + 1] == "x":
+                # F-026: a lowercase `0x` is a ByteString literal on this
+                # surface, whatever its length (as the TS reference).
                 i += 2
                 col += 2
+                hex_start = i
                 while i < n and _is_hex_digit(source[i]):
                     i += 1
                     col += 1
-            else:
-                while i < n and "0" <= source[i] <= "9":
-                    i += 1
-                    col += 1
-            # Skip trailing type suffixes like u8, u64, etc.
-            if not is_hex and i < n and source[i] == "u":
-                i += 1
-                col += 1
-                while i < n and "0" <= source[i] <= "9":
-                    i += 1
-                    col += 1
-            # Hex literals with even digit count → ByteString token; otherwise
-            # fall back to a numeric literal.
-            if is_hex:
-                hex_digits = source[start + 2 : i]
-                if len(hex_digits) > 0 and len(hex_digits) % 2 == 0:
-                    tokens.append(Token(TOK_STRING, hex_digits, line, start_col))
-                    continue
-            tokens.append(Token(TOK_NUMBER, source[start:i], line, start_col))
+                tokens.append(Token(TOK_STRING, source[hex_start:i], line, start_col))
+                continue
+            # F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+            end, value, _, _ = lex_number("move", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
+            tokens.append(Token(TOK_NUMBER, value, line, start_col))
             continue
 
         # Identifiers and keywords
@@ -404,7 +432,9 @@ def _tokenize(source: str) -> list[Token]:
             col += 1
             continue
 
-        # Skip unknown characters
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line, start_col))
         i += 1
         col += 1
 
@@ -416,12 +446,33 @@ def _tokenize(source: str) -> list[Token]:
 # Parser
 # ---------------------------------------------------------------------------
 
+class _MoveAttribute:
+    """N-093: one parsed `#[...]` attribute (see `_parse_attributes`)."""
+    __slots__ = ("kind", "flags", "loc")
+
+    def __init__(self, kind: str, flags: str | None, loc: SourceLocation):
+        self.kind = kind  # "embed_always" | "sighash"
+        self.flags = flags
+        self.loc = loc
+
+
 class _MoveParser:
     def __init__(self, file_name: str):
         self.file_name = file_name
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -489,6 +540,11 @@ class _MoveParser:
         is_unsafe = self.match_ident("unsafe")
 
         # module Name { ... }
+        # N-490: the synthesized constructor is anchored at the first struct's
+        # `struct` keyword (the `resource` token when it stands alone), or at
+        # `module` when the contract declares no struct.
+        ctor_loc = self.loc()
+        saw_struct = False
         if not self.match_ident("module"):
             raise ValueError("expected 'module' keyword")
 
@@ -504,6 +560,12 @@ class _MoveParser:
             parent_class = "UnsafeSmartContract"
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            # N-093: attributes before a function (`#[sighash(...)]`). Anything
+            # else they precede reads neither directive, so each one is refused.
+            attrs = self._parse_attributes()
+            if attrs and not (self.check_ident("public") or self.check_ident("fun")):
+                self._report_lost_attributes(attrs)
+
             # Skip use declarations inside the module
             if self.check_ident("use"):
                 self._skip_use_decl()
@@ -512,8 +574,14 @@ class _MoveParser:
             # resource struct or struct
             if self.check_ident("resource") or self.check_ident("struct"):
                 is_resource = self.check_ident("resource")
+                kind_loc = self.loc()
                 if is_resource:
                     self.advance()  # skip "resource"
+                    if self.check_ident("struct"):
+                        kind_loc = self.loc()
+                if not saw_struct:
+                    saw_struct = True
+                    ctor_loc = kind_loc
                 props = self._parse_move_struct()
                 if not is_unsafe and (
                     is_resource or any(not p.readonly for p in props)
@@ -524,7 +592,7 @@ class _MoveParser:
 
             # public fun or fun
             if self.check_ident("public") or self.check_ident("fun"):
-                method, has_mut = self._parse_move_function()
+                method, has_mut = self._parse_move_function(attrs)
                 if has_mut and not is_unsafe:
                     parent_class = "StatefulSmartContract"
                 methods.append(method)
@@ -536,7 +604,7 @@ class _MoveParser:
         self.expect(TOK_RBRACE)
 
         # Build constructor from properties
-        constructor = self._build_move_constructor(properties)
+        constructor = self._build_move_constructor(properties, ctor_loc)
 
         return ContractNode(
             name=module_name,
@@ -571,8 +639,16 @@ class _MoveParser:
 
         props: list[PropertyNode] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            # N-093: `#[embed_always]` before a field is the native spelling of
+            # `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+            embed_always = False
+            for attr in self._parse_attributes():
+                if attr.kind == "embed_always":
+                    embed_always = True
+                else:
+                    self._report_lost_attributes([attr])
             name_tok = self.expect(TOK_IDENT)
-            field_name = _snake_to_camel(name_tok.value)
+            field_name = self.declare(name_tok.value)
 
             self.expect(TOK_COLON)
 
@@ -598,6 +674,7 @@ class _MoveParser:
                 type=type_node,
                 readonly=readonly,
                 initializer=initializer,
+                embed_always=embed_always,
                 source_location=self.loc(),
             ))
 
@@ -661,7 +738,8 @@ class _MoveParser:
 
         if name == "FixedArray" and self.check(TOK_LT):
             self.advance()  # <
-            inner = self._parse_move_type_node()
+            with self._nest.nested(self.loc):
+                inner = self._parse_move_type_node()
             self.expect(TOK_COMMA)
             len_tok = self.expect(TOK_NUMBER)
             try:
@@ -678,7 +756,8 @@ class _MoveParser:
 
         if name == "vector" and self.check(TOK_LT):
             self.advance()
-            self._parse_move_type_node()  # discard inner type
+            with self._nest.nested(self.loc):
+                self._parse_move_type_node()  # discard inner type
             self._consume_move_generic_close()
             return PrimitiveType(name="ByteString")
 
@@ -719,8 +798,63 @@ class _MoveParser:
 
     # -- Function parsing ----------------------------------------------------
 
-    def _parse_move_function(self) -> tuple[MethodNode, bool]:
+    def _parse_attributes(self) -> list[_MoveAttribute]:
+        """N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+        `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+        otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+        identifier list, or `None` when the parentheses hold anything else or
+        are missing."""
+        attrs: list[_MoveAttribute] = []
+        while self.check(TOK_HASH):
+            loc = self.loc()
+            self.advance()
+            self.expect(TOK_LBRACKET)
+            name = self.advance().value if self.check(TOK_IDENT) else ""
+            flags: str | None = None
+            has_args = False
+            if self.check(TOK_LPAREN):
+                has_args = True
+                self.advance()
+                text = ""
+                ok = True
+                depth = 1
+                while not self.check(TOK_EOF):
+                    t = self.peek()
+                    if t.kind == TOK_LPAREN:
+                        depth += 1
+                    if t.kind == TOK_RPAREN:
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    if t.kind in (TOK_IDENT, TOK_PIPE):
+                        text += t.value
+                    else:
+                        ok = False
+                    self.advance()
+                self.expect(TOK_RPAREN)
+                flags = text if ok else None
+            while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+                self.advance()
+            self.expect(TOK_RBRACKET)
+            if name == "embed_always" and not has_args:
+                attrs.append(_MoveAttribute("embed_always", None, loc))
+            elif name == "sighash":
+                attrs.append(_MoveAttribute("sighash", flags, loc))
+            else:
+                self.errors.append(Diagnostic(
+                    message=unknown_move_attribute_message(name + ("(...)" if has_args else "")),
+                    severity=Severity.ERROR, loc=loc))
+        return attrs
+
+    def _report_lost_attributes(self, attrs: list[_MoveAttribute]) -> None:
+        for attr in attrs:
+            self.errors.append(Diagnostic(
+                message=lost_directive_message("@sighash" if attr.kind == "sighash" else "@embedAlways"),
+                severity=Severity.ERROR, loc=attr.loc))
+
+    def _parse_move_function(self, attrs: list[_MoveAttribute] | None = None) -> tuple[MethodNode, bool]:
         """Returns (method, has_mut_receiver)."""
+        attrs = attrs or []
         location = self.loc()
         visibility = "private"
 
@@ -736,14 +870,15 @@ class _MoveParser:
         self.expect_ident("fun")
 
         name_tok = self.expect(TOK_IDENT)
-        name = _snake_to_camel(name_tok.value)
+        name = self.declare(name_tok.value)
 
         params, has_mut = self._parse_move_params()
 
         # Optional return type: : Type
         has_return_type = False
         if self.match(TOK_COLON):
-            self._parse_move_type_name()  # skip return type
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            reject_unknown_return_type(self.errors, self._parse_move_type_node(), name, location, visibility == "public")
             has_return_type = True
 
         body = self._parse_move_block()
@@ -767,11 +902,21 @@ class _MoveParser:
                     source_location=last.source_location,
                 )
 
+        # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        # annotates nothing.
+        self._report_lost_attributes([a for a in attrs if a.kind != "sighash"])
+        sighash = resolve_native_sighash(
+            name, visibility == "public", [a.flags for a in attrs if a.kind == "sighash"],
+        )
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         ), has_mut
 
@@ -820,7 +965,7 @@ class _MoveParser:
                     continue
                 break
 
-            camel_name = _snake_to_camel(param_name)
+            camel_name = self.declare(param_name)
             params.append(ParamNode(
                 name=camel_name,
                 type=_move_map_type(type_name),
@@ -850,6 +995,10 @@ class _MoveParser:
     # -- Statement parsing ---------------------------------------------------
 
     def _parse_move_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_move_statement_inner()
+
+    def _parse_move_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # let [mut] name [: Type] = expr;
@@ -887,7 +1036,7 @@ class _MoveParser:
             mutable = True
 
         name_tok = self.expect(TOK_IDENT)
-        var_name = _snake_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if self.match(TOK_COLON):
@@ -917,6 +1066,7 @@ class _MoveParser:
 
         if tok.value == "assert_eq!":
             # assert_eq!(a, b, code) -> assert(a === b)
+            start = self.loc()
             left = self._parse_move_expression()
             self.expect(TOK_COMMA)
             right = self._parse_move_expression()
@@ -961,7 +1111,8 @@ class _MoveParser:
         else_block: list[Statement] = []
         if self.match_ident("else"):
             if self.check_ident("if"):
-                else_stmt = self._parse_move_if(self.loc())
+                with self._nest.nested(self.loc):
+                    else_stmt = self._parse_move_if(self.loc())
                 else_block = [else_stmt]
             else:
                 else_block = self._parse_move_block()
@@ -1051,135 +1202,152 @@ class _MoveParser:
     # -- Expression parsing (recursive descent with precedence) ---------------
 
     def _parse_move_expression(self) -> Expression:
-        return self._parse_move_or()
+        with self._nest.nested(self.loc):
+            return self._parse_move_or()
 
     def _parse_move_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_and()
         while self.match(TOK_PIPEPIPE):
             right = self._parse_move_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_move_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_bitwise_or()
         while self.match(TOK_AMPAMP):
             right = self._parse_move_bitwise_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_move_bitwise_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_bitwise_xor()
         while self.match(TOK_PIPE):
             right = self._parse_move_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_move_bitwise_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_bitwise_and()
         while self.match(TOK_CARET):
             right = self._parse_move_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_move_bitwise_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_equality()
         while self.match(TOK_AMP):
             right = self._parse_move_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_move_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_comparison()
         while True:
             if self.match(TOK_EQEQ):
                 right = self._parse_move_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)  # Map == to ===
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)  # Map == to ===
             elif self.match(TOK_NOTEQ):
                 right = self._parse_move_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)  # Map != to !==
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)  # Map != to !==
             else:
                 break
         return left
 
     def _parse_move_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_shift()
         while True:
             if self.match(TOK_LT):
                 right = self._parse_move_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match(TOK_LTEQ):
                 right = self._parse_move_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match(TOK_GT):
                 right = self._parse_move_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match(TOK_GTEQ):
                 right = self._parse_move_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_move_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_additive()
         while True:
             if self.match(TOK_SHL):
                 right = self._parse_move_additive()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match(TOK_SHR):
                 right = self._parse_move_additive()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_move_additive(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_multiplicative()
         while True:
             if self.match(TOK_PLUS):
                 right = self._parse_move_multiplicative()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match(TOK_MINUS):
                 right = self._parse_move_multiplicative()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_move_multiplicative(self) -> Expression:
+        start = self.loc()
         left = self._parse_move_unary()
         while True:
             if self.match(TOK_STAR):
                 right = self._parse_move_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASH):
                 right = self._parse_move_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_PERCENT):
                 right = self._parse_move_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_move_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_BANG):
-            operand = self._parse_move_unary()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         if self.match(TOK_MINUS):
-            operand = self._parse_move_unary()
-            return UnaryExpr(op="-", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
+            return UnaryExpr(op="-", operand=operand, source_location=op_loc)
         if self.match(TOK_TILDE):
-            operand = self._parse_move_unary()
-            return UnaryExpr(op="~", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_move_unary()
+            return UnaryExpr(op="~", operand=operand, source_location=op_loc)
         # Skip & (reference) -- it's a no-op in the Runar context
         if self.match(TOK_AMP):
             self.match_ident("mut")  # &mut expr -- skip both
-            return self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_move_unary()
         # Dereference * -- also a no-op
         if self.check(TOK_STAR) and self._is_deref():
             self.advance()
-            return self._parse_move_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_move_unary()
         return self._parse_move_postfix()
 
     def _is_deref(self) -> bool:
@@ -1245,7 +1413,7 @@ class _MoveParser:
 
         if tok.kind == TOK_STRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_IDENT:
             self.advance()
@@ -1281,9 +1449,9 @@ class _MoveParser:
                 # sites too.
                 if args and isinstance(args[0], Identifier) and args[0].name in ("contract", "self"):
                     args = args[1:]
-                return CallExpr(callee=Identifier(name=mapped_name), args=args)
+                return CallExpr(callee=Identifier(name=mapped_name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=mapped_name)
+            return Identifier(name=mapped_name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()
@@ -1322,7 +1490,7 @@ class _MoveParser:
 
     # -- Constructor builder -------------------------------------------------
 
-    def _build_move_constructor(self, properties: list[PropertyNode]) -> MethodNode:
+    def _build_move_constructor(self, properties: list[PropertyNode], loc: SourceLocation) -> MethodNode:
         # Only include properties without initializers as constructor params
         uninit_props = [p for p in properties if p.initializer is None]
 
@@ -1334,7 +1502,6 @@ class _MoveParser:
             Identifier(name=prop.name) for prop in uninit_props
         ]
 
-        loc = SourceLocation(file=self.file_name, line=1, column=0)
         body: list[Statement] = [
             ExpressionStmt(
                 expr=CallExpr(
@@ -1359,9 +1526,7 @@ class _MoveParser:
             params=params,
             body=body,
             visibility="public",
-            source_location=SourceLocation(
-                file=self.file_name, line=1, column=0,
-            ),
+            source_location=loc,
         )
 
 
@@ -1442,7 +1607,8 @@ def _fold_move_counting_while(decl: VariableDeclStmt, stub: ForStmt) -> Statemen
     Returns ``None`` when the pair is not a representable counting loop.
     """
     iter_name = decl.name
-    cond = stub.condition
+    # N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+    cond = normalize_loop_condition(stub.condition, iter_name)
     if not isinstance(cond, BinaryExpr):
         return None
     if not (isinstance(cond.left, Identifier) and cond.left.name == iter_name):
@@ -1544,9 +1710,21 @@ def _parse_move_number(s: str) -> Expression:
 # ---------------------------------------------------------------------------
 
 def parse_move(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_move_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_move_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Move-syntax Runar contract (.runar.move)."""
     p = _MoveParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:
@@ -1554,6 +1732,7 @@ def parse_move(source: str, file_name: str) -> ParseResult:
     except ValueError as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

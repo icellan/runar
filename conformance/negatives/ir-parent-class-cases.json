@@ -1,0 +1,1411 @@
+{
+  "_comment": [
+    "N-087: --ir parentClass rules + readonly/undeclared-write refusal. Every case is refused by all 7 tiers.",
+    "'error' is the exact diagnostic unless 'match' is 'prefix': Python's F-014 readonly-write sentence names the binding",
+    "after this shared prefix, while the other six tiers finish it with Go F-004's text."
+  ],
+  "accept": [
+    {
+      "name": "p2pk-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      }
+    },
+    {
+      "name": "p2pk-no-parent-class",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "p2pk-unsafesmartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "UnsafeSmartContract"
+      }
+    },
+    {
+      "name": "asm-raw-script-no-parent-class",
+      "ir": {
+        "contractName": "Anyone",
+        "methods": [
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "args": [],
+                  "func": "super",
+                  "kind": "call"
+                }
+              }
+            ],
+            "isPublic": false,
+            "name": "constructor",
+            "params": []
+          },
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "bytes": "51",
+                  "in_arity": 0,
+                  "kind": "raw_script",
+                  "out_arity": 1
+                }
+              }
+            ],
+            "isPublic": true,
+            "name": "unlock",
+            "params": []
+          }
+        ],
+        "properties": []
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "hijack-mutable-owner-smartcontract",
+      "ir": {
+        "contractName": "Hijack",
+        "parentClass": "SmartContract",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": false
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "owner",
+                  "value": "t0"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: Property 'owner' in SmartContract must be readonly. Use StatefulSmartContract for mutable state."
+    },
+    {
+      "name": "hijack-mutable-owner-unsafesmartcontract",
+      "ir": {
+        "contractName": "Hijack",
+        "parentClass": "UnsafeSmartContract",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": false
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "owner",
+                  "value": "t0"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: Property 'owner' in UnsafeSmartContract must be readonly. Use StatefulSmartContract for mutable state."
+    },
+    {
+      "name": "hijack-mutable-owner-no-parent-class",
+      "ir": {
+        "contractName": "Hijack",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": false
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "owner",
+                  "value": "t0"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: Property 'owner' in SmartContract must be readonly. Use StatefulSmartContract for mutable state."
+    },
+    {
+      "name": "p2pk-mutable-pk-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": false
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: Property 'pk' in SmartContract must be readonly. Use StatefulSmartContract for mutable state."
+    },
+    {
+      "name": "readonly-write",
+      "ir": {
+        "contractName": "Hijack",
+        "parentClass": "SmartContract",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "owner",
+                  "value": "t0"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: cannot assign to readonly property 'owner' in method 'steal'",
+      "match": "prefix"
+    },
+    {
+      "name": "readonly-write-in-if-arm",
+      "ir": {
+        "contractName": "Hijack",
+        "parentClass": "SmartContract",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "c",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              },
+              {
+                "name": "i",
+                "value": {
+                  "kind": "if",
+                  "cond": "c",
+                  "then": [
+                    {
+                      "name": "t1",
+                      "value": {
+                        "kind": "update_prop",
+                        "name": "owner",
+                        "value": "t0"
+                      }
+                    }
+                  ],
+                  "else": []
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: cannot assign to readonly property 'owner' in method 'steal'",
+      "match": "prefix"
+    },
+    {
+      "name": "undeclared-property-write",
+      "ir": {
+        "contractName": "Hijack",
+        "parentClass": "SmartContract",
+        "properties": [
+          {
+            "name": "owner",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "constructor",
+            "params": [
+              {
+                "name": "owner",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": false,
+            "body": []
+          },
+          {
+            "name": "steal",
+            "params": [
+              {
+                "name": "x",
+                "type": "PubKey"
+              }
+            ],
+            "isPublic": true,
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "ghost",
+                  "value": "t0"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "owner"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "===",
+                  "left": "t2",
+                  "right": "t3",
+                  "result_type": "bytes"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "assert",
+                  "value": "t4"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: method 'steal' assigns to undeclared property 'ghost'"
+    },
+    {
+      "name": "add-output-in-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "add_output",
+                  "satoshis": "t4",
+                  "stateValues": [],
+                  "preimage": "t0"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: 'add_output' in method 'unlock' is only available in StatefulSmartContract; got SmartContract"
+    },
+    {
+      "name": "add-raw-output-in-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "add_raw_output",
+                  "satoshis": "t4",
+                  "scriptBytes": "t1"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: 'add_raw_output' in method 'unlock' is only available in StatefulSmartContract; got SmartContract"
+    },
+    {
+      "name": "add-data-output-in-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "add_data_output",
+                  "satoshis": "t4",
+                  "scriptBytes": "t1"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: 'add_data_output' in method 'unlock' is only available in StatefulSmartContract; got SmartContract"
+    },
+    {
+      "name": "get-state-script-in-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "get_state_script"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: 'get_state_script' in method 'unlock' is only available in StatefulSmartContract; got SmartContract"
+    },
+    {
+      "name": "deserialize-state-in-smartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "deserialize_state",
+                  "preimage": "t0"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "SmartContract"
+      },
+      "error": "IR validation: 'deserialize_state' in method 'unlock' is only available in StatefulSmartContract; got SmartContract"
+    },
+    {
+      "name": "get-state-script-in-if-arm-unsafesmartcontract",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": [
+                    {
+                      "name": "t6",
+                      "value": {
+                        "kind": "get_state_script"
+                      }
+                    }
+                  ],
+                  "else": []
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "UnsafeSmartContract"
+      },
+      "error": "IR validation: 'get_state_script' in method 'unlock' is only available in StatefulSmartContract; got UnsafeSmartContract"
+    },
+    {
+      "name": "raw-script-in-smartcontract",
+      "ir": {
+        "contractName": "Anyone",
+        "methods": [
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "args": [],
+                  "func": "super",
+                  "kind": "call"
+                }
+              }
+            ],
+            "isPublic": false,
+            "name": "constructor",
+            "params": []
+          },
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "bytes": "51",
+                  "in_arity": 0,
+                  "kind": "raw_script",
+                  "out_arity": 1
+                }
+              }
+            ],
+            "isPublic": true,
+            "name": "unlock",
+            "params": []
+          }
+        ],
+        "parentClass": "SmartContract",
+        "properties": []
+      },
+      "error": "IR validation: 'raw_script' in method 'unlock' is only available in contracts extending UnsafeSmartContract; got SmartContract"
+    },
+    {
+      "name": "raw-script-in-statefulsmartcontract",
+      "ir": {
+        "contractName": "Anyone",
+        "methods": [
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "args": [],
+                  "func": "super",
+                  "kind": "call"
+                }
+              }
+            ],
+            "isPublic": false,
+            "name": "constructor",
+            "params": []
+          },
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "bytes": "51",
+                  "in_arity": 0,
+                  "kind": "raw_script",
+                  "out_arity": 1
+                }
+              }
+            ],
+            "isPublic": true,
+            "name": "unlock",
+            "params": []
+          }
+        ],
+        "parentClass": "StatefulSmartContract",
+        "properties": []
+      },
+      "error": "IR validation: 'raw_script' in method 'unlock' is only available in contracts extending UnsafeSmartContract; got StatefulSmartContract"
+    },
+    {
+      "name": "raw-script-with-stateful-marker-no-parent-class",
+      "ir": {
+        "contractName": "Anyone",
+        "methods": [
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "args": [],
+                  "func": "super",
+                  "kind": "call"
+                }
+              }
+            ],
+            "isPublic": false,
+            "name": "constructor",
+            "params": []
+          },
+          {
+            "body": [
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "get_state_script"
+                }
+              },
+              {
+                "name": "t0",
+                "value": {
+                  "bytes": "51",
+                  "in_arity": 0,
+                  "kind": "raw_script",
+                  "out_arity": 1
+                }
+              }
+            ],
+            "isPublic": true,
+            "name": "unlock",
+            "params": []
+          }
+        ],
+        "properties": []
+      },
+      "error": "IR validation: 'raw_script' in method 'unlock' is only available in contracts extending UnsafeSmartContract; got StatefulSmartContract"
+    }
+  ]
+}

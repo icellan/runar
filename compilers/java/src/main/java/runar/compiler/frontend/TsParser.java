@@ -66,10 +66,24 @@ public final class TsParser {
     // ---------------------------------------------------------------
 
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         List<CommentInfo> comments = new ArrayList<>();
-        List<Token> tokens = tokenize(source, comments);
-        Parser p = new Parser(tokens, filename, comments);
-        ContractNode contract = p.parseContract();
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, comments, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
+        Parser p = new Parser(tokens, filename, comments, source);
+        // F-213: measures (A) and (B). Counted to match the TS reference's
+        // ts-morph mapping (tsChildNesting in passes/01-parse.ts).
+        ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
+        // N-342: `const` locals cannot be reassigned.
+        p.errors.addAll(ConstReassign.check(contract, p.constDecls, filename));
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("\n", p.errors));
         }
@@ -77,13 +91,20 @@ public final class TsParser {
     }
 
     // Author-facing comment directives honoured ONLY on the .runar.ts surface
-    // (issues #109 / #123). Word-boundary anchored to mirror the TS
-    // /@embedAlways\b/ and /@sighash\b/ scans.
+    // (issues #109 / #123), mirroring the TS /@embedAlways\b/ and /@sighash/
+    // scans. N-039 (R85): @sighash has no word boundary, so
+    // @sighashSINGLE|FORKID / @sighashType are refused as malformed, not prose.
     private static final Pattern EMBED_ALWAYS_RE = Pattern.compile("@embedAlways\\b");
-    private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash\\b");
+    private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash");
 
-    /** A source comment captured by the tokenizer, keyed by its start line. */
-    private record CommentInfo(int line, String text) {}
+    /**
+     * A source comment captured by the tokenizer, keyed by its start line and
+     * column. The column is needed (F-282) to distinguish a comment that
+     * leads a member from one that trails the PRECEDING tokens on the same
+     * line — a pure line comparison cannot tell them apart when a member's
+     * whole declaration sits on one line.
+     */
+    private record CommentInfo(int line, int col, String text, int start, int end) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -95,6 +116,23 @@ public final class TsParser {
     // ---------------------------------------------------------------
     // Token kinds (mirror Python TOK_* constants)
     // ---------------------------------------------------------------
+
+    /**
+     * F-064: statement keywords the TS reference refuses, mapped to the
+     * ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+     */
+    private static final java.util.Map<String, String> UNSUPPORTED_STATEMENT_KEYWORDS = java.util.Map.ofEntries(
+        java.util.Map.entry("while", "WhileStatement"),
+        java.util.Map.entry("do", "DoStatement"),
+        java.util.Map.entry("switch", "SwitchStatement"),
+        java.util.Map.entry("try", "TryStatement"),
+        java.util.Map.entry("throw", "ThrowStatement"),
+        java.util.Map.entry("debugger", "DebuggerStatement"),
+        java.util.Map.entry("with", "WithStatement"),
+        java.util.Map.entry("class", "ClassDeclaration"),
+        java.util.Map.entry("function", "FunctionDeclaration"),
+        java.util.Map.entry("break", "BreakStatement"),
+        java.util.Map.entry("continue", "ContinueStatement"));
 
     private static final int TOK_EOF = 0;
     private static final int TOK_IDENT = 1;
@@ -206,11 +244,13 @@ public final class TsParser {
     // ---------------------------------------------------------------
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_' || ch == '$';
+        // N-423: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_' || ch == '$';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_' || ch == '$';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
     }
 
     private static boolean isHexDigit(char ch) {
@@ -225,12 +265,13 @@ public final class TsParser {
         return ch == '0' || ch == '1';
     }
 
-    private static List<Token> tokenize(String source, List<CommentInfo> comments) {
+    private static List<Token> tokenize(String source, List<CommentInfo> comments, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
         int i = 0;
         int n = source.length();
+        boolean optionalChainSeen = false; // N-121
 
         while (i < n) {
             char ch = source.charAt(i);
@@ -261,12 +302,13 @@ public final class TsParser {
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
                 int commentStart = i;
                 int commentLine = line;
+                int commentCol = col;
                 while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     i++;
                 }
                 // Capture leading trivia so the parser can detect .runar.ts
                 // comment directives (#109 @embedAlways / #123 @sighash).
-                comments.add(new CommentInfo(commentLine, source.substring(commentStart, i)));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, i), commentStart, i));
                 continue;
             }
 
@@ -274,6 +316,7 @@ public final class TsParser {
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '*') {
                 int commentStart = i;
                 int commentLine = line;
+                int commentCol = col;
                 i += 2;
                 col += 2;
                 boolean closed = false;
@@ -295,7 +338,8 @@ public final class TsParser {
                 if (!closed && i < n) {
                     i++;
                 }
-                comments.add(new CommentInfo(commentLine, source.substring(commentStart, Math.min(i, n))));
+                comments.add(new CommentInfo(commentLine, commentCol, source.substring(commentStart, Math.min(i, n)),
+                    commentStart, Math.min(i, n)));
                 continue;
             }
 
@@ -303,6 +347,7 @@ public final class TsParser {
 
             // Template string literals (backticks)
             if (ch == '`') {
+                int tickLine = line;
                 i++;
                 col++;
                 int start = i;
@@ -322,9 +367,13 @@ public final class TsParser {
                     }
                 }
                 String val = source.substring(start, i);
+                // F-011: this literal may span lines; only end of file leaves
+                // it unterminated.
                 if (i < n) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, tickLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;
@@ -336,62 +385,35 @@ public final class TsParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches an unescaped line break or end of
+                // file is unterminated (a backslash before the break continues it).
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n) break;
                         i++;
                         col++;
                     }
-                    if (i < n) {
-                        i++;
-                        col++;
-                    }
-                }
-                String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
                     i++;
                     col++;
+                }
+                String val = source.substring(start, Math.min(i, n));
+                if (i < n && source.charAt(i) == quote) {
+                    i++;
+                    col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;
             }
 
-            // Numbers (with optional BigInt 'n' suffix)
-            if (Character.isDigit(ch)) {
-                int start = i;
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isHexDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'o' || source.charAt(i + 1) == 'O')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isOctalDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'b' || source.charAt(i + 1) == 'B')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isBinaryDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else {
-                    while (i < n && (Character.isDigit(source.charAt(i)) || source.charAt(i) == '_')) {
-                        i++;
-                        col++;
-                    }
-                }
-                String numStr = source.substring(start, i).replace("_", "");
-                // BigInt suffix 'n'
-                if (i < n && source.charAt(i) == 'n') {
-                    i++;
-                    col++;
-                }
-                tokens.add(new Token(TOK_NUMBER, numStr, line, startCol));
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one
+            // TypeScript integer literal, BigInt suffix `n` included.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("ts", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(TOK_NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -405,6 +427,15 @@ public final class TsParser {
                 String word = source.substring(start, i);
                 tokens.add(new Token(TOK_IDENT, word, line, startCol));
                 continue;
+            }
+
+            // N-121: `?.` not followed by a decimal digit is optional
+            // chaining, which is disallowed. Report the first one; `?` is
+            // still lexed below.
+            if (ch == '?' && !optionalChainSeen && i + 1 < n && source.charAt(i + 1) == '.'
+                    && !(i + 2 < n && source.charAt(i + 2) >= '0' && source.charAt(i + 2) <= '9')) {
+                optionalChainSeen = true;
+                lex.add(LexDiag.at(filename, line, startCol, LexDiag.OPTIONAL_CHAINING));
             }
 
             // Three-character operators
@@ -440,7 +471,9 @@ public final class TsParser {
                 continue;
             }
 
-            // Skip unknown
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -513,32 +546,146 @@ public final class TsParser {
         final List<CommentInfo> comments;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-342: the declarations read as {@code const} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         boolean fatal = false;
         String fatalMsg = null;
 
-        Parser(List<Token> tokens, String fileName, List<CommentInfo> comments) {
+        /** N-199: raw source, and the comments each member kind read as leading trivia. */
+        final String source;
+        final List<CommentInfo> methodComments = new ArrayList<>();
+        final List<CommentInfo> propertyComments = new ArrayList<>();
+
+        Parser(List<Token> tokens, String fileName, List<CommentInfo> comments, String source) {
             this.tokens = tokens;
             this.fileName = fileName;
             this.comments = comments;
+            this.source = source;
         }
 
         /**
          * Concatenate the text of every captured comment that leads the member
-         * whose first token is on {@code memberLine} — i.e. comments strictly
-         * after the previous token's line and up to (and including) the member
-         * line. Mirrors ts-morph's leading-trivia scan used by the TS reference.
+         * whose first token starts at {@code (memberLine, memberCol)} — i.e.
+         * comments strictly after the previous token's line, and strictly
+         * before the member's own first token. Mirrors ts-morph's leading-trivia
+         * scan used by the TS reference, which has two position-sensitive
+         * properties a pure line comparison cannot reproduce (F-282):
+         *
+         * <p>(1) A comment that shares a line with the PRECEDING token (no line
+         * break yet encountered since it) is ts-morph's TRAILING trivia of that
+         * preceding token, never this member's leading trivia — `c.line() >
+         * afterLine` enforces that by requiring a strictly later line than the
+         * previous token's.
+         *
+         * <p>(2) A comment on the member's OWN line that comes AFTER the
+         * member's own first token (e.g. trailing `// @sighash ...` after a
+         * one-line method body) is this member's own trailing trivia, not its
+         * leading trivia, even though it shares `memberLine` — the column check
+         * `c.col() < memberCol` excludes it where a `c.line() <= memberLine`
+         * line-only check would wrongly include it.
          */
-        String collectLeadingComments(int afterLine, int memberLine) {
+        String collectLeadingComments(int afterLine, int memberLine, int memberCol) {
             StringBuilder sb = new StringBuilder();
-            for (CommentInfo c : comments) {
-                if (c.line() > afterLine && c.line() <= memberLine) {
-                    if (sb.length() > 0) {
-                        sb.append('\n');
-                    }
-                    sb.append(c.text());
+            for (CommentInfo c : leadingCommentInfos(afterLine, memberLine, memberCol)) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
                 }
+                sb.append(c.text());
             }
             return sb.toString();
+        }
+
+        /** The comments {@link #collectLeadingComments} concatenates. */
+        List<CommentInfo> leadingCommentInfos(int afterLine, int memberLine, int memberCol) {
+            List<CommentInfo> out = new ArrayList<>();
+            for (CommentInfo c : comments) {
+                boolean afterPrevToken = c.line() > afterLine;
+                boolean beforeMember = c.line() < memberLine
+                    || (c.line() == memberLine && c.col() < memberCol);
+                if (afterPrevToken && beforeMember) {
+                    out.add(c);
+                }
+            }
+            return out;
+        }
+
+        /**
+         * N-199 (user decision R75): refuse a {@code @sighash} /
+         * {@code @embedAlways} marker inside the contract class body that is
+         * not in the leading comments of a member of the kind that reads it
+         * ({@code @sighash} of a method, {@code @embedAlways} of a property).
+         * A comment sharing a line with the preceding token never attaches
+         * (F-282), so such a directive used to be dropped silently. Text
+         * outside the class braces is prose and not scanned. Mirrors
+         * reportLostDirectives in the TS reference (01-parse.ts).
+         */
+        void reportLostDirectives(Token open, Token close) {
+            int bodyStart = offsetOf(open.line, open.col) + 1;
+            int bodyEnd = close.kind == TOK_RBRACE ? offsetOf(close.line, close.col) : source.length();
+            if (bodyEnd <= bodyStart) {
+                return;
+            }
+            String body = source.substring(bodyStart, bodyEnd);
+            java.util.TreeMap<Integer, String> lost = new java.util.TreeMap<>();
+            scanLost(body, bodyStart, SIGHASH_TOKEN_RE, "@sighash", methodComments, lost);
+            scanLost(body, bodyStart, EMBED_ALWAYS_RE, "@embedAlways", propertyComments, lost);
+            for (Map.Entry<Integer, String> e : lost.entrySet()) {
+                int pos = e.getKey();
+                int lineStart = lineStartBefore(pos);
+                int line = 1;
+                for (int k = 0; k < pos; k++) {
+                    if (source.charAt(k) == '\n') line++;
+                }
+                addError(LexDiag.at(fileName, line, pos - lineStart,
+                    SighashDirective.lostDirectiveMessage(e.getValue())));
+            }
+        }
+
+        private static void scanLost(String body, int bodyStart, Pattern re, String directive,
+                                     List<CommentInfo> spans, Map<Integer, String> lost) {
+            java.util.regex.Matcher m = re.matcher(body);
+            while (m.find()) {
+                int pos = bodyStart + m.start();
+                boolean attached = false;
+                for (CommentInfo c : spans) {
+                    if (c.start() <= pos && pos < c.end()) {
+                        attached = true;
+                        break;
+                    }
+                }
+                if (!attached) {
+                    lost.put(pos, directive);
+                }
+            }
+        }
+
+        /** Offset of the first char after the last '\n' or '\r' before {@code pos}. */
+        private int lineStartBefore(int pos) {
+            for (int k = pos - 1; k >= 0; k--) {
+                char c = source.charAt(k);
+                if (c == '\n' || c == '\r') return k + 1;
+            }
+            return 0;
+        }
+
+        /** Source offset of a token at (line, col), using the tokenizer's line rules. */
+        private int offsetOf(int line, int col) {
+            int l = 1;
+            int i = 0;
+            int n = source.length();
+            while (l < line && i < n) {
+                char c = source.charAt(i++);
+                if (c == '\n') {
+                    l++;
+                } else if (c == '\r') {
+                    if (i < n && source.charAt(i) == '\n') i++;
+                    l++;
+                }
+            }
+            return i + col;
         }
 
         void addError(String msg) {
@@ -623,36 +770,66 @@ public final class TsParser {
 
         // -- Top-level ------------------------------------------------
 
+        static final java.util.Set<String> VALID_BASE_CLASSES =
+            java.util.Set.of("SmartContract", "StatefulSmartContract", "UnsafeSmartContract");
+
         ContractNode parseContract() throws ParseException {
+            // N-011: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+            // class; only one whose `extends` names a valid base is the contract.
+            // Other classes are ignored wherever they sit. Each valid class after
+            // the first is an error, and the LAST valid class is the one parsed.
+            List<Integer> valid = new ArrayList<>(); // token index of each valid `class` keyword
             while (!check(TOK_EOF)) {
                 if (checkIdent("import")) {
                     skipImport();
                     continue;
                 }
 
+                Token declTok = peek();
+                // export class ... / export default class ...
                 if (checkIdent("export")) {
                     advance();
-                    if (checkIdent("class")) {
-                        return parseClass();
-                    }
                     if (checkIdent("default")) {
                         advance();
-                        if (checkIdent("class")) {
-                            return parseClass();
-                        }
                     }
-                    skipStatement();
-                    continue;
+                    if (!checkIdent("class")) {
+                        skipStatement();
+                        continue;
+                    }
                 }
 
                 if (checkIdent("class")) {
-                    return parseClass();
+                    int classPos = pos;
+                    advance();
+                    match(TOK_IDENT); // class name
+                    String base = null;
+                    if (matchIdent("extends") && check(TOK_IDENT)) {
+                        base = peek().value;
+                    }
+                    // Skip the rest of the header and the balanced class body.
+                    skipStatement();
+                    if (base != null && VALID_BASE_CLASSES.contains(base)) {
+                        // The TS reference locates a declaration at its first
+                        // token (`export` included).
+                        if (!valid.isEmpty()) {
+                            addError(LexDiag.at(fileName, declTok.line, declTok.col,
+                                "Only one SmartContract subclass is allowed per file"));
+                        }
+                        valid.add(classPos);
+                    }
+                    continue;
                 }
 
                 skipStatement();
             }
 
-            throw new ParseException("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found");
+            if (valid.isEmpty()) {
+                throw new ParseException(LexDiag.at(fileName, 1, 0,
+                    "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"));
+            }
+
+            pos = valid.get(valid.size() - 1);
+            return parseClass();
         }
 
         void skipImport() {
@@ -708,15 +885,13 @@ public final class TsParser {
                 parentClass = parentTok.value;
             }
 
-            if (!parentClass.equals("SmartContract")
-                && !parentClass.equals("StatefulSmartContract")
-                && !parentClass.equals("UnsafeSmartContract")) {
+            if (!VALID_BASE_CLASSES.contains(parentClass)) {
                 throw new ParseException(
-                    "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+                    "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
                 );
             }
 
-            expect(TOK_LBRACE);
+            Token openBrace = expect(TOK_LBRACE);
 
             List<PropertyNode> properties = new ArrayList<>();
             MethodNode constructor = null;
@@ -746,6 +921,9 @@ public final class TsParser {
                 }
             }
 
+            // N-199 (R75): a directive in the class body that no member reads.
+            reportLostDirectives(openBrace, peek());
+
             expect(TOK_RBRACE);
 
             if (constructor == null) {
@@ -772,13 +950,21 @@ public final class TsParser {
             // detect the .runar.ts comment directives (#109 @embedAlways on a
             // readonly field, #123 @sighash on a public method).
             int prevTokenLine = pos > 0 ? tokens.get(pos - 1).line : 0;
-            String leadingComments = collectLeadingComments(prevTokenLine, location.line());
+            List<CommentInfo> leadingInfos = leadingCommentInfos(prevTokenLine, location.line(), location.column());
+            String leadingComments = collectLeadingComments(prevTokenLine, location.line(), location.column());
 
             String visibility = "private";
             boolean isReadonly = false;
+            boolean isStatic = false;
 
             while (true) {
-                if (checkIdent("public")) {
+                if (!isStatic && checkIdent("static") && pos + 1 < tokens.size()
+                        && tokens.get(pos + 1).kind == TOK_IDENT) {
+                    // N-050: `static` used to be read as the member NAME, which
+                    // skipped the member and refused the contract by accident.
+                    isStatic = true;
+                    advance();
+                } else if (checkIdent("public")) {
                     visibility = "public";
                     advance();
                 } else if (checkIdent("private")) {
@@ -809,10 +995,24 @@ public final class TsParser {
 
             // Method: name(...)
             if (check(TOK_LPAREN)) {
+                if (isStatic) {
+                    // N-050: a static method is not a contract method.
+                    addError(LexDiag.staticMethod(memberName));
+                }
+                methodComments.addAll(leadingInfos);
                 return parseMethod(memberName, visibility, location, leadingComments);
             }
 
+            if (isStatic) {
+                // Not a method: keep the pre-N-050 handling of a static member.
+                skipToNextMember();
+                return null;
+            }
+
             // Property: name: Type
+            if (check(TOK_COLON) || check(TOK_SEMICOLON)) {
+                propertyComments.addAll(leadingInfos);
+            }
             if (check(TOK_COLON)) {
                 advance();
                 TypeNode typeNode = parseType();
@@ -901,13 +1101,15 @@ public final class TsParser {
 
             if (check(TOK_COLON)) {
                 advance();
-                parseType();
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                String unknownReturn = LexDiag.unknownReturnType(parseType(), name, visibility.equals("public"));
+                if (unknownReturn != null) addError(unknownReturn);
             }
 
             List<Statement> body = parseBlock();
 
             Visibility vis = visibility.equals("public") ? Visibility.PUBLIC : Visibility.PRIVATE;
-            Integer sighashType = parseSighashDirective(name, vis, leadingComments);
+            Integer sighashType = parseSighashDirective(name, vis, leadingComments, location);
             return new MethodNode(name, params, body, vis, location, sighashType);
         }
 
@@ -918,22 +1120,30 @@ public final class TsParser {
          * present. Pushes an error for a malformed flag list or a directive on a
          * non-public method (only public methods are spending entry points).
          */
-        Integer parseSighashDirective(String name, Visibility vis, String leadingComments) {
+        Integer parseSighashDirective(String name, Visibility vis, String leadingComments,
+                                      SourceLocation location) {
             if (leadingComments == null || !SIGHASH_TOKEN_RE.matcher(leadingComments).find()) {
                 return null;
             }
+            // N-039 (R88a): located at the method declaration, like the TS reference.
             if (vis != Visibility.PUBLIC) {
-                addError(String.format(
+                addError(LexDiag.at(fileName, location.line(), location.column(), String.format(
                     "@sighash directive on non-public method '%s' has no effect "
-                    + "— only public methods are spending entry points", name));
+                    + "— only public methods are spending entry points", name)));
                 return null;
             }
+            // Non-null: the marker is present (checked above). A malformed or
+            // duplicated directive comes back as an error, never as "no
+            // directive" (F-039).
             SighashDirective.Result result = SighashDirective.extractSighashDirective(leadingComments);
             if (result == null) {
+                addError(LexDiag.at(fileName, location.line(), location.column(),
+                    String.format("Method '%s': %s", name, SighashDirective.SIGHASH_MALFORMED_ERROR)));
                 return null;
             }
             if (result.isError()) {
-                addError(String.format("Method '%s': %s", name, result.error()));
+                addError(LexDiag.at(fileName, location.line(), location.column(),
+                    String.format("Method '%s': %s", name, result.error())));
                 return null;
             }
             return result.value();
@@ -992,9 +1202,23 @@ public final class TsParser {
 
             if (name.equals("FixedArray")) {
                 if (match(TOK_LT)) {
-                    TypeNode elem = parseType();
+                    TypeNode elem = nest.nested(this::parseType);
                     expect(TOK_COMMA);
                     Token sizeTok = expect(TOK_NUMBER);
+                    // N-120: the TS reference reads the size with
+                    // parseInt(text, 10), which refuses a 0x/0o/0b spelling.
+                    if (sizeTok.kind == TOK_NUMBER) {
+                        int off = offsetOf(sizeTok.line, sizeTok.col);
+                        String raw = source.substring(off, IntLiteral.scanEnd(source, off));
+                        // N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+                        if (raw.matches("0[xXoObB].*") || raw.contains("_") || raw.endsWith("n")) {
+                            addError(String.format(
+                                "line %d: FixedArray size must be a positive integer literal, got '%s'",
+                                sizeTok.line, raw));
+                            expect(TOK_GT);
+                            return new CustomType(name);
+                        }
+                    }
                     int size;
                     try {
                         size = Integer.parseInt(sizeTok.value);
@@ -1057,10 +1281,8 @@ public final class TsParser {
             List<Statement> stmts = new ArrayList<>();
 
             while (!check(TOK_RBRACE) && !check(TOK_EOF)) {
-                skipSemicolons();
-                if (check(TOK_RBRACE) || check(TOK_EOF)) {
-                    break;
-                }
+                // F-064: a stray `;` is an EmptyStatement, refused by
+                // parseStatement -- no longer swallowed here.
                 Statement stmt = parseStatement();
                 if (stmt != null) {
                     stmts.add(stmt);
@@ -1074,10 +1296,25 @@ public final class TsParser {
         // -- Statements -----------------------------------------------
 
         Statement parseStatement() throws ParseException {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() throws ParseException {
             SourceLocation location = loc();
             Token tok = peek();
 
-            if (tok.kind == TOK_IDENT && (tok.value.equals("const") || tok.value.equals("let"))) {
+            // F-064: refuse every statement kind outside spec/grammar.md §9
+            // with the TS reference's diagnostic instead of falling through to
+            // the expression parser (or silently skipping a `;`).
+            String unsupported = unsupportedStatementKind();
+            if (unsupported != null) {
+                addError("line " + location.line() + ": Unsupported statement kind: " + unsupported);
+                skipUnsupportedStatement();
+                return null;
+            }
+
+            // N-054: `var` is a mutable `let`.
+            if (tok.kind == TOK_IDENT && (tok.value.equals("const") || tok.value.equals("let") || tok.value.equals("var"))) {
                 return parseVariableDecl(location);
             }
             if (tok.kind == TOK_IDENT && tok.value.equals("if")) {
@@ -1092,14 +1329,59 @@ public final class TsParser {
             return parseExpressionStatement(location);
         }
 
+        /** The ts.SyntaxKind name of an unsupported statement starting here, or null. */
+        String unsupportedStatementKind() {
+            Token tok = peek();
+            if (tok.kind == TOK_SEMICOLON) return "EmptyStatement";
+            if (tok.kind == TOK_LBRACE) return "Block";
+            if (tok.kind != TOK_IDENT) return null;
+            String kw = UNSUPPORTED_STATEMENT_KEYWORDS.get(tok.value);
+            if (kw != null) return kw;
+            if (peekNextKind() == TOK_COLON) return "LabeledStatement";
+            if (tok.value.equals("for") && pos + 4 < tokens.size()) {
+                // for (const|let <name> in|of ...)
+                Token lp = tokens.get(pos + 1);
+                Token decl = tokens.get(pos + 2);
+                Token name = tokens.get(pos + 3);
+                Token op = tokens.get(pos + 4);
+                boolean isDecl = decl.kind == TOK_IDENT
+                    && (decl.value.equals("const") || decl.value.equals("let") || decl.value.equals("var"));
+                if (lp.kind == TOK_LPAREN && isDecl && name.kind == TOK_IDENT && op.kind == TOK_IDENT) {
+                    if (op.value.equals("in")) return "ForInStatement";
+                    if (op.value.equals("of")) return "ForOfStatement";
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Consume a refused statement: tokens up to a `;` or a closing brace at
+         * nesting depth 0, stopping before a `}` that closes the enclosing block.
+         */
+        void skipUnsupportedStatement() {
+            int depth = 0;
+            while (!check(TOK_EOF)) {
+                Token tok = peek();
+                if (tok.kind == TOK_LBRACE || tok.kind == TOK_LPAREN || tok.kind == TOK_LBRACKET) {
+                    depth++;
+                } else if (tok.kind == TOK_RBRACE || tok.kind == TOK_RPAREN || tok.kind == TOK_RBRACKET) {
+                    if (depth == 0) return;
+                    depth--;
+                    advance();
+                    if (depth == 0 && tok.kind == TOK_RBRACE) return;
+                    continue;
+                } else if (tok.kind == TOK_SEMICOLON && depth == 0) {
+                    advance();
+                    return;
+                }
+                advance();
+            }
+        }
+
         Statement parseVariableDecl(SourceLocation locArg) throws ParseException {
             Token keyword = advance();
-            // mutability tracked indirectly: VariableDeclStatement records type/init only;
-            // 'let' vs 'const' is enforced upstream (validate pass) — but the AST shape
-            // here matches the Python parser which does record it. The Java AST does
-            // not carry a mutable flag, so we drop it.
-            // (Reference: VariableDeclStatement record has no mutable field.)
-            // 'let'/'const' equally produce VariableDeclStatement.
+            // The Java AST's VariableDeclStatement carries no mutable flag, so
+            // `const` is remembered by identity in constDecls (N-342).
 
             Token nameTok = expect(TOK_IDENT);
             String varName = nameTok.value;
@@ -1117,8 +1399,10 @@ public final class TsParser {
                 init = new BigIntLiteral(BigInteger.ZERO);
             }
 
-            skipSemicolons();
-            return new VariableDeclStatement(varName, typeNode, init, locArg);
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
+            VariableDeclStatement decl = new VariableDeclStatement(varName, typeNode, init, locArg);
+            if (keyword.value.equals("const")) constDecls.add(decl);
+            return decl;
         }
 
         Statement parseIf(SourceLocation locArg) throws ParseException {
@@ -1133,7 +1417,8 @@ public final class TsParser {
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
                     SourceLocation elifLoc = loc();
-                    Statement elifStmt = parseIf(elifLoc);
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elifStmt = nest.nested(() -> parseIf(elifLoc));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elifStmt);
                 } else {
@@ -1162,7 +1447,7 @@ public final class TsParser {
 
             SourceLocation initLoc = loc();
             VariableDeclStatement initStmt;
-            if (checkIdent("let") || checkIdent("const")) {
+            if (checkIdent("let") || checkIdent("const") || checkIdent("var")) {
                 Statement stmt = parseVariableDecl(initLoc);
                 if (stmt instanceof VariableDeclStatement vds) {
                     initStmt = vds;
@@ -1171,17 +1456,30 @@ public final class TsParser {
                         "_i", null, new BigIntLiteral(BigInteger.ZERO), initLoc);
                 }
             } else {
+                // N-306: the TS reference's parseForStatement refuses a
+                // non-declaration for-initializer with this diagnostic. This
+                // branch used to silently substitute a synthetic `_i = 0`
+                // for the real initializer expression, discarding it with
+                // no error.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have a variable declaration initializer"));
                 initStmt = new VariableDeclStatement(
                     "_i", null, new BigIntLiteral(BigInteger.ZERO), initLoc);
                 while (!check(TOK_SEMICOLON) && !check(TOK_EOF)) {
                     advance();
                 }
+                // N-135: only this branch stops ON the `;`; the variable decl
+                // above already consumed its own, so matching again there
+                // swallowed an empty condition slot's `;`.
+                match(TOK_SEMICOLON);
             }
-
-            match(TOK_SEMICOLON);
 
             Expression condition;
             if (check(TOK_SEMICOLON)) {
+                // N-135: the TS reference refuses an empty condition slot; the
+                // placeholder below only keeps the AST well-formed.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have a condition"));
                 condition = new BoolLiteral(false);
             } else {
                 condition = parseExpression();
@@ -1191,6 +1489,10 @@ public final class TsParser {
             SourceLocation updateLoc = loc();
             Statement update;
             if (check(TOK_RPAREN)) {
+                // N-132: the TS reference refuses an empty update slot; the
+                // placeholder below only keeps the AST well-formed.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have an update expression"));
                 update = new ExpressionStatement(new BigIntLiteral(BigInteger.ZERO), updateLoc);
             } else {
                 Expression updateExpr = parseExpression();
@@ -1210,7 +1512,7 @@ public final class TsParser {
             if (!check(TOK_SEMICOLON) && !check(TOK_RBRACE) && !check(TOK_EOF)) {
                 value = parseExpression();
             }
-            skipSemicolons();
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
             return new ReturnStatement(value, locArg);
         }
 
@@ -1219,7 +1521,7 @@ public final class TsParser {
 
             if (match(TOK_ASSIGN)) {
                 Expression value = parseExpression();
-                skipSemicolons();
+                match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
                 return new AssignmentStatement(expr, value, locArg);
             }
 
@@ -1231,88 +1533,95 @@ public final class TsParser {
             for (int idx = 0; idx < compoundKinds.length; idx++) {
                 if (match(compoundKinds[idx])) {
                     Expression right = parseExpression();
-                    skipSemicolons();
+                    match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
                     Expression.BinaryOp op = Expression.BinaryOp.fromCanonical(compoundOps[idx]);
                     Expression value = new BinaryExpr(op, expr, right);
                     return new AssignmentStatement(expr, value, locArg);
                 }
             }
 
-            skipSemicolons();
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
             return new ExpressionStatement(expr, locArg);
         }
 
         // -- Expressions ----------------------------------------------
 
         Expression parseExpression() throws ParseException {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() throws ParseException {
             Expression expr = parseOr();
             if (match(TOK_QUESTION)) {
-                Expression consequent = parseTernary();
+                // F-213 A4: ternary arms recurse outside parseExpression.
+                Expression consequent = nest.nested(this::parseTernary);
                 expect(TOK_COLON);
-                Expression alternate = parseTernary();
+                Expression alternate = nest.nested(this::parseTernary);
                 return new TernaryExpr(expr, consequent, alternate);
             }
             return expr;
         }
 
         Expression parseOr() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TOK_PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (match(TOK_AMPAMP)) {
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TOK_PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TOK_CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TOK_AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TOK_EQEQEQ) || match(TOK_EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TOK_NOTEQEQ) || match(TOK_NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1321,20 +1630,21 @@ public final class TsParser {
         }
 
         Expression parseComparison() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TOK_LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TOK_LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TOK_GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TOK_GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1343,14 +1653,15 @@ public final class TsParser {
         }
 
         Expression parseShift() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TOK_LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TOK_RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1359,14 +1670,15 @@ public final class TsParser {
         }
 
         Expression parseAdditive() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TOK_PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TOK_MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1375,17 +1687,18 @@ public final class TsParser {
         }
 
         Expression parseMultiplicative() throws ParseException {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TOK_STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TOK_SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TOK_PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1394,24 +1707,25 @@ public final class TsParser {
         }
 
         Expression parseUnary() throws ParseException {
+            SourceLocation opLoc = loc();
             if (match(TOK_BANG)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             if (match(TOK_MINUS)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TOK_TILDE)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TOK_PLUSPLUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new IncrementExpr(operand, true);
             }
             if (match(TOK_MINUSMINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new DecrementExpr(operand, true);
             }
             return parsePostfix();
@@ -1428,7 +1742,7 @@ public final class TsParser {
                         List<Expression> args = parseCallArgs();
                         if (expr instanceof Identifier id && id.name().equals("this")) {
                             expr = new CallExpr(
-                                new MemberExpr(new Identifier("this"), propName),
+                                new MemberExpr(new Identifier("this", id.sourceLocation()), propName),
                                 args
                             );
                         } else {
@@ -1439,7 +1753,7 @@ public final class TsParser {
                         }
                     } else {
                         if (expr instanceof Identifier id && id.name().equals("this")) {
-                            expr = new PropertyAccessExpr(propName);
+                            expr = new PropertyAccessExpr(propName, id.sourceLocation());
                         } else {
                             expr = new MemberExpr(expr, propName);
                         }
@@ -1492,11 +1806,13 @@ public final class TsParser {
             }
 
             if (tok.kind == TOK_STRING) {
+                SourceLocation litLoc = loc();
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, litLoc);
             }
 
             if (tok.kind == TOK_IDENT) {
+                SourceLocation identLoc = loc();
                 advance();
                 String name = tok.value;
                 if (name.equals("true")) {
@@ -1506,10 +1822,10 @@ public final class TsParser {
                     return new BoolLiteral(false);
                 }
                 if (name.equals("this")) {
-                    return new Identifier("this");
+                    return new Identifier("this", identLoc);
                 }
                 if (name.equals("super")) {
-                    return new Identifier("super");
+                    return new Identifier("super", identLoc);
                 }
                 // asm({...}) / asm<T>({...}) compiler intrinsic — must be
                 // recognised before the generic LT lookahead in
@@ -1519,9 +1835,9 @@ public final class TsParser {
                 }
                 if (check(TOK_LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(name), args);
+                    return new CallExpr(new Identifier(name, identLoc), args);
                 }
-                return new Identifier(name);
+                return new Identifier(name, identLoc);
             }
 
             if (tok.kind == TOK_LPAREN) {

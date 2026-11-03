@@ -63,6 +63,8 @@ final class StackAnalyzer {
         TABLE[0x88] = new Effect(2, 0); // OP_EQUALVERIFY
         TABLE[0x8b] = new Effect(1, 1); // OP_1ADD
         TABLE[0x8c] = new Effect(1, 1); // OP_1SUB
+        TABLE[0x8d] = new Effect(1, 1); // OP_2MUL (Chronicle)
+        TABLE[0x8e] = new Effect(1, 1); // OP_2DIV (Chronicle)
         TABLE[0x8f] = new Effect(1, 1); // OP_NEGATE
         TABLE[0x90] = new Effect(1, 1); // OP_ABS
         TABLE[0x91] = new Effect(1, 1); // OP_NOT
@@ -95,6 +97,11 @@ final class StackAnalyzer {
         TABLE[0xad] = new Effect(2, 0); // OP_CHECKSIGVERIFY
         TABLE[0xae] = new Effect(3, 1); // OP_CHECKMULTISIG
         TABLE[0xaf] = new Effect(3, 0); // OP_CHECKMULTISIGVERIFY
+        TABLE[0xb3] = new Effect(3, 1); // OP_SUBSTR (Chronicle): buf, offset, len -> substring
+        TABLE[0xb4] = new Effect(2, 1); // OP_LEFT (Chronicle): buf, len -> prefix
+        TABLE[0xb5] = new Effect(2, 1); // OP_RIGHT (Chronicle): buf, len -> suffix
+        TABLE[0xb6] = new Effect(2, 1); // OP_LSHIFTNUM (Chronicle): value, bits -> value << bits
+        TABLE[0xb7] = new Effect(2, 1); // OP_RSHIFTNUM (Chronicle): value, bits -> value >> bits
     }
 
     static Effect effectFor(OpStep op) {

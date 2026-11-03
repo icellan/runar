@@ -80,6 +80,26 @@ export class WithInit extends StatefulSmartContract {
   public increment(): void { this.count = this.count + 1n; }
 }`;
 
+// F-271: real property-initializer sources for the BigInt serialization
+// format tests below, so those tests exercise the compiler's own
+// initializer-lowering path (AST literal -> 04-anf-lower -> assembler
+// extractStateFields) instead of a hand-injected value.
+const POSITIVE_INIT_SOURCE = `
+import { StatefulSmartContract } from 'runar-lang';
+export class PositiveInit extends StatefulSmartContract {
+  count: bigint = 42n;
+  constructor() { super(42n); }
+  public increment(): void { this.count = this.count + 1n; }
+}`;
+
+const NEGATIVE_INIT_SOURCE = `
+import { StatefulSmartContract } from 'runar-lang';
+export class NegativeInit extends StatefulSmartContract {
+  count: bigint = -1n;
+  constructor() { super(-1n); }
+  public increment(): void { this.count = this.count + 1n; }
+}`;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -257,19 +277,41 @@ describe('Assembler', () => {
   // 6. BigInt serialization format
   // -------------------------------------------------------------------------
   describe('BigInt serialization format', () => {
-    it('serializes BigInt 42n to string "42n"', () => {
-      const artifact = assemble(INITIALIZED_SOURCE);
-      // Manually set a BigInt value to test the format
-      artifact.stateFields![0]!.initialValue = 42n;
+    // F-271 (CL-BUG-019): these two tests used to `assemble(INITIALIZED_SOURCE)`
+    // (whose real compiled initialValue is 0n) and then overwrite
+    // `artifact.stateFields![0]!.initialValue` in place with a hand-picked
+    // BigInt before serializing — proving only that serializeArtifact's
+    // bigintReplacer formats a BigInt the test itself just wrote, never that
+    // the compiler's own literal-initializer -> ANF -> assembler path
+    // produces that BigInt in stateFields[].initialValue to begin with. A
+    // mutation that widens a real compiled BigInt initialValue to a JS
+    // `number` inside extractStateFields (verified empirically: 32/34 tests
+    // still pass under that mutation, including both tests below as they
+    // stood before this change) would go undetected by the old form. These
+    // now compile real sources whose property initializer literal IS the
+    // BigInt under test, so they exercise assembleArtifact's real output.
+    it('serializes a real compiled BigInt 42n initializer to string "42n"', () => {
+      const artifact = assemble(POSITIVE_INIT_SOURCE);
+      const countField = artifact.stateFields!.find(f => f.name === 'count');
+      expect(countField!.initialValue).toBe(42n);
       const json = serializeArtifact(artifact);
       expect(json).toContain('"42n"');
+
+      const restored = deserializeArtifact(json);
+      const restoredField = restored.stateFields!.find(f => f.name === 'count');
+      expect(restoredField!.initialValue).toBe(42n);
     });
 
-    it('serializes negative BigInt to "-1n"', () => {
-      const artifact = assemble(INITIALIZED_SOURCE);
-      artifact.stateFields![0]!.initialValue = -1n;
+    it('serializes a real compiled negative BigInt -1n initializer to string "-1n"', () => {
+      const artifact = assemble(NEGATIVE_INIT_SOURCE);
+      const countField = artifact.stateFields!.find(f => f.name === 'count');
+      expect(countField!.initialValue).toBe(-1n);
       const json = serializeArtifact(artifact);
       expect(json).toContain('"-1n"');
+
+      const restored = deserializeArtifact(json);
+      const restoredField = restored.stateFields!.find(f => f.name === 'count');
+      expect(restoredField!.initialValue).toBe(-1n);
     });
 
     it('deserializes "42n" back to BigInt', () => {

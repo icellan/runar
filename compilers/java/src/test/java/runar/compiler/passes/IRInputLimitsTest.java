@@ -52,10 +52,13 @@ class IRInputLimitsTest {
      * anyone-can-spend shape (no public method =&gt; empty locking script =&gt;
      * spendable with OP_1). These tests' subject is the DoS caps, not the
      * schema, so the fixtures are made valid rather than the assertions
-     * weakened.
+     * weakened. N-071: and a public method must end with an assert, so the
+     * body is one constant plus the assert on it.
      */
     private static final String MINIMAL_VALID_METHODS =
-        "\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":[]}]";
+        "\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":["
+        + "{\"name\":\"_ok\",\"value\":{\"kind\":\"load_const\",\"value\":true}},{\"name\":\"_ok_assert\",\"value\":{\"kind\":\"assert\",\"value\":\"_ok\"}}"
+        + "]}]";
 
     @Test
     void depthWalkIgnoresBracesInsideStrings() {

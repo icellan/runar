@@ -457,7 +457,7 @@ function cEmitCoordCanonVerify(t: ECTracker, xName: string, yName: string, c: Cu
 // Affine point addition (for ecAdd — same formulas, different field)
 // ===========================================================================
 
-function cAffineAdd(t: ECTracker, c: CurveParams): void {
+function cAffineAdd(t: ECTracker, c: CurveParams, abortOnY0Tangent: boolean): void {
   // The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
   // denominator is zero and the correct slope is the TANGENT, (3px^2 + a)/(2py)
   // — and a = -3 on both NIST curves, so the numerator is 3px^2 - 3.
@@ -517,6 +517,29 @@ function cAffineAdd(t: ECTracker, c: CurveParams): void {
     e({ op: 'opcode', code: 'OP_SUB' });
     e({ op: 'opcode', code: 'OP_NOT' });
   });
+
+  // N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+  // when py == 0 (2*py == 0, and cFieldInv is Fermat, so inv(0) = 0 silently
+  // returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime order,
+  // no 2-torsion), so only an off-curve operand gets here. ABORT:
+  //   ok = NOT(cond AND px != 0 AND py == 0)
+  // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+  // Only pNNNAdd asks for it. cEmitVerifyECDSA passes false: that builtin is
+  // total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+  // cond = 1 with py == 0 there already means px == 0, the exempt case.
+  if (abortOnY0Tangent) {
+    t.copyToTop('px', '_px_g');
+    t.copyToTop('py', '_py_g');
+    t.copyToTop('_cond', '_cond_g');
+    t.rawBlock(['_px_g', '_py_g', '_cond_g'], null, (e) => {
+      e({ op: 'opcode', code: 'OP_SWAP' });
+      e({ op: 'opcode', code: 'OP_NOT' });
+      e({ op: 'opcode', code: 'OP_BOOLAND' });
+      e({ op: 'opcode', code: 'OP_BOOLAND' });
+      e({ op: 'opcode', code: 'OP_NOT' });
+      e({ op: 'opcode', code: 'OP_VERIFY' });
+    });
+  }
 
   // chord numerator / denominator
   t.copyToTop('qy', '_qy1');
@@ -1484,7 +1507,7 @@ function cEmitVerifyECDSA(
   const rqyIdx = t.nm.lastIndexOf('_rqy');
   if (rqyIdx >= 0) t.nm[rqyIdx] = 'qy';
 
-  cAffineAdd(t, c);
+  cAffineAdd(t, c, false);
   // Produces rx, ry on tracker
 
   // Step 8: x_R mod n == r
@@ -1562,7 +1585,7 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
   // R-117: cAffineAdd's selectors compare these four values RAW.
   cEmitCoordCanonVerify(t, 'px', 'py', P256_PARAMS);
   cEmitCoordCanonVerify(t, 'qx', 'qy', P256_PARAMS);
-  cAffineAdd(t, P256_PARAMS);
+  cAffineAdd(t, P256_PARAMS, true);
   cComposePoint(t, 'rx', 'ry', '_result', P256_PARAMS);
 }
 
@@ -1709,7 +1732,7 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
   // R-117: cAffineAdd's selectors compare these four values RAW.
   cEmitCoordCanonVerify(t, 'px', 'py', P384_PARAMS);
   cEmitCoordCanonVerify(t, 'qx', 'qy', P384_PARAMS);
-  cAffineAdd(t, P384_PARAMS);
+  cAffineAdd(t, P384_PARAMS, true);
   cComposePoint(t, 'rx', 'ry', '_result', P384_PARAMS);
 }
 

@@ -20,6 +20,8 @@ pub const DeployError = error{
     InvalidScript,
     OutOfMemory,
     BuildFailed,
+    /// An address string that is not a decodable Base58Check P2PKH address (N-043).
+    InvalidAddress,
 };
 
 /// Result of building a deploy transaction.
@@ -202,7 +204,9 @@ pub fn estimateDeployFee(
     return @divTrunc(total * rate + 999, 1000);
 }
 
-/// Build a standard P2PKH locking script from a hex pubkey hash or address.
+/// Build a standard P2PKH locking script from a 40-char hex pubkey hash, a
+/// 66-/130-char hex public key (hashed with HASH160), or a Base58Check P2PKH
+/// address (checksum and version verified by bsvz).
 pub fn buildP2PKHScript(allocator: std.mem.Allocator, address: []const u8) ![]u8 {
     // If 40-char hex, treat as raw pubkey hash
     if (address.len == 40 and isHex(address)) {
@@ -213,8 +217,26 @@ pub fn buildP2PKHScript(allocator: std.mem.Allocator, address: []const u8) ![]u8
         return result;
     }
 
+    // Compressed (33 bytes) or uncompressed (65 bytes) public key — hash it
+    if ((address.len == 66 or address.len == 130) and isHex(address)) {
+        var pub_key_buf: [65]u8 = undefined;
+        const pub_key = std.fmt.hexToBytes(pub_key_buf[0 .. address.len / 2], address) catch unreachable; // isHex + even length
+        const pkh = bsvz.crypto.hash.hash160(pub_key);
+        var result = try allocator.alloc(u8, 50);
+        @memcpy(result[0..6], "76a914");
+        _ = bsvz.primitives.hex.encodeLower(&pkh.bytes, result[6..46]) catch unreachable; // 20 bytes -> 40 chars
+        @memcpy(result[46..50], "88ac");
+        return result;
+    }
+
     // Decode Base58Check address
-    const decoded = bsvz.compat.address.decodeP2pkh(allocator, address) catch return error.OutOfMemory;
+    // N-043: only a real allocation failure is OutOfMemory; every decode
+    // failure (bad Base58, checksum, payload length, network prefix) is
+    // InvalidAddress.
+    const decoded = bsvz.compat.address.decodeP2pkh(allocator, address) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidAddress,
+    };
     const ls = decoded.lockingScript();
     const hex_buf = try allocator.alloc(u8, ls.len * 2);
     _ = bsvz.primitives.hex.encodeLower(&ls, hex_buf) catch {
@@ -255,6 +277,73 @@ test "buildP2PKHScript from hex pubkey hash" {
     const result = try buildP2PKHScript(allocator, "0000000000000000000000000000000000000000");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("76a914000000000000000000000000000000000000000088ac", result);
+}
+
+// F-043: every SDK must accept the same inputs with the same result, using a
+// real key (the secp256k1 generator G). buildP2PKHScript had no 66/130-char
+// pubkey branch, so a pubkey fell through to the Base58 decoder and failed.
+// PROVES: compressed / uncompressed pubkeys are hashed with HASH160 and the
+// mainnet / testnet addresses of G decode to HASH160(G) (values match Go
+// BuildP2PKHScript and TS buildP2PKHScript); the Genesis address with its last
+// character flipped (bad checksum), a P2SH address and a non-Base58 character
+// are rejected.
+// DOES NOT PROVE: that a pubkey is a valid curve point (no SDK checks it), or
+// the specific error name (the address branch maps every failure to one error).
+test "buildP2PKHScript accepts G as pubkey, hash and address; rejects bad addresses (F-043)" {
+    const allocator = std.testing.allocator;
+    const want_g = "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac";
+    const inputs = [_][]const u8{
+        "751e76e8199196d454941c45d1b3a323f1433bd6",
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+        "mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r",
+    };
+    for (inputs) |in| {
+        const got = try buildP2PKHScript(allocator, in);
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings(want_g, got);
+    }
+
+    const unc = try buildP2PKHScript(allocator, "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" ++
+        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+    defer allocator.free(unc);
+    try std.testing.expectEqualStrings("76a91491b24bf9f5288532960ac687abb035127b1d28a588ac", unc);
+
+    const genesis = try buildP2PKHScript(allocator, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa");
+    defer allocator.free(genesis);
+    try std.testing.expectEqualStrings("76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac", genesis);
+
+    const bad = [_][]const u8{
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb",
+        "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf0a",
+        "1Badx",
+    };
+    for (bad) |in| {
+        if (buildP2PKHScript(allocator, in)) |script| {
+            allocator.free(script);
+            std.debug.print("buildP2PKHScript accepted {s}\n", .{in});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+// N-043: an address that fails to decode used to surface as error.OutOfMemory
+// (every decode failure was mapped to it). Proves: a bad checksum, a P2SH
+// payload and a non-Base58 string each yield the distinct error.InvalidAddress.
+// Does not prove: which underlying bsvz decode error occurred (all collapse to
+// InvalidAddress); real allocation failure still reports OutOfMemory (not
+// exercised here).
+test "N-043 buildP2PKHScript reports a distinct InvalidAddress error" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb", // bad checksum
+        "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", // P2SH
+        "1Badx", // not Base58Check
+    };
+    for (bad) |in| {
+        try std.testing.expectError(error.InvalidAddress, buildP2PKHScript(allocator, in));
+    }
 }
 
 test "selectUtxos selects largest first" {

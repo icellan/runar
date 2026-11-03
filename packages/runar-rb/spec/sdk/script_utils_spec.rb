@@ -57,3 +57,71 @@ RSpec.describe 'Runar::SDK::ScriptUtils.extract_constructor_args' do
     expect(args['beta']).to eq(7)
   end
 end
+
+# F-238 — read_script_element must refuse malformed provider-supplied scripts
+# instead of raising a bare ArgumentError/TypeError or silently truncating.
+#
+# Before this fix, `hex[offset, 2].to_i(16)` raised an uncaught
+# ArgumentError/TypeError when `offset` ran past the end of the string (`nil`
+# has no `to_i(16)`), and a push whose declared length ran past the remaining
+# bytes silently returned a SHORT data_hex (`hex[offset+2, data_len] || ''`
+# just takes whatever Ruby's slicing leaves) instead of erroring — which
+# extract_constructor_args / matches_artifact then treat as a valid (wrong)
+# element, corrupting every later slot's offset in the same walk.
+#
+# rubocop:disable RSpec/DescribeClass
+RSpec.describe 'Runar::SDK::ScriptUtils malformed-script rejection (F-238)' do
+  # rubocop:enable RSpec/DescribeClass
+
+  MALFORMED_VECTORS = [
+    '',           # no opcode byte at all
+    'f',          # odd-length hex, can't even form an opcode byte
+    '05aabb',     # direct push declares 5 bytes, only 2 remain
+    '4c',         # OP_PUSHDATA1 with no length byte
+    '4c05aa',     # OP_PUSHDATA1 declares 5 bytes, only 1 remains
+    '4d0100',     # OP_PUSHDATA2 length prefix present, 0 of the 1 declared bytes remain
+    '4e01000000'  # OP_PUSHDATA4 length prefix present, 0 of the 1 declared bytes remain
+  ].freeze
+
+  def one_slot_artifact(type = 'bigint')
+    Runar::SDK::RunarArtifact.new(
+      script: '00ac',
+      constructor_slots: [Runar::SDK::ConstructorSlot.new(param_index: 0, byte_offset: 0)],
+      abi: Runar::SDK::ABI.new(constructor_params: [Runar::SDK::ABIParam.new(name: 'x', type: type)])
+    )
+  end
+
+  describe '.read_script_element' do
+    MALFORMED_VECTORS.each do |hex|
+      it "refuses #{hex.inspect}" do
+        expect { Runar::SDK::ScriptUtils.read_script_element(hex, 0) }
+          .to raise_error(Runar::SDK::MalformedScriptError)
+      end
+    end
+
+    it 'still decodes valid pushes of every pushdata flavour unchanged' do
+      expect(Runar::SDK::ScriptUtils.read_script_element('012a', 0))
+        .to eq(data_hex: '2a', total_hex_chars: 4, opcode: 0x01)
+      expect(Runar::SDK::ScriptUtils.read_script_element('4c012a', 0))
+        .to eq(data_hex: '2a', total_hex_chars: 6, opcode: 0x4C)
+      expect(Runar::SDK::ScriptUtils.read_script_element('4d01002a', 0))
+        .to eq(data_hex: '2a', total_hex_chars: 8, opcode: 0x4D)
+      expect(Runar::SDK::ScriptUtils.read_script_element('4e010000002a', 0))
+        .to eq(data_hex: '2a', total_hex_chars: 12, opcode: 0x4E)
+    end
+  end
+
+  describe '.extract_constructor_args' do
+    it 'propagates the rejection on a truncated push' do
+      expect { Runar::SDK::ScriptUtils.extract_constructor_args(one_slot_artifact, '05aabb') }
+        .to raise_error(Runar::SDK::MalformedScriptError)
+    end
+  end
+
+  describe '.matches_artifact' do
+    it 'propagates the rejection on a truncated push' do
+      expect { Runar::SDK::ScriptUtils.matches_artifact(one_slot_artifact, '05aabb') }
+        .to raise_error(Runar::SDK::MalformedScriptError)
+    end
+  end
+end

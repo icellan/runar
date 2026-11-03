@@ -54,8 +54,10 @@ type StackOp struct {
 	// verify_code_part_len (R-095) — pin SIZE(_codePart) against the code
 	// part's own DEPLOYED byte length. CodePartLenDelta is the deploy-time
 	// byte growth of the template's OP_0 placeholders; CodePartLenExact says
-	// whether that growth is fully type-determined (equality pin) or only a
-	// lower bound. Both are resolved by pinCodePartLength once every method
+	// whether that growth is fully type-determined or only a lower bound. The
+	// pin is an equality either way (N-051): a non-exact pin's length field is
+	// recorded as a codePartLenSlots entry the SDK fills at deploy time. Both
+	// are resolved by pinCodePartLength once every method
 	// has been lowered; the emitter back-patches the length itself.
 	CodePartLenDelta int
 	CodePartLenExact bool
@@ -129,6 +131,29 @@ func isVariableLengthStateType(t string) bool {
 		return true
 	}
 	return false
+}
+
+// fixedWidthStateBytes is the declared byte width of a fixed-width byte state
+// type (N-045), or 0 for every other type. MUST match the reader's size table
+// in lowerDeserializeState and the shared STATE_FIELD_WIDTHS table.
+// FixedWidthValueBytes exports fixedWidthStateBytes for the constructorArgs
+// value check (F-101): the same widths a baked value of these types must have.
+func FixedWidthValueBytes(t string) int { return fixedWidthStateBytes(t) }
+
+func fixedWidthStateBytes(t string) int {
+	switch t {
+	case "PubKey":
+		return 33
+	case "Addr", "Ripemd160":
+		return 20
+	case "Sha256":
+		return 32
+	case "Point", "P256Point":
+		return 64
+	case "P384Point":
+		return 96
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -350,17 +375,38 @@ func (s *stackMap) namedSlots() map[string]bool {
 // ---------------------------------------------------------------------------
 
 func computeLastUses(bindings []ir.ANFBinding) map[string]int {
+	return computeLastUsesWithArrays(bindings, nil)
+}
+
+// computeLastUsesWithArrays is computeLastUses seeded with the array_literal
+// metadata of an ENCLOSING scope (F-081): an if-arm or loop body can consume
+// an array declared before it, and its own bindings do not contain that
+// array_literal. Without the seed an element reached only through the outer
+// array had no last-use here and was consumed at its first read.
+func computeLastUsesWithArrays(bindings []ir.ANFBinding, inheritedArrays map[string][]string) map[string]int {
 	lastUse := make(map[string]int)
 	// Pre-scan: map each array_literal binding to its element refs. Used to
 	// propagate last-use across the array indirection (the array binding is
 	// pure metadata in lowerArrayLiteral, so its elements must remain live
 	// until the array's consumer, not until the array_literal binding itself).
-	arrayElems := make(map[string][]string)
+	arrayElems := make(map[string][]string, len(inheritedArrays))
+	for name, elems := range inheritedArrays {
+		arrayElems[name] = elems
+	}
 	for _, b := range bindings {
 		if b.Value.Kind == "array_literal" {
 			elems := make([]string, len(b.Value.Elements))
 			copy(elems, b.Value.Elements)
 			arrayElems[b.Name] = elems
+		} else if b.Value.Kind == "load_const" && b.Value.ConstString != nil &&
+			len(*b.Value.ConstString) > 5 && (*b.Value.ConstString)[:5] == "@ref:" {
+			// F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus
+			// the alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS.
+			// Without following it the elements got no last-use at all and
+			// were consumed at the first checkMultiSig, so a second read failed.
+			if elems, ok := arrayElems[(*b.Value.ConstString)[5:]]; ok {
+				arrayElems[b.Name] = append([]string(nil), elems...)
+			}
 		}
 	}
 	for i, binding := range bindings {
@@ -966,7 +1012,21 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterInnerIf.clone()
 
-	// ELSE: >= 256 → 0x4d + 2-byte LE
+	// ELSE: >= 256
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(65536)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterPd4If := ctx.sm.clone()
+
+	// THEN: 256-65535 → 0x4d + 2-byte LE
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
@@ -997,6 +1057,43 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterPd4If.clone()
+
+	// ELSE: >= 65536 → 0x4e + 4-byte LE (N-044 / F-361: this arm was missing,
+	// so the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+	// gives the unsigned 4-byte LE length.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(5)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4e}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.sm = smEndTarget
@@ -1007,6 +1104,12 @@ func (ctx *loweringContext) emitPushDataEncode() {
 //
 // Expects stack: [..., state_bytes]
 // Leaves stack:  [..., data, remaining_state]
+//
+// Accepts exactly the headers emitPushDataEncode writes: < 76 (the header is
+// the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e (4-byte LE); any
+// other header fails the script. The header and every length are read
+// UNSIGNED (emitUnsignedBin2Num) — bare OP_BIN2NUM read 0x80 as 0 and 0x81..
+// 0xff as negative (N-044).
 func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
@@ -1017,7 +1120,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitUnsignedBin2Num() // [..., rest, hb]
 	ctx.emitOp(StackOp{Op: "dup"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
@@ -1031,7 +1134,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.pop()
 	smAfterOuterIf := ctx.sm.clone()
 
-	// THEN: fb < 76 → direct length
+	// THEN: hb < 76 → direct length
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1042,6 +1145,27 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterOuterIf.clone()
 
+	// ELSE: map the header to its length width (1, 2 or 4).
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterPd1If := ctx.sm.clone()
+	// 0x4c → width 1
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	smWidth := ctx.sm.clone()
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterPd1If.clone()
 	ctx.emitOp(StackOp{Op: "dup"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(77)})
@@ -1050,38 +1174,30 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.pop()
 	ctx.sm.pop()
 	ctx.sm.push("")
-
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
-	smAfterInnerIf := ctx.sm.clone()
-
-	// THEN: fb == 77 → 2-byte LE
+	smAfterPd2If := ctx.sm.clone()
+	// 0x4d → width 2
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-	ctx.sm = smAfterInnerIf.clone()
-
-	// ELSE: fb == 76 → 1-byte
-	ctx.emitOp(StackOp{Op: "drop"})
-	ctx.sm.pop()
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm = smAfterPd2If.clone()
+	// 0x4e → width 4; any other header fails the script
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(78)})
 	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.sm = smWidth
+	// [..., rest, width]
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1089,7 +1205,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitUnsignedBin2Num() // [..., rest2, len]
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1097,8 +1213,41 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.sm = smEndTarget
+}
+
+// emitAssertStateConsumed fails the script unless the value on top (the rest
+// of the state section after the last field) is empty, and pops it: the last
+// state field must consume the state section exactly (N-044).
+func (ctx *loweringContext) emitAssertStateConsumed() {
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+}
+
+// emitFixedWidthStateCheck (N-045): before a fixed-width state value (Sha256,
+// PubKey, Addr, Ripemd160, Point, P256Point, P384Point) is committed to a
+// continuation, assert it has exactly its declared width:
+//
+//	[..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+//
+// The writer copies these values as they are and the next spend's reader
+// slices each at its declared width, so a wrong-width value shifts every later
+// field. No-op for every other type.
+func (ctx *loweringContext) emitFixedWidthStateCheck(t string) {
+	width := fixedWidthStateBytes(t)
+	if width == 0 {
+		return
+	}
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(width))})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
 }
 
 // bringToTop moves the named value to the top of the stack.
@@ -1311,11 +1460,17 @@ func (ctx *loweringContext) operandConsume(ref string, operands []string, curren
 // ---------------------------------------------------------------------------
 
 func (ctx *loweringContext) lowerBindings(bindings []ir.ANFBinding, terminalAssert bool) {
+	ctx.lowerBindingsWithArrays(bindings, terminalAssert, nil)
+}
+
+// lowerBindingsWithArrays is lowerBindings for a branch arm, whose liveness
+// must see the enclosing scope's array_literal metadata (F-081).
+func (ctx *loweringContext) lowerBindingsWithArrays(bindings []ir.ANFBinding, terminalAssert bool, inheritedArrays map[string][]string) {
 	ctx.localBindings = make(map[string]bool, len(bindings))
 	for _, b := range bindings {
 		ctx.localBindings[b.Name] = true
 	}
-	lastUses := computeLastUses(bindings)
+	lastUses := computeLastUsesWithArrays(bindings, inheritedArrays)
 
 	// Protect parent-scope refs that are still needed after this scope
 	if ctx.outerProtectedRefs != nil {
@@ -1327,19 +1482,18 @@ func (ctx *loweringContext) lowerBindings(bindings []ir.ANFBinding, terminalAsse
 	// Find the terminal binding index (if terminalAssert is set).
 	// If the last binding is an 'if' whose branches end in asserts,
 	// that 'if' is the terminal point (not an earlier standalone assert).
+	// Only an assert that IS the last binding may leave its value as the
+	// result (N-005): any later binding (e.g. a terminal asm() raw_script with
+	// out_arity 1) pushes its own result, the cleanup NIPs the assert's value
+	// away, and the check is never enforced. Such an assert gets OP_VERIFY.
 	lastAssertIdx := -1
 	terminalIfIdx := -1
 	if terminalAssert {
 		lastBinding := bindings[len(bindings)-1]
 		if lastBinding.Value.Kind == "if" {
 			terminalIfIdx = len(bindings) - 1
-		} else {
-			for i := len(bindings) - 1; i >= 0; i-- {
-				if bindings[i].Value.Kind == "assert" {
-					lastAssertIdx = i
-					break
-				}
-			}
+		} else if lastBinding.Value.Kind == "assert" {
+			lastAssertIdx = len(bindings) - 1
 		}
 	}
 
@@ -1476,14 +1630,18 @@ func (ctx *loweringContext) lowerLoadProp(bindingName, propName string) {
 		}
 	}
 
-	if ctx.sm.has(propName) {
+	// N-016: only a MUTABLE property ever lives on the stack (deserialize_state
+	// / update_prop). A readonly property is a deploy-time constant, so a slot
+	// that merely shares its name is a param, local or temp — reading it made
+	// `this.target` return whatever that slot held.
+	if (prop == nil || !prop.Readonly) && ctx.sm.has(propName) {
 		// Property has been updated (via update_prop) — use the stack value.
 		// Must check this BEFORE InitialValue — after update_prop, we need the
 		// updated value, not the original constant.
 		ctx.bringToTop(propName, false)
 		ctx.sm.pop()
 	} else if prop != nil && prop.InitialValue != nil {
-		ctx.pushPropertyValue(prop.InitialValue)
+		ctx.pushPropertyValue(prop.InitialValue, prop.Name)
 	} else {
 		// Property value will be provided at deployment time; emit a placeholder.
 		// The emitter records byte offsets so the SDK can splice in real values.
@@ -1532,7 +1690,7 @@ func (ctx *loweringContext) lowerLoadProp(bindingName, propName string) {
 	ctx.sm.push(bindingName)
 }
 
-func (ctx *loweringContext) pushPropertyValue(val interface{}) {
+func (ctx *loweringContext) pushPropertyValue(val interface{}, propName string) {
 	switch v := val.(type) {
 	case bool:
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: v}})
@@ -1543,7 +1701,17 @@ func (ctx *loweringContext) pushPropertyValue(val interface{}) {
 	case string:
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: hexToBytes(v)}})
 	default:
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+		// F-258 / CL-BUG-151: a property initializer is supposed to be a
+		// literal (bool/float64/*big.Int/string) -- the language only allows
+		// BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+		// `--ir` skips the frontend that enforces that, so a hand-written IR
+		// file can hand this an array or object. Silently pushing 0 compiled
+		// a working-looking script whose property reads whatever the caller
+		// named always as 0 -- fail loudly instead.
+		panic(fmt.Errorf(
+			"stack lowering: property '%s' has a non-literal initializer of "+
+				"type %T (%v). Refusing to emit a silent OP_0 placeholder.",
+			propName, val, val))
 	}
 }
 
@@ -1740,7 +1908,9 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 			ctx.bringToTop(args[0], isLast)
 			ctx.sm.pop()
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-			ctx.sm.push(bindingName)
+			// No result slot: OP_VERIFY leaves nothing behind, and a
+			// model-only slot puts every later PICK/ROLL one item too
+			// deep (F-072). Same model as lowerAssert.
 		}
 		return
 	}
@@ -1752,7 +1922,9 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 			ctx.bringToTop(args[0], isLast)
 			ctx.sm.pop()
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-			ctx.sm.push(bindingName)
+			// No result slot: OP_VERIFY leaves nothing behind, and a
+			// model-only slot puts every later PICK/ROLL one item too
+			// deep (F-072). Same model as lowerAssert.
 		}
 		return
 	}
@@ -1760,7 +1932,7 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 	// super() in constructor — no opcode emission needed.
 	// Constructor args are already on the stack.
 	if funcName == "super" {
-		ctx.sm.push(bindingName)
+		// No opcode, so no stack slot either (F-072).
 		return
 	}
 
@@ -2056,6 +2228,11 @@ func (ctx *loweringContext) lowerMethodCall(bindingName, object string, method s
 // inlineMethodCall inlines a private method by lowering its body in the current context.
 // The method's parameters are bound to the call arguments.
 func (ctx *loweringContext) inlineMethodCall(bindingName string, method *ir.ANFMethod, args []string, bindingIndex int, lastUses map[string]int) {
+	// N-055: see irOutputDelegationError.
+	if containsOutputIntrinsic(method.Body) {
+		panic(irOutputDelegationError)
+	}
+
 	type shadowEntry struct {
 		paramName    string
 		shadowedName string
@@ -2308,8 +2485,22 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// are source-level substitution (spec/semantics.md §6.3), which stack
 	// lowering performs; an arm is not a different scope for that.
 	thenCtx.privateMethods = ctx.privateMethods
+	// N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+	// `__param_<name>` slot for a param that shadows a mutable property, so the
+	// arm must resolve load_param through the same map. newLoweringContext
+	// starts with it EMPTY, and the arm then read the same-named deserialized
+	// PROPERTY slot — the stale on-chain state — in place of the caller's
+	// witness argument.
+	for param, slot := range ctx.renamedParams {
+		thenCtx.renamedParams[param] = slot
+	}
+	// F-081: the same holds for array_literal metadata. An array declared
+	// before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+	// there needs its element refs; a fresh context has none and failed with
+	// "array_literal metadata missing".
+	thenCtx.inheritArrays(ctx)
 	thenCtx.insideBranch = true
-	thenCtx.lowerBindings(thenBindings, ta)
+	thenCtx.lowerBindingsWithArrays(thenBindings, ta, ctx.arrayElements)
 
 	thenCtx.drainBranchPrivateResidue(preIfNames)
 
@@ -2320,6 +2511,16 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			thenCtx.sm.removeAtDepth(1)
 		}
 	}
+	// N-072: under a terminal assert the arm's one remaining slot is its
+	// VERDICT, which nothing reads by name. It must not keep the name of the
+	// parent local it asserted (`const x = a; if (c) { assert(x); } else
+	// { assert(b); }`): phase 1 below would then see "the else-arm consumed
+	// `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+	// the depth back with OP_0 -- an arm that always fails.
+	if ta && thenCtx.sm.depth() >= 1 {
+		thenCtx.sm.pop()
+		thenCtx.sm.push("")
+	}
 
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
@@ -2327,8 +2528,13 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
 	elseCtx.privateMethods = ctx.privateMethods // N-051, see thenCtx above
+	// N-007, see thenCtx above.
+	for param, slot := range ctx.renamedParams {
+		elseCtx.renamedParams[param] = slot
+	}
+	elseCtx.inheritArrays(ctx) // F-081, see thenCtx above
 	elseCtx.insideBranch = true
-	elseCtx.lowerBindings(elseBindings, ta)
+	elseCtx.lowerBindingsWithArrays(elseBindings, ta, ctx.arrayElements)
 
 	elseCtx.drainBranchPrivateResidue(preIfNames)
 
@@ -2338,6 +2544,11 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			elseCtx.emitOp(StackOp{Op: "nip"})
 			elseCtx.sm.removeAtDepth(1)
 		}
+	}
+	// N-072, see thenCtx above
+	if ta && elseCtx.sm.depth() >= 1 {
+		elseCtx.sm.pop()
+		elseCtx.sm.push("")
 	}
 
 	// Balance stack between branches so both end at the same depth.
@@ -2691,7 +2902,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -2726,7 +2937,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			for j := 0; j < sinkBelow; j++ {
 				ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(windowSize - 1))})
 				ctx.sm.push("")
-				ctx.emitOp(StackOp{Op: "roll", Depth: windowSize})
+				ctx.emitOp(StackOp{Op: "roll", Depth: windowSize - 1})
 				ctx.sm.pop()
 				lifted := ctx.sm.removeAtDepth(windowSize - 1)
 				ctx.sm.push(lifted)
@@ -2757,7 +2968,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -2793,7 +3004,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -2817,7 +3028,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -2923,6 +3134,20 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 		}
 	}
 
+	// F-081: an outer array_literal binding is metadata only — its ELEMENTS
+	// are the stack slots. Protecting the array name protects nothing, so the
+	// first iteration consumed the elements and the second failed with
+	// "value 't0' not found on stack". Protect the elements themselves.
+	outerArrays := make(map[string][]string, len(ctx.arrayElements))
+	for name, elems := range ctx.arrayElements {
+		outerArrays[name] = elems
+	}
+	for ref := range outerRefs {
+		for _, e := range outerArrays[ref] {
+			outerRefs[e] = true
+		}
+	}
+
 	// Temporarily extend localBindings with body binding names so
 	// @ref: to body-internal values can consume on last use.
 	prevLocalBindings := ctx.localBindings
@@ -2943,7 +3168,7 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: iterVal}})
 		ctx.sm.push(iterVar)
 
-		lastUses := computeLastUses(body)
+		lastUses := computeLastUsesWithArrays(body, outerArrays)
 
 		// Prevent outer-scope refs from being consumed by setting their
 		// last-use beyond any body binding index:
@@ -2969,8 +3194,16 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 			}
 		}
 
+		// F-259: each body binding's ops carry that binding's own location (a
+		// binding without one keeps the loop's). The iteration-variable push
+		// above and the cleanup below stay on the loop's location.
+		loopLoc := ctx.currentSourceLoc
 		for j, binding := range body {
+			if binding.SourceLoc != nil {
+				ctx.currentSourceLoc = binding.SourceLoc
+			}
 			ctx.lowerBinding(&binding, j, lastUses)
+			ctx.currentSourceLoc = loopLoc
 		}
 
 		// Clean up the iteration variable if it was not consumed by the body.
@@ -3047,7 +3280,7 @@ func (ctx *loweringContext) lowerUpdateProp(propName, valueRef string, bindingIn
 				} else {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -3081,12 +3314,15 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 		if ctx.sm.has(prop.Name) {
 			ctx.bringToTop(prop.Name, true) // consume: raw value dead after serialization
 		} else if prop.InitialValue != nil {
-			ctx.pushPropertyValue(prop.InitialValue)
+			ctx.pushPropertyValue(prop.InitialValue, prop.Name)
 			ctx.sm.push("")
 		} else {
 			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
 			ctx.sm.push("")
 		}
+
+		// N-045: a fixed-width byte value must have its declared width.
+		ctx.emitFixedWidthStateCheck(prop.Type)
 
 		// Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
 		// The width MUST come from numericStateTypeWidth — the same table the
@@ -3604,10 +3840,9 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 		prop := stateProps[0]
 		if isVariableLengthStateType(prop.Type) {
 			// Single variable-length byte-string: decode push-data
-			// prefix, drop trailing empty.
-			ctx.emitPushDataDecode() // [..., data, remaining]
-			ctx.emitOp(StackOp{Op: "drop"})
-			ctx.sm.pop()
+			// prefix; the remainder must be empty (N-044).
+			ctx.emitPushDataDecode()      // [..., data, remaining]
+			ctx.emitAssertStateConsumed() // [..., data]
 		} else if isNumericStateType(prop.Type) {
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 		}
@@ -3645,14 +3880,23 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					ctx.sm.push("")
 				}
 			} else {
+				// Last field: it must consume the state section
+				// exactly (N-044).
 				if isVariableLengthStateType(prop.Type) {
-					// Last variable-length byte-string: decode
-					// push-data prefix, drop trailing empty.
-					ctx.emitPushDataDecode() // [..., data, remaining]
-					ctx.emitOp(StackOp{Op: "drop"})
+					ctx.emitPushDataDecode()      // [..., data, remaining]
+					ctx.emitAssertStateConsumed() // [..., data]
+				} else {
+					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(propSizes[i]))})
+					ctx.sm.push("")
+					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 					ctx.sm.pop()
-				} else if isNumericStateType(prop.Type) {
-					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+					ctx.sm.pop()
+					ctx.sm.push("")
+					ctx.sm.push("")
+					ctx.emitAssertStateConsumed() // [..., field]
+					if isNumericStateType(prop.Type) {
+						ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+					}
 				}
 				ctx.sm.pop()
 				ctx.sm.push(prop.Name)
@@ -3701,6 +3945,9 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 
 		consume := ctx.operandConsume(valueRef, outputOperands, bindingIndex, lastUses)
 		ctx.bringToTop(valueRef, consume)
+
+		// N-045: a fixed-width byte value must have its declared width.
+		ctx.emitFixedWidthStateCheck(prop.Type)
 
 		// Convert numeric/boolean values to fixed-width bytes. Same table as the
 		// reader — see numericStateTypeWidth.
@@ -3804,6 +4051,18 @@ func (ctx *loweringContext) lowerAddRawOutput(bindingName, satoshis, scriptBytes
 	ctx.sm.pop()
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
+}
+
+// inheritArrays copies the enclosing context's array_literal metadata into
+// this (branch) context (F-081). Copies, so an arm-local array does not leak
+// out.
+func (ctx *loweringContext) inheritArrays(parent *loweringContext) {
+	for name, elems := range parent.arrayElements {
+		ctx.arrayElements[name] = append([]string(nil), elems...)
+	}
+	for name, n := range parent.arrayLengths {
+		ctx.arrayLengths[name] = n
+	}
 }
 
 func (ctx *loweringContext) lowerArrayLiteral(bindingName string, elements []string, bindingIndex int, lastUses map[string]int) {
@@ -5311,16 +5570,20 @@ func (ctx *loweringContext) lowerDivmod(bindingName string, args []string, bindi
 	ctx.trackDepth()
 }
 
-// lowerLog2 lowers log2(n) — exact floor(log2(n)) via bit-scanning.
+// lowerLog2 lowers log2(n) — exact floor(log2(n)) for every n > 0; n <= 0
+// aborts (N-103, user decision R86). No iteration cap: the bit length is read
+// off the minimal Script-number encoding.
 //
-// Uses a bounded unrolled loop (64 iterations for bigint range):
+//	OP_BIN2NUM                              n        (minimal re-encoding)
+//	OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+//	OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+//	OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+//	OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+//	7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+//	OP_NIP                                  b + #{c : t >= c}
 //
-//	counter = 0
-//	while input > 1: input >>= 1, counter++
-//	result = counter
-//
-// Stack layout during loop: <input> <counter>
-// Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+// t = 0 only as the sign-padding byte, where n's bit length is exactly
+// 8(s-1). Mirrors packages/runar-compiler/src/passes/05-stack-lower.ts#lowerLog2.
 func (ctx *loweringContext) lowerLog2(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 1 {
 		panic("log2 requires 1 argument")
@@ -5331,35 +5594,29 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 	ctx.bringToTop(n, nIsLast)
 	ctx.sm.pop()
 
-	// Stack: <n>
-	// Push counter = 0
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)}) // n 0
-
-	// 64 iterations (sufficient for Bitcoin Script bigint range)
-	const log2Iterations = 64
-	for i := 0; i < log2Iterations; i++ {
-		// Stack: input counter
-		ctx.emitOp(StackOp{Op: "swap"})                           // counter input
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})         // counter input input
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})     // counter input input 1
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // counter input (input>1)
-		ctx.emitOp(StackOp{
-			Op: "if",
-			Then: []StackOp{
-				{Op: "push", Value: bigIntPush(2)}, // counter input 2
-				{Op: "opcode", Code: "OP_DIV"},     // counter (input/2)
-				{Op: "swap"},                       // (input/2) counter
-				{Op: "opcode", Code: "OP_1ADD"},    // (input/2) (counter+1)
-				{Op: "swap"},                       // (counter+1) (input/2)
-			},
-		})
-		// Stack: counter input (or input counter if swapped back)
-		// After the if: stack is counter input (swap at start, then if-branch swaps back)
-		ctx.emitOp(StackOp{Op: "swap"}) // input counter
+	op := func(code string) { ctx.emitOp(StackOp{Op: "opcode", Code: code}) }
+	op("OP_BIN2NUM")
+	op("OP_DUP")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+	op("OP_GREATERTHAN")
+	op("OP_VERIFY")
+	op("OP_SIZE")
+	op("OP_1SUB")
+	op("OP_TUCK")
+	op("OP_SPLIT")
+	op("OP_NIP")
+	op("OP_BIN2NUM")
+	op("OP_SWAP")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	op("OP_MUL")
+	op("OP_1SUB")
+	for _, c := range []int64{1, 2, 4, 8, 16, 32, 64} {
+		op("OP_OVER")
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(c)})
+		op("OP_GREATERTHANOREQUAL")
+		op("OP_ADD")
 	}
-	// Stack: input counter
-	// Drop input, keep counter
-	ctx.emitOp(StackOp{Op: "nip"}) // counter
+	op("OP_NIP")
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
@@ -5636,7 +5893,9 @@ func pinCodePartLength(methods []StackMethod, properties []ir.ANFProperty) {
 		growth, known := constructorSlotGrowth(typ)
 		if !known {
 			// No compile-time width. Growth is never negative, so the running
-			// sum stays a sound lower bound — just not an exact one.
+			// sum is only a lower bound; the emitter records the pin's length
+			// field as a codePartLenSlots entry and the SDK writes the exact
+			// deployed length there (N-051). The pin stays an equality.
 			exact = false
 		} else {
 			delta += growth
@@ -5899,6 +6158,33 @@ func methodReadsVarLenStateRec(
 						return true
 					}
 				}
+			}
+		}
+	}
+	return false
+}
+
+// irOutputDelegationError (N-055) is the one diagnostic all seven tiers give an
+// --ir program whose method_call reaches a private method holding an output
+// intrinsic. The source frontend inlines such helpers before ANF, so the
+// intrinsic always sits in the public method; --ir has no delegation support.
+const irOutputDelegationError = "output intrinsics must be called from the public method or an inlined helper; " +
+	"--ir method_call delegation is not supported"
+
+// containsOutputIntrinsic reports whether bindings, at any if / loop depth,
+// hold an add_output, add_raw_output or add_data_output.
+func containsOutputIntrinsic(bindings []ir.ANFBinding) bool {
+	for _, b := range bindings {
+		switch b.Value.Kind {
+		case "add_output", "add_raw_output", "add_data_output":
+			return true
+		case "if":
+			if containsOutputIntrinsic(b.Value.Then) || containsOutputIntrinsic(b.Value.Else) {
+				return true
+			}
+		case "loop":
+			if containsOutputIntrinsic(b.Value.Body) {
+				return true
 			}
 		}
 	}

@@ -159,7 +159,7 @@ func TestValidateIR_StructuralErrorsStillReportedFirst(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	if !strings.Contains(err.Error(), "property") {
+	if !strings.Contains(err.Error(), "properties[0].type must be a non-empty string") {
 		t.Errorf("the empty-property-type diagnostic must survive, got: %v", err)
 	}
 }

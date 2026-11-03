@@ -227,3 +227,97 @@ pub fn assert_no_json_floats(data: &[u8]) -> Option<IRFloatValueError> {
     }
     None
 }
+
+/// N-212 (decision R82: every tier parses a bare JSON integer exactly).
+///
+/// `serde_json` (built without `arbitrary_precision`) turns an integer token
+/// too wide for `i64`/`u64` into an `f64` while parsing, and `ANFValue` is an
+/// internally tagged enum, so serde buffers it before `LoadConst` ever sees
+/// it: the digits of a 256-bit constant are gone before any Rúnar code runs,
+/// and `parse_const_value` then saturated the double to `i128::MAX`.
+///
+/// This rewrites, in the raw text, every bare integer that is the value of a
+/// `"value"` or `"initialValue"` member and does not fit an `i64` into the
+/// sanctioned `"<decimal>n"` string, which `parse_const_value` already reads
+/// exactly. Narrower than enabling `arbitrary_precision`, which is
+/// crate-wide and breaks numbers inside serde's internally tagged and
+/// untagged enums — the shape `ANFValue` uses.
+///
+/// Run after `assert_no_json_floats`, so every number token here is an
+/// integer. Returns `None` when nothing needs rewriting.
+pub fn quote_wide_integer_constants(json: &str) -> Option<String> {
+    let data = json.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut str_start = 0usize;
+    // The last complete string token, and whether a `:` has followed it.
+    let mut last_key: Option<(usize, usize)> = None;
+    let mut after_colon = false;
+    let mut i = 0usize;
+    while i < data.len() {
+        let b = data[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+                last_key = Some((str_start, i));
+                after_colon = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                str_start = i + 1;
+                i += 1;
+            }
+            b':' => {
+                after_colon = last_key.is_some();
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < data.len() && (data[i] == b'-' || data[i].is_ascii_digit()) {
+                    i += 1;
+                }
+                let key = if after_colon {
+                    last_key.map(|(s, e)| &json[s..e])
+                } else {
+                    None
+                };
+                let token = &json[start..i];
+                let digits = token.strip_prefix('-').unwrap_or(token);
+                if matches!(key, Some("value") | Some("initialValue"))
+                    && !digits.is_empty()
+                    && digits.bytes().all(|c| c.is_ascii_digit())
+                    && token.parse::<i64>().is_err()
+                {
+                    let o = out.get_or_insert_with(|| String::with_capacity(json.len() + 16));
+                    o.push_str(&json[copied..start]);
+                    o.push('"');
+                    o.push_str(token);
+                    o.push_str("n\"");
+                    copied = i;
+                }
+                last_key = None;
+                after_colon = false;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            _ => {
+                last_key = None;
+                after_colon = false;
+                i += 1;
+            }
+        }
+    }
+    out.map(|mut o| {
+        o.push_str(&json[copied..]);
+        o
+    })
+}

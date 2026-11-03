@@ -1,0 +1,78 @@
+{
+  "fixture": "state-leaderboard",
+  "kind": "stateful",
+  "note": "LeaderBoard claim(): {PubKey, bigint} mutable state, the second witness for the shape auction pins. A claim needs the current leader's real checkSig and a strictly higher score; both mutable fields are rewritten and the real checkPreimage continuation commits them.",
+  "constructorArgs": [
+    {
+      "$pubkey": "alice"
+    },
+    "10n"
+  ],
+  "spends": [
+    {
+      "method": "claim",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        },
+        "25n"
+      ],
+      "expect": "accept",
+      "note": "alice (current leader) hands the board to bob with score 25 > 10",
+      "signerKey": "alice",
+      "expectedState": {
+        "leader": {
+          "$pubkey": "bob"
+        },
+        "topScore": "25n"
+      }
+    },
+    {
+      "method": "claim",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        },
+        "25n"
+      ],
+      "expect": "reject",
+      "note": "wrong signer: leader=alice but bob signs",
+      "signerKey": "bob",
+      "cryptoNearMiss": true
+    },
+    {
+      "method": "claim",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        },
+        "10n"
+      ],
+      "expect": "reject",
+      "note": "score 10 is not greater than topScore 10",
+      "signerKey": "alice"
+    },
+    {
+      "method": "claim",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        },
+        "25n"
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output: the covenant must bind the new leader and score",
+      "signerKey": "alice",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "3bb6105581000c053d94a57257175be5895a5bf94bfa600614bc5f8712e54e53",
+    "expected-ir.json": "16224078378afc3bd655b545e75321f217ea86e155b7d4b56a9ff3b07e4875d7"
+  }
+}

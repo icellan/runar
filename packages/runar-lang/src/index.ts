@@ -170,6 +170,16 @@ export {
   bn254G1ScalarMul,
   bn254G1Negate,
   bn254G1OnCurve,
+  // BN254 pairing
+  bn254Pairing,
+  bn254MultiPairing3,
+  bn254MultiPairing4,
+  // Go-tier STARK / Groth16
+  verifySP1FRI,
+  merkleRootPoseidon2KB,
+  assertGroth16WitnessAssisted,
+  assertGroth16WitnessAssistedWithMSM,
+  groth16PublicInput,
   // Merkle proof verification
   merkleRootSha256,
   merkleRootHash256,
@@ -203,6 +213,8 @@ export {
   extractPrevOutputScript,
   requireOutputP2PKH,
   currentBlockHeight,
+  // F-024 (R14): read-only view of the default continuation's satoshis
+  continuationAmount,
 } from './preimage.js';
 
 // ---------------------------------------------------------------------------

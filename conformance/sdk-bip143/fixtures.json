@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "notes": "Cross-tier BIP-143 sighash fixture (GAP-003). TS (@bsv/sdk TransactionSignature.format) is the reference. Every SDK tier must INDEPENDENTLY recompute preimageHex from (unsignedTxHex, inputIndex, prevScriptHex, prevValueSats, sighashFlags) and assert byte-equality, then verify sigHex against pubkeyHex over sha256d(preimage). sigHex is deterministic RFC-6979 + low-S DER over sha256d(preimage) with priv=1 and the scenario's own sighash byte appended. See conformance/sdk-bip143/generate-fixtures.ts.",
   "provenance_note": "R-206 asked whether these vectors are self-graded. Partly: they are produced by the TS tier, but they are CHECKED by seven independent implementations, two of which are upstream third-party libraries rather than repo code — @bsv/sdk (TS) and bsv-blockchain/go-sdk (Go, via CalcInputPreimage). Rust, Python, Zig, Ruby and Java hand-roll the preimage. Two independent upstream BIP-143 implementations agreeing is category (b), not (c). What is still missing is a category-(a) vector published by the BIP itself; adding one requires fetching it from the spec, and transcribing digests from memory would be fabricating test data.",
-  "coverage_note": "Sighash modes covered: ALL|FORKID (0x41, three tx shapes), NONE|FORKID (0x42), SINGLE|FORKID (0x43), ALL|ANYONECANPAY|FORKID (0xc1), NONE|ANYONECANPAY|FORKID (0xc2), SINGLE|ANYONECANPAY|FORKID (0xc3). The five mode scenarios share one 2-in/2-out transaction signing input 1, so the only difference between their preimages is the flag. Two outputs are required: under SINGLE the digest covers the output at the SIGNING index, and with a single output index 1 would hit the no-corresponding-output case, zero hashOutputs, and make SINGLE indistinguishable from NONE.",
+  "coverage_note": "Sighash modes covered: ALL|FORKID (0x41, three tx shapes plus one with a non-zero nLockTime 0x65f1a2b3), NONE|FORKID (0x42), SINGLE|FORKID (0x43), ALL|ANYONECANPAY|FORKID (0xc1), NONE|ANYONECANPAY|FORKID (0xc2), SINGLE|ANYONECANPAY|FORKID (0xc3). The five mode scenarios share one 2-in/2-out transaction signing input 1, so the only difference between their preimages is the flag. Two outputs are required: under SINGLE the digest covers the output at the SIGNING index, and with a single output index 1 would hit the no-corresponding-output case, zero hashOutputs, and make SINGLE indistinguishable from NONE.",
   "signer_priv_hex": "0000000000000000000000000000000000000000000000000000000000000001",
   "signer_pub_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
   "sighash_note": "0x41 = SIGHASH_ALL | SIGHASH_FORKID. digestHex = sha256d(preimage) = the value ECDSA actually signs. Each scenario carries its own sighashFlags; consumers must recompute under THAT value, not a hardcoded one.",
@@ -109,6 +109,19 @@
       "preimageHex": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac2823000000000000feffffffb0c6969175dece07571d7014d0a8c8c8da578ba1580b8f38c6a651643abd94ca00000000c3000000",
       "digestHex": "eca3c3193046543f1c3476e557d3815244abfb0642f07acae7c1b49c2c23e158",
       "sigHex": "3045022100c30731356acc352a7057fa1ce27910626804d08013baa63d46183862a59b0cd20220011b2f47c5141667ce1f761c3b11fb6fec009fb1780797c423676f57792d8ff6c3",
+      "pubkeyHex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    {
+      "scenario": "nonzero_locktime",
+      "description": "Non-zero nLockTime 0x65f1a2b3 (distinct bytes), sequence 0xfffffffe, single input, SIGHASH_ALL|FORKID. Pins that the preimage commits to the tx nLockTime rather than a constant 0.",
+      "unsignedTxHex": "010000000199999999999999999999999999999999999999999999999999999999999999990300000000feffffff01a00f0000000000001976a914751e76e8199196d454941c45d1b3a323f1433bd688acb3a2f165",
+      "inputIndex": 0,
+      "prevScriptHex": "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac",
+      "prevValueSats": 6000,
+      "sighashFlags": 65,
+      "preimageHex": "010000002751deee4c9b4dbb6f6b4368acafd6731788d7533170e3caf87dcd4b32d3e59c18606b350cd8bf565266bc352f0caddcf01e8fa789dd8a15386327cf8cabe1989999999999999999999999999999999999999999999999999999999999999999030000001976a914751e76e8199196d454941c45d1b3a323f1433bd688ac7017000000000000feffffffabb8c1c9329a63a4fbc71014870ce6fc5890d492eb25437f0cf266a1e974452eb3a2f16541000000",
+      "digestHex": "67c4daa6f0bf03edcf65d756f2de41d788ddd76773da39acb4b205f66411edae",
+      "sigHex": "30440220465db9182b9f2900d51adc527e885225c434105aa0921879912b3069078935df02205c8a3cf0b0017151c536caa1f6bed957e93b039e3ed324c9e3124c764bf8331841",
       "pubkeyHex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     }
   ]

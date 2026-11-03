@@ -27,16 +27,35 @@
 
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GATE = join(ROOT, 'conformance', 'scripts', 'check-golden-provenance.mjs');
 
+/**
+ * A golden the gate must JUSTIFY at this tree: the first allowlist entry whose
+ * pinned sha256 matches the file's current bytes. Chosen dynamically so the
+ * test does not rot when one pin is legitimately re-stamped.
+ */
+function justifiedGolden(): string | undefined {
+  const allowlist = JSON.parse(
+    readFileSync(join(ROOT, 'conformance', 'golden-provenance-allowlist.json'), 'utf8'),
+  ) as { entries?: { path: string; sha256: string }[] };
+  return (allowlist.entries ?? []).find((e) => {
+    const abs = join(ROOT, e.path);
+    return (
+      existsSync(abs) && createHash('sha256').update(readFileSync(abs)).digest('hex') === e.sha256
+    );
+  })?.path;
+}
+
 /** Runs the gate from `cwd` and returns its exit code and stdout+stderr. */
-function runGate(cwd: string): { code: number; out: string } {
+function runGate(cwd: string, args: string[] = ['--base', 'origin/main']): { code: number; out: string } {
   try {
-    const out = execFileSync('node', [GATE, '--base', 'origin/main'], {
+    const out = execFileSync('node', [GATE, ...args], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -73,21 +92,60 @@ describe('the golden-provenance gate does not depend on the caller cwd', () => {
     expect(marks(fromConformance.out)).toBe(marks(fromRoot.out));
   });
 
-  it('is not vacuous: the gate actually ran and examined goldens', () => {
-    // Anti-vacuity. If the gate crashed on startup from both directories it
-    // would "agree" perfectly and prove nothing — which is the exact class of
-    // guard this branch keeps finding. A real run always prints one of two
-    // headers, both anchored at `Golden-provenance gate:`:
-    //   - `Golden-provenance gate: N golden/vector file(s) changed.`
-    //   - `Golden-provenance gate: no golden/vector files changed — nothing to justify.`
-    // A crash, empty stdout, or the skip-fail line (`…changed, but the allowlist
-    // itself is invalid`) matches neither.
+  it('is not vacuous: the gate actually ran from both directories', () => {
+    // Anti-vacuity for the `--base origin/main` pair. If the gate crashed on
+    // startup from both directories it would "agree" perfectly and prove
+    // nothing. Either summary form is a real run: a tree with no golden diff
+    // against origin/main (origin/main itself, any clean branch) legitimately
+    // prints "no golden/vector files changed", so requiring the non-empty form
+    // here made this test red everywhere except on a branch that happened to
+    // move a golden (F-000). The examined-count is asserted by the pinned-set
+    // tests below, which do not depend on the diff.
+    const summary =
+      /Golden-provenance gate: (?:no golden\/vector files changed|\d+ golden\/vector file\(s\) changed)/;
+    expect(fromRoot.out, 'no gate summary from the repo root').toMatch(summary);
+    expect(fromConformance.out, 'no gate summary from conformance/').toMatch(summary);
+  });
+
+  // The pair above is vacuous for the cwd property on a tree with no golden
+  // diff: both runs print "nothing to justify" whatever `root` resolves to. So
+  // the property is ALSO checked against a pinned changed set containing one
+  // golden that is justified at this tree. Under the original defect
+  // (root = process.cwd()) the run from conformance/ cannot find the allowlist,
+  // reports that golden as unjustified and exits 1, while the repo-root run
+  // justifies it and exits 0 — so these assertions go red.
+  //
+  // Proves: with a non-empty golden set, the gate examines it and reaches the
+  // same verdict from the repo root and from conformance/.
+  // Does not prove: that `git diff` discovery of the changed set is itself
+  // cwd-independent (the `--base` pair covers that only when the diff is
+  // non-empty), nor anything about the correctness of the allowlist pins.
+  const golden = justifiedGolden();
+  const pinnedArgs = golden ? ['--files', golden] : [];
+  const pinnedFromRoot = golden ? runGate(ROOT, pinnedArgs) : { code: -1, out: '' };
+  const pinnedFromConformance = golden
+    ? runGate(join(ROOT, 'conformance'), pinnedArgs)
+    : { code: -1, out: '' };
+
+  it('has a golden that is justified at this tree to drive the gate with', () => {
     expect(
-      fromRoot.out,
-      'the gate produced no summary line from the repo root, so the agreement ' +
-        'asserted above is between two non-runs',
-    ).toMatch(
-      /Golden-provenance gate: (?:\d+ golden\/vector file\(s\) changed\.|no golden\/vector files changed — nothing to justify\.)/,
-    );
+      golden,
+      'no allowlist entry pins its golden\'s current bytes, so the pinned-set ' +
+        'checks below cannot discriminate a cwd-dependent gate from a correct one',
+    ).toBeDefined();
+  });
+
+  it('examines the pinned golden and justifies it from the repo root', () => {
+    expect(pinnedFromRoot.out).toMatch(/Golden-provenance gate: 1 golden\/vector file\(s\) changed/);
+    expect(pinnedFromRoot.out).toContain(`✓ ${golden}`);
+  });
+
+  it('gives the same verdict on the pinned golden from conformance/', () => {
+    expect(
+      pinnedFromConformance.code,
+      `from repo root:   exit ${pinnedFromRoot.code}\n${pinnedFromRoot.out}\n` +
+        `from conformance: exit ${pinnedFromConformance.code}\n${pinnedFromConformance.out}`,
+    ).toBe(pinnedFromRoot.code);
+    expect(pinnedFromConformance.out).toContain(`✓ ${golden}`);
   });
 });

@@ -38,6 +38,12 @@ class Auction < Runar::StatefulSmartContract
   def bid(sig, bidder, bid_amount)
     assert check_sig(sig, bidder)
     assert bid_amount > @highest_bid
+    # The bid must be paid into the pot (N-027): the continuation carries the
+    # prior pot plus the new bid. This example never refunds an outbid bidder,
+    # so the pot is the deposit plus every bid, and close() hands all of it to
+    # the auctioneer. `>=` lets a bidder add more; the compiler's own
+    # `>= input` floor alone would let a bid pay nothing.
+    assert continuation_amount() >= extract_amount(@tx_preimage) + bid_amount
     @highest_bidder = bidder
     @highest_bid = bid_amount
   end

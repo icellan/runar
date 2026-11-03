@@ -37,8 +37,8 @@
 //! synthesize for a bounded loop:
 //!   * `i++` / `i--` / `++i` / `--i`            (ts, sol, move-fold, go, java,
 //!                                               python, ruby, rust-macro)
-//!   * `i = i + 1` / `i = i - 1` / `i = 1 + i`  (sol `i += 1`, zig
-//!                                               `while (c) : (i += 1)`, java)
+//!   * `i = i + 1` / `i = i - 1` / `i = 1 + i`  (zig `while (c) : (i += 1)`,
+//!                                               java; N-133: no longer sol)
 //!   * an effect-free literal or bare identifier — the no-op sentinel that the
 //!     zig / move / go while-shaped parsers synthesize when the source has no
 //!     continue expression at all.
@@ -171,13 +171,52 @@ fn control_ts_increment_is_byte_identical() {
     assert_eq!(hex, BOUNDED_LOOP_HEX, "`i++` lowering must not move bytes");
 }
 
-/// `i += 1` through the Solidity frontend lands as
-/// `Assignment { target: i, value: i + 1 }` — a different AST shape than `i++`
-/// that the accepted set has to keep.
+/// N-133: an assignment in the Solidity for-header's update slot (`i += 1`,
+/// `i -= 1`, `i = i + 1`) is not part of the `.runar.sol` surface. The TS
+/// reference's Solidity parser takes one expression there plus an optional
+/// postfix `++`/`--` and then expects `)`, so it refuses all three with
+/// "Expected ')', got '<op>'"; Go, Python, Zig, Ruby and Java refuse them in
+/// their parsers too. This tier alone desugared them into an `Assignment` and
+/// compiled the unit-step spellings (938 hexchars, byte-identical to `i++`).
+/// This used to be a control asserting `i += 1` compiles; it pinned the
+/// divergence, not the reference.
+///
+/// Proves: the Rust `.runar.sol` parser refuses each spelling. Does not prove:
+/// the wording matches TS (each tier's parser reports its own expect-token
+/// text), nor anything about the Zig/Java surfaces, whose assignment-shaped
+/// updates are still legitimately synthesized and accepted.
 #[test]
-fn control_sol_compound_assign_unit_step_is_byte_identical() {
-    let hex = compile(&sol_with_update("i < 5", "i += 1"), "BoundedLoop.runar.sol")
-        .expect("`i += 1` is a unit step and must still compile");
+fn sol_assignment_update_is_refused_like_the_reference() {
+    for (bound, update) in [
+        ("i < 5", "i += 1"),
+        ("i < 5", "i = i + 1"),
+        ("i < 5", "i = 1 + i"),
+    ] {
+        if let Ok(hex) = compile(&sol_with_update(bound, update), "BoundedLoop.runar.sol") {
+            panic!(
+                "`{update}` in a .runar.sol for-update must not compile (the TS \
+                 reference refuses it in the parser); got {} hex chars",
+                hex.len()
+            );
+        }
+    }
+    let countdown = example("examples/sol/bounded-loop/BoundedLoop.runar.sol")
+        .replace("int i = 0; i < 5; i++", "int i = 5; i > 0; i -= 1");
+    assert!(countdown.contains("i -= 1"), "fixture rewrite did not apply");
+    if let Ok(hex) = compile(&countdown, "BoundedLoop.runar.sol") {
+        panic!(
+            "`i -= 1` in a .runar.sol for-update must not compile; got {} hex chars",
+            hex.len()
+        );
+    }
+}
+
+/// `++i` through the Solidity frontend is the other unit-step spelling the TS
+/// reference accepts there; it must stay byte-identical to `i++`.
+#[test]
+fn control_sol_prefix_increment_is_byte_identical() {
+    let hex = compile(&sol_with_update("i < 5", "++i"), "BoundedLoop.runar.sol")
+        .expect("`++i` is a unit step and must still compile");
     assert_eq!(hex, BOUNDED_LOOP_HEX);
 }
 
@@ -226,4 +265,33 @@ export class Countdown extends SmartContract {
 }
 "#;
     compile(source, "Countdown.runar.ts").expect("a countdown loop must still compile");
+}
+
+/// N-116: an update that names the iterator (or is a literal) without
+/// advancing it. The validator accepted these as the "no-op sentinel" the
+/// while-shaped parsers synthesize, and the step was then inferred as +1 from
+/// the comparison direction — so a source loop that never terminates (i stays
+/// 3 forever) unrolled to two laps over i = 3, 4. Proves the refusal with the
+/// shared R-065 sentence on the Zig continue expression and the TS for-update
+/// surface; does NOT cover while loops whose update lives in the body (those
+/// keep a placeholder iterator and the condition rule refuses them).
+#[test]
+fn n116_non_advancing_update_is_rejected() {
+    let zig = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+        .replace("var i: i64 = 0;", "var i: i64 = 3;")
+        .replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+    let cases = [
+        ("zig continue reads iterator", zig, "BoundedLoop.runar.zig"),
+        ("ts update reads iterator", ts_with_update("i"), "UpdateProbe.runar.ts"),
+        ("ts update literal", ts_with_update("0n"), "UpdateProbe.runar.ts"),
+    ];
+    for (name, source, file) in cases.iter() {
+        match compile(source, file) {
+            Ok(hex) => panic!("{name}: a non-advancing update must not compile; got {hex}"),
+            Err(diags) => assert!(
+                diags.contains("must advance the loop variable by one"),
+                "{name}: rejection must carry the shared cross-tier diagnostic, got: {diags}"
+            ),
+        }
+    }
 }

@@ -227,6 +227,11 @@ pub struct RunarArtifact {
     pub constructor_slots: Option<Vec<ConstructorSlot>>,
     #[serde(default)]
     pub code_sep_index_slots: Option<Vec<CodeSepIndexSlot>>,
+    /// N-051 -- `verify_code_part_len` length fields whose value is only known
+    /// at deploy time. The SDK writes the deployed code-part length into each
+    /// one (see `patch_code_part_len_slots`). Absent when every pin is exact.
+    #[serde(default)]
+    pub code_part_len_slots: Option<Vec<CodePartLenSlot>>,
     #[serde(default, rename = "codeSeparatorIndex")]
     pub code_separator_index: Option<usize>,
     #[serde(default, rename = "codeSeparatorIndices")]
@@ -339,6 +344,16 @@ pub struct ConstructorSlot {
 pub struct CodeSepIndexSlot {
     pub byte_offset: usize,
     pub code_sep_index: usize,
+}
+
+/// N-051 -- a `verify_code_part_len` length field the SDK patches at deploy
+/// time with the deployed code-part length (4 bytes, little-endian).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodePartLenSlot {
+    /// Byte offset, in the TEMPLATE script, of the first of the 4 length bytes
+    /// (the byte after the `04` push opcode).
+    pub byte_offset: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -678,9 +693,16 @@ mod tests {
 /// Result of `prepare_call()` — contains everything needed for external signing
 /// and subsequent `finalize_call()`.
 ///
-/// Public fields (`sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, `sig_indices`)
-/// are for external signer coordination. Other fields are opaque
-/// internals consumed by `finalize_call()`.
+/// Public fields (`sighash`, `preimage`, `tx_hex`, `sig_indices`) are for
+/// external signer coordination. Other fields are opaque internals consumed
+/// by `finalize_call()`.
+///
+/// N-213: there is deliberately NO `op_push_tx_sig` field. Post-BUG-100 the
+/// OP_PUSH_TX signature is derived ON-CHAIN from `preimage` —
+/// `build_stateful_prefix`'s signature parameter is accepted for call-site
+/// compatibility but ignored (see its `let _ = op_sig_hex;` discard), so
+/// there was nothing for an external signer to produce or push here. Mirrors
+/// F-369's TS fix.
 #[derive(Debug, Clone)]
 pub struct PreparedCall {
     /// BIP-143 sighash digest (hex) — `hash256(preimage)`, i.e.
@@ -689,8 +711,6 @@ pub struct PreparedCall {
     pub sighash: String,
     /// Full BIP-143 preimage (hex).
     pub preimage: String,
-    /// OP_PUSH_TX DER signature + sighash byte (hex). Empty if not needed.
-    pub op_push_tx_sig: String,
     /// Built transaction hex (P2PKH funding signed, primary contract input uses placeholder sigs).
     pub tx_hex: String,
     /// User-visible arg positions that need external Sig values.

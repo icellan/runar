@@ -19,6 +19,8 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -152,7 +154,7 @@ module RunarCompiler
       #
       # @param source [String]
       # @return [Array<Token>]
-      def self.tokenize(source)
+      def self.tokenize(source, lex = [], file_name = "")
         tokens = []
         line = 1
         col = 0
@@ -228,8 +230,12 @@ module RunarCompiler
             i += 1
             col += 1
             start = i
-            while i < n && source[i] != quote
+            # F-011: a literal that reaches a line break (escaped or not) or end
+            # of file is unterminated; it must never run on into the next lines.
+            while i < n && source[i] != quote && source[i] != "\n" && source[i] != "\r"
               if source[i] == "\\"
+                break if i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r"
+
                 i += 1
                 col += 1
               end
@@ -239,9 +245,14 @@ module RunarCompiler
               end
             end
             val = source[start...i]
-            if i < n
+            if i < n && source[i] == quote
               i += 1
               col += 1
+              # N-019: this surface has no quoted literal; a terminated one is
+              # refused as an unexpected character (as the TS reference).
+              lex << Frontend.lex_error("Unexpected character '#{quote}'", file_name, line, start_col)
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
             end
             tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
             next
@@ -249,7 +260,8 @@ module RunarCompiler
 
           # Numbers (and hex byte string literals: 0x... -> ByteString)
           if ch >= "0" && ch <= "9"
-            if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
+            # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+            if ch == "0" && i + 1 < n && source[i + 1] == "x"
               i += 2
               col += 2
               hex_start = i
@@ -260,17 +272,11 @@ module RunarCompiler
               tokens << Token.new(kind: TOK_HEXSTRING, value: source[hex_start...i], line: line, col: start_col)
               next
             end
-            start = i
-            while i < n && source[i] >= "0" && source[i] <= "9"
-              i += 1
-              col += 1
-            end
-            # Skip trailing BigInt suffix 'n' (from TS syntax)
-            if i < n && source[i] == "n"
-              i += 1
-              col += 1
-            end
-            tokens << Token.new(kind: TOK_NUMBER, value: source[start...i], line: line, col: start_col)
+            # F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+            stop, value, = IntLiteral.lex_number("sol", source, i, lex, file_name, line, start_col)
+            col += stop - i
+            i = stop
+            tokens << Token.new(kind: TOK_NUMBER, value: value, line: line, col: start_col)
             next
           end
 
@@ -306,7 +312,9 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown characters
+          # N-214: an unrecognised character is refused, as the TS reference
+          # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
           i += 1
           col += 1
         end
@@ -350,6 +358,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class SolParser
+      include InputLimits::NestingCounter
+
       include SolTokens
 
       def initialize(file_name)
@@ -431,6 +441,12 @@ module RunarCompiler
         advance while check(TOK_SEMICOLON)
       end
 
+      def peek_at(n)
+        return @tokens[@pos + n] if @pos + n < @tokens.length
+
+        Token.new(kind: TOK_EOF, value: "", line: 0, col: 0)
+      end
+
       def peek_next_kind
         return @tokens[@pos + 1].kind if @pos + 1 < @tokens.length
 
@@ -461,6 +477,8 @@ module RunarCompiler
         is_stateful_keyword = match_ident("stateful")
 
         # contract Name is ParentClass {
+        # N-490: a synthesized constructor is anchored at the `contract` keyword.
+        contract_loc = loc
         unless match_ident("contract")
           raise "expected 'contract' keyword"
         end
@@ -480,7 +498,7 @@ module RunarCompiler
         end
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          raise "unknown parent class: #{parent_class}"
+          raise "unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
         end
 
         expect(TOK_LBRACE)
@@ -505,7 +523,7 @@ module RunarCompiler
 
         # Auto-generate constructor if not explicitly defined
         if constructor.nil?
-          default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+          default_loc = contract_loc
           # Only non-initialized properties become constructor params
           uninit_props = properties.select { |p| p.initializer.nil? }
           constructor = MethodNode.new(
@@ -557,11 +575,24 @@ module RunarCompiler
         # Check for array type: Type[N]
         type_node = parse_sol_type_from_name(type_name)
 
-        # Check for immutable keyword
+        # Modifiers, any order: +immutable+ (readonly) and N-093's
+        # +embedAlways+ (the native spelling of the +@embedAlways+ directive).
+        # An +embedAlways+ directly followed by +;+ or +=+ is the property
+        # NAME, not a modifier.
         is_readonly = false
-        if check_ident("immutable")
-          advance
-          is_readonly = true
+        embed_always = false
+        loop do
+          if check_ident("immutable")
+            advance
+            is_readonly = true
+            next
+          end
+          if check_ident("embedAlways") && ![TOK_SEMICOLON, TOK_ASSIGN].include?(peek_at(1).kind)
+            advance
+            embed_always = true
+            next
+          end
+          break
         end
 
         # Property name
@@ -581,6 +612,7 @@ module RunarCompiler
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: location
         )
       end
@@ -615,7 +647,7 @@ module RunarCompiler
       def parse_sol_constructor(properties)
         location = loc
         expect_ident("constructor")
-        params = parse_sol_params
+        params = parse_sol_params(strip_underscore: true)
         body = parse_sol_block
 
         # Build proper constructor body with super() call and assignments
@@ -678,17 +710,31 @@ module RunarCompiler
 
         params = parse_sol_params
 
-        # Parse visibility modifiers and other qualifiers
+        # Parse visibility modifiers and other qualifiers, and N-093's
+        # +sighash(FLAGS)+ (the native spelling of the +@sighash+ directive),
+        # in any order. FLAGS must be identifiers separated by +|+; any other
+        # token makes the spelling malformed.
         visibility = "private"
-        while check_ident("public") || check_ident("private") ||
+        sighash_specs = []
+        pending_ret = nil
+        while (check_ident("sighash") && peek_at(1).kind == TOK_LPAREN) ||
+              check_ident("public") || check_ident("private") ||
               check_ident("external") || check_ident("internal") ||
               check_ident("view") || check_ident("pure") ||
               check_ident("returns") || check_ident("payable")
           tok = advance
+          if tok.value == "sighash"
+            sighash_specs << parse_sighash_flag_tokens
+            next
+          end
           visibility = "public" if tok.value == "public" || tok.value == "external"
           # Skip 'returns (Type)' clause
           if tok.value == "returns" && check(TOK_LPAREN)
             advance # (
+            # N-331: the AST keeps no return type; an unknown name is refused.
+            # N-332: checked after the modifier loop, because `public` may
+            # follow `returns (...)`.
+            pending_ret = Frontend.parse_sol_type_name(peek.value) if check(TOK_IDENT)
             depth = 1
             while depth > 0 && !check(TOK_EOF)
               depth += 1 if check(TOK_LPAREN)
@@ -698,20 +744,57 @@ module RunarCompiler
           end
         end
 
+        if pending_ret
+          Frontend.reject_unknown_return_type(@errors, pending_ret, name, location, visibility == "public")
+        end
+
         body = parse_sol_block
+
+        sighash = SighashDirective.resolve_native_sighash(name, visibility == "public", sighash_specs)
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
 
         MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
+      end
+
+      # N-093: +( IDENT ( '|' IDENT )* )+ after +sighash+ -> the flag text, or
+      # nil when anything else appears inside the parentheses. Always consumes
+      # through the matching +)+ so a malformed spelling does not derail
+      # parsing.
+      def parse_sighash_flag_tokens
+        expect(TOK_LPAREN)
+        text = +""
+        ok = true
+        depth = 1
+        until check(TOK_EOF)
+          t = peek
+          depth += 1 if t.kind == TOK_LPAREN
+          if t.kind == TOK_RPAREN
+            depth -= 1
+            break if depth.zero?
+          end
+          if t.kind == TOK_IDENT || t.kind == TOK_PIPE
+            text << t.value
+          else
+            ok = false
+          end
+          advance
+        end
+        expect(TOK_RPAREN)
+        ok ? text : nil
       end
 
       # -- Parameter parsing: (Type name, Type name, ...) -------------------
 
-      def parse_sol_params
+      def parse_sol_params(strip_underscore: false)
         expect(TOK_LPAREN)
         params = []
 
@@ -726,8 +809,10 @@ module RunarCompiler
 
           name_tok = expect(TOK_IDENT)
           param_name = name_tok.value
-          # Strip leading underscore (Solidity convention)
-          param_name = param_name[1..] if param_name.start_with?("_")
+          # Strip leading underscore (Solidity convention) for CONSTRUCTOR
+          # params only, whose body parse_sol_constructor renames. Method
+          # params keep their name verbatim, as in TS 01-parse-sol.ts (F-200).
+          param_name = param_name[1..] if strip_underscore && param_name.start_with?("_")
 
           params << ParamNode.new(
             name: param_name,
@@ -757,6 +842,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_sol_statement
+        nested { parse_sol_statement_inner }
+      end
+
+      def parse_sol_statement_inner
         location = loc
 
         # require(...) -> assert(...)
@@ -840,7 +929,7 @@ module RunarCompiler
         if match_ident("else")
           if check_ident("if")
             # else if -- recurse
-            else_stmt = parse_if_statement(loc)
+            else_stmt = nested { parse_if_statement(loc) }
             else_block = [else_stmt]
           else
             else_block = parse_sol_block
@@ -996,7 +1085,7 @@ module RunarCompiler
       # -- Expression parsing (recursive descent with precedence) -----------
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1015,59 +1104,65 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match(TOK_PIPEPIPE)
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bitwise_or
         while match(TOK_AMPAMP)
           right = parse_bitwise_or
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_or
+        start = loc
         left = parse_bitwise_xor
         while match(TOK_PIPE)
           right = parse_bitwise_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_xor
+        start = loc
         left = parse_bitwise_and
         while match(TOK_CARET)
           right = parse_bitwise_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_and
+        start = loc
         left = parse_equality
         while match(TOK_AMP)
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           if match(TOK_EQEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif match(TOK_NOTEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1076,20 +1171,21 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           if match(TOK_LT)
             right = parse_shift
-            left = BinaryExpr.new(op: "<", left: left, right: right)
+            left = BinaryExpr.new(op: "<", left: left, right: right, source_location: start)
           elsif match(TOK_LTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: "<=", left: left, right: right)
+            left = BinaryExpr.new(op: "<=", left: left, right: right, source_location: start)
           elsif match(TOK_GT)
             right = parse_shift
-            left = BinaryExpr.new(op: ">", left: left, right: right)
+            left = BinaryExpr.new(op: ">", left: left, right: right, source_location: start)
           elsif match(TOK_GTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: ">=", left: left, right: right)
+            left = BinaryExpr.new(op: ">=", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1098,14 +1194,15 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match(TOK_LSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: "<<", left: left, right: right)
+            left = BinaryExpr.new(op: "<<", left: left, right: right, source_location: start)
           elsif match(TOK_RSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: ">>", left: left, right: right)
+            left = BinaryExpr.new(op: ">>", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1114,14 +1211,15 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match(TOK_PLUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "+", left: left, right: right)
+            left = BinaryExpr.new(op: "+", left: left, right: right, source_location: start)
           elsif match(TOK_MINUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "-", left: left, right: right)
+            left = BinaryExpr.new(op: "-", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1130,17 +1228,18 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match(TOK_STAR)
             right = parse_unary
-            left = BinaryExpr.new(op: "*", left: left, right: right)
+            left = BinaryExpr.new(op: "*", left: left, right: right, source_location: start)
           elsif match(TOK_SLASH)
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif match(TOK_PERCENT)
             right = parse_unary
-            left = BinaryExpr.new(op: "%", left: left, right: right)
+            left = BinaryExpr.new(op: "%", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1149,25 +1248,26 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match(TOK_BANG)
-          operand = parse_unary
-          return UnaryExpr.new(op: "!", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
         if match(TOK_MINUS)
-          operand = parse_unary
-          return UnaryExpr.new(op: "-", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "-", operand: operand, source_location: op_loc)
         end
         if match(TOK_TILDE)
-          operand = parse_unary
-          return UnaryExpr.new(op: "~", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "~", operand: operand, source_location: op_loc)
         end
         # Prefix increment/decrement
         if match(TOK_PLUSPLUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return IncrementExpr.new(operand: operand, prefix: true)
         end
         if match(TOK_MINUSMINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return DecrementExpr.new(operand: operand, prefix: true)
         end
         parse_postfix
@@ -1234,12 +1334,12 @@ module RunarCompiler
 
         if tok.kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         if tok.kind == TOK_STRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         if tok.kind == TOK_IDENT
@@ -1254,10 +1354,10 @@ module RunarCompiler
           # Function call
           if check(TOK_LPAREN)
             args = parse_call_args
-            return CallExpr.new(callee: Identifier.new(name: name), args: args)
+            return CallExpr.new(callee: Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col)), args: args)
           end
 
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         if tok.kind == TOK_LPAREN
@@ -1325,9 +1425,9 @@ module RunarCompiler
         return Identifier.new(name: new_name) if new_name
         expr
       when BinaryExpr
-        BinaryExpr.new(op: expr.op, left: rn.call(expr.left), right: rn.call(expr.right))
+        BinaryExpr.new(op: expr.op, left: rn.call(expr.left), right: rn.call(expr.right), source_location: expr.source_location)
       when UnaryExpr
-        UnaryExpr.new(op: expr.op, operand: rn.call(expr.operand))
+        UnaryExpr.new(op: expr.op, operand: rn.call(expr.operand), source_location: expr.source_location)
       when CallExpr
         CallExpr.new(callee: rn.call(expr.callee), args: expr.args.map { |a| rn.call(a) })
       when MemberExpr
@@ -1405,9 +1505,9 @@ module RunarCompiler
         end
         expr
       when BinaryExpr
-        BinaryExpr.new(op: expr.op, left: rw.call(expr.left), right: rw.call(expr.right))
+        BinaryExpr.new(op: expr.op, left: rw.call(expr.left), right: rw.call(expr.right), source_location: expr.source_location)
       when UnaryExpr
-        UnaryExpr.new(op: expr.op, operand: rw.call(expr.operand))
+        UnaryExpr.new(op: expr.op, operand: rw.call(expr.operand), source_location: expr.source_location)
       when CallExpr
         if expr.callee.is_a?(Identifier) && method_names.include?(expr.callee.name)
           return CallExpr.new(
@@ -1513,12 +1613,27 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_sol(source, file_name = "contract.runar.sol")
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_sol_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_sol_tokens(source, file_name, lex)
       p = SolParser.new(file_name)
-      p.tokens = SolTokens.tokenize(source)
+      p.tokens = SolTokens.tokenize(source, lex, file_name)
       p.pos = 0
 
       begin
         contract = p.parse_contract
+        # F-213 measure (B) before rewrite_sol_contract_props recurses on the AST.
+        InputLimits.assert_ast_nesting!(contract) unless contract.nil?
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

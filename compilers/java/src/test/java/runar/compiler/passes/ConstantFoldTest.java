@@ -288,6 +288,26 @@ class ConstantFoldTest {
         assertTrue(findBinding(m, "t2").value() instanceof BinOp);
     }
 
+    /**
+     * F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+     * on-chain and the fold must say so. Proves the Java folder's verdict on
+     * mixed-case hex; not the emitted script
+     * (conformance/negatives/f160-bytestring-case-fold-parity pins every
+     * tier's bytes).
+     */
+    @Test
+    void byteStringEqualityIgnoresHexCase() {
+        for (String op : List.of("===", "!==")) {
+            List<AnfBinding> body = List.of(
+                bytesConst("t0", "aa"),
+                bytesConst("t1", "AA"),
+                bind("t2", new BinOp(op, "t0", "t1", "bytes"))
+            );
+            AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+            assertEquals("===".equals(op), boolVal(findBinding(m, "t2").value()), op);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Builtin math calls
     // ---------------------------------------------------------------
@@ -467,4 +487,185 @@ class ConstantFoldTest {
             "the post-if bin_op must survive unfolded, got " + v.getClass().getSimpleName());
     }
 
+    // ---------------------------------------------------------------
+    // Same-name rebinding (F-082)
+    // ---------------------------------------------------------------
+    //
+    // ANF allows a name to be bound more than once in a method body (AnfLower's
+    // emitNamed reassignment idiom; a user local whose name collides with a
+    // compiler temp). The env entry must track the LATEST binding: when a name
+    // is rebound to a non-constant value, the old constant must be dropped, or
+    // every later use folds with a value the name no longer holds.
+    //
+    // Proves: the pass drops a stale constant on rebinding to a load_param and to
+    // an `@ref:` alias, and the source-reachable form of the bug (a user local
+    // named like an earlier compiler temp) compiles the same bytes with folding
+    // ON as with folding OFF — i.e. folding no longer turns an unsatisfiable
+    // guard into an unconditional `OP_TRUE`.
+    // Does not prove: anything about the other six tiers (they carry the same
+    // defect and are fixed separately), nor on-chain acceptance (see the item
+    // log for the Spend-based probe).
+
+    @Test
+    void rebindingToParamDropsStaleConstant() {
+        List<AnfBinding> body = List.of(
+            bigIntConst("x", 1),
+            bind("x", new LoadParam("p")),
+            bigIntConst("c", 1),
+            bind("y", new BinOp("+", "x", "c", null))
+        );
+        AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+        AnfValue y = m.body().get(3).value();
+        assertTrue(y instanceof BinOp,
+            "y = x + 1 after x was rebound to load_param must stay a bin_op, got " + y);
+    }
+
+    @Test
+    void rebindingToRefAliasDropsStaleConstant() {
+        List<AnfBinding> body = List.of(
+            bigIntConst("x", 1),
+            bind("t0", new LoadParam("p")),
+            bytesConst("x", "@ref:t0"),
+            bigIntConst("c", 1),
+            bind("y", new BinOp("+", "x", "c", null))
+        );
+        AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+        AnfValue y = m.body().get(4).value();
+        assertTrue(y instanceof BinOp,
+            "y = x + 1 after x was rebound to an @ref alias must stay a bin_op, got " + y);
+    }
+
+    // ---------------------------------------------------------------
+    // Collision probes (N-064), replayed as ANF since N-065
+    // ---------------------------------------------------------------
+    //
+    // F-082 made a top-level rebinding drop the stale constant; N-064 did the
+    // same for an if arm or a loop body that rebinds a name the enclosing env
+    // holds as a constant. The source-reachable shapes were user locals named
+    // like an earlier compiler temp (`let t1 = p` after `0n` lowered to t1).
+    // N-065 now refuses those sources (a local may not be spelled like an ANF
+    // temp), so each probe's EXACT fold-OFF ANF — parse -> lowerToANF with no
+    // validator, conformance/negatives/n064-collision-anf.json — is loaded
+    // through AnfLoader (t<N> binding names are legal IR) and folded here. The
+    // pre-N-064 reference folder turns that ANF into `staleFoldOn`.
+    //
+    // Proves: the probe source is refused with the N-065 diagnostic, and on
+    // its ANF this tier gives the same bytes with folding ON as OFF, pinned to
+    // the fold-OFF bytes every tier emits and differing from the stale script.
+    // Does not prove on-chain behaviour — the Spend-engine proof is
+    // packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Map<String, Object> n064Probe(String name) throws Exception {
+        java.nio.file.Path p = java.nio.file.Path.of("..", "..", "conformance", "negatives", "n064-collision-anf.json");
+        java.util.Map<String, Object> root =
+            (java.util.Map<String, Object>) AnfLoader.parseJsonTree(java.nio.file.Files.readString(p));
+        for (Object o : (List<Object>) root.get("probes")) {
+            java.util.Map<String, Object> m = (java.util.Map<String, Object>) o;
+            if (name.equals(m.get("name"))) return m;
+        }
+        throw new AssertionError("no probe " + name);
+    }
+
+    private static void assertCollisionProbeFoldsClean(String name, String collidingLocal) throws Exception {
+        java.util.Map<String, Object> probe = n064Probe(name);
+        String message = "'" + collidingLocal + "' is reserved for compiler-generated names and cannot be used as an identifier";
+        List<String> errors = Validate.runCollecting(
+            runar.compiler.frontend.ParserDispatch.parse((String) probe.get("source"), name + ".runar.ts")).errors();
+        assertTrue(errors.stream().anyMatch(e -> e.endsWith(message)), "N-065 must refuse the source: " + errors);
+
+        String irJson = runar.compiler.canonical.Jcs.stringify(probe.get("ir"));
+        String foldOff = (String) probe.get("foldOff");
+        String off = Emit.run(Peephole.run(StackLower.run(runar.compiler.Cli.optimizeAnf(AnfLoader.parse(irJson), true))));
+        String on = Emit.run(Peephole.run(StackLower.run(runar.compiler.Cli.optimizeAnf(AnfLoader.parse(irJson), false))));
+        assertEquals(foldOff, off);
+        assertTrue(!on.equals(probe.get("staleFoldOn")), name + ": folded with a stale constant");
+        assertEquals(foldOff, on, name + ": constant folding must not change this program's bytes");
+    }
+
+    @Test
+    void userLocalCollidingWithTempDoesNotFoldStaleConstant() throws Exception {
+        // `0n` in the first assert lowers to temp t1 = 0; `let t1 = p` then
+        // rebinds t1 to @ref:<load_param p>. Source semantics: p > 0 && p + 1 == 1
+        // is unsatisfiable. Pre-fix, folding used the stale t1 = 0, folded the
+        // second assert to assert(true), and the script accepted every p > 0.
+        assertCollisionProbeFoldsClean("Rebind", "t1");
+        assertCollisionProbeFoldsClean("RebindEq", "t1");
+    }
+
+    @Test
+    void ifArmRebindingDoesNotFoldStaleConstant() throws Exception {
+        assertCollisionProbeFoldsClean("IfStale", "t2");
+    }
+
+    @Test
+    void loopBodyRebindingDoesNotFoldStaleConstant() throws Exception {
+        assertCollisionProbeFoldsClean("LoopStale", "t2");
+    }
+
+
+    // ---------------------------------------------------------------
+    // N-029: folded values must be what the emitted script computes.
+    // clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi),
+    // which differs from `v < lo ? lo : ...` once lo > hi; gcd unrolls 256
+    // Euclid steps, so past those the script returns a partial value and the
+    // folder must decline. log2 is exact for every n > 0 since N-103 and
+    // aborts for n <= 0, so the folder folds every positive operand and
+    // declines the rest. Expected values
+    // were executed on @bsv/sdk Spend.validate by
+    // packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+    // Proves the Java folder's value/decline decisions; not the script itself.
+    // ---------------------------------------------------------------
+
+    private static BigInteger n029Fib(int n) {
+        BigInteger a = BigInteger.ZERO, c = BigInteger.ONE;
+        for (int i = 0; i < n; i++) {
+            BigInteger t = a.add(c);
+            a = c;
+            c = t;
+        }
+        return a;
+    }
+
+    private static AnfValue n029Fold(String func, BigInteger... args) {
+        List<AnfBinding> body = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            body.add(bind("t" + i, new LoadConst(new BigIntConst(args[i]))));
+            names.add("t" + i);
+        }
+        body.add(bind("r", new Call(func, names)));
+        return findBinding(soleMethod(ConstantFold.run(singleMethodProgram(body))), "r").value();
+    }
+
+    private static BigInteger n029Int(long v) {
+        return BigInteger.valueOf(v);
+    }
+
+    @Test
+    void n029ClampLoAboveHiMatchesScript() {
+        assertEquals(n029Int(0), bigInt(n029Fold("clamp", n029Int(5), n029Int(10), n029Int(0))));
+        assertEquals(n029Int(-3), bigInt(n029Fold("clamp", n029Int(0), n029Int(3), n029Int(-3))));
+        assertEquals(n029Int(0), bigInt(n029Fold("clamp", n029Int(-20), n029Int(10), n029Int(0))));
+    }
+
+    // N-103 (user decision R86): this used to pin the decline past 64 halvings
+    // (2^65 and 2^70 not folded). The script is now exact with no cap, and
+    // n <= 0 (which it aborts on) is declined instead of folded to 0.
+    @Test
+    void n103Log2ExactAndDeclinesNonPositive() {
+        assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(64))));
+        assertEquals(n029Int(64), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(65).subtract(BigInteger.ONE))));
+        assertEquals(n029Int(65), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(65))));
+        assertEquals(n029Int(70), bigInt(n029Fold("log2", BigInteger.ONE.shiftLeft(70))));
+        assertTrue(n029Fold("log2", BigInteger.ZERO) instanceof Call);
+        assertTrue(n029Fold("log2", BigInteger.valueOf(-1)) instanceof Call);
+    }
+
+    @Test
+    void n029GcdDeclinesPast256Steps() {
+        assertEquals(BigInteger.ONE, bigInt(n029Fold("gcd", n029Fib(258), n029Fib(257))));
+        assertTrue(n029Fold("gcd", n029Fib(259), n029Fib(258)) instanceof Call);
+        assertTrue(n029Fold("gcd", n029Fib(300), n029Fib(299)) instanceof Call);
+    }
 }

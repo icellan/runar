@@ -139,7 +139,7 @@ Python contract source uses `snake_case` identifiers. The Rúnar parser converts
 | `check_sig` | `checkSig` |
 | `release_by_seller` | `releaseBySeller` |
 
-The deployment SDK (this package) is `snake_case` throughout — `contract.get_state()`, `prepare_call`, `op_push_tx_sig`. The conversion only applies inside contract source.
+The deployment SDK (this package) is `snake_case` throughout — `contract.get_state()`, `prepare_call`, `sig_indices`. The conversion only applies inside contract source.
 
 ### Type annotations
 
@@ -224,6 +224,8 @@ Constructors must call `super(...)` as their first statement, passing every prop
 ### Allowed call surface
 
 Only Rúnar built-in functions and methods on `self` are callable from contract source. `print()`, `math.floor()`, third-party libraries — anything not in the Rúnar prelude — is rejected at typecheck. See Section 15 for the full intrinsic list.
+
+**Division and modulo.** In a native Python run of a contract (pytest), the operators `//` and `%` use Python's flooring semantics (`-7 // 2 == -4`), while the compiled script's `OP_DIV` / `OP_MOD` truncate toward zero (`-7 / 2 == -3`) and abort on a zero divisor. Python cannot change its operators, so for negative operands use the Rúnar builtins `safediv`, `safemod` and `divmod`, which truncate and refuse zero exactly like the script. The SDK ANF interpreter (`compute_new_state`) follows the script.
 
 ---
 
@@ -833,7 +835,7 @@ from runar.sdk import WhatsOnChainProvider
 provider = WhatsOnChainProvider(network="mainnet")  # or "testnet"
 ```
 
-Source: [runar/sdk/woc_provider.py](runar/sdk/woc_provider.py). `get_utxos(address)` does not return locking scripts (WoC limitation); `get_contract_utxo(script_hash)` does work.
+Source: [runar/sdk/woc_provider.py](runar/sdk/woc_provider.py). `get_utxos(address)` reads each UTXO's locking script from the verified `/tx/{txid}/hex` (WoC's listing has none) and raises rather than return an empty script (F-040); `get_contract_utxo(script_hash)` does the same for the first listed UTXO and also checks its script hashes to `script_hash`, and `get_transaction(txid)` parses the verified `/tx/{txid}/hex` with exact integer satoshis and `raw` set (N-041).
 
 ### GorillaPoolProvider
 
@@ -1055,7 +1057,7 @@ Sign the fixed `TEST_MESSAGE` for fixture generation.
 
 #### `slh_keygen(param_set: str) -> SLHKeyPair` / `slh_verify(pub_key, message, signature, param_set) -> bool`
 
-Real SLH-DSA (FIPS 205) key generation and verification.
+SLH-DSA key generation and verification for the repo's SHA-256-only variant (what the compiled on-chain verifier and the other six SDKs implement; for the 192/256 sets this is not FIPS 205, which uses SHA-512 there). `slh_verify` is stdlib-only; `slh_keygen` needs the optional `slh-dsa` package.
 
 #### `SmartContract`
 
@@ -1349,8 +1351,9 @@ Output of `RunarContract.prepare_call`. Public fields callers use:
 |-------|------|---------|
 | `sighash` | `str` | 64-char hex BIP-143 sighash for external signers |
 | `preimage` | `str` | Full BIP-143 preimage hex |
-| `op_push_tx_sig` | `str` | OP_PUSH_TX DER signature hex (empty if not needed) |
 | `tx_hex` | `str` | The built tx (P2PKH funding signed, primary input has placeholder Sigs) |
+
+There is no `op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived ON-CHAIN (against the well-known `k=1` generator-point key), so there is no spender-supplied signature to expose.
 | `sig_indices` | `list[int]` | User-arg positions that need external signatures |
 
 Internal fields (consumed by `finalize_call`): `method_name`, `resolved_args`, `method_selector_hex`, `is_stateful`, `is_terminal`, `needs_op_push_tx`, `method_needs_change`, `change_pkh_hex`, `change_amount`, `method_needs_new_amount`, `new_amount`, `preimage_index`, `contract_utxo`, `new_locking_script`, `new_satoshis`, `has_multi_output`, `contract_outputs`, `code_sep_idx`.
@@ -1541,6 +1544,8 @@ class TokenWallet:
 
 Higher-level wrapper for fungible-token contracts. Assumes the artifact has a `transfer` method and a state field named `balance`, `supply`, or `amount`. Source: [runar/sdk/token_wallet.py:22](runar/sdk/token_wallet.py).
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each raises a `DeprecationWarning` (hidden by Python's default filters outside `__main__`; run with `-W default` to see it). They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/python/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `Transaction`
 
 Backward-compat alias for `TransactionData`.
@@ -1711,7 +1716,7 @@ You're calling on a fresh `RunarContract` instance. Either call `deploy()` first
 
 **Q. My snake_case method name doesn't match the artifact's ABI.**
 
-Python contract sources are converted to camelCase in the AST. Pass the camelCase form to `contract.call("releaseBySeller", [...])`. The SDK API on the Python side stays snake_case (`prepare_call`, `op_push_tx_sig`).
+Python contract sources are converted to camelCase in the AST. Pass the camelCase form to `contract.call("releaseBySeller", [...])`. The SDK API on the Python side stays snake_case (`prepare_call`, `sig_indices`).
 
 **Q. State doesn't update after `call()`.**
 
@@ -1723,7 +1728,7 @@ Off-chain testing uses mock crypto (`check_sig` always True). On-chain, the scri
 
 **Q. `WhatsOnChainProvider.get_utxos(address)` returns UTXOs with empty `script` fields.**
 
-WoC's `address/<a>/unspent` endpoint doesn't include locking scripts. Use `get_contract_utxo(script_hash)` for contract UTXOs (which does include scripts), or fetch the locking script via `get_transaction(txid)` and read `outputs[output_index].script`.
+WoC's `address/<a>/unspent` endpoint doesn't include locking scripts, so since F-040 `get_utxos` fetches `/tx/{txid}/hex` for each UTXO, checks it hashes to the txid, and returns the real script. Since N-041 `get_contract_utxo(script_hash)` does the same and also checks the script hashes to `script_hash`.
 
 **Q. How do I sign with a hardware wallet?**
 

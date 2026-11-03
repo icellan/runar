@@ -17,6 +17,8 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { computeSideEffectSummary } from './side-effect-summary.js';
+import type { MethodEffects, SideEffectSummary } from './side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -27,6 +29,17 @@ export interface TypeCheckResult {
   errors: CompilerDiagnostic[];
 }
 
+/** N-321: cap on a typecheck message; mirrored in every tier. */
+export const MAX_DIAGNOSTIC_CHARS = 1024;
+
+function capDiagnostic(d: CompilerDiagnostic): CompilerDiagnostic {
+  if (d.message.length <= MAX_DIAGNOSTIC_CHARS) return d;
+  let cut = MAX_DIAGNOSTIC_CHARS;
+  const c = d.message.charCodeAt(cut);
+  if (c >= 0xdc00 && c <= 0xdfff) cut--; // do not split a surrogate pair
+  return { ...d, message: `${d.message.slice(0, cut)}...(${d.message.length - cut} more bytes elided)` };
+}
+
 /**
  * Type-check a Rúnar AST. Returns the same AST (no transformation) plus
  * any type errors found.
@@ -35,12 +48,13 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
   const errors: CompilerDiagnostic[] = [];
   const checker = new TypeChecker(contract, errors);
 
+  checker.checkPropertyInitializers();
   checker.checkConstructor();
   for (const method of contract.methods) {
     checker.checkMethod(method);
   }
 
-  return { typedContract: contract, errors };
+  return { typedContract: contract, errors: errors.map(capDiagnostic) };
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +78,23 @@ interface FuncSig {
   params: TType[];
   returnType: TType;
 }
+
+// N-398: builtins runar-lang exports and the Go tier implements, that this tier
+// deliberately has no codegen for (proof-system families scoped to the Go tier
+// by project policy, CLAUDE.md). Keyed by name, valued by the family named in
+// the diagnostic; labels match Python's GO_ONLY_BUILTINS.
+const GO_ONLY_BUILTINS: Map<string, string> = new Map([
+  ['bn254Pairing',       'BN254 pairing'],
+  ['bn254MultiPairing3', 'BN254 pairing'],
+  ['bn254MultiPairing4', 'BN254 pairing'],
+  // N-403: the remaining Go-only builtins, labels as in Python's GO_ONLY_BUILTINS
+  // and Rust's go_only_builtin_family.
+  ['verifySP1FRI',                        'SP1 FRI'],
+  ['merkleRootPoseidon2KB',               'Poseidon2 Merkle'],
+  ['assertGroth16WitnessAssisted',        'BN254 + Groth16'],
+  ['assertGroth16WitnessAssistedWithMSM', 'BN254 + Groth16'],
+  ['groth16PublicInput',                  'BN254 + Groth16'],
+]);
 
 const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['sha256',       { params: ['ByteString'], returnType: 'Sha256' }],
@@ -219,6 +250,9 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractPrevOutputScript', { params: ['bigint', 'ByteString'], returnType: 'ByteString' }],
   ['requireOutputP2PKH',      { params: ['bigint', 'ByteString', 'bigint'], returnType: 'void' }],
   ['currentBlockHeight',      { params: [], returnType: 'bigint' }],
+  // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+  // satoshis of the default single-output state continuation.
+  ['continuationAmount',      { params: [], returnType: 'bigint' }],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -281,6 +315,20 @@ export function isByteStringFamilyType(t: string): boolean {
  */
 export function isBigintFamilyType(t: string): boolean {
   return BIGINT_SUBTYPES.has(t as TType);
+}
+
+/**
+ * Does the builtin `name` return a ByteString-family value?
+ *
+ * N-347: `04-anf-lower.ts` answers "is `f(x)` a byte string?" from this, i.e.
+ * from the `returnType` column of BUILTIN_FUNCTIONS, instead of keeping its own
+ * hand-written list. That list drifted twice (N-054, N-345) and was still
+ * missing merkleRootSha256 / merkleRootHash256 / bn254G1Add / bn254G1Negate /
+ * bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to OP_NUMEQUAL.
+ */
+export function isByteReturningBuiltin(name: string): boolean {
+  const sig = BUILTIN_FUNCTIONS.get(name);
+  return sig !== undefined && BYTESTRING_SUBTYPES.has(sig.returnType);
 }
 
 function isSubtype(actual: TType, expected: TType): boolean {
@@ -381,248 +429,6 @@ function flattenAddOutputArgs(args: Expression[]): Expression[] {
 }
 
 // ---------------------------------------------------------------------------
-// Crit-3 body-walk helpers (BSVM Phase 13)
-// ---------------------------------------------------------------------------
-// Recursive AST walkers used by checkMethod to detect whether a method body
-// contains both requireOutputP2PKH() and this.addDataOutput() calls. Walk
-// covers if/else branches and for-loop bodies — anywhere a call expression
-// can syntactically appear. Mirrors compilers/go/frontend/typecheck.go.
-
-function bodyCallsBuiltin(body: Statement[], name: string): boolean {
-  for (const stmt of body) {
-    if (stmtContainsCallTo(stmt, name)) return true;
-  }
-  return false;
-}
-
-function bodyCallsAddDataOutput(body: Statement[]): boolean {
-  for (const stmt of body) {
-    if (stmtContainsAddDataOutput(stmt)) return true;
-  }
-  return false;
-}
-
-function stmtContainsCallTo(stmt: Statement, name: string): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprContainsCallTo(stmt.expression, name);
-    case 'variable_decl':
-      return exprContainsCallTo(stmt.init, name);
-    case 'assignment':
-      return exprContainsCallTo(stmt.value, name) || exprContainsCallTo(stmt.target, name);
-    case 'if_statement':
-      if (exprContainsCallTo(stmt.condition, name)) return true;
-      for (const t of stmt.then) if (stmtContainsCallTo(t, name)) return true;
-      if (stmt.else) {
-        for (const e of stmt.else) if (stmtContainsCallTo(e, name)) return true;
-      }
-      return false;
-    case 'for_statement':
-      if (stmtContainsCallTo(stmt.init, name)) return true;
-      if (exprContainsCallTo(stmt.condition, name)) return true;
-      if (stmtContainsCallTo(stmt.update, name)) return true;
-      for (const t of stmt.body) if (stmtContainsCallTo(t, name)) return true;
-      return false;
-    case 'return_statement':
-      return stmt.value !== undefined && exprContainsCallTo(stmt.value, name);
-  }
-  return false;
-}
-
-function exprContainsCallTo(expr: Expression, name: string): boolean {
-  if (!expr) return false;
-  switch (expr.kind) {
-    case 'call_expr':
-      if (expr.callee.kind === 'identifier' && expr.callee.name === name) return true;
-      if (exprContainsCallTo(expr.callee, name)) return true;
-      for (const a of expr.args) if (exprContainsCallTo(a, name)) return true;
-      return false;
-    case 'binary_expr':
-      return exprContainsCallTo(expr.left, name) || exprContainsCallTo(expr.right, name);
-    case 'unary_expr':
-      return exprContainsCallTo(expr.operand, name);
-    case 'ternary_expr':
-      return exprContainsCallTo(expr.condition, name) ||
-        exprContainsCallTo(expr.consequent, name) ||
-        exprContainsCallTo(expr.alternate, name);
-    case 'index_access':
-      return exprContainsCallTo(expr.object, name) || exprContainsCallTo(expr.index, name);
-    case 'member_expr':
-      return exprContainsCallTo(expr.object, name);
-    case 'array_literal':
-      for (const el of expr.elements) if (exprContainsCallTo(el, name)) return true;
-      return false;
-    case 'increment_expr':
-    case 'decrement_expr':
-      return exprContainsCallTo(expr.operand, name);
-  }
-  return false;
-}
-
-function stmtContainsAddDataOutput(stmt: Statement): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprContainsAddDataOutput(stmt.expression);
-    case 'variable_decl':
-      return exprContainsAddDataOutput(stmt.init);
-    case 'assignment':
-      return exprContainsAddDataOutput(stmt.value) || exprContainsAddDataOutput(stmt.target);
-    case 'if_statement':
-      if (exprContainsAddDataOutput(stmt.condition)) return true;
-      for (const t of stmt.then) if (stmtContainsAddDataOutput(t)) return true;
-      if (stmt.else) {
-        for (const e of stmt.else) if (stmtContainsAddDataOutput(e)) return true;
-      }
-      return false;
-    case 'for_statement':
-      if (stmtContainsAddDataOutput(stmt.init)) return true;
-      if (exprContainsAddDataOutput(stmt.condition)) return true;
-      if (stmtContainsAddDataOutput(stmt.update)) return true;
-      for (const t of stmt.body) if (stmtContainsAddDataOutput(t)) return true;
-      return false;
-    case 'return_statement':
-      return stmt.value !== undefined && exprContainsAddDataOutput(stmt.value);
-  }
-  return false;
-}
-
-function exprContainsAddDataOutput(expr: Expression): boolean {
-  if (!expr) return false;
-  switch (expr.kind) {
-    case 'call_expr': {
-      const callee = expr.callee;
-      // Match both `this.addDataOutput(...)` (property_access) and
-      // `c.addDataOutput(...)` (member_expr) callee shapes.
-      if (callee.kind === 'property_access' && callee.property === 'addDataOutput') return true;
-      if (callee.kind === 'member_expr' && callee.property === 'addDataOutput') return true;
-      if (exprContainsAddDataOutput(callee)) return true;
-      for (const a of expr.args) if (exprContainsAddDataOutput(a)) return true;
-      return false;
-    }
-    case 'binary_expr':
-      return exprContainsAddDataOutput(expr.left) || exprContainsAddDataOutput(expr.right);
-    case 'unary_expr':
-      return exprContainsAddDataOutput(expr.operand);
-    case 'ternary_expr':
-      return exprContainsAddDataOutput(expr.condition) ||
-        exprContainsAddDataOutput(expr.consequent) ||
-        exprContainsAddDataOutput(expr.alternate);
-    case 'index_access':
-      return exprContainsAddDataOutput(expr.object) || exprContainsAddDataOutput(expr.index);
-    case 'member_expr':
-      return exprContainsAddDataOutput(expr.object);
-    case 'array_literal':
-      for (const el of expr.elements) if (exprContainsAddDataOutput(el)) return true;
-      return false;
-    case 'increment_expr':
-    case 'decrement_expr':
-      return exprContainsAddDataOutput(expr.operand);
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ---------------------------------------------------------------------------
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the
-// state-output intrinsic set in side-effect-summary.ts.
-
-const STATE_OUTPUT_METHOD_NAMES = new Set(['addOutput', 'addRawOutput']);
-
-interface MethodOutputSignals {
-  mutatesState: boolean;      // assigns to / ++/-- a non-readonly property
-  hasStateOutput: boolean;    // calls this.addOutput() or this.addRawOutput()
-  requiresOutputP2PKHZero: boolean; // calls requireOutputP2PKH(0n, ...)
-}
-
-function analyzeMethodOutputSignals(body: Statement[], mutableProps: Set<string>): MethodOutputSignals {
-  const sig: MethodOutputSignals = { mutatesState: false, hasStateOutput: false, requiresOutputP2PKHZero: false };
-  for (const stmt of body) walkStmtForOutputSignals(stmt, mutableProps, sig);
-  return sig;
-}
-
-function walkStmtForOutputSignals(stmt: Statement, mutableProps: Set<string>, sig: MethodOutputSignals): void {
-  switch (stmt.kind) {
-    case 'assignment':
-      if (stmt.target.kind === 'property_access' && mutableProps.has(stmt.target.property)) sig.mutatesState = true;
-      walkExprForOutputSignals(stmt.target, mutableProps, sig);
-      walkExprForOutputSignals(stmt.value, mutableProps, sig);
-      return;
-    case 'expression_statement':
-      walkExprForOutputSignals(stmt.expression, mutableProps, sig);
-      return;
-    case 'variable_decl':
-      walkExprForOutputSignals(stmt.init, mutableProps, sig);
-      return;
-    case 'if_statement':
-      walkExprForOutputSignals(stmt.condition, mutableProps, sig);
-      for (const t of stmt.then) walkStmtForOutputSignals(t, mutableProps, sig);
-      if (stmt.else) for (const e of stmt.else) walkStmtForOutputSignals(e, mutableProps, sig);
-      return;
-    case 'for_statement':
-      walkStmtForOutputSignals(stmt.init, mutableProps, sig);
-      walkExprForOutputSignals(stmt.condition, mutableProps, sig);
-      walkStmtForOutputSignals(stmt.update, mutableProps, sig);
-      for (const b of stmt.body) walkStmtForOutputSignals(b, mutableProps, sig);
-      return;
-    case 'return_statement':
-      if (stmt.value) walkExprForOutputSignals(stmt.value, mutableProps, sig);
-      return;
-  }
-}
-
-function walkExprForOutputSignals(expr: Expression, mutableProps: Set<string>, sig: MethodOutputSignals): void {
-  if (!expr) return;
-  switch (expr.kind) {
-    case 'increment_expr':
-    case 'decrement_expr':
-      if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) sig.mutatesState = true;
-      walkExprForOutputSignals(expr.operand, mutableProps, sig);
-      return;
-    case 'call_expr': {
-      const callee = expr.callee;
-      if ((callee.kind === 'property_access' || callee.kind === 'member_expr') && STATE_OUTPUT_METHOD_NAMES.has(callee.property)) {
-        sig.hasStateOutput = true;
-      }
-      if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
-        const idx = expr.args[0];
-        if (idx && idx.kind === 'bigint_literal' && idx.value === 0n) sig.requiresOutputP2PKHZero = true;
-      }
-      for (const arg of expr.args) walkExprForOutputSignals(arg, mutableProps, sig);
-      if (callee.kind !== 'identifier') walkExprForOutputSignals(callee, mutableProps, sig);
-      return;
-    }
-    case 'binary_expr':
-      walkExprForOutputSignals(expr.left, mutableProps, sig);
-      walkExprForOutputSignals(expr.right, mutableProps, sig);
-      return;
-    case 'unary_expr':
-      walkExprForOutputSignals(expr.operand, mutableProps, sig);
-      return;
-    case 'ternary_expr':
-      walkExprForOutputSignals(expr.condition, mutableProps, sig);
-      walkExprForOutputSignals(expr.consequent, mutableProps, sig);
-      walkExprForOutputSignals(expr.alternate, mutableProps, sig);
-      return;
-    case 'index_access':
-      walkExprForOutputSignals(expr.object, mutableProps, sig);
-      walkExprForOutputSignals(expr.index, mutableProps, sig);
-      return;
-    case 'member_expr':
-      walkExprForOutputSignals(expr.object, mutableProps, sig);
-      return;
-    case 'array_literal':
-      for (const el of expr.elements) walkExprForOutputSignals(el, mutableProps, sig);
-      return;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Type environment
 // ---------------------------------------------------------------------------
 
@@ -653,6 +459,19 @@ class TypeEnv {
     }
     return undefined;
   }
+
+  /** Index of the innermost scope that binds `name`, or -1 if none does. */
+  scopeIndexOf(name: string): number {
+    for (let i = this.scopes.length - 1; i >= 0; i--) {
+      if (this.scopes[i]!.has(name)) return i;
+    }
+    return -1;
+  }
+
+  /** Index the next `pushScope()` will occupy. */
+  get depth(): number {
+    return this.scopes.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +489,16 @@ const CONSUMING_FUNCTIONS: Record<string, number[]> = {
   'checkMultiSig': [0],   // first param (Sig[]) is consumed
   'checkPreimage': [0],   // first param (SigHashPreimage) is consumed
 };
+
+/**
+ * N-109 / N-288: what a contract method consumes when it is called (it is
+ * inlined): the indices of its affine parameters, and the `prop:<name>` origin
+ * keys of the affine properties it consumes.
+ */
+interface MethodConsumption {
+  params: number[];
+  props: string[];
+}
 
 // ---------------------------------------------------------------------------
 // Type checker
@@ -700,9 +529,43 @@ class TypeChecker {
    */
   private affineAliases: Map<string, string> = new Map();
 
-  constructor(contract: ContractNode, errors: CompilerDiagnostic[]) {
+  /**
+   * F-110: for every enclosing loop that may run two or more times, the env
+   * scope index its init/body bindings live at (innermost last). A bounded
+   * loop is unrolled `count` times, so consuming an affine value bound below
+   * the innermost such index is a consumption per iteration.
+   */
+  private repeatingLoopScopes: number[] = [];
+
+  /**
+   * N-109: for every contract method, the indices of the parameters it
+   * consumes (directly or through further helper calls). Private helpers are
+   * inlined, so a call consumes the arguments at those positions exactly as a
+   * direct `checkSig`/`checkPreimage` would. N-288: also the property origin
+   * keys (`prop:<name>`) it consumes, which a call consumes in the caller.
+   * Computed once, by a fixpoint over scratch checkers that share this map
+   * (see `consumedParamSummary`).
+   */
+  private consumedParams: Map<string, MethodConsumption> | null;
+
+  /** Lazily computed side-effect summary (follows private helpers). */
+  private sideEffects: SideEffectSummary | null = null;
+
+  private methodEffects(name: string): MethodEffects {
+    if (this.sideEffects === null) this.sideEffects = computeSideEffectSummary(this.contract);
+    const effects = this.sideEffects.get(name);
+    if (!effects) throw new Error(`side-effect summary has no entry for method '${name}'`);
+    return effects;
+  }
+
+  constructor(
+    contract: ContractNode,
+    errors: CompilerDiagnostic[],
+    consumedParams: Map<string, MethodConsumption> | null = null,
+  ) {
     this.contract = contract;
     this.errors = errors;
+    this.consumedParams = consumedParams;
 
     // Build property type map
     this.propTypes = new Map();
@@ -722,6 +585,36 @@ class TypeChecker {
         params: method.params.map(p => typeNodeToTType(p.type)),
         returnType: method.visibility === 'public' ? 'void' : inferMethodReturnType(method),
       });
+    }
+  }
+
+  /**
+   * N-234: a scalar property initializer whose literal type does not match
+   * the declared property type compiled without complaint on every tier
+   * (`readonly x: bigint = toByteString('ab')` emitted a locking script that
+   * pushes a byte string where the contract's own arithmetic expects a
+   * script NUMBER — a different program from the one the author wrote).
+   *
+   * 02-validate only checks that an initializer IS a literal (of any of the
+   * three literal families), never that it is a literal OF THE DECLARED
+   * TYPE. `FixedArray` properties are skipped here: their element-type check
+   * already lives in 03b-expand-fixed-arrays (N-133), which runs on the
+   * expanded array elements, not the whole-array initializer this pass sees.
+   */
+  checkPropertyInitializers(): void {
+    for (const prop of this.contract.properties) {
+      if (prop.initializer === undefined) continue;
+      if (prop.type.kind === 'fixed_array_type') continue;
+      const initType = inferExprTypeStatic(prop.initializer);
+      if (initType === '<unknown>') continue;
+      const declaredType = typeNodeToTType(prop.type);
+      if (!isSubtype(initType, declaredType)) {
+        this.errors.push(makeDiagnostic(
+          `Type '${initType}' is not assignable to type '${declaredType}'`,
+          'error',
+          prop.sourceLocation,
+        ));
+      }
     }
   }
 
@@ -760,15 +653,24 @@ class TypeChecker {
 
     this.checkStatements(method.body, env, method.sourceLocation);
 
+    // F-075: every guard below reads the method's effects from the shared
+    // side-effect summary, which follows the private-helper call graph. That is
+    // the same analysis ANF lowering uses to inject the continuation, and ANF
+    // lowering inlines private helpers, so a body-local walk here let a
+    // developer disable all three guards by moving the triggering call into a
+    // helper while the continuation was still injected as if it were inline.
+    const effects = this.methodEffects(method.name);
+
     // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH() with
-    // this.addDataOutput() in the same method body. The intrinsic's
+    // this.addDataOutput() in the same method (including its private
+    // helpers). The intrinsic's
     // compile-time output-offset assumes a fixed 34-byte stride per output;
     // a preceding variable-length OP_RETURN output silently shifts the
     // OP_EQUALVERIFY target, letting the bond P2PKH route through an
     // unmatched index. v1 forbids the mix; v2 may relax with a
     // variable-stride decoder.
-    const hasRequireP2PKH = bodyCallsBuiltin(method.body, 'requireOutputP2PKH');
-    const hasAddDataOutput = bodyCallsAddDataOutput(method.body);
+    const hasRequireP2PKH = effects.callsRequireOutputP2PKH;
+    const hasAddDataOutput = effects.hasDataOutput;
     if (hasRequireP2PKH && hasAddDataOutput) {
       this.errors.push(makeDiagnostic(
         `method '${method.name}' mixes requireOutputP2PKH() with addDataOutput() — ` +
@@ -801,11 +703,7 @@ class TypeChecker {
     // before this guard existed — ts `success = true`, go `exit = 0` — see
     // conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
     if (this.contract.parentClass === 'StatefulSmartContract') {
-      const mutableProps = new Set(
-        this.contract.properties.filter(p => !p.readonly).map(p => p.name),
-      );
-      const sig = analyzeMethodOutputSignals(method.body, mutableProps);
-      if (hasRequireP2PKH && sig.hasStateOutput) {
+      if (hasRequireP2PKH && effects.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' mixes requireOutputP2PKH() with ` +
             `this.addOutput()/addRawOutput() — the intrinsic reads output i at byte ` +
@@ -820,7 +718,7 @@ class TypeChecker {
         ));
       }
 
-      if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
+      if (effects.requiresOutputP2PKHZero && effects.mutatesState && !effects.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' calls requireOutputP2PKH(0, ...) but also mutates state ` +
             `without this.addOutput()/addRawOutput() — the auto-injected single-output state ` +
@@ -859,6 +757,18 @@ class TypeChecker {
    */
   private currentStmtLoc: SourceLocation | undefined;
 
+  /**
+   * F-024 (R14): `continuationAmount()` is a read-only view of the
+   * auto-injected `_newAmount`. Without this check an assignment to it would
+   * lower as a plain read and silently drop the write.
+   */
+  private refuseContinuationAmountWrite(target: Expression, loc: SourceLocation | undefined): void {
+    if (target.kind === 'call_expr' && target.callee.kind === 'identifier' && target.callee.name === 'continuationAmount') {
+      // F-024 (R14): the one diagnostic every tier emits for this write.
+      this.errors.push(makeDiagnostic('continuationAmount() is read-only and cannot be assigned', 'error', loc));
+    }
+  }
+
   private checkStatement(stmt: Statement, env: TypeEnv): void {
     this.currentStmtLoc = stmt.sourceLocation ?? this.currentStmtLoc;
     switch (stmt.kind) {
@@ -893,6 +803,7 @@ class TypeChecker {
       }
 
       case 'assignment': {
+        this.refuseContinuationAmountWrite(stmt.target, stmt.sourceLocation);
         const targetType = this.inferExprType(stmt.target, env);
         const valueType = this.inferExprType(stmt.value, env);
         if (!isSubtype(valueType, targetType)) {
@@ -914,18 +825,27 @@ class TypeChecker {
             stmt.sourceLocation,
           ));
         }
+        // F-222: the arms are mutually exclusive, so each is checked against
+        // the consumed set as it stood before the if; afterwards a value
+        // consumed in either arm counts as consumed.
+        const consumedBefore = new Set(this.consumedValues);
         env.pushScope();
         this.checkStatements(stmt.then, env, stmt.sourceLocation);
         env.popScope();
+        const consumedAfterThen = this.consumedValues;
+        this.consumedValues = consumedBefore;
         if (stmt.else) {
           env.pushScope();
           this.checkStatements(stmt.else, env, stmt.sourceLocation);
           env.popScope();
         }
+        for (const origin of consumedAfterThen) this.consumedValues.add(origin);
         break;
       }
 
       case 'for_statement': {
+        const loopScope = env.depth;
+        const repeats = loopMayRunTwice(stmt);
         env.pushScope();
         // Check init
         this.checkStatement(stmt.init, env);
@@ -945,8 +865,11 @@ class TypeChecker {
         // separately restricts the clause to a unit-step advance; this is the
         // type-level half of the same guard.
         this.checkStatement(stmt.update, env);
-        // Check body
+        // Check body. F-110: the body runs once per iteration; see
+        // `repeatingLoopScopes`.
+        if (repeats) this.repeatingLoopScopes.push(loopScope);
         this.checkStatements(stmt.body, env, stmt.sourceLocation);
+        if (repeats) this.repeatingLoopScopes.pop();
         env.popScope();
         break;
       }
@@ -1143,6 +1066,7 @@ class TypeChecker {
 
       case 'increment_expr':
       case 'decrement_expr': {
+        this.refuseContinuationAmountWrite(expr.operand, expr.sourceLocation);
         const operandType = this.inferExprType(expr.operand, env);
         if (!isBigintFamily(operandType)) {
           this.errors.push(makeDiagnostic(
@@ -1398,20 +1322,41 @@ class TypeChecker {
         return this.checkCallArgs(callee.name, methodSig, args, env);
       }
 
-      // Check if it's a local variable in the environment
+      // Check if it's a local variable in the environment -- F-208: Rúnar
+      // has no first-class functions, so a bound local can never be called.
+      // This used to return '<unknown>' with NO diagnostic, silently
+      // accepting `const f: bigint = a; const r = f(a, a, a);`.
       const localType = env.lookup(callee.name);
       if (localType) {
+        this.errors.push(makeDiagnostic(
+          `Local variable '${callee.name}' is not callable. Rúnar has no first-class functions; only built-in functions and contract methods can be called.`,
+          'error',
+          expr.sourceLocation,
+        ));
         for (const arg of args) {
           this.inferExprType(arg, env);
         }
         return '<unknown>';
       }
 
-      this.errors.push(makeDiagnostic(
-        `Unknown function '${callee.name}'. Only Rúnar built-in functions and contract methods are allowed.`,
-        'error',
-        expr.sourceLocation,
-      ));
+      const goOnlyFamily = GO_ONLY_BUILTINS.get(callee.name);
+      if (goOnlyFamily !== undefined) {
+        // N-398: a real Rúnar builtin (runar-lang exports it, builtin-arity.ts
+        // lists it) scoped to the Go tier by project policy. "Unknown function"
+        // would send the author hunting for a typo. Same sentence as Python's
+        // GO_ONLY_BUILTINS (R-258/R-259) and Rust's go_only_builtin_family (N-238).
+        this.errors.push(makeDiagnostic(
+          `builtin '${callee.name}' belongs to the ${goOnlyFamily} family, which is scoped to the Go tier by project policy -- see CLAUDE.md ("EVM/STARK proof-system primitives") and conformance/README.md ("Per-fixture compiler allowlist"). Compile this contract with the Go compiler, or opt the fixture out of the TypeScript tier via source.json's "compilers" allowlist.`,
+          'error',
+          expr.sourceLocation,
+        ));
+      } else {
+        this.errors.push(makeDiagnostic(
+          `Unknown function '${callee.name}'. Only Rúnar built-in functions and contract methods are allowed.`,
+          'error',
+          expr.sourceLocation,
+        ));
+      }
       for (const arg of args) {
         this.inferExprType(arg, env);
       }
@@ -2091,14 +2036,44 @@ class TypeChecker {
       return sig.returnType;
     }
 
-    // requireOutputP2PKH and currentBlockHeight need the auto-injected
-    // txPreimage — only available in StatefulSmartContract methods.
-    if (funcName === 'requireOutputP2PKH' || funcName === 'currentBlockHeight') {
+    // requireOutputP2PKH, currentBlockHeight and continuationAmount need the
+    // auto-injected txPreimage / _newAmount — only available in
+    // StatefulSmartContract methods.
+    if (funcName === 'requireOutputP2PKH' || funcName === 'currentBlockHeight' || funcName === 'continuationAmount') {
       if (this.contract.parentClass !== 'StatefulSmartContract') {
         this.errors.push(makeDiagnostic(
           `${funcName}() is only available in StatefulSmartContract methods`,
           'error',
           args[0]?.sourceLocation,
+        ));
+      }
+    }
+
+    // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT argument.
+    // A literal negative start used to type-check as plain 'bigint' (the
+    // standard subtype loop below never inspects a literal's VALUE) and
+    // compile to a script that aborts at runtime -- `-5n` minimal-encodes
+    // to `<85>`, which OP_SPLIT rejects. Catch the literal case (bare or
+    // unary-negated BigIntLiteral) at compile time, mirroring the
+    // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" pattern
+    // above. A non-literal start (a variable or computed expression) has
+    // no static value to check and is unaffected.
+    if (funcName === 'substr' && args.length >= 2) {
+      let litValue: bigint | null = null;
+      if (args[1]!.kind === 'bigint_literal') {
+        litValue = (args[1] as { value: bigint }).value;
+      } else if (
+        args[1]!.kind === 'unary_expr' &&
+        (args[1] as { op: string }).op === '-' &&
+        (args[1] as { operand: { kind: string } }).operand.kind === 'bigint_literal'
+      ) {
+        litValue = -(args[1] as { operand: { value: bigint } }).operand.value;
+      }
+      if (litValue !== null && litValue < 0n) {
+        this.errors.push(makeDiagnostic(
+          `substr() argument 2 (start) must be >= 0; got ${litValue.toString()}`,
+          'error',
+          args[1]!.sourceLocation,
         ));
       }
     }
@@ -2152,7 +2127,12 @@ class TypeChecker {
     args: Expression[],
     env: TypeEnv,
   ): void {
-    const consumedIndices = CONSUMING_FUNCTIONS[funcName];
+    // N-109: a call to a contract method consumes the arguments at the
+    // parameter positions that method consumes.
+    const methodConsumption = CONSUMING_FUNCTIONS[funcName] || BUILTIN_FUNCTIONS.has(funcName)
+      ? undefined
+      : this.methodConsumedParams(funcName);
+    const consumedIndices = CONSUMING_FUNCTIONS[funcName] ?? methodConsumption?.params;
     if (!consumedIndices) return;
 
     for (const paramIndex of consumedIndices) {
@@ -2173,7 +2153,7 @@ class TypeChecker {
         : arg.kind === 'property_access' ? `this.${arg.property}`
         : origin;
 
-      if (this.consumedValues.has(origin)) {
+      if (this.consumedValues.has(origin) || this.consumedPerLoopIteration(origin, env)) {
         this.errors.push(makeDiagnostic(
           `affine value '${label}' has already been consumed`,
           'error',
@@ -2183,6 +2163,91 @@ class TypeChecker {
         this.consumedValues.add(origin);
       }
     }
+
+    // N-288: the call also consumes every property the method consumes.
+    for (const origin of methodConsumption?.props ?? []) {
+      const label = `this.${origin.slice('prop:'.length)}`;
+      if (this.consumedValues.has(origin) || this.consumedPerLoopIteration(origin, env)) {
+        this.errors.push(makeDiagnostic(
+          `affine value '${label}' has already been consumed`,
+          'error',
+          args[0]?.sourceLocation ?? this.currentStmtLoc,
+        ));
+      } else {
+        this.consumedValues.add(origin);
+      }
+    }
+  }
+
+  /**
+   * N-109: the parameter indices (and, N-288, the property origin keys)
+   * contract method `name` consumes, or undefined when `name` is not a
+   * contract method.
+   */
+  private methodConsumedParams(name: string): MethodConsumption | undefined {
+    if (!this.methodSigs.has(name)) return undefined;
+    if (this.consumedParams === null) this.consumedParams = this.consumedParamSummary();
+    return this.consumedParams.get(name);
+  }
+
+  /**
+   * N-109: run the affine checker over each method body with a throwaway
+   * diagnostics list and record which parameters end up consumed. Reusing the
+   * checker (rather than a second walker) inherits alias, if-arm and loop
+   * handling. Consumption only grows as summaries grow, so iterating until no
+   * entry changes terminates, also for the recursive call graphs 02-validate
+   * refuses separately.
+   */
+  private consumedParamSummary(): Map<string, MethodConsumption> {
+    const summary = new Map<string, MethodConsumption>();
+    for (const method of this.contract.methods) summary.set(method.name, { params: [], props: [] });
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const method of this.contract.methods) {
+        const scratch = new TypeChecker(this.contract, [], summary);
+        const consumed = scratch.consumedParamIndices(method);
+        const prev = summary.get(method.name)!;
+        if (consumed.params.length !== prev.params.length || consumed.props.length !== prev.props.length) {
+          summary.set(method.name, consumed);
+          changed = true;
+        }
+      }
+    }
+    return summary;
+  }
+
+  /**
+   * N-109: the indices of `method`'s parameters its body consumes, and
+   * (N-288) the property origin keys it consumes.
+   */
+  private consumedParamIndices(method: MethodNode): MethodConsumption {
+    const env = new TypeEnv();
+    this.consumedValues = new Set();
+    this.affineAliases = new Map();
+    for (const param of method.params) {
+      env.define(param.name, typeNodeToTType(param.type));
+    }
+    this.checkStatements(method.body, env, method.sourceLocation);
+    const indices: number[] = [];
+    method.params.forEach((param, i) => {
+      if (this.consumedValues.has(param.name)) indices.push(i);
+    });
+    const props = [...this.consumedValues].filter(origin => origin.startsWith('prop:')).sort();
+    return { params: indices, props };
+  }
+
+  /**
+   * F-110: true when `origin` is bound outside the innermost enclosing loop
+   * that may run two or more times, so this one syntactic consumption is
+   * executed once per iteration — a double use. A property, or a name the env
+   * does not bind (a bare-identifier property), is always outside.
+   */
+  private consumedPerLoopIteration(origin: string, env: TypeEnv): boolean {
+    const innermost = this.repeatingLoopScopes[this.repeatingLoopScopes.length - 1];
+    if (innermost === undefined) return false;
+    if (origin.startsWith('prop:')) return true;
+    return env.scopeIndexOf(origin) < innermost;
   }
 
   /**
@@ -2221,6 +2286,36 @@ class TypeChecker {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * F-110: whether a for-statement may execute its body two or more times.
+ * Mirrors the trip count `extractLoopShape` (04-anf-lower) unrolls; a shape it
+ * cannot resolve is refused elsewhere and is treated as repeating here.
+ */
+function loopMayRunTwice(stmt: Extract<Statement, { kind: 'for_statement' }>): boolean {
+  const literal = (e: Expression): bigint | null => {
+    if (e.kind === 'bigint_literal') return e.value;
+    if (e.kind === 'unary_expr' && e.op === '-') {
+      const inner = literal(e.operand);
+      return inner === null ? null : -inner;
+    }
+    return null;
+  };
+  const start = literal(stmt.init.init);
+  const cond = stmt.condition;
+  if (start === null || cond.kind !== 'binary_expr') return true;
+  const bound = literal(cond.right);
+  if (bound === null) return true;
+  let count: bigint;
+  switch (cond.op) {
+    case '<': count = bound - start; break;
+    case '<=': count = bound - start + 1n; break;
+    case '>': count = start - bound; break;
+    case '>=': count = start - bound + 1n; break;
+    default: return true;
+  }
+  return count >= 2n;
+}
 
 function typeNodeToTType(node: TypeNode): TType {
   switch (node.kind) {

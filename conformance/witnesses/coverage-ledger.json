@@ -126,17 +126,6 @@
         "kind": "go-only-nocodegen"
       }
     },
-    {
-      "fixture": "blake3",
-      "cause": "crypto-witness-infeasible",
-      "reason": "BLAKE3 hash-preimage (blake3Compress/blake3Hash) — not a secp256k1 signature",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "blake3",
-        "marker": "TestBlake3Compress_",
-        "note": "script_execution_test.go also has func TestBlake3Hash_* real-execution tests; both run inline blake3Compress/blake3Hash contracts through the real Go BSV SDK Spend, not the literal 'blake3' fixture file."
-      }
-    },
         {
       "fixture": "convergence-proof",
       "cause": "crypto-witness-infeasible",
@@ -155,26 +144,6 @@
         "kind": "integration",
         "path": "integration/go/covenant_vault_test.go",
         "note": "real deploy + spend on a live regtest node: TestCovenantVault_ValidSpend (accept) and TestCovenantVault_WrongOutput_Rejected (reject) — both against examples/ts/covenant-vault/CovenantVault.runar.ts, the exact .runar.ts source this fixture resolves to."
-      }
-    },
-    {
-      "fixture": "ec-demo",
-      "cause": "crypto-witness-infeasible",
-      "reason": "secp256k1 EC primitives — EC point witness",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/ec_isolation_test.zig",
-        "note": "real deploy + spend on a live regtest node: ECIsolation_Call_CheckOnCurve, _CheckMulGenOnCurve and _CheckNegateRoundtrip (accepts). Compiled output for examples/zig/ec-demo/ECDemo.runar.zig verified byte-identical to this fixture's expected-script.hex (1,328,331 bytes)."
-      }
-    },
-    {
-      "fixture": "ec-primitives",
-      "cause": "crypto-witness-infeasible",
-      "reason": "secp256k1 EC primitives — EC point witness",
-      "coveredBy": {
-        "kind": "go-script-exec",
-        "fixture": "ec-primitives",
-        "note": "compileRúnar(\"ec-primitives\", ...) is executed by ~16 TestECPrimitives_* functions in script_execution_test.go, including _Fail variants (reject)."
       }
     },
     {
@@ -291,16 +260,6 @@
       }
     },
     {
-      "fixture": "post-quantum-slhdsa-256f",
-      "cause": "crypto-witness-infeasible",
-      "reason": "SLH-DSA-SHA2-256f verification — huge PQ witness. UPGRADED from byte-golden-only: conformance/script_execution_test.go now compiles and EXECUTES this exact fixture with a real, independently cross-checked-valid signature (packages/runar-go's native impl, byte-identical to the TS reference impl) on the go-sdk interpreter, and the compiled script ACCEPTS it (and REJECTS a tampered / wrong-message signature). The pre-existing SLH-DSA codegen miscompile that made it reject a genuinely valid signature (emitSLHHmsg multi-block CAT order) is now FIXED byte-identically across all 7 tiers (audit #2).",
-      "coveredBy": {
-        "kind": "go-script-exec",
-        "fixture": "post-quantum-slhdsa-256f",
-        "note": "compileRúnar(\"post-quantum-slhdsa-256f\", ...) is executed by TestSLHDSA256f_ScriptExecution (accept, real valid signature) + _TamperedSig + _WrongMessage (reject) in script_execution_test.go."
-      }
-    },
-    {
       "fixture": "post-quantum-slhdsa-256s",
       "cause": "crypto-witness-infeasible",
       "reason": "SLH-DSA-SHA2-256s verification — huge PQ witness. UPGRADED from byte-golden-only: conformance/script_execution_test.go now compiles and EXECUTES this exact fixture with a real, independently cross-checked-valid signature (packages/runar-go's native impl, byte-identical to the TS reference impl) on the go-sdk interpreter, and the compiled script ACCEPTS it (and REJECTS a tampered / wrong-message signature). The pre-existing SLH-DSA codegen miscompile that made it reject a genuinely valid signature (emitSLHHmsg multi-block CAT order + emitSLHFors 3-byte FORS window for a=14) is now FIXED byte-identically across all 7 tiers (audit #2).",
@@ -341,28 +300,6 @@
       }
     },
     {
-      "fixture": "sha256-compress",
-      "cause": "crypto-witness-infeasible",
-      "reason": "SHA-256 compression preimage (sha256Compress) — hash-preimage witness",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "sha256",
-        "marker": "TestSha256Compress_",
-        "note": "script_execution_test.go runs an inline sha256Compress contract (not the literal 'sha256-compress' fixture file) through the real Go BSV SDK Spend, including a rejects-wrong-hash case."
-      }
-    },
-    {
-      "fixture": "sha256-finalize",
-      "cause": "crypto-witness-infeasible",
-      "reason": "SHA-256 finalize preimage (sha256Finalize) — hash-preimage witness",
-      "coveredBy": {
-        "kind": "go-family-exec",
-        "family": "sha256",
-        "marker": "TestSha256Finalize_",
-        "note": "script_execution_test.go runs an inline sha256Finalize contract (not the literal 'sha256-finalize' fixture file) through the real Go BSV SDK Spend, including a rejects-wrong-hash case."
-      }
-    },
-    {
       "fixture": "sphincs-wallet",
       "cause": "crypto-witness-infeasible",
       "reason": "SLH-DSA (SPHINCS+) verification + ECDSA checkSig — huge PQ witness; the in-process differential oracle cannot synthesise one. UPGRADED from codegen-golden 2026-08-06 (plan Phase G2), same stale-claim correction as post-quantum-wallet.",
@@ -370,16 +307,6 @@
         "kind": "integration",
         "path": "integration/go/slhdsa_test.go",
         "note": "real deploy + SPEND on a live regtest node: TestSLHDSA_ValidSpend (accept — real ECDSA signature over the spending input, then a real SLH-DSA-SHA2-128s signature over those bytes via runar.SLHSign, confirmed with AssertTxAccepted) plus TestSLHDSA_TamperedSig_Rejected and TestSLHDSA_WrongECDSASig_Rejected (AssertTxRejected). getSLHDSAArtifact compiles examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts — the exact .runar.ts source this fixture resolves to — verified 2026-08-06 to be BYTE-IDENTICAL to this fixture's expected-script.hex (188,609 bytes, in BOTH fold modes), so the node executed this fixture's own bytes with only the two constructorSlots substituted. This is the strongest available answer to the C24 'parity-green-but-wrong' risk for the SLH-DSA family: an all-tiers-agree-and-all-are-wrong verifier would reject a signature produced by an independent signer, and it does not. SCOPE: Go tier only (integration/go/sphincs_wallet_test.go and the six peer-tier suites are deploy-only); //go:build integration, skipped under -short, run in CI at .github/workflows/ci.yml:1305."
-      }
-    },
-    {
-      "fixture": "state-covenant",
-      "cause": "crypto-witness-infeasible",
-      "reason": "hash256 + SHA-256 Merkle covenant (Go-only, compilers:[go]) + stateful preimage — no TS codegen",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/state_covenant_test.zig",
-        "note": "real deploy + spend on a live regtest node: StateCovenant_AdvanceState and StateCovenant_ChainAdvances (accepts) plus four reject cases (wrong pre-state root, invalid block number, invalid BabyBear proof, invalid Merkle proof). Compiles examples/ts/state-covenant/StateCovenant.runar.ts — this fixture's own source — verified byte-identical to expected-script.hex (1196 bytes)."
       }
     },
     {

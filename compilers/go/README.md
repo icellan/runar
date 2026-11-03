@@ -45,7 +45,7 @@ The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` fil
 
 Why tree-sitter instead of a custom parser? Rúnar source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
 
-Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`, `.runar.rs`, `.runar.zig`, `.runar.rb`, `.runar.java`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST (`frontend/parser.go`'s format dispatch).
 
 ### Dedicated Codegen Modules
 
@@ -70,6 +70,27 @@ go build -o runar-compiler-go .
 
 - Go 1.26+
 - cgo support (for tree-sitter TypeScript parser, bundled via go-tree-sitter)
+
+### Supported build path: `go.work`, not standalone `go get`
+
+This module imports `github.com/icellan/runar/packages/runar-go` (for
+`debug.go`'s `ScriptVM` wrapper and `compiler/groth16_wa.go`'s
+`bn254witness` helpers), and `packages/runar-go` imports back from this
+module (`codegen`, `frontend`) — the two are a cross-module cycle resolved
+today only by the root `go.work` file's `use ./compilers/go` and
+`use ./packages/runar-go` directives, which make both modules resolve to
+this local checkout regardless of version pins. Building or testing from
+within this checkout (`cd compilers/go && go build ./...`, no `GOWORK`
+override) is the supported and CI-exercised path.
+
+A standalone build (`GOWORK=off go build ./...`) or `go get` of this module
+from outside this repository is **not** currently supported: this module has
+no `require` for `packages/runar-go` at all, and even adding one would
+resolve against `packages/runar-go`'s latest published tag, which predates
+`packages/runar-go/bn254witness` — a package this module's non-test source
+(`compiler/groth16_wa.go`) already imports — and also predates
+`packages/runar-go/sp1fri`, imported only by this module's own test files.
+Publishing tags that close the cycle is tracked separately as N-204.
 
 ---
 
@@ -105,7 +126,60 @@ runar-compiler-go --source MyContract.runar.ts --emit-ir
 
 # Write output to a file
 runar-compiler-go --source MyContract.runar.ts --output artifacts/MyContract.json
+
+# Stop after parse + validate (no codegen); exits 0 printing a "parser ok" marker
+runar-compiler-go --source MyContract.runar.ts --parse-only
+
+# Write the ANF IR JSON to a file (same bytes --emit-ir prints) and keep compiling
+runar-compiler-go --source MyContract.runar.ts --emit-ir-to anf.json --output artifact.json
+
+# Disable the ANF constant-folding optimizer (for byte-exact replay against fold-OFF goldens)
+runar-compiler-go --source MyContract.runar.ts --disable-constant-folding
+
+# Write artifact.sourceMap JSON after a successful compile
+runar-compiler-go --source MyContract.runar.ts --emit-source-map MyContract.sourcemap.json
+
+# Supply a Groth16 verifying key, required when the contract calls assertGroth16WitnessAssisted
+runar-compiler-go --source MyContract.runar.ts --groth16-wa-vk MyContract.groth16.vk.json
 ```
+
+### Flags
+
+| Flag | Applies to | Description |
+|---|---|---|
+| `--ir <path>` | Phase 1 | Path to ANF IR JSON file |
+| `--source <path>` | Phase 2 | Path to `.runar.{ts,sol,move,go,py,rs,zig,rb,java}` source file |
+| `--output <path>` | both | Output artifact path (default: stdout) |
+| `--hex` | both | Output only the script hex (no artifact JSON) |
+| `--asm` | both | Output only the script ASM (no artifact JSON) |
+| `--emit-ir` | Phase 2 | Output only the ANF IR JSON (requires `--source`) |
+| `--emit-ir-to <path>` | Phase 2 | Write the ANF IR JSON (same bytes as `--emit-ir`) to this path and CONTINUE compiling (requires `--source`) |
+| `--parse-only` | Phase 2 | Stop after parse + validate; exits 0 with a `parser ok` marker (requires `--source`) |
+| `--disable-constant-folding` | both | Disable the ANF constant folding pass |
+| `--emit-source-map <path>` | both | After a successful compile, write `artifact.sourceMap` JSON to this path |
+| `--no-source-map` | both | Omit the `sourceMap` key from the artifact (it is present by default and can dominate the size of a large artifact). Mutually exclusive with `--emit-source-map` |
+| `--groth16-wa-vk <path>` | both | Path to a SP1-format Groth16 `vk.json` file; required to compile a `--source`/`--ir` contract whose method body calls `assertGroth16WitnessAssisted` (F-305). Distinct from the `groth16-wa` subcommand below, which synthesizes a bare fixed-VK verifier and takes no `--source`/`--ir` file at all. |
+
+### `debug` subcommand: step-through Bitcoin Script execution
+
+Wraps `packages/runar-go`'s `ScriptVM` (itself a wrapper around the BSV SDK's
+script interpreter) to print a per-opcode execution trace, non-interactively:
+
+```bash
+runar-compiler-go debug --script <hex> [--unlock <hex>] [--max-stack-bytes <n>]
+runar-compiler-go debug --artifact <path> [--unlock <hex>]
+```
+
+Options:
+
+- `--script <hex>`: locking-script hex (required unless `--artifact` is used).
+- `--artifact <path>`: compiled artifact JSON path; uses its `script` field as the locking hex.
+- `--unlock <hex>`: unlocking-script hex (default: empty).
+- `--max-stack-bytes <n>`: max bytes of each printed stack element (`0` = full; default `32`).
+
+Each line printed is `step=<n>  ctx=<unlocking|locking>  offset=<byte>  op=<name>  stack=[...]`,
+followed by a final `final: pass|fail  ops=<n>  stack=[...]` summary. Exits 1 if the script
+does not end in a successful (truthy top-of-stack, no evaluation error) state.
 
 ### `groth16-wa` subcommand: BN254 Groth16 verifier with baked-in VK
 
@@ -165,16 +239,22 @@ For each test case in `conformance/tests/`:
 3. Compare script hex output with `expected-script.hex` (string equality).
 4. If `expected-ir.json` exists, also compile from IR and verify the IR-compiled script matches the source-compiled script.
 
-Most conformance tests also include multi-format variants (`.runar.sol`, `.runar.move`) that are tested through the same pipeline. The Go compiler additionally supports `.runar.go` native format via a hand-written recursive descent parser.
+Every conformance fixture ships source in all nine formats (`.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`, `.runar.rs`, `.runar.zig`, `.runar.rb`, `.runar.java`); the Go compiler's hand-written recursive descent parsers cover all eight non-TypeScript formats, so `--source` accepts any of them.
 
 ```bash
-# Run conformance from repo root
-pnpm run conformance:go
-
-# Or directly
+# Byte-exact golden check: compiles every conformance/tests/* fixture from
+# source (fold-OFF, the mode the checked-in goldens were stamped under) and
+# compares both the script hex and the ANF IR against the checked-in
+# expected-script.hex / expected-ir.json.
 cd compilers/go
-go test -v -run TestSourceCompile ./...
+go test -v -run TestConformanceGoldens .
 ```
+
+`pnpm run conformance:go` (repo root) runs `go test -v -run TestSourceCompile
+./...` instead — the example-based `TestSourceCompile_*` tests, which
+exercise the pipeline end to end but do NOT byte-compare against the
+goldens. Run `TestConformanceGoldens` directly, as above, for the real
+golden check.
 
 ---
 
@@ -185,7 +265,7 @@ cd compilers/go
 go test ./...
 ```
 
-Unit tests cover each pass independently, using synthetic IR inputs and asserting structural properties of the output. Source compilation tests (`TestSourceCompile_*`) verify the full pipeline against conformance test cases.
+Unit tests cover each pass independently, using synthetic IR inputs and asserting structural properties of the output. Source compilation tests (`TestSourceCompile_*`) verify the full pipeline against conformance test cases. `TestConformanceGoldens` (see "Conformance Testing" above) is the byte-exact golden comparison; it also runs here since `go test ./...` applies no `-run` filter.
 
 ---
 

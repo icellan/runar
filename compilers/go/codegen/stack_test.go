@@ -763,12 +763,17 @@ func TestLoop_UnusedIterVar_Cleanup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// log2 — bit-scanning implementation (not byte-size approximation)
+// log2 — exact read of the minimal encoding (N-103)
 // ---------------------------------------------------------------------------
 
-func TestLog2_BitScanning(t *testing.T) {
-	// Build IR that calls log2. The compiled output should use a bit-scanning
-	// loop with OP_RSHIFT and OP_GREATERTHAN, NOT the old OP_SIZE approximation.
+// N-103 (user decision R86) replaced the 64-iteration halving loop — which
+// saturated at 64 — with an exact, branch-free read of the operand's minimal
+// encoding. The previous assertions here (OP_DIV, no OP_SIZE / OP_MUL, exactly
+// 64 if-ops) pinned the old loop; this pins the whole new sequence instead.
+// Proves: the lowering emits exactly the N-103 op sequence and no branch.
+// Does not prove: that the sequence computes log2 (executed on @bsv/sdk by
+// conformance/negatives/n103-log2-exact-parity.test.ts).
+func TestLog2_ExactEncodingRead(t *testing.T) {
 	assertRef, _ := marshalString("t2")
 	program := &ir.ANFProgram{
 		ContractName: "Log2Test",
@@ -808,36 +813,24 @@ func TestLog2_BitScanning(t *testing.T) {
 	asm := opsToString(check.Ops)
 	t.Logf("log2 ops: %s", asm)
 
-	// Must use OP_GREATERTHAN (bit-scanning loop), not OP_SIZE (byte approximation)
-	if !strings.Contains(asm, "OP_GREATERTHAN") {
-		t.Errorf("log2 should use OP_GREATERTHAN for bit-scanning loop, got: %s", asm)
+	op := func(code string) StackOp { return StackOp{Op: "opcode", Code: code} }
+	push := func(v int64) StackOp { return StackOp{Op: "push", Value: bigIntPush(v)} }
+	want := []StackOp{
+		op("OP_BIN2NUM"), op("OP_DUP"), push(0), op("OP_GREATERTHAN"), op("OP_VERIFY"),
+		op("OP_SIZE"), op("OP_1SUB"), op("OP_TUCK"), op("OP_SPLIT"), op("OP_NIP"), op("OP_BIN2NUM"),
+		op("OP_SWAP"), push(8), op("OP_MUL"), op("OP_1SUB"),
 	}
-
-	// Must use OP_DIV for numeric halving in the bit-scanning loop
-	if !strings.Contains(asm, "OP_DIV") {
-		t.Errorf("log2 should use OP_DIV for bit-scanning loop, got: %s", asm)
+	for _, c := range []int64{1, 2, 4, 8, 16, 32, 64} {
+		want = append(want, op("OP_OVER"), push(c), op("OP_GREATERTHANOREQUAL"), op("OP_ADD"))
 	}
-
-	// Must NOT use the old OP_SIZE byte-approximation approach
-	if strings.Contains(asm, "OP_SIZE") {
-		t.Errorf("log2 should NOT use OP_SIZE (old byte approximation), got: %s", asm)
+	want = append(want, op("OP_NIP"))
+	if wantAsm := opsToString(want); !strings.Contains(asm, wantAsm) {
+		t.Errorf("log2 should emit the N-103 sequence\nwant (substring): %s\ngot: %s", wantAsm, asm)
 	}
-	if strings.Contains(asm, "OP_MUL") {
-		t.Errorf("log2 should NOT use OP_MUL (old byte approximation), got: %s", asm)
-	}
-
-	// The bit-scanning loop should have 64 if-ops with OP_DIV + OP_1ADD inside
-	ifCount := 0
-	for _, op := range check.Ops {
-		if op.Op == "if" {
-			thenStr := opsToString(op.Then)
-			if strings.Contains(thenStr, "OP_DIV") && strings.Contains(thenStr, "OP_1ADD") {
-				ifCount++
-			}
+	for _, o := range check.Ops {
+		if o.Op == "if" {
+			t.Errorf("log2 must be branch-free, got an if-op in: %s", asm)
 		}
-	}
-	if ifCount != 64 {
-		t.Errorf("log2 should have 64 if-ops for bit-scanning iterations, got %d", ifCount)
 	}
 }
 

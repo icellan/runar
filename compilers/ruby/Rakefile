@@ -1,21 +1,23 @@
 require 'rake/testtask'
+require_relative 'rakelib/test_runner'
 
 # Run each test file in its own subprocess to avoid constant collisions
 # between the TS and Ruby parsers (they share a namespace for token constants).
+#
+# test_helper.rb matches the test_*.rb glob too (it's a shared support
+# module, required by every other test file, with no Minitest::Test
+# subclass of its own) but legitimately runs zero tests, so it is excluded
+# by name rather than weakening the zero-tests check below for everyone else.
 task :test do
-  test_files = FileList['test/test_*.rb', 'test/**/test_*.rb'].uniq
-  failures = 0
+  test_files = FileList['test/test_*.rb', 'test/**/test_*.rb'].exclude('test/test_helper.rb').uniq
+  suite = RunarCompiler::TestRunner.run_suite(test_files)
 
-  test_files.each do |f|
-    puts "Running #{f}..."
-    system("ruby -Ilib -Itest #{f}")
-    failures += 1 unless $?.success?
-  end
-
-  if failures > 0
-    abort "#{failures} test file(s) failed"
+  if suite.failed_results.any?
+    puts
+    suite.failed_results.each { |r| puts "FAILED: #{r.reason}" }
+    abort "#{suite.failed_results.size} test file(s) failed"
   else
-    puts "\nAll #{test_files.size} test files passed."
+    puts "\nAll #{test_files.size} test files passed (#{suite.total_runs} runs, #{suite.total_assertions} assertions)."
   end
 end
 

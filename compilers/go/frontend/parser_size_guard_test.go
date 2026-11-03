@@ -61,3 +61,80 @@ func TestParseSource_AcceptsNormalSizedInput(t *testing.T) {
 		t.Fatalf("size guard incorrectly tripped: %v", res.SourceSizeErr)
 	}
 }
+
+// F-177: the size guard is documented to cover ParseSource, Parse, and every
+// per-format parser, but was only ever wired into ParseSource. A caller that
+// imports this package and calls e.g. ParseJava or ParseGoContract directly
+// (bypassing ParseSource) skipped the guard entirely and forced
+// tokenization of arbitrarily large input. Each exported parser entry must
+// refuse oversized input on its own, before touching the tokenizer, with the
+// same *SourceSizeExceededError ParseSource already returns.
+func TestExportedParsers_RejectOversizedSourceDirectly(t *testing.T) {
+	oversized := make([]byte, MaxSourceBytes+1)
+	for i := range oversized {
+		oversized[i] = ' '
+	}
+
+	parsers := []struct {
+		name string
+		fn   func(source []byte, fileName string) *ParseResult
+	}{
+		{"Parse", Parse},
+		{"ParseSolidity", ParseSolidity},
+		{"ParseMove", ParseMove},
+		{"ParseGoContract", ParseGoContract},
+		{"ParsePython", ParsePython},
+		{"ParseRustMacro", ParseRustMacro},
+		{"ParseRuby", ParseRuby},
+		{"ParseZig", ParseZig},
+		{"ParseJava", ParseJava},
+	}
+
+	for _, p := range parsers {
+		res := p.fn(oversized, "Counter.runar.ts")
+		if res.SourceSizeErr == nil {
+			t.Errorf("%s: expected SourceSizeErr to be set for %d-byte input (limit %d), got nil", p.name, len(oversized), MaxSourceBytes)
+			continue
+		}
+		if res.SourceSizeErr.Limit != MaxSourceBytes {
+			t.Errorf("%s: expected Limit=%d, got %d", p.name, MaxSourceBytes, res.SourceSizeErr.Limit)
+		}
+		if res.SourceSizeErr.Actual != MaxSourceBytes+1 {
+			t.Errorf("%s: expected Actual=%d, got %d", p.name, MaxSourceBytes+1, res.SourceSizeErr.Actual)
+		}
+		if len(res.Errors) == 0 {
+			t.Errorf("%s: expected at least one diagnostic, got none", p.name)
+		}
+	}
+}
+
+// Control for TestExportedParsers_RejectOversizedSourceDirectly: small input,
+// well under the cap, must not trip the guard on any entry point (the guard
+// itself only looks at byte length, so empty input is sufficient — each
+// parser is still free to fail afterwards for its own syntactic reasons,
+// which this test does not assert on).
+func TestExportedParsers_AcceptSmallInputDirectly(t *testing.T) {
+	small := []byte(``)
+
+	parsers := []struct {
+		name string
+		fn   func(source []byte, fileName string) *ParseResult
+	}{
+		{"Parse", Parse},
+		{"ParseSolidity", ParseSolidity},
+		{"ParseMove", ParseMove},
+		{"ParseGoContract", ParseGoContract},
+		{"ParsePython", ParsePython},
+		{"ParseRustMacro", ParseRustMacro},
+		{"ParseRuby", ParseRuby},
+		{"ParseZig", ParseZig},
+		{"ParseJava", ParseJava},
+	}
+
+	for _, p := range parsers {
+		res := p.fn(small, "Counter.runar.ts")
+		if res.SourceSizeErr != nil {
+			t.Errorf("%s: size guard incorrectly tripped on %d-byte input: %v", p.name, len(small), res.SourceSizeErr)
+		}
+	}
+}

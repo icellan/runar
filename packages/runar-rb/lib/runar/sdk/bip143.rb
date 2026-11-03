@@ -107,44 +107,93 @@ module Runar
         Digest::SHA256.digest(Digest::SHA256.digest(data))
       end
 
-      # Compute the BIP-143 sighash digest for one input of a parsed transaction.
+      # 32 zero bytes: what BIP-143 puts in hashPrevouts / hashSequence /
+      # hashOutputs when the sighash flags exclude them.
+      ZERO32 = ("\x00".b * 32).freeze
+
+      # Build the BIP-143 sighash preimage for one input of a parsed transaction.
+      #
+      # F-137: this is the ONLY BIP-143 preimage builder in the Ruby SDK. Both
+      # {Runar::SDK.compute_preimage} (OP_PUSH_TX / WalletSigner) and
+      # {Runar::SDK::LocalSigner}'s pure-Ruby backend (via {bip143_sighash})
+      # go through it. LocalSigner used to have its own copy that skipped the
+      # issue-#123 per-flag zeroing below and signed the wrong digest for every
+      # flag other than ALL|FORKID.
       #
       # @param tx           [Hash]    output of {parse_raw_tx}
       # @param input_index  [Integer] index of the input being signed
       # @param subscript    [String]  binary scriptCode for this input
       # @param satoshis     [Integer] value of the UTXO being spent
       # @param sighash_type [Integer] sighash flags (typically 0x41 = ALL|FORKID)
-      # @return [String] 32-byte binary digest
-      def bip143_sighash(tx, input_index, subscript, satoshis, sighash_type)
-        hash_prevouts = sha256d(
-          tx[:inputs].map { |inp| inp[:prev_txid] + [inp[:prev_output_index]].pack('V') }.join
-        )
+      # @return [String] binary preimage
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
+      def bip143_preimage(tx, input_index, subscript, satoshis, sighash_type)
+        base = sighash_type & 0x1f
+        acp  = (sighash_type & 0x80) != 0
 
-        hash_sequence = sha256d(
-          tx[:inputs].map { |inp| [inp[:sequence]].pack('V') }.join
-        )
+        # hashPrevouts. Issue #123: ANYONECANPAY zeroes it (only this input is signed).
+        hash_prevouts =
+          if acp
+            ZERO32.dup
+          else
+            sha256d(tx[:inputs].map { |inp| inp[:prev_txid] + [inp[:prev_output_index]].pack('V') }.join)
+          end
 
-        hash_outputs = sha256d(
-          tx[:outputs].map { |out|
-            [out[:satoshis] & 0xffffffff, out[:satoshis] >> 32].pack('VV') +
-              write_var_int(out[:script].bytesize) + out[:script]
-          }.join
-        )
+        # hashSequence. Issue #123: zeroed under anything but pure SIGHASH_ALL
+        # (NONE / SINGLE / ANYONECANPAY all clear it).
+        hash_sequence =
+          if base == 0x01 && !acp
+            sha256d(tx[:inputs].map { |inp| [inp[:sequence]].pack('V') }.join)
+          else
+            ZERO32.dup
+          end
+
+        # hashOutputs by sighash base (issue #123):
+        #   ALL    -> hash256(all outputs)
+        #   SINGLE -> hash256(the single output at THIS input's index), or 32 zero
+        #             bytes when input_index >= outputs.length. It must NOT digest
+        #             the whole output set — under SINGLE every other output is
+        #             attacker-controllable (F5).
+        #   NONE   -> 32 zero bytes (no outputs committed)
+        hash_outputs =
+          if base == 0x02 # NONE
+            ZERO32.dup
+          elsif base == 0x03 # SINGLE
+            if input_index < tx[:outputs].length
+              sha256d(serialize_output(tx[:outputs][input_index]))
+            else
+              ZERO32.dup
+            end
+          else
+            sha256d(tx[:outputs].map { |out| serialize_output(out) }.join)
+          end
 
         inp = tx[:inputs][input_index]
-        preimage = [tx[:version]].pack('V') +
-                   hash_prevouts +
-                   hash_sequence +
-                   inp[:prev_txid] +
-                   [inp[:prev_output_index]].pack('V') +
-                   write_var_int(subscript.bytesize) + subscript +
-                   [satoshis & 0xffffffff, satoshis >> 32].pack('VV') +
-                   [inp[:sequence]].pack('V') +
-                   hash_outputs +
-                   [tx[:locktime]].pack('V') +
-                   [sighash_type & 0xffffffff].pack('V')
+        [tx[:version]].pack('V') +
+          hash_prevouts +
+          hash_sequence +
+          inp[:prev_txid] +
+          [inp[:prev_output_index]].pack('V') +
+          write_var_int(subscript.bytesize) + subscript +
+          [satoshis].pack('Q<') +
+          [inp[:sequence]].pack('V') +
+          hash_outputs +
+          [tx[:locktime]].pack('V') +
+          [sighash_type & 0xffffffff].pack('V')
+      end
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
 
-        sha256d(preimage)
+      # Serialize one output as value (8 LE) || varint(len) || script.
+      def serialize_output(out)
+        [out[:satoshis]].pack('Q<') + write_var_int(out[:script].bytesize) + out[:script]
+      end
+
+      # Compute the BIP-143 sighash digest for one input of a parsed transaction:
+      # sha256d of {bip143_preimage}. Same parameters.
+      #
+      # @return [String] 32-byte binary digest
+      def bip143_sighash(tx, input_index, subscript, satoshis, sighash_type)
+        sha256d(bip143_preimage(tx, input_index, subscript, satoshis, sighash_type))
       end
 
       # Bitcoin Base58 alphabet.

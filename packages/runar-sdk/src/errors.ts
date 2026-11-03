@@ -45,6 +45,40 @@ export function assertScriptHexUnderLimit(
 }
 
 /**
+ * Thrown when a provider-supplied script cannot be parsed as a sequence of
+ * Bitcoin Script push elements (F-238).
+ *
+ * `readScriptElement` (script-utils.ts) used to be fail-open: an
+ * empty/out-of-range offset produced `opcode = NaN` and fell through to the
+ * single-byte-opcode default instead of throwing, and a push whose declared
+ * length ran past the end of the hex string was handed to `.slice()`, which
+ * silently returns whatever is left instead of erroring — corrupting every
+ * later constructor slot's offset in the same walk. A script fetched via a
+ * `Provider` (`fromTxId` / `fromUtxo`) is untrusted input and needs a typed,
+ * specific rejection, not a crash or a quietly wrong value.
+ */
+export class MalformedScriptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MalformedScriptError';
+  }
+}
+
+/**
+ * Thrown by `new RunarContract` when a ByteString-family constructor arg
+ * (ByteString, PubKey, Sig, Addr, Ripemd160, Sha256, Point, P256Point,
+ * P384Point, SigHashPreimage) is a string that is not an even-length hex
+ * string (N-329). The SDK treats such a string as hex when it splices it into
+ * the locking script, so raw bytes would otherwise build a corrupt script.
+ */
+export class InvalidConstructorArgError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidConstructorArgError';
+  }
+}
+
+/**
  * Thrown when a method call requires a caller-supplied intent-intrinsic
  * witness value (auto-injected `_prevOutScript_<i>` or `_serialisedOutputs`)
  * that has not been set on the RunarContract.

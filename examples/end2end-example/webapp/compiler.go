@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,10 +40,15 @@ var sourceLangs = map[string]sourceLang{
 	"py":   {key: "py", filename: "PriceBet.runar.py", dirs: []string{"../python", "."}},
 	"rb":   {key: "rb", filename: "PriceBet.runar.rb", dirs: []string{"../ruby", "."}},
 	"zig":  {key: "zig", filename: "PriceBet.runar.zig", dirs: []string{"../zig", "."}},
-	// Java: no external PriceBet.runar.java yet (milestone 12 / examples/java
-	// ports are separate from examples/end2end-example). The webapp carries
-	// its own copy alongside main.go so the Java compile path works without
-	// reaching outside this directory.
+	// Java: an external canonical copy DOES exist, at
+	// examples/end2end-example/java/src/main/java/runar/end2end/PriceBet.runar.java
+	// — but it lives inside that example's Gradle source layout, not as a flat
+	// file next to this directory, so the "../java" entry below can never
+	// resolve to it. The webapp instead serves its own copy (kept deliberately
+	// NOT byte-identical to the reference, so tests/r277-webapp-contract-copy-
+	// in-sync.test.ts still guards real drift, but required to compile under
+	// real javac — see F-190 / CL-BUG-256) so the Java compile path works
+	// without reaching into that nested tree.
 	"java": {key: "java", filename: "PriceBet.runar.java", dirs: []string{".", "../java"}},
 }
 
@@ -73,7 +79,10 @@ func normalizeLang(lang string) string {
 	}
 }
 
-func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (scriptHex string, scriptAsm string, err error) {
+// alicePubKeyHex and bobPubKeyHex fill the contract's slots of those names:
+// settle pays alicePubKey when price > strikePrice and bobPubKey otherwise.
+// oracleN is the Rabin modulus whose signature settle accepts.
+func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, oracleN *big.Int, threshold int) (scriptHex string, scriptAsm string, err error) {
 	key := normalizeLang(lang)
 	spec, ok := sourceLangs[key]
 	if !ok {
@@ -119,7 +128,9 @@ func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (
 		case "bobPubKey":
 			program.Properties[i].InitialValue = bobPubKeyHex
 		case "oraclePubKey":
-			program.Properties[i].InitialValue = float64(12345)
+			// F-162: the game's real oracle modulus. It used to be 12345, under
+			// which settle accepts sig = 0, padding = SHA256(msg) mod 12345.
+			program.Properties[i].InitialValue = new(big.Int).Set(oracleN)
 		case "strikePrice":
 			program.Properties[i].InitialValue = float64(threshold)
 		}

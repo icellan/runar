@@ -2,21 +2,27 @@
  * Issue #106 — `EMPTY_SIG` producer-side convention for OR-CHECKSIG branched
  * authorization.
  *
- * An OR-CHECKSIG method — `checkSig(sigA, pkA) || checkSig(sigB, pkB)` — runs
- * BOTH `OP_CHECKSIG` branches (Rúnar lowers `||` to the non-lazy `OP_BOOLOR`).
- * Only the matching branch supplies a real signature; the failing branch MUST
- * push an empty signature (OP_0) or BIP146 NULLFAIL rejects the whole spend.
+ * An OR-CHECKSIG method — `checkSig(sigA, pkA) || checkSig(sigB, pkB)`. `||`
+ * short-circuits: it lowers to OP_IF / OP_ELSE / OP_ENDIF (NEW-014), not to
+ * `OP_BOOLOR`, so the second `OP_CHECKSIG` runs only when the first FAILS —
+ * and the first then ran with whatever its slot holds. A branch that is
+ * evaluated and must fail MUST push an empty signature (OP_0) or BIP146
+ * NULLFAIL aborts the whole spend. Since N-198 the SDK ANF interpreters and
+ * TestContract model that rule; @bsv/sdk `Spend` does not (see below).
  *
  * These tests drive the full SDK deploy → call path and replay the built call
  * tx offline through @bsv/sdk's `Spend` interpreter:
  *   * GREEN (interpreter-level): `call('execute', [null, EMPTY_SIG])` signs only
- *     the auto slot; the EMPTY_SIG slot stays OP_0 → the failing CHECKSIG
- *     returns false without aborting → the spend VALIDATES, and the failing
- *     branch's Sig push is OP_0 (NULLFAIL-clean).
+ *     the auto slot; the EMPTY_SIG slot stays OP_0 → the spend VALIDATES, and
+ *     the non-matching branch's Sig push is OP_0 (NULLFAIL-clean whichever
+ *     branch runs).
  *   * RED baseline (wire-level): `call('execute', [null, null])` fills BOTH sig
  *     slots with Alice's signature, so the non-matching branch carries a
- *     NON-EMPTY, invalid signature — exactly the byte pattern BIP146 NULLFAIL
- *     rejects (ARC HTTP 461).
+ *     NON-EMPTY, invalid signature. Here Alice is pkA, so branch A succeeds and
+ *     the short-circuit never runs branch B — this particular tx is valid on a
+ *     node. The pattern is a NULLFAIL abort (ARC HTTP 461) exactly when the
+ *     evaluated failing branch holds it, e.g. the signer is pkB and branch A
+ *     carries the non-empty invalid signature. The test pins the wire bytes.
  *
  * Note on the interpreter: the installed @bsv/sdk (2.0.7) `Spend` does NOT
  * implement SCRIPT_VERIFY_NULLFAIL — a non-empty invalid signature makes
@@ -173,7 +179,8 @@ describe('#106 — EMPTY_SIG for OR-CHECKSIG branched authorization', () => {
 
     // Both slots auto → the SDK fills BOTH with Alice's signature. Branch B's
     // non-empty-but-invalid signature (valid for pkA, checked against pkB) is
-    // the exact byte pattern a NULLFAIL-enforcing node rejects (ARC HTTP 461).
+    // the byte pattern a NULLFAIL-enforcing node rejects (ARC HTTP 461) when
+    // that branch is evaluated — not here, where branch A succeeds first.
     await contract.call('execute', [null, null], provider, alice);
     const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
 

@@ -74,4 +74,31 @@ class StatePushFramingTest {
             assertEquals(payload, decoded.get("b"), "roundtrip 0x" + payload);
         }
     }
+
+    /**
+     * N-044 / F-083: the compiler's on-chain state reader and writer frame a
+     * ByteString with an UNSIGNED length ({@code <len>} below 76,
+     * {@code 4c <len8>}, {@code 4d <len16 LE>}, {@code 4e <len32 LE>}), and the
+     * covenant only accepts a continuation whose state bytes equal the SDK's.
+     * Hand-written expected headers at every boundary where a signed reading
+     * of the length used to differ (0x80, 0x81.., 0x8000, 0xffff) and where
+     * PUSHDATA4 starts. The on-chain side is run against the same frames by
+     * packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+     */
+    @Test
+    void pushDataLengthBoundariesMatchTheOnChainFrame() {
+        Object[][] cases = {
+            {75, "4b"}, {76, "4c4c"}, {127, "4c7f"}, {128, "4c80"}, {129, "4c81"},
+            {255, "4cff"}, {256, "4d0001"}, {32767, "4dff7f"}, {32768, "4d0080"},
+            {65535, "4dffff"}, {65536, "4e00000100"},
+        };
+        for (Object[] c : cases) {
+            int n = (Integer) c[0];
+            String header = (String) c[1];
+            String payload = "ab".repeat(n);
+            String encoded = encode(payload);
+            assertEquals(header + payload, encoded, "len " + n + ": frame header");
+            assertEquals(payload, StateSerializer.deserialize(FIELDS, encoded).get("b"), "len " + n + ": round-trip");
+        }
+    }
 }

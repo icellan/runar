@@ -12,6 +12,7 @@ import runar.compiler.ir.ast.ExpressionStatement;
 import runar.compiler.ir.ast.Identifier;
 import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.MemberExpr;
+import runar.compiler.ir.ast.MethodNode;
 import runar.compiler.ir.ast.ParentClass;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
@@ -423,5 +424,154 @@ class GoParserTest {
         assertEquals("this", ((Identifier) callee.object()).name());
         // Argument is this.a (PropertyAccessExpr), since c.A on the receiver lowers to that.
         assertEquals("a", ((PropertyAccessExpr) call.args().get(0)).property());
+    }
+
+    // ------------------------------------------------------------------
+    // F-010: a method is a contract method only if its receiver IS the
+    // contract. This tier silently dropped a method on another type (and any
+    // method declared before the contract struct); the TS reference, Go and
+    // Ruby made it a PUBLIC entry point. The rule (user decision R9),
+    // diagnostics verbatim in all seven tiers:
+    //   - the contract is THE struct embedding a runar base; others ignored;
+    //   - zero or several such structs refuse the file;
+    //   - a method whose receiver (value or pointer) is another type refuses it;
+    //   - a free function, exported or not, is a private helper.
+    // Proves: this tier's .runar.go diagnostics and method set per shape.
+    // Does NOT prove: the other tiers, or anything on chain.
+    // ------------------------------------------------------------------
+
+    private static final String F010_PRELUDE =
+        "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n";
+    private static final String F010_GUARDED =
+        "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n"
+        + "\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n";
+    private static final String F010_RECEIVER_ERROR =
+        "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; "
+        + "methods on other types are not allowed";
+
+    private static String f010Unrelated(String recv) {
+        return "\ntype Unrelated struct{}\n\nfunc (" + recv + ") Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n";
+    }
+
+    private static String f010Refusal(String src) {
+        return assertThrows(GoParser.ParseException.class,
+            () -> GoParser.parse(src, "Guarded.runar.go")).getMessage();
+    }
+
+    private static java.util.List<String> f010Methods(String src) throws Exception {
+        ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+        return c.methods().stream()
+            .map(m -> m.name() + "(" + (m.visibility() == Visibility.PUBLIC ? "public" : "private") + ")")
+            .toList();
+    }
+
+    @Test
+    void f010ForeignReceiverRefused() {
+        for (String src : java.util.List.of(
+                F010_PRELUDE + F010_GUARDED + f010Unrelated("u Unrelated"),
+                F010_PRELUDE + F010_GUARDED + f010Unrelated("u *Unrelated"),
+                F010_PRELUDE + f010Unrelated("u Unrelated") + F010_GUARDED,
+                F010_PRELUDE + f010Unrelated("u *Unrelated") + F010_GUARDED,
+                F010_PRELUDE + F010_GUARDED
+                    + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n")) {
+            assertEquals(F010_RECEIVER_ERROR, f010Refusal(src));
+        }
+    }
+
+    @Test
+    void f010ContractReceiversKept() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)", "drain(public)"), f010Methods(src));
+    }
+
+    @Test
+    void f010ExportedFreeFunctionIsPrivateHelper() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)", "drain(private)"), f010Methods(src));
+    }
+
+    @Test
+    void f010HelperStructIgnored() throws Exception {
+        String helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n";
+        for (String src : java.util.List.of(F010_PRELUDE + F010_GUARDED + helper, F010_PRELUDE + helper + F010_GUARDED)) {
+            ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+            assertEquals("Guarded", c.name());
+            assertEquals(java.util.List.of("pubKey"), c.properties().stream().map(PropertyNode::name).toList());
+        }
+    }
+
+    @Test
+    void f010NoContractStruct() {
+        assertEquals("no Rúnar contract struct found in Go source",
+            f010Refusal(F010_PRELUDE + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"));
+    }
+
+    @Test
+    void f010TwoContractStructs() {
+        assertEquals(
+            "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; "
+                + "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
+            f010Refusal(F010_PRELUDE + F010_GUARDED
+                + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n"));
+    }
+
+    // ------------------------------------------------------------------
+    // N-018: a free `init`/`main` is not an ordinary private helper. Real Go
+    // reserves both names for the package initializer / entry point, which
+    // can never be called as a function; this tier already skips it (the
+    // fix for TS/Ruby/Zig matches this tier's existing behaviour; see their
+    // own suites). This locks the behaviour in.
+    //
+    // A 0-param free `init()` is not a case this test reaches: the existing
+    // init-extraction pass (`m.name().equals("init") && m.params().isEmpty()`)
+    // already absorbs it regardless of receiver. A free `init` WITH a
+    // parameter does reach `parseFuncDecl`'s skip.
+    // ------------------------------------------------------------------
+    @Test
+    void n018FreeInitParamAndMainAreDropped() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc main() {\n\trunar.Assert(true)\n}\n"
+            + "\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)"), f010Methods(src));
+    }
+
+    // ------------------------------------------------------------------
+    // N-018: the unnamed receiver `(T)` must leave the receiver
+    // unreferenceable. Real Go forbids referencing an unnamed receiver in
+    // the method body at all -- there is no name bound to it. This tier
+    // instead failed to parse `(T)` at all (a generic parse error, since
+    // `looksLikeReceiver` only recognised the two-identifier `(name Type)`
+    // shape) AND (independently) hardcoded "c"/"self" as always meaning
+    // "the receiver" regardless of the actual declared name. The TS/Ruby
+    // reference already gets this right; Go, Rust, Zig and Python carried
+    // the identical hardcoded-alias bug (fixed alongside this one; see
+    // their own suites).
+    //
+    // Proves: this tier's .runar.go parser accepts an unnamed receiver and
+    // never treats a same-spelled non-receiver identifier as the contract's
+    // self; `c.PubKey` parses as a MemberExpr on the parameter `c`, not a
+    // PropertyAccessExpr on the contract. Does NOT prove: the other six
+    // tiers.
+    // ------------------------------------------------------------------
+    @Test
+    void n018UnnamedReceiverParamNamedCStaysPlain() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n";
+        ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+        MethodNode method = c.methods().stream()
+            .filter(m -> m.name().equals("checkC"))
+            .findFirst()
+            .orElseThrow();
+        ExpressionStatement stmt = (ExpressionStatement) method.body().get(0);
+        CallExpr call = (CallExpr) stmt.expression();
+        Expression arg = call.args().get(0);
+        assertInstanceOf(MemberExpr.class, arg,
+            "c.PubKey parsed as " + arg.getClass().getSimpleName()
+                + ", want MemberExpr -- the unnamed receiver must not bind the name \"c\"");
+        MemberExpr member = (MemberExpr) arg;
+        assertInstanceOf(Identifier.class, member.object());
+        assertEquals("c", ((Identifier) member.object()).name());
+        assertEquals("pubKey", member.property());
     }
 }

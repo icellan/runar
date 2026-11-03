@@ -13,7 +13,8 @@
  *   ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa
  */
 
-import { PrivateKey, PublicKey, Signature } from '@bsv/sdk';
+import { PrivateKey, PublicKey, Signature, TransactionSignature } from '@bsv/sdk';
+import { isStrictDerSignature } from 'runar-sdk';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,6 +90,50 @@ export function verifyTestMessageSig(
 }
 
 /**
+ * F-227: why `OP_CHECKSIG` would ABORT the whole script on these operands,
+ * or `null` when it would run and push a boolean.
+ *
+ * Mirrors `@bsv/sdk` `Spend`'s `checkSignatureEncoding` and
+ * `checkPublicKeyEncoding` (version-1 consensus rule set), which run before
+ * any verification and end the script on failure rather than pushing false:
+ *   - a non-empty signature must be strict DER (BIP66) with a low S;
+ *   - the public key must be 33 bytes behind 0x02/0x03 or 65 bytes behind
+ *     0x04, and decode to a curve point.
+ * An empty signature is well-encoded (it pushes false). A well-formed
+ * signature that does not verify is NOT an encoding abort — `Spend` has no
+ * NULLFAIL rule and pushes false; a real node enforces NULLFAIL (issue #106),
+ * which the interpreter's `checkSig` applies after verification (N-198).
+ *
+ * The signature layout is the one {@link verifyTestMessageSig} accepts (bare
+ * DER, or DER plus a trailing sighash-type byte), because the interpreter
+ * signs a fixed test message rather than a sighash.
+ */
+export function checkSigEncodingError(
+  sigBytes: Uint8Array,
+  pubKeyBytes: Uint8Array,
+): string | null {
+  if (sigBytes.length > 0) {
+    const der = derBody(sigBytes);
+    if (!isStrictDerSignature(der)) return 'the signature is not strict DER';
+    const sig = Signature.fromDER(der);
+    if (!new TransactionSignature(sig.r, sig.s, 0).hasLowS()) {
+      return 'the signature does not have a low S value';
+    }
+  }
+  const prefix = pubKeyBytes[0];
+  const len = pubKeyBytes.length;
+  const shapeOk =
+    ((prefix === 0x02 || prefix === 0x03) && len === 33) || (prefix === 0x04 && len === 65);
+  if (!shapeOk) return 'the public key is not a 33-byte compressed or 65-byte uncompressed key';
+  try {
+    ecPublicKeyFromBytes(pubKeyBytes);
+  } catch {
+    return 'the public key is not a point on secp256k1';
+  }
+  return null;
+}
+
+/**
  * Verify an ECDSA signature given hex-encoded sig and pubkey.
  * Convenience wrapper for interpreter and runtime builtins.
  */
@@ -125,7 +170,16 @@ function ecPublicKeyFromBytes(bytes: Uint8Array): InstanceType<typeof PublicKey>
  */
 function parseDERSignature(bytes: Uint8Array): InstanceType<typeof Signature> | null {
   if (bytes.length < 8) return null;
+  const derBytes = derBody(bytes);
 
+  // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. Signature.fromDER
+  // alone accepts an unpadded high-bit INTEGER.
+  if (!isStrictDerSignature(derBytes)) return null;
+  return Signature.fromDER(derBytes);
+}
+
+/** The DER part of a signature: `bytes` with a trailing sighash byte, if any, removed. */
+function derBody(bytes: Uint8Array): number[] {
   // DER envelope: bytes[0] = 0x30, bytes[1] = declared length
   // If actual length = declared + 2, it's pure DER (0x30 + len byte + content)
   // If actual length = declared + 3, there's a trailing sighash byte
@@ -142,6 +196,5 @@ function parseDERSignature(bytes: Uint8Array): InstanceType<typeof Signature> | 
     // Try as-is
     derBytes = Array.from(bytes);
   }
-
-  return Signature.fromDER(derBytes);
+  return derBytes;
 }

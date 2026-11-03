@@ -17,7 +17,7 @@ import {
   SLH_SHA2_192s, SLH_SHA2_192f,
   SLH_SHA2_256s, SLH_SHA2_256f,
 } from '../crypto/slh-dsa.js';
-import { verifyTestMessageSig } from '../crypto/ecdsa.js';
+import { verifyTestMessageSig, checkSigEncodingError } from '../crypto/ecdsa.js';
 import { rabinVerify as rabinVerifyImpl } from '../crypto/rabin.js';
 import type {
   ContractNode,
@@ -346,6 +346,10 @@ export class RunarInterpreter {
     sequence: 0xfffffffen,
   };
   private _mockPreimageBytes: Record<string, Uint8Array> = {};
+  // F-024 (R14): the value `continuationAmount()` reads (the default
+  // continuation's `_newAmount`). Unset = the honest continuation, which
+  // keeps the input's value (the mock preimage's `amount`).
+  private _continuationAmount: bigint | undefined;
   // Witness bytes for auto-injected intent-intrinsic params, keyed by the
   // ANF-level synthetic name (`_prevOutScript_<idx>`, `_serialisedOutputs`).
   // Tests populate these via TestContract.setPrevOutScript / .setSerialisedOutputs;
@@ -366,6 +370,7 @@ export class RunarInterpreter {
   setContract(contract: ContractNode): void { this._contract = contract; }
   setMockPreimage(overrides: Record<string, bigint>): void { Object.assign(this._mockPreimage, overrides); }
   setMockPreimageBytes(overrides: Record<string, Uint8Array>): void { Object.assign(this._mockPreimageBytes, overrides); }
+  setContinuationAmount(amount: bigint | undefined): void { this._continuationAmount = amount; }
   setPrevOutScript(inputIndex: bigint | number, bytes: Uint8Array): void {
     const idx = typeof inputIndex === 'bigint' ? inputIndex.toString() : String(inputIndex);
     this._witnessBytes[`_prevOutScript_${idx}`] = bytes;
@@ -1005,7 +1010,30 @@ export class RunarInterpreter {
         // Real ECDSA verification over the fixed TEST_MESSAGE.
         const sig = this.toBytes(args[0]!);
         const pubKey = this.toBytes(args[1]!);
-        return { kind: 'boolean', value: verifyTestMessageSig(sig, pubKey) };
+        // F-227: OP_CHECKSIG ABORTS on a malformed signature or public-key
+        // encoding; it does not push false. Answering false here let
+        // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+        // spend the chain aborts on.
+        const encodingError = checkSigEncodingError(sig, pubKey);
+        if (encodingError !== null) {
+          throw new Error(
+            `checkSig: ${encodingError} — OP_CHECKSIG aborts the script on a malformed ` +
+              'signature or public key encoding, it does not push false',
+          );
+        }
+        const ok = verifyTestMessageSig(sig, pubKey);
+        // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+        // does not verify aborts the script; only an empty one pushes false.
+        // So the arm of `checkSig(a, A) || checkSig(b, B)` that must fail
+        // takes an empty signature (EMPTY_SIG, issue #106).
+        if (!ok && sig.length > 0) {
+          throw new Error(
+            'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' +
+              'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+              'the arm that must fail takes an empty signature (EMPTY_SIG)',
+          );
+        }
+        return { kind: 'boolean', value: ok };
       }
 
       case 'checkMultiSig': {
@@ -1185,7 +1213,11 @@ export class RunarInterpreter {
         const val = this.toBigInt(args[0]!);
         const lo = this.toBigInt(args[1]!);
         const hi = this.toBigInt(args[2]!);
-        return { kind: 'bigint', value: val < lo ? lo : val > hi ? hi : val };
+        // The compiled script is `<val> <lo> OP_MAX <hi> OP_MIN`, i.e.
+        // min(max(val, lo), hi) — which differs from `val < lo ? lo : ...`
+        // once lo > hi (N-029).
+        const m = val > lo ? val : lo;
+        return { kind: 'bigint', value: m < hi ? m : hi };
       }
 
       case 'sign': {
@@ -1247,7 +1279,10 @@ export class RunarInterpreter {
         let b = this.toBigInt(args[1]!);
         a = a < 0n ? -a : a;
         b = b < 0n ? -b : b;
-        while (b !== 0n) {
+        // The compiled script unrolls exactly 256 Euclid steps
+        // (`05-stack-lower.ts#lowerGcd`) and returns `a` after them, which is
+        // a partial remainder, not the gcd, when 256 are not enough (N-029).
+        for (let i = 0; i < 256 && b !== 0n; i++) {
           const temp = b;
           b = a % b;
           a = temp;
@@ -1264,11 +1299,10 @@ export class RunarInterpreter {
 
       case 'log2': {
         const n = this.toBigInt(args[0]!);
-        if (n <= 0n) return { kind: 'bigint', value: 0n };
-        let bits = 0n;
-        let val = n;
-        while (val > 1n) { val >>= 1n; bits++; }
-        return { kind: 'bigint', value: bits };
+        // The compiled script (`05-stack-lower.ts#lowerLog2`) is exact for
+        // every n > 0 and aborts for n <= 0 (N-103).
+        if (n <= 0n) throw new Error('log2: non-positive input');
+        return { kind: 'bigint', value: BigInt(n.toString(2).length - 1) };
       }
 
       case 'bool': {
@@ -1281,10 +1315,22 @@ export class RunarInterpreter {
 
       case 'verifyRabinSig': {
         // Real Rabin verification: (sig² + padding) mod n === SHA256(msg) mod n
+        // F-144: the emitted script appends 0x00 to each of sig, padding and
+        // pubKey and applies OP_BIN2NUM, i.e. it reads each operand's STACK
+        // BYTES as an unsigned little-endian integer. Mirror that exactly: a raw
+        // unsigned push keeps its unsigned value, a non-negative Script number is
+        // unchanged, and a negative one is read as its bytes' unsigned value.
+        const rabinOperandBytes = (v: RunarValue): Uint8Array =>
+          v.kind === 'bigint' ? (v.scriptBytes ?? encodeScriptNumber(v.value)) : this.toBytes(v);
+        const unsignedLE = (b: Uint8Array): bigint => {
+          let r = 0n;
+          for (let i = b.length - 1; i >= 0; i--) r = (r << 8n) | BigInt(b[i]!);
+          return r;
+        };
         const rabinMsg = this.toBytes(args[0]!);
-        const rabinSig = this.toBigInt(args[1]!);
-        const rabinPad = this.toBytes(args[2]!);
-        const rabinPk = this.toBigInt(args[3]!);
+        const rabinSig = unsignedLE(rabinOperandBytes(args[1]!));
+        const rabinPad = rabinOperandBytes(args[2]!);
+        const rabinPk = unsignedLE(rabinOperandBytes(args[3]!));
         return { kind: 'boolean', value: rabinVerifyImpl(rabinMsg, rabinSig, rabinPad, rabinPk) };
       }
 
@@ -1419,6 +1465,11 @@ export class RunarInterpreter {
 
       case 'extractAmount':
         return { kind: 'bigint', value: this._mockPreimage.amount ?? 10000n };
+
+      case 'continuationAmount':
+        // F-024 (R14): read-only view of the default continuation's
+        // `_newAmount`; defaults to the input amount (an honest continuation).
+        return { kind: 'bigint', value: this._continuationAmount ?? this._mockPreimage.amount ?? 10000n };
 
       case 'extractVersion':
         return { kind: 'bigint', value: this._mockPreimage.version ?? 1n };
@@ -1560,16 +1611,29 @@ export class RunarInterpreter {
       case 'blake3Compress': {
         const cv = this.toBytes(args[0]!);
         const block = this.toBytes(args[1]!);
+        // F-114: the compiled script aborts on a mis-sized operand, so the
+        // interpreter must fail too, not truncate / zero-extend.
+        if (cv.length !== 32) {
+          throw new Error(`blake3Compress: chaining value must be 32 bytes, got ${cv.length}`);
+        }
+        if (block.length !== 64) {
+          throw new Error(`blake3Compress: block must be 64 bytes, got ${block.length}`);
+        }
         return { kind: 'bytes', value: blake3CompressImpl(cv, block) };
       }
 
       case 'blake3Hash': {
         const msg = this.toBytes(args[0]!);
+        // The compiled script aborts on >64 bytes (OP_NUM2BIN with negative
+        // padding size), so the interpreter must fail too, not truncate.
+        if (msg.length > 64) {
+          throw new Error(`blake3Hash: message must be <= 64 bytes, got ${msg.length}`);
+        }
         // Standard BLAKE3 single block: zero-pad to 64 bytes, IV as chaining
         // value, real message length as block_len (correct for 0..64 bytes).
         const padded = new Uint8Array(64);
-        padded.set(msg.subarray(0, 64));
-        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded, Math.min(msg.length, 64)) };
+        padded.set(msg);
+        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded, msg.length) };
       }
 
       // Baby Bear field arithmetic (p = 2013265921)
@@ -2148,6 +2212,12 @@ function ecPointAddCoords(
   x1: bigint, y1: bigint, x2: bigint, y2: bigint,
 ): [bigint, bigint] {
   const p = EC_P;
+  // R-053: the all-zero point is the identity. The compiled `affineAdd`
+  // selects over it (pinf / qinf, both coordinates zero) before the chord
+  // and tangent paths; without this the interpreter took the chord for
+  // (G, O) where the script returns G.
+  if (x1 === 0n && y1 === 0n) return [x2, y2];
+  if (x2 === 0n && y2 === 0n) return [x1, y1];
   // P + (-P) = O. Affine x||y cannot encode O, so both this interpreter and
   // `affineAdd` in ec-codegen.ts represent it as the ALL-ZERO point — the same
   // encoding `ecMul(P, 0n)` already yields. The two MUST agree: the differential
@@ -2157,6 +2227,10 @@ function ecPointAddCoords(
   // repair if the script were the one that had drifted.
   if (x1 === x2 && y1 !== y2) return [0n, 0n];
   if (x1 === x2 && y1 === y2) {
+    // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+    if (y1 === 0n) {
+      throw new Error('ecAdd: cannot double a point with y = 0 (the tangent is vertical)');
+    }
     // Point doubling
     const s = ecMod(3n * x1 * x1 * ecModInv(2n * y1, p), p);
     const rx = ecMod(s * s - 2n * x1, p);
@@ -2198,15 +2272,34 @@ function ecScalarMul(x: bigint, y: bigint, k: bigint): [bigint, bigint] {
   return [rx, ry];
 }
 
+/**
+ * N-111 / R-117: the compiled ecAdd and ecNegate OP_VERIFY that each
+ * coordinate is a canonical field element (x < p, y < p) before any field
+ * arithmetic. Abort the same way rather than reducing.
+ */
+function ecRequireCanonical(x: bigint, y: bigint, fn: string): void {
+  if (x >= EC_P || y >= EC_P) {
+    throw new Error(`${fn}: point coordinate is not a canonical field element (x and y must be < p)`);
+  }
+}
+
 function ecAddImpl(a: Uint8Array, b: Uint8Array): Uint8Array {
   const [ax, ay] = ecDecodePoint(a);
   const [bx, by] = ecDecodePoint(b);
+  ecRequireCanonical(ax, ay, 'ecAdd');
+  ecRequireCanonical(bx, by, 'ecAdd');
   const [rx, ry] = ecPointAddCoords(ax, ay, bx, by);
   return ecEncodePoint(rx, ry);
 }
 
 function ecMulImpl(pt: Uint8Array, k: bigint): Uint8Array {
   const [x, y] = ecDecodePoint(pt);
+  // N-111 / R-157: the compiled ecMul OP_VERIFYs `onCurve(P) OR P == O`
+  // before the ladder (its +3n trick is sound only for points of order n).
+  // On-curve already implies 64 bytes and canonical coordinates.
+  if (!(x === 0n && y === 0n) && !ecOnCurveImpl(pt)) {
+    throw new Error('ecMul: point is neither on secp256k1 nor the point at infinity');
+  }
   const [rx, ry] = ecScalarMul(x, y, k);
   return ecEncodePoint(rx, ry);
 }
@@ -2218,10 +2311,19 @@ function ecMulGenImpl(k: bigint): Uint8Array {
 
 function ecNegateImpl(pt: Uint8Array): Uint8Array {
   const [x, y] = ecDecodePoint(pt);
+  ecRequireCanonical(x, y, 'ecNegate');
   return ecEncodePoint(x, ecMod(EC_P - y, EC_P));
 }
 
 function ecOnCurveImpl(pt: Uint8Array): boolean {
+  // N-184: a predicate over untrusted bytes must stay total. The compiled
+  // emitPointLengthGate ANDs a width flag into the result instead of
+  // aborting, so a 63- or 65-byte blob is false, not a thrown error --
+  // matching the `if (ecOnCurve(p)) {...} else {...}` idiom the codegen
+  // itself documents for this builtin. ecDecodePoint throws on the wrong
+  // width, which is correct for ecAdd/ecMul/ecNegate (the script aborts
+  // there too) but wrong here, so this check must run before it.
+  if (pt.length !== 64) return false;
   const [x, y] = ecDecodePoint(pt);
   // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p) to
   // match the compiled script, which range-checks the coordinates before the
@@ -2246,6 +2348,11 @@ function ecEncodeCompressedImpl(pt: Uint8Array): Uint8Array {
 }
 
 function ecMakePointImpl(x: bigint, y: bigint): Uint8Array {
+  // N-183 / R-156: the script requires each coordinate to be a field element
+  // (0 <= v < p, OP_WITHIN + OP_VERIFY) before it builds the Point.
+  if (x < 0n || x >= EC_P || y < 0n || y >= EC_P) {
+    throw new Error('ecMakePoint: coordinate is not a field element (0 <= v < p)');
+  }
   return ecEncodePoint(x, y);
 }
 

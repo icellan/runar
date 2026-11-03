@@ -17,6 +17,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const const_arith = @import("const_arith.zig");
+const dce = @import("dce.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -25,6 +26,11 @@ const Allocator = std.mem.Allocator;
 /// multiplies and enforces the bound with `OP_DUP <0> <33> OP_WITHIN
 /// OP_VERIFY`) and with the reference interpreter.
 const pow_fold_exponent_limit: u32 = 32;
+
+/// Unroll count of the emitted `gcd` loop (`passes/stack_lower.zig`). Past it
+/// the script returns a partial value, not the mathematical one, so the folder
+/// declines there (N-029). `log2` is exact for every n > 0 since N-103.
+const gcd_fold_iterations: usize = 256;
 const ConstValue = types.ConstValue;
 const ANFValue = types.ANFValue;
 const ANFBinding = types.ANFBinding;
@@ -153,8 +159,10 @@ fn evalBinOp(allocator: Allocator, op: []const u8, left: ConstValue, right: Cons
     // String (ByteString) operations
     if (left == .string and right == .string) {
         return switch (tag) {
-            .op_strict_eq => .{ .boolean = std.mem.eql(u8, left.string, right.string) },
-            .op_strict_neq => .{ .boolean = !std.mem.eql(u8, left.string, right.string) },
+            // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+            // ignores case, so 'aa' === 'AA' is true on-chain.
+            .op_strict_eq => .{ .boolean = hexEqual(left.string, right.string) },
+            .op_strict_neq => .{ .boolean = !hexEqual(left.string, right.string) },
             // String concatenation: we cannot allocate in a pure evaluator, skip
             else => null,
         };
@@ -166,6 +174,20 @@ fn evalBinOp(allocator: Allocator, op: []const u8, left: ConstValue, right: Cons
         .op_strict_neq => .{ .boolean = true },
         else => null,
     };
+}
+
+/// Compares two ByteString literals as bytes: case-insensitively when both
+/// are hex, by exact text otherwise.
+fn hexEqual(a: []const u8, b: []const u8) bool {
+    if (isHex(a) and isHex(b)) return std.ascii.eqlIgnoreCase(a, b);
+    return std.mem.eql(u8, a, b);
+}
+
+fn isHex(s: []const u8) bool {
+    for (s) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 // ============================================================================
@@ -318,13 +340,14 @@ fn evalBuiltinCall(
             return try const_arith.store(allocator, r);
         },
         .builtin_clamp => {
-            // max(lo, min(val, hi))
+            // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+            // That differs from max(lo, min(val, hi)) once lo > hi (N-029).
             if (count != 3) return null;
             const val = big_args[0];
             const lo = big_args[1];
             const hi = big_args[2];
-            const upper: usize = if (const_arith.order(val, hi) == .gt) 2 else 0;
-            const clamped = if (const_arith.order(big_args[upper], lo) == .lt) lo else big_args[upper];
+            const m = if (const_arith.order(val, lo) == .gt) val else lo;
+            const clamped = if (const_arith.order(m, hi) == .lt) m else hi;
             return try const_arith.store(allocator, clamped);
         },
         .builtin_sign => {
@@ -417,19 +440,24 @@ fn evalBuiltinCall(
             try b.copy(big_args[1].toConst());
             b.abs();
 
-            while (!const_arith.isZero(b)) {
+            // The script runs at most gcd_fold_iterations Euclid steps; if
+            // that is not enough it returns a partial remainder, not the gcd.
+            // Decline there (N-029).
+            var step: usize = 0;
+            while (step < gcd_fold_iterations and !const_arith.isZero(b)) : (step += 1) {
                 var r = try const_arith.remTrunc(allocator, a, b);
                 defer r.deinit();
                 try a.copy(b.toConst());
                 try b.copy(r.toConst());
             }
+            if (!const_arith.isZero(b)) return null;
             return try const_arith.store(allocator, a);
         },
         .builtin_log2 => {
             if (count != 1) return null;
             const n = big_args[0];
-            // n <= 0 folds to 0, matching the TS reference.
-            if (const_arith.isZero(n) or const_arith.isNegative(n)) return .{ .integer = 0 };
+            // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+            if (const_arith.isZero(n) or const_arith.isNegative(n)) return null;
             // Bit length - 1. `bitCountAbs` is exact for a positive value.
             const bits = n.toConst().bitCountAbs();
             return .{ .integer = @as(i128, @intCast(bits - 1)) };
@@ -478,6 +506,12 @@ fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerr
 
     // If the folded value is a load_const, register in the environment.
     // Skip @ref: values — they are symbolic references to runtime bindings, not foldable constants.
+    //
+    // A name may be bound more than once (reassignment, or a user local that
+    // shares a compiler temp's name). The env must track the LATEST binding:
+    // a rebinding to a non-constant drops the old constant, or later uses
+    // would fold with a value the name no longer holds (N-064).
+    var registered = false;
     if (anfValueToConst(folded_value)) |cv| {
         const skip = switch (cv) {
             .string => |s| std.mem.startsWith(u8, s, "@ref:"),
@@ -485,8 +519,18 @@ fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerr
         };
         if (!skip) {
             try env.put(binding.name, cv);
+            registered = true;
+        } else if (env.get(cv.string["@ref:".len..])) |target| {
+            // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not
+            // itself a constant, but when its target currently holds one the
+            // alias holds the same value, so later uses of the alias fold too.
+            // The binding stays an alias; the prune removes it if the fold
+            // orphaned it.
+            try env.put(binding.name, target);
+            registered = true;
         }
     }
+    if (!registered) _ = env.remove(binding.name);
 
     return .{ .name = binding.name, .value = folded_value, .source_loc = binding.source_loc };
 }
@@ -567,6 +611,11 @@ fn foldValue(allocator: Allocator, value: ANFValue, env: *ConstEnv) anyerror!ANF
             defer else_env.deinit();
             const folded_then = try foldBindings(allocator, if_node.then, &then_env);
             const folded_else = try foldBindings(allocator, if_node.@"else", &else_env);
+            // N-064: a name either arm rebinds may hold the arm's value after
+            // the if (that is how a branch reassigns a local), so the enclosing
+            // env's constant for it is stale past this point.
+            removeBoundNames(env, if_node.then);
+            removeBoundNames(env, if_node.@"else");
 
             const new_if = try allocator.create(types.ANFIf);
             new_if.* = .{
@@ -583,9 +632,14 @@ fn foldValue(allocator: Allocator, value: ANFValue, env: *ConstEnv) anyerror!ANF
         },
 
         .loop => |loop_node| {
+            // N-064: the body runs once per iteration, so a name it rebinds
+            // holds the entry constant only in iteration 0 -- it is not a
+            // constant inside the body, nor after the loop.
             var body_env = try cloneEnv(allocator, env);
             defer body_env.deinit();
+            removeBoundNames(&body_env, loop_node.body);
             const folded_body = try foldBindings(allocator, loop_node.body, &body_env);
+            removeBoundNames(env, loop_node.body);
 
             const new_loop = try allocator.create(types.ANFLoop);
             new_loop.* = .{
@@ -632,12 +686,18 @@ fn cloneEnv(allocator: Allocator, env: *const ConstEnv) !ConstEnv {
     return new_env;
 }
 
-/// Merge constants from a branch environment into the parent. Only adds new entries.
-fn mergeEnv(parent: *ConstEnv, branch: *const ConstEnv) void {
-    var it = branch.iterator();
-    while (it.next()) |entry| {
-        if (!parent.contains(entry.key_ptr.*)) {
-            parent.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
+/// Drop from `env` every name bound in `bindings`, including inside nested if
+/// arms and loop bodies.
+fn removeBoundNames(env: *ConstEnv, bindings: []const ANFBinding) void {
+    for (bindings) |b| {
+        _ = env.remove(b.name);
+        switch (b.value) {
+            .@"if" => |n| {
+                removeBoundNames(env, n.then);
+                removeBoundNames(env, n.@"else");
+            },
+            .loop => |n| removeBoundNames(env, n.body),
+            else => {},
         }
     }
 }
@@ -679,6 +739,26 @@ pub fn foldConstants(allocator: Allocator, program: ANFProgram) !ANFProgram {
         .constructor = program.constructor,
         .methods = try methods.toOwnedSlice(allocator),
     };
+}
+
+/// `foldConstants` followed by removal of the operand bindings the fold
+/// orphaned (N-138).
+///
+/// `foldConstants` rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+/// `t0 = 1` in place, and stack lowering then pushes it and drops it again
+/// (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding
+/// referenced BEFORE folding are removal candidates, so a binding that was
+/// already dead is left exactly as it was. `foldConstants` itself stays a pure
+/// rewrite.
+pub fn foldConstantsAndPrune(allocator: Allocator, program: ANFProgram) !ANFProgram {
+    var folded = try foldConstants(allocator, program);
+    for (program.methods, 0..) |before, i| {
+        var candidates = std.StringHashMap(void).init(allocator);
+        defer candidates.deinit();
+        for (before.body) |b| try dce.collectRefs(b.value, &candidates);
+        folded.methods[i].body = try dce.eliminateDeadBindingsAmongInMethod(allocator, folded.methods[i], &candidates);
+    }
+    return folded;
 }
 
 // ============================================================================
@@ -1148,6 +1228,78 @@ test "fold builtin log2(1024) = 10" {
     try expectConst(.{ .integer = 10 }, result[1]);
 }
 
+// N-029: every folded value must be what the emitted script computes.
+// clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+// differs from max(lo, min(v, hi)) once lo > hi; gcd unrolls 256 Euclid steps,
+// so past those the script returns a partial value and the folder must decline.
+// log2 is exact for every n > 0 since N-103 and aborts for n <= 0, so the
+// folder folds every positive operand and declines the rest. Expected values were executed on @bsv/sdk
+// Spend.validate by
+// packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+// Proves the Zig folder's value/decline decisions; not the script itself.
+const n029_fib257 = "229265413057075367692743352179590077832064383222590237";
+const n029_fib258 = "370959230771131880927453318055001997489772178180790104";
+const n029_fib259 = "600224643828207248620196670234592075321836561403380341";
+
+/// Fold `func(args...)` over all-constant args; returns the folded value of
+/// the call binding, or null when the folder declined.
+fn n029Fold(arena: Allocator, func: []const u8, args: []const ConstValue) !?ConstValue {
+    var env = ConstEnv.init(arena);
+    const names = [_][]const u8{ "t0", "t1", "t2" };
+    var bindings: [4]ANFBinding = undefined;
+    for (args, 0..) |a, i| bindings[i] = makeBinding(names[i], makeLoadConst(a));
+    bindings[args.len] = makeBinding("r", .{ .call = .{ .func = func, .args = names[0..args.len] } });
+    const result = try foldBindings(arena, bindings[0 .. args.len + 1], &env);
+    return anfValueToConst(result[args.len].value);
+}
+
+test "N-029 clamp with lo > hi folds to min(max(v, lo), hi), as the script computes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { args: [3]i128, want: i128 }{
+        .{ .args = .{ 5, 10, 0 }, .want = 0 },
+        .{ .args = .{ 0, 3, -3 }, .want = -3 },
+        .{ .args = .{ -20, 10, 0 }, .want = 0 },
+    };
+    for (cases) |c| {
+        const args = [_]ConstValue{ .{ .integer = c.args[0] }, .{ .integer = c.args[1] }, .{ .integer = c.args[2] } };
+        const got = (try n029Fold(a, "clamp", &args)) orelse return error.TestExpectedEqual;
+        try testing.expect(got.eql(.{ .integer = c.want }));
+    }
+}
+
+// N-103 (user decision R86): this used to pin the decline past 64 halvings
+// (2^65 and 2^70 not folded). The script is now exact with no cap, and n <= 0
+// (which it aborts on) is declined instead of folded to 0.
+test "N-103 log2 folds exactly and declines n <= 0" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const one: i128 = 1;
+    const cases = [_]struct { n: i128, want: i128 }{
+        .{ .n = one << 64, .want = 64 },
+        .{ .n = (one << 65) - 1, .want = 64 },
+        .{ .n = one << 65, .want = 65 },
+        .{ .n = one << 70, .want = 70 },
+    };
+    for (cases) |c| {
+        const got = (try n029Fold(a, "log2", &.{.{ .integer = c.n }})) orelse return error.TestExpectedEqual;
+        try testing.expect(got.eql(.{ .integer = c.want }));
+    }
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = 0 }})) == null);
+    try testing.expect((try n029Fold(a, "log2", &.{.{ .integer = -1 }})) == null);
+}
+
+test "N-029 gcd declines past the script's 256 Euclid steps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const exact = (try n029Fold(a, "gcd", &.{ .{ .big_integer = n029_fib258 }, .{ .big_integer = n029_fib257 } })) orelse return error.TestExpectedEqual;
+    try testing.expect(exact.eql(.{ .integer = 1 }));
+    try testing.expect((try n029Fold(a, "gcd", &.{ .{ .big_integer = n029_fib259 }, .{ .big_integer = n029_fib258 } })) == null);
+}
+
 test "fold builtin bool(0) = false" {
     const allocator = testing.allocator;
     var env = ConstEnv.init(allocator);
@@ -1333,6 +1485,18 @@ test "fold if with known condition does not propagate the taken arm's constants"
     try testing.expect(result[2].value == .bin_op);
 }
 
+// N-068: `mergeEnv` ("merge constants from a branch environment into the
+// parent, only adding new entries") is the exact unsound add-only merge the
+// test above pins the ABSENCE of -- it is never called by the live `if` case
+// (which only ever removes names via `removeBoundNames`, never merges one
+// branch's env into the parent). This test proves no such helper exists to be
+// wired back in by a future edit. It does NOT prove the live if-fold path is
+// sound on its own -- that is what "fold if with known condition does not
+// propagate the taken arm's constants" above already covers.
+test "no branch-env merge helper exists to be wired into the if fold" {
+    try testing.expect(!@hasDecl(@This(), "mergeEnv"));
+}
+
 // --- Constant propagation ---
 
 test "transitive constant propagation: a=3, b=a+4=7, c=b*2=14" {
@@ -1472,6 +1636,30 @@ test "fold string inequality: different strings" {
     const result = try foldBindings(allocator, &bindings, &env);
     defer allocator.free(result);
     try expectConst(.{ .boolean = true }, result[2]);
+}
+
+// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true on-chain
+// and the fold must say so. Proves the Zig folder's verdict on mixed-case hex;
+// not the emitted script (conformance/negatives/f160-bytestring-case-fold-parity
+// pins every tier's bytes).
+test "fold string equality ignores hex case (F-160)" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { op: []const u8, want: bool }{
+        .{ .op = "===", .want = true },
+        .{ .op = "!==", .want = false },
+    };
+    for (cases) |tc| {
+        var env = ConstEnv.init(allocator);
+        defer env.deinit();
+        const bindings = [_]ANFBinding{
+            makeBinding("a", makeLoadConst(.{ .string = "aa" })),
+            makeBinding("b", makeLoadConst(.{ .string = "AA" })),
+            makeBinding("c", .{ .bin_op = .{ .op = tc.op, .left = "a", .right = "b" } }),
+        };
+        const result = try foldBindings(allocator, &bindings, &env);
+        defer allocator.free(result);
+        try expectConst(.{ .boolean = tc.want }, result[2]);
+    }
 }
 
 // --- Loop body folding ---

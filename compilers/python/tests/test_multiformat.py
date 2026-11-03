@@ -91,7 +91,10 @@ MULTI_FORMAT_TESTS = [
 # (e.g. Move resource struct marks all fields readonly). Test separately.
 MULTI_FORMAT_TESTS_WITH_STATEFUL = MULTI_FORMAT_TESTS + ["stateful"]
 
-FORMATS = [".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs", ".runar.py", ".runar.rb"]
+FORMATS = [
+    ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+    ".runar.py", ".runar.rb", ".runar.zig", ".runar.java",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -348,3 +351,44 @@ class TestFormatSpecificParsing:
         spend = [m for m in program.methods if m.name == "spend"][0]
         funcs = [b.value.func for b in spend.body if b.value.kind == "call"]
         assert "verifySLHDSA_SHA2_128s" in funcs
+
+
+# ---------------------------------------------------------------------------
+# N-127: every one of the nine source formats is covered by the per-format
+# golden test and the N-way identity test.
+#
+# Proves: FORMATS names exactly the nine formats of the frontend-parity
+# invariant (CLAUDE.md), and basic-p2pkh compiled from each of them through
+# compile_from_source reaches the shared golden expected-script.hex and
+# therefore the same bytes as every other format.
+# Does not prove: fixtures beyond basic-p2pkh, constructs beyond
+# hash160+checkSig, or constant-folding-OFF output.
+# ---------------------------------------------------------------------------
+
+ALL_NINE_FORMATS = {
+    ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+    ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
+}
+
+
+def _basic_p2pkh_script(ext: str) -> str:
+    from runar_compiler.compiler import compile_from_source
+
+    path = _resolve_source("basic-p2pkh", ext)
+    assert path is not None, f"basic-p2pkh declares no resolvable {ext} source"
+    return compile_from_source(str(path)).script
+
+
+class TestAllNineFormats:
+    def test_formats_list_covers_all_nine(self):
+        assert len(FORMATS) == len(set(FORMATS)), f"FORMATS has duplicates: {FORMATS}"
+        assert set(FORMATS) == ALL_NINE_FORMATS
+
+    @pytest.mark.parametrize("ext", sorted(ALL_NINE_FORMATS))
+    def test_basic_p2pkh_matches_golden(self, ext: str):
+        golden = (conformance_dir() / "basic-p2pkh" / "expected-script.hex").read_text().strip()
+        assert _basic_p2pkh_script(ext) == golden
+
+    def test_basic_p2pkh_all_formats_identical(self):
+        scripts = {ext: _basic_p2pkh_script(ext) for ext in sorted(ALL_NINE_FORMATS)}
+        assert len(set(scripts.values())) == 1, f"formats diverge: {scripts}"

@@ -39,6 +39,12 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, err
 	}
 
+	// N-069: required fields present and correctly typed, with the field path
+	// in the diagnostic, before encoding/json zero-fills anything missing.
+	if err := assertRequiredIRFields(data); err != nil {
+		return nil, err
+	}
+
 	var program ANFProgram
 	if err := json.Unmarshal(data, &program); err != nil {
 		return nil, fmt.Errorf("invalid IR JSON: %w", err)
@@ -48,7 +54,24 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, fmt.Errorf("decoding constants: %w", err)
 	}
 
+	// N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+	if err := assertNoReservedIRNames(&program); err != nil {
+		return nil, err
+	}
+
 	if err := ValidateIR(&program); err != nil {
+		return nil, err
+	}
+
+	// N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+	// written (shared rule and diagnostic, 7 tiers).
+	if err := AssertSyntheticArrayChains(&program); err != nil {
+		return nil, err
+	}
+
+	// N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+	// mutable key property (shared rule and diagnostics, 7 tiers).
+	if err := AssertRabinKeyProvenance(&program); err != nil {
 		return nil, err
 	}
 
@@ -63,7 +86,7 @@ const MaxLoopCount = 10000
 // ValidateIR performs basic structural validation of a parsed ANF program.
 func ValidateIR(program *ANFProgram) error {
 	if program.ContractName == "" {
-		return fmt.Errorf("IR validation: contractName is required")
+		return fmt.Errorf("IR validation: contractName must be a non-empty string")
 	}
 
 	// R-126 / CL-BUG-164: an add_output must name exactly one state value per
@@ -78,27 +101,27 @@ func ValidateIR(program *ANFProgram) error {
 
 	for i, method := range program.Methods {
 		if method.Name == "" {
-			return fmt.Errorf("IR validation: method[%d] has empty name", i)
+			return fmt.Errorf("IR validation: methods[%d].name must be a non-empty string", i)
 		}
 		for j, param := range method.Params {
 			if param.Name == "" {
-				return fmt.Errorf("IR validation: method %s param[%d] has empty name", method.Name, j)
+				return fmt.Errorf("IR validation: methods[%d].params[%d].name must be a non-empty string", i, j)
 			}
 			if param.Type == "" {
-				return fmt.Errorf("IR validation: method %s param %s has empty type", method.Name, param.Name)
+				return fmt.Errorf("IR validation: methods[%d].params[%d].type must be a non-empty string", i, j)
 			}
 		}
-		if err := validateBindings(method.Body, method.Name, mutableCount); err != nil {
+		if err := validateBindings(method.Body, method.Name, fmt.Sprintf("methods[%d].body", i), mutableCount, 1); err != nil {
 			return err
 		}
 	}
 
 	for i, prop := range program.Properties {
 		if prop.Name == "" {
-			return fmt.Errorf("IR validation: property[%d] has empty name", i)
+			return fmt.Errorf("IR validation: properties[%d].name must be a non-empty string", i)
 		}
 		if prop.Type == "" {
-			return fmt.Errorf("IR validation: property %s has empty type", prop.Name)
+			return fmt.Errorf("IR validation: properties[%d].type must be a non-empty string", i)
 		}
 	}
 
@@ -162,14 +185,30 @@ var knownKinds = map[string]bool{
 	"raw_script":        true,
 }
 
-func validateBindings(bindings []ANFBinding, methodName string, mutableCount int) error {
+// validSighashFlags is every sighash byte the @sighash directive grammar
+// (frontend/sighash_directive.go, TS passes/sighash-directive.ts) can produce.
+var validSighashFlags = map[int]bool{
+	0x41: true, 0x42: true, 0x43: true,
+	0xC1: true, 0xC2: true, 0xC3: true,
+}
+
+// enclosingLoopCount is the product of every loop count already entered on
+// the path from the method body down to bindings (1 at the top). F-283 /
+// CL-GAP-164: the per-binding MaxLoopCount check below bounds a single
+// loop's own count but never the PRODUCT across nesting -- two loops of
+// 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000. By the time
+// this function is called with a non-default enclosingLoopCount, every
+// level above it has already returned early if its own count failed the
+// per-binding check, so enclosingLoopCount is always <= MaxLoopCount here.
+func validateBindings(bindings []ANFBinding, methodName string, path string, mutableCount int, enclosingLoopCount int) error {
 	for i, binding := range bindings {
 		if binding.Name == "" {
-			return fmt.Errorf("IR validation: method %s binding[%d] has empty name", methodName, i)
+			return fmt.Errorf("IR validation: %s[%d].name must be a non-empty string", path, i)
 		}
 		kind := binding.Value.Kind
 		if kind == "" {
-			return fmt.Errorf("IR validation: method %s binding %s has empty kind", methodName, binding.Name)
+			return fmt.Errorf("IR validation: %s[%d].value.kind must be a non-empty string", path, i)
 		}
 		if !knownKinds[kind] {
 			return fmt.Errorf("IR validation: method %s binding %s has unknown kind %q", methodName, binding.Name, kind)
@@ -252,12 +291,27 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 				methodName, len(binding.Value.StateValues), mutableCount)
 		}
 
+		// F-068 / CL-BUG-218: check_preimage sighashFlag.
+		//
+		// The flag is appended as `sighashFlag & 0xff` to the on-chain
+		// OP_PUSH_TX binding (codegen.checkPreimageBindingBytesWithFlag), so an
+		// unchecked --ir value was truncated to its low byte: 999999 -> 0x3F,
+		// FORKID absent, a covenant no BSV spend can satisfy. Accept exactly
+		// the set the source-level @sighash grammar can produce (one base type,
+		// FORKID mandatory, ANYONECANPAY optional). 0 is the decoded form of an
+		// absent field and means the default ALL|FORKID.
+		if kind == "check_preimage" && binding.Value.SighashFlag != 0 && !validSighashFlags[binding.Value.SighashFlag] {
+			return fmt.Errorf(
+				"IR validation: method %s binding %s check_preimage has sighashFlag %d; sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.",
+				methodName, binding.Name, binding.Value.SighashFlag)
+		}
+
 		// Validate nested bindings
 		if kind == "if" {
-			if err := validateBindings(binding.Value.Then, methodName, mutableCount); err != nil {
+			if err := validateBindings(binding.Value.Then, methodName, fmt.Sprintf("%s[%d].value.then", path, i), mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
-			if err := validateBindings(binding.Value.Else, methodName, mutableCount); err != nil {
+			if err := validateBindings(binding.Value.Else, methodName, fmt.Sprintf("%s[%d].value.else", path, i), mutableCount, enclosingLoopCount); err != nil {
 				return err
 			}
 		}
@@ -268,7 +322,14 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 			if binding.Value.Count > MaxLoopCount {
 				return fmt.Errorf("IR validation: method %s binding %s has loop count %d exceeding maximum %d", methodName, binding.Name, binding.Value.Count, MaxLoopCount)
 			}
-			if err := validateBindings(binding.Value.Body, methodName, mutableCount); err != nil {
+			// F-283 / CL-GAP-164: the product check. Reached only once the
+			// binding's own count is within MaxLoopCount, so both operands
+			// are <= MaxLoopCount and the multiplication cannot overflow.
+			totalLoopCount := enclosingLoopCount * binding.Value.Count
+			if totalLoopCount > MaxLoopCount {
+				return fmt.Errorf("IR validation: method %s binding %s has loop count %d nested inside an enclosing loop of total count %d, producing %d total iterations, exceeding maximum %d", methodName, binding.Name, binding.Value.Count, enclosingLoopCount, totalLoopCount, MaxLoopCount)
+			}
+			if err := validateBindings(binding.Value.Body, methodName, fmt.Sprintf("%s[%d].value.body", path, i), mutableCount, totalLoopCount); err != nil {
 				return err
 			}
 		}

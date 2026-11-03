@@ -11,6 +11,20 @@ use super::state::find_last_op_return;
 // P2PKH script building (enhanced)
 // ---------------------------------------------------------------------------
 
+/// N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+/// (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant
+/// rebuilds its change output from `_changePKH` = hash160(changePubKey ??
+/// signer pubkey), so a `changeAddress` naming a different key builds a spend
+/// the network rejects.
+pub fn change_address_mismatch_message(change_address: &str) -> String {
+    format!(
+        "changeAddress {} does not match the change key the covenant enforces \
+         (hash160 of changePubKey, or of the signer's key when changePubKey is unset); \
+         pass changePubKey for that address",
+        change_address
+    )
+}
+
 /// Build a standard P2PKH locking script hex from an address, pubkey hash,
 /// or public key.
 ///
@@ -43,7 +57,15 @@ pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
                 decoded.len(), address_or_pub_key
             );
         }
-        // Skip version byte (0x00 for mainnet, 0x6f for testnet), take 20-byte hash
+        // Only P2PKH version bytes: 0x00 mainnet, 0x6f testnet/regtest. A P2SH
+        // address (0x05 / 0xc4) carries a SCRIPT hash; wrapping it in a P2PKH
+        // script would burn the output.
+        if decoded[0] != 0x00 && decoded[0] != 0x6f {
+            panic!(
+                "build_p2pkh_script: unsupported address version byte 0x{:02x} for {:?} (expected 0x00 or 0x6f P2PKH)",
+                decoded[0], address_or_pub_key
+            );
+        }
         bytes_to_hex(&decoded[1..])
     };
 
@@ -54,65 +76,82 @@ pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
 // Constructor arg extraction
 // ---------------------------------------------------------------------------
 
+/// Require `chars` hex chars to be available from `offset`, else return a
+/// [`MalformedScriptError`]-style `String` (F-238). Mirrors the Java tier's
+/// `ScriptUtils.need` guard — already used for the on-chain state-section
+/// reader — applied here to the push-data reader used by constructor-arg
+/// extraction and artifact matching.
+/// True when `s` is an even-length string of ASCII hex digits (N-317).
+pub(crate) fn is_hex_bytes(s: &str) -> bool {
+    s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn need_hex_chars(hex: &str, offset: usize, chars: usize, what: &str) -> Result<(), String> {
+    if offset + chars > hex.len() {
+        let remaining = hex.len().saturating_sub(offset);
+        return Err(format!(
+            "read_script_element: truncated script — {} runs past the end \
+             (needs {} byte(s) at hex offset {}, only {} remain)",
+            what,
+            chars / 2,
+            offset,
+            remaining / 2,
+        ));
+    }
+    Ok(())
+}
+
 /// Read a single Bitcoin Script element (opcode + data) at the given hex offset.
 ///
-/// Returns the pushed data hex, total hex chars consumed, and the opcode byte.
-fn read_script_element(hex: &str, offset: usize) -> (String, usize, u8) {
-    if offset + 2 > hex.len() {
-        return (String::new(), 2, 0);
-    }
-    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap_or(0);
+/// Returns the pushed data hex, total hex chars consumed, and the opcode
+/// byte, or an `Err` (F-238) if the opcode byte itself, an OP_PUSHDATA1/2/4
+/// length prefix, or the declared push payload runs past the end of `hex`.
+fn read_script_element(hex: &str, offset: usize) -> Result<(String, usize, u8), String> {
+    need_hex_chars(hex, offset, 2, "push opcode")?;
+    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16)
+        .map_err(|_| format!("read_script_element: non-hex byte at hex offset {}", offset))?;
 
     if opcode == 0x00 {
-        return (String::new(), 2, opcode);
+        return Ok((String::new(), 2, opcode));
     }
     if opcode >= 0x01 && opcode <= 0x4b {
         let data_len = opcode as usize * 2;
-        let data = safe_slice(hex, offset + 2, data_len);
-        return (data, 2 + data_len, opcode);
+        need_hex_chars(hex, offset, 2 + data_len, "push payload")?;
+        return Ok((hex[offset + 2..offset + 2 + data_len].to_string(), 2 + data_len, opcode));
     }
     if opcode == 0x4c {
         // OP_PUSHDATA1
-        if offset + 4 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 4, "OP_PUSHDATA1 length prefix")?;
         let len = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 4, data_len);
-        return (data, 4 + data_len, opcode);
+        need_hex_chars(hex, offset, 4 + data_len, "OP_PUSHDATA1 payload")?;
+        return Ok((hex[offset + 4..offset + 4 + data_len].to_string(), 4 + data_len, opcode));
     }
     if opcode == 0x4d {
         // OP_PUSHDATA2
-        if offset + 6 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 6, "OP_PUSHDATA2 length prefix")?;
         let lo = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let hi = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
         let len = lo | (hi << 8);
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 6, data_len);
-        return (data, 6 + data_len, opcode);
+        need_hex_chars(hex, offset, 6 + data_len, "OP_PUSHDATA2 payload")?;
+        return Ok((hex[offset + 6..offset + 6 + data_len].to_string(), 6 + data_len, opcode));
     }
     if opcode == 0x4e {
         // OP_PUSHDATA4
-        if offset + 10 > hex.len() { return (String::new(), 2, opcode); }
+        need_hex_chars(hex, offset, 10, "OP_PUSHDATA4 length prefix")?;
         let b0 = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let b1 = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
         let b2 = u8::from_str_radix(&hex[offset + 6..offset + 8], 16).unwrap_or(0) as usize;
         let b3 = u8::from_str_radix(&hex[offset + 8..offset + 10], 16).unwrap_or(0) as usize;
         let len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
         let data_len = len * 2;
-        let data = safe_slice(hex, offset + 10, data_len);
-        return (data, 10 + data_len, opcode);
+        need_hex_chars(hex, offset, 10 + data_len, "OP_PUSHDATA4 payload")?;
+        return Ok((hex[offset + 10..offset + 10 + data_len].to_string(), 10 + data_len, opcode));
     }
 
     // All other opcodes
-    (String::new(), 2, opcode)
-}
-
-/// Safely slice a hex string, returning empty if out of bounds.
-fn safe_slice(hex: &str, start: usize, len: usize) -> String {
-    if start + len <= hex.len() {
-        hex[start..start + len].to_string()
-    } else {
-        String::new()
-    }
+    Ok((String::new(), 2, opcode))
 }
 
 /// Decode a Bitcoin Script number from hex (little-endian sign-magnitude).
@@ -284,7 +323,7 @@ pub fn extract_constructor_args(
 
     for slot in &sorted_slots {
         let adjusted_hex_offset = ((slot.byte_offset as isize) + cumulative_shift) as usize * 2;
-        let (data_hex, total_hex_chars, opcode) = read_script_element(&code_hex, adjusted_hex_offset);
+        let (data_hex, total_hex_chars, opcode) = read_script_element(&code_hex, adjusted_hex_offset)?;
         // Template placeholders are exactly 1 byte, so the shift contributed by
         // each occurrence is its encoded width minus that byte.
         cumulative_shift += (total_hex_chars as isize) / 2 - 1;
@@ -308,7 +347,20 @@ pub fn extract_constructor_args(
 
 /// Determine whether a given on-chain script was produced from the given
 /// contract artifact (regardless of what constructor args were used).
-pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
+///
+/// Every OP_0 placeholder the SDK substitutes at deploy time -- constructor
+/// slots and codeSepIndex slots -- matches whatever single script element sits
+/// at that position. N-051: a `codePartLenSlots` field holds the DEPLOYED
+/// code-part length, not the template's compile-time value, so it must equal
+/// the length of the code part being matched (everything before the state
+/// section, inscription envelope included).
+pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bool, String> {
+    // N-317: refuse anything that is not whole bytes of hex up front, so no
+    // reader below slices a partial byte (or off a UTF-8 char boundary, which
+    // panics) and every tier makes the same call.
+    if !is_hex_bytes(script_hex) {
+        return Err("matches_artifact: script is not an even-length hex string".to_string());
+    }
     let mut code_hex = script_hex.to_string();
     if let Some(ref state_fields) = artifact.state_fields {
         if !state_fields.is_empty() {
@@ -320,38 +372,119 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
 
     let template = &artifact.script;
 
-    let slots = match artifact.constructor_slots.as_ref() {
-        Some(s) if !s.is_empty() => s,
-        _ => return code_hex == *template,
-    };
+    // N-316: compare literally only when the template has no slot of ANY kind.
+    let none_of = |n: Option<usize>| n.unwrap_or(0) == 0;
+    if none_of(artifact.constructor_slots.as_ref().map(|v| v.len()))
+        && none_of(artifact.code_sep_index_slots.as_ref().map(|v| v.len()))
+        && none_of(artifact.code_part_len_slots.as_ref().map(|v| v.len()))
+    {
+        return Ok(code_hex == *template);
+    }
+    let slots = artifact.constructor_slots.as_deref().unwrap_or(&[]);
 
-    // Deduplicate by byteOffset and sort
+    // Deduplicate by byteOffset and sort. codeSepIndex placeholders are
+    // substituted at deploy time too (OP_0 -> the adjusted separator index).
     let mut seen_offsets = std::collections::HashSet::new();
-    let mut sorted_slots: Vec<_> = slots.iter().collect();
-    sorted_slots.sort_by_key(|s| s.byte_offset);
-    sorted_slots.retain(|s| seen_offsets.insert(s.byte_offset));
+    let mut placeholder_offsets: Vec<usize> = slots.iter().map(|s| s.byte_offset).collect();
+    if let Some(ref cs) = artifact.code_sep_index_slots {
+        placeholder_offsets.extend(cs.iter().map(|s| s.byte_offset));
+    }
+    placeholder_offsets.sort_unstable();
+    placeholder_offsets.retain(|o| seen_offsets.insert(*o));
+
+    let len_fields: std::collections::HashSet<usize> = artifact
+        .code_part_len_slots
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.byte_offset * 2).collect())
+        .unwrap_or_default();
+    let deployed_len: String = (0..4)
+        .map(|i| format!("{:02x}", ((code_hex.len() / 2) >> (8 * i)) & 0xff))
+        .collect();
+    let t_bytes = template.as_bytes();
+    let c_bytes = code_hex.as_bytes();
+    // Compare template[t_start..t_end] with code[c_start..], substituting the
+    // deployed length at every codePartLen field. Callers bounds-check first.
+    let segment_matches = |t_start: usize, t_end: usize, c_start: usize| -> bool {
+        let mut t = t_start;
+        let mut c = c_start;
+        while t < t_end {
+            if len_fields.contains(&t) {
+                if t + 8 > t_end || code_hex.get(c..c + 8) != Some(deployed_len.as_str()) {
+                    return false;
+                }
+                t += 8;
+                c += 8;
+                continue;
+            }
+            if t_bytes[t] != c_bytes[c] {
+                return false;
+            }
+            t += 1;
+            c += 1;
+        }
+        true
+    };
 
     let mut template_pos = 0;
     let mut code_pos = 0;
+    // N-318: the element read at each placeholder, keyed by template byte offset.
+    let mut elems: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
 
-    for slot in &sorted_slots {
-        let slot_hex_offset = slot.byte_offset * 2;
-        let template_segment = &template[template_pos..slot_hex_offset];
-        let code_end = code_pos + template_segment.len();
-        if code_end > code_hex.len() {
-            return false;
+    for byte_offset in &placeholder_offsets {
+        let slot_hex_offset = byte_offset * 2;
+        if slot_hex_offset < template_pos || slot_hex_offset + 2 > template.len() {
+            return Ok(false);
         }
-        let code_segment = &code_hex[code_pos..code_end];
-        if template_segment != code_segment {
-            return false;
+        let seg_len = slot_hex_offset - template_pos;
+        if code_pos + seg_len > code_hex.len() {
+            return Ok(false);
+        }
+        if !segment_matches(template_pos, slot_hex_offset, code_pos) {
+            return Ok(false);
         }
         template_pos = slot_hex_offset + 2;
-        let elem_offset = code_pos + template_segment.len();
-        let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset);
+        let elem_offset = code_pos + seg_len;
+        let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset)?;
+        elems.insert(*byte_offset, &code_hex[elem_offset..elem_offset + total_hex_chars]);
         code_pos = elem_offset + total_hex_chars;
     }
 
-    template[template_pos..] == code_hex[code_pos..]
+    if !(code_pos <= code_hex.len()
+        && code_hex.len() - code_pos == template.len() - template_pos
+        && segment_matches(template_pos, template.len(), code_pos))
+    {
+        return Ok(false);
+    }
+
+    // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+    // encode_script_number(code_sep_index + shift) there
+    // (`resolved_code_sep_slot_values`), shift = the growth of every
+    // constructor slot before code_sep_index plus that of every earlier
+    // codeSep slot before it. The matcher does not know the constructor args,
+    // so their growth is taken from the elements actually read.
+    let mut sep_slots: Vec<_> = artifact.code_sep_index_slots.as_deref().unwrap_or(&[]).iter().collect();
+    sep_slots.sort_by_key(|s| s.byte_offset);
+    let mut resolved: Vec<(usize, usize)> = Vec::new(); // (byte_offset, width)
+    for slot in sep_slots {
+        let mut shift: i64 = 0;
+        for cs in slots {
+            if cs.byte_offset < slot.code_sep_index {
+                shift += (elems[&cs.byte_offset].len() / 2) as i64 - 1;
+            }
+        }
+        for &(prev_offset, prev_width) in &resolved {
+            if prev_offset < slot.code_sep_index {
+                shift += prev_width as i64 - 1;
+            }
+        }
+        let expected =
+            crate::sdk::contract::encode_script_number(slot.code_sep_index as i64 + shift);
+        if elems.get(&slot.byte_offset).copied() != Some(expected.as_str()) {
+            return Ok(false);
+        }
+        resolved.push((slot.byte_offset, expected.len() / 2));
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +541,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(slots),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -446,6 +580,49 @@ mod tests {
         assert_eq!(script.len(), 50);
     }
 
+    // F-043: every SDK must accept the same inputs with the same result, using
+    // a real key (the secp256k1 generator G).
+    //
+    // PROVES: the pubkey hash, compressed / uncompressed pubkeys and the
+    // mainnet / testnet addresses of G map to the P2PKH of HASH160(G) (values
+    // match Go BuildP2PKHScript and TS buildP2PKHScript); the Genesis address
+    // with its last character flipped (bad checksum) and a P2SH address
+    // (version 0x05) panic.
+    // DOES NOT PROVE: that a pubkey is a valid curve point (no SDK checks it).
+    const G_PKH: &str = "751e76e8199196d454941c45d1b3a323f1433bd6";
+
+    #[test]
+    fn build_p2pkh_f043_accepts_g_in_every_form() {
+        let want = format!("76a914{}88ac", G_PKH);
+        assert_eq!(build_p2pkh_script(G_PKH), want);
+        assert_eq!(build_p2pkh_script("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"), want);
+        assert_eq!(
+            build_p2pkh_script(concat!(
+                "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+            )),
+            "76a91491b24bf9f5288532960ac687abb035127b1d28a588ac"
+        );
+        assert_eq!(build_p2pkh_script("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"), want);
+        assert_eq!(build_p2pkh_script("mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r"), want);
+        assert_eq!(
+            build_p2pkh_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+            "76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid address")]
+    fn build_p2pkh_f043_rejects_flipped_checksum() {
+        build_p2pkh_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb");
+    }
+
+    #[test]
+    #[should_panic(expected = "version byte")]
+    fn build_p2pkh_f043_rejects_p2sh_version() {
+        build_p2pkh_script("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy");
+    }
+
     // -----------------------------------------------------------------------
     // extract_constructor_args
     // -----------------------------------------------------------------------
@@ -465,6 +642,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -527,6 +705,86 @@ mod tests {
             let script = format!("{:02x}93", opcode);
             let result = extract_constructor_args(&artifact, &script).unwrap();
             assert_eq!(result["x"], SdkValue::Int(n as i64));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-238 — read_script_element must refuse malformed provider-supplied
+    // scripts instead of silently truncating.
+    //
+    // Before this fix, a push whose declared length (a direct push opcode
+    // 0x01-0x4b, or an OP_PUSHDATA1/2/4 length prefix) ran past the
+    // remaining bytes was handed to `safe_slice`, which silently returned an
+    // EMPTY string instead of erroring — extract_constructor_args /
+    // matches_artifact then treat that as a valid (wrong) element, which
+    // corrupts every later slot's offset in the same walk.
+    //
+    // PROVES: extract_constructor_args / matches_artifact return Err for
+    // every vector in the brief's testable assertion, and a valid push of
+    // every pushdata flavour still decodes unchanged.
+    // DOES NOT PROVE: fail-closed behaviour of any other script reader in
+    // this crate.
+    // -----------------------------------------------------------------------
+
+    const F238_MALFORMED_VECTORS: &[&str] = &[
+        "",           // no opcode byte at all
+        "f",          // odd-length hex, can't even form an opcode byte
+        "05aabb",     // direct push declares 5 bytes, only 2 remain
+        "4c",         // OP_PUSHDATA1 with no length byte
+        "4c05aa",     // OP_PUSHDATA1 declares 5 bytes, only 1 remains
+        "4d0100",     // OP_PUSHDATA2 length prefix present, 0 of the 1 declared bytes remain
+        "4e01000000", // OP_PUSHDATA4 length prefix present, 0 of the 1 declared bytes remain
+    ];
+
+    fn f238_one_slot_artifact() -> RunarArtifact {
+        make_artifact(
+            "00ac",
+            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+        )
+    }
+
+    #[test]
+    fn extract_constructor_args_refuses_malformed_script_f238() {
+        let artifact = f238_one_slot_artifact();
+        for hex in F238_MALFORMED_VECTORS {
+            assert!(
+                extract_constructor_args(&artifact, hex).is_err(),
+                "extract_constructor_args({:?}): want Err, got Ok",
+                hex
+            );
+        }
+    }
+
+    #[test]
+    fn matches_artifact_refuses_malformed_script_f238() {
+        let artifact = f238_one_slot_artifact();
+        for hex in F238_MALFORMED_VECTORS {
+            assert!(
+                matches_artifact(&artifact, hex).is_err(),
+                "matches_artifact({:?}): want Err, got Ok",
+                hex
+            );
+        }
+    }
+
+    #[test]
+    fn valid_pushes_still_decode_unchanged_f238() {
+        let artifact = make_artifact(
+            "00ac",
+            vec![AbiParam { name: "x".to_string(), param_type: "ByteString".to_string(), fixed_array: None }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+        );
+        let cases: &[(&str, &str)] = &[
+            ("012a", "2a"),             // direct push
+            ("4c012a", "2a"),           // OP_PUSHDATA1 exact length
+            ("4d01002a", "2a"),         // OP_PUSHDATA2 exact length
+            ("4e010000002a", "2a"),     // OP_PUSHDATA4 exact length
+        ];
+        for (script, want) in cases {
+            let full = format!("{}ac", script);
+            let args = extract_constructor_args(&artifact, &full).unwrap();
+            assert_eq!(args.get("x"), Some(&SdkValue::Bytes(want.to_string())), "script {:?}", full);
         }
     }
 
@@ -616,13 +874,14 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
         };
-        assert!(matches_artifact(&artifact, "5151"));
-        assert!(!matches_artifact(&artifact, "5152"));
+        assert!(matches_artifact(&artifact, "5151").unwrap());
+        assert!(!matches_artifact(&artifact, "5152").unwrap());
     }
 
     #[test]
@@ -634,11 +893,11 @@ mod tests {
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // Script with different arg (push 1 byte: 42) then OP_ADD
-        assert!(matches_artifact(&artifact, "012a93"));
+        assert!(matches_artifact(&artifact, "012a93").unwrap());
         // Script with arg=0 (OP_0) then OP_ADD
-        assert!(matches_artifact(&artifact, "0093"));
+        assert!(matches_artifact(&artifact, "0093").unwrap());
         // Different suffix should not match
-        assert!(!matches_artifact(&artifact, "012a94"));
+        assert!(!matches_artifact(&artifact, "012a94").unwrap());
     }
 
     #[test]
@@ -661,15 +920,16 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
             unsound_primitives: None,
         };
         // Script with code + OP_RETURN + state data
-        assert!(matches_artifact(&artifact, "51516a0000000000000000"));
+        assert!(matches_artifact(&artifact, "51516a0000000000000000").unwrap());
         // Without state should still match
-        assert!(matches_artifact(&artifact, "5151"));
+        assert!(matches_artifact(&artifact, "5151").unwrap());
     }
 
 // -----------------------------------------------------------------------
@@ -843,6 +1103,7 @@ mod n074_script_number_width {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./EcChainedRewrite.runar.ts",
+    ".runar.sol": "./EcChainedRewrite.runar.sol",
+    ".runar.move": "./EcChainedRewrite.runar.move",
+    ".runar.go": "./EcChainedRewrite.runar.go",
+    ".runar.rs": "./EcChainedRewrite.runar.rs",
+    ".runar.py": "./EcChainedRewrite.runar.py",
+    ".runar.zig": "./EcChainedRewrite.runar.zig",
+    ".runar.rb": "./EcChainedRewrite.runar.rb",
+    ".runar.java": "./EcChainedRewrite.runar.java"
+  }
+}

@@ -1,6 +1,5 @@
 {
   "fixture": "bitwise-ops",
-  "acceptOnly": true,
   "constructorArgs": {
     "a": "12n",
     "b": "10n"
@@ -8,18 +7,43 @@
   "spends": [
     {
       "method": "testShift",
-      "args": [],
+      "args": ["48n", "6n"],
       "expect": "accept",
-      "note": "left/right shifts; asserts are tautologies (x>=0 || x<0). No rejecting witness exists \u2014 accept-only."
+      "note": "12 << 2 = 48 and 12 >> 1 = 6: the 1-byte 0x0c shifted as a byte array, both results minimal and below 0x80"
+    },
+    {
+      "method": "testShift",
+      "args": ["49n", "6n"],
+      "expect": "reject",
+      "note": "near-miss: wrong left-shift result (49 != 48)"
+    },
+    {
+      "method": "testShift",
+      "args": ["48n", "7n"],
+      "expect": "reject",
+      "note": "near-miss: wrong right-shift result (7 != 6)"
     },
     {
       "method": "testBitwise",
-      "args": [],
+      "args": ["8n", "14n", "6n"],
       "expect": "accept",
-      "note": "and/or/xor/not; tautological asserts. No rejecting witness exists \u2014 accept-only."
+      "note": "12 & 10 = 8, 12 | 10 = 14, 12 ^ 10 = 6; ~~12 = 12 and ~(12|10) == ~12 & ~10 hold under OP_INVERT's byte semantics"
+    },
+    {
+      "method": "testBitwise",
+      "args": ["14n", "8n", "6n"],
+      "expect": "reject",
+      "note": "near-miss: AND and OR results swapped — what an &/| opcode mix-up would produce"
+    },
+    {
+      "method": "testBitwise",
+      "args": ["8n", "14n", "7n"],
+      "expect": "reject",
+      "note": "near-miss: wrong XOR result (7 != 6)"
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "c4b769c133a8f60a24a2023b5b701bdb51a0c962e4153fc4937823a8892804f5"
+    "expected-script.hex": "e3be0961596d9c1cb429ba2010bd73eb1cf68dd8db38d46267cd515847936b46",
+    "expected-ir.json": "79901c336fa3814d98d4b2a06145365f2f4d1429aeb0e6230df99dc4dfd1a356"
   }
 }

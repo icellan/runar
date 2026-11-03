@@ -397,6 +397,23 @@ RSpec.describe RubyLsp::Runar::Hover do
       the_hover.on_call_node_enter(call_node(:params))
       expect(the_builder.pushes).not_to be_empty
     end
+
+    # N-303: runar_sighash and embed_always are DSL spellings of the compiler's
+    # @sighash / @embedAlways directives (N-093). Proves each has a hover entry
+    # naming the directive; does not prove the text is complete.
+    it 'provides documentation for runar_sighash' do
+      the_hover.on_call_node_enter(call_node(:runar_sighash))
+      doc = the_builder.pushes.find { |p| p[:category] == :documentation }
+      expect(doc).not_to be_nil
+      expect(doc[:text]).to include('sighash')
+    end
+
+    it 'provides documentation for embed_always' do
+      the_hover.on_call_node_enter(call_node(:embed_always))
+      doc = the_builder.pushes.find { |p| p[:category] == :documentation }
+      expect(doc).not_to be_nil
+      expect(doc[:text]).to include('embed_always')
+    end
   end
 
   # -------------------------------------------------------------------------

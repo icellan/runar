@@ -226,6 +226,37 @@ Values are positional, matching mutable properties in declaration order. The fun
 
 ---
 
+## Compiler Directives
+
+Both directives are attributes, the Move spelling for item annotations:
+
+```move
+struct Directives {
+    pub_key_hash: Addr,
+    #[embed_always]                       // @embedAlways
+    deploy_tag: ByteString,
+}
+
+#[sighash(SINGLE | FORKID)]               // @sighash
+public fun spend_single(contract: &Directives, sig: Sig, pub_key: PubKey) { ... }
+```
+
+- `#[embed_always]` goes on the line before a struct field.
+- `#[sighash(FLAGS)]` goes before a `public fun`. Inside the parentheses only
+  flag names and `|` may appear.
+- These are the only two attributes; any other `#[...]` is an error.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/move/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Examples
 
 ### P2PKH
@@ -295,7 +326,7 @@ module Escrow {
 ```move
 module Auction {
     use runar::types::{PubKey, Sig};
-    use runar::crypto::{check_sig, extract_locktime};
+    use runar::crypto::{check_sig, extract_amount, extract_locktime};
 
     resource struct Auction {
         auctioneer: PubKey,
@@ -307,6 +338,8 @@ module Auction {
     public fun bid(contract: &mut Auction, sig: Sig, bidder: PubKey, bid_amount: bigint) {
         assert!(check_sig(sig, bidder), 0);
         assert!(bid_amount > contract.highest_bid, 0);
+        // The bid must be paid into the pot (continuation = prior pot + bid).
+        assert!(continuation_amount() >= extract_amount(contract.tx_preimage) + bid_amount, 0);
         assert!(extract_locktime(contract.tx_preimage) < contract.deadline, 0);
 
         contract.highest_bidder = bidder;
@@ -478,6 +511,10 @@ The parser applies these conversions automatically:
 | Type names | PascalCase | PascalCase (unchanged) |
 
 The snake_case to camelCase conversion handles underscores before both letters and digits: `hash_160` becomes `hash160`, `num_2_bin` becomes `num2Bin` (then the builtin map normalizes it to `num2bin`).
+
+### Identifier Collision Rule
+
+The snake_case to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `tmp` and `tmp_` both become `tmp`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling, or one identifier that maps to a different name (`sum_` → `sum`), is fine.
 
 ### `Sha256Digest` is not a type name on this surface
 

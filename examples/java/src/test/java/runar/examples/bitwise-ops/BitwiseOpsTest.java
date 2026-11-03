@@ -6,11 +6,16 @@ import runar.lang.types.Bigint;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Surface + simulator tests for BitwiseOps -- just verifies the
- * Bigint-wrapper method lowering accepts the source shape. The method
- * bodies return no value; success means all asserts pass.
+ * Surface + simulator tests for BitwiseOps. The caller supplies the expected
+ * shift / AND / OR / XOR results and the contract checks them (F-167: it used
+ * to assert only tautologies, so no input could fail). a = 12, b = 10 are
+ * 1-byte operands whose results stay below 0x80, so the simulator's integer
+ * semantics agree with the on-chain byte-array opcodes; the on-chain verdict
+ * for the same values is pinned by
+ * conformance/witnesses/real-crypto/bitwise-ops.json.
  */
 class BitwiseOpsTest {
 
@@ -24,15 +29,33 @@ class BitwiseOpsTest {
 
     @Test
     void shiftMethodPassesAssertions() {
-        BitwiseOps c = new BitwiseOps(Bigint.of(0x10), Bigint.of(0x01));
+        BitwiseOps c = new BitwiseOps(Bigint.of(12), Bigint.of(10));
         ContractSimulator sim = ContractSimulator.stateless(c);
-        sim.call("testShift");
+        sim.call("testShift", Bigint.of(48), Bigint.of(6));
+    }
+
+    @Test
+    void shiftMethodRejectsWrongResult() {
+        BitwiseOps c = new BitwiseOps(Bigint.of(12), Bigint.of(10));
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(AssertionError.class, () -> sim.call("testShift", Bigint.of(49), Bigint.of(6)));
+        assertThrows(AssertionError.class, () -> sim.call("testShift", Bigint.of(48), Bigint.of(7)));
     }
 
     @Test
     void bitwiseMethodPassesAssertions() {
-        BitwiseOps c = new BitwiseOps(Bigint.of(0xFF), Bigint.of(0x0F));
+        BitwiseOps c = new BitwiseOps(Bigint.of(12), Bigint.of(10));
         ContractSimulator sim = ContractSimulator.stateless(c);
-        sim.call("testBitwise");
+        sim.call("testBitwise", Bigint.of(8), Bigint.of(14), Bigint.of(6));
+    }
+
+    @Test
+    void bitwiseMethodRejectsWrongResult() {
+        BitwiseOps c = new BitwiseOps(Bigint.of(12), Bigint.of(10));
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(AssertionError.class,
+            () -> sim.call("testBitwise", Bigint.of(14), Bigint.of(8), Bigint.of(6)));
+        assertThrows(AssertionError.class,
+            () -> sim.call("testBitwise", Bigint.of(8), Bigint.of(14), Bigint.of(7)));
     }
 }

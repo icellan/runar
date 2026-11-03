@@ -36,8 +36,12 @@ class TestIRLoaderSizeGuard < Minitest::Test
   # shape (no public method => empty locking script => spendable with OP_1).
   # These tests' subject is the DoS caps, not the schema, so the fix is a
   # fixture that is genuinely minimal AND valid rather than a weaker assertion.
+  # N-071: and a public method must end with an assert, so the body is one
+  # constant plus the assert on it (as in the Python tier's copy of this test).
   MINIMAL_VALID_METHODS =
-    '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]'
+    '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[' \
+    '{"name":"t0","value":{"kind":"load_const","value":true}},' \
+    '{"name":"t1","value":{"kind":"assert","value":"t0"}}]}]'
 
   def test_depth_walk_ignores_braces_inside_strings
     open_braces = "{" * 1000

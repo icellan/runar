@@ -30,10 +30,12 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic } from '../errors.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
+import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unexpectedClassBodyTokenMessage, unexpectedTokenAfterClassMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -69,6 +71,90 @@ const KEYWORDS = new Map<string, TokenType>([
   ['assert', 'assert'],
 ]);
 
+/**
+ * N-053: the tokens that can begin an expression and are not already a
+ * statement form of their own. A statement starting with one of these is an
+ * expression statement; a statement starting with anything else is refused.
+ */
+const PY_EXPRESSION_START: ReadonlySet<TokenType> = new Set<TokenType>([
+  'number', 'string', 'hexstring', 'True', 'False', 'None',
+  '(', '[', '-', '~', '!', 'not',
+]);
+
+/** F-203: the single-character escapes CPython defines for bytes and str. */
+const PY_SIMPLE_ESCAPES: ReadonlyMap<string, number> = new Map([
+  ['\\', 0x5c], ["'", 0x27], ['"', 0x22], ['a', 0x07], ['b', 0x08],
+  ['f', 0x0c], ['n', 0x0a], ['r', 0x0d], ['t', 0x09], ['v', 0x0b],
+]);
+
+const isOctal = (c: string | undefined): boolean => c !== undefined && c >= '0' && c <= '7';
+const isHexDigit = (c: string | undefined): boolean => c !== undefined && /^[0-9a-fA-F]$/.test(c);
+
+/**
+ * F-203: decode the body of a .runar.py quoted literal (the text between the
+ * quotes) the way CPython decodes a bytes (`bytes = true`) or str literal.
+ * Returns the decoded text, its bytes as hex (meaningful for bytes only) and
+ * the first refusal, or null. A body ending in a lone backslash only arises for an
+ * unterminated literal, which the tokenizer already refuses; it is dropped.
+ * `\xHH` keeps its two hex digits verbatim in `hex` so the literal's spelling
+ * reaches the IR unchanged.
+ */
+function decodePyLiteral(body: string, bytes: boolean): { text: string; hex: string; error: string | null } {
+  let text = '';
+  let hex = '';
+  const push = (v: number): void => { text += String.fromCharCode(v); hex += v.toString(16).padStart(2, '0'); };
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i]!;
+    if (bytes && c.charCodeAt(0) >= 0x80) return { text, hex, error: PY_BYTES_NON_ASCII };
+    if (c !== '\\') { text += c; if (bytes) hex += c.charCodeAt(0).toString(16).padStart(2, '0'); i++; continue; }
+    if (i + 1 >= body.length) break;
+    const e = body[i + 1]!;
+    const simple = PY_SIMPLE_ESCAPES.get(e);
+    if (simple !== undefined) { push(simple); i += 2; continue; }
+    if (isOctal(e)) {
+      let j = i + 1;
+      while (j < body.length && j < i + 4 && isOctal(body[j])) j++;
+      const v = parseInt(body.slice(i + 1, j), 8);
+      if (v > 0xff) return { text, hex, error: invalidEscapeSequenceMessage(body.slice(i, j)) };
+      push(v);
+      i = j;
+      continue;
+    }
+    if (e === 'x') {
+      if (!isHexDigit(body[i + 2]) || !isHexDigit(body[i + 3])) {
+        return { text, hex, error: invalidEscapeSequenceMessage('\\x') };
+      }
+      text += String.fromCharCode(parseInt(body.slice(i + 2, i + 4), 16));
+      hex += body.slice(i + 2, i + 4);
+      i += 4;
+      continue;
+    }
+    if (bytes && e.charCodeAt(0) >= 0x80) return { text, hex, error: PY_BYTES_NON_ASCII };
+    // Anything else — including str's \N{..}, \u and \U, which the surface
+    // does not support — is refused.
+    return { text, hex, error: invalidEscapeSequenceMessage('\\' + String.fromCodePoint(body.codePointAt(i + 1)!)) };
+  }
+  return { text, hex, error: null };
+}
+
+/**
+ * F-203: scan a single-line quoted literal starting just after its opening
+ * quote. A backslash always takes the next character with it (so an escaped
+ * quote does not close the literal); a backslash at the line break is a
+ * continuation, which this surface does not support — the literal is then
+ * unterminated. Returns the body and the index just past the scan.
+ */
+function scanPyQuoted(line: string, start: number, quote: string): { body: string; end: number; closed: boolean } {
+  let pos = start;
+  while (pos < line.length && line[pos] !== quote) {
+    pos += line[pos] === '\\' ? 2 : 1;
+  }
+  if (pos > line.length) pos = line.length;
+  const body = line.slice(start, pos);
+  return pos < line.length ? { body, end: pos + 1, closed: true } : { body, end: pos, closed: false };
+}
+
 function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   const lines = source.split('\n');
@@ -80,6 +166,12 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   // Track multi-line triple-quoted strings (docstrings).
   // When non-null, holds the closing quote sequence ('"""' or "'''").
   let inTripleQuote: string | null = null;
+  // F-011: where the open triple-quoted string started; if it is still open
+  // at end of file it is unterminated.
+  let tripleStart = { line: 0, column: 0 };
+  function unterminated(line: number, column: number) {
+    errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line, column }));
+  }
 
   function add(type: TokenType, value: string, line: number, col: number) {
     tokens.push({ type, value, line, column: col });
@@ -116,6 +208,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       if (closeIdx === -1) {
         // Multi-line docstring: skip until closing quote found
         inTripleQuote = quote;
+        tripleStart = { line: lineNum, column: line.length - stripped.length };
       }
       // Either way, skip this line (it's a docstring, not code)
       continue;
@@ -132,11 +225,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
       if (indent > indentStack[indentStack.length - 1]!) {
         indentStack.push(indent);
-        add('INDENT', '', lineNum, 1);
+        add('INDENT', '', lineNum, 0);
       } else if (indent < indentStack[indentStack.length - 1]!) {
         while (indentStack.length > 1 && indentStack[indentStack.length - 1]! > indent) {
           indentStack.pop();
-          add('DEDENT', '', lineNum, 1);
+          add('DEDENT', '', lineNum, 0);
         }
       }
     }
@@ -146,7 +239,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     while (pos < line.length) {
       const ch = line[pos]!;
-      const col = pos + 1;
+      const col = pos;
 
       // Whitespace within line
       if (ch === ' ' || ch === '\t') {
@@ -268,24 +361,16 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       if (ch === '*') { add('*', '*', lineNum, col); pos++; continue; }
       if (ch === '/') { add('/', '/', lineNum, col); pos++; continue; }
 
-      // Hex byte string: b'\xde\xad' or b"\xde\xad"
+      // Byte string: b'..' or b".." — escapes decode as in CPython (F-203).
       if (ch === 'b' && pos + 1 < line.length && (line[pos + 1] === '\'' || line[pos + 1] === '"')) {
-        const quote = line[pos + 1]!;
-        pos += 2; // skip b and opening quote
-        let hex = '';
-        while (pos < line.length && line[pos] !== quote) {
-          if (line[pos] === '\\' && pos + 1 < line.length && line[pos + 1] === 'x') {
-            // \xHH
-            hex += line.substring(pos + 2, pos + 4);
-            pos += 4;
-          } else {
-            // Non-hex byte — encode as hex
-            hex += line.charCodeAt(pos).toString(16).padStart(2, '0');
-            pos++;
-          }
-        }
-        if (pos < line.length) pos++; // skip closing quote
-        add('hexstring', hex, lineNum, col);
+        const scan = scanPyQuoted(line, pos + 2, line[pos + 1]!);
+        pos = scan.end;
+        // F-011: a single-line literal that reaches the line break is
+        // unterminated; it must never run on into the next line.
+        if (!scan.closed) unterminated(lineNum, col);
+        const dec = decodePyLiteral(scan.body, true);
+        if (dec.error !== null) errors.push(makeDiagnostic(dec.error, 'error', { file, line: lineNum, column: col }));
+        add('hexstring', dec.hex, lineNum, col);
         continue;
       }
 
@@ -302,46 +387,30 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           } else {
             // Multi-line: skip rest of this line, mark for skipping subsequent lines
             inTripleQuote = tripleQuote;
+            tripleStart = { line: lineNum, column: col };
             break; // stop tokenizing this line
           }
           continue; // triple-quoted strings are docstrings — skip, don't emit a token
         }
 
-        const quote = ch;
-        pos++;
-        let val = '';
-        while (pos < line.length && line[pos] !== quote) {
-          if (line[pos] === '\\' && pos + 1 < line.length) {
-            pos++; // skip backslash
-            val += line[pos];
-            pos++;
-          } else {
-            val += line[pos];
-            pos++;
-          }
-        }
-        if (pos < line.length) pos++; // skip closing quote
-        add('string', val, lineNum, col);
+        const scan = scanPyQuoted(line, pos + 1, ch);
+        pos = scan.end;
+        if (!scan.closed) unterminated(lineNum, col); // F-011: reached the line break
+        // F-203: a str literal decodes the same escapes as CPython does.
+        const dec = decodePyLiteral(scan.body, false);
+        if (dec.error !== null) errors.push(makeDiagnostic(dec.error, 'error', { file, line: lineNum, column: col }));
+        add('string', dec.text, lineNum, col);
         continue;
       }
 
-      // Numbers (decimal and hex)
+      // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
       if (ch >= '0' && ch <= '9') {
-        let num = '';
-        if (ch === '0' && pos + 1 < line.length && (line[pos + 1] === 'x' || line[pos + 1] === 'X')) {
-          num = '0x';
-          pos += 2;
-          while (pos < line.length && /[0-9a-fA-F_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        } else {
-          while (pos < line.length && /[0-9_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        }
-        add('number', num, lineNum, col);
+        const end = scanNumberEnd(line, pos);
+        const text = line.slice(pos, end);
+        pos = end;
+        const lit = parseIntLiteral('py', text);
+        if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('py', text), 'error', { file, line: lineNum, column: col }));
+        add('number', lit ? lit.value.toString() : '0', lineNum, col);
         continue;
       }
 
@@ -368,17 +437,21 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     // Emit NEWLINE at end of significant line (only if not inside parens)
     if (parenDepth === 0) {
-      add('NEWLINE', '', lineNum, line.length + 1);
+      add('NEWLINE', '', lineNum, line.length);
     }
   }
+
+  // F-011: a triple-quoted string still open at end of file swallowed every
+  // line after it; refuse it instead.
+  if (inTripleQuote !== null) unterminated(tripleStart.line, tripleStart.column);
 
   // Emit remaining DEDENTs
   while (indentStack.length > 1) {
     indentStack.pop();
-    add('DEDENT', '', lines.length, 1);
+    add('DEDENT', '', lines.length, 0);
   }
 
-  add('eof', '', lines.length + 1, 1);
+  add('eof', '', lines.length + 1, 0);
   return tokens;
 }
 
@@ -403,6 +476,15 @@ function snakeToCamel(name: string): string {
   }
 
   return snakeToCamelCore(n);
+}
+
+/** N-404: the AST name of a contract METHOD (declaration and `self.<m>(...)`
+ *  call). Generic snake->camel, except `require_output_p2pkh`, which keeps the
+ *  intrinsic's spelling like every other tier: a method of that name then hits
+ *  the same `requireOutputP2PKH` refusal a native `.runar.ts` method does,
+ *  rather than being accepted under the distinct name `requireOutputP2pkh`. */
+function methodAstName(raw: string): string {
+  return raw === 'require_output_p2pkh' ? 'requireOutputP2PKH' : snakeToCamel(raw);
 }
 
 /** Map Python built-in function names to AST callee names. */
@@ -559,11 +641,43 @@ class PyParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+  /**
+   * N-046: the locals already bound in the current method, so a later
+   * `name = expr` of one of them is emitted as an `assignment`, not a fresh
+   * `variable_decl`. Python is function-scoped, so rebinding an existing local
+   * inside a loop body or an if-arm IS an assignment; ANF lowering alpha-renames
+   * a `variable_decl` that reuses an enclosing binding's name (block-scoped
+   * shadowing in every other surface). Snapshot/restored around if-branches
+   * and loop bodies exactly as the Ruby parser's `declaredLocals`, so a name
+   * first bound inside a branch stays branch-local as before.
+   */
+  private declaredLocals: Set<string> = new Set();
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
     this.errors = errors;
+  }
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
+  /** N-017: declare a parameter, local or loop variable. References go through
+   *  `mapBuiltinName`, so the declaration must too — otherwise `safe_div = ...`
+   *  is declared `safeDiv` but read back as the builtin `safediv`. */
+  private declareBinding(raw: string): string {
+    const name = mapBuiltinName(raw);
+    this.declared.push([raw, name]);
+    return name;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -626,6 +740,11 @@ class PyParser {
       return { contract: null, errors: this.errors };
     }
 
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -684,7 +803,7 @@ class PyParser {
       parentClass !== 'UnsafeSmartContract'
     ) {
       this.errors.push(makeDiagnostic(
-        `Unknown parent class: ${parentClass}`,
+        `unknown parent class: '${parentClass}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
         'error',
         { file: this.file, line: parentToken.line, column: parentToken.column },
       ));
@@ -700,18 +819,31 @@ class PyParser {
       this.skipNewlines();
       if (this.peek().type === 'DEDENT' || this.peek().type === 'eof') break;
 
+      // `pass` is a valid (empty) class-body statement.
+      if (this.peek().type === 'pass') {
+        this.advance();
+        this.expectStatementEnd();
+        continue;
+      }
+
       // Decorators
       const decorators: string[] = [];
+      const sighashSpecs: Array<string | null> = [];
       while (this.peek().type === '@') {
         this.advance(); // '@'
         const decName = this.advance().value;
         decorators.push(decName);
+        // N-093: `@public(sighash="FLAGS")` is the native spelling of the
+        // `@sighash` directive.
+        if (decName === 'public' && this.peek().type === '(') {
+          sighashSpecs.push(...this.parsePublicDecoratorArgs());
+        }
         this.skipNewlines();
       }
 
       // Method definition
       if (this.peek().type === 'def') {
-        const method = this.parseMethodDef(decorators);
+        const method = this.parseMethodDef(decorators, sighashSpecs);
         if (method.name === 'constructor') {
           constructor = method;
         } else {
@@ -731,11 +863,24 @@ class PyParser {
         continue;
       }
 
-      // Skip unknown tokens
-      this.advance();
+      // N-033: any other token is refused, never skipped (a skipped stray
+      // token is how a line of the class body vanished without a word).
+      this.refuseClassBodyToken(this.peek());
     }
 
     this.match('DEDENT');
+
+    // N-410: nothing but blank lines may follow the class (N-004 did this
+    // for .runar.rb); a method or class after it used to be dropped unread.
+    this.skipNewlines();
+    const trailing = this.peek();
+    if (trailing.type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        unexpectedTokenAfterClassMessage(trailing.type === 'INDENT' ? 'INDENT' : trailing.value || trailing.type),
+        'error',
+        { file: this.file, line: trailing.line, column: trailing.column },
+      ));
+    }
 
     // Auto-generate constructor if not provided
     if (!constructor) {
@@ -759,25 +904,27 @@ class PyParser {
     const rawName = nameTok.value;
 
     if (this.peek().type !== ':') {
-      // Not a property — might be a stray identifier; skip the line
-      while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') this.advance();
+      // N-033: not a property — a stray identifier line is refused, not skipped.
+      this.pos--;
+      this.refuseClassBodyToken(nameTok);
       return null;
     }
     this.advance(); // ':'
 
-    // Parse type (possibly Readonly[T])
+    // Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+    // native spelling of the `@embedAlways` directive; the two wrappers
+    // compose in either order.
     let isReadonly = false;
-    let typeNode: TypeNode;
-
-    if (this.checkIdent('Readonly')) {
-      isReadonly = true;
-      this.advance(); // 'Readonly'
+    let embedAlways = false;
+    let wrappers = 0;
+    while (this.checkIdent('Readonly') || this.checkIdent('EmbedAlways')) {
+      if (this.advance().value === 'Readonly') isReadonly = true;
+      else embedAlways = true;
       this.expect('[');
-      typeNode = this.parseType();
-      this.expect(']');
-    } else {
-      typeNode = this.parseType();
+      wrappers++;
     }
+    const typeNode: TypeNode = this.parseType();
+    for (let w = 0; w < wrappers; w++) this.expect(']');
 
     // In stateless contracts (SmartContract and UnsafeSmartContract),
     // all properties are automatically readonly.
@@ -792,19 +939,30 @@ class PyParser {
       initializer = this.parseExpression();
     }
 
-    // Skip rest of line
-    while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof' && this.peek().type !== 'DEDENT') {
-      this.advance();
-    }
+    // F-026: the field declaration ends at its line break.
+    this.expectStatementEnd();
 
     return {
       kind: 'property',
-      name: snakeToCamel(rawName),
+      name: this.declare(rawName),
       type: typeNode,
       readonly: isReadonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
+  }
+
+  /**
+   * N-033: refuse a class-body token that begins no property, method,
+   * decorator or `pass`, at that token, then skip the rest of its line.
+   * Mirrors N-004's .runar.rb refusal and shares its diagnostic.
+   */
+  private refuseClassBodyToken(tok: Token): void {
+    const text = tok.type === 'INDENT' ? 'INDENT' : tok.value;
+    this.errors.push(makeDiagnostic(unexpectedClassBodyTokenMessage(text), 'error', { file: this.file, line: tok.line, column: tok.column }));
+    this.advance();
+    while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'DEDENT' && this.peek().type !== 'eof') this.advance();
   }
 
   private parseType(): TypeNode {
@@ -816,7 +974,7 @@ class PyParser {
       // E.g., FixedArray[T, N]
       if (rawName === 'FixedArray') {
         this.advance(); // '['
-        const elemType = this.parseType();
+        const elemType = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(',');
         const sizeTok = this.expect('number');
         const size = parseInt(sizeTok.value, 10);
@@ -829,12 +987,55 @@ class PyParser {
     return makePrimitiveOrCustom(mapped);
   }
 
-  private parseMethodDef(decorators: string[]): MethodNode {
+  /**
+   * N-093: the argument list of `@public(...)`. The only argument is the
+   * keyword `sighash=<str>`; each one yields its string, and any other
+   * argument (positional, another keyword, a non-str value) yields `null`,
+   * which is refused as a malformed spelling.
+   */
+  private parsePublicDecoratorArgs(): Array<string | null> {
+    const specs: Array<string | null> = [];
+    this.expect('(');
+    while (this.peek().type !== ')' && this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+      const isSighashKw = this.checkIdent('sighash') && this.tokens[this.pos + 1]?.type === '=';
+      if (isSighashKw) {
+        this.advance(); // 'sighash'
+        this.advance(); // '='
+      }
+      // One argument value: up to the next top-level ',' or ')'.
+      const first = this.peek();
+      let count = 0;
+      let depth = 0;
+      while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+        const t = this.peek().type;
+        if ((t === ',' || t === ')') && depth === 0) break;
+        if (t === '(' || t === '[') depth++;
+        if (t === ')' || t === ']') depth--;
+        this.advance();
+        count++;
+      }
+      specs.push(isSighashKw && count === 1 && first.type === 'string' ? first.value : null);
+      if (!this.match(',')) break;
+    }
+    this.expect(')');
+    return specs;
+  }
+
+  private parseMethodDef(decorators: string[], sighashSpecs: Array<string | null> = []): MethodNode {
     const loc = this.loc();
     this.expect('def');
 
     const nameTok = this.advance();
     const rawName = nameTok.value;
+
+    // N-050: @staticmethod / @classmethod declare a class-level function, not
+    // a contract method; `@public @staticmethod` used to become an entry point.
+    if (decorators.includes('staticmethod') || decorators.includes('classmethod')) {
+      this.errors.push(makeDiagnostic(staticMethodMessage(rawName), 'error', loc));
+    }
+
+    // N-046: reset local tracking for this method's scope.
+    this.declaredLocals = new Set();
 
     this.expect('(');
     const params = this.parseParams();
@@ -842,7 +1043,12 @@ class PyParser {
 
     // Optional return type annotation: -> Type
     if (this.match('->')) {
-      this.parseType(); // consume and discard return type
+      // The AST keeps no return type; N-331 refuses an unknown name. `None`
+      // is Python's spelling of "returns nothing".
+      const returnType = this.parseType();
+      if (!(returnType.kind === 'custom_type' && returnType.name === 'None')) {
+        checkReturnType(returnType, rawName, loc, this.errors, decorators.includes('public'));
+      }
     }
 
     this.expect(':');
@@ -855,6 +1061,10 @@ class PyParser {
 
     // Determine if this is the constructor
     if (rawName === '__init__') {
+      // N-093: the constructor is not a spending entry point.
+      if (sighashSpecs.length > 0) {
+        this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', loc));
+      }
       return {
         kind: 'method',
         name: 'constructor',
@@ -866,7 +1076,13 @@ class PyParser {
     }
 
     const isPublic = decorators.includes('public');
-    const methodName = snakeToCamel(rawName);
+    const methodName = methodAstName(rawName);
+    this.declared.push([rawName, methodName]);
+
+    const sighash = resolveNativeSighash(methodName, isPublic, sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', loc));
+    }
 
     return {
       kind: 'method',
@@ -874,6 +1090,7 @@ class PyParser {
       params,
       body,
       visibility: isPublic ? 'public' : 'private',
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
       sourceLocation: loc,
     };
   }
@@ -899,7 +1116,7 @@ class PyParser {
 
       params.push({
         kind: 'param',
-        name: snakeToCamel(rawName),
+        name: this.declareBinding(rawName),
         type: typeNode ?? { kind: 'custom_type', name: 'unknown' },
       });
 
@@ -927,7 +1144,7 @@ class PyParser {
       kind: 'expression_statement',
       expression: {
         kind: 'call_expr',
-        callee: { kind: 'member_expr', object: { kind: 'identifier', name: 'super' }, property: '' },
+        callee: { kind: 'identifier', name: 'super' },
         args: superArgs,
       },
       sourceLocation: { file: this.file, line: 1, column: 0 },
@@ -963,13 +1180,33 @@ class PyParser {
 
       const stmt = this.parseStatement();
       if (stmt) stmts.push(stmt);
+      this.expectStatementEnd();
       this.skipNewlines();
     }
 
     return stmts;
   }
 
+  /**
+   * F-026: a simple statement ends at its line break. Compound statements end
+   * on a DEDENT / NEWLINE they consumed themselves. Anything else on the same
+   * line used to be parsed as a second statement, which is how `lim = 0b1010`
+   * became `lim = 0` followed by the expression statement `b1010`.
+   */
+  private expectStatementEnd(): void {
+    const next = this.peek();
+    if (next.type === 'NEWLINE' || next.type === 'DEDENT' || next.type === 'eof') return;
+    const prev = this.tokens[this.pos - 1];
+    if (prev && (prev.type === 'NEWLINE' || prev.type === 'DEDENT')) return;
+    this.errors.push(makeDiagnostic(PY_STATEMENT_LINE_BREAK, 'error', { file: this.file, line: next.line, column: next.column }));
+    while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'DEDENT' && this.peek().type !== 'eof') this.advance();
+  }
+
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
 
     // assert statement: assert expr or assert_(expr)
@@ -1014,8 +1251,14 @@ class PyParser {
       return this.parseIdentStatement(loc);
     }
 
-    // Skip unknown
-    this.advance();
+    // N-053: a token that can begin an expression begins an expression
+    // statement; any other token (a stray `elif`, `from`, `@`, an unexpected
+    // indent, ...) is refused. Skipping it silently dropped the token.
+    if (PY_EXPRESSION_START.has(this.peek().type)) {
+      return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
+    }
+    const tok = this.advance();
+    this.errors.push(makeDiagnostic(unsupportedStatementMessage(tok.value || tok.type), 'error', loc));
     return null;
   }
 
@@ -1039,7 +1282,10 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: a name first bound inside a branch stays branch-local.
+    const localsBefore = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBefore);
     this.match('DEDENT');
     this.skipNewlines();
 
@@ -1048,13 +1294,15 @@ class PyParser {
     if (this.peek().type === 'elif') {
       // elif -> else { if ... }
       const elifLoc = this.loc();
-      elseBranch = [this.parseElifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElifStatement(elifLoc))];
+      this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
       this.expect(':');
       this.skipNewlines();
       this.expect('INDENT');
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBefore);
       this.match('DEDENT');
     }
 
@@ -1073,7 +1321,10 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: see parseIfStatement.
+    const localsBefore = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBefore);
     this.match('DEDENT');
     this.skipNewlines();
 
@@ -1081,13 +1332,15 @@ class PyParser {
 
     if (this.peek().type === 'elif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElifStatement(elifLoc))];
+      this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance();
       this.expect(':');
       this.skipNewlines();
       this.expect('INDENT');
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBefore);
       this.match('DEDENT');
     }
 
@@ -1104,7 +1357,7 @@ class PyParser {
     this.advance(); // 'for'
 
     const iterVar = this.advance(); // loop variable
-    const varName = snakeToCamel(iterVar.value);
+    const varName = this.declareBinding(iterVar.value);
 
     this.expect('in');
     this.expect('range');
@@ -1154,7 +1407,12 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: the loop variable and the body's first bindings are body-local;
+    // a rebinding of the loop variable inside the body is an assignment.
+    const localsBeforeBody = new Set(this.declaredLocals);
+    this.declaredLocals.add(varName);
     const body = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeBody);
     this.match('DEDENT');
 
     // Construct a C-style for loop AST node:
@@ -1290,9 +1548,15 @@ class PyParser {
       } else {
         init = { kind: 'bigint_literal', value: 0n };
       }
+      const name = this.declareBinding(rawName);
+      // N-046: rebinding a local of this method is an assignment in Python.
+      if (this.declaredLocals.has(name)) {
+        return { kind: 'assignment', target: { kind: 'identifier', name }, value: init, sourceLocation: loc };
+      }
+      this.declaredLocals.add(name);
       return {
         kind: 'variable_decl',
-        name: snakeToCamel(rawName),
+        name,
         type: typeNode,
         mutable: true,
         init,
@@ -1307,9 +1571,15 @@ class PyParser {
       this.advance(); // consume ident
       this.advance(); // consume '='
       const value = this.parseExpression();
+      const name = this.declareBinding(rawName);
+      // N-046: rebinding a local of this method is an assignment in Python.
+      if (this.declaredLocals.has(name)) {
+        return { kind: 'assignment', target: { kind: 'identifier', name }, value, sourceLocation: loc };
+      }
+      this.declaredLocals.add(name);
       return {
         kind: 'variable_decl',
-        name: snakeToCamel(rawName),
+        name,
         mutable: true,
         init: value,
         sourceLocation: loc,
@@ -1349,7 +1619,7 @@ class PyParser {
   // ---------------------------------------------------------------------------
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   // Python conditional expression: x if cond else y
@@ -1361,7 +1631,7 @@ class PyParser {
       this.advance(); // 'if'
       const condition = this.parseOr();
       this.expect('else');
-      const alternate = this.parseTernary();
+      const alternate = this.nest.nested(this.loc(), () => this.parseTernary());
       return { kind: 'ternary_expr', condition, consequent: expr, alternate };
     }
 
@@ -1369,75 +1639,89 @@ class PyParser {
   }
 
   private parseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAnd();
     while (this.peek().type === 'or') {
       this.advance();
       const right = this.parseAnd();
-      left = { kind: 'binary_expr', op: '||', left, right };
+      left = { kind: 'binary_expr', op: '||', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseNot();
     while (this.peek().type === 'and') {
       this.advance();
       const right = this.parseNot();
-      left = { kind: 'binary_expr', op: '&&', left, right };
+      left = { kind: 'binary_expr', op: '&&', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseNot(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.peek().type === 'not') {
       this.advance();
-      const operand = this.parseNot();
-      return { kind: 'unary_expr', op: '!', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseNot());
+      return { kind: 'unary_expr', op: '!', operand, sourceLocation: at };
     }
     return this.parseBitwiseOr();
   }
 
   private parseBitwiseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitwiseXor();
     while (this.peek().type === '|') {
       this.advance();
       const right = this.parseBitwiseXor();
-      left = { kind: 'binary_expr', op: '|', left, right };
+      left = { kind: 'binary_expr', op: '|', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseBitwiseXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitwiseAnd();
     while (this.peek().type === '^') {
       this.advance();
       const right = this.parseBitwiseAnd();
-      left = { kind: 'binary_expr', op: '^', left, right };
+      left = { kind: 'binary_expr', op: '^', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseBitwiseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.peek().type === '&') {
       this.advance();
       const right = this.parseEquality();
-      left = { kind: 'binary_expr', op: '&', left, right };
+      left = { kind: 'binary_expr', op: '&', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (true) {
       if (this.peek().type === '==') {
         this.advance();
         const right = this.parseComparison();
-        left = { kind: 'binary_expr', op: '===', left, right };
+        left = { kind: 'binary_expr', op: '===', left, right, sourceLocation: start };
       } else if (this.peek().type === '!=') {
         this.advance();
         const right = this.parseComparison();
-        left = { kind: 'binary_expr', op: '!==', left, right };
+        left = { kind: 'binary_expr', op: '!==', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1446,13 +1730,15 @@ class PyParser {
   }
 
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (true) {
       const t = this.peek().type;
       if (t === '<' || t === '<=' || t === '>' || t === '>=') {
         const op = this.advance().type as BinaryOp;
         const right = this.parseShift();
-        left = { kind: 'binary_expr', op, left, right };
+        left = { kind: 'binary_expr', op, left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1461,16 +1747,18 @@ class PyParser {
   }
 
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (true) {
       if (this.peek().type === '<<') {
         this.advance();
         const right = this.parseAddSub();
-        left = { kind: 'binary_expr', op: '<<', left, right };
+        left = { kind: 'binary_expr', op: '<<', left, right, sourceLocation: start };
       } else if (this.peek().type === '>>') {
         this.advance();
         const right = this.parseAddSub();
-        left = { kind: 'binary_expr', op: '>>', left, right };
+        left = { kind: 'binary_expr', op: '>>', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1479,16 +1767,18 @@ class PyParser {
   }
 
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (true) {
       if (this.peek().type === '+') {
         this.advance();
         const right = this.parseMulDiv();
-        left = { kind: 'binary_expr', op: '+', left, right };
+        left = { kind: 'binary_expr', op: '+', left, right, sourceLocation: start };
       } else if (this.peek().type === '-') {
         this.advance();
         const right = this.parseMulDiv();
-        left = { kind: 'binary_expr', op: '-', left, right };
+        left = { kind: 'binary_expr', op: '-', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1497,25 +1787,27 @@ class PyParser {
   }
 
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (true) {
       if (this.peek().type === '*') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '*', left, right };
+        left = { kind: 'binary_expr', op: '*', left, right, sourceLocation: start };
       } else if (this.peek().type === '//') {
         // Python integer division // maps to / in AST (OP_DIV)
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '/', left, right };
+        left = { kind: 'binary_expr', op: '/', left, right, sourceLocation: start };
       } else if (this.peek().type === '/') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '/', left, right };
+        left = { kind: 'binary_expr', op: '/', left, right, sourceLocation: start };
       } else if (this.peek().type === '%') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '%', left, right };
+        left = { kind: 'binary_expr', op: '%', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1524,22 +1816,37 @@ class PyParser {
   }
 
   private parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.peek().type === '-') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '-', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '-', operand, sourceLocation: at };
     }
     if (this.peek().type === '~') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '~', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '~', operand, sourceLocation: at };
     }
     if (this.peek().type === '!') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '!', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '!', operand, sourceLocation: at };
     }
-    return this.parsePostfix();
+    return this.parsePower();
+  }
+
+  // `**` is the documented spelling of the builtin `pow(base, exp)` (docs/formats/python.md).
+  // It binds tighter than a unary minus on its left and is right-associative; the
+  // exponent may itself be unary, as in Python.
+  private parsePower(): Expression {
+    const base = this.parsePostfix();
+    if (this.peek().type === '**') {
+      this.advance();
+      const exp = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'call_expr', callee: { kind: 'identifier', name: 'pow' }, args: [base, exp] };
+    }
+    return base;
   }
 
   private parsePostfix(): Expression {
@@ -1550,10 +1857,11 @@ class PyParser {
       if (this.peek().type === '.') {
         this.advance(); // '.'
         const propTok = this.advance();
-        const propName = snakeToCamel(propTok.value);
+        const isCall = this.peek().type === '(';
+        const propName = isCall ? methodAstName(propTok.value) : snakeToCamel(propTok.value);
 
         // Check if it's a method call
-        if (this.peek().type === '(') {
+        if (isCall) {
           const args = this.parseCallArgs();
           // Handle self.method(...) → this.method(...)
           if (expr.kind === 'identifier' && (expr as { name: string }).name === 'this') {
@@ -1627,13 +1935,13 @@ class PyParser {
     // Hex string literal (already parsed by tokenizer)
     if (tok.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // String literal
     if (tok.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // Array literal: [expr, expr, ...]
@@ -1658,7 +1966,7 @@ class PyParser {
         this.expect('(');
         const strTok = this.advance(); // string literal
         this.expect(')');
-        return { kind: 'bytestring_literal', value: strTok.value };
+        return { kind: 'bytestring_literal', value: strTok.value, sourceLocation: { file: this.file, line: strTok.line, column: strTok.column } };
       }
     }
 
@@ -1681,7 +1989,7 @@ class PyParser {
       this.advance();
       const rawName = tok.value;
       const name = mapBuiltinName(rawName);
-      return { kind: 'identifier', name };
+      return { kind: 'identifier', name, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // None -> 0
@@ -1722,5 +2030,5 @@ export function parsePythonSource(source: string, fileName: string): ParseResult
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, fileName, errors);
   const parser = new PyParser(tokens, fileName, errors);
-  return parser.parse();
+  return withNestingLimit(fileName, () => parser.parse());
 }

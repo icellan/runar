@@ -57,9 +57,9 @@ class ECPrimitives < Runar::SmartContract
 
   runar_public x: Bigint, y: Bigint, expected_x: Bigint, expected_y: Bigint
   def check_make_point(x, y, expected_x, expected_y)
-    pt = ec_make_point(x, y)
-    assert ec_point_x(pt) == expected_x
-    assert ec_point_y(pt) == expected_y
+    point = ec_make_point(x, y)
+    assert ec_point_x(point) == expected_x
+    assert ec_point_y(point) == expected_y
   end
 
   runar_public expected: ByteString

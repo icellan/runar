@@ -3,7 +3,7 @@
 // Do not edit manually.
 
 import { RunarContract, buildP2PKHScript } from 'runar-sdk';
-import type { Provider, Signer, TransactionData, DeployOptions, RunarArtifact, PreparedCall } from 'runar-sdk';
+import type { Provider, Signer, TransactionData, DeployOptions, RunarArtifact, PreparedCall, Inscription } from 'runar-sdk';
 
 type CallResult = { txid: string; tx: TransactionData };
 
@@ -66,6 +66,11 @@ export class {{contractName}}Contract {
     const instance = Object.create({{contractName}}Contract.prototype) as {{contractName}}Contract;
     (instance as any).inner = await RunarContract.fromTxId(artifact, txid, outputIndex, provider);
     return instance;
+  }
+
+  attachInscription(insc: Inscription): this {
+    this.inner.withInscription(insc);
+    return this;
   }
 
   connect(provider: Provider, signer: Signer): void {

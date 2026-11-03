@@ -47,9 +47,9 @@ func (c *ECPrimitives) CheckMulGen(scalar runar.Bigint, expectedX, expectedY run
 }
 
 func (c *ECPrimitives) CheckMakePoint(x, y, expectedX, expectedY runar.BigintBig) {
-	pt := runar.EcMakePoint(x, y)
-	runar.Assert(runar.BigintBigEqual(runar.EcPointX(pt), expectedX))
-	runar.Assert(runar.BigintBigEqual(runar.EcPointY(pt), expectedY))
+	point := runar.EcMakePoint(x, y)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(point), expectedX))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(point), expectedY))
 }
 
 func (c *ECPrimitives) CheckEncodeCompressed(expected runar.ByteString) {

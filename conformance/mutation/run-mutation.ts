@@ -102,8 +102,8 @@ export const GATES: Record<string, GateSpec> = {
   // --- Phase E1 / TG-007 (2026-08): Palmer-class corpus additions ----------
   // branch-merged-locals-vm / state-push-framing-vm / c28-state-strict run
   // from the repo root because they live under packages/runar-testing and
-  // packages/runar-sdk, which have no nearer vitest config (same root SRC
-  // alias as the gates above).
+  // packages/runar-sdk, whose vitest.config.ts re-exports the root one (same
+  // root SRC alias as the gates above).
   'branch-merged-locals-vm': {
     cwd: '.',
     argv: ['npx', 'vitest', 'run', 'packages/runar-testing/src/__tests__/branch-merged-locals-vm.test.ts'],
@@ -122,6 +122,25 @@ export const GATES: Record<string, GateSpec> = {
   'real-crypto-branch-merged-locals': {
     cwd: 'conformance',
     argv: ['npx', 'vitest', 'run', 'witnesses/real-crypto-execution.test.ts', '-t', 'branch-merged-locals'],
+  },
+  // N-287: real-crypto witness replay for private-helper-outputs — the
+  // regression fixture for side-effect-summary.ts's call-graph walk (a public
+  // method's continuation shape must reflect side effects buried in a private
+  // helper it calls). Deployed through the actual @bsv/sdk Spend, not the
+  // interpreter, so a dropped/corrupted effect changes the compiled
+  // continuation shape and the real spend rejects.
+  'real-crypto-private-helper-outputs': {
+    cwd: 'conformance',
+    argv: ['npx', 'vitest', 'run', 'witnesses/real-crypto-execution.test.ts', '-t', 'private-helper-outputs'],
+  },
+  // N-298: direct unit gate on `collectStmt`'s `if_statement` case — closes
+  // the measured hole where every `real-crypto-private-helper-outputs` /
+  // F1 fixture puts its helper's effect at the top level or in a `then` arm,
+  // never exclusively inside an `else` branch, so the `stmt.else` walk itself
+  // was untested by any gate in this corpus.
+  'side-effect-summary-unit': {
+    cwd: '.',
+    argv: ['npx', 'vitest', 'run', 'packages/runar-compiler/src/__tests__/side-effect-summary.test.ts'],
   },
   'state-push-framing-vm': {
     cwd: '.',
@@ -337,6 +356,54 @@ export function loadMutants(path = join(__dirname, 'mutants.json')): Mutant[] {
 }
 
 // ---------------------------------------------------------------------------
+// Baseline regression check (nightly CI gate)
+// ---------------------------------------------------------------------------
+
+/** The shape read from `baseline.json`'s `results` array (see `serializeBaseline`). */
+export type BaselineEntry = Pick<MutantResult, 'id' | 'caught' | 'survived' | 'expectCaughtBy'>;
+
+/**
+ * Compare a stamped `baseline.json` against a fresh scorecard run and report
+ * every mutant that weakened since the baseline was last written.
+ *
+ * F-251: this used to be a `for (const b of base)` loop inlined directly in
+ * `.github/workflows/fuzzer-nightly.yml`, which only ever looks up a `base`
+ * entry's id in `cur` — it never visits a `cur` entry that has no `base`
+ * entry at all. `mutants.json` can grow (six `stacklower-*` mutants landed in
+ * `ef753a8f6` without a `--write-baseline` re-stamp, by that commit's own
+ * deliberate choice: "new ids are simply not compared and cannot produce a
+ * false failure") and every one of those un-stamped mutants is then
+ * structurally invisible to this specific gate — if one is caught today and
+ * survives tomorrow, the forward-only loop has nothing to compare it
+ * against and reports nothing. The reverse loop below closes that: a `cur`
+ * mutant absent from `base` that must be caught (`expectCaughtBy` non-empty)
+ * and is currently surviving is still reported. (The separate "must never
+ * survive" scorecard gate in `score()`/`main()` already catches a *brand
+ * new* mutant that is born surviving; this function is the regression-since-
+ * last-stamp gate, and the point is that un-stamped is not the same as
+ * exempt from it.)
+ */
+export function findBaselineRegressions(base: BaselineEntry[], cur: MutantResult[]): string[] {
+  const curById = new Map(cur.map((r) => [r.id, r]));
+  const baseIds = new Set(base.map((b) => b.id));
+  const regressions: string[] = [];
+  for (const b of base) {
+    const c = curById.get(b.id);
+    if (!c) {
+      regressions.push(`${b.id} (missing from current run)`);
+      continue;
+    }
+    if (b.caught && c.survived) regressions.push(`${b.id} (was caught, now SURVIVES)`);
+  }
+  for (const c of cur) {
+    if (!baseIds.has(c.id) && c.expectCaughtBy.length > 0 && c.survived) {
+      regressions.push(`${c.id} (no baseline entry, and currently SURVIVES)`);
+    }
+  }
+  return regressions;
+}
+
+// ---------------------------------------------------------------------------
 // Scorecard driver
 // ---------------------------------------------------------------------------
 
@@ -348,6 +415,16 @@ export interface Scorecard {
   documentedSurvivors: MutantResult[];
   /** Mutants whose patch no longer applies — scored as neither caught nor survived. */
   stale: MutantResult[];
+  /**
+   * Mutants that were `caught` (so not an `unexpectedSurvivor`) but where at
+   * least one gate the mutant itself nominated in `expectCaughtBy` never
+   * fired. `scoreMutant` only runs the gates a mutant nominates, so "caught"
+   * means "one of the gates this mutant already believed would catch it
+   * did" — a sibling gate can go silently dead forever and `caught: true`
+   * would hide it. This bucket is what makes that visible to the exit code
+   * (F-172).
+   */
+  partiallyCaught: MutantResult[];
   results: MutantResult[];
 }
 
@@ -364,6 +441,9 @@ export function score(mutants: Mutant[]): Scorecard {
     unexpectedSurvivors: results.filter((r) => r.unexpectedSurvivor),
     documentedSurvivors: results.filter((r) => r.documentedSurvivor && !r.stale),
     stale: results.filter((r) => r.stale),
+    partiallyCaught: results.filter(
+      (r) => !r.documentedSurvivor && r.caught && r.missedExpectedGates.length > 0,
+    ),
     results,
   };
 }
@@ -418,6 +498,16 @@ function printScorecard(card: Scorecard, mutants: Mutant[]): void {
     console.log('  ✗ UNEXPECTED SURVIVORS (real holes in the net — MUST be addressed):');
     for (const r of card.unexpectedSurvivors) {
       console.log(`   • ${r.id} (${r.class} / ${r.stage}) — expected ${r.expectCaughtBy.join(', ')}`);
+    }
+    console.log('');
+  }
+  if (card.partiallyCaught.length) {
+    console.log('  ✗ PARTIALLY CAUGHT (a nominated gate never fired — MUST be addressed):');
+    for (const r of card.partiallyCaught) {
+      console.log(
+        `   • ${r.id} (${r.class} / ${r.stage}) — caught by [${r.caughtBy.join(', ')}], ` +
+          `dead gate(s): ${r.missedExpectedGates.join(', ')}`,
+      );
     }
     console.log('');
   }
@@ -491,9 +581,13 @@ function main(): void {
     console.log(serializeBaseline(card));
   }
 
-  // Fail the run if any mutant that MUST be caught survived (net weakened), or
-  // if any mutant is stale (the corpus no longer describes the code it grades).
-  if (card.unexpectedSurvivors.length > 0 || card.stale.length > 0) {
+  // Fail the run if any mutant that MUST be caught survived (net weakened), if
+  // any mutant is stale (the corpus no longer describes the code it grades),
+  // or if a caught mutant's nominated gate list contains one that never fired
+  // (F-172: `caught: true` must not hide a dead sibling gate — "caught" would
+  // otherwise mean only "one of the gates this mutant already believed would
+  // catch it did").
+  if (card.unexpectedSurvivors.length > 0 || card.stale.length > 0 || card.partiallyCaught.length > 0) {
     process.exitCode = 1;
   }
 }

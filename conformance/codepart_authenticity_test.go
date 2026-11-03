@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os/exec"
@@ -38,6 +39,12 @@ import (
 //   - TestCodePartHonestSpend_Control : the honest spend. MUST be accepted,
 //     both before and after the fix, so that a "fix" which simply breaks all
 //     spending is caught.
+//
+// N-074: every hijack asserts the SPECIFIC guard that rejected it (via
+// requireRejectedAt), not merely that the spend failed. A bare "it failed"
+// stays green when the code-part guard is deleted but some unrelated assert —
+// e.g. F-024's value conservation on an underfunded continuation — still
+// happens to fire.
 // ---------------------------------------------------------------------------
 
 // attackerPKH is a recognizable 20-byte hash160 standing in for a key the
@@ -47,10 +54,60 @@ var attackerPKH = []byte{
 	0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
 }
 
+// N-074 — amounts. Every spend in this file moves the contract UTXO's FULL
+// value into the output built from `_codePart`; a separate funding input pays
+// the fee and the change (see addFeeFundingInput). F-024 rejects any default
+// continuation worth less than the input it spends, so an honest control that
+// moved 9,000 of 10,000 sat died at that assert, and a hijack on those amounts
+// could be "rejected" by it without the code-part guard ever being reached.
+const (
+	codePartInputSatoshis       = 10000 // the contract UTXO
+	codePartChangeSatoshis      = 500
+	codePartFeeFundingSatoshis  = 1000 // pays change + a 500-sat fee
+	codePartUnderfundedSatoshis = 9000 // 1,000 sat short of the input: F-024 rejects it
+)
+
+// Guards of emitCodePartAuthentication (05-stack-lower.ts), located in the
+// compiled script by the bytes the emitter writes for them. Each returns the
+// offsets of the opcode that aborts the spend when the guard fails.
+
+// codePartExactSplitGuard is clause 8a for stateful-counter: SIZE(rest) == 9
+// (OP_RETURN + one 8-byte bigint), aborting at OP_NUMEQUALVERIFY.
+//
+//	OP_SIZE OP_9 OP_NUMEQUALVERIFY | OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY
+func codePartExactSplitGuard(lockingHex string) []int {
+	return lockingGuardOffsets(lockingHex, "82599d517f75016a88", 2)
+}
+
+// codePartBytesGuard is step 10: `_codePart == 0x61ab || scriptCode[0:n]`,
+// byte for byte, aborting at the final OP_EQUALVERIFY.
+//
+//	<61ab> OP_SWAP OP_CAT OP_EQUALVERIFY
+func codePartBytesGuard(lockingHex string) []int {
+	return lockingGuardOffsets(lockingHex, "0261ab7c7e88", 5)
+}
+
+// codePartLengthPinGuard is clause 6a (R-095 / N-051), emitted only on the
+// variable-length-state path: SIZE(_codePart) == the deployed code-part
+// length, a 4-byte deploy-time slot, aborting at OP_VERIFY.
+//
+//	OP_SIZE OP_DUP <len as 4 LE bytes> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
+func codePartLengthPinGuard(lockingHex string, deployedCodePartLen int) []int {
+	var le [4]byte
+	binary.LittleEndian.PutUint32(le[:], uint32(deployedCodePartLen))
+	return lockingGuardOffsets(lockingHex, "827604"+hex.EncodeToString(le[:])+"819c69", 9)
+}
+
 // codePartSpendResult is the outcome of running one stateful-counter spend
 // through the interpreter with a caller-chosen `_codePart`.
 type codePartSpendResult struct {
 	err error
+	// rejection locates where the engine stopped the spend (N-074), so a
+	// hijack test can assert WHICH guard rejected it, not merely that one did.
+	rejection spendRejection
+	// lockingHex is the full locking script that was executed, for locating
+	// guards by their emitted bytes.
+	lockingHex string
 	// continuationScriptHex is the script the attacker actually pays to.
 	continuationScriptHex string
 }
@@ -96,7 +153,7 @@ func runCounterSpendWithCodePart(
 		t.Fatal("OP_CODESEPARATOR not found in codePart")
 	}
 
-	prevSatoshis := uint64(10000)
+	prevSatoshis := uint64(codePartInputSatoshis)
 	changePKH := make([]byte, 20)
 
 	fullLockingScript, err := script.NewFromHex(fullLockingHex)
@@ -114,6 +171,9 @@ func runCounterSpendWithCodePart(
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	// N-074: the contract UTXO's full value can go to the continuation only if
+	// someone else pays the fee and the change.
+	addFeeFundingInput(spendTx, codePartFeeFundingSatoshis)
 
 	contScript, err := script.NewFromHex(continuationScriptHex)
 	if err != nil {
@@ -160,8 +220,11 @@ func runCounterSpendWithCodePart(
 	}
 	spendTx.Inputs[0].UnlockingScript = unlockScript
 
+	rej := executeScriptWithTxLocated(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)
 	return codePartSpendResult{
-		err:                   executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput),
+		err:                   rej.err,
+		rejection:             rej,
+		lockingHex:            fullLockingHex,
 		continuationScriptHex: continuationScriptHex,
 	}
 }
@@ -186,15 +249,27 @@ func trueCounterCodePart(t *testing.T) []byte {
 // before and after the R-010 fix — a fix that merely breaks all spending fails
 // here.
 func TestCodePartHonestSpend_Control(t *testing.T) {
-	res := runCounterSpendWithCodePart(t, trueCounterCodePart(t), 9000, 500)
+	res := runCounterSpendWithCodePart(t, trueCounterCodePart(t), codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err != nil {
-		t.Fatalf("honest spend must verify, got: %v", res.err)
+		t.Fatalf("honest spend must verify, got: %s", res.rejection)
 	}
 }
 
+// TestCodePartHonestSpend_Underfunded_RejectedByValueConservation is the
+// control's amounts as they were before N-074: the honest code part, but only
+// 9,000 of the 10,000 input satoshis carried into the continuation. F-024
+// must reject it, and at its own assert — this pins why the controls had to
+// move the full input value, and that every other test in this file runs
+// above that line.
+func TestCodePartHonestSpend_Underfunded_RejectedByValueConservation(t *testing.T) {
+	res := runCounterSpendWithCodePart(t, trueCounterCodePart(t), codePartUnderfundedSatoshis, codePartChangeSatoshis)
+	requireRejectedAt(t, res.rejection, "F-024 value conservation (_newAmount >= input amount)",
+		valueConservationGuard(res.lockingHex))
+}
+
 // TestCodePartHijack_P2PKH is the fund-loss attack: `_codePart` is replaced
-// with a bare P2PKH to the attacker, and 9,900 of the 10,000 input satoshis are
-// routed into that output. Nothing about the contract's state machine is
+// with a bare P2PKH to the attacker, and all 10,000 input satoshis are routed
+// into that output. Nothing about the contract's state machine is
 // preserved. The script MUST reject.
 func TestCodePartHijack_P2PKH(t *testing.T) {
 	hijacked, err := hex.DecodeString("76a914" + hex.EncodeToString(attackerPKH) + "88ac")
@@ -202,18 +277,19 @@ func TestCodePartHijack_P2PKH(t *testing.T) {
 		t.Fatalf("decode hijack script: %v", err)
 	}
 
-	// 9,900 of the 10,000 input satoshis go to the attacker; 100 is left as
-	// change so the fee/serialization arithmetic of the honest path is
-	// untouched and the only thing under test is `_codePart`.
-	res := runCounterSpendWithCodePart(t, hijacked, 9900, 100)
+	// All 10,000 input satoshis go to the attacker — the same amounts as the
+	// honest control, so the value-conservation assert (F-024) is satisfied and
+	// the only thing under test is `_codePart`.
+	res := runCounterSpendWithCodePart(t, hijacked, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
-			"CODEPART HIJACK ACCEPTED: the script verified while paying 9900/10000 sat to "+
+			"CODEPART HIJACK ACCEPTED: the script verified while paying 10000/10000 sat to "+
 				"an attacker-controlled output %s — `_codePart` is an unauthenticated "+
 				"spender witness",
 			res.continuationScriptHex,
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_TruncatedTail truncates the genuine code part, dropping
@@ -235,7 +311,7 @@ func TestCodePartHijack_TruncatedTail(t *testing.T) {
 	}
 	truncated := full[:sepOffset+1]
 
-	res := runCounterSpendWithCodePart(t, truncated, 9000, 500)
+	res := runCounterSpendWithCodePart(t, truncated, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with a truncated code part "+
@@ -243,6 +319,7 @@ func TestCodePartHijack_TruncatedTail(t *testing.T) {
 			len(truncated), len(full), res.continuationScriptHex,
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_AppendedTail keeps the genuine code part intact but
@@ -254,7 +331,7 @@ func TestCodePartHijack_AppendedTail(t *testing.T) {
 	// OP_DROP OP_1 — harmless-looking, but it is not the deployed code.
 	appended := append(append([]byte{}, full...), 0x75, 0x51)
 
-	res := runCounterSpendWithCodePart(t, appended, 9000, 500)
+	res := runCounterSpendWithCodePart(t, appended, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with %d bytes appended to the "+
@@ -262,6 +339,7 @@ func TestCodePartHijack_AppendedTail(t *testing.T) {
 			len(appended)-len(full), res.continuationScriptHex,
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_PrologueOnly is the degenerate truncation: the spender
@@ -271,7 +349,7 @@ func TestCodePartHijack_AppendedTail(t *testing.T) {
 // spendable by anyone. A prefix-only check would accept this (the empty tail
 // trivially matches), so it is the sharpest test of the split-point pin.
 func TestCodePartHijack_PrologueOnly(t *testing.T) {
-	res := runCounterSpendWithCodePart(t, []byte{0x61, 0xab}, 9900, 100)
+	res := runCounterSpendWithCodePart(t, []byte{0x61, 0xab}, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with a 2-byte prologue-only "+
@@ -279,6 +357,7 @@ func TestCodePartHijack_PrologueOnly(t *testing.T) {
 			res.continuationScriptHex,
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_PrologueSwapped keeps the genuine code part but rewrites
@@ -291,7 +370,7 @@ func TestCodePartHijack_PrologueSwapped(t *testing.T) {
 	swapped := append([]byte{}, full...)
 	swapped[0] = 0x6a
 
-	res := runCounterSpendWithCodePart(t, swapped, 9900, 100)
+	res := runCounterSpendWithCodePart(t, swapped, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with the prologue byte "+
@@ -299,6 +378,7 @@ func TestCodePartHijack_PrologueSwapped(t *testing.T) {
 			res.continuationScriptHex[:64],
 		)
 	}
+	requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,14 +439,23 @@ func TestCodePartHijack_ForeignContract(t *testing.T) {
 		t.Fatal("foreign contract compiled to the same bytes as the honest one — not a substitution")
 	}
 
-	res := runCounterSpendWithCodePart(t, foreign, 9900, 100)
+	res := runCounterSpendWithCodePart(t, foreign, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with the code part of a "+
 				"DIFFERENT valid contract (%d bytes vs the honest %d), redirecting "+
-				"9900/10000 sat into %s… — `_codePart` is not bound to the executing script",
+				"10000/10000 sat into %s… — `_codePart` is not bound to the executing script",
 			len(foreign), len(honest), res.continuationScriptHex[:64],
 		)
+	}
+	// N-074: the length pin (8a) and the byte compare (10) are separate guards.
+	// At today's sizes (1407 vs 1405 bytes) the foreign code part dies at 8a
+	// before its bytes are ever compared; a same-length substitute would reach
+	// step 10. Name whichever one the forgery's shape selects.
+	if len(foreign) != len(honest) {
+		requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
+	} else {
+		requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 	}
 }
 
@@ -384,7 +473,7 @@ func TestCodePartHijack_ProloguePreserved(t *testing.T) {
 		t.Fatal("prologue must stay intact for this case to mean anything")
 	}
 
-	res := runCounterSpendWithCodePart(t, forged, 9000, 500)
+	res := runCounterSpendWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with an intact 61ab prologue "+
@@ -392,6 +481,7 @@ func TestCodePartHijack_ProloguePreserved(t *testing.T) {
 			forged[2]^0xff, forged[2],
 		)
 	}
+	requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_DeepByteFlip changes exactly one byte in the middle of the
@@ -409,7 +499,7 @@ func TestCodePartHijack_DeepByteFlip(t *testing.T) {
 		t.Fatal("flip must not change the length")
 	}
 
-	res := runCounterSpendWithCodePart(t, forged, 9000, 500)
+	res := runCounterSpendWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with a single byte flipped at "+
@@ -417,6 +507,7 @@ func TestCodePartHijack_DeepByteFlip(t *testing.T) {
 			mid, len(honest), honest[mid], forged[mid],
 		)
 	}
+	requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_ShortByOne drops the final byte. This is the nearest
@@ -428,7 +519,7 @@ func TestCodePartHijack_ShortByOne(t *testing.T) {
 	honest := trueCounterCodePart(t)
 	forged := honest[:len(honest)-1]
 
-	res := runCounterSpendWithCodePart(t, forged, 9000, 500)
+	res := runCounterSpendWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with a code part one byte SHORT "+
@@ -437,6 +528,7 @@ func TestCodePartHijack_ShortByOne(t *testing.T) {
 			len(forged), len(honest),
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_LongByOne appends a single byte. The nearest possible miss
@@ -446,7 +538,7 @@ func TestCodePartHijack_LongByOne(t *testing.T) {
 	honest := trueCounterCodePart(t)
 	forged := append(append([]byte{}, honest...), 0x75) // OP_DROP
 
-	res := runCounterSpendWithCodePart(t, forged, 9000, 500)
+	res := runCounterSpendWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the script verified with a code part one byte LONG "+
@@ -454,6 +546,7 @@ func TestCodePartHijack_LongByOne(t *testing.T) {
 			len(forged), len(honest),
 		)
 	}
+	requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)", codePartExactSplitGuard(res.lockingHex))
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +676,7 @@ func runMessageBoardPostWithCodePart(
 		t.Fatal("OP_CODESEPARATOR not found in codePart")
 	}
 
-	prevSatoshis := uint64(10000)
+	prevSatoshis := uint64(codePartInputSatoshis)
 	changePKH := make([]byte, 20)
 
 	fullLockingScript, err := script.NewFromHex(fullLockingHex)
@@ -601,6 +694,9 @@ func runMessageBoardPostWithCodePart(
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	// N-074: the contract UTXO's full value can go to the continuation only if
+	// someone else pays the fee and the change.
+	addFeeFundingInput(spendTx, codePartFeeFundingSatoshis)
 
 	contScript, err := script.NewFromHex(continuationScriptHex)
 	if err != nil {
@@ -652,8 +748,11 @@ func runMessageBoardPostWithCodePart(
 	}
 	spendTx.Inputs[0].UnlockingScript = unlockScript
 
+	rej := executeScriptWithTxLocated(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)
 	return codePartSpendResult{
-		err:                   executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput),
+		err:                   rej.err,
+		rejection:             rej,
+		lockingHex:            fullLockingHex,
 		continuationScriptHex: continuationScriptHex,
 	}
 }
@@ -662,9 +761,9 @@ func runMessageBoardPostWithCodePart(
 // variable-length-state harness. Without it every rejection below could be the
 // harness failing rather than the covenant rejecting.
 func TestCodePartHonestSpend_VarLenState_Control(t *testing.T) {
-	res := runMessageBoardPostWithCodePart(t, trueMessageBoardCodePart(t), 9000, 500)
+	res := runMessageBoardPostWithCodePart(t, trueMessageBoardCodePart(t), codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err != nil {
-		t.Fatalf("honest var-len-state spend must verify, got: %v", res.err)
+		t.Fatalf("honest var-len-state spend must verify, got: %s", res.rejection)
 	}
 }
 
@@ -728,18 +827,22 @@ func TestCodePartHijack_VarLenState_SplitPointCollision(t *testing.T) {
 			t.Fatalf("k=%d: forgery does not satisfy rest[0] == 0x6a", k)
 		}
 
-		res := runMessageBoardPostWithCodePart(t, forged, 9900, 100)
+		res := runMessageBoardPostWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 		if res.err == nil {
 			t.Errorf(
 				"CODEPART HIJACK ACCEPTED at k=%d: a %d-byte claimed code part (the executing "+
 					"script truncated at its own interior 0x6a) passed authentication and "+
-					"redirected 9900/10000 sat into %s… — with variable-length state the split "+
+					"redirected 10000/10000 sat into %s… — with variable-length state the split "+
 					"point is not pinned",
 				k, len(forged), res.continuationScriptHex[:64],
 			)
-		} else {
-			t.Logf("k=%d (%d bytes): rejected — %v", k, len(forged), res.err)
+			continue
 		}
+		// N-074: a genuine prefix ending on a real 0x6a satisfies 8b and step 10
+		// by construction; only the code-part length pin (6a) can reject it.
+		t.Logf("k=%d (%d bytes): rejected — %s", k, len(forged), res.rejection)
+		requireRejectedAt(t, res.rejection, "clause 6a (SIZE(_codePart) == deployed length)",
+			codePartLengthPinGuard(res.lockingHex, len(honest)))
 	}
 }
 
@@ -750,13 +853,21 @@ func TestCodePartHijack_VarLenState_ForeignContract(t *testing.T) {
 	honest := trueMessageBoardCodePart(t)
 	foreign := foreignCodePart(t)
 
-	res := runMessageBoardPostWithCodePart(t, foreign, 9900, 100)
+	res := runMessageBoardPostWithCodePart(t, foreign, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the var-len-state script verified with the code part "+
 				"of a DIFFERENT valid contract (%d bytes vs the honest %d)",
 			len(foreign), len(honest),
 		)
+	}
+	// N-074: as in TestCodePartHijack_ForeignContract — a different length dies
+	// at the code-part length pin (6a), the only length check on this path; an
+	// equal length would reach the byte compare (10).
+	if len(foreign) != len(honest) {
+		requireRejectedAt(t, res.rejection, "clause 6a (SIZE(_codePart) == deployed length)", codePartLengthPinGuard(res.lockingHex, len(honest)))
+	} else {
+		requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 	}
 }
 
@@ -768,7 +879,7 @@ func TestCodePartHijack_VarLenState_DeepByteFlip(t *testing.T) {
 	mid := len(forged) / 2
 	forged[mid] ^= 0x01
 
-	res := runMessageBoardPostWithCodePart(t, forged, 9000, 500)
+	res := runMessageBoardPostWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 	if res.err == nil {
 		t.Fatalf(
 			"CODEPART HIJACK ACCEPTED: the var-len-state script verified with a single byte "+
@@ -776,6 +887,7 @@ func TestCodePartHijack_VarLenState_DeepByteFlip(t *testing.T) {
 			mid, len(honest), honest[mid], forged[mid],
 		)
 	}
+	requireRejectedAt(t, res.rejection, "step 10 (byte-for-byte _codePart compare)", codePartBytesGuard(res.lockingHex))
 }
 
 // TestCodePartHijack_SplitPointCollision is the fixed-size-state twin of
@@ -815,16 +927,20 @@ func TestCodePartHijack_SplitPointCollision(t *testing.T) {
 
 	for _, k := range collisions {
 		forged := honest[:k]
-		res := runCounterSpendWithCodePart(t, forged, 9900, 100)
+		res := runCounterSpendWithCodePart(t, forged, codePartInputSatoshis, codePartChangeSatoshis)
 		if res.err == nil {
 			t.Errorf(
 				"CODEPART HIJACK ACCEPTED at k=%d: a %d-byte claimed code part (the executing "+
 					"script truncated at its own interior 0x6a) passed authentication and "+
-					"redirected 9900/10000 sat into %s… — the exact split-point pin is gone",
+					"redirected 10000/10000 sat into %s… — the exact split-point pin is gone",
 				k, len(forged), res.continuationScriptHex[:64],
 			)
-		} else {
-			t.Logf("k=%d (%d bytes): rejected — %v", k, len(forged), res.err)
+			continue
 		}
+		// N-074: as the doc comment says, 8a is the ONLY guard this forgery
+		// cannot satisfy — so it must be the one that rejects it.
+		t.Logf("k=%d (%d bytes): rejected — %s", k, len(forged), res.rejection)
+		requireRejectedAt(t, res.rejection, "clause 8a (exact split point, SIZE(rest) == 9)",
+			codePartExactSplitGuard(res.lockingHex))
 	}
 }

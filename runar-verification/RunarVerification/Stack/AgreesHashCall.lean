@@ -775,7 +775,11 @@ theorem lowerMethod_ops_hashAssert
         [arg, expected] d (.call func [arg])
       = ([StackOp.opcode op], ([d, expected] : Lower.StackMap), [d, ok, anm])) :
     (Lower.lowerMethod progMethods props anfM).ops = hashAssertOps op := by
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter
+  -- shadow-rename is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [hashAssertBody, Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   simp only [List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil,
     List.nil_append, List.cons_append]
@@ -789,6 +793,12 @@ theorem lowerMethod_ops_hashAssert
   have hEndsAssert : Lower.bodyEndsInAssert
       (hashAssertBody d ok anm arg expected func s1 s2 s3) = true := by
     simp [hashAssertBody, Lower.bodyEndsInAssert]
+  -- F-148: this body does not end in an `if`, so the terminal-`if` lowering
+  -- path of `lowerMethodCore` is not taken.
+  have hEndsIf : Lower.bodyEndsInIf
+      (hashAssertBody d ok anm arg expected func s1 s2 s3) = false := by
+    simp [hashAssertBody, Lower.bodyEndsInIf]
+  simp only [hEndsIf, Bool.and_false, Bool.false_eq_true, if_false]
   have hNoDeser : Lower.bindingsUseDeserializeState
       (hashAssertBody d ok anm arg expected func s1 s2 s3) = false := by
     simp [hashAssertBody, Lower.bindingsUseDeserializeState]
@@ -1180,7 +1190,11 @@ theorem lowerMethod_ops_hashChain
     · exact Or.inr (Or.inl h)
     · exact Or.inr (Or.inr (Or.inl h))
     · exact Or.inr (Or.inr (Or.inr h))
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter
+  -- shadow-rename is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [hashChainBody, Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   simp only [List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil,
     List.nil_append]

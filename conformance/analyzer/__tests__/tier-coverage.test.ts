@@ -26,6 +26,14 @@ describe('decideMissingTierAction', () => {
     expect(decideMissingTierAction(['zig'], { CI: 'true' })).toBe('fail');
   });
 
+  it('N-236: fails hard under CI=1 too — not only the literal CI=true GitHub sets', () => {
+    // A runner exporting CI=1 (GitLab CI and many self-hosted runners) used
+    // to fall through to 'warn' because the check compared CI directly
+    // against the literal string "true".
+    expect(decideMissingTierAction(['zig'], { CI: '1' })).toBe('fail');
+    expect(decideMissingTierAction(['zig'], { CI: 'yes' })).toBe('fail');
+  });
+
   it('fails hard under RUNAR_CONFORMANCE_STRICT', () => {
     expect(decideMissingTierAction(['zig'], { RUNAR_CONFORMANCE_STRICT: '1' })).toBe('fail');
     expect(decideMissingTierAction(['zig'], { RUNAR_CONFORMANCE_STRICT: 'true' })).toBe('fail');

@@ -380,8 +380,8 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(mod.eval_bin_op('/', -7, 2)).to eq(-3)
     end
 
-    it 'returns 0 on division by zero' do
-      expect(mod.eval_bin_op('/', 5, 0)).to eq(0)
+    it 'refuses division by zero (OP_DIV aborts the script; was: returned 0, N-102)' do
+      expect { mod.eval_bin_op('/', 5, 0) }.to raise_error(RuntimeError, /division by zero/)
     end
 
     it 'computes modulo truncating toward zero' do
@@ -794,8 +794,8 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
   # shape the compiler actually emits.
   #
   # +conformance/tests/shift-ops+ is a live example: +left = this.a << 3n;
-  # assert(left >= 0n || left < 0n)+. With +a = 32+ the shift leaves the 1-byte
-  # [0x00] and OP_GREATERTHANOREQUAL aborts on chain.
+  # assert(left === expectedLeft)+. With +a = 32+ the shift leaves the 1-byte
+  # [0x00] and OP_NUMEQUALVERIFY (the left check; the final assert is OP_NUMEQUAL) aborts on chain.
   # ---------------------------------------------------------------------------
 
   describe '@ref: alias bindings carry the threaded stack bytes' do
@@ -900,8 +900,8 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(mod.eval_call('within', [10, 1, 10])).to be false
     end
 
-    it 'safediv returns 0 when divisor is zero' do
-      expect(mod.eval_call('safediv', [10, 0])).to eq(0)
+    it 'safediv aborts when divisor is zero, like the script (F-134)' do
+      expect { mod.eval_call('safediv', [10, 0]) }.to raise_error(RuntimeError, /safediv: division by zero/)
     end
 
     it 'safediv truncates toward zero' do
@@ -1554,6 +1554,49 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
     it 'round-trips through bin2num (smoke test only, NOT the evidence)' do
       [-1000, -128, -1, 0, 1, 128, 1000].each do |n|
         expect(mod.bin2num_int(mod.num2bin_hex(n, 8))).to eq(n)
+      end
+    end
+  end
+
+  # N-102: binary `/` and `%` refuse a zero divisor and truncate toward zero.
+  #
+  # Proves: the Ruby ANF interpreter raises on a zero divisor (OP_DIV / OP_MOD
+  # abort the script, so there is no post-state) and computes -7/2 == -3,
+  # -7%2 == -1 like the script. It used to return 0 for a zero divisor.
+  # Does not prove: agreement with an executed script (expected values are the
+  # OP_DIV / OP_MOD semantics); Ruby's native `/` and `%` in a .runar.rb
+  # contract floor and are not this interpreter.
+  describe 'binary / and % (N-102)' do
+    def div_anf(op, a, b)
+      {
+        'contractName' => 'DivOps',
+        'properties' => [{ 'name' => 'result', 'type' => 'bigint', 'readonly' => false }],
+        'methods' => [
+          { 'name' => 'constructor', 'params' => [], 'body' => [], 'isPublic' => false },
+          {
+            'name' => 'compute', 'params' => [], 'isPublic' => true,
+            'body' => [
+              { 'name' => 't0', 'value' => { 'kind' => 'load_const', 'value' => a } },
+              { 'name' => 't1', 'value' => { 'kind' => 'load_const', 'value' => b } },
+              { 'name' => 't2', 'value' => { 'kind' => 'bin_op', 'op' => op, 'left' => 't0', 'right' => 't1' } },
+              { 'name' => 't3', 'value' => { 'kind' => 'update_prop', 'name' => 'result', 'value' => 't2' } },
+            ],
+          },
+        ],
+      }
+    end
+
+    ['/', '%'].each do |op|
+      it "refuses a zero divisor for #{op}" do
+        expect { mod.compute_new_state(div_anf(op, 7, 0), 'compute', { 'result' => 0 }, {}) }
+          .to raise_error(RuntimeError, /by zero/)
+      end
+    end
+
+    [['/', -7, 2, -3], ['%', -7, 2, -1], ['/', 7, -2, -3], ['%', 7, -2, 1]].each do |op, a, b, want|
+      it "truncates toward zero: #{a} #{op} #{b} == #{want}" do
+        state = mod.compute_new_state(div_anf(op, a, b), 'compute', { 'result' => 0 }, {})
+        expect(state['result']).to eq(want)
       end
     end
   end

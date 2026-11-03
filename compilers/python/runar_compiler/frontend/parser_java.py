@@ -37,7 +37,17 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, assert_ast_nesting, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    bare_java_property_assignment_message,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +98,11 @@ TOK_PLUSPLUS = 40
 TOK_MINUSMINUS = 41
 TOK_LSHIFT = 42
 TOK_RSHIFT = 43
+TOK_LSHIFTEQ = 44
+TOK_RSHIFTEQ = 45
+TOK_AMPEQ = 46
+TOK_PIPEEQ = 47
+TOK_CARETEQ = 48
 
 # Keywords
 TOK_PACKAGE = 60
@@ -149,13 +164,17 @@ _KEYWORDS: dict[str, int] = {
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw", "neg_only")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, raw: str = "", neg_only: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # F-026: a number token's text as written, and whether it is valid
+        # only under a unary minus.
+        self.raw = raw
+        self.neg_only = neg_only
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +263,13 @@ def _parse_type_name(name: str) -> TypeNode:
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     n = len(source)
     pos = 0
     line = 1
-    col = 1
+    col = 0
 
     while pos < n:
         ch = source[pos]
@@ -262,7 +282,7 @@ def _tokenize(source: str) -> list[Token]:
         if ch == "\n":
             pos += 1
             line += 1
-            col = 1
+            col = 0
             continue
 
         # Line comments
@@ -278,7 +298,7 @@ def _tokenize(source: str) -> list[Token]:
             while pos + 1 < n and not (source[pos] == "*" and source[pos + 1] == "/"):
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
@@ -290,8 +310,14 @@ def _tokenize(source: str) -> list[Token]:
         l = line
         c = col
 
-        # Three-character operators: none that matter for our subset
-        # (>>> right-shift-unsigned, <<= etc. not supported).
+        # Three-character operators: <<= and >>= (N-134). `>>>` / `>>>=` are
+        # not supported and fall through to two-character tokens, as before.
+        three = source[pos:pos + 3]
+        if three in ("<<=", ">>="):
+            tokens.append(Token(TOK_LSHIFTEQ if three == "<<=" else TOK_RSHIFTEQ, three, l, c))
+            pos += 3
+            col += 3
+            continue
 
         # Two-character operators
         if pos + 1 < n:
@@ -308,6 +334,9 @@ def _tokenize(source: str) -> list[Token]:
                 "*=": TOK_STAREQ,
                 "/=": TOK_SLASHEQ,
                 "%=": TOK_PERCENTEQ,
+                "&=": TOK_AMPEQ,
+                "|=": TOK_PIPEEQ,
+                "^=": TOK_CARETEQ,
                 "++": TOK_PLUSPLUS,
                 "--": TOK_MINUSMINUS,
                 "<<": TOK_LSHIFT,
@@ -359,7 +388,12 @@ def _tokenize(source: str) -> list[Token]:
             pos += 1
             col += 1
             start = pos
-            while pos < n and source[pos] != '"':
+            # F-011: a Java string literal cannot span lines; one that
+            # reaches a line break (escaped or not) or end of file is
+            # unterminated and must never run on into the following lines.
+            while pos < n and source[pos] != '"' and source[pos] not in "\r\n":
+                if source[pos] == "\\" and (pos + 1 >= n or source[pos + 1] in "\r\n"):
+                    break
                 if source[pos] == "\\" and pos + 1 < n:
                     # Skip the escape sequence; we don't interpret escapes —
                     # Rúnar only uses these for ByteString.fromHex("...") hex
@@ -369,19 +403,23 @@ def _tokenize(source: str) -> list[Token]:
                     continue
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
             val = source[start:pos]
-            if pos < n:
+            if pos < n and source[pos] == '"':
                 pos += 1  # closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, l, c))
             tokens.append(Token(TOK_STRING, val, l, c))
             continue
 
         # Char literal — rejected later, but tokenize so we produce an error
         if ch == "'":
+            # F-011: refused exactly as the TS reference refuses it.
+            lex.append(lex_error(JAVA_CHAR_LITERAL, file_name, l, c))
             pos += 1
             col += 1
             start = pos
@@ -400,35 +438,22 @@ def _tokenize(source: str) -> list[Token]:
             tokens.append(Token(TOK_STRING, val, l, c))
             continue
 
-        # Hex integer literal 0x...
-        if ch == "0" and pos + 1 < n and source[pos + 1] in ("x", "X"):
-            start = pos
-            pos += 2
-            col += 2
-            while pos < n and (source[pos].isdigit() or source[pos] in "abcdefABCDEF_"):
-                pos += 1
-                col += 1
-            val = source[start:pos].replace("_", "")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
-            continue
-
-        # Numeric literal (decimal). Trailing L/l suffix accepted.
-        if ch.isdigit():
-            start = pos
-            while pos < n and (source[pos].isdigit() or source[pos] == "_"):
-                pos += 1
-                col += 1
-            if pos < n and source[pos] in ("L", "l"):
-                pos += 1
-                col += 1
-            val = source[start:pos].replace("_", "").rstrip("Ll")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
+        # Numeric literal (F-026): the whole glued [0-9A-Za-z_] run is one Java
+        # integer literal (JLS 3.10.1), with Java's value: hex / octal /
+        # binary int and long literals wrap to two's complement.
+        if "0" <= ch <= "9":
+            end, val, lit, raw = lex_number("java", source, pos, lex, file_name, l, c)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, val, l, c, raw, bool(lit and lit.neg_only)))
             continue
 
         # Identifier / keyword
-        if ch.isalpha() or ch == "_" or ch == "$":
+        # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        # as an unexpected character.
+        if ch.isascii() and (ch.isalpha() or ch == "_" or ch == "$"):
             start = pos
-            while pos < n and (source[pos].isalnum() or source[pos] in ("_", "$")):
+            while pos < n and source[pos].isascii() and (source[pos].isalnum() or source[pos] in ("_", "$")):
                 pos += 1
                 col += 1
             word = source[start:pos]
@@ -439,7 +464,9 @@ def _tokenize(source: str) -> list[Token]:
                 tokens.append(Token(TOK_IDENT, word, l, c))
             continue
 
-        # Unknown character — skip
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, l, c))
         pos += 1
         col += 1
 
@@ -452,6 +479,23 @@ def _tokenize(source: str) -> list[Token]:
 # ---------------------------------------------------------------------------
 
 
+# N-134: compound assignment token -> binary operator, exactly TS's ten
+# (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+# `t = t op e`.
+_COMPOUND_OPS = {
+    TOK_PLUSEQ: "+",
+    TOK_MINUSEQ: "-",
+    TOK_STAREQ: "*",
+    TOK_SLASHEQ: "/",
+    TOK_PERCENTEQ: "%",
+    TOK_AMPEQ: "&",
+    TOK_PIPEEQ: "|",
+    TOK_CARETEQ: "^",
+    TOK_LSHIFTEQ: "<<",
+    TOK_RSHIFTEQ: ">>",
+}
+
+
 class _JavaParseError(Exception):
     """Raised on unrecoverable parse errors; bubbles up to parse_java."""
 
@@ -462,6 +506,8 @@ class _JavaParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     # -- Token helpers -------------------------------------------------------
 
@@ -557,8 +603,8 @@ class _JavaParser:
             parent_class = "UnsafeSmartContract"
         else:
             raise _JavaParseError(
-                f"contract class in {self.file_name} must extend SmartContract, "
-                f"StatefulSmartContract, or UnsafeSmartContract, got {parent_name}"
+                f"unknown parent class: '{parent_name}', expected SmartContract, "
+                "StatefulSmartContract, or UnsafeSmartContract"
             )
 
         # Ignore implements clause entirely.
@@ -594,7 +640,7 @@ class _JavaParser:
         if constructor is None:
             constructor = self._synthetic_constructor(properties, class_loc)
 
-        return ContractNode(
+        contract = ContractNode(
             name=class_name,
             parent_class=parent_class,
             properties=properties,
@@ -602,21 +648,140 @@ class _JavaParser:
             methods=methods,
             source_file=self.file_name,
         )
+        # F-213: measure (B) before the recursive N-023 walk below.
+        assert_ast_nesting(contract)
+        self._check_bare_property_assignments(contract)
+        return contract
+
+    def _check_bare_property_assignments(self, contract: ContractNode) -> None:
+        """N-023 (R49). In Java a bare name inside a method that no local or
+        parameter shadows IS the field, so ``count = ...``, ``count += ...``,
+        ``count++`` and ``--count`` write contract state. Lowering them as a
+        local rebind dropped the state write silently, so the bare form is
+        refused (mirrors the TS reference's checkBarePropertyAssignments).
+        Shadowing follows Java block scope: parameters, a local from its
+        declaration to the end of its block, a for-loop variable inside the
+        loop. Bare reads are not touched."""
+        props = {p.name for p in contract.properties}
+        if not props:
+            return
+
+        def check_target(e, scope: list[set[str]], loc) -> None:
+            if isinstance(e, Identifier) and e.name in props \
+                    and not any(e.name in s for s in scope):
+                self.errors.append(Diagnostic(
+                    message=bare_java_property_assignment_message(e.name),
+                    severity=Severity.ERROR, loc=loc))
+
+        def walk_expr(e, scope: list[set[str]], loc) -> None:
+            if e is None:
+                return
+            if isinstance(e, (IncrementExpr, DecrementExpr)):
+                check_target(e.operand, scope, loc)
+                walk_expr(e.operand, scope, loc)
+            elif isinstance(e, BinaryExpr):
+                walk_expr(e.left, scope, loc)
+                walk_expr(e.right, scope, loc)
+            elif isinstance(e, UnaryExpr):
+                walk_expr(e.operand, scope, loc)
+            elif isinstance(e, CallExpr):
+                walk_expr(e.callee, scope, loc)
+                for a in e.args:
+                    walk_expr(a, scope, loc)
+            elif isinstance(e, MemberExpr):
+                walk_expr(e.object, scope, loc)
+            elif isinstance(e, TernaryExpr):
+                walk_expr(e.condition, scope, loc)
+                walk_expr(e.consequent, scope, loc)
+                walk_expr(e.alternate, scope, loc)
+            elif isinstance(e, IndexAccessExpr):
+                walk_expr(e.object, scope, loc)
+                walk_expr(e.index, scope, loc)
+            elif isinstance(e, ArrayLiteralExpr):
+                for el in e.elements:
+                    walk_expr(el, scope, loc)
+
+        def walk_stmt(s, scope: list[set[str]]) -> None:
+            if s is None:
+                return
+            loc = s.source_location
+            if isinstance(s, VariableDeclStmt):
+                walk_expr(s.init, scope, loc)
+                scope[-1].add(s.name)
+            elif isinstance(s, AssignmentStmt):
+                check_target(s.target, scope, loc)
+                walk_expr(s.target, scope, loc)
+                walk_expr(s.value, scope, loc)
+            elif isinstance(s, IfStmt):
+                walk_expr(s.condition, scope, loc)
+                walk_block(s.then, scope)
+                if s.else_:
+                    walk_block(s.else_, scope)
+            elif isinstance(s, ForStmt):
+                loop = scope + [set()]
+                walk_stmt(s.init, loop)
+                walk_expr(s.condition, loop, loc)
+                walk_stmt(s.update, loop)
+                walk_block(s.body, loop)
+            elif isinstance(s, ReturnStmt):
+                walk_expr(s.value, scope, loc)
+            elif isinstance(s, ExpressionStmt):
+                walk_expr(s.expr, scope, loc)
+
+        def walk_block(body: list, outer: list[set[str]]) -> None:
+            scope = outer + [set()]
+            for s in body:
+                walk_stmt(s, scope)
+
+        for m in [contract.constructor, *contract.methods]:
+            walk_block(m.body, [{p.name for p in m.params}])
 
     # -- Annotations ---------------------------------------------------------
 
-    def _skip_annotations(self) -> list[str]:
-        """Consume @Foo / @Foo(...) annotations, returning the bare names."""
+    # F-205: the annotation names Rúnar recognizes at member position,
+    # matching the TS reference (01-parse-java.ts, parseMember). Anything
+    # else is a loud "unsupported annotation" diagnostic when `validate`
+    # is requested, rather than a silent visibility downgrade.
+    # N-093: ``@EmbedAlways`` / ``@Sighash("FLAGS")`` are the native spellings
+    # of the ``@embedAlways`` / ``@sighash`` directives.
+    _KNOWN_ANNOTATIONS = {
+        "Readonly", "Public", "Stateful", "Override", "SuppressWarnings", "EmbedAlways", "Sighash",
+    }
+
+    def _skip_annotations(
+        self,
+        validate: bool = False,
+        records: list[tuple[str, list[Token], SourceLocation]] | None = None,
+    ) -> list[str]:
+        """Consume @Foo / @pkg.Foo(...) annotations, returning the simple
+        (rightmost) names. F-205: a qualified name (@runar.lang.annotations
+        .Public) is read in full, not just its leading segment. With
+        validate=True — member position only, matching the TS reference —
+        an annotation whose simple name is not recognized is reported as
+        "unsupported annotation @<name>" instead of being silently ignored.
+        N-093: ``records``, when given, receives ``(name, argument tokens
+        from '(' through ')' or [], location of '@')`` for each annotation."""
         names: list[str] = []
         while self.check(TOK_AT):
+            start_loc = self.loc()
             self.advance()  # @
+            name = ""
             if self.peek().kind == TOK_IDENT or self.peek().kind in (
                 TOK_PUBLIC, TOK_PRIVATE, TOK_PROTECTED, TOK_STATIC, TOK_FINAL
             ):
-                names.append(self.peek().value)
+                name = self.peek().value
                 self.advance()
+                # Qualified annotation name: keep consuming `.ident` and
+                # take the rightmost segment as the simple name.
+                while self.check(TOK_DOT) and self.peek(1).kind == TOK_IDENT:
+                    self.advance()  # .
+                    name = self.peek().value
+                    self.advance()
+            if name:
+                names.append(name)
             # Optional (...) arguments. We tolerate arbitrary token sequences
             # inside — they're ignored for our subset.
+            arg_start = self.pos
             if self.check(TOK_LPAREN):
                 self.advance()
                 depth = 1
@@ -629,6 +794,12 @@ class _JavaParser:
                             self.advance()
                             break
                     self.advance()
+            if records is not None and name:
+                records.append((name, self.tokens[arg_start:self.pos], start_loc))
+            if validate and name and name not in self._KNOWN_ANNOTATIONS:
+                self.errors.append(Diagnostic(
+                    message=f"unsupported annotation @{name}",
+                    severity=Severity.ERROR, loc=start_loc))
         return names
 
     # -- Class members -------------------------------------------------------
@@ -636,21 +807,36 @@ class _JavaParser:
     def _parse_member(self, class_name: str) -> PropertyNode | MethodNode | None:
         loc = self.loc()
 
-        anns = self._skip_annotations()
+        # N-093: every member annotation with its arguments and location.
+        records: list[tuple[str, list[Token], SourceLocation]] = []
+        anns = self._skip_annotations(validate=True, records=records)
         readonly = any(a == "Readonly" for a in anns)
         is_public_ann = any(a == "Public" for a in anns)
 
-        # Skip Java modifiers — they don't affect the AST.
+        # Skip Java modifiers — they don't affect the AST, except `static`
+        # (N-050).
+        is_static = False
         while self.check(TOK_PUBLIC) or self.check(TOK_PRIVATE) or \
                 self.check(TOK_PROTECTED) or self.check(TOK_STATIC) or \
                 self.check(TOK_FINAL):
+            if self.check(TOK_STATIC):
+                is_static = True
             self.advance()
         # Annotations can also appear between modifiers.
-        more_anns = self._skip_annotations()
+        more_anns = self._skip_annotations(validate=True, records=records)
         if any(a == "Readonly" for a in more_anns):
             readonly = True
         if any(a == "Public" for a in more_anns):
             is_public_ann = True
+
+        # N-093: `@EmbedAlways` / `@Sighash("FLAGS")`.
+        embed_loc: SourceLocation | None = next((r[2] for r in records if r[0] == "EmbedAlways"), None)
+        sighash_recs = [r for r in records if r[0] == "Sighash"]
+        sighash_specs: list[str | None] = [
+            args[1].value if len(args) == 3 and args[1].kind == TOK_STRING else None
+            for _, args, _ in sighash_recs
+        ]
+        sighash_loc: SourceLocation | None = sighash_recs[0][2] if sighash_recs else None
 
         if self.check(TOK_RBRACE) or self.check(TOK_EOF):
             return None
@@ -658,7 +844,15 @@ class _JavaParser:
         # Constructor: Name(...) { ... }
         if self.peek().kind == TOK_IDENT and self.peek().value == class_name \
                 and self.peek(1).kind == TOK_LPAREN:
-            return self._parse_constructor(class_name, loc)
+            ctor = self._parse_constructor(class_name, loc)
+            # N-093: the constructor is neither a spending entry point nor a field.
+            if sighash_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@sighash"), severity=Severity.ERROR, loc=sighash_loc))
+            if embed_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@embedAlways"), severity=Severity.ERROR, loc=embed_loc))
+            return ctor
 
         # Otherwise it's a field or method. Both start with a type then a name.
         # If the token after the type+name is `(`, it's a method; else a field.
@@ -683,9 +877,27 @@ class _JavaParser:
         self.advance()
 
         if self.check(TOK_LPAREN):
-            return self._parse_method(
+            if is_static:
+                # N-050: a static method is not a contract method (`@Public
+                # static` used to become a spending entry point).
+                self.errors.append(Diagnostic(
+                    message=static_method_message(member_name),
+                    severity=Severity.ERROR, loc=loc))
+            method = self._parse_method(
                 member_name, type_node, is_public_ann, loc
             )
+            if embed_loc is not None:
+                self.errors.append(Diagnostic(
+                    message=lost_directive_message("@embedAlways"), severity=Severity.ERROR, loc=embed_loc))
+            sighash = resolve_native_sighash(member_name, is_public_ann, sighash_specs)
+            if sighash is not None and sighash.error is not None:
+                self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=loc))
+            elif sighash is not None:
+                method.sighash_type = sighash.value
+            return method
+        if sighash_loc is not None:
+            self.errors.append(Diagnostic(
+                message=lost_directive_message("@sighash"), severity=Severity.ERROR, loc=sighash_loc))
 
         # Field declaration: optional `= initializer`, then `;`.
         init_expr: Expression | None = None
@@ -698,6 +910,7 @@ class _JavaParser:
             type=type_node,
             readonly=readonly,
             initializer=init_expr,
+            embed_always=embed_loc is not None,
             source_location=loc,
         )
 
@@ -724,9 +937,9 @@ class _JavaParser:
         params = self._parse_params()
         visibility = "public" if is_public_ann else "private"
         body = self._parse_block()
-        # return_type is intentionally unused by the Python-side AST: methods
-        # in Rúnar are declared by their body structure.
-        _ = return_type
+        # The AST keeps no return type: methods in Rúnar are declared by their
+        # body structure. N-331 refuses an unknown return type name.
+        reject_unknown_return_type(self.errors, return_type, name, loc, visibility == "public")
         return MethodNode(
             name=name,
             params=params,
@@ -825,7 +1038,8 @@ class _JavaParser:
         # FixedArray<T, N>
         if name == "FixedArray" and self.check(TOK_LT):
             self.advance()  # <
-            element = self._parse_type()
+            with self._nest.nested(self.loc):
+                element = self._parse_type()
             self.expect(TOK_COMMA, "',' in FixedArray")
             len_tok = self.expect(TOK_NUMBER, "integer literal length")
             try:
@@ -865,13 +1079,24 @@ class _JavaParser:
         self.expect(TOK_LBRACE, "'{'")
         stmts: list[Statement] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-            stmts.append(self._parse_statement())
+            stmt = self._parse_statement()
+            if stmt is not None:
+                stmts.append(stmt)
         self.expect(TOK_RBRACE, "'}'")
         return stmts
 
-    def _parse_statement(self) -> Statement:
+    def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self.loc()
         tok = self.peek()
+
+        # N-053: an empty statement `;` is a no-op, as in the TS reference.
+        if tok.kind == TOK_SEMI:
+            self.advance()
+            return None
 
         # Block → flatten single block to its statements sequence. The Java
         # reference parser rejects nested blocks; we follow suit.
@@ -1000,7 +1225,8 @@ class _JavaParser:
     def _parse_stmt_or_block(self) -> list[Statement]:
         if self.check(TOK_LBRACE):
             return self._parse_block()
-        return [self._parse_statement()]
+        stmt = self._parse_statement()
+        return [stmt] if stmt is not None else []
 
     def _parse_for(self, loc: SourceLocation) -> Statement:
         self.expect(TOK_FOR, "'for'")
@@ -1038,22 +1264,13 @@ class _JavaParser:
                 update_stmt = AssignmentStmt(
                     target=target, value=rhs, source_location=update_loc
                 )
-            elif self.check(TOK_PLUSEQ):
-                self.advance()
+            elif self.peek().kind in _COMPOUND_OPS:
+                op = _COMPOUND_OPS[self.advance().kind]
                 rhs = self._parse_expression()
                 target = self._to_assign_target(update_expr)
                 update_stmt = AssignmentStmt(
                     target=target,
-                    value=BinaryExpr(op="+", left=target, right=rhs),
-                    source_location=update_loc,
-                )
-            elif self.check(TOK_MINUSEQ):
-                self.advance()
-                rhs = self._parse_expression()
-                target = self._to_assign_target(update_expr)
-                update_stmt = AssignmentStmt(
-                    target=target,
-                    value=BinaryExpr(op="-", left=target, right=rhs),
+                    value=BinaryExpr(op=op, left=target, right=rhs),
                     source_location=update_loc,
                 )
             else:
@@ -1089,14 +1306,7 @@ class _JavaParser:
             return AssignmentStmt(target=target, value=value, source_location=loc)
 
         # Compound assignments map to `target = target <op> rhs`.
-        compound_map = {
-            TOK_PLUSEQ: "+",
-            TOK_MINUSEQ: "-",
-            TOK_STAREQ: "*",
-            TOK_SLASHEQ: "/",
-            TOK_PERCENTEQ: "%",
-        }
-        for tok_kind, op in compound_map.items():
+        for tok_kind, op in _COMPOUND_OPS.items():
             if self.check(tok_kind):
                 self.advance()
                 rhs = self._parse_expression()
@@ -1114,7 +1324,8 @@ class _JavaParser:
     # -- Expressions (precedence climbing) -----------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         cond = self._parse_or()
@@ -1128,128 +1339,153 @@ class _JavaParser:
         return cond
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match_tok(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_or()
         while self.match_tok(TOK_AMPAMP):
             right = self._parse_bit_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_xor()
         while self.match_tok(TOK_PIPE):
             right = self._parse_bit_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_and()
         while self.match_tok(TOK_CARET):
             right = self._parse_bit_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match_tok(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match_tok(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = _fold_compare_to_zero("===", left, right)
+                left = _fold_compare_to_zero("===", left, right, start)
             elif self.match_tok(TOK_BANGEQ):
                 right = self._parse_comparison()
-                left = _fold_compare_to_zero("!==", left, right)
+                left = _fold_compare_to_zero("!==", left, right, start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match_tok(TOK_LT):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero("<", left, right)
+                left = _fold_compare_to_zero("<", left, right, start)
             elif self.match_tok(TOK_LTEQ):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero("<=", left, right)
+                left = _fold_compare_to_zero("<=", left, right, start)
             elif self.match_tok(TOK_GT):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero(">", left, right)
+                left = _fold_compare_to_zero(">", left, right, start)
             elif self.match_tok(TOK_GTEQ):
                 right = self._parse_shift()
-                left = _fold_compare_to_zero(">=", left, right)
+                left = _fold_compare_to_zero(">=", left, right, start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_add()
         while True:
             if self.match_tok(TOK_LSHIFT):
                 right = self._parse_add()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_RSHIFT):
                 right = self._parse_add()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_add(self) -> Expression:
+        start = self.loc()
         left = self._parse_mul()
         while True:
             if self.match_tok(TOK_PLUS):
                 right = self._parse_mul()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_MINUS):
                 right = self._parse_mul()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_mul(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match_tok(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match_tok(TOK_BANG):
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="!", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_TILDE):
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="~", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_MINUS):
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+            # legal only as the direct operand of this minus.
+            if self.check(TOK_NUMBER):
+                self.peek().neg_only = False
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="-", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_PLUS):
             # Unary +x == x (matches Java parser reference).
-            return self._parse_unary()
+            with self._nest.nested(self.loc):
+                return self._parse_unary()
         if self.match_tok(TOK_PLUSPLUS):
-            return IncrementExpr(operand=self._parse_unary(), prefix=True)
+            with self._nest.nested(self.loc):
+                return IncrementExpr(operand=self._parse_unary(), prefix=True)
         if self.match_tok(TOK_MINUSMINUS):
-            return DecrementExpr(operand=self._parse_unary(), prefix=True)
+            with self._nest.nested(self.loc):
+                return DecrementExpr(operand=self._parse_unary(), prefix=True)
         return self._parse_postfix()
 
     def _parse_postfix(self) -> Expression:
@@ -1291,7 +1527,7 @@ class _JavaParser:
             self.advance()  # (
             hex_tok = self.advance()  # string
             self.advance()  # )
-            return ByteStringLiteral(value=hex_tok.value)
+            return ByteStringLiteral(value=hex_tok.value, source_location=SourceLocation(file=self.file_name, line=hex_tok.line, column=hex_tok.col))
 
         # Special-case `asm("<hex>", in_arity, out_arity)` — the asm() intrinsic
         # body is the only call position where a bare String literal is legal.
@@ -1305,7 +1541,7 @@ class _JavaParser:
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
             if is_asm_call and first_arg and self.peek().kind == TOK_STRING:
                 str_tok = self.advance()
-                args.append(ByteStringLiteral(value=str_tok.value))
+                args.append(ByteStringLiteral(value=str_tok.value, source_location=SourceLocation(file=self.file_name, line=str_tok.line, column=str_tok.col)))
             else:
                 args.append(self._parse_expression())
             first_arg = False
@@ -1385,9 +1621,11 @@ class _JavaParser:
         tok = self.peek()
 
         if tok.kind == TOK_NUMBER:
+            if tok.neg_only:
+                self.errors.append(lex_error(invalid_integer_literal("java", tok.raw), self.file_name, tok.line, tok.col))
             self.advance()
             try:
-                val = int(tok.value, 0) if tok.value.startswith(("0x", "0X")) else int(tok.value)
+                val = int(tok.value)
             except ValueError:
                 val = 0
             return BigIntLiteral(value=val)
@@ -1447,7 +1685,7 @@ class _JavaParser:
         # over.
         if tok.kind == TOK_IDENT:
             self.advance()
-            return Identifier(name=tok.value)
+            return Identifier(name=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         raise _JavaParseError(
             f"line {tok.line}:{tok.col}: unexpected token {tok.value!r}"
@@ -1590,18 +1828,18 @@ def _is_bigint_of_callee(callee: Expression) -> bool:
 _COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "===", "!=="})
 
 
-def _fold_compare_to_zero(op: str, left: Expression, right: Expression) -> Expression:
+def _fold_compare_to_zero(op: str, left: Expression, right: Expression, start) -> Expression:
     if op not in _COMPARISON_OPS:
-        return BinaryExpr(op=op, left=left, right=right)
+        return BinaryExpr(op=op, left=left, right=right, source_location=start)
     pair = _compare_to_receiver_arg(left)
     if pair is not None and isinstance(right, BigIntLiteral) and right.value == 0:
         a, b = pair
-        return BinaryExpr(op=op, left=a, right=b)
+        return BinaryExpr(op=op, left=a, right=b, source_location=start)
     pair = _compare_to_receiver_arg(right)
     if pair is not None and isinstance(left, BigIntLiteral) and left.value == 0:
         a, b = pair
-        return BinaryExpr(op=op, left=b, right=a)
-    return BinaryExpr(op=op, left=left, right=right)
+        return BinaryExpr(op=op, left=b, right=a, source_location=start)
+    return BinaryExpr(op=op, left=left, right=right, source_location=start)
 
 
 def _compare_to_receiver_arg(e: Expression):
@@ -1620,9 +1858,21 @@ def _compare_to_receiver_arg(e: Expression):
 
 
 def parse_java(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_java_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_java_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Java-syntax Runar contract (.runar.java)."""
     parser = _JavaParser(file_name)
-    parser.tokens = _tokenize(source)
+    parser.tokens = _tokenize(source, lex, file_name)
     parser.pos = 0
 
     try:

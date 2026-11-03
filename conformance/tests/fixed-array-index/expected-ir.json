@@ -186,6 +186,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "initialValue": 10,

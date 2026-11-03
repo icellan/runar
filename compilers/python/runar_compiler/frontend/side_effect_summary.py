@@ -7,6 +7,10 @@ the contract's continuation requirements. Walks the private-method
 call graph so effects buried inside private helpers surface to their
 public callers.
 
+Also consumed by ``typecheck.py``'s requireOutputP2PKH output-layout
+guards (Crit-3, R-300, index-0 continuation collision) — F-075: those
+guards must see the same effects the continuation is injected from.
+
 Consumed by ``anf_lower.py`` for:
 
   - Auto-injecting continuation parameters (``_changePKH``,
@@ -28,6 +32,7 @@ from dataclasses import dataclass
 from .ast_nodes import (
     ArrayLiteralExpr,
     AssignmentStmt,
+    BigIntLiteral,
     BinaryExpr,
     CallExpr,
     ContractNode,
@@ -63,12 +68,28 @@ class MethodEffects:
     has_state_output: bool = False
     has_data_output: bool = False
     uses_preimage: bool = False
+    # Calls requireOutputP2PKH(...) with any output index.
+    calls_require_output_p2pkh: bool = False
+    # Calls requireOutputP2PKH(0, ...) (literal index 0).
+    requires_output_p2pkh_zero: bool = False
+    # Calls extractPrevOutputScript(...) (N-315).
+    calls_extract_prev_output_script: bool = False
 
     def union(self, other: "MethodEffects") -> None:
         self.mutates_state = self.mutates_state or other.mutates_state
         self.has_state_output = self.has_state_output or other.has_state_output
         self.has_data_output = self.has_data_output or other.has_data_output
         self.uses_preimage = self.uses_preimage or other.uses_preimage
+        self.calls_require_output_p2pkh = (
+            self.calls_require_output_p2pkh or other.calls_require_output_p2pkh
+        )
+        self.requires_output_p2pkh_zero = (
+            self.requires_output_p2pkh_zero or other.requires_output_p2pkh_zero
+        )
+        self.calls_extract_prev_output_script = (
+            self.calls_extract_prev_output_script
+            or other.calls_extract_prev_output_script
+        )
 
 
 @dataclass
@@ -76,14 +97,21 @@ class ContinuationShape:
     """Continuation requirements derived from MethodEffects."""
 
     needs_change: bool
+    # N-038: ``_changePKH`` / ``_changeAmount`` injection and the change
+    # segment of the continuation hash. Equal to ``needs_change`` except under
+    # a SIGHASH_SINGLE base, where BIP-143 commits hashOutputs to the
+    # same-index output only, so the change output is not committed.
+    includes_change: bool
     needs_new_amount: bool
     is_terminal: bool
 
 
-def continuation_shape_for(eff: MethodEffects) -> ContinuationShape:
+def continuation_shape_for(eff: MethodEffects, sighash_type: int | None = None) -> ContinuationShape:
     needs_change = (
         eff.mutates_state or eff.has_state_output or eff.has_data_output
     )
+    mode = 0x41 if sighash_type is None else sighash_type
+    includes_change = needs_change and (mode & 0x1F) != 0x03
     # addOutput / addRawOutput already specify per-output amounts, so
     # when those are present the single-output _newAmount is redundant.
     # Otherwise the single-output continuation path needs _newAmount to
@@ -93,9 +121,18 @@ def continuation_shape_for(eff: MethodEffects) -> ContinuationShape:
     )
     return ContinuationShape(
         needs_change=needs_change,
+        includes_change=includes_change,
         needs_new_amount=needs_new_amount,
         is_terminal=not needs_change,
     )
+
+
+class _NeedCallee(Exception):
+    """Raised by a body walk that needs a callee classified first (N-264)."""
+
+    def __init__(self, target: MethodNode) -> None:
+        super().__init__(target.name)
+        self.target = target
 
 
 def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffects]:
@@ -114,6 +151,24 @@ def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffec
     }
     in_progress: set[str] = set()
 
+    # N-264: the walk is ITERATIVE across calls. It used to classify a callee
+    # by recursing from inside the caller's statement walk, so the host stack
+    # held every caller's nesting at once: a chain of D helpers that each call
+    # the next under K nested ifs (both within their own bounds) needed D*K
+    # frames. Now a body walk that meets an unclassified callee abandons itself
+    # (``_NeedCallee``), the callee is classified first on an explicit work
+    # stack, and the caller's walk restarts. The walk is pure, so a restart
+    # yields exactly what the recursive walk did, in the same visit order with
+    # the same in-progress set.
+    def callee_effects(target: MethodNode) -> MethodEffects:
+        if target.name in summary:
+            return summary[target.name]
+        if target.name in in_progress:
+            # Validation should reject recursion before we get here;
+            # return empty effects defensively to avoid infinite loops.
+            return MethodEffects()
+        raise _NeedCallee(target)
+
     def classify(method_name: str, body: list[Statement]) -> MethodEffects:
         if method_name in summary:
             return summary[method_name]
@@ -121,13 +176,22 @@ def compute_side_effect_summary(contract: ContractNode) -> dict[str, MethodEffec
             # Validation should reject recursion before we get here;
             # return empty effects defensively to avoid infinite loops.
             return MethodEffects()
+        work: list[tuple[str, list[Statement]]] = [(method_name, body)]
         in_progress.add(method_name)
-        effects = MethodEffects()
-        for stmt in body:
-            _collect_stmt(stmt, effects, mutable_props, private_by_name, classify)
-        in_progress.discard(method_name)
-        summary[method_name] = effects
-        return effects
+        while work:
+            name, stmts = work[-1]
+            effects = MethodEffects()
+            try:
+                for stmt in stmts:
+                    _collect_stmt(stmt, effects, mutable_props, private_by_name, callee_effects)
+            except _NeedCallee as need:
+                in_progress.add(need.target.name)
+                work.append((need.target.name, need.target.body))
+                continue
+            work.pop()
+            in_progress.discard(name)
+            summary[name] = effects
+        return summary[method_name]
 
     classify("constructor", contract.constructor.body)
     for m in contract.methods:
@@ -216,14 +280,22 @@ def _collect_expr(
                 into.has_data_output = True
             target = private_by_name.get(callee_name)
             if target is not None:
-                into.union(classify(target.name, target.body))
+                into.union(classify(target))
 
         if isinstance(callee, Identifier):
             if callee.name == "checkPreimage":
                 into.uses_preimage = True
+            if callee.name == "requireOutputP2PKH":
+                into.calls_require_output_p2pkh = True
+                if expr.args:
+                    idx = expr.args[0]
+                    if isinstance(idx, BigIntLiteral) and idx.value == 0:
+                        into.requires_output_p2pkh_zero = True
+            if callee.name == "extractPrevOutputScript":
+                into.calls_extract_prev_output_script = True
             target = private_by_name.get(callee.name)
             if target is not None:
-                into.union(classify(target.name, target.body))
+                into.union(classify(target))
 
         for arg in expr.args:
             _collect_expr(arg, into, mutable_props, private_by_name, classify)

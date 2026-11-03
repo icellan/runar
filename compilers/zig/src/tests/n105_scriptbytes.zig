@@ -173,6 +173,8 @@ fn typecheckHasError(a: std.mem.Allocator, src: []const u8, needle: []const u8) 
 fn compileHex(a: std.mem.Allocator, src: []const u8) ![]const u8 {
     const result = try compiler_api.compileSource(a, src, "C.runar.ts");
     if (result.artifact_json) |j| a.free(j);
+    for (result.warnings) |line| a.free(line);
+    a.free(result.warnings);
     return result.script_hex;
 }
 

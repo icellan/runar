@@ -67,6 +67,16 @@ fn const_int(name: &str, n: i64) -> ANFBinding {
     }
 }
 
+fn load_param(name: &str, param_name: &str) -> ANFBinding {
+    ANFBinding {
+        name: name.to_string(),
+        value: ANFValue::LoadParam {
+            name: param_name.to_string(),
+        },
+        source_loc: None,
+    }
+}
+
 fn call(name: &str, func: &str, args: Vec<&str>) -> ANFBinding {
     ANFBinding {
         name: name.to_string(),
@@ -321,6 +331,53 @@ fn test_rule12_ecmul_g_becomes_ecmulgen() {
             assert_eq!(args, &["t1"], "Rule 12: expected args [t1], got {args:?}");
         }
         other => panic!("Rule 12: expected Call(ecMulGen), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule 9: ecMul(ecMul(p, k1), k2) → ecMul(p, k1*k2) (associative scalar fold)
+//
+// Mirrors the "ec-mul-associative" probe in
+// packages/runar-compiler/src/__tests__/r034-ec-rules-completeness.test.ts,
+// which is the cross-tier reference for this rule (TS checks itself against
+// the JSON spec `optimizer/ec-rules.json`; this test checks Rust against that
+// same probe shape). `p` is a `load_param` binding, not a constant point, so
+// the rule is proven to match through a parameter reference and not merely
+// through two identical constant bindings.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rule9_ecmul_associative_folds_scalars() {
+    let bindings = vec![
+        load_param("p", "pt"),
+        const_int("five", 5),
+        const_int("seven", 7),
+        call("m1", "ecMul", vec!["p", "five"]),
+        call("t", "ecMul", vec!["m1", "seven"]),
+        assert_binding("a", "t"),
+    ];
+    let result = optimize_ec(make_program(bindings));
+    let body = get_body(&result);
+
+    let t = find_binding(body, "t").expect("binding t should be present");
+    match &t.value {
+        ANFValue::Call { func, args } => {
+            assert_eq!(func, "ecMul", "Rule 9: expected ecMul, got {func}");
+            assert_eq!(args[0], "p", "Rule 9: expected point p in slot 0, got {args:?}");
+            let scalar =
+                find_binding(body, &args[1]).expect("Rule 9: folded scalar binding should be present");
+            match &scalar.value {
+                ANFValue::LoadConst { value } => {
+                    assert_eq!(
+                        value.as_i64(),
+                        Some(35),
+                        "Rule 9: expected folded scalar 5*7=35, got {value}"
+                    );
+                }
+                other => panic!("Rule 9: expected LoadConst(35), got {other:?}"),
+            }
+        }
+        other => panic!("Rule 9: expected Call(ecMul), got {other:?}"),
     }
 }
 
@@ -675,6 +732,54 @@ fn test_rule10_ecadd_ecmulgen_plus_ecmulgen_becomes_ecmulgen_sum() {
             );
         }
         other => panic!("Rule 10: expected Call(ecMulGen), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule 11: ecAdd(ecMul(p, k1), ecMul(p, k2)) → ecMul(p, k1+k2) (distributive
+// scalar fold)
+//
+// Mirrors the "ec-mul-distributive" probe in
+// packages/runar-compiler/src/__tests__/r034-ec-rules-completeness.test.ts
+// (see Rule 9 above for why `p` is a `load_param`, not a constant point).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rule11_ecadd_distributive_folds_scalars() {
+    let bindings = vec![
+        load_param("p", "pt"),
+        const_int("five", 5),
+        const_int("seven", 7),
+        call("m1", "ecMul", vec!["p", "five"]),
+        call("m2", "ecMul", vec!["p", "seven"]),
+        call("t", "ecAdd", vec!["m1", "m2"]),
+        assert_binding("a", "t"),
+    ];
+    let result = optimize_ec(make_program(bindings));
+    let body = get_body(&result);
+
+    let t = find_binding(body, "t").expect("binding t should be present");
+    match &t.value {
+        ANFValue::Call { func, args } => {
+            assert_eq!(func, "ecMul", "Rule 11: expected ecMul, got {func}");
+            assert_eq!(
+                args[0], "p",
+                "Rule 11: expected shared point p in slot 0, got {args:?}"
+            );
+            let scalar =
+                find_binding(body, &args[1]).expect("Rule 11: folded scalar binding should be present");
+            match &scalar.value {
+                ANFValue::LoadConst { value } => {
+                    assert_eq!(
+                        value.as_i64(),
+                        Some(12),
+                        "Rule 11: expected folded scalar 5+7=12, got {value}"
+                    );
+                }
+                other => panic!("Rule 11: expected LoadConst(12), got {other:?}"),
+            }
+        }
+        other => panic!("Rule 11: expected Call(ecMul), got {other:?}"),
     }
 }
 

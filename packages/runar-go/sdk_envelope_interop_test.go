@@ -40,6 +40,13 @@ type fixtureDepthVector struct {
 	Envelope SignedEnvelope `json:"envelope"`
 }
 
+type fixtureMalleability struct {
+	VectorID string         `json:"_vector_id"`
+	ExpectOK bool           `json:"expect_ok"`
+	Reason   string         `json:"reason"`
+	Envelope SignedEnvelope `json:"envelope"`
+}
+
 type fixtureClockVector struct {
 	VectorID string `json:"_vector_id"`
 	// Pointers so a JSON null ("the caller supplies nothing") is
@@ -63,6 +70,19 @@ type fixture struct {
 	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
+	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
+	SizeLimits           struct {
+		MaxPayloadBytes int `json:"max_payload_bytes"`
+		MaxFieldBytes   int `json:"max_field_bytes"`
+	} `json:"size_limits"`
+	SizeVectors []fixtureSizeVector `json:"size_vectors"`
+}
+
+type fixtureSizeVector struct {
+	VectorID       string `json:"_vector_id"`
+	Field          string `json:"field"`
+	Length         int    `json:"length"`
+	ExpectTooLarge bool   `json:"expect_too_large"`
 }
 
 func loadFixture(t *testing.T) fixture {
@@ -338,12 +358,86 @@ func TestEnvelopeInterop_DepthVectors(t *testing.T) {
 	}
 }
 
+// TestEnvelopeInterop_MalleabilityVectors — F-138. A high-S signature (s
+// replaced by N - s) is still a valid ECDSA signature, and the TS reference
+// accepts it: BIP-62's low-S rule is transaction-script policy, not part of
+// the envelope protocol. Ruby used to reject it as bad-sig. Proves this tier
+// reaches the TS verdict on the fixture's high-S envelope; it does not prove
+// anything about signing (every tier's signer still emits low-S).
+func TestEnvelopeInterop_MalleabilityVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.MalleabilityVectors) == 0 {
+		t.Fatal("malleability_vectors missing or empty")
+	}
+	for _, mv := range f.MalleabilityVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: mv.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if mv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", mv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", mv.VectorID)
+			continue
+		}
+		if string(r.Reason) != mv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", mv.VectorID, r.Reason, mv.Reason)
+		}
+	}
+}
+
 // The bound is part of the wire contract, so the fixture pins it and every
 // tier asserts its own constant against the fixture's number.
 func TestEnvelopeInterop_PayloadDepthLimitMatchesFixture(t *testing.T) {
 	f := loadFixture(t)
 	if f.PayloadDepthLimit != MaxEnvelopePayloadDepth {
 		t.Fatalf("fixture payload_depth_limit=%d, MaxEnvelopePayloadDepth=%d", f.PayloadDepthLimit, MaxEnvelopePayloadDepth)
+	}
+}
+
+// TestEnvelopeInterop_SizeLimitsMatchFixture — F-296. The DoS size bound is
+// hard-coded per tier; the fixture's size_limits is the shared source of truth
+// and every tier pins its own constants to it. Does not prove the other six
+// tiers agree -- each replays this same fixture.
+func TestEnvelopeInterop_SizeLimitsMatchFixture(t *testing.T) {
+	f := loadFixture(t)
+	if f.SizeLimits.MaxPayloadBytes != MaxEnvelopePayloadBytes || f.SizeLimits.MaxFieldBytes != MaxEnvelopeFieldBytes {
+		t.Fatalf("fixture size_limits=%+v, MaxEnvelopePayloadBytes=%d MaxEnvelopeFieldBytes=%d",
+			f.SizeLimits, MaxEnvelopePayloadBytes, MaxEnvelopeFieldBytes)
+	}
+}
+
+// TestEnvelopeInterop_SizeVectors — F-296. Replays size_vectors: one byte over
+// each limit must be 'too-large'; exactly at the limit must be rejected for a
+// LATER reason (so the guard is not off by one). Proves this tier returns the
+// fixture reason; says nothing about the sig/pubkey being well-formed.
+func TestEnvelopeInterop_SizeVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.SizeVectors) < 6 {
+		t.Fatal("size_vectors missing or short")
+	}
+	for _, sv := range f.SizeVectors {
+		env := f.ValidEnvelope
+		big := strings.Repeat("x", sv.Length)
+		switch sv.Field {
+		case "payload":
+			env.Payload = big
+		case "sig":
+			env.Sig = big
+		case "pubkey":
+			env.Pubkey = big
+		default:
+			t.Fatalf("%s: unknown field %q", sv.VectorID, sv.Field)
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if r.OK {
+			t.Errorf("%s: expected ok=false", sv.VectorID)
+			continue
+		}
+		if got := r.Reason == ReasonTooLarge; got != sv.ExpectTooLarge {
+			t.Errorf("%s: reason=%s, expect_too_large=%v", sv.VectorID, r.Reason, sv.ExpectTooLarge)
+		}
 	}
 }
 

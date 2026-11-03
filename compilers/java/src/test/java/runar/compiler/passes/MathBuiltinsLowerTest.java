@@ -377,33 +377,39 @@ class MathBuiltinsLowerTest {
     }
 
     /* ================================================================== */
-    /* log2(n) — 64 iterations + final OP_NIP                              */
+    /* log2(n) — exact read of the minimal encoding (N-103)                */
     /* ================================================================== */
 
+    /**
+     * N-103 (user decision R86, 2026-10-21): this used to pin the 64-iteration
+     * halving loop (64 OP_DUP / OP_GREATERTHAN / OP_DIV / OP_1ADD, 64 IF
+     * blocks), which capped log2 at 64. The lowering is now an exact,
+     * branch-free read of the operand's minimal encoding; this pins the whole
+     * sequence. Execution is covered by
+     * conformance/negatives/n103-log2-exact-parity.test.ts.
+     */
     @Test
-    void log2Emits64Iterations() {
+    void log2ReadsTheMinimalEncodingExactly() {
         List<StackOp> ops = compileSingleCall(
             "Bigint r = log2(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        // Each iteration: swap OP_DUP push1 OP_GREATERTHAN IF{push2 OP_DIV swap OP_1ADD swap} swap
-        // 64 OP_DUP at top level (one per iter)
-        // 64 OP_GREATERTHAN at top level
-        // 64 OP_DIV inside IFs
-        // 64 OP_1ADD inside IFs
-        assertEquals(64, countOpcode(ops, "OP_DUP"),
-            "log2 must emit 64 OP_DUP at iterations");
-        assertEquals(64, countOpcode(ops, "OP_GREATERTHAN"),
-            "log2 must emit 64 OP_GREATERTHAN");
-        assertEquals(64, countOpcode(ops, "OP_DIV"),
-            "log2 must emit 64 OP_DIV (one inside each IF body)");
-        assertEquals(64, countOpcode(ops, "OP_1ADD"),
-            "log2 must emit 64 OP_1ADD (one inside each IF body)");
-        // Trailing OP_NIP to drop the input.
-        long nipCount = ops.stream().filter(op -> op instanceof NipOp).count();
-        assertTrue(nipCount >= 1, "log2 must end with at least one NIP");
-        // 64 IF blocks at top level
-        assertEquals(64, countIfOpsTopLevel(ops),
-            "log2 must emit exactly 64 top-level IF blocks");
+        List<String> want = new ArrayList<>(List.of(
+            "OP_BIN2NUM", "OP_DUP", "PUSH(0)", "OP_GREATERTHAN", "OP_VERIFY",
+            "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+            "OP_SWAP", "PUSH(8)", "OP_MUL", "OP_1SUB"));
+        for (int c : new int[]{1, 2, 4, 8, 16, 32, 64}) {
+            want.addAll(List.of("OP_OVER", "PUSH(" + c + ")", "OP_GREATERTHANOREQUAL", "OP_ADD"));
+        }
+        want.add("OP_NIP");
+        List<String> got = new ArrayList<>();
+        for (StackOp op : ops) {
+            if (op instanceof OpcodeOp o) got.add(o.code());
+            else if (pushInt(op) != null) got.add("PUSH(" + pushInt(op) + ")");
+            else got.add(op.op());
+        }
+        assertTrue(java.util.Collections.indexOfSubList(got, want) >= 0,
+            "log2 must emit the N-103 sequence " + want + ", got " + got);
+        assertEquals(0, countIfOpsTopLevel(ops), "log2 must be branch-free");
     }
 
     /* ================================================================== */
@@ -549,12 +555,13 @@ class MathBuiltinsLowerTest {
     }
 
     @Test
-    void log2IterationsMatchGoReference64() {
-        // Go's lowerLog2 at stack.go:3703 uses const log2Iterations = 64.
+    void log2IsBranchFreeLikeGoReference() {
+        // N-103 (R86, 2026-10-21): Go's lowerLog2 no longer unrolls 64 IF
+        // rounds (the loop that capped log2 at 64); it is branch-free.
         List<StackOp> ops = compileSingleCall(
             "Bigint r = log2(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        assertEquals(64, countIfOpsTopLevel(ops),
-            "Java log2 must emit exactly 64 top-level IF rounds (Go reference)");
+        assertEquals(0, countIfOpsTopLevel(ops),
+            "Java log2 must emit no IF rounds (Go reference)");
     }
 }

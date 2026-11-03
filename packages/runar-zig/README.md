@@ -230,9 +230,11 @@ pub fn main() !void {
 ```
 
 Replace `MockProvider`/`MockSigner` with `RPCProvider`+`LocalSigner`,
-`WhatsOnChainProvider`, or `WalletProvider`+`WalletSigner` to talk to a
-real network. The `RunarContract` API is identical across providers and
-signers because both are vtable-based interfaces.
+`WhatsOnChainProvider`+`LocalSigner`, or `WhatsOnChainProvider`/`RPCProvider`/
+`GorillaPoolProvider`+`WalletSigner` to talk to a real network
+(`WalletProvider` cannot broadcast — see Section 9c). The `RunarContract`
+API is identical across providers and signers because both are
+vtable-based interfaces.
 
 The Counter source lives at
 [examples/zig/stateful-counter/Counter.runar.zig](../../examples/zig/stateful-counter/Counter.runar.zig);
@@ -284,8 +286,9 @@ Implementations: `LocalSigner` (raw key in memory), `MockSigner`
 the three-method `Signer.VTable`.
 
 **WalletClient.** A BRC-100 wallet client (vtable struct). Backs both
-`WalletProvider` (for UTXO lookup and broadcast) and `WalletSigner` (for
-key derivation and signing). `MockWalletClient` is shipped for tests.
+`WalletProvider` (for UTXO lookup — its `broadcast` always refuses; see
+Section 9c) and `WalletSigner` (for key derivation and signing).
+`MockWalletClient` is shipped for tests.
 
 **HttpTransport.** The HTTP-using providers (`WhatsOnChainProvider`,
 `GorillaPoolProvider`, `RPCProvider`) each declare an `HttpTransport`
@@ -734,8 +737,11 @@ will mirror the Go and Rust shapes:
 
 When the SDK can't hold raw private keys (browser extensions, OS
 keychains, hardware wallets exposing a BRC-100 surface), use
-`WalletProvider` + `WalletSigner` to delegate UTXO management and
-signing to the wallet. Both are backed by a `WalletClient` vtable struct.
+`WalletSigner` to delegate signing to the wallet. `WalletProvider` is
+also backed by the same `WalletClient` and can look up the wallet's
+tracked UTXOs, but — see the note after the example below — it cannot
+broadcast, so an actual deploy/call pairs `WalletSigner` with a
+broadcast-capable `Provider` instead.
 
 ```zig
 pub const WalletClient = struct {
@@ -796,28 +802,21 @@ const wallet = mock.walletClient();
 const protocol = runar.ProtocolID{ .level = 2, .name = "runar-counter" };
 const key_id = "1";
 
-var wallet_provider = runar.WalletProvider.init(
-    allocator,
-    wallet,
-    "runar-funding",        // wallet basket name
-    .{
-        .funding_tag = "funding",
-        .network = "testnet",
-        .fee_rate = 50,
-    },
-);
-defer wallet_provider.deinit();
-
 var wallet_signer = runar.WalletSigner.init(allocator, wallet, protocol, key_id);
 defer wallet_signer.deinit();
 
-// One-shot deploy convenience that sets up the expected-script filter
-// for funding UTXOs and forwards everything to contract.deploy().
-const deploy_txid = try runar.deployWithWallet(&contract, wallet, .{
+// WalletProvider's broadcast always refuses (see note below), so the
+// provider half of the pair is a broadcast-capable one — here,
+// WhatsOnChainProvider — while WalletSigner still does the signing.
+var woc = runar.WhatsOnChainProvider.init(allocator, .testnet);
+defer woc.deinit();
+var http = try runar.CurlHttpTransport.init(allocator);
+defer http.deinit();
+woc.setTransport(http.wocTransport());
+const prov = woc.provider();
+
+const deploy_txid = try contract.deploy(prov, wallet_signer.signer(), .{
     .satoshis = 5000,
-    .basket = "runar-funding",
-    .protocol_id = protocol,
-    .key_id = key_id,
 });
 defer allocator.free(deploy_txid);
 
@@ -826,17 +825,32 @@ defer allocator.free(deploy_txid);
 const inc_txid = try contract.call(
     "increment",
     &.{},
-    wallet_provider.provider(),
+    prov,
     wallet_signer.signer(),
     null,
 );
 defer allocator.free(inc_txid);
 ```
 
-`WalletProvider.setExpectedScript` lets you scope `getUtxos` to outputs
-whose locking script matches a specific P2PKH template (used internally
-by `deployWithWallet` to filter the wallet basket down to funding
-UTXOs).
+**`WalletProvider` cannot broadcast.** It still implements `getUtxos`
+against the wallet's tracked basket, and `setExpectedScript` still
+scopes that lookup to a specific P2PKH template — but its `broadcast`
+always refuses. BRC-100's `createAction` builds and submits a *new*
+wallet-composed action from outputs the wallet itself picks; it has no
+"relay this exact, already-signed transaction" primitive, so
+`WalletProvider` cannot safely forward the bytes `contract.deploy()` /
+`contract.call()` built. It fails closed (R100): it records
+
+> raw broadcast unsupported by BRC-100; use an ARC/WhatsOnChain provider
+
+and returns `error.BroadcastFailed`, which surfaces as
+`error.DeployFailed` / `error.CallFailed` from `contract.deploy()` /
+`contract.call()`. `deployWithWallet` is a thin convenience wrapper
+around `WalletProvider` + `WalletSigner` + `contract.deploy()`, so it
+inherits the same refusal: it clears the funding and R-062 gates and
+then fails at the broadcast step every time. Use the pairing above
+(`WalletSigner` with `WhatsOnChainProvider`, `RPCProvider`, or
+`GorillaPoolProvider`) for an actual on-chain deploy/call.
 
 A custom `WalletClient` implementation is wired exactly the same way as
 a custom `Provider` (Section 14): write a struct, declare a `vtable`

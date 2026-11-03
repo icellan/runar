@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -297,6 +298,115 @@ class CompileCheckTest {
             return;
         }
         assertDoesNotThrow(() -> CompileCheck.run(example));
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* N-131: CompileCheck.check/run call Validate.run(contract) and       */
+    /* discard the warnings it returns, so a validator warning (e.g. an   */
+    /* unreferenced readonly field DCE'd out of the on-chain script) never */
+    /* surfaces through the Java SDK's compile check. checkWithWarnings   */
+    /* (and runWithWarnings) must return that warning without changing    */
+    /* check/run's void API or behaviour.                                 */
+    /*                                                                     */
+    /* What these tests prove: Validate.run's warning list reaches the    */
+    /* caller through the new API for at least one concrete warning       */
+    /* family (readonly-unused), is empty for a clean contract, and the   */
+    /* existing void check()/run() still accept a warning-only contract   */
+    /* exactly as before (no behaviour change to the pre-existing API).   */
+    /*                                                                     */
+    /* What they do NOT prove: that every other warning family Validate   */
+    /* can emit (e.g. the sighash SINGLE-covenant warning, or any other   */
+    /* d.isWarning() diagnostic) also surfaces — only this one path is    */
+    /* exercised, though the fix is generic (it returns whatever          */
+    /* Validate.run returns, not this specific message). They also don't  */
+    /* prove anything about on-chain bytes: the warning text asserts that */
+    /* DCE *will* strip the field per Validate's own diagnostic, not that */
+    /* the emitted script bytes actually omit it (that's covered, if at  */
+    /* all, by codegen/DCE tests elsewhere). Warning ordering and dedup   */
+    /* across multiple simultaneous warnings are untested.                */
+    /* ------------------------------------------------------------------ */
+
+    private static final String VALID_JAVA_WITH_UNUSED_READONLY = String.join(
+        "\n",
+        "package fixture;",
+        "",
+        "import runar.lang.SmartContract;",
+        "import runar.lang.annotations.Public;",
+        "import runar.lang.annotations.Readonly;",
+        "import runar.lang.types.Addr;",
+        "import runar.lang.types.PubKey;",
+        "import runar.lang.types.Sig;",
+        "import java.math.BigInteger;",
+        "",
+        "import static runar.lang.Builtins.assertThat;",
+        "import static runar.lang.Builtins.checkSig;",
+        "import static runar.lang.Builtins.hash160;",
+        "",
+        "class P2PKH extends SmartContract {",
+        "    @Readonly Addr pubKeyHash;",
+        "    @Readonly BigInteger nonce;",
+        "    P2PKH(Addr pubKeyHash, BigInteger nonce) {",
+        "        super(pubKeyHash, nonce);",
+        "        this.pubKeyHash = pubKeyHash;",
+        "        this.nonce = nonce;",
+        "    }",
+        "    @Public",
+        "    void unlock(Sig sig, PubKey pubKey) {",
+        "        assertThat(hash160(pubKey).equals(pubKeyHash));",
+        "        assertThat(checkSig(sig, pubKey));",
+        "    }",
+        "}",
+        ""
+    );
+
+    @Test
+    void checkWithWarningsSurfacesUnreferencedReadonlyFieldWarning() {
+        List<String> warnings = CompileCheck.checkWithWarnings(
+            VALID_JAVA_WITH_UNUSED_READONLY, "P2PKH.runar.java");
+        assertFalse(warnings.isEmpty(), "Expected the unreferenced-readonly-field warning");
+        assertTrue(
+            warnings.stream().anyMatch(w -> w.contains("nonce") && w.contains("not referenced")),
+            "Expected a warning about 'nonce' not being referenced, got: " + warnings
+        );
+    }
+
+    @Test
+    void checkWithWarningsReturnsEmptyListForCleanContract() {
+        List<String> warnings = CompileCheck.checkWithWarnings(VALID_JAVA, "P2PKH.runar.java");
+        assertTrue(warnings.isEmpty(), "Expected no warnings for a clean contract, got: " + warnings);
+    }
+
+    @Test
+    void checkWithWarningsStillThrowsOnErrors() {
+        String bad = "this is not java {{{";
+        assertThrows(CompileException.class,
+            () -> CompileCheck.checkWithWarnings(bad, "Bad.runar.java"));
+    }
+
+    @Test
+    void checkStillAcceptsContractWithWarningsWithoutThrowing() {
+        // The existing void API's behaviour must not change: a contract that
+        // only produces a warning (no errors) still passes check()/run().
+        assertDoesNotThrow(
+            () -> CompileCheck.check(VALID_JAVA_WITH_UNUSED_READONLY, "P2PKH.runar.java"));
+    }
+
+    @Test
+    void runWithWarningsSurfacesWarningFromDisk(@TempDir Path tmp) throws IOException {
+        Path file = tmp.resolve("P2PKH.runar.java");
+        Files.writeString(file, VALID_JAVA_WITH_UNUSED_READONLY);
+        List<String> warnings = CompileCheck.runWithWarnings(file);
+        assertTrue(
+            warnings.stream().anyMatch(w -> w.contains("nonce") && w.contains("not referenced")),
+            "Expected a warning about 'nonce' not being referenced, got: " + warnings
+        );
+    }
+
+    @Test
+    void runStillAcceptsContractWithWarningsWithoutThrowing(@TempDir Path tmp) throws IOException {
+        Path file = tmp.resolve("P2PKH.runar.java");
+        Files.writeString(file, VALID_JAVA_WITH_UNUSED_READONLY);
+        assertDoesNotThrow(() -> CompileCheck.run(file));
     }
 
     @Test

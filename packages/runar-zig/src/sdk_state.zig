@@ -1,6 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const types = @import("sdk_types.zig");
+const script_utils = @import("sdk_script_utils.zig");
 
 // ---------------------------------------------------------------------------
 // State serialization — encode/decode state values as Bitcoin Script push data
@@ -120,6 +121,9 @@ pub fn extractStateFromScript(
     artifact: *const types.RunarArtifact,
     script_hex: []const u8,
 ) !?[]types.StateValue {
+    // N-320: the script is untrusted (fromUtxo). Refuse anything that is not
+    // whole bytes of hex before any reader sees it — the N-317 rule.
+    if (!script_utils.isHexBytes(script_hex)) return error.MalformedScript;
     if (artifact.state_fields.len == 0) return null;
 
     const op_return_pos = findLastOpReturn(script_hex);
@@ -130,8 +134,15 @@ pub fn extractStateFromScript(
     return try deserializeState(allocator, artifact.state_fields, state_hex);
 }
 
-/// FindLastOpReturn walks the script hex as Bitcoin Script opcodes to find the
-/// last OP_RETURN (0x6a) at a real opcode boundary.
+/// findLastOpReturn walks the script hex as Bitcoin Script opcodes and
+/// returns the first OP_RETURN (0x6a) found at a real opcode boundary. The
+/// walk stops immediately on the first match rather than continuing to
+/// look for a later one — that is correct here, not a shortcut: the
+/// on-chain interpreter itself stops at the first OP_RETURN it executes,
+/// and the compiler emits exactly one separator (codePart + OP_RETURN +
+/// stateBytes), so "first" and "last" coincide for every script this
+/// function will ever see. The name is kept for parity with the other six
+/// SDKs, which all implement the same first-match walk.
 pub fn findLastOpReturn(script_hex: []const u8) ?usize {
     var offset: usize = 0;
     const length = script_hex.len;
@@ -177,6 +188,15 @@ pub fn findLastOpReturn(script_hex: []const u8) ?usize {
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/// F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores them
+/// as the same 8-byte OP_NUM2BIN word as int / bigint.
+fn isNum2Bin8Type(field_type: []const u8) bool {
+    return std.mem.eql(u8, field_type, "int") or
+        std.mem.eql(u8, field_type, "bigint") or
+        std.mem.eql(u8, field_type, "RabinSig") or
+        std.mem.eql(u8, field_type, "RabinPubKey");
+}
+
 /// Encode a state value as hex. The result is raw hex bytes (no push opcode for
 /// fixed-width types) matching the compiler's OP_NUM2BIN-based serialization.
 fn encodeStateValue(
@@ -184,18 +204,14 @@ fn encodeStateValue(
     value: types.StateValue,
     field_type: []const u8,
 ) ![]u8 {
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
-        switch (value) {
-            .big_int => |decimal_str| return encodeBigNum2Bin(allocator, decimal_str, 8),
-            else => {},
-        }
+    if (isNum2Bin8Type(field_type)) {
+        // N-084: only `.int` and a decimal-integer `.big_int` are num2bin
+        // values. `.bytes`, `.boolean` and `.empty_sig` used to encode as 0 / 1,
+        // writing a number the caller never supplied into the state section.
         const n: i64 = switch (value) {
             .int => |i| i,
-            .boolean => |b| if (b) @as(i64, 1) else @as(i64, 0),
-            // .empty_sig (#106) is a call-arg-only marker, never a state field;
-            // grouped with .bytes for exhaustiveness.
-            .bytes, .empty_sig => 0,
-            .big_int => unreachable, // handled above
+            .big_int => |decimal_str| return encodeBigNum2Bin(allocator, decimal_str, 8),
+            .bytes, .boolean, .empty_sig => return error.NotAnInteger,
             .array_value => return error.ArrayValueInScalarField,
         };
         return encodeNum2Bin(allocator, n, 8);
@@ -235,6 +251,11 @@ fn encodeStateValue(
         // and TS "undefined" — four different non-hex placeholders for the same
         // mistake, a silent byte divergence on a path whose bytes are committed
         // on chain. Refusing is the only answer that is the same in every tier.
+        // N-045: a wrong-width value shifts every later field for the reader.
+        switch (value) {
+            .bytes => try checkFixedWidthValue(value, field_type),
+            else => {},
+        }
         return switch (value) {
             .bytes => |b| allocator.dupe(u8, b),
             else => error.MissingStateValue,
@@ -375,6 +396,13 @@ pub fn encodeBigNum2Bin(allocator: std.mem.Allocator, decimal_str: []const u8, w
     // Check for negative sign
     const negative = decimal_str.len > 0 and decimal_str[0] == '-';
     const digits = if (negative) decimal_str[1..] else decimal_str;
+
+    // N-084: refuse a string that is not a decimal integer (`c - '0'` below
+    // would otherwise wrap or index garbage).
+    if (digits.len == 0) return error.NotAnInteger;
+    for (digits) |c| {
+        if (c < '0' or c > '9') return error.NotAnInteger;
+    }
 
     var buf = try allocator.alloc(u8, width);
     defer allocator.free(buf);
@@ -538,13 +566,42 @@ const DecodedValue = struct {
 /// cannot drift.
 pub fn stateFieldByteWidth(field_type: []const u8) ?usize {
     if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) return 1;
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) return 8;
+    if (isNum2Bin8Type(field_type)) return 8;
     if (std.mem.eql(u8, field_type, "PubKey")) return 33;
     if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) return 20;
     if (std.mem.eql(u8, field_type, "Sha256")) return 32;
     if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) return 64;
     if (std.mem.eql(u8, field_type, "P384Point")) return 96;
     return null;
+}
+
+/// N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+/// Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+/// that is not a hex string of exactly its declared width
+/// (`error.FixedWidthMismatch`). The on-chain reader slices each such field at
+/// its declared width, so a wrong-width value in a state section (or an
+/// argument a covenant copies into one) shifts every later field. The compiled
+/// covenant refuses such a continuation on chain (OP_SIZE <width>
+/// OP_NUMEQUALVERIFY); this is the off-chain refusal. No-op for every other
+/// type.
+pub fn checkFixedWidthValue(value: types.StateValue, field_type: []const u8) error{FixedWidthMismatch}!void {
+    const is_raw = std.mem.eql(u8, field_type, "PubKey") or
+        std.mem.eql(u8, field_type, "Addr") or
+        std.mem.eql(u8, field_type, "Ripemd160") or
+        std.mem.eql(u8, field_type, "Sha256") or
+        std.mem.eql(u8, field_type, "Point") or
+        std.mem.eql(u8, field_type, "P256Point") or
+        std.mem.eql(u8, field_type, "P384Point");
+    if (!is_raw) return;
+    const width = stateFieldByteWidth(field_type).?;
+    const hex = switch (value) {
+        .bytes => |b| b,
+        else => return error.FixedWidthMismatch,
+    };
+    if (hex.len != width * 2) return error.FixedWidthMismatch;
+    for (hex) |c| {
+        if (!std.ascii.isHex(c)) return error.FixedWidthMismatch;
+    }
 }
 
 fn decodeStateValue(
@@ -572,7 +629,7 @@ fn decodeStateValue(
         // boolean field as push data and desynchronises every field after it.
         return .{ .value = .{ .boolean = !std.mem.eql(u8, data, "00") }, .hex_chars_read = hex_width };
     }
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
+    if (isNum2Bin8Type(field_type)) {
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
         return .{ .value = .{ .int = decodeNum2Bin(data) }, .hex_chars_read = hex_width };
     }
@@ -1145,6 +1202,64 @@ test "findLastOpReturn finds OP_RETURN at opcode boundary" {
     try std.testing.expectEqual(@as(?usize, null), findLastOpReturn("5151"));
 }
 
+// N-167 (sibling of F-367): findLastOpReturn's doc comment must describe the
+// first-match walk it actually performs, not a "last OP_RETURN" search.
+//
+// Proves: the doc comment above `pub fn findLastOpReturn` in this file no
+// longer claims to find the LAST OP_RETURN. All seven SDKs implement the
+// same "stop at the first opcode-boundary 0x6a" walk, which is correct here
+// (the on-chain interpreter stops at the first OP_RETURN it executes, and
+// the compiler emits exactly one separator), so "first" and "last" coincide
+// for every script this function will ever see.
+// Does not prove: runtime behaviour — that is already pinned by
+// "findLastOpReturn finds OP_RETURN at opcode boundary" above, unchanged by
+// this fix.
+test "findLastOpReturn doc comment does not claim 'last' (N-167)" {
+    // Self-embed: the slice below stops BEFORE this test's own source (the
+    // function definition precedes all tests in the file), so this literal
+    // never shadows the assertion below.
+    const source = @embedFile("sdk_state.zig");
+    const fn_marker = "pub fn findLastOpReturn";
+    const fn_index = std.mem.indexOf(u8, source, fn_marker) orelse
+        return error.FnMarkerNotFound;
+    const doc_block = source[0..fn_index];
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(std.testing.allocator);
+
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer collected.deinit(std.testing.allocator);
+
+    var lines = std.mem.splitBackwardsScalar(u8, doc_block, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "///")) {
+            try collected.append(std.testing.allocator, line);
+        } else if (trimmed.len == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    var i: usize = collected.items.len;
+    while (i > 0) {
+        i -= 1;
+        try doc.appendSlice(std.testing.allocator, collected.items[i]);
+        try doc.append(std.testing.allocator, '\n');
+    }
+
+    // Anchor: fails loudly (empty/short doc) if the slicing above ever
+    // points at the wrong comment instead of silently passing.
+    try std.testing.expect(std.mem.indexOf(u8, doc.items, "OP_RETURN") != null);
+
+    const lower = try std.testing.allocator.alloc(u8, doc.items.len);
+    defer std.testing.allocator.free(lower);
+    for (doc.items, 0..) |c, idx| lower[idx] = std.ascii.toLower(c);
+
+    try std.testing.expect(std.mem.indexOf(u8, lower, "last op_return") == null);
+}
+
 test "flattenStateValue walks nested arrays depth-first" {
     const allocator = std.testing.allocator;
     const inner0 = try allocator.alloc(types.StateValue, 2);
@@ -1324,5 +1439,49 @@ test "state ByteString: round-trips for every single-byte value" {
             allocator.free(decoded);
         }
         try std.testing.expectEqualStrings(&in_buf, decoded[0].bytes);
+    }
+}
+
+// N-044: the compiler's on-chain state reader and writer frame a ByteString
+// with an UNSIGNED length (<len> below 76, 4c <len8>, 4d <len16 LE>,
+// 4e <len32 LE>), and the covenant only accepts a continuation whose state
+// bytes equal the SDK's. Hand-written expected headers at every boundary where
+// a signed reading of the length used to differ (0x80, 0x81.., 0x8000, 0xffff)
+// and where PUSHDATA4 starts. The on-chain side is run against the same frames
+// by packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+test "state ByteString: PUSHDATA length boundaries match the on-chain frame" {
+    const allocator = std.testing.allocator;
+    const fields = &[_]types.StateField{
+        .{ .name = "b", .type_name = "ByteString", .index = 0 },
+    };
+    const Case = struct { n: usize, header: []const u8 };
+    const cases = [_]Case{
+        .{ .n = 75, .header = "4b" },       .{ .n = 76, .header = "4c4c" },
+        .{ .n = 127, .header = "4c7f" },    .{ .n = 128, .header = "4c80" },
+        .{ .n = 129, .header = "4c81" },    .{ .n = 255, .header = "4cff" },
+        .{ .n = 256, .header = "4d0001" },  .{ .n = 32767, .header = "4dff7f" },
+        .{ .n = 32768, .header = "4d0080" }, .{ .n = 65535, .header = "4dffff" },
+        .{ .n = 65536, .header = "4e00000100" },
+    };
+    for (cases) |c| {
+        const payload = try allocator.alloc(u8, c.n * 2);
+        defer allocator.free(payload);
+        var k: usize = 0;
+        while (k < payload.len) : (k += 2) {
+            payload[k] = 'a';
+            payload[k + 1] = 'b';
+        }
+        const values = &[_]types.StateValue{.{ .bytes = payload }};
+        const serialized = try serializeState(allocator, fields, values);
+        defer allocator.free(serialized);
+        try std.testing.expectEqual(c.header.len + payload.len, serialized.len);
+        try std.testing.expectEqualStrings(c.header, serialized[0..c.header.len]);
+        try std.testing.expectEqualStrings(payload, serialized[c.header.len..]);
+        const decoded = try deserializeState(allocator, fields, serialized);
+        defer {
+            for (decoded) |*v| v.deinit(allocator);
+            allocator.free(decoded);
+        }
+        try std.testing.expectEqualStrings(payload, decoded[0].bytes);
     }
 }

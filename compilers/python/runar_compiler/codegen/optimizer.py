@@ -17,10 +17,35 @@ MAX_OPTIMIZATION_ITERATIONS = 100
 
 
 def optimize_stack_ops(ops: list[StackOp]) -> list[StackOp]:
-    """Apply peephole optimization to a list of stack ops."""
-    # First, recursively optimize nested if-blocks
-    current = [_optimize_nested_if(op) for op in ops]
+    """Apply peephole optimization to a list of stack ops.
 
+    Nested if-blocks are optimized bottom-up: every if-arm before the list
+    holding it. N-264: by an explicit list, not recursion -- private methods
+    are inlined, so a chain of D helpers that each call the next under K
+    nested ifs nests D*K if-ops here, past the recursion limit. Every op list
+    reachable through if arms is collected parents first, then optimized in
+    reverse (children before parents), each list exactly as the recursive
+    version optimized it.
+    """
+    lists: list[list[StackOp]] = [ops]
+    k = 0
+    while k < len(lists):
+        for op in lists[k]:
+            if op.op == "if":
+                lists.append(op.then)
+                if op.else_ops:
+                    lists.append(op.else_ops)
+        k += 1
+    # Keyed by list identity; every list stays referenced by ``lists``.
+    optimized: dict[int, list[StackOp]] = {}
+    for lst in reversed(lists):
+        current = [_with_optimized_arms(op, optimized) for op in lst]
+        optimized[id(lst)] = _optimize_one_level(current)
+    return optimized[id(ops)]
+
+
+def _optimize_one_level(current: list[StackOp]) -> list[StackOp]:
+    """The fixed-point rule loop over one op list whose if-arms are done."""
     for _ in range(MAX_OPTIMIZATION_ITERATIONS):
         result, changed = _apply_one_pass(current)
         if not changed:
@@ -30,10 +55,10 @@ def optimize_stack_ops(ops: list[StackOp]) -> list[StackOp]:
     return current
 
 
-def _optimize_nested_if(op: StackOp) -> StackOp:
+def _with_optimized_arms(op: StackOp, optimized: dict[int, list[StackOp]]) -> StackOp:
     if op.op == "if":
-        optimized_then = optimize_stack_ops(op.then)
-        optimized_else = optimize_stack_ops(op.else_ops) if op.else_ops else []
+        optimized_then = optimized[id(op.then)]
+        optimized_else = optimized[id(op.else_ops)] if op.else_ops else []
         return StackOp(
             op="if",
             then=optimized_then,
@@ -127,22 +152,17 @@ def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
     if _is_push_bigint(a, 1) and _is_opcode_op(b, "OP_SUB"):
         return [StackOp(op="opcode", code="OP_1SUB")]
 
-    # PUSH 0, OP_ADD -> remove both (x + 0 = x)
-    if _is_push_bigint(a, 0) and _is_opcode_op(b, "OP_ADD"):
-        return []
-
-    # PUSH 0, OP_SUB -> remove both (x - 0 = x)
-    if _is_push_bigint(a, 0) and _is_opcode_op(b, "OP_SUB"):
-        return []
+    # NOTE (F-001): no ``PUSH 0, OP_ADD``, ``PUSH 0, OP_SUB`` or
+    # ``OP_NEGATE, OP_NEGATE`` elimination.  x+0, x-0 and -(-x) are identities
+    # over integers, not over stack elements: the opcode decodes its operand as
+    # a CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    # pushes back the minimal re-encoding.  Deleting it changes accept/reject
+    # and the value for a witness-supplied operand.
 
     # NOTE: ``OP_NOT, OP_NOT`` is NOT eliminated here -- see the guarded 3-op
     # rule in ``_match_window3`` (C17).  The pair is boolean normalisation, not
     # numeric identity, so it may only be dropped when the producer of the
     # negated value provably leaves a canonical 0/1 behind.
-
-    # OP_NEGATE, OP_NEGATE -> remove both
-    if _is_opcode_op(a, "OP_NEGATE") and _is_opcode_op(b, "OP_NEGATE"):
-        return []
 
     # OP_EQUAL, OP_VERIFY -> OP_EQUALVERIFY
     if _is_opcode_op(a, "OP_EQUAL") and _is_opcode_op(b, "OP_VERIFY"):
@@ -258,6 +278,13 @@ def _match_window3(a: StackOp, b: StackOp, c: StackOp) -> Optional[list[StackOp]
     if _is_raw_bytes(a) or _is_raw_bytes(b) or _is_raw_bytes(c):
         return None
 
+    # ROT, ROT, ROT -> remove all three (N-376).  OP_ROT is a 3-cycle on the
+    # top three items, so three in a row are the identity; the fixed-point
+    # loop leaves a run of n as n mod 3.  Matches the opcode-string form too
+    # (F-392 convention), as every tier does.
+    if _is_rot(a) and _is_rot(b) and _is_rot(c):
+        return []
+
     # <canonical-bool producer>, OP_NOT, OP_NOT -> <canonical-bool producer>
     #
     # ``OP_NOT OP_NOT`` is boolean NORMALISATION, not numeric identity: for any
@@ -330,6 +357,11 @@ def _is_push_bigint(op: StackOp, n: int) -> bool:
     if op.value.kind != "bigint" or op.value.big_int is None:
         return False
     return op.value.big_int == n
+
+
+def _is_rot(op: StackOp) -> bool:
+    """A typed ``rot`` or the opcode-string ``OP_ROT`` (N-376)."""
+    return op.op == "rot" or _is_opcode_op(op, "OP_ROT")
 
 
 def _is_opcode_op(op: StackOp, code: str) -> bool:

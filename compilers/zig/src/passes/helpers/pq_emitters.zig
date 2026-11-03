@@ -318,7 +318,7 @@ pub fn lookupSLHParams(param_key: []const u8) ?SLHCodegenParams {
     if (std.mem.eql(u8, param_key, "SHA2_192s")) return slhMk(24, 63, 7, 14, 17, 3);
     if (std.mem.eql(u8, param_key, "SHA2_192f")) return slhMk(24, 66, 22, 8, 33, 3);
     if (std.mem.eql(u8, param_key, "SHA2_256s")) return slhMk(32, 64, 8, 14, 22, 3);
-    if (std.mem.eql(u8, param_key, "SHA2_256f")) return slhMk(32, 68, 17, 8, 35, 3);
+    if (std.mem.eql(u8, param_key, "SHA2_256f")) return slhMk(32, 68, 17, 9, 35, 3);
     return null;
 }
 
@@ -1275,7 +1275,21 @@ pub fn appendVerifySLHDSA(
     try tracker.consumeProduce(1, "leafIdx");
 
     try tracker.copyToTop("treeIdx", "_ti8");
-    try appendNumToBigEndianToBuilder(&builder, 8);
+    if (p.h - hp >= 64) {
+        // F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about half
+        // of all signatures it is >= 2^63 and its minimal script-number
+        // encoding needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in 9
+        // bytes and drop the trailing (little-endian) 0x00 sign byte. Only the
+        // first conversion needs it: per-layer indices are shifted right by h'.
+        try builder.emitPushInt(9);
+        try builder.emitOp("OP_NUM2BIN");
+        try builder.emitPushInt(8);
+        try builder.emitOp("OP_SPLIT");
+        try builder.emitOp("OP_DROP");
+        try appendReverseNToBuilder(&builder, 8);
+    } else {
+        try appendNumToBigEndianToBuilder(&builder, 8);
+    }
     try tracker.consumeProduce(1, "treeAddr8");
 
     try tracker.copyToTop("leafIdx", "_li4");
@@ -1430,6 +1444,35 @@ test "SLH params lookup covers all SHA2 families" {
     try std.testing.expectEqual(@as(usize, 17), p256f.d);
 
     try std.testing.expectEqual(@as(?SLHCodegenParams, null), lookupSLHParams("SHA2_999x"));
+}
+
+// F-034: every parameter set must match FIPS 205 Table 2. SHA2_256f shipped
+// FORS height a=8 (48,736-byte signature) in all 7 tiers; FIPS 205 says a=9
+// (49,856 bytes), so the compiled verifier rejected every honest 256f signature
+// at its OP_SIZE gate. Proves the table and the emitted exact-length gate; does
+// NOT prove a real signature verifies (that is the real-crypto witness
+// conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+test "SLH params match FIPS 205 Table 2 and the OP_SIZE gate demands the FIPS signature size" {
+    const allocator = std.testing.allocator;
+    const Row = struct { key: []const u8, dims: [6]usize, sig_len: i64 };
+    const rows = [_]Row{
+        .{ .key = "SHA2_128s", .dims = .{ 16, 63, 7, 9, 12, 14 }, .sig_len = 7856 },
+        .{ .key = "SHA2_128f", .dims = .{ 16, 66, 22, 3, 6, 33 }, .sig_len = 17088 },
+        .{ .key = "SHA2_192s", .dims = .{ 24, 63, 7, 9, 14, 17 }, .sig_len = 16224 },
+        .{ .key = "SHA2_192f", .dims = .{ 24, 66, 22, 3, 8, 33 }, .sig_len = 35664 },
+        .{ .key = "SHA2_256s", .dims = .{ 32, 64, 8, 8, 14, 22 }, .sig_len = 29792 },
+        .{ .key = "SHA2_256f", .dims = .{ 32, 68, 17, 4, 9, 35 }, .sig_len = 49856 },
+    };
+    for (rows) |row| {
+        const p = lookupSLHParams(row.key).?;
+        try std.testing.expectEqual(row.dims, [6]usize{ p.n, p.h, p.d, p.hp, p.a, p.k });
+
+        var list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
+        defer list.deinit(allocator);
+        try appendVerifySLHDSA(&list, allocator, row.key);
+        try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_SIZE" }, list.items[1]);
+        try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = row.sig_len }, list.items[2]);
+    }
 }
 
 test "runtime ADRS helpers emit concatenation pipeline" {

@@ -343,4 +343,77 @@ class AdditionalContractInputsTest {
                 java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
                 opts, s.provider(), s.signer()));
     }
+
+    /**
+     * N-294: {@code layoutPushTx}'s funding-candidate filter excluded only
+     * {@code currentUtxo} (the primary contract input), not
+     * {@code additionalContractInputs} — TS excludes BOTH under finding
+     * F-045 (see {@code f045-token-wallet-signs-broadcast-tx.test.ts},
+     * "a token UTXO larger than the funding coin is still spent as a
+     * contract input, not as funding").
+     *
+     * <p>An indexer that lists a token UTXO under the signer's own address
+     * (exactly what {@code provider.addUtxo(signer.address(), other)} below
+     * simulates — the same scenario the TS fix targets) made that UTXO a
+     * legitimate-looking P2PKH funding candidate too. Largest-first coin
+     * selection in {@code TransactionBuilder.buildCallTransactionFull}
+     * always spends at least one funding candidate when any exist (N-292
+     * TS parity), so a large-enough "extra contract input" outranks a small
+     * genuine funding coin and gets selected AGAIN as funding — spending
+     * the same outpoint twice in one transaction.
+     */
+    @Test
+    void mergeNeverSelectsTheAdditionalContractUtxoAsFunding() throws Exception {
+        RunarArtifact artifact = tokenArtifact();
+        LocalSigner signer = new LocalSigner(PRIV);
+        MockProvider provider = new MockProvider();
+        String p2pkh = ScriptUtils.buildP2PKHScript(signer.address());
+
+        String ownerHex = ScriptUtils.bytesToHex(signer.pubKey());
+        List<Object> args1 = List.of(ownerHex, BigInteger.valueOf(400), BigInteger.ZERO, TOKEN_ID);
+        List<Object> args2 = List.of(ownerHex, BigInteger.valueOf(600), BigInteger.ZERO, TOKEN_ID);
+        RunarContract first = new RunarContract(artifact, args1);
+        RunarContract second = new RunarContract(artifact, args2);
+
+        // `other` carries a LARGE satoshi value so largest-first selection
+        // prefers it over the genuine small funding coin, if it is (wrongly)
+        // treated as a funding candidate.
+        UTXO primary = new UTXO("cc".repeat(32), 0, 1L,
+            ContractScript.renderLockingScript(artifact, args1, null));
+        UTXO other = new UTXO("dd".repeat(32), 0, 300_000L,
+            ContractScript.renderLockingScript(artifact, args2, null));
+        first.setCurrentUtxo(primary);
+        provider.addKnownOutpoint(primary);
+        second.setCurrentUtxo(other);
+
+        // A small genuine P2PKH funding coin — alone, comfortably enough to
+        // cover the tx fee.
+        UTXO funding = new UTXO("ee".repeat(32), 0, 2_000L, p2pkh);
+        provider.addUtxo(signer.address(), funding);
+        // The indexer ALSO lists the second token UTXO under the signer's
+        // own address (F-045's exact scenario). addUtxo registers it both
+        // as a candidate from provider.listUtxos(signer.address()) and as a
+        // known outpoint for broadcast validation.
+        provider.addUtxo(signer.address(), other);
+
+        CallOptions opts = new CallOptions(null, null, null)
+            .withAdditionalContractInputs(List.of(other))
+            .withAdditionalContractInputArgs(List.of(
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+        first.callWithOptions(
+            "merge",
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            opts, provider, signer);
+
+        List<String> txs = provider.getBroadcastedTxs();
+        RawTx callTx = RawTxParser.parse(txs.get(txs.size() - 1));
+
+        long otherOccurrences = callTx.inputs.stream()
+            .filter(in -> in.prevTxid.equals(other.txid()) && in.prevVout == other.outputIndex())
+            .count();
+        assertEquals(1, otherOccurrences,
+            "the additional contract UTXO must be spent exactly once (as the merge's extra "
+                + "contract input), never a second time as a P2PKH funding input — got "
+                + otherOccurrences + " occurrences among " + callTx.inputs.size() + " inputs");
+    }
 }

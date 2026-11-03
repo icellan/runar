@@ -8,10 +8,11 @@ import hashlib
 import math
 import struct
 
+from runar._ripemd160 import ripemd160_digest
 from runar.ecdsa import ecdsa_verify, TEST_MESSAGE_DIGEST
 from runar.rabin_sig import rabin_verify as _rabin_verify_real
 from runar.wots import wots_verify as _wots_verify_real
-from runar.slhdsa_impl import slh_verify as _slh_verify
+from runar.slh_dsa import slh_verify as _slh_verify_repo
 
 
 # -- Assertion ---------------------------------------------------------------
@@ -268,25 +269,27 @@ def verify_ecdsa_p384(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return rx % _P384_N == r
 
 
-# -- Real SLH-DSA Verification (raises RuntimeError if slhdsa not installed) -
+# -- Real SLH-DSA Verification ---------------------------------------------
+# The repo's SHA-256-only SLH-DSA variant (runar/slh_dsa.py), the one the
+# compiled on-chain verifier and the other six SDKs implement (F-133).
 
 def verify_slh_dsa_sha2_128s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_128s')
+    return _slh_verify_repo('sha2_128s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_128f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_128f')
+    return _slh_verify_repo('sha2_128f', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_192s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_192s')
+    return _slh_verify_repo('sha2_192s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_192f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_192f')
+    return _slh_verify_repo('sha2_192f', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_256s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_256s')
+    return _slh_verify_repo('sha2_256s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_256f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_256f')
+    return _slh_verify_repo('sha2_256f', msg, sig, pubkey)
 
 
 # -- Byte coercion -----------------------------------------------------------
@@ -401,8 +404,12 @@ def blake3_hash(message) -> bytes:
     interpreter reference.
     """
     msg = _as_bytes(message)
-    padded = msg[:64] + b"\x00" * max(0, 64 - len(msg))
-    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded, min(len(msg), 64))
+    # The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+    # padding size), so the runtime must fail too rather than truncate.
+    if len(msg) > 64:
+        raise ValueError(f"blake3Hash: message must be <= 64 bytes, got {len(msg)}")
+    padded = msg + b"\x00" * (64 - len(msg))
+    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded, len(msg))
 
 
 # -- SHA-256 Compression (real implementation) --------------------------------
@@ -448,8 +455,10 @@ def sha256_compress(state: bytes, block: bytes) -> bytes:
     Returns:
         32-byte updated hash state (big-endian).
     """
-    assert len(state) == 32, f"state must be 32 bytes, got {len(state)}"
-    assert len(block) == 64, f"block must be 64 bytes, got {len(block)}"
+    if len(state) != 32:
+        raise ValueError(f"state must be 32 bytes, got {len(state)}")
+    if len(block) != 64:
+        raise ValueError(f"block must be 64 bytes, got {len(block)}")
 
     # Parse state as 8 big-endian uint32
     H = list(struct.unpack('>8I', state))
@@ -530,7 +539,7 @@ def sha256_finalize(state: bytes, remaining: bytes, msg_bit_len: int) -> bytes:
 def hash160(data) -> bytes:
     """RIPEMD160(SHA256(data))"""
     data = _as_bytes(data)
-    return hashlib.new('ripemd160', hashlib.sha256(data).digest()).digest()
+    return ripemd160_digest(hashlib.sha256(data).digest())
 
 def hash256(data) -> bytes:
     """SHA256(SHA256(data))"""
@@ -550,7 +559,7 @@ def sha256_hash(data) -> bytes:
 
 def ripemd160(data) -> bytes:
     data = _as_bytes(data)
-    return hashlib.new('ripemd160', data).digest()
+    return ripemd160_digest(data)
 
 
 # -- Mock Preimage Extraction ------------------------------------------------
@@ -559,13 +568,15 @@ def extract_locktime(preimage: bytes) -> int:
     return 0
 
 def extract_output_hash(preimage) -> bytes:
-    """Returns the first 32 bytes of the preimage in test mode.
-    Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
-    hash256(outputs) == extract_output_hash(tx_preimage) passes.
-    Falls back to 32 zero bytes when the preimage is shorter than 32 bytes."""
+    """Returns the preimage's hashOutputs field in test mode: the 32 bytes
+    ending 8 bytes before the end (end-relative, matching the compiled
+    opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP).
+    Falls back to 32 zero bytes when the preimage is shorter than 40 bytes.
+    N-246: this used to echo the leading 32 bytes (nVersion + most of
+    hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188)."""
     preimage = _as_bytes(preimage)
-    if len(preimage) >= 32:
-        return preimage[:32]
+    if len(preimage) >= 40:
+        return preimage[len(preimage) - 40: len(preimage) - 8]
     return b'\x00' * 32
 
 def extract_amount(preimage: bytes) -> int:
@@ -634,32 +645,64 @@ def current_block_height() -> int:
     return 0
 
 
+def continuation_amount() -> int:
+    """Test-mode stub for the read-only view of the satoshis the call puts in
+    the next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+    injected ``_newAmount`` witness, already bound to
+    ``>= extract_amount(tx_preimage)``. Returns 10000 -- the mock input amount
+    ``extract_amount`` returns, i.e. an honest continuation -- unless a test
+    has set another value with ``set_mock_continuation_amount``."""
+    return _mock_continuation_amount
+
+
+_mock_continuation_amount = 10000
+
+
+def set_mock_continuation_amount(amount: int) -> int:
+    """Set what ``continuation_amount()`` returns in test mode; returns the
+    previous value so a test can restore it. ``extract_amount`` stays 10000,
+    so a native test of an author rule such as
+    ``continuation_amount() == extract_amount(self.tx_preimage) + bet`` sets
+    10000 + bet for the paying call and anything else for a non-paying one
+    (N-027)."""
+    global _mock_continuation_amount
+    prev = _mock_continuation_amount
+    _mock_continuation_amount = amount
+    return prev
+
+
 # -- Math Utilities ----------------------------------------------------------
 
-def safediv(a: int, b: int) -> int:
+# Python's ``//`` and ``%`` floor; Bitcoin Script's OP_DIV / OP_MOD truncate
+# toward zero, and abort on a zero divisor. Every division-shaped builtin
+# below goes through these two so the native run of a contract computes what
+# the deployed script computes (F-134).
+
+def _script_div(a: int, b: int, name: str) -> int:
     if b == 0:
-        return 0
-    # Python integer division truncates toward negative infinity,
-    # but Bitcoin Script truncates toward zero. Match that behavior.
-    if (a < 0) != (b < 0) and a % b != 0:
-        return -(abs(a) // abs(b))
-    return a // b
+        # OP_DIV by zero fails the script; there is no value to return.
+        raise ZeroDivisionError(f'{name}: division by zero')
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def _script_mod(a: int, b: int, name: str) -> int:
+    if b == 0:
+        raise ZeroDivisionError(f'{name}: modulo by zero')
+    return a - _script_div(a, b, name) * b
+
+def safediv(a: int, b: int) -> int:
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV -- a zero divisor aborts.
+    return _script_div(a, b, 'safediv')
 
 def safemod(a: int, b: int) -> int:
-    if b == 0:
-        return 0
-    r = a % b
-    # Ensure sign matches dividend (Bitcoin Script behavior)
-    if r != 0 and (a < 0) != (r < 0):
-        r -= b
-    return r
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD -- remainder takes the
+    # dividend's sign; a zero divisor aborts.
+    return _script_mod(a, b, 'safemod')
 
 def clamp(value: int, lo: int, hi: int) -> int:
-    if value < lo:
-        return lo
-    if value > hi:
-        return hi
-    return value
+    # Script: <value> <lo> OP_MAX <hi> OP_MIN, i.e. min(max(value, lo), hi);
+    # with lo > hi, hi wins (N-030).
+    return min(max(value, lo), hi)
 
 def sign(n: int) -> int:
     if n > 0:
@@ -669,18 +712,29 @@ def sign(n: int) -> int:
     return 0
 
 def pow_(base: int, exp: int) -> int:
+    # Script: OP_DUP 0 33 OP_WITHIN OP_VERIFY, then 32 unrolled multiplies --
+    # any exponent outside 0..32 aborts.
+    if exp < 0:
+        raise ValueError('pow: negative exponent')
+    if exp > 32:
+        raise ValueError('pow: exponent outside the supported domain (exp > 32)')
     return base ** exp
 
 def mul_div(a: int, b: int, c: int) -> int:
-    return (a * b) // c
+    # Script: <a> <b> OP_MUL <c> OP_DIV -- truncated; a zero divisor aborts.
+    return _script_div(a * b, c, 'mulDiv')
 
 def percent_of(amount: int, bps: int) -> int:
-    return (amount * bps) // 10000
+    # Script: <amount> <bps> OP_MUL 10000 OP_DIV -- truncated toward zero.
+    return _script_div(amount * bps, 10000, 'percentOf')
 
 def sqrt(n: int) -> int:
     """Integer square root using Newton's method."""
+    # Script: n >= 0 and OP_SIZE(n) < 63 are VERIFIED, i.e. 0 <= n < 2^495.
     if n < 0:
-        raise ValueError("sqrt of negative number")
+        raise ValueError('sqrt: negative input')
+    if n >= 1 << 495:
+        raise ValueError('sqrt: input outside the supported domain (n >= 2^495)')
     if n == 0:
         return 0
     x = n
@@ -691,18 +745,24 @@ def sqrt(n: int) -> int:
     return x
 
 def gcd(a: int, b: int) -> int:
+    # The script unrolls exactly 256 Euclid steps and returns the partial
+    # remainder when they are not enough (N-030).
     a, b = abs(a), abs(b)
-    while b:
+    for _ in range(256):
+        if not b:
+            break
         a, b = b, a % b
     return a
 
 def divmod_(a: int, b: int) -> int:
     """Returns quotient only (matching Runar's divmod which returns quotient)."""
-    return a // b
+    # Script: OP_2DUP OP_DIV ... OP_MOD OP_DROP -- truncated; zero aborts.
+    return _script_div(a, b, 'divmod')
 
 def log2(n: int) -> int:
+    # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
     if n <= 0:
-        return 0
+        raise ValueError('log2: non-positive input')
     return n.bit_length() - 1
 
 def bool_cast(n: int) -> bool:
@@ -761,7 +821,20 @@ def cat(a, b) -> bytes:
     return _as_bytes(a) + _as_bytes(b)
 
 def substr(data, start: int, length: int) -> bytes:
-    return _as_bytes(data)[start:start + length]
+    """N-171 (sibling of F-274): `substr` compiles to `<data> <start>
+    OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the
+    second against the REMAINDER `size(data) - start`. It ABORTS whenever
+    `start` is outside [0, size(data)] or `length` is outside
+    [0, size(data) - start], which collapses to: start < 0, length < 0, or
+    start + length > size(data). Python slicing clamps instead of raising,
+    so the bound is checked explicitly here.
+    """
+    b = _as_bytes(data)
+    if start < 0 or length < 0 or start + length > len(b):
+        raise ValueError(
+            f'substr: start {start}, length {length} is outside a {len(b)}-byte value'
+        )
+    return b[start:start + length]
 
 def reverse_bytes(data) -> bytes:
     return _as_bytes(data)[::-1]

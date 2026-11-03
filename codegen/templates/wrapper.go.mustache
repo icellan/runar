@@ -78,6 +78,22 @@ func {{contractName}}ContractFromTxId(artifact *runar.RunarArtifact, txid string
 	return &{{contractName}}Contract{inner: inner}, nil
 }
 
+// {{contractName}}ContractFromUtxo reconnects to an existing contract from a known UTXO.
+func {{contractName}}ContractFromUtxo(artifact *runar.RunarArtifact, utxo runar.UTXO) (*{{contractName}}Contract, error) {
+	inner, err := runar.FromUtxo(artifact, utxo)
+	if err != nil {
+		return nil, err
+	}
+	return &{{contractName}}Contract{inner: inner}, nil
+}
+
+// AttachInscription attaches a 1sat ordinals inscription to the contract. It returns
+// an error when the envelope would break the contract's own SIZE(_codePart) pin.
+func (c *{{contractName}}Contract) AttachInscription(insc *runar.Inscription) error {
+	_, err := c.inner.WithInscription(insc)
+	return err
+}
+
 // Connect stores a provider and signer for implicit use.
 func (c *{{contractName}}Contract) Connect(provider runar.Provider, signer runar.Signer) {
 	c.inner.Connect(provider, signer)
@@ -131,8 +147,9 @@ func (c *{{contractName}}Contract) Prepare{{capitalizedName}}({{#prepareUserPara
 }
 
 // Finalize{{capitalizedName}} completes a prepared call with external signatures.
-func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}) (string, *runar.TransactionData, error) {
-	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} })
+// A nil provider falls back to the one stored by Connect.
+func (c *{{contractName}}Contract) Finalize{{capitalizedName}}(prepared *runar.PreparedCall{{#sigParams}}, {{name}} string{{/sigParams}}, provider runar.Provider) (string, *runar.TransactionData, error) {
+	return c.inner.FinalizeCall(prepared, map[int]string{ {{sigEntriesExpr}} }, provider)
 }
 
 {{/hasSigParams}}

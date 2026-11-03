@@ -91,6 +91,8 @@ class TestLoadIR_DecodesConstants:
                         {"name": "t1", "value": {"kind": "load_const", "value": True}},
                         {"name": "t2", "value": {"kind": "load_const", "value": "deadbeef"}},
                         {"name": "t3", "value": {"kind": "load_param", "name": "x"}},
+                        # F-014: a public method must end with an assert.
+                        {"name": "t4", "value": {"kind": "assert", "value": "t1"}},
                     ],
                     "isPublic": True,
                 },
@@ -256,6 +258,92 @@ class TestValidateIR_LoopCountExceedsMax:
 
 
 # ---------------------------------------------------------------------------
+# Test: validate_ir rejects a nested-loop PRODUCT exceeding maximum
+# (F-283 / CL-GAP-164)
+# ---------------------------------------------------------------------------
+
+class TestValidateIR_NestedLoopProductExceedsMax:
+    """The per-binding check above bounds a single loop's own count but
+    never the PRODUCT across nesting. Two loops of MAX_LOOP_COUNT each, one
+    nested inside the other, each individually satisfy the per-binding check
+    while the real unrolled work is MAX_LOOP_COUNT x MAX_LOOP_COUNT =
+    100,000,000.
+
+    What this proves: validate_ir rejects a nested-loop IR whose counts each
+    individually satisfy MAX_LOOP_COUNT but whose product does not, before
+    any lowering pass sees the program.
+    What this does not prove: that stack lowering itself would be safe
+    against such a product if it arrived some other way -- only that this
+    loader-level route is closed.
+    """
+
+    def _nested_program(self, outer_count, inner_count):
+        return ANFProgram(
+            contract_name="Test",
+            properties=[],
+            methods=[
+                ANFMethod(
+                    name="run",
+                    params=[],
+                    body=[
+                        ANFBinding(
+                            name="outer",
+                            value=ANFValue(
+                                kind="loop",
+                                count=outer_count,
+                                iter_var="i",
+                                body=[
+                                    ANFBinding(
+                                        name="inner",
+                                        value=ANFValue(
+                                            kind="loop",
+                                            count=inner_count,
+                                            iter_var="j",
+                                            body=[],
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        ),
+                        # N-071: a public method must end with an assert().
+                        ANFBinding(
+                            name="tTrue",
+                            value=ANFValue(kind="load_const", raw_value=True),
+                        ),
+                        ANFBinding(
+                            name="tAssert",
+                            value=ANFValue(kind="assert", raw_value="tTrue"),
+                        ),
+                    ],
+                    is_public=True,
+                ),
+            ],
+        )
+
+    def test_nested_loop_product_exceeds_max(self):
+        program = self._nested_program(MAX_LOOP_COUNT, MAX_LOOP_COUNT)
+        errors = validate_ir(program)
+        assert any("100000000" in e for e in errors), (
+            f"expected error naming the total iteration count, got: {errors}"
+        )
+
+    def test_small_nested_counts_whose_product_exceeds_max(self):
+        # Neither 101 nor 100 alone trips the per-binding ceiling, but their
+        # product (10,100) does. Proves the rule is the product, not a
+        # disguised re-check of the single bound.
+        program = self._nested_program(101, 100)
+        errors = validate_ir(program)
+        assert any("10100" in e for e in errors), (
+            f"expected error naming the total iteration count, got: {errors}"
+        )
+
+    def test_nested_loop_product_within_max_is_accepted(self):
+        program = self._nested_program(10, 10)
+        errors = validate_ir(program)
+        assert errors == [], f"expected no errors, got: {errors}"
+
+
+# ---------------------------------------------------------------------------
 # Test: validate_ir rejects negative loop count
 # ---------------------------------------------------------------------------
 
@@ -399,8 +487,9 @@ class TestValidateIR_EmptyPropertyType:
         )
         errors = validate_ir(program)
         assert len(errors) > 0, "expected error for empty property type"
-        assert any("empty type" in e for e in errors), (
-            f"expected error mentioning 'empty type', got: {errors}"
+        # N-419: wording converged on the --ir loader's shared message.
+        assert any("properties[0].type must be a non-empty string" in e for e in errors), (
+            f"expected the shared non-empty-string error, got: {errors}"
         )
 
 
@@ -473,6 +562,8 @@ class TestLoadIR_RoundTripExtended:
                                 ],
                             },
                         },
+                        # F-014: a public method must end with an assert.
+                        {"name": "done", "value": {"kind": "assert", "value": "cond"}},
                     ],
                     "isPublic": True,
                 },
@@ -484,7 +575,7 @@ class TestLoadIR_RoundTripExtended:
         assert len(loaded.methods) == 1
 
         body = loaded.methods[0].body
-        assert len(body) == 3
+        assert len(body) == 4
 
         # Verify if survived
         if_binding = body[1]
@@ -673,3 +764,69 @@ def test_structural_errors_keep_priority_over_the_entry_point_error() -> None:
     with pytest.raises(ValueError) as exc:
         load_ir(json.dumps(payload))
     assert "odd hex length" in str(exc.value), str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# N-419: the public validate_ir carries the SAME empty-identifier wording as
+# the --ir loader's required-fields pass (N-207 / N-408):
+#     IR validation: <path> must be a non-empty string
+# validate_ir returns bare messages and load_ir prepends "IR validation: ", so
+# the entries here are "<path> must be a non-empty string".
+#
+# Proves: each empty identifier / binding name / binding kind reached through
+# the direct API names its path in the shared wording, at the top level and
+# inside `if` arms and `loop` bodies. Does not prove: whitespace-only names,
+# or that load_ir still refuses these earlier (conformance/negatives/
+# ir-identifiers.test.ts and n419-ir-empty-kind-parity.test.ts cover that).
+# ---------------------------------------------------------------------------
+
+def _lc(name):
+    return ANFBinding(name=name, value=ANFValue(kind="load_const", raw_value=True, const_bool=True))
+
+
+def _program(**kw):
+    kw.setdefault("contract_name", "T")
+    kw.setdefault("properties", [])
+    kw.setdefault("methods", [])
+    return ANFProgram(**kw)
+
+
+def _method(body=None, params=None, name="m"):
+    return ANFMethod(name=name, params=params or [], body=body or [], is_public=True)
+
+
+_N419_CASES = [
+    ("contractName", _program(contract_name=""),
+     "contractName must be a non-empty string"),
+    ("method name", _program(methods=[_method(name="")]),
+     "methods[0].name must be a non-empty string"),
+    ("param name", _program(methods=[_method(params=[
+        ANFParam(name="a", type="bigint"), ANFParam(name="", type="bigint")])]),
+     "methods[0].params[1].name must be a non-empty string"),
+    ("param type", _program(methods=[_method(params=[ANFParam(name="a", type="")])]),
+     "methods[0].params[0].type must be a non-empty string"),
+    ("property name", _program(properties=[ANFProperty(name="", type="bigint", readonly=True)]),
+     "properties[0].name must be a non-empty string"),
+    ("property type", _program(properties=[ANFProperty(name="p", type="", readonly=True)]),
+     "properties[0].type must be a non-empty string"),
+    ("binding name", _program(methods=[_method(body=[_lc("t0"), _lc("")])]),
+     "methods[0].body[1].name must be a non-empty string"),
+    ("binding kind", _program(methods=[_method(body=[
+        ANFBinding(name="t0", value=ANFValue(kind=""))])]),
+     "methods[0].body[0].value.kind must be a non-empty string"),
+    ("binding name in then arm", _program(methods=[_method(body=[
+        ANFBinding(name="t1", value=ANFValue(kind="if", then=[_lc("")], else_=[_lc("e0")]))])]),
+     "methods[0].body[0].value.then[0].name must be a non-empty string"),
+    ("binding kind in loop body", _program(methods=[_method(body=[
+        ANFBinding(name="t1", value=ANFValue(kind="loop", count=2, body=[
+            ANFBinding(name="l0", value=ANFValue(kind=""))]))])]),
+     "methods[0].body[0].value.body[0].value.kind must be a non-empty string"),
+]
+
+
+class TestValidateIR_N419_SharedEmptyWording:
+    @pytest.mark.parametrize("label,program,want", _N419_CASES, ids=[c[0] for c in _N419_CASES])
+    def test_shared_wording(self, label, program, want):
+        errors = validate_ir(program)
+        assert errors, f"{label}: expected a validation error"
+        assert errors[0] == want, f"{label}: got {errors[0]!r}, want {want!r}"

@@ -7,43 +7,55 @@
       "column": 1
     },
     {
+      "opcodeIndex": 108,
+      "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
+      "line": 36,
+      "column": 1
+    },
+    {
       "opcodeIndex": 109,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 36,
       "column": 1
     },
     {
-      "opcodeIndex": 324,
+      "opcodeIndex": 339,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 325,
+      "opcodeIndex": 340,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 326,
+      "opcodeIndex": 341,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 327,
+      "opcodeIndex": 342,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 328,
+      "opcodeIndex": 343,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 43,
       "column": 1
     },
     {
-      "opcodeIndex": 330,
+      "opcodeIndex": 344,
+      "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
+      "line": 43,
+      "column": 1
+    },
+    {
+      "opcodeIndex": 345,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 43,
       "column": 1

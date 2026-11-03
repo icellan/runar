@@ -53,8 +53,13 @@ class TestN028ECFreshConstBinding < Minitest::Test
   # TYPESCRIPT tier and cross-checked against Ruby's own output, not copied
   # from this tier — the whole point of the pin is that it is another tier's
   # opinion of these bytes.
-  EC_LINEAR_REFERENCE_SHA256 = "7214cad88783e09e484fe15f57c3d45fdf4443960c7f7a45731e052065b1bcad"
-  EC_LINEAR_REFERENCE_HEX_LEN = 2_554_314
+  # N-376 re-stamp (ROT ROT ROT -> [] peephole rule, 4644 identity OP_ROTs
+  # deleted; TS and Go agree). Was 7214cad88783e09e... / 2_554_314.
+  # N-113 re-stamp: the two inner ecMulGen(<const>) calls the fusion orphans
+  # are no longer kept (they cannot abort); TS and Go agree. Was
+  # 87a45fc5c08da42f... / 2_545_026.
+  EC_LINEAR_REFERENCE_SHA256 = "389db2b9d4a17bda5d7606ce913de744ebcaeabdf9cd915cf69ed74c1521b09c"
+  EC_LINEAR_REFERENCE_HEX_LEN = 849_418
 
   # Control: no EC calls at all, so +optimize_ec+ returns early. Pinned so the
   # fix above cannot be "achieved" by disabling the optimizer.
@@ -210,7 +215,7 @@ class TestN028ECFreshConstBinding < Minitest::Test
       end
       ir = JSON.parse(out)
       folded = ir["methods"].flat_map { |m| m["body"] }
-                            .select { |b| b["name"].start_with?("__ec_opt_") }
+                            .select { |b| b["name"].end_with?("_k") } # TS-style <binding>_k (N-112)
       refute_empty folded, "expected the EC optimizer to emit a folded-scalar binding"
       value = folded[0]["value"]["value"]
       assert_equal "123456789012345678901234567897n", value,

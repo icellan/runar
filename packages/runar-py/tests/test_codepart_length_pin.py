@@ -3,8 +3,12 @@
 A stateful contract with a variable-length state section carries an EQUALITY pin
 on the deployed code-part length, emitted as a fixed-width nine-byte run::
 
-    76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-    OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+    76 | 04 LL LL LL LL | 81 | 9c | 69
+    OP_DUP  <len LE32>    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
+
+(Compilers before N-051 emitted ``a2`` = OP_GREATERTHANOREQUAL instead of ``9c``
+when the length was not known at compile time; they now always emit ``9c`` and
+record such a field as a ``codePartLenSlots`` entry the SDK patches.)
 
 ``_get_code_part_hex`` concatenates the inscription envelope INTO the code part,
 so attaching one makes the real code part longer than the pinned number and every
@@ -29,8 +33,9 @@ PIN_TEMPLATE_EXACT_10 = '5176040a000000819c69'
 # decoder that reads the length big-endian gets 0x21000000 here and wrongly
 # refuses.
 PIN_TEMPLATE_EXACT_33 = '51760421000000819c69'
-# LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy it, so
-# it must never trigger a refusal.
+# LEGACY (pre-N-051) LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra
+# bytes satisfy it, so it must never trigger a refusal. Current compilers no
+# longer emit it; an artifact from an older compiler may still carry it.
 PIN_TEMPLATE_LOWER_BOUND_10 = '5176040a00000081a269'
 # No pin at all (a bare P2PKH template). Accept.
 PIN_TEMPLATE_NONE = '76a90088ac'
@@ -102,10 +107,11 @@ def test_with_inscription_accepts_when_exact_pin_matches_inscribed_length():
 
 
 def test_with_inscription_accepts_lower_bound_pin():
-    """Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes.
+    """Control 1 (mandatory): a LEGACY (pre-N-051) LOWER-BOUND pin is satisfied
+    by the extra bytes.
 
-    Guarding ``a2`` would turn this fix into an outage for every lower-bound
-    contract.
+    Guarding ``a2`` would turn this fix into an outage for every contract
+    already deployed from an older artifact.
     """
     contract = pin_fixture_contract(PIN_TEMPLATE_LOWER_BOUND_10)
 
@@ -121,3 +127,4 @@ def test_with_inscription_accepts_unpinned_contract():
     contract.with_inscription(pin_fixture_inscription())
 
     assert contract.inscription is not None
+

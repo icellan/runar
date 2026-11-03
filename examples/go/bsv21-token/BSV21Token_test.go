@@ -96,7 +96,7 @@ func TestBSV21Token_DeployMintInscription_AllFields(t *testing.T) {
 	sym := "RNR"
 	icon := "b61b0172d95e266c18aea0c624db987e971a5d6d4ebc2aaed85da4642d635735_0"
 	inscription := runar.BSV21DeployMint("1000000", &dec, &sym, &icon)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBSV21Token_DeployMintInscription_AllFields(t *testing.T) {
 func TestBSV21Token_DeployMintInscription_MinimalFields(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV21DeployMint("500", nil, nil, nil)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestBSV21Token_TransferInscription(t *testing.T) {
 	a := compileContract(t)
 	tokenID := "3b313338fa0555aebeaf91d8db1ffebd74773c67c8ad5181ff3d3f51e21e0000_1"
 	inscription := runar.BSV21Transfer(tokenID, "100")
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestBSV21Token_DeployMintFromUtxoRoundTrip(t *testing.T) {
 	a := compileContract(t)
 	sym := "RNR"
 	inscription := runar.BSV21DeployMint("1000000", nil, &sym, nil)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestBSV21Token_TransferFromUtxoRoundTrip(t *testing.T) {
 	a := compileContract(t)
 	tokenID := "abc123_0"
 	inscription := runar.BSV21Transfer(tokenID, "50")
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	if _, err := contract.WithInscription(inscription); err != nil {
 		t.Fatalf("WithInscription: %v", err)
 	}

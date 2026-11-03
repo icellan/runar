@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { ScriptExecutionContract } from '../script-execution.js';
+import { TestContract } from '../test-contract.js';
 
 // ---- Contracts ----
 
@@ -266,4 +267,55 @@ describe('blake3Hash — script execution', () => {
       expect(result.success).toBe(true);
     });
   }
+});
+
+// F-128: mock/script parity for messages longer than one block.
+//
+// The compiled blake3Hash script computes `64 - len(msg)` and feeds it to
+// OP_NUM2BIN as the zero-padding size. For len > 64 that size is negative and
+// the script aborts (observed: OP_NUM2BIN at locking-script PC 10, "negative
+// size"). The interpreter used to zero-pad only the first 64 bytes and return a
+// digest of the truncated message, so TestContract accepted a spend the
+// locking script rejects.
+//
+// Proves: for 65/100/128-byte messages the script fails AND the interpreter
+// fails (it no longer returns the truncated-message digest), while the
+// 64-byte boundary still succeeds in both. Does not prove anything about
+// multi-block BLAKE3 (unsupported on-chain by design) or about other tiers'
+// runtimes (each has its own test).
+describe('blake3Hash — messages longer than 64 bytes are rejected by script and interpreter', () => {
+  for (const len of [65, 100, 128]) {
+    it(`${len}-byte message: script aborts and interpreter rejects`, () => {
+      const hex = 'cd'.repeat(len);
+      // The digest the old interpreter returned: BLAKE3 of the first 64 bytes.
+      const truncatedDigest = referenceBlake3Hash(hex.slice(0, 128));
+
+      const script = ScriptExecutionContract.fromSource(
+        BLAKE3_HASH_SOURCE,
+        { expected: truncatedDigest },
+        'Blake3HashTest.runar.ts',
+      );
+      const scriptResult = script.execute('verify', [hex]);
+      expect(scriptResult.success).toBe(false);
+      expect(scriptResult.error).toMatch(/negative size/);
+
+      const interp = TestContract.fromSource(
+        BLAKE3_HASH_SOURCE,
+        { expected: truncatedDigest },
+        'Blake3HashTest.runar.ts',
+      );
+      const interpResult = interp.call('verify', { message: hex });
+      expect(interpResult.success).toBe(false);
+      expect(interpResult.error).toMatch(/blake3Hash.*64 bytes/);
+    });
+  }
+
+  it('64-byte message: script and interpreter both accept the standard digest', () => {
+    const hex = 'cd'.repeat(64);
+    const expected = referenceBlake3Hash(hex);
+    const script = ScriptExecutionContract.fromSource(BLAKE3_HASH_SOURCE, { expected }, 'Blake3HashTest.runar.ts');
+    expect(script.execute('verify', [hex]).success).toBe(true);
+    const interp = TestContract.fromSource(BLAKE3_HASH_SOURCE, { expected }, 'Blake3HashTest.runar.ts');
+    expect(interp.call('verify', { message: hex }).success).toBe(true);
+  });
 });

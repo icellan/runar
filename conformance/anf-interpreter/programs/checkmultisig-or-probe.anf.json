@@ -1,0 +1,230 @@
+{
+  "contractName": "CheckMultiSigOrProbe",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 15
+          },
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "s1"
+          }
+        },
+        {
+          "name": "t1",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "s2"
+          }
+        },
+        {
+          "name": "t2",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "elements": [
+              "t0",
+              "t1"
+            ],
+            "kind": "array_literal"
+          }
+        },
+        {
+          "name": "t3",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "pk1"
+          }
+        },
+        {
+          "name": "t4",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "pk2"
+          }
+        },
+        {
+          "name": "t5",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "pk3"
+          }
+        },
+        {
+          "name": "t6",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "elements": [
+              "t3",
+              "t4",
+              "t5"
+            ],
+            "kind": "array_literal"
+          }
+        },
+        {
+          "name": "t7",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "args": [
+              "t2",
+              "t6"
+            ],
+            "func": "checkMultiSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t12",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "cond": "t7",
+            "else": [
+              {
+                "name": "t9",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sigB"
+                }
+              },
+              {
+                "name": "t10",
+                "value": {
+                  "kind": "load_param",
+                  "name": "pubB"
+                }
+              },
+              {
+                "name": "t11",
+                "value": {
+                  "args": [
+                    "t9",
+                    "t10"
+                  ],
+                  "func": "checkSig",
+                  "kind": "call"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t8",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t13",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckMultiSigOrProbe.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "assert",
+            "value": "t12"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": [
+        {
+          "name": "s1",
+          "type": "Sig"
+        },
+        {
+          "name": "s2",
+          "type": "Sig"
+        },
+        {
+          "name": "pk1",
+          "type": "PubKey"
+        },
+        {
+          "name": "pk2",
+          "type": "PubKey"
+        },
+        {
+          "name": "pk3",
+          "type": "PubKey"
+        },
+        {
+          "name": "sigB",
+          "type": "Sig"
+        },
+        {
+          "name": "pubB",
+          "type": "PubKey"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": []
+}

@@ -2,9 +2,12 @@
  * Rule loader — loads peephole rules from the central JSON definition.
  *
  * The JSON rules in optimizer/peephole-rules.json serve as the canonical
- * rule definition shared across all four compilers. Each compiler implements
- * the rules procedurally for performance, but this loader validates that
- * the implementation matches the central definition.
+ * rule definition shared across all seven compiler tiers (TypeScript, Go,
+ * Rust, Python, Zig, Ruby, Java). Each tier implements the rules
+ * procedurally for performance — none of them reads this JSON file at
+ * runtime, it is the porting source of truth, not a shared runtime
+ * dependency. This loader itself is TS-only and validates that the
+ * TypeScript implementation matches the central definition.
  *
  * This module is used by tests to verify rule coverage, not at runtime. Until
  * R-139 it had no callers at all (CL-GAP-005), which is how the JSON came to

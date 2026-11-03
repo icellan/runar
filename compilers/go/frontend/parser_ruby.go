@@ -15,6 +15,15 @@ import (
 // ParseRuby parses a Ruby-syntax Rúnar contract (.runar.rb) and produces
 // the standard AST.
 func ParseRuby(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseRubySurface(source, fileName) })
+}
+
+func parseRubySurface(source []byte, fileName string) *ParseResult {
 	p := &rbParser{
 		fileName: fileName,
 	}
@@ -27,6 +36,12 @@ func ParseRuby(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	// N-004: nothing may follow the class's `end`.
+	p.skipNewlines()
+	if trailing := p.peek(); trailing.kind != rbTokEOF {
+		p.errors = append(p.errors, lexDiag(UnexpectedTokenAfterClassMsg(trailing.value), p.fileName, trailing.line, trailing.col))
+	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -126,6 +141,12 @@ type rbParser struct {
 	pos           int
 	errors        []Diagnostic
 	declaredLocals map[string]bool // track locally declared variables per method scope
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *rbParser) addError(msg string) {
@@ -164,12 +185,31 @@ func (p *rbParser) tokenize(source string) []rbToken {
 	var tokens []rbToken
 	lines := strings.Split(source, "\n")
 	parenDepth := 0
+	// Line number of an open `=begin` embedded document, or 0.
+	blockCommentStart := 0
 
 	for lineIdx, rawLine := range lines {
 		lineNum := lineIdx + 1
 
 		// Strip trailing \r
 		line := strings.TrimRight(rawLine, "\r")
+
+		// F-012: Ruby embedded documents, the Ruby tier's rule (F-018), which is
+		// Ruby's own. `=begin` / `=end` open and close a block comment only at
+		// column 0 and only as a whole word (followed by whitespace or end of
+		// line). Everything from the `=begin` line through the `=end` line is a
+		// comment. Before this, a method "commented out" this way compiled as a
+		// live spend path and the `end` of `=end` closed the class early.
+		if blockCommentStart != 0 {
+			if rbIsEmbeddedDocMarker(line, "=end") {
+				blockCommentStart = 0
+			}
+			continue
+		}
+		if rbIsEmbeddedDocMarker(line, "=begin") {
+			blockCommentStart = lineNum
+			continue
+		}
 
 		// Skip blank lines and comment-only lines
 		stripped := strings.TrimLeft(line, " \t")
@@ -201,13 +241,19 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Instance variable: @name
 			if ch == '@' {
 				pos++
-				name := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					name += string(line[pos])
 					pos++
 				}
+				name := line[start:pos]
 				if len(name) > 0 {
 					tokens = append(tokens, rbToken{kind: rbTokIvar, value: name, line: lineNum, col: col})
+				} else {
+					// N-214: a bare `@` was dropped, so `a + @ b` compiled as
+					// `a + b`. The TS reference lexes it as its own token and
+					// refuses it in the expression; refuse it here with TS's
+					// diagnostic.
+					p.errors = append(p.errors, lexDiag("Unexpected token in expression: '@'", p.fileName, lineNum, col))
 				}
 				continue
 			}
@@ -305,11 +351,11 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Symbol: :name (but not ::)
 			if ch == ':' && pos+1 < len(line) && rbIsIdentStart(line[pos+1]) {
 				pos++ // skip ':'
-				name := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					name += string(line[pos])
 					pos++
 				}
+				name := line[start:pos]
 				tokens = append(tokens, rbToken{kind: rbTokSymbol, value: name, line: lineNum, col: col})
 				continue
 			}
@@ -317,64 +363,66 @@ func (p *rbParser) tokenize(source string) []rbToken {
 			// Single-quoted string literals: hex ByteStrings
 			if ch == '\'' {
 				pos++
-				val := ""
+				// N-181: a Builder, not `val += …`, which copied the whole
+				// literal per byte (quadratic on a 4 MiB unterminated string).
+				// WriteByte keeps the source bytes (UTF-8 intact); WriteRune(rune(b)) re-encoded each byte as Latin-1 (N-436).
+				var val strings.Builder
 				for pos < len(line) && line[pos] != '\'' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val += string(line[pos])
+						val.WriteByte(line[pos])
 						pos++
 					} else {
-						val += string(line[pos])
+						val.WriteByte(line[pos])
 						pos++
 					}
 				}
 				if pos < len(line) {
 					pos++ // skip closing quote
+				} else {
+					// F-011: line-based, so reaching the line break means the
+					// literal is unterminated; refuse it, never end it silently.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
-				tokens = append(tokens, rbToken{kind: rbTokHexString, value: val, line: lineNum, col: col})
+				tokens = append(tokens, rbToken{kind: rbTokHexString, value: val.String(), line: lineNum, col: col})
 				continue
 			}
 
 			// Double-quoted string literals
 			if ch == '"' {
 				pos++
-				val := ""
+				var val strings.Builder
 				for pos < len(line) && line[pos] != '"' {
 					if line[pos] == '\\' && pos+1 < len(line) {
 						pos++ // skip backslash
-						val += string(line[pos])
+						val.WriteByte(line[pos])
 						pos++
 					} else {
-						val += string(line[pos])
+						val.WriteByte(line[pos])
 						pos++
 					}
 				}
 				if pos < len(line) {
 					pos++ // skip closing quote
+				} else {
+					// F-011: line-based, so reaching the line break means the
+					// literal is unterminated; refuse it, never end it silently.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
-				tokens = append(tokens, rbToken{kind: rbTokString, value: val, line: lineNum, col: col})
+				tokens = append(tokens, rbToken{kind: rbTokString, value: val.String(), line: lineNum, col: col})
 				continue
 			}
 
-			// Numbers (decimal and hex)
+			// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
 			if ch >= '0' && ch <= '9' {
-				num := ""
-				if ch == '0' && pos+1 < len(line) && (line[pos+1] == 'x' || line[pos+1] == 'X') {
-					num = "0x"
-					pos += 2
-					for pos < len(line) && (isHexDigit(line[pos]) || line[pos] == '_') {
-						if line[pos] != '_' {
-							num += string(line[pos])
-						}
-						pos++
-					}
+				end := scanNumberEnd(line, pos)
+				text := line[pos:end]
+				pos = end
+				num := "0"
+				if lit := parseIntLiteral("rb", text); lit != nil {
+					num = lit.Value.String()
 				} else {
-					for pos < len(line) && ((line[pos] >= '0' && line[pos] <= '9') || line[pos] == '_') {
-						if line[pos] != '_' {
-							num += string(line[pos])
-						}
-						pos++
-					}
+					p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("rb", text), p.fileName, lineNum, col))
 				}
 				tokens = append(tokens, rbToken{kind: rbTokNumber, value: num, line: lineNum, col: col})
 				continue
@@ -382,16 +430,15 @@ func (p *rbParser) tokenize(source string) []rbToken {
 
 			// Identifiers and keywords
 			if rbIsIdentStart(ch) {
-				val := ""
+				start := pos
 				for pos < len(line) && rbIsIdentPart(line[pos]) {
-					val += string(line[pos])
 					pos++
 				}
 				// Check for trailing ? or ! (Ruby convention)
 				if pos < len(line) && (line[pos] == '?' || line[pos] == '!') {
-					val += string(line[pos])
 					pos++
 				}
+				val := line[start:pos]
 				if kw, ok := rbKeywords[val]; ok {
 					tokens = append(tokens, rbToken{kind: kw, value: val, line: lineNum, col: col})
 				} else {
@@ -447,8 +494,11 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				continue
 			}
 
-			// Skip unknown characters
-			pos++
+			// N-214: an unrecognised character is refused, as the TS reference
+			// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+			d, size := unexpectedCharDiag(line, pos, p.fileName, lineNum, col)
+			p.errors = append(p.errors, d)
+			pos += size
 		}
 
 		// Emit NEWLINE at end of significant line (only if not inside parens)
@@ -457,8 +507,30 @@ func (p *rbParser) tokenize(source string) []rbToken {
 		}
 	}
 
+	if blockCommentStart != 0 {
+		p.errors = append(p.errors, lexDiag(
+			fmt.Sprintf("unterminated '=begin' block comment starting at line %d: missing '=end'", blockCommentStart),
+			p.fileName, blockCommentStart, 0))
+	}
+
 	tokens = append(tokens, rbToken{kind: rbTokEOF, value: "", line: len(lines) + 1, col: 1})
 	return tokens
+}
+
+// rbIsEmbeddedDocMarker reports whether line starts at column 0 with marker
+// (`=begin` or `=end`) as a whole word: followed by whitespace or end of line.
+func rbIsEmbeddedDocMarker(line, marker string) bool {
+	if !strings.HasPrefix(line, marker) {
+		return false
+	}
+	if len(line) == len(marker) {
+		return true
+	}
+	switch line[len(marker)] {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
 }
 
 func rbIsIdentStart(ch byte) bool {
@@ -613,7 +685,7 @@ func rbMapType(name string) string {
 	switch name {
 	case "Bigint", "Integer", "Int":
 		return "bigint"
-	case "Boolean":
+	case "Boolean", "Bool":
 		return "boolean"
 	case "ByteString":
 		return "ByteString"
@@ -711,6 +783,17 @@ func (p *rbParser) skipNewlines() {
 // Type parsing
 // ---------------------------------------------------------------------------
 
+// badBooleanPropOption refuses a `readonly:` / `embed_always:` value that is
+// not a literal true or false (N-313). Same text in all seven tiers.
+func (p *rbParser) badBooleanPropOption(option string) {
+	tok := p.peek()
+	got := tok.value
+	if tok.kind == rbTokNewline || tok.kind == rbTokEOF {
+		got = "<end of line>"
+	}
+	p.addError(fmt.Sprintf("line %d: invalid value '%s' for prop option '%s' (expected true or false)", tok.line, got, option))
+}
+
 func (p *rbParser) parseRbType() TypeNode {
 	tok := p.advance()
 	rawName := tok.value
@@ -718,7 +801,7 @@ func (p *rbParser) parseRbType() TypeNode {
 	// Check for FixedArray[T, N] style generic
 	if rawName == "FixedArray" && p.check(rbTokLBracket) {
 		p.advance() // '['
-		elemType := p.parseRbType()
+		elemType := nested(&p.nest, p.loc(), p.parseRbType)
 		p.expect(rbTokComma)
 		sizeTok := p.expect(rbTokNumber)
 		size, err := strconv.Atoi(sizeTok.value)
@@ -771,7 +854,7 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	}
 
 	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
-		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
+		return nil, fmt.Errorf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentClass)
 	}
 
 	p.skipNewlines()
@@ -784,6 +867,12 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	// Pending visibility/param types for the next method
 	var pendingVisibility string          // "public" or ""
 	var pendingParamTypes map[string]TypeNode
+	// N-093: pending `runar_sighash` specs (nil = malformed) for the next def.
+	type rbPendingSighash struct {
+		spec *string
+		loc  SourceLocation
+	}
+	var pendingSighash []rbPendingSighash
 
 	for !p.check(rbTokEnd) && !p.check(rbTokEOF) {
 		p.skipNewlines()
@@ -797,6 +886,26 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 			if prop != nil {
 				properties = append(properties, *prop)
 			}
+			p.skipNewlines()
+			continue
+		}
+
+		// N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+		// `@sighash` directive; it applies to the next `def`.
+		if p.checkIdent("runar_sighash") {
+			sighashLoc := p.loc()
+			p.advance() // 'runar_sighash'
+			arg := p.peek()
+			count := 0
+			for !p.check(rbTokNewline) && !p.check(rbTokEOF) {
+				p.advance()
+				count++
+			}
+			var spec *string
+			if count == 1 && (arg.kind == rbTokString || arg.kind == rbTokHexString) {
+				spec = nativeSighashSpec(arg.value)
+			}
+			pendingSighash = append(pendingSighash, rbPendingSighash{spec: spec, loc: sighashLoc})
 			p.skipNewlines()
 			continue
 		}
@@ -822,21 +931,55 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		if p.check(rbTokDef) {
 			method := p.parseMethod(pendingVisibility, pendingParamTypes)
 			if method.Name == "constructor" {
+				// N-093: the constructor is not a spending entry point.
+				for _, ps := range pendingSighash {
+					errLoc := ps.loc
+					p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+				}
 				constructor = &method
 			} else {
+				specs := make([]*string, len(pendingSighash))
+				for i, ps := range pendingSighash {
+					specs[i] = ps.spec
+				}
+				sighashType, sighashErr := resolveNativeSighash(method.Name, method.Visibility == "public", specs)
+				if sighashErr != "" {
+					errLoc := method.SourceLocation
+					p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+				}
+				method.SighashType = sighashType
 				methods = append(methods, method)
 			}
 			pendingVisibility = ""
 			pendingParamTypes = nil
+			pendingSighash = nil
 			p.skipNewlines()
 			continue
 		}
 
-		// Skip unknown tokens
-		p.advance()
+		// Ruby's bare visibility markers are no-ops here (visibility comes
+		// from `runar_public`); examples/ruby uses them.
+		if p.checkIdent("private") || p.checkIdent("public") {
+			p.advance()
+			continue
+		}
+
+		// N-004: refuse anything else (an indented `=begin` lexes as `=`).
+		stray := p.advance()
+		p.errors = append(p.errors, lexDiag(UnexpectedClassBodyTokenMsg(stray.value), p.fileName, stray.line, stray.col))
 	}
 
-	p.match(rbTokEnd) // end of class
+	// N-093: a `runar_sighash` with no `def` after it annotates nothing.
+	for _, ps := range pendingSighash {
+		errLoc := ps.loc
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+	}
+
+	// N-319: the class `end` is required; EOF here means it is missing.
+	if !p.match(rbTokEnd) {
+		eofTok := p.peek()
+		p.errors = append(p.errors, lexDiag("unterminated class: missing closing 'end'", p.fileName, eofTok.line, eofTok.col))
+	}
 
 	// Auto-generate constructor if not provided
 	if constructor == nil {
@@ -969,10 +1112,27 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	// Check for optional trailing options: readonly: true/false, default: <literal>
 	// Multiple options are comma-separated and may appear in any order.
 	isReadonly := false
+	embedAlways := false
 	var initializer Expression
+	optionError := false
 	for p.check(rbTokComma) {
 		p.advance() // ','
-		if p.checkIdent("readonly") {
+		if p.checkIdent("embed_always") {
+			// N-093: the native spelling of the `@embedAlways` directive.
+			p.advance() // 'embed_always'
+			p.expect(rbTokColon)
+			if p.check(rbTokTrue) {
+				p.advance()
+				embedAlways = true
+			} else if p.check(rbTokFalse) {
+				p.advance()
+				embedAlways = false
+			} else {
+				p.badBooleanPropOption("embed_always")
+				optionError = true
+				break
+			}
+		} else if p.checkIdent("readonly") {
 			p.advance() // 'readonly'
 			p.expect(rbTokColon)
 			if p.check(rbTokTrue) {
@@ -981,15 +1141,35 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 			} else if p.check(rbTokFalse) {
 				p.advance()
 				isReadonly = false
+			} else {
+				p.badBooleanPropOption("readonly")
+				optionError = true
+				break
 			}
 		} else if p.checkIdent("default") {
 			p.advance() // 'default'
 			p.expect(rbTokColon)
-			initializer = p.parseUnary()
+			if p.check(rbTokNil) {
+				// N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+				p.addError(fmt.Sprintf("line %d: prop default 'nil' is not a literal (expected a number, true, false or a hex string)", p.peek().line))
+				p.advance() // 'nil'
+			} else {
+				initializer = p.parseUnary()
+			}
 		} else {
-			// Unknown trailing option -- stop parsing options
+			// N-301: an unknown option (e.g. a typo of `embed_always`) is
+			// refused, never silently dropped. Same text in all seven tiers.
+			p.addError(fmt.Sprintf("line %d: unknown prop option '%s' (expected readonly, embed_always or default)", p.peek().line, p.peek().value))
+			optionError = true
 			break
 		}
+	}
+
+	// N-413: nothing may follow the type or an option value except `,` (the
+	// next option) or end of line, so `default: 1 + 2` is refused rather than
+	// silently truncated to its first operand. Same text in all seven tiers.
+	if !optionError && !p.check(rbTokNewline) && !p.check(rbTokEOF) {
+		p.addError(fmt.Sprintf("line %d: unexpected '%s' in prop declaration (expected ',' or end of line)", p.peek().line, p.peek().value))
 	}
 
 	// In stateless contracts (SmartContract and UnsafeSmartContract), all
@@ -1004,10 +1184,11 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	}
 
 	return &PropertyNode{
-		Name:           rbConvertName(rawName),
+		Name:           p.idents.declare(rawName, rbConvertName(rawName)),
 		Type:           typeNode,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
 }
@@ -1021,6 +1202,13 @@ func (p *rbParser) parseMethod(pendingVisibility string, pendingParamTypes map[s
 	p.expect(rbTokDef)
 
 	nameTok := p.advance()
+	// N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+	// method, not a contract method.
+	if p.check(rbTokDot) {
+		p.advance() // '.'
+		nameTok = p.advance()
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(nameTok.value), Severity: SeverityError, Loc: &loc})
+	}
 	rawName := nameTok.value
 
 	// Reset local variable tracking for this method scope
@@ -1053,7 +1241,7 @@ func (p *rbParser) parseMethod(pendingVisibility string, pendingParamTypes map[s
 	}
 
 	isPublic := pendingVisibility == "public"
-	methodName := rbConvertName(rawName)
+	methodName := p.idents.declare(rawName, rbConvertName(rawName))
 
 	visibility := "private"
 	if isPublic {
@@ -1075,7 +1263,7 @@ func (p *rbParser) parseParams(paramTypes map[string]TypeNode) []ParamNode {
 	for !p.check(rbTokRParen) && !p.check(rbTokEOF) {
 		nameTok := p.advance()
 		rawName := nameTok.value
-		camelName := rbConvertName(rawName)
+		camelName := p.idents.declare(rawName, rbConvertName(rawName))
 
 		// Look up the type from the preceding runar_public/params declaration
 		var typeNode TypeNode
@@ -1175,6 +1363,10 @@ func (p *rbParser) parseStatements() []Statement {
 }
 
 func (p *rbParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *rbParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// assert statement: assert expr
@@ -1217,8 +1409,16 @@ func (p *rbParser) parseStatement() Statement {
 		return p.parseIdentStatement(loc)
 	}
 
-	// Skip unknown
-	p.advance()
+	// N-053: a token that can begin an expression begins an expression
+	// statement (a private helper's last one is its implicit return value);
+	// any other token is refused. Skipping it dropped `!` / `(` / literals.
+	switch p.peek().kind {
+	case rbTokNumber, rbTokString, rbTokHexString, rbTokTrue, rbTokFalse, rbTokNil,
+		rbTokLParen, rbTokLBracket, rbTokMinus, rbTokTilde, rbTokBang, rbTokNot:
+		return ExpressionStmt{Expr: p.parseExpression(), SourceLocation: loc}
+	}
+	tok := p.advance()
+	p.errors = append(p.errors, lexDiag(UnsupportedStatementMsg(tok.value), p.fileName, tok.line, tok.col))
 	return nil
 }
 
@@ -1262,7 +1462,7 @@ func (p *rbParser) parseIfStatement(loc SourceLocation) Statement {
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
-		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		elseBranch = []Statement{nested(&p.nest, elifLoc, func() Statement { return p.parseElsifStatement(elifLoc) })}
 		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
@@ -1295,7 +1495,7 @@ func (p *rbParser) parseElsifStatement(loc SourceLocation) Statement {
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
-		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		elseBranch = []Statement{nested(&p.nest, elifLoc, func() Statement { return p.parseElsifStatement(elifLoc) })}
 		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
@@ -1338,7 +1538,7 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 	p.advance() // 'for'
 
 	iterVar := p.advance() // loop variable
-	varName := rbConvertName(iterVar.value)
+	varName := p.idents.declare(iterVar.value, rbConvertName(iterVar.value))
 
 	p.expect(rbTokIn)
 
@@ -1479,6 +1679,7 @@ func (p *rbParser) parseSuperCall(loc SourceLocation) Statement {
 }
 
 func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
+	start := p.pos
 	ivarTok := p.advance() // ivar token
 	rawName := ivarTok.value
 	propName := rbConvertName(rawName)
@@ -1519,10 +1720,12 @@ func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
 		}
 	}
 
-	// Expression statement (e.g. @var.method(...))
-	expr := p.parsePostfixFrom(target)
-
-	return ExpressionStmt{Expr: expr, SourceLocation: loc}
+	// Expression statement (@var on its own line, @var.method(...), or a
+	// private helper's implicit return such as `@x + 1`). N-053: re-parse
+	// from the ivar as a whole expression; continuing only the postfix chain
+	// left `+ 1` behind, and the statement dispatcher skipped it.
+	p.pos = start
+	return ExpressionStmt{Expr: p.parseExpression(), SourceLocation: loc}
 }
 
 func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {
@@ -1534,7 +1737,7 @@ func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {
 		p.advance() // consume ident
 		p.advance() // consume '='
 		value := p.parseExpression()
-		camelName := rbConvertName(rawName)
+		camelName := p.idents.declare(rawName, rbConvertName(rawName))
 
 		if p.declaredLocals[camelName] {
 			// Already declared: this is an assignment
@@ -1589,7 +1792,7 @@ func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *rbParser) parseExpression() Expression {
-	return p.parseTernary()
+	return nested(&p.nest, p.loc(), p.parseTernary)
 }
 
 // Ruby ternary: condition ? consequent : alternate
@@ -1611,67 +1814,74 @@ func (p *rbParser) parseTernary() Expression {
 }
 
 func (p *rbParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.match(rbTokOr) || p.match(rbTokPipePipe) {
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseNot()
 	for p.match(rbTokAnd) || p.match(rbTokAmpAmp) {
 		right := p.parseNot()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseNot() Expression {
+	opLoc := p.loc()
 	if p.match(rbTokNot) || p.match(rbTokBang) {
-		operand := p.parseNot()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseNot)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parseBitwiseOr()
 }
 
 func (p *rbParser) parseBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseBitwiseXor()
 	for p.match(rbTokPipe) {
 		right := p.parseBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseBitwiseAnd()
 	for p.match(rbTokCaret) {
 		right := p.parseBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.match(rbTokAmp) {
 		right := p.parseEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rbParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		if p.match(rbTokEqEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(rbTokNotEq) {
 			right := p.parseComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1680,20 +1890,21 @@ func (p *rbParser) parseEquality() Expression {
 }
 
 func (p *rbParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		if p.match(rbTokLt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokLtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokGt) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokGtEq) {
 			right := p.parseShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1702,14 +1913,15 @@ func (p *rbParser) parseComparison() Expression {
 }
 
 func (p *rbParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAdditive()
 	for {
 		if p.match(rbTokLShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokRShift) {
 			right := p.parseAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1718,14 +1930,15 @@ func (p *rbParser) parseShift() Expression {
 }
 
 func (p *rbParser) parseAdditive() Expression {
+	start := p.loc()
 	left := p.parseMultiplicative()
 	for {
 		if p.match(rbTokPlus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokMinus) {
 			right := p.parseMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1734,17 +1947,18 @@ func (p *rbParser) parseAdditive() Expression {
 }
 
 func (p *rbParser) parseMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		if p.match(rbTokStar) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokSlash) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(rbTokPercent) {
 			right := p.parseUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1753,17 +1967,18 @@ func (p *rbParser) parseMultiplicative() Expression {
 }
 
 func (p *rbParser) parseUnary() Expression {
+	opLoc := p.loc()
 	if p.match(rbTokMinus) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "-", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(rbTokTilde) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "~", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(rbTokBang) {
-		operand := p.parseUnary()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseUnary)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePower()
 }
@@ -1772,7 +1987,7 @@ func (p *rbParser) parseUnary() Expression {
 func (p *rbParser) parsePower() Expression {
 	base := p.parsePostfix()
 	if p.match(rbTokStarStar) {
-		exp := p.parsePower() // right-recursive for right-associativity
+		exp := nested(&p.nest, p.loc(), p.parsePower) // right-recursive for right-associativity
 		return CallExpr{Callee: Identifier{Name: "pow"}, Args: []Expression{base, exp}}
 	}
 	return base
@@ -1848,17 +2063,18 @@ func (p *rbParser) parsePrimary() Expression {
 	// Hex string literal (single-quoted)
 	if tok.kind == rbTokHexString {
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	// String literal (double-quoted)
 	if tok.kind == rbTokString {
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
-	// nil -> 0
+	// N-416: `nil` is not a Rúnar value; refused, never read as 0.
 	if tok.kind == rbTokNil {
+		p.addError(fmt.Sprintf("line %d: 'nil' is not a Rúnar value (use a number, true, false or a hex string)", tok.line))
 		p.advance()
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
@@ -1913,10 +2129,10 @@ func (p *rbParser) parsePrimary() Expression {
 		// Function call
 		if p.check(rbTokLParen) {
 			args := p.parseCallArgs()
-			return CallExpr{Callee: Identifier{Name: name}, Args: args}
+			return CallExpr{Callee: Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	}
 
 	p.addError(fmt.Sprintf("line %d: unexpected token %q", tok.line, tok.value))

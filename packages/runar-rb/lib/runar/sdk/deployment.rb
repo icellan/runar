@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'digest'
+
 # Transaction construction for contract deployment.
 #
 # All public methods live at module level under Runar::SDK so they can be
@@ -147,15 +149,33 @@ module Runar
 
     # Build a standard P2PKH locking script.
     #
-    # Accepts either a 40-character hex pubkey hash or a Base58Check P2PKH
-    # address. Returns the script as hex: +76a914{20-byte-hash}88ac+.
+    # Accepted input formats (parity with Go BuildP2PKHScript / TS buildP2PKHScript):
+    # - 40-char hex: raw 20-byte pubkey hash
+    # - 66-char hex: compressed public key (hashed with HASH160)
+    # - 130-char hex: uncompressed public key (hashed with HASH160)
+    # - otherwise: Base58Check P2PKH address (checksum and version verified)
+    # Returns the script as hex: +76a914{20-byte-hash}88ac+.
     #
-    # @param address [String] 40-char hex pubkey hash or Base58Check address
+    # @param address [String] pubkey hash, public key, or Base58Check address
     # @return [String] hex-encoded P2PKH script
+    # @raise [ArgumentError] if the input is none of the above
+    # N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+    # (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant
+    # rebuilds its change output from _changePKH = hash160(changePubKey ??
+    # signer pubkey), so a changeAddress naming a different key builds a spend
+    # the network rejects.
+    def change_address_mismatch_message(change_address)
+      "changeAddress #{change_address} does not match the change key the covenant enforces " \
+        "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " \
+        'pass changePubKey for that address'
+    end
+
     def build_p2pkh_script(address)
       pub_key_hash =
         if address.length == 40 && hex_string?(address)
           address
+        elsif [66, 130].include?(address.length) && hex_string?(address)
+          Digest::RMD160.hexdigest(Digest::SHA256.digest([address].pack('H*')))
         else
           address_to_pubkey_hash(address)
         end
@@ -220,7 +240,12 @@ module Runar
 
     def base58_decode(encoded)
       num = 0
-      encoded.each_char { |c| num = (num * 58) + BASE58_ALPHABET.index(c) }
+      encoded.each_char do |c|
+        digit = BASE58_ALPHABET.index(c)
+        raise ArgumentError, "invalid Base58 character #{c.inspect} in #{encoded.inspect}" if digit.nil?
+
+        num = (num * 58) + digit
+      end
 
       result = []
       while num > 0
@@ -233,13 +258,26 @@ module Runar
       ([0] * pad + result).pack('C*')
     end
 
-    # Extract the 20-byte pubkey hash from a Base58Check P2PKH address.
+    # Extract the 20-byte pubkey hash from a Base58Check P2PKH address,
+    # verifying the SHA256d checksum and the version byte (0x00 mainnet,
+    # 0x6f testnet/regtest).
     # @return [String] lowercase hex
+    # @raise [ArgumentError] on a bad character, length, checksum or version
     def address_to_pubkey_hash(address)
       decoded = base58_decode(address)
       raise ArgumentError, "invalid address length: #{decoded.bytesize}" unless decoded.bytesize == 25
 
-      decoded[1, 20].unpack1('H*')
+      payload = decoded.byteslice(0, 21)
+      checksum = Digest::SHA256.digest(Digest::SHA256.digest(payload)).byteslice(0, 4)
+      raise ArgumentError, "invalid address checksum: #{address.inspect}" unless checksum == decoded.byteslice(21, 4)
+
+      version = payload.getbyte(0)
+      unless [0x00, 0x6f].include?(version)
+        raise ArgumentError,
+              format('unsupported address version byte 0x%02x (expected 0x00 or 0x6f P2PKH): %s', version, address)
+      end
+
+      payload.byteslice(1, 20).unpack1('H*')
     end
 
     private_constant :BASE58_ALPHABET

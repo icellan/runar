@@ -63,11 +63,12 @@ def test_safediv_truncates():
 
 
 def test_safediv_rejects_zero():
-    # Python mock safediv returns 0 for division by zero (mirrors Bitcoin Script
-    # semantics where the transaction fails on-chain). The mock doesn't raise.
+    # On-chain the script VERIFYs the divisor is non-zero, so the call fails;
+    # the Python mock refuses too rather than inventing a value (F-134).
     c = MathDemo(value=10)
-    c.divide_by(0)
-    assert c.value == 0
+    with pytest.raises(ZeroDivisionError):
+        c.divide_by(0)
+    assert c.value == 10
 
 
 def test_percent_of():

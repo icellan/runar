@@ -6,6 +6,8 @@ import { Hash, Utils } from '@bsv/sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
 import { abiValueEncoding } from 'runar-ir-schema';
 import { findLastOpReturn } from './state.js';
+import { MalformedScriptError } from './errors.js';
+import { encodeScriptNumber } from './contract.js';
 
 /**
  * Hash a 66- or 130-char hex secp256k1 public key into its 40-char hex
@@ -91,40 +93,96 @@ export function buildP2PKHScript(addressOrPubKey: string): string {
   return '76a914' + pubKeyHash + '88ac';
 }
 
+/**
+ * N-426: shared cross-SDK refusal text. A stateful covenant rebuilds its change
+ * output from `_changePKH` = hash160(changePubKey ?? signer pubkey), so a
+ * `changeAddress` naming a different key builds a spend the network rejects.
+ * Byte-identical in all seven SDKs (conformance/sdk-call/n426-change-address-guard.json).
+ */
+export function changeAddressMismatchMessage(changeAddress: string): string {
+  return (
+    `changeAddress ${changeAddress} does not match the change key the covenant enforces ` +
+    "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " +
+    'pass changePubKey for that address'
+  );
+}
+
+/**
+ * N-426: throw unless P2PKH(changeAddress) equals P2PKH(changePKHHex). Called
+ * before any signing or broadcast on a stateful method that takes `_changePKH`.
+ */
+export function assertChangeAddressMatchesCovenantKey(
+  changeAddress: string,
+  changePKHHex: string,
+): void {
+  if (buildP2PKHScript(changeAddress).toLowerCase() !== buildP2PKHScript(changePKHHex).toLowerCase()) {
+    throw new Error(changeAddressMismatchMessage(changeAddress));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor arg extraction
 // ---------------------------------------------------------------------------
+
+/**
+ * Throw {@link MalformedScriptError} unless `chars` hex chars are available
+ * from `offset` (F-238). Mirrors the Java tier's `ScriptUtils.need` guard —
+ * already used for the on-chain state-section reader — applied here to the
+ * push-data reader used by constructor-arg extraction and artifact matching.
+ */
+function need(hex: string, offset: number, chars: number, what: string): void {
+  if (offset + chars > hex.length) {
+    const remaining = Math.max(0, hex.length - offset);
+    throw new MalformedScriptError(
+      `readScriptElement: truncated script — ${what} runs past the end ` +
+        `(needs ${chars / 2} byte(s) at hex offset ${offset}, only ${remaining / 2} remain)`,
+    );
+  }
+}
 
 function readScriptElement(
   hex: string,
   offset: number,
 ): { dataHex: string; totalHexChars: number; opcode: number } {
+  need(hex, offset, 2, 'push opcode');
   const opcode = parseInt(hex.slice(offset, offset + 2), 16);
+  if (Number.isNaN(opcode)) {
+    throw new MalformedScriptError(`readScriptElement: non-hex byte at hex offset ${offset}`);
+  }
 
   if (opcode === 0x00) return { dataHex: '', totalHexChars: 2, opcode };
   if (opcode >= 0x01 && opcode <= 0x4b) {
     const dataLen = opcode * 2;
+    need(hex, offset, 2 + dataLen, 'push payload');
     return { dataHex: hex.slice(offset + 2, offset + 2 + dataLen), totalHexChars: 2 + dataLen, opcode };
   }
   if (opcode === 0x4c) {
+    need(hex, offset, 4, 'OP_PUSHDATA1 length prefix');
     const len = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const dataLen = len * 2;
+    need(hex, offset, 4 + dataLen, 'OP_PUSHDATA1 payload');
     return { dataHex: hex.slice(offset + 4, offset + 4 + dataLen), totalHexChars: 4 + dataLen, opcode };
   }
   if (opcode === 0x4d) {
+    need(hex, offset, 6, 'OP_PUSHDATA2 length prefix');
     const lo = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const hi = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const len = lo | (hi << 8);
     const dataLen = len * 2;
+    need(hex, offset, 6 + dataLen, 'OP_PUSHDATA2 payload');
     return { dataHex: hex.slice(offset + 6, offset + 6 + dataLen), totalHexChars: 6 + dataLen, opcode };
   }
   if (opcode === 0x4e) {
+    need(hex, offset, 10, 'OP_PUSHDATA4 length prefix');
     const b0 = parseInt(hex.slice(offset + 2, offset + 4), 16);
     const b1 = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(hex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(hex.slice(offset + 8, offset + 10), 16);
-    const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    // N-317: unsigned. `b3 << 24` is a signed 32-bit shift, so a length
+    // >= 0x80000000 went negative and slipped past `need`.
+    const len = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
     const dataLen = len * 2;
+    need(hex, offset, 10 + dataLen, 'OP_PUSHDATA4 payload');
     return { dataHex: hex.slice(offset + 10, offset + 10 + dataLen), totalHexChars: 10 + dataLen, opcode };
   }
   return { dataHex: '', totalHexChars: 2, opcode };
@@ -136,8 +194,11 @@ export function decodeScriptNumber(dataHex: string): bigint {
   for (let i = 0; i < dataHex.length; i += 2) bytes.push(parseInt(dataHex.slice(i, i + 2), 16));
   const negative = (bytes[bytes.length - 1]! & 0x80) !== 0;
   bytes[bytes.length - 1]! &= 0x7f;
-  let result = 0n;
-  for (let i = bytes.length - 1; i >= 0; i--) result = (result << 8n) | BigInt(bytes[i]!);
+  // N-320: one BigInt parse of the big-endian hex. Shifting a byte in at a
+  // time is quadratic: a 1 MiB constructor arg held fromUtxo for minutes.
+  let beHex = '';
+  for (let i = bytes.length - 1; i >= 0; i--) beHex += bytes[i]!.toString(16).padStart(2, '0');
+  const result = BigInt('0x' + beHex);
   if (result === 0n) return 0n;
   return negative ? -result : result;
 }
@@ -228,6 +289,11 @@ export function extractConstructorArgs(
 // Script matching
 // ---------------------------------------------------------------------------
 
+/** True when `hex` is an even-length string of hex digits (N-317). */
+export function isHexBytes(hex: string): boolean {
+  return hex.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(hex);
+}
+
 /**
  * Determine whether a given on-chain script was produced from the given
  * contract artifact (regardless of what constructor args were used).
@@ -236,6 +302,12 @@ export function matchesArtifact(
   artifact: RunarArtifact,
   scriptHex: string,
 ): boolean {
+  // N-317: a provider-supplied script is untrusted. Refuse anything that is
+  // not whole bytes of hex up front, so no reader below sees a partial byte
+  // (`parseInt('0g', 16)` is 0) and every tier makes the same call.
+  if (!isHexBytes(scriptHex)) {
+    throw new MalformedScriptError('matchesArtifact: script is not an even-length hex string');
+  }
   let codeHex = scriptHex;
   if (artifact.stateFields && artifact.stateFields.length > 0) {
     const opReturnPos = findLastOpReturn(scriptHex);
@@ -244,26 +316,90 @@ export function matchesArtifact(
 
   const template = artifact.script;
 
-  if (!artifact.constructorSlots || artifact.constructorSlots.length === 0) return codeHex === template;
+  // N-316: a template with no slot of ANY kind is compared literally. Gating on
+  // constructorSlots alone skipped codeSepIndex / codePartLen slots too, so a
+  // stateful artifact carrying only those never matched its honest deployment.
+  if (
+    !(artifact.constructorSlots?.length) &&
+    !(artifact.codeSepIndexSlots?.length) &&
+    !(artifact.codePartLenSlots?.length)
+  ) return codeHex === template;
 
-  const seenOffsets = new Set<number>();
-  const slots = [...artifact.constructorSlots]
-    .sort((a, b) => a.byteOffset - b.byteOffset)
-    .filter((slot) => { if (seenOffsets.has(slot.byteOffset)) return false; seenOffsets.add(slot.byteOffset); return true; });
+  // Every OP_0 placeholder the SDK replaces at deploy time is one variable
+  // script element: constructor slots AND codeSepIndex slots (the latter bake
+  // as OP_1 post-R-010, so comparing them literally rejected every honest
+  // deployment of a stateful contract that carries one; Go/Rust/Python match).
+  const placeholderOffsets = [
+    ...(artifact.constructorSlots ?? []).map((s) => s.byteOffset),
+    ...(artifact.codeSepIndexSlots ?? []).map((s) => s.byteOffset),
+  ];
+
+  const slots = [...new Set(placeholderOffsets)]
+    .sort((a, b) => a - b)
+    .map((byteOffset) => ({ byteOffset }));
+
+  // N-051: a `codePartLenSlots` field holds the DEPLOYED code-part length, not
+  // the template's placeholder value. It must equal the length of the code
+  // part being matched (everything before the state section, inscription
+  // envelope included).
+  const lenFields = new Set((artifact.codePartLenSlots ?? []).map((s) => s.byteOffset * 2));
+  let deployedLen = '';
+  for (let i = 0; i < 4; i++) deployedLen += (((codeHex.length / 2) >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  const segmentMatches = (tStart: number, tEnd: number, cStart: number): boolean => {
+    let t = tStart;
+    let c = cStart;
+    while (t < tEnd) {
+      if (lenFields.has(t)) {
+        if (codeHex.slice(c, c + 8) !== deployedLen) return false;
+        t += 8;
+        c += 8;
+        continue;
+      }
+      if (template[t] !== codeHex[c]) return false;
+      t++;
+      c++;
+    }
+    return true;
+  };
 
   let templatePos = 0;
   let codePos = 0;
+  // N-318: the element read at each placeholder, keyed by template byte offset.
+  const elems = new Map<number, string>();
 
   for (const slot of slots) {
     const slotHexOffset = slot.byteOffset * 2;
-    const templateSegment = template.slice(templatePos, slotHexOffset);
-    const codeSegment = codeHex.slice(codePos, codePos + templateSegment.length);
-    if (templateSegment !== codeSegment) return false;
+    const segLen = slotHexOffset - templatePos;
+    if (codePos + segLen > codeHex.length) return false;
+    if (!segmentMatches(templatePos, slotHexOffset, codePos)) return false;
     templatePos = slotHexOffset + 2;
-    const elemOffset = codePos + templateSegment.length;
+    const elemOffset = codePos + segLen;
     const elem = readScriptElement(codeHex, elemOffset);
+    elems.set(slot.byteOffset, codeHex.slice(elemOffset, elemOffset + elem.totalHexChars));
     codePos = elemOffset + elem.totalHexChars;
   }
 
-  return template.slice(templatePos) === codeHex.slice(codePos);
+  if (!(codeHex.length - codePos === template.length - templatePos &&
+    segmentMatches(templatePos, template.length, codePos))) return false;
+
+  // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+  // encodeScriptNumber(codeSepIndex + shift) there (`_resolvedCodeSepSlotValues`),
+  // shift = the growth of every constructor slot before codeSepIndex plus that
+  // of every earlier codeSep slot before it. The matcher does not know the
+  // constructor args, so their growth is taken from the elements actually read.
+  const sepSlots = [...(artifact.codeSepIndexSlots ?? [])].sort((a, b) => a.byteOffset - b.byteOffset);
+  const resolved: Array<{ byteOffset: number; width: number }> = [];
+  for (const slot of sepSlots) {
+    let shift = 0;
+    for (const cs of artifact.constructorSlots ?? []) {
+      if (cs.byteOffset < slot.codeSepIndex) shift += elems.get(cs.byteOffset)!.length / 2 - 1;
+    }
+    for (const prev of resolved) {
+      if (prev.byteOffset < slot.codeSepIndex) shift += prev.width - 1;
+    }
+    const expected = encodeScriptNumber(BigInt(slot.codeSepIndex + shift));
+    if (elems.get(slot.byteOffset) !== expected) return false;
+    resolved.push({ byteOffset: slot.byteOffset, width: expected.length / 2 });
+  }
+  return true;
 }

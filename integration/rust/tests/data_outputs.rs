@@ -11,7 +11,7 @@
 
 use crate::helpers::*;
 use runar_lang::sdk::{
-    DeployOptions, MockProvider, MockSigner, RunarContract, SdkValue, Signer, Utxo,
+    DeployOptions, LocalSigner, MockProvider, RunarContract, SdkValue, Signer, Utxo,
 };
 
 const SOURCE: &str = r#"
@@ -46,16 +46,23 @@ fn test_add_data_output_end_to_end_via_mock_provider() {
 
     let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
 
-    let signer = MockSigner::new();
+    // A REAL key, not MockSigner. MockProvider executes every broadcast
+    // through bsv-sdk's Spend, and a MockSigner cannot satisfy it: the funding
+    // P2PKH below would have to hash to its key (OP_EQUALVERIFY) and its
+    // signature is not DER. Mirrors integration/go/data_outputs_test.go, which
+    // was already moved to a real wallet for the same reason (F-054: this test
+    // never ran, so nobody noticed it went stale).
+    let wallet = create_wallet();
+    let signer = LocalSigner::new(&wallet.priv_key_hex).expect("LocalSigner");
     let mut provider = MockProvider::testnet();
     let address = signer.get_address().expect("get_address");
 
-    // Fund the mock signer's address.
+    // Fund the signer's address with a P2PKH that actually locks to its key.
     provider.add_utxo(&address, Utxo {
         txid: "aa".repeat(32),
         output_index: 0,
         satoshis: 1_000_000,
-        script: format!("76a914{}88ac", "00".repeat(20)),
+        script: format!("76a914{}88ac", wallet.pub_key_hash),
     });
 
     contract

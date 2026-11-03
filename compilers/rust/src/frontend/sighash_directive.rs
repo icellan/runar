@@ -116,43 +116,70 @@ pub fn parse_sighash_flags(flags_text: &str) -> Result<i64, String> {
     Ok(value)
 }
 
-/// Extract and parse an `@sighash` directive from a block of comment text.
-/// Returns `None` when no well-formed `@sighash <FLAGS>` token is present,
-/// otherwise the parse result (value or error). Mirrors the TS reference regex
-/// `/@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)/`.
+/// Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+/// that is present but not followed by a well-formed flag list, or a second
+/// marker on the same method, is a compile error, never a silent fall-back to
+/// the default ALL|FORKID mode.
+pub const SIGHASH_MALFORMED_ERROR: &str = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+pub const SIGHASH_MULTIPLE_ERROR: &str =
+    "@sighash: more than one @sighash directive on this method; declare exactly one";
+
+/// N-199 (R75): shared diagnostic, identical in all seven tiers, for a
+/// `@sighash` / `@embedAlways` marker inside the contract class body that is
+/// not in the leading comments of the member kind that reads it (`@sighash` ->
+/// a method, `@embedAlways` -> a property). Mirrors the TS reference
+/// `lostDirectiveMessage` (sighash-directive.ts).
+pub fn lost_directive_message(directive: &str) -> String {
+    let target = if directive == "@sighash" { "method" } else { "property" };
+    format!(
+        "{directive} directive is not attached to any {target} and would be silently ignored; put the comment on its own line directly above the {target} it annotates (a comment that shares a line with the preceding code belongs to that code)"
+    )
+}
+
+const SIGHASH_MARKER: &str = "@sighash";
+
+/// Extract and parse an `@sighash` directive from a method's leading-comment
+/// text (all of its leading comments, concatenated). Returns `None` only when
+/// no `@sighash` marker is present, otherwise the parse result (value or
+/// error). Mirrors the TS reference `extractSighashDirective`.
+///
+/// A marker is every occurrence of `@sighash`, whatever follows it (N-039,
+/// user decision R85): `@sighashSINGLE|FORKID` or `@sighashType` is a malformed
+/// directive, never prose. Once a marker is present (fail-closed, F-039):
+///   - more than one marker is an error (`SIGHASH_MULTIPLE_ERROR`);
+///   - the segment after the marker, up to `*/`, a newline, CR or the end, must
+///     be empty, or start with a space/tab and contain only `[A-Za-z0-9_|]`,
+///     spaces and tabs — anything else is `SIGHASH_MALFORMED_ERROR`;
+///   - the flag list itself is then validated by `parse_sighash_flags`.
 pub fn extract_sighash_directive(comment_text: &str) -> Option<Result<i64, String>> {
-    let idx = comment_text.find("@sighash")?;
-    let after = &comment_text[idx + "@sighash".len()..];
+    let markers: Vec<usize> = comment_text
+        .match_indices(SIGHASH_MARKER)
+        .map(|(i, _)| i)
+        .collect();
+    let first = *markers.first()?;
+    if markers.len() > 1 {
+        return Some(Err(SIGHASH_MULTIPLE_ERROR.to_string()));
+    }
 
-    // Segment = text up to the first terminator (`*/`, newline, CR, or end).
-    let mut end = after.len();
-    for (i, ch) in after.char_indices() {
-        if ch == '\n' || ch == '\r' {
-            end = i;
-            break;
-        }
-        if ch == '*' && after[i + 1..].starts_with('/') {
+    let after = &comment_text[first + SIGHASH_MARKER.len()..];
+    let ab = after.as_bytes();
+    let mut end = ab.len();
+    for i in 0..ab.len() {
+        if ab[i] == b'\n' || ab[i] == b'\r' || (ab[i] == b'*' && ab.get(i + 1) == Some(&b'/')) {
             end = i;
             break;
         }
     }
-    let seg = &after[..end];
-
-    // The reference regex requires `\s+` immediately after `@sighash`, and the
-    // captured flag list may only contain `[A-Za-z0-9_|\s]`. If the leading
-    // whitespace is missing or the segment carries any other character, the
-    // regex fails to match → no directive (falls back to the default).
-    if !seg.starts_with(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-        return None;
-    }
-    if !seg
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '|' || c.is_whitespace())
+    let seg = &ab[..end];
+    let is_blank = |c: u8| c == b' ' || c == b'\t';
+    if !seg.is_empty()
+        && !(is_blank(seg[0])
+            && seg.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'|' || is_blank(c)))
     {
-        return None;
+        return Some(Err(SIGHASH_MALFORMED_ERROR.to_string()));
     }
 
-    Some(parse_sighash_flags(seg.trim()))
+    Some(parse_sighash_flags(&after[..end]))
 }
 
 /// Human-readable rendering of a sighash value (for diagnostics).
@@ -175,6 +202,53 @@ pub fn describe_sighash(value: i64) -> String {
         parts.push("FORKID".to_string());
     }
     parts.join("|")
+}
+
+/// N-093 (R38): resolve a sighash declared with a surface's NATIVE spelling
+/// (Solidity `sighash(...)`, Move/Rust `#[sighash(...)]`, Go
+/// `//runar:sighash ...`, Python `@public(sighash="...")`, Zig
+/// `runar.Sighash("...")`, Ruby `runar_sighash '...'`, Java `@Sighash("...")`).
+///
+/// `specs` holds one entry per spelling found on the method: the flag text, or
+/// `None` when the spelling's argument was not well formed (a non-identifier
+/// token, a non-string argument, ...). Returns `None` when there is no
+/// spelling, else the numeric type or the diagnostic — the SAME diagnostics the
+/// `.runar.ts` comment directive produces, checked in the same order:
+/// non-public method, then more than one spelling, then malformed, then the
+/// flag grammar of `parse_sighash_flags`. Mirrors `resolveNativeSighash` in the
+/// TS reference (sighash-directive.ts); identical in all seven tiers.
+pub fn resolve_native_sighash(
+    method_name: &str,
+    is_public: bool,
+    specs: &[Option<String>],
+) -> Option<Result<i64, String>> {
+    if specs.is_empty() {
+        return None;
+    }
+    if !is_public {
+        return Some(Err(format!(
+            "@sighash directive on non-public method '{method_name}' has no effect — only public methods are spending entry points"
+        )));
+    }
+    if specs.len() > 1 {
+        return Some(Err(format!("Method '{method_name}': {SIGHASH_MULTIPLE_ERROR}")));
+    }
+    let Some(spec) = &specs[0] else {
+        return Some(Err(format!("Method '{method_name}': {SIGHASH_MALFORMED_ERROR}")));
+    };
+    Some(parse_sighash_flags(spec).map_err(|e| format!("Method '{method_name}': {e}")))
+}
+
+/// N-093: the Go DSL directive comment `//runar:<name> ...`. Only `sighash`
+/// exists; any other name is refused rather than ignored, so a typo such as
+/// `//runar:sighsh` cannot silently drop the declaration.
+pub fn unknown_go_directive_message(name: &str) -> String {
+    format!("unknown Go DSL directive '//runar:{name}'; the only directive is //runar:sighash <FLAGS>")
+}
+
+/// N-093: an attribute on the Move surface other than the two directives.
+pub fn unknown_move_attribute_message(attr: &str) -> String {
+    format!("unsupported Move attribute #[{attr}]; the supported attributes are #[embed_always] and #[sighash(<FLAGS>)]")
 }
 
 #[cfg(test)]

@@ -35,12 +35,20 @@
 //! - snake_case identifiers -> camelCase in AST
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{
+    invalid_escape_sequence_message, lex_error, static_method_message,
+    unexpected_class_body_token_message, unexpected_token_after_class_message, unknown_return_type_message, unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    UNTERMINATED_STRING_LITERAL,
+};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
+use super::identifier_collision::DeclaredIdents;
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -49,15 +57,40 @@ use super::parser::ParseResult;
 
 /// Parse a Python-format Rúnar contract source.
 pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_python_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_python`], on the parse stack segment.
+fn parse_python_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.py");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
-    let mut parser = PyParser::new(tokens, file, &mut errors);
+    let (tokens, positions) = tokenize(source, file, &mut errors);
+    let mut parser = PyParser::new(tokens, positions, file, &mut errors);
 
     let contract = parser.parse_contract();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
+    let collision = parser.idents.collision_diagnostic();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -83,10 +116,23 @@ const RANGE_STEP_DIAGNOSTIC: &str = concat!(
 fn literal_int_value(expr: &Expression) -> Option<BigInt> {
     match expr {
         Expression::BigIntLiteral { value } => Some(value.clone()),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             literal_int_value(operand).map(|v| -v)
         }
         _ => None,
+    }
+}
+
+/// N-404: the AST name of a contract METHOD (declaration and `self.<m>(...)`
+/// call). Generic snake->camel, except `require_output_p2pkh`, which keeps the
+/// intrinsic's spelling like every other tier, so a method of that name hits
+/// the `requireOutputP2PKH` refusal instead of being accepted as
+/// `requireOutputP2pkh`.
+fn method_ast_name(name: &str) -> String {
+    if name == "require_output_p2pkh" {
+        "requireOutputP2PKH".to_string()
+    } else {
+        snake_to_camel(name)
     }
 }
 
@@ -316,8 +362,180 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+/// A token's source text, for a diagnostic (N-053).
+fn py_token_text(tok: &Token) -> String {
+    match tok {
+        Token::Class => "class".into(),
+        Token::Def => "def".into(),
+        Token::Elif => "elif".into(),
+        Token::Else => "else".into(),
+        Token::In => "in".into(),
+        Token::Range => "range".into(),
+        Token::And => "and".into(),
+        Token::Or => "or".into(),
+        Token::From => "from".into(),
+        Token::Import => "import".into(),
+        Token::At => "@".into(),
+        Token::Plus => "+".into(),
+        Token::Star => "*".into(),
+        Token::Slash => "/".into(),
+        Token::IntDiv => "//".into(),
+        Token::Percent => "%".into(),
+        Token::DoubleStar => "**".into(),
+        Token::EqEq => "==".into(),
+        Token::NotEq => "!=".into(),
+        Token::Lt => "<".into(),
+        Token::Le => "<=".into(),
+        Token::Gt => ">".into(),
+        Token::Ge => ">=".into(),
+        Token::LShift => "<<".into(),
+        Token::RShift => ">>".into(),
+        Token::BitAnd => "&".into(),
+        Token::BitOr => "|".into(),
+        Token::BitXor => "^".into(),
+        Token::Eq => "=".into(),
+        Token::PlusEq => "+=".into(),
+        Token::MinusEq => "-=".into(),
+        Token::StarEq => "*=".into(),
+        Token::SlashEq => "/=".into(),
+        Token::IntDivEq => "//=".into(),
+        Token::PercentEq => "%=".into(),
+        Token::Arrow => "->".into(),
+        Token::RParen => ")".into(),
+        Token::RBracket => "]".into(),
+        Token::Colon => ":".into(),
+        Token::Comma => ",".into(),
+        Token::Dot => ".".into(),
+        Token::Ident(name) => name.clone(),
+        Token::NumberLit(n) => n.to_string(),
+        Token::Indent => "INDENT".into(),
+        Token::Dedent => "DEDENT".into(),
+        Token::Newline => "NEWLINE".into(),
+        Token::Eof => "eof".into(),
+        other => format!("{:?}", other),
+    }
+}
+
+/// F-203: the single-character escapes CPython defines for bytes and str.
+fn py_simple_escape(c: char) -> Option<u32> {
+    Some(match c {
+        '\\' => 0x5c,
+        '\'' => 0x27,
+        '"' => 0x22,
+        'a' => 0x07,
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => 0x0a,
+        'r' => 0x0d,
+        't' => 0x09,
+        'v' => 0x0b,
+        _ => return None,
+    })
+}
+
+/// F-203: decode the body of a .runar.py quoted literal the way CPython decodes
+/// a bytes (`bytes = true`) or str literal (the TS reference's
+/// `decodePyLiteral`). Returns the decoded text, its bytes as hex (meaningful
+/// for bytes only; `\xHH` keeps its digits verbatim) and the first refusal. A
+/// trailing lone backslash only arises for an unterminated literal, which the
+/// tokenizer already refuses; it is dropped.
+fn decode_py_literal(body: &[char], bytes: bool) -> (String, String, Option<String>) {
+    let mut text = String::new();
+    let mut hex = String::new();
+    let mut i = 0;
+    macro_rules! push {
+        ($v:expr) => {{
+            let v: u32 = $v;
+            text.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+            hex.push_str(&format!("{:02x}", v));
+        }};
+    }
+    while i < body.len() {
+        let c = body[i];
+        if bytes && (c as u32) >= 0x80 {
+            return (text, hex, Some(PY_BYTES_NON_ASCII.to_string()));
+        }
+        if c != '\\' {
+            text.push(c);
+            if bytes {
+                hex.push_str(&format!("{:02x}", c as u32));
+            }
+            i += 1;
+            continue;
+        }
+        if i + 1 >= body.len() {
+            break;
+        }
+        let e = body[i + 1];
+        if let Some(v) = py_simple_escape(e) {
+            push!(v);
+            i += 2;
+            continue;
+        }
+        if ('0'..='7').contains(&e) {
+            let mut j = i + 1;
+            while j < body.len() && j < i + 4 && ('0'..='7').contains(&body[j]) {
+                j += 1;
+            }
+            let digits: String = body[i + 1..j].iter().collect();
+            let v = u32::from_str_radix(&digits, 8).unwrap_or(0);
+            if v > 0xff {
+                let esc: String = body[i..j].iter().collect();
+                return (text, hex, Some(invalid_escape_sequence_message(&esc)));
+            }
+            push!(v);
+            i = j;
+            continue;
+        }
+        if e == 'x' {
+            let ok = i + 3 < body.len() && body[i + 2].is_ascii_hexdigit() && body[i + 3].is_ascii_hexdigit();
+            if !ok {
+                return (text, hex, Some(invalid_escape_sequence_message("\\x")));
+            }
+            let digits: String = body[i + 2..i + 4].iter().collect();
+            text.push(char::from_u32(u32::from_str_radix(&digits, 16).unwrap_or(0)).unwrap_or('\u{fffd}'));
+            hex.push_str(&digits);
+            i += 4;
+            continue;
+        }
+        if bytes && (e as u32) >= 0x80 {
+            return (text, hex, Some(PY_BYTES_NON_ASCII.to_string()));
+        }
+        // Anything else -- including str's \N{..}, \u and \U, which the surface
+        // does not support -- is refused.
+        return (text, hex, Some(invalid_escape_sequence_message(&format!("\\{}", e))));
+    }
+    (text, hex, None)
+}
+
+/// F-203: scan a single-line quoted literal starting just after its opening
+/// quote (the TS reference's `scanPyQuoted`). A backslash always takes the
+/// next character with it, so an escaped quote does not close the literal; a
+/// backslash at the line break leaves the literal unterminated. Returns the
+/// body, the index just past the scan, and whether the literal was closed.
+fn scan_py_quoted(chars: &[char], start: usize, quote: char) -> (&[char], usize, bool) {
+    let mut pos = start;
+    while pos < chars.len() && chars[pos] != quote {
+        pos += if chars[pos] == '\\' { 2 } else { 1 };
+    }
+    if pos > chars.len() {
+        pos = chars.len();
+    }
+    let body = &chars[start.min(pos)..pos];
+    if pos < chars.len() {
+        (body, pos + 1, true)
+    } else {
+        (body, pos, false)
+    }
+}
+
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    let mut positions: Vec<(usize, usize)> = Vec::new();
+    let mut at: (usize, usize) = (1, 0);
     let lines: Vec<&str> = source.split('\n').collect();
     let mut indent_stack: Vec<usize> = vec![0];
     let mut paren_depth: usize = 0;
@@ -325,8 +543,12 @@ fn tokenize(source: &str) -> Vec<Token> {
     // the quote character (' or ").  Each line is skipped until we find the
     // closing triple-quote.
     let mut in_triple_quote: Option<char> = None;
+    // F-011: where the open triple-quoted string started (1-based line,
+    // 0-based column); still open at end of file means unterminated.
+    let mut triple_start: (usize, usize) = (0, 0);
 
-    for raw_line in &lines {
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
         // Strip trailing \r
         let line = if raw_line.ends_with('\r') {
             &raw_line[..raw_line.len() - 1]
@@ -361,6 +583,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             } else {
                 // Multi-line docstring
                 in_triple_quote = Some(q);
+                triple_start = (line_num, line.chars().count() - stripped.chars().count());
             }
             continue;
         }
@@ -397,6 +620,9 @@ fn tokenize(source: &str) -> Vec<Token> {
         let mut pos = start_offset;
 
         while pos < chars.len() {
+            // Tokens pushed by the previous iteration started at `at`.
+            positions.resize(tokens.len(), at);
+            at = (line_num, pos + 1);
             let ch = chars[pos];
 
             // Whitespace within line
@@ -615,33 +841,22 @@ fn tokenize(source: &str) -> Vec<Token> {
                 _ => {}
             }
 
-            // Hex byte string: b'\xde\xad' or b"\xde\xad"
+            // Byte string: b'..' or b".." -- escapes decode as in CPython (F-203).
             if ch == 'b'
                 && pos + 1 < chars.len()
                 && (chars[pos + 1] == '\'' || chars[pos + 1] == '"')
             {
-                let quote = chars[pos + 1];
-                pos += 2; // skip b and opening quote
-                let mut hex = String::new();
-                while pos < chars.len() && chars[pos] != quote {
-                    if chars[pos] == '\\'
-                        && pos + 1 < chars.len()
-                        && chars[pos + 1] == 'x'
-                        && pos + 3 < chars.len()
-                    {
-                        // \xHH
-                        hex.push(chars[pos + 2]);
-                        hex.push(chars[pos + 3]);
-                        pos += 4;
-                    } else {
-                        // Non-hex byte -- encode as hex
-                        let byte = chars[pos] as u32;
-                        hex.push_str(&format!("{:02x}", byte));
-                        pos += 1;
-                    }
+                let open_col = pos;
+                let (body, end, closed) = scan_py_quoted(&chars, pos + 2, chars[pos + 1]);
+                pos = end;
+                // F-011: a single-line literal that reaches the line break is
+                // unterminated; it must never run on into the next line.
+                if !closed {
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
-                if pos < chars.len() {
-                    pos += 1; // skip closing quote
+                let (_, hex, err) = decode_py_literal(body, true);
+                if let Some(msg) = err {
+                    errors.push(lex_error(&msg, file, line_num, open_col));
                 }
                 tokens.push(Token::HexStringLit(hex));
                 continue;
@@ -650,6 +865,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             // String literals (single or double quoted, including triple-quoted)
             if ch == '\'' || ch == '"' {
                 let quote = ch;
+                let open_col = pos;
                 // Triple-quoted string — always a docstring in Rúnar.
                 // Skip it without emitting a token.
                 if pos + 2 < chars.len() && chars[pos + 1] == quote && chars[pos + 2] == quote {
@@ -666,64 +882,43 @@ fn tokenize(source: &str) -> Vec<Token> {
                     if pos + 2 < chars.len() {
                         pos += 3;
                     } else {
+                        // F-011: not closed on this line. Like the TS
+                        // reference, the following lines are string text
+                        // until the closing triple quote; if none comes
+                        // before end of file it is unterminated.
                         pos = chars.len();
+                        in_triple_quote = Some(quote);
+                        triple_start = (line_num, open_col);
                     }
                     continue;
                 }
-                pos += 1;
-                let mut val = String::new();
-                while pos < chars.len() && chars[pos] != quote {
-                    if chars[pos] == '\\' && pos + 1 < chars.len() {
-                        pos += 1; // skip backslash
-                        val.push(chars[pos]);
-                        pos += 1;
-                    } else {
-                        val.push(chars[pos]);
-                        pos += 1;
-                    }
+                let (body, end, closed) = scan_py_quoted(&chars, pos + 1, quote);
+                pos = end;
+                if !closed {
+                    // F-011: reached the line break.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
-                if pos < chars.len() {
-                    pos += 1; // skip closing quote
+                // F-203: a str literal decodes the same escapes as CPython does.
+                let (val, _, err) = decode_py_literal(body, false);
+                if let Some(msg) = err {
+                    errors.push(lex_error(&msg, file, line_num, open_col));
                 }
                 tokens.push(Token::StringLit(val));
                 continue;
             }
 
-            // Numbers (decimal and hex)
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
             if ch.is_ascii_digit() {
-                let mut num_str = String::new();
-                if ch == '0'
-                    && pos + 1 < chars.len()
-                    && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
-                {
-                    // Hex number
-                    num_str.push_str("0x");
-                    pos += 2;
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_hexdigit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
+                let end = scan_number_end(&chars, pos);
+                let text: String = chars[pos..end].iter().collect();
+                let val = match parse_int_literal("py", &text) {
+                    Some(lit) => lit.value,
+                    None => {
+                        errors.push(lex_error(&invalid_integer_literal("py", &text), file, line_num, pos));
+                        BigInt::from(0)
                     }
-                } else {
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_digit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
-                    }
-                }
-                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
-                        .unwrap_or_else(|_| BigInt::from(0))
-                } else {
-                    <BigInt as Num>::from_str_radix(&num_str, 10)
-                        .unwrap_or_else(|_| BigInt::from(0))
                 };
+                pos = end;
                 tokens.push(Token::NumberLit(val));
                 continue;
             }
@@ -764,14 +959,23 @@ fn tokenize(source: &str) -> Vec<Token> {
                 continue;
             }
 
-            // Skip unrecognized characters
+            // N-033: a character the TS reference does not tokenize (`;`,
+            // `{`, `$`, `?`, ...) is refused, never skipped.
+            errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line_num, pos));
             pos += 1;
         }
+        positions.resize(tokens.len(), at);
 
         // Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0 {
             tokens.push(Token::Newline);
         }
+    }
+
+    // F-011: a triple-quoted string still open at end of file swallowed every
+    // line after it; refuse it instead.
+    if in_triple_quote.is_some() {
+        errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, triple_start.0, triple_start.1));
     }
 
     // Emit remaining DEDENTs
@@ -781,7 +985,8 @@ fn tokenize(source: &str) -> Vec<Token> {
     }
 
     tokens.push(Token::Eof);
-    tokens
+    positions.resize(tokens.len(), at);
+    (tokens, positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,18 +995,91 @@ fn tokenize(source: &str) -> Vec<Token> {
 
 struct PyParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: DeclaredIdents,
+    /// N-046: the locals already bound in the current method, so a later
+    /// `name = expr` of one of them is emitted as an `Assignment`, not a fresh
+    /// `VariableDecl`. Python is function-scoped, so rebinding an existing
+    /// local inside a loop body or an if-arm IS an assignment; ANF lowering
+    /// alpha-renames a `VariableDecl` that reuses an enclosing binding's name.
+    /// Snapshot/restored around if-branches and loop bodies exactly as the
+    /// Ruby parser's `declared_locals`.
+    declared_locals: std::collections::HashSet<String>,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> PyParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<Diagnostic>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
+            idents: DeclaredIdents::default(),
+            declared_locals: std::collections::HashSet::new(),
+            nest: NestingCounter::new(),
+        }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
+    }
+
+    /// N-046: the statement for `name = init` — an assignment when the method
+    /// already bound `name`, otherwise a declaration.
+    fn bind_local(&mut self, name: String, var_type: Option<TypeNode>, init: Expression) -> Statement {
+        if self.declared_locals.contains(&name) {
+            return Statement::Assignment {
+                target: Expression::Identifier { name, source_location: None },
+                value: init,
+                source_location: self.loc(),
+            };
+        }
+        self.declared_locals.insert(name.clone());
+        Statement::VariableDecl {
+            name,
+            var_type,
+            mutable: true,
+            init,
+            source_location: self.loc(),
         }
     }
 
@@ -849,11 +1127,18 @@ impl<'a> PyParser<'a> {
         }
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -900,7 +1185,7 @@ impl<'a> PyParser<'a> {
             && parent_class != "UnsafeSmartContract"
         {
             self.errors.push(Diagnostic::error(format!(
-                "Unknown parent class: {}",
+                "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
                 parent_class
             ), None));
             return None;
@@ -916,8 +1201,16 @@ impl<'a> PyParser<'a> {
                 break;
             }
 
+            // `pass` is a valid (empty) class-body statement.
+            if *self.peek() == Token::Pass {
+                self.advance();
+                self.expect_statement_end();
+                continue;
+            }
+
             // Decorators
             let mut decorators: Vec<String> = Vec::new();
+            let mut sighash_specs: Vec<Option<String>> = Vec::new();
             while *self.peek() == Token::At {
                 self.advance(); // '@'
                 let dec_name = match self.advance() {
@@ -928,13 +1221,19 @@ impl<'a> PyParser<'a> {
                         String::new()
                     }
                 };
+                // N-093: `@public(sighash="FLAGS")` is the native spelling of
+                // the `@sighash` directive.
+                if dec_name == "public" && *self.peek() == Token::LParen {
+                    let specs = self.parse_public_decorator_args();
+                    sighash_specs.extend(specs);
+                }
                 decorators.push(dec_name);
                 self.skip_newlines();
             }
 
             // Method definition
             if *self.peek() == Token::Def {
-                let method = self.parse_method_def(&decorators);
+                let method = self.parse_method_def(&decorators, &sighash_specs);
                 if method.name == "constructor" {
                     constructor = Some(method);
                 } else {
@@ -953,11 +1252,20 @@ impl<'a> PyParser<'a> {
                 continue;
             }
 
-            // Skip unknown tokens
-            self.advance();
+            // N-033: any other token is refused, never skipped.
+            self.refuse_class_body_token();
         }
 
         self.match_tok(&Token::Dedent);
+
+        // N-410: nothing but blank lines may follow the class (N-004 did this
+        // for .runar.rb); a method or class after it used to be dropped unread.
+        self.skip_newlines();
+        if *self.peek() != Token::Eof {
+            let loc = self.loc();
+            let trailing = py_token_text(self.peek());
+            self.errors.push(Diagnostic::error(unexpected_token_after_class_message(&trailing), Some(loc)));
+        }
 
         // Auto-generate constructor if not provided
         let constructor = constructor
@@ -1004,34 +1312,48 @@ impl<'a> PyParser<'a> {
     // Properties
     // -----------------------------------------------------------------------
 
-    fn parse_property(&mut self, parent_class: &str) -> Option<PropertyNode> {
-        let raw_name = self.expect_ident();
+    /// N-033: a class-body token that begins no property, method, decorator
+    /// or `pass` is refused at that token (N-004's diagnostic), and the rest
+    /// of its line is skipped.
+    fn refuse_class_body_token(&mut self) {
+        let loc = self.loc();
+        let tok = self.advance();
+        self.errors.push(Diagnostic::error(unexpected_class_body_token_message(&py_token_text(&tok)), Some(loc)));
+        while !matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            self.advance();
+        }
+    }
 
-        if *self.peek() != Token::Colon {
-            // Not a property -- might be a stray identifier; skip the line
-            while *self.peek() != Token::Newline && *self.peek() != Token::Eof {
-                self.advance();
-            }
+    fn parse_property(&mut self, parent_class: &str) -> Option<PropertyNode> {
+        if self.tokens.get(self.pos + 1) != Some(&Token::Colon) {
+            // N-033: not a property -- a stray identifier line is refused.
+            self.refuse_class_body_token();
             return None;
         }
+        let raw_name = self.expect_ident();
         self.advance(); // consume ':'
 
-        // Parse type (possibly Readonly[T])
+        // Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+        // native spelling of the `@embedAlways` directive; the two wrappers
+        // compose in either order.
         let mut is_readonly = false;
-        let type_node;
-
-        if let Token::Ident(ref name) = *self.peek() {
+        let mut embed_always = false;
+        let mut wrappers = 0;
+        while let Token::Ident(name) = self.peek().clone() {
             if name == "Readonly" {
                 is_readonly = true;
-                self.advance(); // consume 'Readonly'
-                self.expect(&Token::LBracket);
-                type_node = self.parse_type();
-                self.expect(&Token::RBracket);
+            } else if name == "EmbedAlways" {
+                embed_always = true;
             } else {
-                type_node = self.parse_type();
+                break;
             }
-        } else {
-            type_node = self.parse_type();
+            self.advance(); // consume the wrapper name
+            self.expect(&Token::LBracket);
+            wrappers += 1;
+        }
+        let type_node = self.parse_type();
+        for _ in 0..wrappers {
+            self.expect(&Token::RBracket);
         }
 
         // In stateless contracts (SmartContract and UnsafeSmartContract), all
@@ -1048,22 +1370,17 @@ impl<'a> PyParser<'a> {
             None
         };
 
-        // Skip rest of line
-        while *self.peek() != Token::Newline
-            && *self.peek() != Token::Eof
-            && *self.peek() != Token::Dedent
-        {
-            self.advance();
-        }
+        // F-026: the field declaration ends at its line break.
+        self.expect_statement_end();
 
         Some(PropertyNode {
-            name: snake_to_camel(&raw_name),
+            name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
             prop_type: type_node,
             readonly: is_readonly,
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         })
     }
 
@@ -1072,12 +1389,17 @@ impl<'a> PyParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_type(&mut self) -> TypeNode {
+        // `None` is a keyword token here; as a type it is Python's "returns nothing".
+        if *self.peek() == Token::NoneLit {
+            self.advance();
+            return TypeNode::Custom("None".to_string());
+        }
         let raw_name = self.expect_ident();
 
         // Check for FixedArray[T, N]
         if raw_name == "FixedArray" && *self.peek() == Token::LBracket {
             self.advance(); // '['
-            let element = self.parse_type();
+            let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
             self.expect(&Token::Comma);
             let length = match self.advance() {
                 Token::NumberLit(n) => n.to_usize().unwrap_or(0),
@@ -1106,7 +1428,53 @@ impl<'a> PyParser<'a> {
     // Method definitions
     // -----------------------------------------------------------------------
 
-    fn parse_method_def(&mut self, decorators: &[String]) -> MethodNode {
+    /// N-093: the argument list of `@public(...)`. The only argument is the
+    /// keyword `sighash=<str>`; each one yields its string, and any other
+    /// argument (positional, another keyword, a non-str value) yields `None`,
+    /// which is refused as a malformed spelling. Mirrors
+    /// `parsePublicDecoratorArgs` (01-parse-python.ts).
+    fn parse_public_decorator_args(&mut self) -> Vec<Option<String>> {
+        let mut specs = Vec::new();
+        self.expect(&Token::LParen);
+        while !matches!(self.peek(), Token::RParen | Token::Newline | Token::Eof) {
+            let is_sighash_kw = matches!(self.peek(), Token::Ident(n) if n == "sighash")
+                && matches!(self.tokens.get(self.pos + 1), Some(Token::Eq));
+            if is_sighash_kw {
+                self.advance(); // 'sighash'
+                self.advance(); // '='
+            }
+            // One argument value: up to the next top-level ',' or ')'.
+            let first = self.peek().clone();
+            let mut count = 0;
+            let mut depth: i32 = 0;
+            while !matches!(self.peek(), Token::Newline | Token::Eof) {
+                let t = self.peek().clone();
+                if matches!(t, Token::Comma | Token::RParen) && depth == 0 {
+                    break;
+                }
+                if matches!(t, Token::LParen | Token::LBracket) {
+                    depth += 1;
+                }
+                if matches!(t, Token::RParen | Token::RBracket) {
+                    depth -= 1;
+                }
+                self.advance();
+                count += 1;
+            }
+            specs.push(match first {
+                Token::StringLit(v) if is_sighash_kw && count == 1 => Some(v),
+                _ => None,
+            });
+            if !self.match_tok(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen);
+        specs
+    }
+
+    fn parse_method_def(&mut self, decorators: &[String], sighash_specs: &[Option<String>]) -> MethodNode {
+        let def_loc = self.loc();
         self.expect(&Token::Def);
 
         let raw_name = match self.advance() {
@@ -1118,13 +1486,29 @@ impl<'a> PyParser<'a> {
             }
         };
 
+        // N-050: @staticmethod / @classmethod declare a class-level function,
+        // not a contract method; `@public @staticmethod` used to be an entry point.
+        if decorators.iter().any(|d| d == "staticmethod" || d == "classmethod") {
+            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(def_loc.clone())));
+        }
+
+        // N-046: reset local tracking for this method's scope.
+        self.declared_locals.clear();
+
         self.expect(&Token::LParen);
         let params = self.parse_params();
         self.expect(&Token::RParen);
 
         // Optional return type annotation: -> Type
         if self.match_tok(&Token::Arrow) {
-            self.parse_type(); // consume and discard return type
+            // The AST keeps no return type; N-331 refuses an unknown name. `None`
+            // is Python's spelling of "returns nothing".
+            let ret_type = self.parse_type();
+            if !matches!(&ret_type, TypeNode::Custom(n) if n == "None") {
+                if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name, decorators.iter().any(|d| d == "public")) {
+                    self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
+                }
+            }
         }
 
         self.expect(&Token::Colon);
@@ -1137,18 +1521,31 @@ impl<'a> PyParser<'a> {
 
         // Determine if this is the constructor
         if raw_name == "__init__" {
+            // N-093: the constructor is not a spending entry point.
+            if !sighash_specs.is_empty() {
+                self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(def_loc.clone())));
+            }
             return MethodNode {
                 name: "constructor".to_string(),
                 params,
                 body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: def_loc,
                 sighash_type: None,
             };
         }
 
         let is_public = decorators.contains(&"public".to_string());
-        let method_name = snake_to_camel(&raw_name);
+        let method_name = self.idents.declare(&raw_name, method_ast_name(&raw_name));
+
+        let sighash_type = match resolve_native_sighash(&method_name, is_public, sighash_specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(def_loc.clone())));
+                None
+            }
+            None => None,
+        };
 
         MethodNode {
             name: method_name,
@@ -1159,8 +1556,8 @@ impl<'a> PyParser<'a> {
             } else {
                 Visibility::Private
             },
-            source_location: self.loc(),
-            sighash_type: None,
+            source_location: def_loc,
+            sighash_type,
         }
     }
 
@@ -1186,7 +1583,7 @@ impl<'a> PyParser<'a> {
             };
 
             params.push(ParamNode {
-                name: snake_to_camel(&raw_name),
+                name: self.idents.declare(&raw_name, map_builtin_name(&raw_name)),
                 param_type,
             });
 
@@ -1214,13 +1611,41 @@ impl<'a> PyParser<'a> {
             if let Some(stmt) = self.parse_statement() {
                 stmts.push(stmt);
             }
+            self.expect_statement_end();
             self.skip_newlines();
         }
 
         stmts
     }
 
+    /// F-026: a simple statement ends at its line break; compound statements
+    /// end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+    /// `lim = 0b1010` parsed as `lim = 0` plus a second statement `b1010`.
+    fn expect_statement_end(&mut self) {
+        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            return;
+        }
+        if self.pos > 0 && matches!(self.tokens.get(self.pos - 1), Some(Token::Newline | Token::Dedent)) {
+            return;
+        }
+        self.errors.push(Diagnostic::error(PY_STATEMENT_LINE_BREAK, None));
+        while !matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            self.advance();
+        }
+    }
+
     fn parse_statement(&mut self) -> Option<Statement> {
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         match self.peek().clone() {
             // assert statement: assert expr
             Token::Assert => Some(self.parse_assert_statement()),
@@ -1249,8 +1674,32 @@ impl<'a> PyParser<'a> {
             // Variable declaration or expression statement
             Token::Ident(_) => Some(self.parse_ident_statement()),
 
-            _ => {
+            // N-053: a token that can begin an expression begins an
+            // expression statement.
+            Token::NumberLit(_)
+            | Token::StringLit(_)
+            | Token::HexStringLit(_)
+            | Token::TrueLit
+            | Token::FalseLit
+            | Token::NoneLit
+            | Token::LParen
+            | Token::LBracket
+            | Token::Minus
+            | Token::Tilde
+            | Token::Bang
+            | Token::Not => Some(Statement::ExpressionStatement {
+                expression: self.parse_expression(),
+                source_location: self.loc(),
+            }),
+
+            // N-053: any other token (a stray `elif`, `from`, `@`, an
+            // unexpected indent, ...) is refused; skipping it dropped it.
+            tok => {
                 self.advance();
+                self.errors.push(Diagnostic::error(
+                    unsupported_statement_message(&py_token_text(&tok)),
+                    None,
+                ));
                 None
             }
         }
@@ -1263,6 +1712,7 @@ impl<'a> PyParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1277,19 +1727,26 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: a name first bound inside a branch stays branch-local.
+        let locals_before = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before.clone();
         self.match_tok(&Token::Dedent);
         self.skip_newlines();
 
         let else_branch = if *self.peek() == Token::Elif {
             // elif -> else { if ... }
-            Some(vec![self.parse_elif_statement()])
+            // F-213: elif is an `if` statement of the else branch (+1).
+            let elif = self.nested(None, |p| Some(p.parse_elif_statement()));
+            self.declared_locals = locals_before.clone();
+            Some(elif.into_iter().collect())
         } else if *self.peek() == Token::Else {
             self.advance(); // 'else'
             self.expect(&Token::Colon);
             self.skip_newlines();
             self.expect(&Token::Indent);
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before.clone();
             self.match_tok(&Token::Dedent);
             Some(stmts)
         } else {
@@ -1305,23 +1762,32 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_elif_statement(&mut self) -> Statement {
+        // F-337: located at the `elif` token (parse_statement never sees it).
+        let loc = self.loc();
         self.advance(); // consume 'elif'
         let condition = self.parse_expression();
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: a name first bound inside a branch stays branch-local.
+        let locals_before = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before.clone();
         self.match_tok(&Token::Dedent);
         self.skip_newlines();
 
         let else_branch = if *self.peek() == Token::Elif {
-            Some(vec![self.parse_elif_statement()])
+            // F-213: elif is an `if` statement of the else branch (+1).
+            let elif = self.nested(None, |p| Some(p.parse_elif_statement()));
+            self.declared_locals = locals_before.clone();
+            Some(elif.into_iter().collect())
         } else if *self.peek() == Token::Else {
             self.advance();
             self.expect(&Token::Colon);
             self.skip_newlines();
             self.expect(&Token::Indent);
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before.clone();
             self.match_tok(&Token::Dedent);
             Some(stmts)
         } else {
@@ -1332,7 +1798,7 @@ impl<'a> PyParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 
@@ -1340,7 +1806,7 @@ impl<'a> PyParser<'a> {
         self.advance(); // consume 'for'
 
         let raw_var = self.expect_ident();
-        let var_name = snake_to_camel(&raw_var);
+        let var_name = self.idents.declare(&raw_var, map_builtin_name(&raw_var));
 
         self.expect(&Token::In);
         self.expect(&Token::Range);
@@ -1384,7 +1850,13 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: the loop variable and the body's first bindings are
+        // body-local; a rebinding of the loop variable inside the body is an
+        // assignment.
+        let locals_before_body = self.declared_locals.clone();
+        self.declared_locals.insert(var_name.clone());
         let body = self.parse_statements();
+        self.declared_locals = locals_before_body;
         self.match_tok(&Token::Dedent);
 
         // Construct a C-style for loop AST node:
@@ -1404,11 +1876,13 @@ impl<'a> PyParser<'a> {
             op: if descending { BinaryOp::Gt } else { BinaryOp::Lt },
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
+                source_location: None,
             }),
             right: Box::new(end_expr),
+            source_location: None,
         };
 
-        let update_operand = Box::new(Expression::Identifier { name: var_name });
+        let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
         let update = Statement::ExpressionStatement {
             expression: if descending {
                 Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -1473,6 +1947,7 @@ impl<'a> PyParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args,
                 asm_return_type: None,
@@ -1503,6 +1978,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1517,6 +1993,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1531,6 +2008,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1545,6 +2023,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1559,6 +2038,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1601,13 +2081,9 @@ impl<'a> PyParser<'a> {
                 Expression::BigIntLiteral { value: BigInt::from(0) }
             };
 
-            return Statement::VariableDecl {
-                name: snake_to_camel(&raw_name),
-                var_type: Some(type_node),
-                mutable: true,
-                init,
-                source_location: self.loc(),
-            };
+            // N-046: rebinding a local of this method is an assignment in Python.
+            let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
+            return self.bind_local(name, Some(type_node), init);
         }
 
         // Check for simple name = expr pattern (no type annotation)
@@ -1615,13 +2091,9 @@ impl<'a> PyParser<'a> {
             self.advance(); // consume ident
             self.advance(); // consume '='
             let value = self.parse_expression();
-            return Statement::VariableDecl {
-                name: snake_to_camel(&raw_name),
-                var_type: None,
-                mutable: true,
-                init: value,
-                source_location: self.loc(),
-            };
+            // N-046: rebinding a local of this method is an assignment in Python.
+            let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
+            return self.bind_local(name, None, value);
         }
 
         // Parse as expression first
@@ -1645,6 +2117,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Add,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1659,6 +2132,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Sub,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1673,6 +2147,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mul,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1687,6 +2162,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Div,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1701,6 +2177,7 @@ impl<'a> PyParser<'a> {
                 op: BinaryOp::Mod,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1721,7 +2198,7 @@ impl<'a> PyParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     /// Python conditional expression: `x if cond else y`
@@ -1733,7 +2210,8 @@ impl<'a> PyParser<'a> {
             self.advance(); // 'if'
             let condition = self.parse_or();
             self.expect(&Token::Else);
-            let alternate = self.parse_ternary();
+            // F-213: the alternate recurses into the ternary parser (+1).
+            let alternate = self.nested(zero(), |p| p.parse_ternary());
             Expression::TernaryExpr {
                 condition: Box::new(condition),
                 consequent: Box::new(expr),
@@ -1745,40 +2223,50 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_not();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::And {
             self.advance();
             let right = self.parse_not();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_not(&mut self) -> Expression {
+        let op_loc = self.loc();
         if *self.peek() == Token::Not {
             self.advance();
-            let operand = self.parse_not();
+            let operand = self.nested(zero(), |p| p.parse_not());
             Expression::UnaryExpr {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
+                source_location: Some(op_loc.clone()),
             }
         } else {
             self.parse_bit_or()
@@ -1786,69 +2274,87 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1858,43 +2364,53 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1904,25 +2420,31 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::LShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::RShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1932,25 +2454,31 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1960,44 +2488,54 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::IntDiv => {
                     // Python integer division // maps to / in AST (OP_DIV)
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -2007,54 +2545,84 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
-            _ => self.parse_postfix(),
+            _ => self.parse_power(),
         }
+    }
+
+    /// `**` is the documented spelling of the builtin `pow(base, exp)`
+    /// (docs/formats/python.md): right-associative, tighter than a unary minus
+    /// on its left, with a unary operand allowed on its right.
+    fn parse_power(&mut self) -> Expression {
+        let base = self.parse_postfix();
+        if *self.peek() == Token::DoubleStar {
+            self.advance();
+            let exp = self.nested(zero(), |p| p.parse_unary());
+            return Expression::CallExpr {
+                callee: Box::new(Expression::Identifier {
+                    name: "pow".to_string(),
+                    source_location: None,
+                }),
+                args: vec![base, exp],
+                asm_return_type: None,
+            };
+        }
+        base
     }
 
     fn parse_postfix(&mut self) -> Expression {
         let mut expr = self.parse_primary();
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.peek().clone() {
                 Token::Dot => {
                     self.advance(); // '.'
                     let raw_prop = self.expect_ident();
-                    let prop = snake_to_camel(&raw_prop);
+                    let is_call = *self.peek() == Token::LParen;
+                    let prop = if is_call { method_ast_name(&raw_prop) } else { snake_to_camel(&raw_prop) };
 
                     // Check if it's a method call
-                    if *self.peek() == Token::LParen {
+                    if is_call {
                         let args = self.parse_call_args();
+                        // F-213: the member node, then the call around it.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &[]) || !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         // Handle self.method(...) -> this.method(...)
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
                             expr = Expression::CallExpr {
                                 callee: Box::new(Expression::MemberExpr {
                                     object: Box::new(Expression::Identifier {
                                         name: "this".to_string(),
+                                        source_location: None,
                                     }),
                                     property: prop,
                                 }),
@@ -2073,9 +2641,11 @@ impl<'a> PyParser<'a> {
                         }
                     } else {
                         // Property access
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                            expr = Expression::PropertyAccess { property: prop };
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                            expr = Expression::PropertyAccess { property: prop, source_location: None };
+                            dt = DepthTracker::new();
                         } else {
+                            if !self.grow(&mut dt, &expr, &[]) { break; }
                             expr = Expression::MemberExpr {
                                 object: Box::new(expr),
                                 property: prop,
@@ -2085,6 +2655,8 @@ impl<'a> PyParser<'a> {
                 }
                 Token::LParen => {
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -2095,6 +2667,7 @@ impl<'a> PyParser<'a> {
                     self.advance();
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -2108,17 +2681,19 @@ impl<'a> PyParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
             Token::NoneLit => Expression::BigIntLiteral { value: BigInt::from(0) },
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::SelfKw => {
                 // self -> this
                 Expression::Identifier {
                     name: "this".to_string(),
+                    source_location: None,
                 }
             }
             Token::Ident(name) => {
@@ -2129,6 +2704,7 @@ impl<'a> PyParser<'a> {
                             self.advance(); // '.'
                             self.advance(); // 'fromhex'
                             self.expect(&Token::LParen);
+                            let str_loc = self.loc();
                             let val = match self.advance() {
                                 Token::StringLit(s) => s,
                                 _ => {
@@ -2138,13 +2714,13 @@ impl<'a> PyParser<'a> {
                                 }
                             };
                             self.expect(&Token::RParen);
-                            return Expression::ByteStringLiteral { value: val };
+                            return Expression::ByteStringLiteral { value: val, source_location: Some(str_loc) };
                         }
                     }
                 }
 
                 let mapped = map_builtin_name(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: Some(lit_loc) }
             }
             Token::Assert => {
                 // assert used as expression (unusual but handle it)
@@ -2152,6 +2728,7 @@ impl<'a> PyParser<'a> {
                 // If we get here, it means `assert` keyword was used as an expression callee.
                 Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }
             }
             Token::LParen => {
@@ -2194,6 +2771,11 @@ impl<'a> PyParser<'a> {
     }
 }
 
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor builder
 // ---------------------------------------------------------------------------
@@ -2220,12 +2802,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2242,9 +2826,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -2498,7 +3084,7 @@ class Example(StatefulSmartContract):
         // Should be this.value = newValue (with PropertyAccess)
         if let Statement::Assignment { target, .. } = &body[0] {
             match target {
-                Expression::PropertyAccess { property } => {
+                Expression::PropertyAccess { property, .. } => {
                     assert_eq!(property, "value");
                 }
                 _ => panic!("Expected PropertyAccess, got {:?}", target),
@@ -2610,7 +3196,7 @@ class AssertTest(SmartContract):
 
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
             }
@@ -2637,7 +3223,7 @@ class HexTest(SmartContract):
         let body = &contract.methods[0].body;
 
         if let Statement::VariableDecl { init, .. } = &body[0] {
-            if let Expression::ByteStringLiteral { value } = init {
+            if let Expression::ByteStringLiteral { value, .. } = init {
                 assert_eq!(value, "dead");
             } else {
                 panic!("Expected ByteStringLiteral, got {:?}", init);

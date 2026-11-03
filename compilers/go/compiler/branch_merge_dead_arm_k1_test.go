@@ -124,17 +124,19 @@ func TestBranchMergeK1AndDeadArm_SevenTierScript(t *testing.T) {
 		want                   string
 	}{
 		{"dead-arm-k2/fold-on", deadArmK2Source, false,
-			"00014e01ce006351547a6e7b757b7567527978557a7568527a75537a75527a7c7ba177"},
+			// N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
+			"0001ce006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"dead-arm-k2/fold-off", deadArmK2Source, true,
-			"00014e8f006351537a6e7b757b75676e547a7568527a75527a757ca1"},
+			"00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"},
 		{"self-read-both-arms/fold-on", selfReadBothArmsSource, false,
-			"000340420f0340428f7b7ca069517b00a06351787c9376776751787c94767768517a750340420f0340428f7b7ca07777"},
+			// N-397 (2026-10-30): re-pinned; the folder now sees through `m0 = @ref:t`, so `m0 + 1n` / `m0 - 1n` fold to 2 / 0 in the arms (-8 B).
+			"000340428fa069517c00a06352767767007677687c750340428fa0"},
 		{"self-read-both-arms/fold-off", selfReadBothArmsSource, true,
-			"000340420f8fa069517c00a06351787c9376776751787c94767768517a750340420f8fa0"},
+			"000340420f8fa069517c00a06351787c9376776751787c947677687c750340420f8fa0"},
 		{"const-condition-k1/fold-on", constConditionK1Source, false,
-			"000340420f0340428f7b7ca0695151635276776753767768517a750340420f0340428f7b7ca0777777"},
+			"000340428fa06951516352767767537677687c750340428fa077"},
 		{"const-condition-k1/fold-off", constConditionK1Source, true,
-			"000340420f8fa0695151635276776753767768517a750340420f8fa077"},
+			"000340420f8fa06951516352767767537677687c750340420f8fa077"},
 	}
 
 	for _, tc := range cases {
@@ -150,12 +152,101 @@ func TestBranchMergeK1AndDeadArm_SevenTierScript(t *testing.T) {
 // A constant condition must not be treated differently from a runtime one, at
 // any arity. Before the fix, only the k=2 dead-arm form broke, and only under
 // folding — which is why the fold-OFF parity fuzzers were blind to it.
+//
+// F-311: as written up to 2026-10-11, this test only did
+// `_ = compileScriptHex(t, source, disable)` — it compiled 6 variants (3
+// conditions x 2 fold settings) and asserted nothing about the bytes any of
+// them produced, despite its name claiming "const and runtime conditions
+// agree". compileScriptHex only fails on a diagnostic/panic, so the test
+// passed on ANY compiled output, including a wrong one. Confirmed by
+// instrumenting lowerIf's declared-results adoption block in codegen/stack.go
+// — specifically the POST-ENDIF stale-slot roll-out it runs for `nDeclared
+// >= 1` (`for d := nDeclared; d < ctx.sm.depth(); d++`, the loop that
+// computes `sinkBelow`) — to push `d+1` instead of `d` as the OP_ROLL operand
+// while leaving the stackMap bookkeeping (`ctx.sm.push` / `pop` /
+// `removeAtDepth(d)`) untouched: the compiler's own layout and depth
+// invariants only check the SYMBOLIC model, which the mutation never
+// touches, so they stayed green while the emitted OP_ROLL silently targeted
+// one slot too deep in all six cases. The pre-fix body of this test passed
+// unchanged against that mutation.
+//
+// What "agree" actually means here, verified against the real compiler
+// output: for a fixed fold setting, deadArmK2Source's k=2 dead-arm merge
+// lowers the SAME bytes from OP_IF onward (branch body, trim, and the
+// post-ENDIF reconcile) no matter whether the condition is the constant
+// `false`, the constant `true`, or the runtime comparison `p > 0n` — only the
+// condition-push bytes immediately before OP_IF (0x63) differ. That is
+// exactly the invariant frontend/constant_fold.go's "if" case and
+// codegen/stack.go's result-adoption code (both referenced above) are meant
+// to guarantee: folding never special-cases a statically-known condition
+// in the branch-merge machinery.
+//
+// What this does NOT prove: that the pinned bytes are correct Bitcoin
+// Script — that's TestBranchMergeK1AndDeadArm_SevenTierScript's cross-tier
+// pin (which the "false" cases here are cross-checked against) plus the
+// on-chain/ScriptVM oracles, neither of which this test runs. It also does
+// not prove any OTHER tier agrees on the `true` / `p > 0n` variants — these
+// hexes are Go-only. And lowerIf has no access to whether `cond` is a
+// compile-time constant (it only ever sees the stack-map name "cond"), so
+// EVERY mutation found here — including the one used to prove this test can
+// go red — changes bytes for false/true/p>0n uniformly; the exact-hex pins
+// are what catch that, not the HasSuffix check (a cond-specific regression,
+// if one is ever introduced via constant_fold.go's "if" case, would be
+// caught the same way, by the pins moving).
 func TestBranchMergeK1AndDeadArm_ConstAndRuntimeConditionsAgree(t *testing.T) {
-	for _, cond := range []string{"if (false) {", "if (true) {", "if (p > 0n) {"} {
-		for _, disable := range []bool{false, true} {
-			source := strings.Replace(deadArmK2Source, "if (false) {", cond, 1)
-			// compileScriptHex fails the test on any diagnostic.
-			_ = compileScriptHex(t, source, disable)
+	// Exact hexes, measured against the current compiler (not copied from a
+	// reviewer or a golden file): the fix being guarded is Go-tier-internal
+	// branch-merge lowering, so this is deliberately NOT a cross-tier
+	// conformance golden (unlike TestBranchMergeK1AndDeadArm_SevenTierScript
+	// above). "false"/fold-on and "false"/fold-off match that test's
+	// dead-arm-k2 cases exactly, which is the cross-check that these were
+	// captured correctly.
+	cases := []struct {
+		cond       string
+		foldOnHex  string
+		foldOffHex string
+	}{
+		{"if (false) {",
+			"0001ce006351537a6e7b757b75676e547a75687b757b757ca1",
+			"00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"},
+		{"if (true) {",
+			"0001ce516351537a6e7b757b75676e547a75687b757b757ca1",
+			"00014e8f516351537a6e7b757b75676e547a75687b757b757ca1"},
+		{"if (p > 0n) {",
+			"0001ce527900a06351537a6e7b757b75676e547a75687b757b757ca1",
+			"00014e8f527900a06351537a6e7b757b75676e547a75687b757b757ca1"},
+	}
+
+	// The shared tail every case above must end with: the condition-push
+	// prefix is the only part allowed to vary. Starts at "63" (OP_IF).
+	const foldOnSuffix = "6351537a6e7b757b75676e547a75687b757b757ca1"
+	const foldOffSuffix = "6351537a6e7b757b75676e547a75687b757b757ca1"
+
+	for _, tc := range cases {
+		source := strings.Replace(deadArmK2Source, "if (false) {", tc.cond, 1)
+
+		gotOn := compileScriptHex(t, source, false)
+		if gotOn != tc.foldOnHex {
+			t.Errorf("cond=%q fold-on: hex changed\n got  %s\n want %s", tc.cond, gotOn, tc.foldOnHex)
+		}
+		if !strings.HasSuffix(gotOn, foldOnSuffix) {
+			gotSuffix := gotOn
+			if len(gotOn) > len(foldOnSuffix) {
+				gotSuffix = gotOn[len(gotOn)-len(foldOnSuffix):]
+			}
+			t.Errorf("cond=%q fold-on: branch body/merge bytes (from OP_IF onward) diverged from the shared post-OP_IF tail\n got suffix  ...%s\n want suffix ...%s", tc.cond, gotSuffix, foldOnSuffix)
+		}
+
+		gotOff := compileScriptHex(t, source, true)
+		if gotOff != tc.foldOffHex {
+			t.Errorf("cond=%q fold-off: hex changed\n got  %s\n want %s", tc.cond, gotOff, tc.foldOffHex)
+		}
+		if !strings.HasSuffix(gotOff, foldOffSuffix) {
+			gotSuffix := gotOff
+			if len(gotOff) > len(foldOffSuffix) {
+				gotSuffix = gotOff[len(gotOff)-len(foldOffSuffix):]
+			}
+			t.Errorf("cond=%q fold-off: branch body/merge bytes (from OP_IF onward) diverged from the shared post-OP_IF tail\n got suffix  ...%s\n want suffix ...%s", tc.cond, gotSuffix, foldOffSuffix)
 		}
 	}
 }

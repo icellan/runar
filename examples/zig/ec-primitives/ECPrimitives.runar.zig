@@ -9,11 +9,11 @@ pub const ECPrimitives = struct {
         return .{ .pt = pt };
     }
 
-    pub fn checkX(self: *const ECPrimitives, expectedX: i64) void {
+    pub fn checkX(self: *const ECPrimitives, expectedX: runar.BigintBig) void {
         runar.assert(runar.ecPointX(self.pt) == expectedX);
     }
 
-    pub fn checkY(self: *const ECPrimitives, expectedY: i64) void {
+    pub fn checkY(self: *const ECPrimitives, expectedY: runar.BigintBig) void {
         runar.assert(runar.ecPointY(self.pt) == expectedY);
     }
 
@@ -21,7 +21,7 @@ pub const ECPrimitives = struct {
         runar.assert(runar.ecOnCurve(self.pt));
     }
 
-    pub fn checkNegateY(self: *const ECPrimitives, expectedNegY: i64) void {
+    pub fn checkNegateY(self: *const ECPrimitives, expectedNegY: runar.BigintBig) void {
         const negated = runar.ecNegate(self.pt);
         runar.assert(runar.ecPointY(negated) == expectedNegY);
     }
@@ -31,30 +31,30 @@ pub const ECPrimitives = struct {
         runar.assert(runar.ecModReduce(value, modulus) == expected);
     }
 
-    pub fn checkAdd(self: *const ECPrimitives, other: runar.Point, expectedX: i64, expectedY: i64) void {
+    pub fn checkAdd(self: *const ECPrimitives, other: runar.Point, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         const result = runar.ecAdd(self.pt, other);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkMul(self: *const ECPrimitives, scalar: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMul(self: *const ECPrimitives, scalar: i64, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         const result = runar.ecMul(self.pt, scalar);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkMulGen(self: *const ECPrimitives, scalar: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMulGen(self: *const ECPrimitives, scalar: i64, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         _ = self;
         const result = runar.ecMulGen(scalar);
         runar.assert(runar.ecPointX(result) == expectedX);
         runar.assert(runar.ecPointY(result) == expectedY);
     }
 
-    pub fn checkMakePoint(self: *const ECPrimitives, x: i64, y: i64, expectedX: i64, expectedY: i64) void {
+    pub fn checkMakePoint(self: *const ECPrimitives, x: runar.BigintBig, y: runar.BigintBig, expectedX: runar.BigintBig, expectedY: runar.BigintBig) void {
         _ = self;
-        const pt = runar.ecMakePoint(x, y);
-        runar.assert(runar.ecPointX(pt) == expectedX);
-        runar.assert(runar.ecPointY(pt) == expectedY);
+        const point = runar.ecMakePoint(x, y);
+        runar.assert(runar.ecPointX(point) == expectedX);
+        runar.assert(runar.ecPointY(point) == expectedY);
     }
 
     pub fn checkEncodeCompressed(self: *const ECPrimitives, expected: runar.ByteString) void {

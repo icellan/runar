@@ -202,8 +202,9 @@ class TestParserTSEdges < Minitest::Test
   def test_garbage_input_yields_errors
     result = parse('@@@ not typescript $$$', 'garbage.runar.ts')
     refute_nil result.errors
-    # Either contract is nil OR there are errors — both are OK.
-    bad = result.contract.nil? || !result.errors.empty?
-    assert bad, 'expected diagnostics or nil contract for garbage input'
+    # F-376: require an actual diagnostic. The old `contract.nil? ||
+    # !errors.empty?` was satisfied by a parser that silently returned a nil
+    # contract with NO errors — a regression this test would not have caught.
+    refute_empty result.errors, 'expected diagnostics for garbage input'
   end
 end

@@ -475,9 +475,9 @@ type Sl struct {
     Deadline runar.Bigint `runar:"readonly"`
 }
 
-func (c *Sl) Spend() bool {
+func (c *Sl) Spend() {
     h := runar.CurrentBlockHeight()
-    return h > c.Deadline
+    runar.Assert(h > c.Deadline)
 }
 """
         _expect_typecheck_error(source, "StatefulSmartContract")
@@ -718,3 +718,76 @@ func (c *Cov) PayMulti() {
             if b.value.kind == "call" and b.value.func == "extractOutputHash"
         )
         assert n == 1, f"expected exactly one output-hash commitment, got {n}"
+
+
+# ---------------------------------------------------------------------------
+# F-075 — the requireOutputP2PKH layout guards follow private helpers
+# ---------------------------------------------------------------------------
+# ANF lowering inlines private helpers and compute_side_effect_summary injects
+# the continuation through the private call graph. The guards used to walk only
+# the method's own body, so moving either half of the forbidden pair into a
+# helper compiled a contract the guard itself calls permanently unspendable.
+# Proves: each guard fires with its own diagnostic, naming the public method,
+# when one half sits in a private helper. Does not prove: the helper form would
+# otherwise compile end-to-end (requireOutputP2PKH in a helper also fails later
+# in stack lowering, a separate issue).
+
+def _f075_source(helpers: str, body: str) -> str:
+    return (
+        "package x\n\n"
+        'import runar "github.com/icellan/runar/packages/runar-go"\n\n'
+        "type Cov struct {\n"
+        "\trunar.StatefulSmartContract\n"
+        "\tBondPKH runar.ByteString `runar:\"readonly\"`\n"
+        "\tBond    runar.Bigint     `runar:\"readonly\"`\n"
+        "\tTag     runar.ByteString `runar:\"readonly\"`\n"
+        "\tCount   runar.Bigint\n"
+        "}\n\n"
+        f"{helpers}\n\n"
+        "func (c *Cov) Go() {\n"
+        f"{body}\n"
+        "}\n"
+    )
+
+
+_F075_ASSERT_BOND = "func (c *Cov) assertBond() {\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}"
+
+
+class TestF075GuardsFollowPrivateHelpers:
+    def test_require_output_p2pkh_zero_in_helper_with_mutation(self):
+        _expect_typecheck_error(
+            _f075_source(_F075_ASSERT_BOND, "\tc.Count = c.Count + 1\n\tc.assertBond()"),
+            "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state",
+        )
+
+    def test_mutation_in_helper_with_require_output_p2pkh_zero(self):
+        _expect_typecheck_error(
+            _f075_source(
+                "func (c *Cov) bump() {\n\tc.Count = c.Count + 1\n}",
+                "\tc.bump()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)",
+            ),
+            "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state",
+        )
+
+    def test_crit3_require_output_p2pkh_in_helper(self):
+        _expect_typecheck_error(
+            _f075_source(_F075_ASSERT_BOND, "\tc.AddDataOutput(0, c.Tag)\n\tc.assertBond()"),
+            "method 'go' mixes requireOutputP2PKH() with addDataOutput()",
+        )
+
+    def test_state_output_in_helper(self):
+        _expect_typecheck_error(
+            _f075_source(
+                "func (c *Cov) emitNext() {\n\tc.AddOutput(1000, c.Count+1)\n}",
+                "\tc.emitNext()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)",
+            ),
+            "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()",
+        )
+
+    def test_terminal_helper_not_flagged(self):
+        result = parse_source(_f075_source(_F075_ASSERT_BOND, "\tc.assertBond()"), "Test.runar.go")
+        assert result.errors == [], result.error_strings()
+        msgs = [d.format_message() for d in type_check(result.contract).errors]
+        assert not any(
+            "mixes requireOutputP2PKH()" in m or "permanently unspendable" in m for m in msgs
+        ), msgs

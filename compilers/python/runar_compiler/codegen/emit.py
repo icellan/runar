@@ -172,6 +172,11 @@ class EmitResult:
     source_map: list[SourceMapping] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     code_sep_index_slots: list[dict] = field(default_factory=list)
+    # N-051 -- ``verify_code_part_len`` length fields the SDK patches at deploy
+    # time with the deployed code-part length. Each entry is
+    # ``{"byteOffset": N}`` (TEMPLATE offset of the first of the 4 LE bytes).
+    # Empty when every pin is exact at compile time.
+    code_part_len_slots: list[dict] = field(default_factory=list)
     code_separator_index: int = -1
     code_separator_indices: list[int] = field(default_factory=list)
     # Byte ranges produced by raw_bytes StackOps (asm({...}) calls).
@@ -192,6 +197,8 @@ class _EmitContext:
         self.pending_source_loc: Optional[SourceLocation] = None
         self.constructor_slots: list[ConstructorSlot] = []
         self.code_sep_index_slots: list[dict] = []
+        # N-051 -- pin length fields the SDK patches at deploy time.
+        self.code_part_len_slots: list[dict] = []
         self.code_separator_index: int = -1
         self.code_separator_indices: list[int] = []
         self.raw_script_spans: list[RawScriptSpan] = []
@@ -280,7 +287,7 @@ class _EmitContext:
         """R-095 -- emit the 9-byte ``SIZE(_codePart)`` pin and register its
         length field for back-patching.
 
-            OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
 
         ``LL LL LL LL`` is a fixed-width little-endian field, not a minimal
         Script number push: the value being patched IS the length of the script
@@ -290,6 +297,19 @@ class _EmitContext:
 
         ``exact`` is known here (the stack lowerer resolved it once every method
         had been lowered), so only the four length bytes need patching.
+
+        N-051 -- the comparison is ALWAYS an equality. It used to degrade to
+        OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+        deployed length unknown here, and a lower bound lets a spender claim a
+        TRUNCATED ``_codePart`` that ends at any 0x6a byte inside the baked
+        value (clause 8b's ``rest[0] == 0x6a`` is then satisfied by the
+        script's own bytes), planting attacker-chosen code in the continuation.
+        When the length is not exact at compile time, the field is recorded as
+        a ``codePartLenSlots`` entry and the SDK writes the real deployed
+        code-part length into it at deploy time. The template keeps the
+        compile-time lower bound, so an SDK that does not patch produces a
+        contract whose honest spends fail (funds stuck), never one that accepts
+        a truncated code part.
         """
         self.emit_opcode("OP_DUP")
         # +1 skips the single-byte push header the 4-byte data push carries.
@@ -297,13 +317,15 @@ class _EmitContext:
         asm_index = len(self.asm_parts)
         self.emit_push(PushValue(kind="bytes", bytes_val=bytes(4)))
         self.emit_opcode("OP_BIN2NUM")
-        self.emit_opcode("OP_NUMEQUAL" if exact else "OP_GREATERTHANOREQUAL")
+        self.emit_opcode("OP_NUMEQUAL")
         self.emit_opcode("OP_VERIFY")
         self.code_part_len_fixups.append({
             "value_byte_offset": value_byte_offset,
             "asm_index": asm_index,
             "delta": delta,
         })
+        if not exact:
+            self.code_part_len_slots.append({"byteOffset": value_byte_offset})
 
     def _code_sep_index_growth(self) -> int:
         """Deploy-time byte growth contributed by the codeSepIndex placeholders.
@@ -491,10 +513,54 @@ def encode_push_big_int(n: int) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
-    # Propagate source location from StackOp to the emit context
-    if op.source_loc:
-        ctx.set_source_loc(op.source_loc)
+    _emit_ops([op], ctx)
 
+
+def _emit_ops(root: list[StackOp], ctx: _EmitContext) -> None:
+    """Emit ``root`` in order, descending into if-op arms on an explicit stack.
+
+    N-264: this used to recurse (``_emit_stack_op`` -> ``_emit_if`` ->
+    ``_emit_stack_op``), one level per nested if-op. Private methods are
+    inlined, so a chain of D helpers each calling the next under K nested ifs
+    nests D*K if-ops, past the recursion limit. Each op is emitted in the same
+    order with the same source-location bookkeeping as before: an op's
+    location is set before it, cleared after it, and an if-op's OP_ELSE /
+    OP_ENDIF are emitted under whatever location its last arm op left.
+    """
+    # Frames: [ops, next index, arm, else ops]; arm is "root", "then", "else".
+    stack: list[list] = [[root, 0, "root", None]]
+    while stack:
+        frame = stack[-1]
+        ops, i, arm, else_ops = frame
+        if i < len(ops):
+            frame[1] = i + 1
+            op = ops[i]
+            # Propagate source location from StackOp to the emit context
+            if op.source_loc:
+                ctx.set_source_loc(op.source_loc)
+            if op.op == "if":
+                # An OP_IF / OP_ELSE / OP_ENDIF structure: the arms follow.
+                ctx.emit_opcode("OP_IF")
+                stack.append([op.then, 0, "then", op.else_ops])
+                continue
+            _emit_leaf_op(op, ctx)
+            # Clear after emitting so the location doesn't leak to the next op
+            ctx.set_source_loc(None)
+            continue
+        stack.pop()
+        if arm == "root":
+            continue
+        if arm == "then" and else_ops:
+            ctx.emit_opcode("OP_ELSE")
+            stack.append([else_ops, 0, "else", None])
+            continue
+        ctx.emit_opcode("OP_ENDIF")
+        # The if-op is done: clear its location like any other op's.
+        ctx.set_source_loc(None)
+
+
+def _emit_leaf_op(op: StackOp, ctx: _EmitContext) -> None:
+    """Emit one op that is not an if-op."""
     if op.op == "push":
         ctx.emit_push(op.value)
     elif op.op == "dup":
@@ -517,8 +583,6 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         ctx.emit_opcode("OP_TUCK")
     elif op.op == "opcode":
         ctx.emit_opcode(op.code)
-    elif op.op == "if":
-        _emit_if(op.then, op.else_ops, ctx)
     elif op.op == "placeholder":
         ctx.emit_placeholder(op.param_index)
     elif op.op == "raw_bytes":
@@ -546,24 +610,6 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         })
     else:
         raise ValueError(f"unknown stack op: {op.op}")
-
-    # Clear after emitting so the location doesn't leak to the next op
-    ctx.set_source_loc(None)
-
-
-def _emit_if(then_ops: list[StackOp], else_ops: list[StackOp], ctx: _EmitContext) -> None:
-    """Emit an OP_IF / OP_ELSE / OP_ENDIF structure."""
-    ctx.emit_opcode("OP_IF")
-
-    for op in then_ops:
-        _emit_stack_op(op, ctx)
-
-    if else_ops:
-        ctx.emit_opcode("OP_ELSE")
-        for op in else_ops:
-            _emit_stack_op(op, ctx)
-
-    ctx.emit_opcode("OP_ENDIF")
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +696,7 @@ def emit(methods: list[StackMethod]) -> EmitResult:
         source_map=ctx.source_map,
         constructor_slots=ctx.constructor_slots,
         code_sep_index_slots=ctx.code_sep_index_slots,
+        code_part_len_slots=ctx.code_part_len_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
         raw_script_spans=ctx.raw_script_spans,
@@ -667,6 +714,7 @@ def emit_method(method: StackMethod) -> EmitResult:
         source_map=ctx.source_map,
         constructor_slots=ctx.constructor_slots,
         code_sep_index_slots=ctx.code_sep_index_slots,
+        code_part_len_slots=ctx.code_part_len_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
         raw_script_spans=ctx.raw_script_spans,

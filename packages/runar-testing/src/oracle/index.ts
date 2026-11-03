@@ -9,6 +9,7 @@ export type { FoldEqOptions, FoldEqResult, FoldEqDivergence } from './fold-equiv
 export {
   runStatelessSigned,
   runStatefulSpend,
+  runPrecompiledHexSpend,
   validateContractInput,
   testKey,
 } from './real-crypto-execution.js';
@@ -18,4 +19,5 @@ export type {
   StatelessArg,
   StatelessSignedOptions,
   StatefulSpendOptions,
+  PrecompiledHexOptions,
 } from './real-crypto-execution.js';

@@ -391,8 +391,9 @@ export function divmod(_a: bigint, _b: bigint): bigint {
 }
 
 /**
- * Approximate floor(log2(n)) via bit-scanning.
- * Compiles to a 64-iteration bit-scanning loop.
+ * Exact floor(log2(n)) for every n > 0, with no width cap; the script aborts
+ * for n <= 0. Compiles to a branch-free read of the operand's minimal
+ * Script-number encoding (OP_SIZE plus a scan of the top byte) (N-103).
  */
 export function log2(_n: bigint): bigint {
   return compilerStub('log2');
@@ -505,7 +506,7 @@ export function verifySLHDSA_SHA2_256s(_msg: ByteString, _sig: ByteString, _pubk
 
 /**
  * Verify an SLH-DSA-SHA2-256f (SPHINCS+) signature.
- * NIST FIPS 205, 256-bit security, fast signatures (48,736 bytes).
+ * NIST FIPS 205, 256-bit security, fast signatures (49,856 bytes).
  */
 export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_256f');
@@ -1018,6 +1019,81 @@ export function bn254G1Negate(_p: Point): Point {
  */
 export function bn254G1OnCurve(_p: Point): boolean {
   return compilerStub('bn254G1OnCurve') as unknown as boolean;
+}
+
+// ---------------------------------------------------------------------------
+// BN254 optimal-ate pairing (Go-tier codegen; see CLAUDE.md on EVM/STARK scope)
+// ---------------------------------------------------------------------------
+
+/**
+ * BN254 optimal-ate pairing of one (G1, G2) pair. G1 is a Point; the G2 point
+ * is passed as its four Fp limbs (x0, x1, y0, y1).
+ */
+export function bn254Pairing(
+  _p: Point, _qx0: bigint, _qx1: bigint, _qy0: bigint, _qy1: bigint,
+): bigint {
+  return compilerStub('bn254Pairing');
+}
+
+/**
+ * BN254 multi-pairing check over three (G1, G2) pairs plus six precomputed
+ * Fp limbs; true when the pairing product is the identity in GT.
+ */
+export function bn254MultiPairing3(
+  _p1: Point, _q1x0: bigint, _q1x1: bigint, _q1y0: bigint, _q1y1: bigint,
+  _p2: Point, _q2x0: bigint, _q2x1: bigint, _q2y0: bigint, _q2y1: bigint,
+  _p3: Point, _q3x0: bigint, _q3x1: bigint, _q3y0: bigint, _q3y1: bigint,
+  _pre0: bigint, _pre1: bigint, _pre2: bigint, _pre3: bigint, _pre4: bigint, _pre5: bigint,
+  _pre6: bigint, _pre7: bigint, _pre8: bigint, _pre9: bigint, _pre10: bigint, _pre11: bigint,
+): boolean {
+  return compilerStub('bn254MultiPairing3') as unknown as boolean;
+}
+
+/**
+ * BN254 multi-pairing check over four (G1, G2) pairs:
+ * e(p1,q1) * e(p2,q2) * e(p3,q3) * e(p4,q4) == 1 in GT (Groth16 equation).
+ */
+export function bn254MultiPairing4(
+  _p1: Point, _q1x0: bigint, _q1x1: bigint, _q1y0: bigint, _q1y1: bigint,
+  _p2: Point, _q2x0: bigint, _q2x1: bigint, _q2y0: bigint, _q2y1: bigint,
+  _p3: Point, _q3x0: bigint, _q3x1: bigint, _q3y0: bigint, _q3y1: bigint,
+  _p4: Point, _q4x0: bigint, _q4x1: bigint, _q4y0: bigint, _q4y1: bigint,
+): boolean {
+  return compilerStub('bn254MultiPairing4') as unknown as boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Go-tier STARK / Groth16 builtins (see CLAUDE.md on EVM/STARK scope)
+// ---------------------------------------------------------------------------
+
+/** SP1 FRI verifier (Go-tier codegen). Signature from Go's typecheck table. */
+export function verifySP1FRI(
+  _proof: ByteString, _publicValues: ByteString, _vkHash: ByteString,
+): boolean {
+  return compilerStub('verifySP1FRI') as unknown as boolean;
+}
+
+/**
+ * Poseidon2 (KoalaBear) Merkle root: 8 leaf limbs, the leaf index, the depth,
+ * then 8 sibling limbs per level (8*depth + 10 bigint arguments in total).
+ */
+export function merkleRootPoseidon2KB(..._args: bigint[]): bigint {
+  return compilerStub('merkleRootPoseidon2KB');
+}
+
+/** Mode-3 witness-assisted Groth16 verification entry; takes no arguments. */
+export function assertGroth16WitnessAssisted(): void {
+  compilerStub('assertGroth16WitnessAssisted');
+}
+
+/** Soundness-strict sibling of assertGroth16WitnessAssisted (with MSM). */
+export function assertGroth16WitnessAssistedWithMSM(): void {
+  compilerStub('assertGroth16WitnessAssistedWithMSM');
+}
+
+/** Reads one of the 5 SP1 public-input scalars left by the Groth16 entry. */
+export function groth16PublicInput(_index: bigint): bigint {
+  return compilerStub('groth16PublicInput');
 }
 
 // ---------------------------------------------------------------------------

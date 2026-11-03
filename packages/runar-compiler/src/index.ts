@@ -115,19 +115,26 @@ export * from './ir/index.js';
 
 import { parse } from './passes/01-parse.js';
 import { validate } from './passes/02-validate.js';
-import { typecheck } from './passes/03-typecheck.js';
+import { typecheck, isBigintFamilyType, isByteStringFamilyType } from './passes/03-typecheck.js';
 import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
-import { lowerToStack } from './passes/05-stack-lower.js';
+import { lowerToStack, bakedPropPushOrigin } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
 import { optimizeEC } from './optimizer/anf-ec.js';
-import { foldConstants } from './optimizer/constant-fold.js';
+import { foldConstantsAndPrune } from './optimizer/constant-fold.js';
 import { eliminateDeadBindings } from './optimizer/dce.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
-import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
-import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
+import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact, StackOp } from './ir/index.js';
+import { MAX_LOOP_COUNT } from './ir/index.js';
+import { assertRequiredIrFields } from './ir/anf-required-fields.js';
+import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
+import { assertRabinKeyProvenance } from './ir/rabin-key-provenance.js';
+import { builtinArityViolation } from './ir/builtin-arity.js';
+import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
+import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
+import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Compile options and result
@@ -248,7 +255,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let parseResult: ReturnType<typeof parse>;
   try {
     parseResult = parse(source, opts.fileName);
-    diagnostics.push(...parseResult.errors);
+    // N-310: not `push(...errors)` — a spread of ~10^5 parse diagnostics (a 4 MiB
+    // source of one repeated syntax error) overflows the JS stack.
+    for (const err of parseResult.errors) diagnostics.push(err);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -283,8 +292,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let validationResult: ReturnType<typeof validate>;
   try {
     validationResult = validate(parseResult.contract);
-    diagnostics.push(...validationResult.errors);
-    diagnostics.push(...validationResult.warnings);
+    // N-312: loops, not `push(...list)` — a spread of ~10^5 entries overflows the JS stack.
+    for (const d of validationResult.errors) diagnostics.push(d);
+    for (const d of validationResult.warnings) diagnostics.push(d);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -319,7 +329,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let typeCheckResult: ReturnType<typeof typecheck>;
   try {
     typeCheckResult = typecheck(parseResult.contract);
-    diagnostics.push(...typeCheckResult.errors);
+    for (const d of typeCheckResult.errors) diagnostics.push(d);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -354,7 +364,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   let expandedContract: ContractNode;
   try {
     const expandResult = expandFixedArrays(parseResult.contract);
-    diagnostics.push(...expandResult.errors);
+    for (const d of expandResult.errors) diagnostics.push(d);
     expandedContract = expandResult.contract;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -449,7 +459,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   // Pass 4.25: Constant folding (on by default)
   if (!opts.disableConstantFolding) {
     onProgress?.('Constant folding', 45);
-    anf = foldConstants(anf);
+    anf = foldConstantsAndPrune(anf);
   }
 
   // Pass 4.5: ANF EC Optimizer (always-on by default; opt-out for strict-roundtrip).
@@ -477,8 +487,8 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       ) {
         diagnostics.push({
           message:
-            `readonly field '${prop.name}' is not referenced in any method body and was ` +
-            `eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the ` +
+            `readonly field '${prop.name}' is not referenced in any method body and may ` +
+            `be eliminated by DCE; mark it with the embedAlways directive to preserve it in the ` +
             `on-chain script`,
           severity: 'warning',
           loc: prop.sourceLocation,
@@ -506,12 +516,15 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     const emitResult = emit(stackProgram);
 
     // requireBaked belt-and-braces: in template mode every required prop
-    // without a compile-time value must have produced a constructor slot.
+    // without a compile-time value must have produced a constructor slot; in
+    // baked mode its value push must have survived all optimization (F-111).
     if (opts.requireBaked && opts.requireBaked.length > 0) {
       const slotErrors = findRequireBakedMissingSlots(
         optimizedAnf,
         opts.requireBaked,
         emitResult.constructorSlots,
+        // Only public methods are emitted (06-emit drops the constructor).
+        stackProgram.methods.filter(m => m.name !== 'constructor').map(m => m.ops),
       );
       if (slotErrors.length > 0) {
         for (const msg of slotErrors) {
@@ -536,6 +549,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       {
         constructorSlots: emitResult.constructorSlots,
         codeSepIndexSlots: emitResult.codeSepIndexSlots,
+        codePartLenSlots: emitResult.codePartLenSlots,
         codeSeparatorIndex: emitResult.codeSeparatorIndex,
         codeSeparatorIndices: emitResult.codeSeparatorIndices,
         rawScriptSpans: emitResult.rawScriptSpans,
@@ -573,7 +587,14 @@ export function compile(source: string, options?: CompileOptions): CompileResult
 export interface CompileFromANFOptions {
   /** Bake property values into the locking script (replaces placeholders). */
   constructorArgs?: Record<string, bigint | boolean | string>;
-  /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
+  /**
+   * @deprecated Ignored by `compileFromANF`: ANF constant folding is never run
+   * on IR input, whatever this is set to (the Go/Rust/Python/Zig/Ruby/Java
+   * `--ir` entry points do the same). Accepted only so CLI callers can pass
+   * their `--disable-constant-folding` flag through unchanged. Constant
+   * folding on this path happens only in the Stack-IR peephole optimizer,
+   * which `disablePeephole` controls.
+   */
   disableConstantFolding?: boolean;
   /** If true, skip the EC algebraic optimizer. See CompileOptions for context. */
   disableEcOptimizer?: boolean;
@@ -598,7 +619,9 @@ export interface CompileFromANFResult {
  * Compile a parsed/loaded ANF IR program directly to a Bitcoin Script.
  *
  * Skips passes 1–4 (parse/validate/typecheck/anf-lower) and runs only:
- *   constant-fold (optional) → EC optimize → stack-lower → peephole → emit
+ *   EC optimize → stack-lower → peephole → emit
+ * ANF constant folding is NOT run here (see the note in the body);
+ * `disableConstantFolding` is ignored.
  *
  * Mirrors Go's `CompileFromIR`, Rust's `compile_from_ir`, Python's
  * `compile_from_ir_bytes`, and the corresponding entry points on the Zig,
@@ -613,7 +636,48 @@ export function compileFromANF(
 ): CompileFromANFResult {
   const opts = options ?? {};
 
-  const anf: ANFProgram = program;
+  // F-223: do not alias the caller's ANFProgram — constructor-arg baking
+  // below writes `prop.initialValue` directly onto property objects, and
+  // without a structural copy that mutates the caller's own `program`,
+  // making a second compileFromANF call on the same object inherit the
+  // first call's baked values. structuredClone handles the bigint
+  // `initialValue`s ANF properties carry (JSON.stringify would throw).
+  const anf: ANFProgram = structuredClone(program);
+
+  // N-071: IR input skips 02-validate, whose endsWithAssert rule is what makes
+  // a public method's script a covenant. Stack lowering leaves the method's
+  // last binding as the script result, so a body of [] compiled to an EMPTY
+  // (anyone-can-spend) script. Same rule and words as Go's F-004 check.
+  for (const method of anf.methods) {
+    if (method.isPublic && method.name !== 'constructor' && !endsWithTerminalAssert(method.body)) {
+      throw new Error(
+        `IR validation: public method '${method.name}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend`,
+      );
+    }
+  }
+  // N-113 / R-081 (N-215): a contract with no public method has no spending
+  // entry point, and stack lowering then emits an EMPTY (anyone-can-spend)
+  // locking script. The constructor does not count: ANF flattens it into
+  // `methods`, but emission filters it out by name. Go's words.
+  if (!anf.methods.some((m) => m.isPublic && m.name !== 'constructor')) {
+    throw new Error(
+      `IR validation: contract ${anf.contractName} has no public methods — no spending entry points; an empty locking script is anyone-can-spend`,
+    );
+  }
+  // N-265: IR input skips 02-validate's checkNoRecursion, which enforces both
+  // the call-graph cycle rule and N-180's MAX_CALL_DEPTH bound. Stack lowering
+  // inlines every method_call to a private method by lowering its body in
+  // place with no cycle or depth guard, so a self/mutually-recursive method —
+  // or an acyclic chain past MAX_CALL_DEPTH — recurses the host call stack
+  // until it crashes. Checked before the parentClass rules below, same order
+  // as Go's F-004 checkIRFrontendRules.
+  assertIrNoRecursion(anf);
+
+  // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+  // the scaffolding the frontend injects into each public method.
+  if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
+    assertIrStatefulScaffolding(anf);
+  }
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
@@ -666,6 +730,237 @@ export function compileFromANF(
 }
 
 /**
+ * ANF form of 02-validate's `endsWithAssert`: the last binding is an `assert`,
+ * or an `if` whose then AND else arms both end that way. A terminal
+ * `raw_script` with out_arity 1 (UnsafeSmartContract's `asm()` terminal) is
+ * also accepted, because ANF carries no parentClass.
+ */
+function endsWithTerminalAssert(bindings: ANFBinding[]): boolean {
+  const last = bindings[bindings.length - 1];
+  if (last === undefined) return false;
+  const v = last.value;
+  if (v.kind === 'assert') return true;
+  if (v.kind === 'if') return endsWithTerminalAssert(v.then) && endsWithTerminalAssert(v.else);
+  if (v.kind === 'raw_script') return v.out_arity === 1;
+  return false;
+}
+
+/** ANF kinds only StatefulSmartContract lowering produces (typecheck's addOutput()/
+ *  addRawOutput()/addDataOutput() rule plus the auto-injected state continuation). */
+const STATEFUL_ONLY_KINDS = new Set([
+  'add_output', 'add_raw_output', 'add_data_output', 'get_state_script', 'deserialize_state',
+]);
+
+function forEachIrBinding(bindings: ANFBinding[], fn: (v: ANFBinding['value']) => void): void {
+  for (const b of bindings) {
+    fn(b.value);
+    const v = b.value as { then?: ANFBinding[]; else?: ANFBinding[]; body?: ANFBinding[] };
+    for (const nested of [v.then, v.else, v.body]) if (nested) forEachIrBinding(nested, fn);
+  }
+}
+
+/**
+ * N-265: `--ir` skips 02-validate's `checkNoRecursion`, which enforces both
+ * the call-graph cycle rule and N-180's `MAX_CALL_DEPTH` (128) bound. Stack
+ * lowering (`lowerToStack`'s `inlineMethodCall`) inlines every `method_call`
+ * to a private method by lowering its body in place, with no cycle or depth
+ * guard, so a self/mutually-recursive method recurses the host call stack
+ * until `RangeError: Maximum call stack size exceeded`, and an acyclic chain
+ * past the bound recurses it just as deep. Ported from Go's F-071
+ * `checkIRNoRecursion` (compilers/go/compiler/ir_frontend_rules.go), made
+ * iterative here too (no host recursion), and extended with N-180's depth
+ * bound — Go's existing IR-path check was cycle-only, which is this item's
+ * other half.
+ *
+ * Two iterative passes, cycles checked before depth (a cyclic graph has no
+ * finite depth, so there is nothing for the second pass to measure):
+ *   1. `assertIrNoCycle` — the exact "hit" a recursive depth-first search
+ *      would report the moment it finds a back edge (a method strictly ON
+ *      the cycle, not every caller that merely reaches it), with the stack
+ *      made explicit instead of growing the host call stack one level per
+ *      link. Matches Go F-071's existing reporting convention byte for byte.
+ *   2. `assertIrCallDepthBound` — once known acyclic, a plain iterative
+ *      longest-path over the call graph, refusing the first method
+ *      (declaration order) whose inlining depth exceeds MAX_CALL_DEPTH.
+ */
+function assertIrNoRecursion(program: ANFProgram): void {
+  const callGraph = new Map<string, string[]>();
+  for (const m of program.methods) {
+    if (m.name === 'constructor') continue;
+    const calls: string[] = [];
+    forEachIrBinding(m.body, (v) => {
+      if (v.kind === 'method_call') calls.push(v.method);
+    });
+    callGraph.set(m.name, calls);
+  }
+
+  assertIrNoCycle(callGraph);
+  assertIrCallDepthBound(program.methods, callGraph);
+}
+
+/**
+ * Iterative (explicit-stack), three-state DFS over the IR `method_call`
+ * graph. Declaration order only decides which root the search starts from;
+ * the reported name is whichever back edge is found first, exactly as the
+ * host-recursive version Go's F-071 `checkIRNoRecursion` used would report.
+ */
+function assertIrNoCycle(callGraph: Map<string, string[]>): void {
+  const UNVISITED = 0;
+  const ON_STACK = 1;
+  const DONE = 2;
+  const state = new Map<string, number>();
+
+  for (const root of callGraph.keys()) {
+    if ((state.get(root) ?? UNVISITED) !== UNVISITED) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number }> = [];
+    state.set(root, ON_STACK);
+    stack.push({ name: root, callees: callGraph.get(root)!, next: 0 });
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next >= top.callees.length) {
+        state.set(top.name, DONE);
+        stack.pop();
+        continue;
+      }
+      const callee = top.callees[top.next++]!;
+      if (!callGraph.has(callee)) continue;
+      const calleeState = state.get(callee) ?? UNVISITED;
+      if (calleeState === ON_STACK) {
+        throw new Error(
+          `IR validation: recursion detected: method '${callee}' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering`,
+        );
+      }
+      if (calleeState === UNVISITED) {
+        state.set(callee, ON_STACK);
+        stack.push({ name: callee, callees: callGraph.get(callee)!, next: 0 });
+      }
+    }
+  }
+}
+
+/**
+ * Iterative longest-path over the (by this point known-acyclic) IR call
+ * graph, no host recursion: a method's call depth is 0 if it calls no
+ * contract method, else 1 + the largest call depth among the methods it
+ * calls. Private methods are inlined at every call site, so this is the
+ * inlining depth. Refuses the first method (declaration order) past
+ * MAX_CALL_DEPTH, with the diagnostic every tier shares.
+ */
+function assertIrCallDepthBound(methods: ANFProgram['methods'], callGraph: Map<string, string[]>): void {
+  const depth = new Map<string, number>();
+  const done = new Set<string>();
+
+  for (const root of callGraph.keys()) {
+    if (done.has(root)) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number; depth: number }> = [];
+    stack.push({ name: root, callees: callGraph.get(root)!, next: 0, depth: 0 });
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next < top.callees.length) {
+        const callee = top.callees[top.next++]!;
+        if (!callGraph.has(callee)) continue;
+        if (done.has(callee)) {
+          top.depth = Math.max(top.depth, 1 + depth.get(callee)!);
+        } else {
+          stack.push({ name: callee, callees: callGraph.get(callee)!, next: 0, depth: 0 });
+        }
+        continue;
+      }
+      stack.pop();
+      done.add(top.name);
+      depth.set(top.name, top.depth);
+      const parent = stack[stack.length - 1];
+      if (parent) parent.depth = Math.max(parent.depth, 1 + top.depth);
+    }
+  }
+
+  for (const m of methods) {
+    if (m.name === 'constructor') continue;
+    if ((depth.get(m.name) ?? 0) > InputLimits.MAX_CALL_DEPTH) {
+      throw new Error(
+        `IR validation: call depth of method '${m.name}' exceeds MAX_CALL_DEPTH (limit=${InputLimits.MAX_CALL_DEPTH})`,
+      );
+    }
+  }
+}
+
+/**
+ * N-087: IR skips 02-validate and 03-typecheck, so their parentClass rules
+ * never ran. A SmartContract property declared `readonly: false` got no
+ * constructor slot, and `update_prop owner = x; assert(owner == x)` compiled
+ * to `76767b8777`, which any key spends. Re-asserted here, in this order, with
+ * the diagnostics all seven tiers share:
+ *   1. SmartContract / UnsafeSmartContract properties must be readonly.
+ *   2. add_output / add_raw_output / add_data_output / get_state_script /
+ *      deserialize_state require StatefulSmartContract.
+ *   3. raw_script (asm) requires UnsafeSmartContract.
+ *   4. Go F-004's rule: no update_prop outside the constructor on a readonly
+ *      or undeclared property.
+ * Absent parentClass (IR older than F-038) is inferred fail-closed:
+ * StatefulSmartContract only if a stateful-only node is present, else
+ * UnsafeSmartContract if a raw_script is, else SmartContract. Returns the
+ * (declared or inferred) parentClass.
+ */
+function assertIrParentClassRules(program: ANFProgram): NonNullable<ANFProgram['parentClass']> {
+  let hasStateful = false;
+  let hasRaw = false;
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (STATEFUL_ONLY_KINDS.has(v.kind)) hasStateful = true;
+      if (v.kind === 'raw_script') hasRaw = true;
+    });
+  }
+  const pc = program.parentClass
+    ?? (hasStateful ? 'StatefulSmartContract' : hasRaw ? 'UnsafeSmartContract' : 'SmartContract');
+
+  if (pc !== 'StatefulSmartContract') {
+    for (const p of program.properties) {
+      if (!p.readonly) {
+        throw new Error(
+          `IR validation: Property '${p.name}' in ${pc} must be readonly. Use StatefulSmartContract for mutable state.`,
+        );
+      }
+    }
+  }
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (pc !== 'StatefulSmartContract' && STATEFUL_ONLY_KINDS.has(v.kind)) {
+        throw new Error(
+          `IR validation: '${v.kind}' in method '${m.name}' is only available in StatefulSmartContract; got ${pc}`,
+        );
+      }
+    });
+  }
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (pc !== 'UnsafeSmartContract' && v.kind === 'raw_script') {
+        throw new Error(
+          `IR validation: 'raw_script' in method '${m.name}' is only available in contracts extending UnsafeSmartContract; got ${pc}`,
+        );
+      }
+    });
+  }
+
+  const readonly = new Map(program.properties.map((p) => [p.name, p.readonly]));
+  for (const m of program.methods) {
+    if (m.name === 'constructor') continue;
+    forEachIrBinding(m.body, (v) => {
+      if (v.kind !== 'update_prop') return;
+      const ro = readonly.get(v.name);
+      if (ro === undefined) {
+        throw new Error(`IR validation: method '${m.name}' assigns to undeclared property '${v.name}'`);
+      }
+      if (ro) {
+        throw new Error(
+          `IR validation: cannot assign to readonly property '${v.name}' in method '${m.name}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script`,
+        );
+      }
+    });
+  }
+  return pc;
+}
+
+/**
  * Parse an ANF IR JSON string into an `ANFProgram`.
  *
  * The TS compiler emits `bigint` values as JSON strings of the form
@@ -692,18 +987,36 @@ export function loadANFFromJSON(json: string): ANFProgram {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(json, (_key, value) => {
+    parsed = JSON.parse(json, ((key: string, value: unknown, context?: { source?: string }) => {
       if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
         return BigInt(value.slice(0, -1));
       }
+      // N-212 (R82: parse exactly everywhere): a bare integer constant past
+      // 2^53 has already been rounded in `value`, but the reviver's
+      // `context.source` (Node >= 21) still holds the token, so read the
+      // digits from there. Scoped to the two constant positions, as in the
+      // native tiers. Without `context.source` the number falls through and
+      // coerceNumericBigInts refuses it, as before.
+      if (
+        typeof value === 'number' &&
+        (key === 'value' || key === 'initialValue') &&
+        !Number.isSafeInteger(value) &&
+        typeof context?.source === 'string' &&
+        /^-?\d+$/.test(context.source)
+      ) {
+        return BigInt(context.source);
+      }
       return value;
-    }) as unknown;
+    }) as Parameters<typeof JSON.parse>[1]) as unknown;
   } catch (e) {
     throw new CanonicalJsonError(
       'invalid',
       `loadANFFromJSON: input is not valid JSON: ${(e as Error).message}`,
     );
   }
+  // N-131 / N-215: float SYNTAX is refused, on the raw text (`1.0` parses to
+  // the number 1, so the parsed tree cannot show it).
+  assertNoJsonFloats(json);
 
   // Iterative depth-walk: cap structural nesting at MAX_NESTING before any
   // recursive consumer (typecheck, stack-lower) touches the tree.
@@ -713,19 +1026,177 @@ export function loadANFFromJSON(json: string): ANFProgram {
     throw new Error('loadANFFromJSON: top-level value is not an object');
   }
   const program = parsed as Partial<ANFProgram>;
-  if (typeof program.contractName !== 'string') {
-    throw new Error('loadANFFromJSON: missing string field "contractName"');
-  }
-  if (!Array.isArray(program.properties)) {
-    throw new Error('loadANFFromJSON: missing array field "properties"');
-  }
-  if (!Array.isArray(program.methods)) {
-    throw new Error('loadANFFromJSON: missing array field "methods"');
-  }
+  // N-069: every required field, present and of the right JSON type, with the
+  // field path in the diagnostic (shared verbatim with the other six tiers).
+  assertRequiredIrFields(program);
+  // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+  assertNoReservedIrNames(program as ANFProgram);
   coerceNumericBigInts(program as ANFProgram);
+  // N-133 / R-079 / R-163 (N-215): value rules the native loaders apply per binding.
+  assertBindingValueRules(program as ANFProgram);
+  assertLoopCountWithinBounds(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
+  // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+  // written (shared rule and diagnostic, 7 tiers).
+  assertSyntheticArrayChains(program as ANFProgram);
+  // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+  // mutable key property (shared rule and diagnostics, 7 tiers).
+  assertRabinKeyProvenance(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * N-131 — no JSON number in the IR may be written in float syntax.
+ *
+ * The ANF IR has no float-typed field, and the rule is LEXICAL (a `.` or an
+ * exponent), not value-based, so `1.0` is refused like `3.5` — the rule Go
+ * and Java implement and Python/Ruby adopted. JSON.parse has already turned
+ * `1.0` into 1 by the time any walker runs, so this scans the raw text: only
+ * number tokens are inspected (strings are skipped, and the only other
+ * barewords JSON allows are true/false/null). Runs after JSON.parse accepted
+ * the text, so the token grammar is known to be valid. Message shared with
+ * the Python and Ruby loaders.
+ */
+function assertNoJsonFloats(json: string): void {
+  let i = 0;
+  while (i < json.length) {
+    const c = json[i]!;
+    if (c === '"') {
+      i++;
+      while (i < json.length && json[i] !== '"') i += json[i] === '\\' ? 2 : 1;
+      i++;
+    } else if (c === '-' || (c >= '0' && c <= '9')) {
+      const start = i;
+      while (i < json.length && /[0-9eE+\-.]/.test(json[i]!)) i++;
+      const token = json.slice(start, i);
+      if (/[.eE]/.test(token)) {
+        throw new Error(
+          `loadANFFromJSON: IR JSON contains a floating-point number (${token}); every ` +
+            `numeric field in the ANF IR is an integer (write an oversize value as a ` +
+            `decimal string with an \`n\` suffix)`,
+        );
+      }
+    } else {
+      i++;
+    }
+  }
+}
+
+/**
+ * Per-binding value rules the six native `--ir` loaders apply and this one
+ * did not (N-215). Each message is Go's:
+ *
+ *   - N-133: a string `loop.start` must be the `<decimal>n` form. The reviver
+ *     has already turned every legal one into a bigint, so any string left is
+ *     unreadable — and stack lowering would have substituted 0 for it.
+ *   - R-079: a `raw_script` with an empty `bytes` body. Stack lowering models
+ *     the span from its declared arities while emission writes nothing, so
+ *     every later PICK/ROLL depth addresses the wrong slot.
+ *   - R-163 / R-165: a builtin `call` with the wrong argument count (see
+ *     ir/builtin-arity.ts).
+ */
+function assertBindingValueRules(program: ANFProgram): void {
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const v = binding.value as unknown as Record<string, unknown> & { kind: string };
+      if (v.kind === 'loop' && typeof v.start === 'string') {
+        throw new Error(
+          `IR validation: method ${methodName} binding ${binding.name} loop/start: ` +
+            `a string start must be the \`<decimal>n\` form, got ${JSON.stringify(v.start)}`,
+        );
+      }
+      if (v.kind === 'raw_script' && (typeof v.bytes !== 'string' || v.bytes.length === 0)) {
+        throw new Error(
+          `IR validation: method ${methodName} binding ${binding.name} raw_script has an ` +
+            `empty bytes body but declares in_arity ${String(v.in_arity)} / out_arity ` +
+            `${String(v.out_arity)}; a span that emits no bytes cannot have a stack effect`,
+        );
+      }
+      if (v.kind === 'call' && typeof v.func === 'string' && Array.isArray(v.args)) {
+        const takes = builtinArityViolation(v.func, v.args.length);
+        if (takes !== null) {
+          throw new Error(
+            `IR validation: method ${methodName} binding ${binding.name} calls ${v.func}() ` +
+              `with ${v.args.length} argument(s); it takes ${takes}`,
+          );
+        }
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = v[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+  for (const method of program.methods) walk(method.body ?? [], method.name);
+}
+
+/**
+ * N-060 / N-065 — `--ir` names that alias a name the compiler mints.
+ *
+ * Stack lowering keeps its own slots (`_codePart`, `__param_<name>`,
+ * `__shadowed_<n>_<name>`, `_pub_<n>`) in the same name map as the program's
+ * parameters and bindings, and resolves every reference by name, so an IR
+ * that declares or references one of those names aliases a compiler slot. A
+ * parameter, property, method or loop variable named like an ANF temp
+ * (`t<digits>`, `__merge$<digits>`) aliases the bindings that ARE spelled
+ * that way. Binding names in those two ANF families are the normal IR
+ * spelling and stay legal. See `passes/reserved-names.ts`.
+ *
+ * Checked: property names; method names; parameter names; binding names and
+ * loop `iterVar`s; the name a `load_param` / `load_prop` / `update_prop`
+ * addresses; every binding reference (operands, arguments, `@ref:` aliases).
+ * The message is the source validator's, shared verbatim with the six native
+ * loaders.
+ */
+function assertNoReservedIrNames(program: ANFProgram): void {
+  const check = (name: unknown, declaration: boolean): void => {
+    if (typeof name === 'string' && isReservedIrName(name, declaration)) {
+      throw new Error(reservedNameMessage(name));
+    }
+  };
+  const walk = (bindings: readonly ANFBinding[]): void => {
+    for (const binding of bindings) {
+      check(binding.name, false);
+      const v = binding.value as unknown as Record<string, unknown> & { kind: string };
+      switch (v.kind) {
+        case 'load_param':
+        case 'load_prop':
+          check(v.name, true);
+          break;
+        case 'update_prop':
+          check(v.name, true);
+          check(v.value, false);
+          break;
+        case 'load_const':
+          if (typeof v.value === 'string' && v.value.startsWith('@ref:')) check(v.value.slice(5), false);
+          break;
+        case 'loop':
+          check(v.iterVar, true);
+          break;
+        default:
+          for (const key of ['left', 'right', 'operand', 'cond', 'object', 'preimage', 'satoshis', 'scriptBytes']) {
+            check(v[key], false);
+          }
+          if (v.kind === 'assert') check(v.value, false);
+          for (const key of ['args', 'stateValues', 'elements']) {
+            const list = v[key];
+            if (Array.isArray(list)) for (const r of list) check(r, false);
+          }
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = v[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[]);
+      }
+    }
+  };
+
+  for (const property of program.properties) check(property.name, true);
+  for (const method of program.methods) {
+    check(method.name, true);
+    for (const param of method.params) check(param.name, true);
+    walk(method.body);
+  }
 }
 
 /**
@@ -848,6 +1319,83 @@ function assertSuperOnlyInConstructor(program: ANFProgram): void {
 }
 
 /**
+ * F-283 / CL-GAP-164 — bound a loop's own iteration count, and the PRODUCT
+ * of every loop count nested inside it.
+ *
+ * `loadANFFromJSON` had NEITHER check. `MAX_LOOP_COUNT` (CL-BUG-088) is read
+ * only by `04-anf-lower.ts` on the SOURCE path, which `compileFromANF` never
+ * runs — IR arriving via `--from-ir` skips straight to stack lowering. A
+ * loop count of 10001, or two loops of 10000 nested inside each other
+ * (product 100,000,000), both loaded clean here while the six native
+ * loaders already bounded the SINGLE count (Go `ir.MaxLoopCount`,
+ * Python/Ruby/Rust/Zig/Java's own copies). The PRODUCT bound is new
+ * everywhere (F-283 / CL-GAP-164): two loops of 10,000 each, one nested
+ * inside the other, each independently satisfy the single-binding bound
+ * while the real unrolled work is 10,000 x 10,000 = 100,000,000 — a count
+ * that, if it reached stack lowering, drives the unroller into multi-GB
+ * memory growth (measured on the Ruby tier, same shape: a 1,175-byte
+ * payload loaded in 0.0s and then drove compilation to 5m07s / 3.7GB RSS
+ * and climbing).
+ *
+ * Both diagnostics are shared verbatim with the six native tiers.
+ */
+function assertLoopCountWithinBounds(program: ANFProgram): void {
+  const walk = (
+    bindings: readonly ANFBinding[],
+    methodName: string,
+    enclosingLoopCount: number,
+  ): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string } & Record<string, unknown>;
+      if (value?.kind === 'loop') {
+        if (typeof value.count !== 'number') {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} loop count ` +
+              `must be an integer, got ${JSON.stringify(value.count)}`,
+          );
+        }
+        const count = value.count;
+        if (count < 0) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has negative loop count ${count}`,
+          );
+        }
+        if (count > MAX_LOOP_COUNT) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has loop count ${count} exceeding maximum ${MAX_LOOP_COUNT}`,
+          );
+        }
+        // Reached only once the binding's own count is within
+        // [0, MAX_LOOP_COUNT], so both operands are <= MAX_LOOP_COUNT and
+        // the multiplication stays well inside Number's safe-integer range.
+        const totalLoopCount = enclosingLoopCount * count;
+        if (totalLoopCount > MAX_LOOP_COUNT) {
+          throw new Error(
+            `loadANFFromJSON: method ${methodName} binding ${binding.name} ` +
+              `has loop count ${count} nested inside an enclosing loop of total ` +
+              `count ${enclosingLoopCount}, producing ${totalLoopCount} total ` +
+              `iterations, exceeding maximum ${MAX_LOOP_COUNT}`,
+          );
+        }
+        const body = value.body;
+        if (Array.isArray(body)) walk(body as ANFBinding[], methodName, totalLoopCount);
+      } else {
+        for (const key of ['then', 'else'] as const) {
+          const nested = value[key];
+          if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName, enclosingLoopCount);
+        }
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    walk(method.body ?? [], method.name, 1);
+  }
+}
+
+/**
  * R-126 / CL-BUG-164 — every `add_output` must name exactly one state value
  * per MUTABLE property.
  *
@@ -946,8 +1494,14 @@ export interface CompileCheckOptions {
 }
 
 /**
- * Run the Rúnar frontend (parse → validate → typecheck → expandFixedArrays
- * → typecheck) on a source string and throw on any error-severity diagnostic.
+ * Run the Rúnar frontend (parse → validate → typecheck → expandFixedArrays)
+ * on a source string and throw on any error-severity diagnostic.
+ *
+ * This is the same front end `compile()` uses: one typecheck pass over the
+ * source contract, then FixedArray expansion, which reports its own
+ * diagnostics (e.g. initializer length or element-type mismatches). The
+ * expanded contract is not typechecked a second time — neither is it by
+ * `compile()`.
  *
  * Returns void on success. Throws an Error whose message lists every
  * frontend diagnostic when validation fails. Mirrors the named API exposed
@@ -1004,6 +1558,11 @@ function hasErrors(diagnostics: CompilerDiagnostic[]): boolean {
  *      placeholders (failing opaquely at runtime).
  *  (b) keys that do not match any contract property name (typos would
  *      otherwise silently bake nothing for that key).
+ *  (d) values whose kind or byte width does not match the property's declared
+ *      type (F-101). Stack lowering pushes whatever it is handed — `true` as
+ *      OP_1, `42n` as a 1-byte number, a 6-byte hex string as a 6-byte push —
+ *      so a wrong-typed value where a 20-byte hash belongs compiles cleanly
+ *      into a script no spend can satisfy.
  */
 function validateConstructorArgsShape(
   anf: ANFProgram,
@@ -1033,7 +1592,63 @@ function validateConstructorArgsShape(
     }
   }
 
+  // (d) Value kind / width check, in property declaration order.
+  for (const prop of anf.properties) {
+    if (!(prop.name in constructorArgs)) continue;
+    const msg = constructorArgTypeError(prop.name, prop.type, constructorArgs[prop.name]);
+    if (msg !== null) errors.push(msg);
+  }
+
   return errors;
+}
+
+/**
+ * F-101: return the diagnostic for a constructorArgs value that does not match
+ * its property's declared type, or `null` when it matches. The message text is
+ * shared verbatim by every tier that bakes constructorArgs (Go, Rust, Python,
+ * Ruby). Fixed widths come from the shared `STATE_FIELD_WIDTHS` table — the
+ * same widths the SDK enforces for these types (`assertFixedWidthValue`).
+ */
+function constructorArgTypeError(name: string, type: string, value: unknown): string | null {
+  const isHex = typeof value === 'string' && value.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(value);
+  let expected: string;
+  let ok: boolean;
+  if (isBigintFamilyType(type)) {
+    expected = 'an integer';
+    ok = typeof value === 'bigint';
+  } else if (type === 'boolean') {
+    expected = 'a boolean';
+    ok = typeof value === 'boolean';
+  } else if (isByteStringFamilyType(type)) {
+    const width = STATE_FIELD_WIDTHS[type];
+    if (width?.encoding === 'raw') {
+      expected = `exactly ${width.size} bytes of hex`;
+      ok = isHex && (value as string).length === width.size * 2;
+    } else {
+      expected = 'a hex string';
+      ok = isHex;
+    }
+  } else {
+    return (
+      `constructorArgs value for property '${name}' (${type}) cannot be baked: ` +
+      `unsupported property type.`
+    );
+  }
+  if (ok) return null;
+  const got =
+    typeof value === 'boolean'
+      ? 'a boolean'
+      : typeof value === 'bigint'
+        ? 'an integer'
+        : isHex
+          ? `${(value as string).length / 2} bytes of hex`
+          : typeof value === 'string'
+            ? 'a non-hex string'
+            : 'an unsupported value';
+  return (
+    `constructorArgs value for property '${name}' (${type}) must be ${expected}, ` +
+    `got ${got}. Baking it would silently put the wrong value in the locking script.`
+  );
 }
 
 /**
@@ -1108,38 +1723,55 @@ function validateRequireBaked(anf: ANFProgram, names: string[]): string[] {
 }
 
 /**
- * Post-emit requireBaked cross-check (template mode): every required prop
- * that has no compile-time value must map to at least one emitted
- * constructor slot. Guards against any optimizer pass dropping a reference
- * AFTER the ANF-level check.
+ * Post-emit requireBaked cross-check, run on the FINAL (post-fold, post-EC/DCE,
+ * post-peephole) Stack IR that is emitted. The pre-fold `validateRequireBaked`
+ * only proves a reference existed before optimization; folding can erase it
+ * (F-111: `assert(this.source * 0n === 0n)` folds to `OP_0 OP_0 ...`).
  *
- * SCOPE / KNOWN LIMITATION: this belt-and-braces check covers TEMPLATE mode
- * only — baked props (`initialValue !== undefined`) are skipped because they
- * carry no constructor slot. In baked mode the guarantee rests solely on the
- * pre-fold `validateRequireBaked` reference check. A baked required prop whose
- * ONLY reference constant-folds to a tautology (e.g. `assert(this.source >= 1n)`
- * with `source` baked to `1n` → `assert(true)`, then eliminated) can therefore
- * be dropped from the emitted code with no diagnostic, because folding runs
- * after the reference check and the folded literal is indistinguishable from an
- * eliminated one. A robust baked-mode check would require tracking the baked
- * value's survival through fold+emit; until then, authors relying on
- * requireBaked in baked mode should confirm the value is present in the emitted
- * artifact. Template mode (the documented deploy path) is fully covered.
+ *  - Template mode (no compile-time value): the prop must map to at least one
+ *    emitted constructor slot.
+ *  - Baked mode (`initialValue !== undefined`): at least one `push` op that
+ *    lowering emitted for a `load_prop` of the prop (tracked by identity in
+ *    `bakedPropPushOrigin`) must survive into the emitted ops. A push that
+ *    was folded into another constant (`OP_1 OP_1ADD` → `OP_2`) or dropped
+ *    no longer carries the value, so the script has no commitment to it.
  */
 function findRequireBakedMissingSlots(
   anf: ANFProgram,
   names: string[],
   constructorSlots: { paramIndex: number; byteOffset: number }[],
+  methodOps: StackOp[][],
 ): string[] {
   const ctorProps = anf.properties.filter(p => p.initialValue === undefined);
   const slotNames = new Set(
     constructorSlots.map(s => ctorProps[s.paramIndex]?.name).filter(n => n !== undefined),
   );
+  const bakedPushNames = new Set<string>();
+  const collect = (ops: StackOp[]): void => {
+    for (const op of ops) {
+      const origin = bakedPropPushOrigin.get(op);
+      if (origin !== undefined) bakedPushNames.add(origin);
+      if (op.op === 'if') {
+        collect(op.then);
+        if (op.else) collect(op.else);
+      }
+    }
+  };
+  for (const ops of methodOps) collect(ops);
   const errors: string[] = [];
   for (const name of names) {
     const prop = anf.properties.find(p => p.name === name);
     if (!prop || !prop.readonly) continue; // reported by validateRequireBaked
-    if (prop.initialValue !== undefined) continue; // baked at compile time
+    if (prop.initialValue !== undefined) {
+      if (!bakedPushNames.has(name)) {
+        errors.push(
+          `requireBaked property '${name}' has no on-chain commitment after optimization — ` +
+            `every reference to its baked value was folded or eliminated, so the value ` +
+            `does not appear in the emitted script and could not be verified on-chain.`,
+        );
+      }
+      continue;
+    }
     if (!slotNames.has(name)) {
       errors.push(
         `requireBaked: readonly property '${name}' produced no constructor slot in the ` +

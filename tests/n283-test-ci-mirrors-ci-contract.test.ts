@@ -1,0 +1,518 @@
+/**
+ * N-283 — `pnpm test:ci` vs `.github/workflows/ci.yml` drift: the "green
+ * here -> green CI" contract (README.md's `pnpm test:ci` row, and
+ * CONTRIBUTING.md's "Mirrors CI") was never counted. F-253 flagged the claim
+ * in passing ("the wider claim that `pnpm test:ci` skips CI gates and runs
+ * one CI does not — not re-counted here; N-283") but did not measure it.
+ *
+ * This test measures it. It parses every `run:` step in every ci.yml job and
+ * every command `pnpm run test:ci` expands to (recursively, following
+ * `pnpm run <name>` references), and diffs them.
+ *
+ * The result: far more than the "~18" F-253 guessed. `pnpm test:ci` never
+ * runs the FULL native unit-test suite for 5 of 6 non-TS SDK packages (only
+ * a single narrow wallet-client test per tier, via a DIFFERENT command), the
+ * full Go/Rust compiler suites (only a `-run`-filtered / `--test`-filtered
+ * subset via `conformance:go`/`conformance:rust`), five whole conformance
+ * vitest directories (`negatives/`, `go-only-parity/`, `closed-findings/`,
+ * `preimage-binding/`, `witnesses/`), the script-execution oracle, the
+ * sdk-vertical pins, the decompiler fingerprint/template drift checks, the
+ * mutation-corpus and analyzer gates, and all four merge-base-diffing lint
+ * gates (golden-provenance, wire-format, their self-tests aside).
+ *
+ * N-283 did not blindly wire ~60 more commands into `test:ci` (several need
+ * a merge-base this isn't a PR, and none had been executed to confirm they
+ * pass). N-290 then ran every `addable-locally` command once and wired all
+ * of them into the `test:ci-local` chain; the bucket is now empty. This pins the measured gap, categorized by why it exists, and
+ * rewords the contract (README.md / CONTRIBUTING.md) to point at this test
+ * instead of promising an unconditional mirror. The `addable-locally`
+ * category (no merge-base, no network, no service — just never wired) was
+ * wired into `test:ci` by N-290 and is now empty.
+ *
+ * Categories:
+ *   - addable-locally:      nothing blocks running it in a plain local clone;
+ *                           simply never wired into a `pnpm run` chain.
+ *                           EMPTY since N-290 (all wired into `test:ci-local`).
+ *   - not-actually-local:   looked addable-locally but cannot run as a plain
+ *                           local step; see the per-line reason in the list.
+ *   - needs-merge-base:     the gate diffs `<base>...HEAD`; there is no base
+ *                           outside a PR/push/merge_group event.
+ *   - transitive-via-turbo: not literally the same text, but `turbo run
+ *                           test`/`typecheck` already runs it because it is
+ *                           the named package's own `test`/`typecheck`
+ *                           script (verified against that package's
+ *                           package.json) or because `test`/`typecheck`
+ *                           `dependsOn` `build` in turbo.json.
+ *   - transitive-via-script: a sibling command in the same job already
+ *                           performs the work as a side effect (e.g.
+ *                           `gradle test` compiles before testing, making an
+ *                           explicit `gradle build` step redundant).
+ *   - covered-by-wrapper:   the whole JOB is mirrored by a wrapper script
+ *                           test:ci already calls, matched by name/semantics
+ *                           rather than literal text — `runar-verification`
+ *                           by `scripts/lean-verify.sh` (kept in sync by
+ *                           tests/f174-lean-verify-mirrors-ci.test.ts) and
+ *                           `integration` by `integration/run-all.sh`
+ *                           (verified by hand against every per-tier step).
+ *   - needs-opt-in:         `integration-teranode` only runs on an explicit
+ *                           `workflow_dispatch` flag; it is never part of a
+ *                           default push/PR/merge_group run either.
+ *
+ * What this test proves: the measured set of ci.yml run-steps with no exact
+ * (or `cd DIR &&` / directory-prefix / path-style) equivalent anywhere in
+ * `pnpm run test:ci`'s expansion is exactly the pinned, categorized list
+ * below — so a NEW gap (a ci.yml step added with nothing in test:ci reaching
+ * it, or an existing equivalence that stops holding because test:ci's chain
+ * changed) fails this test instead of silently widening the gap further.
+ * Also: the seven per-tier `wallet-client:*` commands `test:ci` runs are run
+ * by ci.yml too — since N-480 the integration job starts an in-repo BRC-100
+ * test wallet and runs the TS/Go/Rust/Python/Zig/Java commands verbatim (and
+ * Ruby's spec inside its whole-suite integration step). Before N-480 this was
+ * the one direction where test:ci ran something CI ran nothing like.
+ *
+ * What this test does not prove: that the wired `test:ci-local` commands pass
+ * on every machine — it diffs TEXT only; each was run once, green, for N-290.
+ * It does not prove the `transitive-via-turbo` /
+ * `transitive-via-script` claims by executing turbo or gradle; those are
+ * verified by reading the dependency declarations (turbo.json `dependsOn`,
+ * the named package's own scripts) once and cited in the comments, not
+ * re-derived at runtime. A shell-syntax form this parser does not recognise
+ * (a new YAML scalar style, a step with no `run:`, a wrapper job added
+ * without updating JOB_EXPLANATIONS) fails loudly rather than passing
+ * vacuously — see the floor assertions.
+ */
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (rel: string) => readFileSync(resolve(REPO, rel), 'utf-8');
+
+/** Drop full-line comments (also strips bash comments inside `run:` blocks —
+ * those are not commands, so dropping them is correct here too). */
+const codeLines = (text: string) => text.split('\n').filter((l) => !/^\s*#/.test(l));
+
+/** Lines after `startIdx` indented strictly more than `headerIndent`, up to
+ * (not including) the first line that dedents back to `headerIndent` or
+ * less. Blank lines are skipped without ending the block. */
+function block(lines: string[], startIdx: number, headerIndent: number): string[] {
+  const out: string[] = [];
+  for (let i = startIdx; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (l.trim() === '') continue;
+    const indent = l.match(/^ */)![0].length;
+    if (indent <= headerIndent) break;
+    out.push(l);
+  }
+  return out;
+}
+
+function blockByHeader(lines: string[], header: RegExp): string[] | undefined {
+  const start = lines.findIndex((l) => header.test(l));
+  if (start < 0) return undefined;
+  const indent = lines[start]!.match(/^ */)![0].length;
+  return block(lines, start + 1, indent);
+}
+
+interface RawJob {
+  id: string;
+  lines: string[];
+}
+
+/** Top-level `jobs:` entries, in file order, with their body lines. */
+function parseJobs(ciText: string): RawJob[] {
+  const lines = codeLines(ciText);
+  const jobsBlock = blockByHeader(lines, /^jobs:\s*$/);
+  if (!jobsBlock) return [];
+  const re = /^ {2}([A-Za-z0-9_-]+):\s*$/;
+  const out: RawJob[] = [];
+  let cur: RawJob | null = null;
+  for (const l of jobsBlock) {
+    const indent = l.match(/^ */)![0].length;
+    const m = re.exec(l);
+    if (m && indent === 2) {
+      if (cur) out.push(cur);
+      cur = { id: m[1]!, lines: [] };
+    } else if (cur) {
+      cur.lines.push(l);
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** A job's `steps:` list, split into one line-group per `- ` item. The
+ * item's own "      - " prefix is replaced with 8 spaces so its first field
+ * (`run:`, `name:`, `uses:`, ...) sits at the same indent as the rest of the
+ * step's fields, letting a single regex find a field regardless of whether
+ * it was the item's first line or a later one. */
+function splitSteps(jobLines: string[]): string[][] {
+  const stepsBlock = blockByHeader(jobLines, /^ {4}steps:\s*$/);
+  if (!stepsBlock) return [];
+  const out: string[][] = [];
+  let cur: string[] | null = null;
+  for (const l of stepsBlock) {
+    const indent = l.match(/^ */)![0].length;
+    if (indent === 6 && l.slice(6).startsWith('- ')) {
+      if (cur) out.push(cur);
+      cur = ['        ' + l.slice(8)];
+    } else if (cur) {
+      cur.push(l);
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function extractField(stepLines: string[], field: string): string | undefined {
+  const re = new RegExp(`^ {8}${field}:\\s*(.+)$`);
+  for (const l of stepLines) {
+    const m = re.exec(l);
+    if (m) return m[1]!.trim();
+  }
+  return undefined;
+}
+
+/** The step's `run:` value, as a list of raw (un-merged, un-normalized)
+ * lines: a `|`/`|-` literal block keeps its newlines; a `>`/`>-` folded
+ * block is joined into one line (no blank-line paragraph breaks occur in
+ * this file's folded blocks, so plain space-joining is exact); an inline
+ * `run: <cmd>` is a single line. */
+function extractRunLines(stepLines: string[]): string[] | null {
+  const runIdx = stepLines.findIndex((l) => /^ {8}run:/.test(l));
+  if (runIdx < 0) return null;
+  const m = /^ {8}run:\s*(.*)$/.exec(stepLines[runIdx]!)!;
+  const rest = m[1]!;
+  if (rest === '|' || rest === '|-') {
+    return block(stepLines, runIdx + 1, 8).map((l) => l.trim());
+  }
+  if (rest === '>' || rest === '>-') {
+    return [block(stepLines, runIdx + 1, 8).map((l) => l.trim()).join(' ')];
+  }
+  return [rest.trim()];
+}
+
+/** A bare `cd DIR` line (no `&&`) applies to every line after it in the same
+ * run block, same as a real shell. Merges it in as a `cd DIR && ` prefix and
+ * drops the bare line (it is not itself a command). */
+function mergeCd(lines: string[]): string[] {
+  const out: string[] = [];
+  let prefix = '';
+  for (const raw of lines) {
+    const l = raw.trim();
+    const cdOnly = /^cd\s+(\S+)$/.exec(l);
+    if (cdOnly) {
+      prefix = `cd ${cdOnly[1]} && `;
+      continue;
+    }
+    out.push(prefix + l);
+  }
+  return out;
+}
+
+/** Minimal normalization: collapse whitespace, canonicalize `python` (no
+ * version) to `python3` as its own token, and drop a trailing `/` on any
+ * token longer than one character (so `tests/` and `tests` compare equal,
+ * same rule as tests/ci-covers-root-tests.test.ts). Deliberately NOT
+ * aggressive: flag differences (extra `-v`, a glob vs. no glob, a missing
+ * env var) stay real differences rather than being normalized to green. */
+function normalize(s: string): string {
+  return s
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/(^|\s)python(?!3)(?=\s|$)/g, '$1python3')
+    .split(' ')
+    .map((tok) => (tok.length > 1 ? tok.replace(/\/$/, '') : tok))
+    .join(' ');
+}
+
+/** True when `local` holds "npx vitest run <dir>" (bare directory, no file)
+ * and `ciLine` is "npx vitest run <dir>/<anything>" — the directory form
+ * already runs every file under it. */
+function dirContainsFile(localSet: Set<string>, ciLine: string): boolean {
+  const m = /^npx vitest run (\S+)$/.exec(ciLine);
+  if (!m) return false;
+  const parts = m[1]!.split('/');
+  for (let i = 1; i < parts.length; i++) {
+    if (localSet.has(`npx vitest run ${parts.slice(0, i).join('/')}`)) return true;
+  }
+  return false;
+}
+
+/** `cd DIR && npx vitest run X` / `cd DIR && npx tsx X` and `npx vitest run
+ * DIR/X` / `npx tsx DIR/X` reach the identical file two ways: cwd-relative
+ * (most ci.yml steps) vs. repo-root-relative (most package.json scripts).
+ * Produces the repo-root-relative alias so the PATH STYLE isn't mistaken for
+ * a coverage gap; a real gap (no local script at all) still has no alias
+ * present in `localLines` either. */
+function pathJoinedAlias(line: string): string | null {
+  const m = /^cd (\S+) && (npx (?:vitest run|tsx)) (.+)$/.exec(line);
+  if (!m) return null;
+  return `${m[2]} ${m[1]}/${m[3]}`;
+}
+
+const SETUP_EXCLUDE =
+  /^(pnpm install\b|npm ci\b|pip install\b|chmod \+x\b|find \.turbo\/cache\b|git (fetch|rev-parse|cat-file|update-ref)\b|mkdir -p\b|bundle install\b)/;
+/** A command line, not bash control-flow / variable-assignment / comment
+ * plumbing inside a multi-line script. Only lines starting with a real
+ * invocation (after stripping a merged `cd DIR &&` prefix and any leading
+ * `VAR=value` env assignments) count as "gates" worth diffing; `if`, `fi`,
+ * `files=(...)`, bare `echo`, etc. are glue, not tests. */
+const KNOWN_CMD =
+  /^(bash|node|npx|pnpm|go|cargo|python3?|ruby|bundle|zig|gradle|rake|lake|git|curl|tsx|sh|\$\w+)\b|^\.\/gradlew\b|^[\w./-]+\.sh\b/;
+
+function stripEnvPrefix(line: string): string {
+  let s = line;
+  let m: RegExpExecArray | null;
+  while ((m = /^[A-Z][A-Z0-9_]*=(?:"[^"]*"|\S*)\s+(.*)$/.exec(s))) {
+    s = m[1]!;
+  }
+  return s;
+}
+
+function isCandidateCommand(line: string): boolean {
+  if (SETUP_EXCLUDE.test(line)) return false;
+  const afterCd = line.replace(/^cd \S+ && /, '');
+  return KNOWN_CMD.test(stripEnvPrefix(afterCd));
+}
+
+/** Recursively expand a package.json script body, inlining every `pnpm run
+ * <name>` reference it contains (same technique as the sibling
+ * tests/ci-covers-root-tests.test.ts `expandScript`). */
+function expandScript(name: string, scripts: Record<string, string>, seen = new Set<string>()): string {
+  if (seen.has(name)) return '';
+  seen.add(name);
+  const body = scripts[name];
+  if (body === undefined) return '';
+  let out = body + '\n';
+  for (const m of body.matchAll(/pnpm run ([A-Za-z0-9:_-]+)/g)) {
+    out += expandScript(m[1]!, scripts, seen);
+  }
+  return out;
+}
+
+/** Whole jobs mirrored by a wrapper script `test:ci` already calls, matched
+ * by name/semantics rather than literal per-line text — see the module
+ * comment's `covered-by-wrapper` / `needs-opt-in` categories. */
+const JOB_EXPLANATIONS: Record<string, string> = {
+  'runar-verification':
+    'covered-by-wrapper: mirrored by scripts/lean-verify.sh (RUNAR_LEAN_STRICT=1 pnpm run lean:verify), ' +
+    'kept in sync with this job by name (binaries/scripts/build-targets, not literal text) by ' +
+    'tests/f174-lean-verify-mirrors-ci.test.ts.',
+  integration:
+    'covered-by-wrapper: mirrored by integration/run-all.sh (RUNAR_INTEGRATION_STRICT=1 pnpm run ' +
+    "integration:all). Each per-tier command matches run-all.sh's by flags/semantics, not literal " +
+    "path text, because run-all.sh does its own `cd <tier>` from inside integration/ while this " +
+    'job cds from the repo root (e.g. `cd integration/go && go test -tags integration -v -timeout ' +
+    '1800s` here vs. `(cd go && go test -tags integration -v -timeout 1800s)` there) — verified by ' +
+    'reading integration/run-all.sh against every per-tier step in this job.',
+  'integration-teranode':
+    'needs-opt-in: `if: github.event_name == \'workflow_dispatch\' && inputs.run_teranode` — never ' +
+    'part of a default push/PR/merge_group run, so "green here -> green CI" never implied it.',
+};
+
+const ciText = read('.github/workflows/ci.yml');
+const allJobs = parseJobs(ciText);
+
+interface Candidate {
+  job: string;
+  line: string;
+}
+
+function buildCiCandidates(jobs: RawJob[]): Candidate[] {
+  const out: Candidate[] = [];
+  for (const job of jobs) {
+    if (job.id in JOB_EXPLANATIONS) continue;
+    for (const stepLines of splitSteps(job.lines)) {
+      const runLines = extractRunLines(stepLines);
+      if (!runLines) continue;
+      const wd = extractField(stepLines, 'working-directory');
+      let merged = mergeCd(runLines);
+      if (wd) merged = merged.map((l) => `cd ${wd} && ${l}`);
+      for (const l of merged) {
+        if (!isCandidateCommand(l)) continue;
+        out.push({ job: job.id, line: normalize(l) });
+      }
+    }
+  }
+  return out;
+}
+
+function buildLocalLines(): Set<string> {
+  const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+  const expanded = expandScript('test:ci', pkg.scripts);
+  const out: string[] = [];
+  for (const rawLine of expanded.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    out.push(...mergeCd(rawLine.split('&&').map((s) => s.trim()).filter(Boolean)));
+  }
+  return new Set(out.map(normalize));
+}
+
+const ciCandidates = buildCiCandidates(allJobs);
+const localLines = buildLocalLines();
+
+function isCoveredLocally(line: string): boolean {
+  if (localLines.has(line)) return true;
+  if (dirContainsFile(localLines, line)) return true;
+  const alias = pathJoinedAlias(line);
+  if (alias && (localLines.has(alias) || dirContainsFile(localLines, alias))) return true;
+  return false;
+}
+
+/**
+ * The measured gap: every ci.yml run-step command (job not in
+ * JOB_EXPLANATIONS) with no exact, directory-prefix, or path-style
+ * equivalent in `pnpm run test:ci`'s expansion. Formatted "<job> :: <cmd>"
+ * so a job rename shows up as a diff instead of silently re-keying.
+ *
+ * Grouped by category (see module comment).
+ */
+/**
+ * N-290: every `addable-locally` command was run once locally and wired into
+ * `pnpm run test:ci` (the `test:ci-local` chain in package.json), so this
+ * bucket is empty. A command that FAILS locally must NOT be wired and must
+ * not be skipped silently: it goes in `not-actually-local` below with a
+ * comment naming the finding.
+ */
+const ADDABLE_LOCALLY: string[] = [];
+
+const EXPECTED_UNCOVERED: string[] = [
+  ...ADDABLE_LOCALLY,
+  // --- not-actually-local (looked addable-locally; wiring it for N-290
+  //     found a real reason it cannot run as a plain local step) ----------
+  // CI's dependency-install step for the Ruby examples. It reaches out to
+  // rubygems.org when the locked gems are not already vendored — the same
+  // class of network-capable setup step SETUP_EXCLUDE drops for
+  // `pnpm install` / `npm ci` / `pip install` (it slips through that
+  // `^`-anchored filter only because of the merged `cd DIR && ` prefix).
+  'ruby-sdk :: cd examples/ruby && bundle install',
+  // Cross-compiles compilers/zig for CI's upload-artifact step. build.zig's
+  // only executable installs to the fixed path zig-out/bin/runar-zig whatever
+  // -Dtarget is, so running this on a non-linux-x86_64 dev machine would
+  // overwrite the native binary every other wired step shells out to, for an
+  // artifact nothing local consumes.
+  'zig-compiler :: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline',
+  // --- needs-merge-base (the gate diffs <base>...HEAD; no base outside a
+  //     PR/push/merge_group event) ----------------------------------------
+  'golden-provenance-gate :: GOLDEN_GATE_BASE="${base}" node conformance/scripts/check-golden-provenance.mjs',
+  'wire-format-must-move-golden :: WIRE_FORMAT_GATE_BASE="${base}" pnpm run wire-format-audit',
+  // --- transitive-via-turbo (turbo.json: `test`/`typecheck` dependsOn
+  //     `build`; the named package's own `test`/`typecheck` script IS this
+  //     command — verified against that package's package.json) ----------
+  'ts-compiler :: pnpm run build',
+  'ts-compiler :: npx vitest run packages/runar-testing/src/__tests__/fold-equivalence.test.ts',
+  'conformance :: pnpm run build',
+  'conformance-anf-parity :: pnpm run build',
+  'decompiler-roundtrip :: pnpm run build',
+  'decompiler-roundtrip :: pnpm --filter runar-decompiler run typecheck',
+  'decompiler-roundtrip :: pnpm --filter runar-decompiler run test',
+  'sdk-conformance :: pnpm run build',
+  'script-execution :: pnpm run build',
+  // --- transitive-via-script (a sibling command in the same job already
+  //     performs this as a side effect) -----------------------------------
+  'java-compiler :: cd compilers/java && ./gradlew build --no-daemon',
+];
+
+describe('N-283: pnpm test:ci vs .github/workflows/ci.yml — the measured drift', () => {
+  it('parses a non-trivial number of ci.yml jobs (anti-vacuity)', () => {
+    expect(allJobs.length).toBeGreaterThan(20);
+    expect(allJobs.map((j) => j.id)).toContain('conformance');
+  });
+
+  it('every JOB_EXPLANATIONS entry names a job that still exists in ci.yml', () => {
+    const ids = new Set(allJobs.map((j) => j.id));
+    const missing = Object.keys(JOB_EXPLANATIONS).filter((id) => !ids.has(id));
+    expect(missing, 'a covered-by-wrapper/needs-opt-in job was renamed or removed').toEqual([]);
+  });
+
+  it('extracts a non-trivial number of candidate CI commands (anti-vacuity)', () => {
+    expect(ciCandidates.length).toBeGreaterThan(60);
+  });
+
+  it('expands a non-trivial `pnpm run test:ci` command set (anti-vacuity)', () => {
+    expect(localLines.size).toBeGreaterThan(50);
+    expect(localLines.has('bash scripts/lint-no-silent-skips.sh')).toBe(true);
+  });
+
+  it('the measured set of ci.yml commands with no local equivalent matches the pinned, categorized list', () => {
+    const actual = [...new Set(ciCandidates.filter((c) => !isCoveredLocally(c.line)).map((c) => `${c.job} :: ${c.line}`))].sort();
+    const expected = [...EXPECTED_UNCOVERED].sort();
+
+    const newlyUncovered = actual.filter((a) => !expected.includes(a));
+    const noLongerUncovered = expected.filter((e) => !actual.includes(e));
+
+    expect(
+      newlyUncovered,
+      'ci.yml runs something pnpm test:ci does not, and it is not in the pinned list above. ' +
+        'Either wire it into test:ci (if it needs no merge-base/network/service), or add it to ' +
+        'EXPECTED_UNCOVERED with a category and a one-line reason.',
+    ).toEqual([]);
+    expect(
+      noLongerUncovered,
+      'these pinned gaps no longer show up as uncovered -- either test:ci now runs them (delete the ' +
+        'line, and update README.md/CONTRIBUTING.md if the count they cite changed) or the parser ' +
+        'regressed (false "covered").',
+    ).toEqual([]);
+  });
+
+  it('the addable-locally bucket is empty: every no-merge-base/no-network/no-service ci.yml command is wired into test:ci (N-290)', () => {
+    // N-283 pinned ~60 commands as "addable-locally" without running them.
+    // N-290 wired each one into `pnpm run test:ci` (via test:ci-local) after
+    // running it once. This proves the bucket is empty; it does NOT prove the
+    // wired commands pass on every machine (that is only shown by running them).
+    expect(ADDABLE_LOCALLY, 'commands still not run by pnpm test:ci although they need no merge-base/network/service').toEqual([]);
+  });
+
+  it('EXPECTED_UNCOVERED has no duplicate entries', () => {
+    const seen = new Set<string>();
+    const dupes = EXPECTED_UNCOVERED.filter((e) => (seen.has(e) ? true : (seen.add(e), false)));
+    expect(dupes).toEqual([]);
+  });
+
+  it('the wallet-client family pnpm test:ci runs is run by ci.yml too (N-480)', () => {
+    // Before N-480 this asserted the opposite: ci.yml named no wallet-client test, because no
+    // CI job had a BRC-100 wallet, so the seven env-gated `wallet-client:*` commands ran only
+    // locally (and skipped there too without RUNAR_WALLET_ENDPOINT). The integration job now
+    // starts integration/mock-wallet and runs each tier's command verbatim. Ruby's
+    // `wallet-client:ruby` narrows the integration rspec run to one file; CI runs that file
+    // inside the whole-suite Ruby integration step instead (held by the N-474 guard).
+    // Proves: the commands are textually present in ci.yml. Does not prove the wallet is up
+    // or the endpoint set for them — tests/n474-gated-vitest-skips-reachable-from-ci.test.ts
+    // checks that per step.
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    expect(pkg.scripts['wallet-client:all'], 'package.json: wallet-client:all script not found').toBeTruthy();
+    for (const tier of ['ts', 'go', 'rust', 'python', 'zig', 'java']) {
+      const cmd = pkg.scripts[`wallet-client:${tier}`];
+      expect(cmd, `package.json: wallet-client:${tier} script not found`).toBeTruthy();
+      expect(ciText, `ci.yml does not run \`${cmd}\` (wallet-client:${tier})`).toContain(`run: ${cmd}\n`);
+    }
+  });
+
+  it('README.md / CONTRIBUTING.md no longer promise an unconditional mirror and point at this test', () => {
+    const readme = read('README.md');
+    const contributing = read('CONTRIBUTING.md');
+
+    // The defect: README.md's `pnpm test:ci` row said "The contract is:
+    // green here -> green CI" with nothing qualifying it, and
+    // CONTRIBUTING.md's table said "Mirrors CI" -- both unconditional, and
+    // both false given the ~72-command gap measured above. Both now have to
+    // name this test as the place the real (pinned, categorized) gap lives,
+    // instead of repeating the unconditional claim.
+    expect(
+      readme,
+      'README.md no longer names tests/n283-test-ci-mirrors-ci-contract.test.ts next to the ' +
+        '`pnpm test:ci` row -- it should point there instead of (or alongside) any "mirrors CI" claim.',
+    ).toMatch(/n283-test-ci-mirrors-ci-contract\.test\.ts/);
+    expect(
+      contributing,
+      'CONTRIBUTING.md no longer names tests/n283-test-ci-mirrors-ci-contract.test.ts next to its ' +
+        '`pnpm test:ci` row.',
+    ).toMatch(/n283-test-ci-mirrors-ci-contract\.test\.ts/);
+
+    expect(
+      readme,
+      'README.md still claims the unconditional "green here -> green CI" contract this test disproves.',
+    ).not.toMatch(/green here\s*(?:->|→)\s*green CI/i);
+  });
+});

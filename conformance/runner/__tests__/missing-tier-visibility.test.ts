@@ -25,6 +25,7 @@ const report = (avail: Record<string, boolean>): ConformanceReport => ({
   passed: 1,
   failed: 0,
   skipped: 0,
+  vacuous: 0,
   results: [
     { testName: 'demo', status: 'pass', irMatch: true, scriptMatch: true, errors: [], timings: {} },
   ],
@@ -57,6 +58,14 @@ describe('R-103 missing-tier visibility', () => {
       expect(decideMissingCompilerAction(['zig'], { CI: 'true' })).toBe('fail');
     });
 
+    it('N-236: hard-fails under CI=1 too — not only the literal CI=true GitHub sets', () => {
+      // A runner exporting CI=1 (GitLab CI and many self-hosted runners) used
+      // to fall through to 'warn' because the check compared CI directly
+      // against the literal string "true".
+      expect(decideMissingCompilerAction(['zig'], { CI: '1' })).toBe('fail');
+      expect(decideMissingCompilerAction(['zig'], { CI: 'yes' })).toBe('fail');
+    });
+
     it('hard-fails locally when strict mode is requested — R-103', () => {
       expect(decideMissingCompilerAction(['zig'], { RUNAR_CONFORMANCE_STRICT: '1' })).toBe('fail');
       expect(decideMissingCompilerAction(['zig'], { RUNAR_CONFORMANCE_STRICT: 'true' })).toBe('fail');
@@ -79,6 +88,27 @@ describe('R-103 missing-tier visibility', () => {
       expect(out).toMatch(/Ruby/);
       // and tells the reader how to turn it into a non-zero exit
       expect(out).toContain('RUNAR_CONFORMANCE_STRICT');
+    });
+
+    // N-373: the footer used to hard-code "This PASS covers N tiers" even on a
+    // run that FAILED. Proves the footer never says PASS on a failed run and
+    // still reports the tier count; does not prove the process exit code.
+    it('N-373: a failed run with a dropped tier never calls itself a PASS in the footer', () => {
+      const r = report({ TypeScript: true, Go: true, Zig: false });
+      r.passed = 0;
+      r.failed = 1;
+      r.results = [
+        { testName: 'demo', status: 'fail', irMatch: false, scriptMatch: false, errors: ['x'], timings: {} },
+      ];
+      const out = capture(r);
+      const footer = out.slice(out.indexOf('INCOMPLETE COVERAGE'));
+      expect(footer).not.toMatch(/PASS/);
+      expect(footer).toContain('covers 2 tiers, not 3');
+    });
+
+    it('N-373: a passing run with a dropped tier keeps its tier-count footer without claiming more', () => {
+      const out = capture(report({ TypeScript: true, Go: true, Zig: false }));
+      expect(out).toContain('covers 2 tiers, not 3');
     });
 
     it('says nothing of the sort when every tier ran', () => {

@@ -2011,3 +2011,297 @@ export class BadAsm extends UnsafeSmartContract {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-063: array-literal elements are walked by every validator walker
+// ---------------------------------------------------------------------------
+//
+// ArrayLiteralExpr was missing from collectMethodCallsInExpr, validateExpression,
+// walkExpr and subExpressions, so anything written inside `[...]` — the only
+// place checkMultiSig's arguments can be written — escaped the rule those
+// walkers enforce. Before the fix the recursion shape escaped checkNoRecursion
+// and the compiler then spun forever inlining the self-call.
+//
+// Proves: Validate refuses each shape with the diagnostic it already gives the
+// un-nested form. Does not prove: CLI exit status or cross-tier parity (that is
+// conformance/negatives N99+).
+
+func validateTSSourceF063(t *testing.T, source string) *ValidationResult {
+	t.Helper()
+	return Validate(mustParseTS(t, source))
+}
+
+func requireValidationError(t *testing.T, result *ValidationResult, substr string) {
+	t.Helper()
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, substr) {
+			return
+		}
+	}
+	t.Fatalf("expected a validation error containing %q, got: %v", substr, result.ErrorStrings())
+}
+
+func TestValidate_F063_RecursionInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+}
+`)
+	requireValidationError(t, result, "recursion detected: method 'h'")
+}
+
+func TestValidate_F063_OddLengthHexInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+}
+`)
+	requireValidationError(t, result, "ByteString literal 'abc' has odd length (3)")
+}
+
+func TestValidate_F063_NonHexInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }
+}
+`)
+	requireValidationError(t, result, "ByteString literal 'zz' contains non-hex characters")
+}
+
+func TestValidate_F063_ReadonlyIncrementInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+}
+`)
+	requireValidationError(t, result, "cannot assign to readonly property 'n'")
+}
+
+func TestValidate_F063_OutputIntrinsicInsideArrayLiteralInLoop(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public step() {
+    for (let i = 0n; i < 2n; i++) {
+      const a = [this.addOutput(1000n, this.count)];
+    }
+    assert(true);
+  }
+}
+`)
+	requireValidationError(t, result, "Output intrinsic 'addOutput'")
+}
+
+// ---------------------------------------------------------------------------
+// N-012: expression walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+//
+// Proves: both statement walkers (plain and WithLoc — the latter is the one
+// behind the asm() gate) visit all three header slots of a `for` statement, so
+// an asm(...) call planted in the init, condition or update of a loop in a
+// non-Unsafe contract is refused. The AST is hand-built (mutated after
+// parsing) because the for-update and literal-init rules make these shapes
+// unreachable from source today.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of those rules cannot reopen the asm gate through the walkers.
+
+func TestValidate_N012_ForHeaderSlotsAreWalked(t *testing.T) {
+	const src = `
+import { SmartContract, assert } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly t: bigint;
+
+  constructor(t: bigint) {
+    super(t);
+    this.t = t;
+  }
+
+  public verify(a: bigint): void {
+    let s: bigint = 0n;
+    for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+    assert(s === this.t);
+  }
+}
+`
+	asmCall := func() Expression { return CallExpr{Callee: Identifier{Name: "asm"}} }
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			contract := mustParseTS(t, src)
+			body := contract.Methods[0].Body
+			idx := -1
+			for i, st := range body {
+				if _, ok := st.(ForStmt); ok {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				t.Fatal("no ForStmt in method body")
+			}
+			loop := body[idx].(ForStmt)
+			switch slot {
+			case "init":
+				loop.Init.Init = asmCall()
+			case "condition":
+				loop.Condition = asmCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: asmCall(), SourceLocation: loop.SourceLocation}
+			}
+			body[idx] = loop
+
+			res := Validate(contract)
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, "'asm' is only available in contracts extending UnsafeSmartContract") {
+					return
+				}
+			}
+			t.Fatalf("asm() in for-loop %s was not refused; got %v", slot, res.ErrorStrings())
+		})
+	}
+
+	// The plain walker is a separate function from the WithLoc one.
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run("plain-"+slot, func(t *testing.T) {
+			loop := mustParseTS(t, src).Methods[0].Body[1].(ForStmt)
+			switch slot {
+			case "init":
+				loop.Init.Init = asmCall()
+			case "condition":
+				loop.Condition = asmCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: asmCall()}
+			}
+			seen := false
+			walkExpressionsInStatement(loop, func(e Expression) {
+				if isAsmCall(e) {
+					seen = true
+				}
+			})
+			if !seen {
+				t.Fatalf("walkExpressionsInStatement did not visit the for-loop %s", slot)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-401: statement walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+//
+// Proves: the method-call collector (behind the recursion check) and the
+// output-intrinsic search (behind the no-addOutput-in-a-loop rule) visit all
+// three header slots of a `for` statement. A call planted only in the init,
+// condition or update is collected, and an addOutput planted only in a NESTED
+// loop's header is found from the enclosing loop. The AST is hand-built
+// because the for-update and literal-init rules make these shapes unreachable
+// from source today.
+// Does not prove: that any source program can reach these shapes today.
+
+func TestValidate_N401_CollectMethodCallsVisitsForHeader(t *testing.T) {
+	thisCall := func() Expression {
+		return CallExpr{Callee: PropertyAccessExpr{Property: "m"}}
+	}
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			loop := ForStmt{
+				Init:      VariableDeclStmt{Name: "i", Init: BigIntLiteral{Value: big.NewInt(0)}},
+				Condition: BoolLiteral{Value: true},
+				Update:    ExpressionStmt{Expr: BoolLiteral{Value: true}},
+			}
+			switch slot {
+			case "init":
+				loop.Init.Init = thisCall()
+			case "condition":
+				loop.Condition = thisCall()
+			case "update":
+				loop.Update = ExpressionStmt{Expr: thisCall()}
+			}
+			calls := map[string]bool{}
+			collectMethodCalls([]Statement{loop}, calls, true)
+			if !calls["m"] {
+				t.Fatalf("collectMethodCalls did not visit the for-loop %s; got %v", slot, calls)
+			}
+		})
+	}
+}
+
+func TestValidate_N401_OutputIntrinsicSearchVisitsNestedForHeader(t *testing.T) {
+	const src = `
+import { StatefulSmartContract } from 'runar-lang';
+
+class C extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public m(a: bigint): void {
+    let s: bigint = 0n;
+    for (let i: bigint = 0n; i < 3n; i++) {
+      for (let j: bigint = 0n; j < 3n; j++) { s = s + a; }
+    }
+    this.count = s;
+  }
+}
+`
+	addOutput := func() Expression {
+		return CallExpr{Callee: PropertyAccessExpr{Property: "addOutput"}}
+	}
+	for _, slot := range []string{"init", "condition", "update"} {
+		t.Run(slot, func(t *testing.T) {
+			contract := mustParseTS(t, src)
+			body := contract.Methods[0].Body
+			outerIdx := -1
+			for i, st := range body {
+				if _, ok := st.(ForStmt); ok {
+					outerIdx = i
+				}
+			}
+			if outerIdx < 0 {
+				t.Fatal("no ForStmt in method body")
+			}
+			outer := body[outerIdx].(ForStmt)
+			innerIdx := -1
+			for i, st := range outer.Body {
+				if _, ok := st.(ForStmt); ok {
+					innerIdx = i
+				}
+			}
+			if innerIdx < 0 {
+				t.Fatal("no nested ForStmt")
+			}
+			inner := outer.Body[innerIdx].(ForStmt)
+			switch slot {
+			case "init":
+				inner.Init.Init = addOutput()
+			case "condition":
+				inner.Condition = addOutput()
+			case "update":
+				inner.Update = ExpressionStmt{Expr: addOutput(), SourceLocation: inner.SourceLocation}
+			}
+			outer.Body[innerIdx] = inner
+			body[outerIdx] = outer
+
+			res := Validate(contract)
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, "Output intrinsic 'addOutput'") {
+					return
+				}
+			}
+			t.Fatalf("addOutput in nested for-loop %s was not found; got %v", slot, res.ErrorStrings())
+		})
+	}
+}

@@ -2,3 +2,4 @@
 tools/rs-sdk-tool/target/
 tools/zig-sdk-tool/zig-out/
 tools/zig-sdk-tool/.zig-cache/
+tools/go-sdk-tool-bin

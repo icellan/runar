@@ -36,6 +36,18 @@ pub struct CodeSepIndexSlot {
     pub code_sep_index: usize,
 }
 
+/// N-051 — a `verify_code_part_len` length field whose value is only known at
+/// deploy time (a readonly constructor arg of variable width is baked into the
+/// code part). The SDK overwrites the 4 bytes at `byte_offset` with the
+/// deployed code-part length, little-endian.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodePartLenSlot {
+    /// Byte offset, in the TEMPLATE script, of the first of the 4
+    /// little-endian length bytes (the byte after the `04` push opcode).
+    #[serde(rename = "byteOffset")]
+    pub byte_offset: usize,
+}
+
 // ---------------------------------------------------------------------------
 // RawScriptSpan
 // ---------------------------------------------------------------------------
@@ -80,6 +92,10 @@ pub struct EmitResult {
     pub script_asm: String,
     pub constructor_slots: Vec<ConstructorSlot>,
     pub code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — `verify_code_part_len` length fields the SDK patches at deploy
+    /// time with the deployed code-part length. Empty when every pin is exact
+    /// at compile time.
+    pub code_part_len_slots: Vec<CodePartLenSlot>,
     pub code_separator_index: i64,
     pub code_separator_indices: Vec<usize>,
     /// Source mappings (opcode index to source location).
@@ -98,6 +114,8 @@ struct EmitContext {
     byte_length: usize,
     constructor_slots: Vec<ConstructorSlot>,
     code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — pin length fields the SDK patches at deploy time.
+    code_part_len_slots: Vec<CodePartLenSlot>,
     code_separator_index: i64,
     code_separator_indices: Vec<usize>,
     opcode_index: usize,
@@ -126,6 +144,7 @@ impl EmitContext {
             byte_length: 0,
             constructor_slots: Vec::new(),
             code_sep_index_slots: Vec::new(),
+            code_part_len_slots: Vec::new(),
             code_separator_index: -1,
             code_separator_indices: Vec::new(),
             opcode_index: 0,
@@ -226,7 +245,7 @@ impl EmitContext {
     /// field for back-patching.
     ///
     /// ```text
-    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
     /// ```
     ///
     /// `LL LL LL LL` is a fixed-width little-endian field, not a minimal Script
@@ -237,6 +256,18 @@ impl EmitContext {
     ///
     /// `exact` is known here (the stack lowerer resolved it once every method
     /// had been lowered), so only the four length bytes need patching.
+    ///
+    /// N-051 — the comparison is ALWAYS an equality. It used to degrade to
+    /// OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+    /// deployed length unknown here, and a lower bound lets a spender claim a
+    /// TRUNCATED `_codePart` that ends at any 0x6a byte inside the baked value
+    /// (the continuation's `rest[0] == 0x6a` check is then satisfied by the
+    /// script's own bytes), planting attacker-chosen code in the continuation.
+    /// When the length is not exact at compile time, the field is recorded as a
+    /// `codePartLenSlots` entry and the SDK writes the real deployed code-part
+    /// length into it at deploy time. The template keeps the compile-time lower
+    /// bound, so an SDK that does not patch produces a contract whose honest
+    /// spends fail (funds stuck), never one that accepts a truncated code part.
     fn emit_verify_code_part_len(&mut self, delta: i64, exact: bool) -> Result<(), String> {
         self.emit_opcode("OP_DUP")?;
         // +1 skips the single-byte push header the 4-byte data push carries.
@@ -244,13 +275,16 @@ impl EmitContext {
         let asm_index = self.asm_parts.len();
         self.emit_push(&PushValue::Bytes(vec![0u8; 4]));
         self.emit_opcode("OP_BIN2NUM")?;
-        self.emit_opcode(if exact { "OP_NUMEQUAL" } else { "OP_GREATERTHANOREQUAL" })?;
+        self.emit_opcode("OP_NUMEQUAL")?;
         self.emit_opcode("OP_VERIFY")?;
         self.code_part_len_fixups.push(CodePartLenFixup {
             value_byte_offset,
             asm_index,
             delta,
         });
+        if !exact {
+            self.code_part_len_slots.push(CodePartLenSlot { byte_offset: value_byte_offset });
+        }
         Ok(())
     }
 
@@ -525,6 +559,83 @@ pub fn encode_push_int(n: &num_bigint::BigInt) -> (String, String) {
 // ---------------------------------------------------------------------------
 
 fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
+    emit_ops(std::slice::from_ref(op), ctx)
+}
+
+/// Emit `root` in order, descending into if-op arms on an explicit stack.
+///
+/// N-264: this used to recurse (`emit_stack_op` -> `emit_if` ->
+/// `emit_stack_op`), one level per nested if-op. Private methods are inlined,
+/// so a chain of D helpers each calling the next under K nested ifs nests D*K
+/// if-ops, too deep for a thread stack. Same opcodes in the same order, and
+/// the first error stops the emission, as before.
+///
+/// N-222: an arm op's location comes from its if-op's `then_locs` /
+/// `else_locs`, with the TS reference's bookkeeping (`06-emit.ts` `emitOps`):
+/// an op's location is set before it when it has one, cleared after it, and
+/// an if-op's OP_ELSE / OP_ENDIF are emitted under whatever location its last
+/// arm op left. The caller sets the location of `root`'s ops. This used to
+/// leave the if-op's location pending across both arms, so every opcode under
+/// an `if` was attributed to the `if` statement.
+fn emit_ops(root: &[StackOp], ctx: &mut EmitContext) -> Result<(), String> {
+    type Loc = Option<crate::ir::SourceLocation>;
+    // Each frame: the remaining ops of a list with their locations, and — for
+    // an if-op's then-arm — the else-arm still to emit (`None` for the root
+    // and for an else-arm).
+    struct Frame<'o> {
+        ops: std::slice::Iter<'o, StackOp>,
+        locs: &'o [Loc],
+        next: usize,
+        arm: Option<Option<(&'o [StackOp], &'o [Loc])>>,
+    }
+    let mut stack: Vec<Frame<'_>> = vec![Frame { ops: root.iter(), locs: &[], next: 0, arm: None }];
+    while let Some(frame) = stack.last_mut() {
+        if let Some(op) = frame.ops.next() {
+            let i = frame.next;
+            frame.next += 1;
+            if frame.arm.is_some() {
+                if let Some(Some(loc)) = frame.locs.get(i) {
+                    ctx.pending_source_loc = Some(loc.clone());
+                }
+            }
+            if let StackOp::If { then_ops, else_ops, then_locs, else_locs } = op {
+                ctx.emit_opcode("OP_IF")?;
+                let locs: &[Loc] = if then_locs.len() == then_ops.len() { then_locs } else { &[] };
+                let else_locs: &[Loc] = if else_locs.len() == else_ops.len() { else_locs } else { &[] };
+                stack.push(Frame {
+                    ops: then_ops.iter(),
+                    locs,
+                    next: 0,
+                    arm: Some(Some((&else_ops[..], else_locs))),
+                });
+            } else {
+                emit_leaf_op(op, ctx)?;
+                ctx.pending_source_loc = None;
+            }
+            continue;
+        }
+        let arm = frame.arm;
+        stack.pop();
+        match arm {
+            // The root list.
+            None => {}
+            // A then-arm, followed by its else-arm when that is non-empty.
+            Some(Some((else_ops, else_locs))) if !else_ops.is_empty() => {
+                ctx.emit_opcode("OP_ELSE")?;
+                stack.push(Frame { ops: else_ops.iter(), locs: else_locs, next: 0, arm: Some(None) });
+            }
+            // The if-op is done: clear its location like any other op's.
+            Some(_) => {
+                ctx.emit_opcode("OP_ENDIF")?;
+                ctx.pending_source_loc = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Emit one op that is not an if-op.
+fn emit_leaf_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
     match op {
         StackOp::Push(value) => {
             ctx.emit_push(value);
@@ -540,10 +651,7 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
         StackOp::Rot => ctx.emit_opcode("OP_ROT"),
         StackOp::Tuck => ctx.emit_opcode("OP_TUCK"),
         StackOp::Opcode(code) => ctx.emit_opcode(code),
-        StackOp::If {
-            then_ops,
-            else_ops,
-        } => emit_if(then_ops, else_ops, ctx),
+        StackOp::If { .. } => unreachable!("emit_ops emits if-ops"),
         StackOp::Placeholder {
             param_index,
             param_name,
@@ -591,26 +699,6 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
     }
 }
 
-fn emit_if(
-    then_ops: &[StackOp],
-    else_ops: &[StackOp],
-    ctx: &mut EmitContext,
-) -> Result<(), String> {
-    ctx.emit_opcode("OP_IF")?;
-
-    for op in then_ops {
-        emit_stack_op(op, ctx)?;
-    }
-
-    if !else_ops.is_empty() {
-        ctx.emit_opcode("OP_ELSE")?;
-        for op in else_ops {
-            emit_stack_op(op, ctx)?;
-        }
-    }
-
-    ctx.emit_opcode("OP_ENDIF")
-}
 
 // ---------------------------------------------------------------------------
 // Peephole optimization
@@ -630,11 +718,12 @@ fn emit_if(
 pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
     let mut ctx = EmitContext::new();
 
-    // Filter to public methods (exclude constructor)
-    let public_methods: Vec<StackMethod> = methods
+    // Filter to public methods (exclude constructor). N-264: by reference —
+    // cloning a method deep-copied its op tree, recursively, once per nested
+    // if-op (D*K deep for a chain of D inlined helpers under K ifs each).
+    let public_methods: Vec<&StackMethod> = methods
         .iter()
         .filter(|m| m.name != "constructor")
-        .cloned()
         .collect();
 
     if public_methods.is_empty() {
@@ -643,6 +732,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
             script_asm: String::new(),
             constructor_slots: Vec::new(),
             code_sep_index_slots: Vec::new(),
+            code_part_len_slots: Vec::new(),
             code_separator_index: -1,
             code_separator_indices: Vec::new(),
             source_map: Vec::new(),
@@ -668,13 +758,13 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
     }
 
     if public_methods.len() == 1 {
-        let m = &public_methods[0];
+        let m = public_methods[0];
         for (idx, op) in m.ops.iter().enumerate() {
             ctx.pending_source_loc = m.source_locs.get(idx).cloned().flatten();
             emit_stack_op(op, &mut ctx)?;
         }
     } else {
-        let refs: Vec<&StackMethod> = public_methods.iter().collect();
+        let refs: Vec<&StackMethod> = public_methods.clone();
         emit_method_dispatch(&refs, &mut ctx)?;
     }
 
@@ -685,6 +775,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,
@@ -715,6 +806,9 @@ fn emit_method_dispatch(
             ctx.pending_source_loc = method.source_locs.get(idx).cloned().flatten();
             emit_stack_op(op, ctx)?;
         }
+        // F-211: the dispatch opcodes that follow belong to no statement of
+        // this method (TS clears after every op in `emitStackOp`).
+        ctx.pending_source_loc = None;
 
         if !is_last {
             ctx.emit_opcode("OP_ELSE")?;
@@ -743,6 +837,7 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,
@@ -1481,6 +1576,8 @@ mod tests {
             ops: vec![StackOp::If {
                 then_ops: vec![StackOp::Opcode("OP_DROP".to_string())],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             }],
             max_stack_depth: 1,
             source_locs: vec![],

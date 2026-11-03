@@ -50,7 +50,7 @@ export type {
 } from './multi-contract.js';
 
 // Typed SDK errors
-export { ScriptSizeExceededError, assertScriptHexUnderLimit } from './errors.js';
+export { ScriptSizeExceededError, InvalidConstructorArgError, assertScriptHexUnderLimit } from './errors.js';
 
 // Transaction building
 export { buildDeployTransaction, selectUtxos, estimateDeployFee } from './deployment.js';
@@ -66,7 +66,7 @@ export {
 } from './state.js';
 
 // OP_PUSH_TX
-export { computeOpPushTx } from './oppushtx.js';
+export { computeOpPushTx, computeOpPushTxPreimage } from './oppushtx.js';
 
 // Script utilities
 export { buildP2PKHScript, extractConstructorArgs, matchesArtifact, pubkeyToPKH } from './script-utils.js';
@@ -92,6 +92,7 @@ export type {
 
 // Signed-envelope wire protocol for overlay apps
 export { canonicalJson, signEnvelope, verifyEnvelope } from './envelope.js';
+export { isStrictDerSignature } from './der.js';
 export type {
   SignedEnvelope,
   SignEnvelopeOpts,

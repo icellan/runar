@@ -7,7 +7,9 @@ import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.CompoundAssignmentTree;
 import com.sun.source.tree.ConditionalExpressionTree;
+import com.sun.source.tree.EmptyStatementTree;
 import com.sun.source.tree.ExpressionStatementTree;
 import com.sun.source.tree.ExpressionTree;
 import com.sun.source.tree.ForLoopTree;
@@ -40,9 +42,11 @@ import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
@@ -83,6 +87,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.java} source into a Rúnar {@link ContractNode}.
@@ -111,9 +116,24 @@ public final class JavaParser {
 
     /** Parse Java source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) {
-        Unit unit = parseToTree(source, filename);
-        ClassTree classTree = firstTopLevelClass(unit.cu(), filename);
-        return convertClass(classTree, filename, unit);
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
+        // F-213: measure (A) is recomputed over javac's tree (javac's parser
+        // cannot be instrumented) BEFORE the converter recurses into it;
+        // measure (B) runs on the converted contract. A StackOverflowError
+        // from javac itself or from the converter on a loop-built chain far
+        // past the limit is the backstop (SourceNesting.guard).
+        return SourceNesting.guard(() -> {
+            Unit unit = parseToTree(source, filename);
+            if (parseNestingViolation(unit.cu()) != null) throw new SourceNesting.LimitExceeded();
+            ClassTree classTree = firstTopLevelClass(unit.cu(), filename);
+            return convertClass(classTree, filename, unit);
+        }, ParseException::new);
     }
 
     // ---------------------------------------------------------------
@@ -142,8 +162,12 @@ public final class JavaParser {
         // name) matches a plain Java convention. The Rúnar filename is
         // preserved separately for source-location reporting.
         JavaFileObject fileObject = new StringSource(stripRunarInfix(filename), source);
+        // F-213: javac's own output (its "An exception has occurred in the
+        // compiler" banner on a stack overflow) is not this compiler's
+        // diagnostic; diagnostics proper go through the collector.
+        java.io.StringWriter javacOut = new java.io.StringWriter();
         JavacTask task = (JavacTask) compiler.getTask(
-            null,
+            javacOut,
             null,
             diagnostics,
             List.of("-proc:none"),
@@ -155,11 +179,30 @@ public final class JavaParser {
             units = task.parse();
         } catch (IOException e) {
             throw new ParseException("I/O error parsing " + filename + ": " + e.getMessage());
+        } catch (RuntimeException e) {
+            // F-213: javac wraps a StackOverflowError in its own parser (a
+            // source nested thousands deep) in a RuntimeException.
+            for (Throwable c = e; c != null; c = c.getCause()) {
+                if (c instanceof StackOverflowError) throw new SourceNesting.LimitExceeded();
+            }
+            throw e;
         }
         List<String> errors = new ArrayList<>();
         for (var d : diagnostics.getDiagnostics()) {
             if (d.getKind() == Diagnostic.Kind.ERROR) {
-                errors.add(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(null));
+                // F-026: javac's error on a malformed integer literal also
+                // gets the shared text every other tier emits for it.
+                String shared = sharedLiteralDiagnostic(source, (int) d.getPosition());
+                String where = javacDiagnosticLocation(source, filename, d);
+                if (shared != null) errors.add(where + shared);
+                // N-214: javac's "illegal character: '\u00a7'" is the TS
+                // reference's "Unexpected character '§'", at the same position.
+                long p = d.getPosition();
+                if ("compiler.err.illegal.char".equals(d.getCode()) && p >= 0 && p < source.length()) {
+                    errors.add(where + "Unexpected character '" + source.charAt((int) p) + "'");
+                } else {
+                    errors.add(where + d.getMessage(null));
+                }
             }
         }
         if (!errors.isEmpty()) {
@@ -167,11 +210,36 @@ public final class JavaParser {
                 "javac reported errors parsing " + filename + ":\n  " + String.join("\n  ", errors)
             );
         }
+        // N-407: javac takes Unicode letters into identifiers; the TS
+        // reference (01-parse-java.ts) refuses every non-ASCII character
+        // outside a comment or a literal as an unexpected character.
+        List<String> nonAscii = nonAsciiOutsideLiterals(source, filename);
+        if (!nonAscii.isEmpty()) {
+            throw new ParseException(String.join("\n  ", nonAscii));
+        }
         var iter = units.iterator();
         if (!iter.hasNext()) {
             throw new ParseException("no compilation unit parsed from " + filename);
         }
         return new Unit(iter.next(), Trees.instance(task).getSourcePositions());
+    }
+
+    /**
+     * F-026: when javac reports an error inside a number token (the run of
+     * {@code [0-9A-Za-z_]} starting at a digit that contains {@code pos}), the
+     * shared refusal of that literal. javac has already judged the context, so a
+     * literal valid only under a unary minus counts as refused here.
+     */
+    private static String sharedLiteralDiagnostic(String source, int pos) {
+        if (pos < 0 || pos >= source.length() || !IntLiteral.isNumberContinue(source.charAt(pos))) return null;
+        int start = pos;
+        while (start > 0 && IntLiteral.isNumberContinue(source.charAt(start - 1))) start--;
+        char first = source.charAt(start);
+        if (first < '0' || first > '9') return null;
+        String text = source.substring(start, IntLiteral.scanEnd(source, start));
+        IntLiteral.Lit lit = IntLiteral.parse("java", text);
+        if (lit != null && !lit.negOnly()) return null;
+        return IntLiteral.invalid("java", text);
     }
 
     private static String stripRunarInfix(String filename) {
@@ -212,6 +280,11 @@ public final class JavaParser {
                     }
                     constructorTree = m;
                 } else {
+                    // N-050: a static method is not a contract method
+                    // (`@Public static` used to become a spending entry point).
+                    if (m.getModifiers().getFlags().contains(javax.lang.model.element.Modifier.STATIC)) {
+                        throw new ParseException(LexDiag.staticMethod(m.getName().toString()));
+                    }
                     methodTrees.add(m);
                 }
             } else {
@@ -228,7 +301,113 @@ public final class JavaParser {
             methods.add(convertMethod(mt, filename, cu, className));
         }
 
+        checkBarePropertyAssignments(properties, constructor, methods);
         return new ContractNode(className, parentClass, properties, constructor, methods, filename);
+    }
+
+    // ---------------------------------------------------------------
+    // N-023 (R49): bare property assignment
+    // ---------------------------------------------------------------
+
+    /**
+     * In Java a bare name inside a method that no local or parameter shadows
+     * IS the field, so {@code count = ...}, {@code count++} and
+     * {@code --count} write contract state. Lowering them as a local rebind
+     * dropped the state write silently, so the bare form is refused (mirrors
+     * the TS reference's checkBarePropertyAssignments). Shadowing follows
+     * Java block scope: parameters, a local from its declaration to the end
+     * of its block, a for-loop variable inside the loop. Bare reads are not
+     * touched. (Compound {@code op=} never reaches here: this tier refuses
+     * every compound assignment during conversion.)
+     */
+    private static void checkBarePropertyAssignments(
+        List<PropertyNode> properties, MethodNode constructor, List<MethodNode> methods
+    ) {
+        Set<String> props = new HashSet<>();
+        for (PropertyNode p : properties) props.add(p.name());
+        if (props.isEmpty()) return;
+        List<MethodNode> all = new ArrayList<>();
+        all.add(constructor);
+        all.addAll(methods);
+        for (MethodNode m : all) {
+            List<Set<String>> scope = new ArrayList<>();
+            Set<String> params = new HashSet<>();
+            for (ParamNode p : m.params()) params.add(p.name());
+            scope.add(params);
+            bareBlock(m.body(), scope, props);
+        }
+    }
+
+    private static void bareTarget(Expression e, List<Set<String>> scope, Set<String> props) {
+        if (e instanceof Identifier id && props.contains(id.name())) {
+            for (Set<String> s : scope) {
+                if (s.contains(id.name())) return;
+            }
+            throw new ParseException(LexDiag.bareJavaPropertyAssignment(id.name()));
+        }
+    }
+
+    private static void bareBlock(List<Statement> body, List<Set<String>> outer, Set<String> props) {
+        if (body == null) return;
+        List<Set<String>> scope = new ArrayList<>(outer);
+        scope.add(new HashSet<>());
+        for (Statement s : body) bareStmt(s, scope, props);
+    }
+
+    private static void bareStmt(Statement s, List<Set<String>> scope, Set<String> props) {
+        if (s instanceof VariableDeclStatement v) {
+            bareExpr(v.init(), scope, props);
+            scope.get(scope.size() - 1).add(v.name());
+        } else if (s instanceof AssignmentStatement a) {
+            bareTarget(a.target(), scope, props);
+            bareExpr(a.target(), scope, props);
+            bareExpr(a.value(), scope, props);
+        } else if (s instanceof IfStatement i) {
+            bareExpr(i.condition(), scope, props);
+            bareBlock(i.thenBody(), scope, props);
+            bareBlock(i.elseBody(), scope, props);
+        } else if (s instanceof ForStatement f) {
+            List<Set<String>> loop = new ArrayList<>(scope);
+            loop.add(new HashSet<>());
+            if (f.init() != null) bareStmt(f.init(), loop, props);
+            bareExpr(f.condition(), loop, props);
+            if (f.update() != null) bareStmt(f.update(), loop, props);
+            bareBlock(f.body(), loop, props);
+        } else if (s instanceof ReturnStatement r) {
+            bareExpr(r.value(), scope, props);
+        } else if (s instanceof ExpressionStatement es) {
+            bareExpr(es.expression(), scope, props);
+        }
+    }
+
+    private static void bareExpr(Expression e, List<Set<String>> scope, Set<String> props) {
+        if (e == null) return;
+        if (e instanceof IncrementExpr x) {
+            bareTarget(x.operand(), scope, props);
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof DecrementExpr x) {
+            bareTarget(x.operand(), scope, props);
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof BinaryExpr x) {
+            bareExpr(x.left(), scope, props);
+            bareExpr(x.right(), scope, props);
+        } else if (e instanceof UnaryExpr x) {
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof CallExpr x) {
+            bareExpr(x.callee(), scope, props);
+            for (Expression a : x.args()) bareExpr(a, scope, props);
+        } else if (e instanceof MemberExpr x) {
+            bareExpr(x.object(), scope, props);
+        } else if (e instanceof TernaryExpr x) {
+            bareExpr(x.condition(), scope, props);
+            bareExpr(x.consequent(), scope, props);
+            bareExpr(x.alternate(), scope, props);
+        } else if (e instanceof IndexAccessExpr x) {
+            bareExpr(x.object(), scope, props);
+            bareExpr(x.index(), scope, props);
+        } else if (e instanceof ArrayLiteralExpr x) {
+            for (Expression el : x.elements()) bareExpr(el, scope, props);
+        }
     }
 
     private static ParentClass determineParentClass(ClassTree cls, String filename) {
@@ -245,8 +424,8 @@ public final class JavaParser {
             case "StatefulSmartContract" -> ParentClass.STATEFUL_SMART_CONTRACT;
             case "UnsafeSmartContract" -> ParentClass.UNSAFE_SMART_CONTRACT;
             default -> throw new ParseException(
-                "contract class in " + filename
-                    + " must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got " + name
+                "unknown parent class: '" + name
+                    + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
             );
         };
     }
@@ -256,7 +435,14 @@ public final class JavaParser {
     // ---------------------------------------------------------------
 
     private static PropertyNode convertField(VariableTree v, String filename, Unit cu) {
+        validateAnnotations(v.getModifiers());
         boolean readonly = hasAnnotation(v.getModifiers(), "Readonly");
+        // N-093: `@EmbedAlways` is the native spelling of the `@embedAlways`
+        // directive; a `@Sighash` here annotates nothing.
+        boolean embedAlways = hasAnnotation(v.getModifiers(), "EmbedAlways");
+        if (hasAnnotation(v.getModifiers(), "Sighash")) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@sighash"));
+        }
         TypeNode type = convertType(v.getType(), filename);
         Expression init = v.getInitializer() != null ? convertExpression(v.getInitializer(), filename, cu) : null;
         return new PropertyNode(
@@ -265,7 +451,8 @@ public final class JavaParser {
             readonly,
             init,
             locationOf(v, cu, filename),
-            null
+            null,
+            embedAlways
         );
     }
 
@@ -274,7 +461,21 @@ public final class JavaParser {
     // ---------------------------------------------------------------
 
     private static MethodNode convertMethod(MethodTree m, String filename, Unit cu, String className) {
+        validateAnnotations(m.getModifiers());
         boolean isConstructor = m.getName().contentEquals("<init>") || m.getName().contentEquals(className);
+
+        // N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+        // the `@embedAlways` / `@sighash` directives. Neither applies to the
+        // constructor (not a spending entry point, not a field), nor
+        // `@EmbedAlways` to any method. Checked in the TS reference's order.
+        boolean sighashAnn = hasAnnotation(m.getModifiers(), "Sighash");
+        boolean embedAnn = hasAnnotation(m.getModifiers(), "EmbedAlways");
+        if (isConstructor && sighashAnn) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@sighash"));
+        }
+        if (embedAnn) {
+            throw new ParseException(SighashDirective.lostDirectiveMessage("@embedAlways"));
+        }
 
         Visibility vis;
         if (isConstructor) {
@@ -290,12 +491,36 @@ public final class JavaParser {
             params.add(new ParamNode(p.getName().toString(), convertType(p.getType(), filename)));
         }
 
+        // The AST keeps no return type; N-331 refuses an unknown name. A
+        // primitive return type (`void`, `boolean`) is not a name to check.
+        // N-332: a public method may declare no return type but `void`.
+        if (!isConstructor && m.getReturnType() != null) {
+            if (m.getReturnType() instanceof PrimitiveTypeTree ptt) {
+                if (vis == Visibility.PUBLIC && ptt.getPrimitiveTypeKind() != javax.lang.model.type.TypeKind.VOID) {
+                    throw new ParseException(LexDiag.publicReturnType(m.getName().toString()));
+                }
+            } else {
+                String unknownReturn = LexDiag.unknownReturnType(
+                    convertType(m.getReturnType(), filename), m.getName().toString(), vis == Visibility.PUBLIC);
+                if (unknownReturn != null) {
+                    throw new ParseException(unknownReturn);
+                }
+            }
+        }
+
         List<Statement> body = m.getBody() == null
             ? List.of()
             : convertStatements(m.getBody().getStatements(), filename, cu);
 
         String name = isConstructor ? "constructor" : m.getName().toString();
-        return new MethodNode(name, params, body, vis, locationOf(m, cu, filename));
+        SighashDirective.Result sighash = isConstructor
+            ? null
+            : SighashDirective.resolveNativeSighash(name, vis == Visibility.PUBLIC, sighashSpecs(m.getModifiers()));
+        if (sighash != null && sighash.isError()) {
+            throw new ParseException(sighash.error());
+        }
+        return new MethodNode(name, params, body, vis, locationOf(m, cu, filename),
+            sighash == null ? null : sighash.value());
     }
 
     private static MethodNode syntheticConstructor(List<PropertyNode> properties, String filename) {
@@ -409,6 +634,8 @@ public final class JavaParser {
     private static List<Statement> convertStatements(List<? extends StatementTree> stmts, String filename, Unit cu) {
         List<Statement> out = new ArrayList<>(stmts.size());
         for (StatementTree s : stmts) {
+            // N-053: an empty statement `;` is a no-op, as in the TS reference.
+            if (s instanceof EmptyStatementTree) continue;
             out.add(convertStatement(s, filename, cu));
         }
         return out;
@@ -430,6 +657,17 @@ public final class JavaParser {
                 return new AssignmentStatement(
                     convertExpression(at.getVariable(), filename, cu),
                     convertExpression(at.getExpression(), filename, cu),
+                    loc
+                );
+            }
+            if (inner instanceof CompoundAssignmentTree ct) {
+                // `t op= e` lowers to `t = t op e`, like the TS reference
+                // (01-parse-java.ts finishExpressionStatement).
+                Expression.BinaryOp op = mapCompoundOp(ct.getKind(), filename);
+                Expression target = convertExpression(ct.getVariable(), filename, cu);
+                return new AssignmentStatement(
+                    target,
+                    new BinaryExpr(op, target, convertExpression(ct.getExpression(), filename, cu)),
                     loc
                 );
             }
@@ -471,6 +709,7 @@ public final class JavaParser {
         if (s instanceof BlockTree bt) {
             return convertStatements(bt.getStatements(), filename, cu);
         }
+        if (s instanceof EmptyStatementTree) return List.of(); // N-053: `if (c) ;`
         return List.of(convertStatement(s, filename, cu));
     }
 
@@ -483,10 +722,10 @@ public final class JavaParser {
             return convertExpression(pt.getExpression(), filename, cu);
         }
         if (e instanceof LiteralTree lt) {
-            return convertLiteral(lt, filename);
+            return convertLiteral(lt, filename, cu);
         }
         if (e instanceof IdentifierTree id) {
-            return new Identifier(id.getName().toString());
+            return new Identifier(id.getName().toString(), locationOf(id, cu, filename));
         }
         if (e instanceof MemberSelectTree ms) {
             // Special-case BigInteger.ZERO/ONE/TWO/TEN → literal. The Bigint
@@ -536,7 +775,7 @@ public final class JavaParser {
                 && leftMi.getArguments().size() == 1) {
                 Expression a = convertExpression(leftMs.getExpression(), filename, cu);
                 Expression b = convertExpression(leftMi.getArguments().get(0), filename, cu);
-                return new BinaryExpr(op, a, b);
+                return new BinaryExpr(op, a, b, locationOf(bt, cu, filename));
             }
             // Symmetric: `0 <cmp> <a>.compareTo(<b>)` → `<b> <cmp> <a>`.
             if (isComparisonOp(op)
@@ -549,11 +788,12 @@ public final class JavaParser {
                 && rightMi.getArguments().size() == 1) {
                 Expression a = convertExpression(rightMs.getExpression(), filename, cu);
                 Expression b = convertExpression(rightMi.getArguments().get(0), filename, cu);
-                return new BinaryExpr(op, b, a);
+                return new BinaryExpr(op, b, a, locationOf(bt, cu, filename));
             }
             return new BinaryExpr(op,
                 convertExpression(bt.getLeftOperand(), filename, cu),
-                convertExpression(bt.getRightOperand(), filename, cu)
+                convertExpression(bt.getRightOperand(), filename, cu),
+                locationOf(bt, cu, filename)
             );
         }
         if (e instanceof UnaryTree ut) {
@@ -628,16 +868,35 @@ public final class JavaParser {
         throw new ParseException("unsupported expression kind " + e.getKind() + " in " + filename);
     }
 
-    private static Expression convertLiteral(LiteralTree lt, String filename) {
+    /**
+     * F-189: javac's parser folds a minus in front of a decimal integer literal
+     * into the literal ({@code -5} is one literal of value -5; JLS 3.10.1 needs
+     * that for {@code -2147483648}). The literal's tree then starts at the
+     * {@code -}. The TS reference parses the same text as negation applied to
+     * the literal, which emits different bytes, so the minus is restored here.
+     */
+    private static boolean negatedLiteral(LiteralTree lt, Unit cu) {
+        long start = cu.positions().getStartPosition(cu.cu(), lt);
+        if (start < 0) return false;
+        try {
+            CharSequence text = cu.cu().getSourceFile().getCharContent(true);
+            return start < text.length() && text.charAt((int) start) == '-';
+        } catch (IOException e) {
+            throw new ParseException("cannot read source text: " + e.getMessage());
+        }
+    }
+
+    private static Expression convertLiteral(LiteralTree lt, String filename, Unit cu) {
         Object value = lt.getValue();
         if (value == null) {
             throw new ParseException("null literals are unsupported in " + filename);
         }
-        if (value instanceof Integer i) {
-            return new BigIntLiteral(BigInteger.valueOf(i));
-        }
-        if (value instanceof Long l) {
-            return new BigIntLiteral(BigInteger.valueOf(l));
+        if (value instanceof Integer || value instanceof Long) {
+            BigInteger v = BigInteger.valueOf(((Number) value).longValue());
+            if (negatedLiteral(lt, cu)) {
+                return new UnaryExpr(Expression.UnaryOp.NEG, new BigIntLiteral(v.negate()));
+            }
+            return new BigIntLiteral(v);
         }
         if (value instanceof Boolean b) {
             return new BoolLiteral(b);
@@ -651,7 +910,8 @@ public final class JavaParser {
             );
         }
         if (value instanceof Character) {
-            throw new ParseException("char literals are unsupported in " + filename);
+            // F-011: the TS reference's text.
+            throw new ParseException(filename + ": " + LexDiag.JAVA_CHAR_LITERAL);
         }
         if (value instanceof Double || value instanceof Float) {
             throw new ParseException("floating-point literals are unsupported in " + filename);
@@ -667,7 +927,7 @@ public final class JavaParser {
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree hex
             && hex.getValue() instanceof String hs) {
-            return new ByteStringLiteral(hs);
+            return new ByteStringLiteral(hs, locationOf(hex, cu, filename));
         }
         // Recognise asm("<hex>", in_arity, out_arity) — the asm() intrinsic
         // body is the only call position where a bare String literal is legal.
@@ -691,8 +951,12 @@ public final class JavaParser {
             && (isBigIntegerValueOf(ms) || isBigintOf(ms))
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree n
-            && n.getValue() instanceof Number num) {
-            return new BigIntLiteral(BigInteger.valueOf(num.longValue()));
+            && (n.getValue() instanceof Integer || n.getValue() instanceof Long)) {
+            // F-026: only an int / long literal. A floating-point one
+            // (`Bigint.of(1e3)`, `BigInteger.valueOf(1.5)`) used to be
+            // truncated here by longValue(); it now falls through to
+            // convertLiteral, which refuses it.
+            return convertLiteral(n, filename, cu);
         }
         // Bigint.of(<arbitrary expression>) — wrapping a BigInteger-typed value
         // (e.g. the result of a builtin like `percentOf` or `extractLocktime`)
@@ -920,12 +1184,29 @@ public final class JavaParser {
         };
     }
 
+    /** The compound-assignment set the TS reference accepts: + - * / % & | ^ << >>. */
+    private static Expression.BinaryOp mapCompoundOp(Tree.Kind kind, String filename) {
+        return switch (kind) {
+            case PLUS_ASSIGNMENT -> Expression.BinaryOp.ADD;
+            case MINUS_ASSIGNMENT -> Expression.BinaryOp.SUB;
+            case MULTIPLY_ASSIGNMENT -> Expression.BinaryOp.MUL;
+            case DIVIDE_ASSIGNMENT -> Expression.BinaryOp.DIV;
+            case REMAINDER_ASSIGNMENT -> Expression.BinaryOp.MOD;
+            case AND_ASSIGNMENT -> Expression.BinaryOp.BIT_AND;
+            case OR_ASSIGNMENT -> Expression.BinaryOp.BIT_OR;
+            case XOR_ASSIGNMENT -> Expression.BinaryOp.BIT_XOR;
+            case LEFT_SHIFT_ASSIGNMENT -> Expression.BinaryOp.SHL;
+            case RIGHT_SHIFT_ASSIGNMENT -> Expression.BinaryOp.SHR;
+            default -> throw new ParseException("unsupported compound assignment operator " + kind + " in " + filename);
+        };
+    }
+
     private static Expression convertUnary(UnaryTree ut, String filename, Unit cu) {
         Expression operand = convertExpression(ut.getExpression(), filename, cu);
         return switch (ut.getKind()) {
-            case LOGICAL_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.NOT, operand);
-            case UNARY_MINUS -> new UnaryExpr(Expression.UnaryOp.NEG, operand);
-            case BITWISE_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+            case LOGICAL_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.NOT, operand, locationOf(ut, cu, filename));
+            case UNARY_MINUS -> new UnaryExpr(Expression.UnaryOp.NEG, operand, locationOf(ut, cu, filename));
+            case BITWISE_COMPLEMENT -> new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, locationOf(ut, cu, filename));
             case UNARY_PLUS -> operand; // +x == x
             case PREFIX_INCREMENT -> new IncrementExpr(operand, true);
             case POSTFIX_INCREMENT -> new IncrementExpr(operand, false);
@@ -947,6 +1228,50 @@ public final class JavaParser {
             }
         }
         return false;
+    }
+
+    /**
+     * N-093: the flag text of each {@code @Sighash} annotation in {@code mods},
+     * or {@code null} for one whose argument is not exactly one string literal
+     * ({@code @Sighash}, {@code @Sighash(1)}, {@code @Sighash(value = "...")},
+     * ...), which is refused as a malformed spelling.
+     */
+    private static List<String> sighashSpecs(ModifiersTree mods) {
+        List<String> specs = new ArrayList<>();
+        if (mods == null) return specs;
+        for (AnnotationTree a : mods.getAnnotations()) {
+            if (!typeSimpleName(a.getAnnotationType()).equals("Sighash")) continue;
+            List<? extends ExpressionTree> args = a.getArguments();
+            if (args.size() == 1
+                && args.get(0) instanceof LiteralTree lit
+                && lit.getKind() == Tree.Kind.STRING_LITERAL) {
+                specs.add((String) lit.getValue());
+            } else {
+                specs.add(null);
+            }
+        }
+        return specs;
+    }
+
+    // F-205: the annotation names Rúnar recognizes at member position,
+    // matching the TS reference (01-parse-java.ts, parseMember). Anything
+    // else is a loud "unsupported annotation" diagnostic rather than a
+    // silent visibility downgrade — e.g. a misspelled `@Publlic` used to
+    // parse with no error and leave the method at the default `private`
+    // visibility.
+    private static final java.util.Set<String> KNOWN_MEMBER_ANNOTATIONS =
+        java.util.Set.of("Readonly", "Public", "Stateful", "Override", "SuppressWarnings",
+            // N-093: the native spellings of `@embedAlways` / `@sighash`.
+            "EmbedAlways", "Sighash");
+
+    private static void validateAnnotations(ModifiersTree mods) {
+        if (mods == null) return;
+        for (AnnotationTree a : mods.getAnnotations()) {
+            String name = typeSimpleName(a.getAnnotationType());
+            if (!KNOWN_MEMBER_ANNOTATIONS.contains(name)) {
+                throw new ParseException("unsupported annotation @" + name);
+            }
+        }
     }
 
     private static String typeSimpleName(Tree t) {
@@ -975,7 +1300,81 @@ public final class JavaParser {
      * oracle treats {@code line == 0} as "untracked" rather than as a wrong
      * position, so a genuine unknown must not be reported as line 1.
      */
-    private static SourceLocation locationOf(Tree t, Unit cu, String filename) {
+    /**
+     * {@code file:line:column: } for a javac diagnostic, with the same 0-based
+     * raw character column as {@link #locationOf} (N-078, R88a): javac's own
+     * {@code getColumnNumber} is 1-based and expands tabs to 8-column stops.
+     */
+    private static String javacDiagnosticLocation(String source, String filename, Diagnostic<?> d) {
+        long pos = d.getPosition();
+        if (pos == Diagnostic.NOPOS || pos < 0 || pos > source.length()) {
+            return "";
+        }
+        int lineStart = source.lastIndexOf('\n', (int) pos - 1) + 1;
+        return filename + ":" + d.getLineNumber() + ":" + (pos - lineStart) + ": ";
+    }
+
+    /**
+     * N-407: {@code file:line:col: Unexpected character '<c>'} (0-based raw
+     * character column, as {@link #javacDiagnosticLocation}) for every
+     * non-ASCII character outside a comment, a string or text block, or a
+     * char literal. Only reached once javac accepted the source, so those
+     * constructs are well formed. Java's backslash-u Unicode escapes are not
+     * decoded here.
+     */
+    private static List<String> nonAsciiOutsideLiterals(String source, String filename) {
+        List<String> out = new ArrayList<>();
+        int n = source.length();
+        int line = 1;
+        int lineStart = 0;
+        int i = 0;
+        while (i < n) {
+            char c = source.charAt(i);
+            if (c == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
+                while (i < n && source.charAt(i) != '\n') i++;
+                continue;
+            }
+            int skipTo = -1;
+            if (c == '/' && i + 1 < n && source.charAt(i + 1) == '*') {
+                int end = source.indexOf("*/", i + 2);
+                skipTo = end < 0 ? n : end + 2;
+            } else if (c == '"' && source.startsWith("\"\"\"", i)) {
+                int j = i + 3;
+                while (j < n && !source.startsWith("\"\"\"", j)) j += source.charAt(j) == '\\' ? 2 : 1;
+                skipTo = Math.min(n, j + 3);
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && source.charAt(j) != c && source.charAt(j) != '\n') {
+                    j += source.charAt(j) == '\\' ? 2 : 1;
+                }
+                skipTo = Math.min(n, j + 1);
+            }
+            if (skipTo >= 0) {
+                for (int k = i; k < skipTo; k++) {
+                    if (source.charAt(k) == '\n') {
+                        line++;
+                        lineStart = k + 1;
+                    }
+                }
+                i = skipTo;
+                continue;
+            }
+            if (c == '\n') {
+                line++;
+                lineStart = i + 1;
+            } else if (c >= 0x80) {
+                int cp = source.codePointAt(i);
+                out.add(filename + ":" + line + ":" + (i - lineStart) + ": Unexpected character '"
+                    + new String(Character.toChars(cp)) + "'");
+                i += Character.charCount(cp);
+                continue;
+            }
+            i++;
+        }
+        return out;
+    }
+
+        private static SourceLocation locationOf(Tree t, Unit cu, String filename) {
         if (t == null || cu == null) return new SourceLocation(filename, 0, 0);
         long start = cu.positions().getStartPosition(cu.cu(), t);
         if (start == Diagnostic.NOPOS || start < 0) return new SourceLocation(filename, 0, 0);
@@ -1006,6 +1405,132 @@ public final class JavaParser {
     }
 
     /** Unchecked exception for parse-time problems. */
+    // ---------------------------------------------------------------
+    // F-213 measure (A) over the javac tree
+    // ---------------------------------------------------------------
+
+    /** Collects a tree's immediate children without recursing into them. */
+    private static final class Children extends com.sun.source.util.TreeScanner<Void, List<Tree>> {
+        private static final Children INSTANCE = new Children();
+
+        @Override
+        public Void scan(Tree tree, List<Tree> out) {
+            if (tree != null) out.add(tree);
+            return null;
+        }
+
+        static List<Tree> of(Tree t) {
+            List<Tree> out = new ArrayList<>();
+            t.accept(INSTANCE, out);
+            return out;
+        }
+    }
+
+    /** A statement context: a block, or a statement other than a class declaration. */
+    private static boolean isStatementContext(Tree t) {
+        return t instanceof BlockTree || (t instanceof StatementTree && !(t instanceof ClassTree));
+    }
+
+    /**
+     * The parse-nesting counter (measure A) of {@code child}, given its
+     * parent's. Mirrors what the TS reference's hand-written .runar.java parser
+     * counts (01-parse-java.ts; same mapping as tsChildNesting in 01-parse.ts):
+     * a statement inside a body (+1; a block is free unless it is itself a
+     * nested statement), each expression slot of a statement / declaration, a
+     * parenthesised group, a call or {@code new} argument, an array-access
+     * index, an array-initializer element, a ternary arm, a prefix-unary
+     * operand, a type argument. Binary operands, assignment sides, member
+     * objects and callees add nothing. A for's init / update are parsed as
+     * part of the for (their expressions are its slots), and javac's
+     * parenthesised if / while / switch condition IS the slot, not a group
+     * inside it.
+     */
+    private static int childNesting(Tree parent, Tree child, int level) {
+        if (parent instanceof ForLoopTree fl) {
+            if (fl.getInitializer().contains(child) || fl.getUpdate().contains(child)) return level;
+            if (child == fl.getCondition()) return level + 1;
+        }
+        if (child instanceof StatementTree && isStatementContext(parent)) {
+            if (child instanceof BlockTree && !(parent instanceof BlockTree)) return level;
+            return level + 1;
+        }
+        if (parent instanceof ExpressionStatementTree es) {
+            return child == es.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof ReturnTree rt) {
+            return child == rt.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof com.sun.source.tree.ThrowTree tt) {
+            return child == tt.getExpression() ? level + 1 : level;
+        }
+        if (parent instanceof IfTree it) {
+            return child == it.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.WhileLoopTree wt) {
+            return child == wt.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.DoWhileLoopTree dt) {
+            return child == dt.getCondition() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof com.sun.source.tree.SwitchTree st) {
+            return child == st.getExpression() ? conditionSlot(child, level) : level;
+        }
+        if (parent instanceof VariableTree v) {
+            return child == v.getInitializer() ? level + 1 : level;
+        }
+        if (parent instanceof ParenthesizedTree) {
+            return level + 1;
+        }
+        if (parent instanceof UnaryTree ut) {
+            return switch (ut.getKind()) {
+                case POSTFIX_INCREMENT, POSTFIX_DECREMENT -> level;
+                default -> level + 1;
+            };
+        }
+        if (parent instanceof NewArrayTree na) {
+            boolean slot = (na.getInitializers() != null && na.getInitializers().contains(child))
+                || (na.getDimensions() != null && na.getDimensions().contains(child));
+            return slot ? level + 1 : level;
+        }
+        if (parent instanceof MethodInvocationTree mi) {
+            return mi.getArguments().contains(child) ? level + 1 : level;
+        }
+        if (parent instanceof NewClassTree nc) {
+            return nc.getArguments().contains(child) ? level + 1 : level;
+        }
+        if (parent instanceof ArrayAccessTree aa) {
+            return child == aa.getIndex() ? level + 1 : level;
+        }
+        if (parent instanceof ConditionalExpressionTree ce) {
+            return child == ce.getCondition() ? level : level + 1;
+        }
+        if (parent instanceof ParameterizedTypeTree pt) {
+            return pt.getTypeArguments().contains(child) ? level + 1 : level;
+        }
+        return level;
+    }
+
+    /** javac keeps the parens of {@code if (c)}: they are the slot, so the group adds nothing. */
+    private static int conditionSlot(Tree cond, int level) {
+        return cond instanceof ParenthesizedTree ? level : level + 1;
+    }
+
+    private record Nesting(Tree tree, int level) {}
+
+    /** The first tree whose parse nesting exceeds the limit, or null. Iterative. */
+    private static Tree parseNestingViolation(CompilationUnitTree cu) {
+        java.util.ArrayDeque<Nesting> work = new java.util.ArrayDeque<>();
+        work.push(new Nesting(cu, 0));
+        while (!work.isEmpty()) {
+            Nesting n = work.pop();
+            if (n.level() > InputLimits.MAX_SOURCE_NESTING) return n.tree();
+            for (Tree child : Children.of(n.tree())) {
+                work.push(new Nesting(child, childNesting(n.tree(), child, n.level())));
+            }
+        }
+        return null;
+    }
+
     public static final class ParseException extends RuntimeException {
         public ParseException(String message) {
             super(message);

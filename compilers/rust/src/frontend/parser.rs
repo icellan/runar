@@ -9,7 +9,7 @@ use swc_common::sync::Lrc;
 use swc_common::{BytePos, FileName, SourceMap, Spanned};
 use swc_ecma_ast as swc;
 use swc_ecma_ast::{
-    Accessibility, AssignExpr, AssignOp, AssignTarget, CallExpr, Callee, Class, ClassDecl,
+    Accessibility, AssignExpr, AssignOp, AssignTarget, CallExpr, Callee, Class,
     ClassMember, Decl, EsVersion, Expr, ExprOrSpread, ForStmt, IfStmt, Lit,
     MemberExpr as SwcMemberExpr, MemberProp, ModuleDecl, ModuleItem, Param, ParamOrTsParamProp,
     Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt, SuperProp,
@@ -22,7 +22,9 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, OPTIONAL_CHAINING};
+use super::int_literal::{invalid_integer_literal, parse_int_literal};
+use super::sighash_directive::lost_directive_message;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -48,6 +50,90 @@ impl ParseResult {
 }
 
 /// Parse a TypeScript source string and extract the Rúnar contract AST.
+/// F-026 (the TS reference's reportInvalidNumericLiterals): scan the source
+/// with swc's own lexer and validate every numeric literal token.
+fn check_ts_numeric_literals(
+    fm: &Lrc<swc_common::SourceFile>,
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    use swc_ecma_parser::token::Token as SwcToken;
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax { tsx: false, decorators: false, ..Default::default() }),
+        EsVersion::Es2022,
+        StringInput::from(&**fm),
+        None,
+    );
+    let base = fm.start_pos.0;
+    let bytes = source.as_bytes();
+    let mut covered = 0usize;
+    for t in lexer {
+        let start = (t.span.lo.0 - base) as usize;
+        if start < covered || start >= bytes.len() {
+            continue;
+        }
+        // swc turns some malformed numbers (`0xG`, `10i64`) into an error
+        // token rather than a number: treat any token that starts a number
+        // (a digit not glued to an identifier) the same way.
+        let starts_number = matches!(t.token, SwcToken::Num { .. } | SwcToken::BigInt { .. })
+            || (matches!(t.token, SwcToken::Error(_))
+                && bytes[start].is_ascii_digit()
+                && (start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] == b'$')));
+        if !starts_number {
+            continue;
+        }
+        let mut end = ((t.span.hi.0 - base) as usize).min(bytes.len());
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        covered = end;
+        let text = &source[start..end];
+        if parse_int_literal("ts", text).is_none() {
+            let before = &source[..start];
+            let line = 1 + before.matches('\n').count();
+            let column = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0);
+            errors.push(lex_error(&invalid_integer_literal("ts", text), file, line, column));
+        }
+    }
+}
+
+/// N-121 (the TS reference's reportOptionalChaining): scan the source with
+/// swc's own lexer and refuse the first `?.` -- a `?` token immediately
+/// followed by a `.` token (swc lexes `?.5` as `?` then a number, so a `.`
+/// token after `?` is always optional chaining) -- located at the `?`.
+fn check_ts_optional_chaining(
+    fm: &Lrc<swc_common::SourceFile>,
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    use swc_ecma_parser::token::Token as SwcToken;
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax { tsx: false, decorators: false, ..Default::default() }),
+        EsVersion::Es2022,
+        StringInput::from(&**fm),
+        None,
+    );
+    let base = fm.start_pos.0;
+    let mut question: Option<(u32, u32)> = None;
+    for t in lexer {
+        if matches!(t.token, SwcToken::Dot) {
+            if let Some((lo, hi)) = question {
+                if hi == t.span.lo.0 {
+                    let start = ((lo - base) as usize).min(source.len());
+                    let before = &source[..start];
+                    let line = 1 + before.matches('\n').count();
+                    let column = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0);
+                    errors.push(lex_error(OPTIONAL_CHAINING, file, line, column));
+                    return;
+                }
+            }
+        }
+        question = if matches!(t.token, SwcToken::QuestionMark) { Some((t.span.lo.0, t.span.hi.0)) } else { None };
+    }
+}
+
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     // DoS-bound size guard. Reject oversized source BEFORE the tokenizer
     // touches the input. BUG-008 follow-up.
@@ -58,8 +144,84 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
             source_size_err: Some(sse),
         };
     }
-    let mut errors: Vec<Diagnostic> = Vec::new();
     let file = file_name.unwrap_or("contract.ts");
+    // F-213: everything that holds or walks the swc AST -- the swc parse, the
+    // measure-(A) walk, the conversion, the drop of the swc AST -- runs on its
+    // own stack segment (see ts_nesting.rs); measure (B) then runs on the
+    // converted Rúnar AST.
+    let result = super::input_limits::run_on_parse_stack(|| parse_ts_surface(source, file));
+    super::input_limits::enforce_ast_nesting(result)
+}
+
+/// N-423: port of the TS reference's `firstNonAsciiOutsideLiterals`
+/// (01-parse.ts) -- the byte offset of the first non-ASCII character outside a
+/// comment or a string / template literal. `//` comments end at '\n', '\r',
+/// U+2028 or U+2029; `/* */` at its close or end of file; '..' / ".." at the
+/// matching quote or a '\n' / '\r'; templates at the matching backtick. A
+/// backslash in a string or template skips the next character (or "\r\n").
+fn first_non_ascii_outside_ts_literals(src: &str) -> Option<usize> {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if c == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            i += 2;
+            while i < n
+                && b[i] != b'\n'
+                && b[i] != b'\r'
+                && !b[i..].starts_with("\u{2028}".as_bytes())
+                && !b[i..].starts_with("\u{2029}".as_bytes())
+            {
+                i += 1;
+            }
+        } else if c == b'/' && i + 1 < n && b[i + 1] == b'*' {
+            i = match src[i + 2..].find("*/") {
+                Some(end) => i + 2 + end + 2,
+                None => n,
+            };
+        } else if c == b'\'' || c == b'"' || c == b'`' {
+            i += 1;
+            while i < n {
+                let d = b[i];
+                if d == c {
+                    i += 1;
+                    break;
+                }
+                if c != b'`' && (d == b'\n' || d == b'\r') {
+                    break;
+                }
+                if d == b'\\' {
+                    i += if b[i + 1..].starts_with(b"\r\n") { 3 } else { 2 };
+                } else {
+                    i += 1;
+                }
+            }
+        } else if c >= 0x80 {
+            return Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The `.runar.ts` surface: swc parse (behind the F-213 token guard), measure
+/// (A) over the swc AST, then conversion to the Rúnar AST.
+fn parse_ts_surface(source: &str, file: &str) -> ParseResult {
+    let mut errors: Vec<Diagnostic> = Vec::new();
+
+    // N-423 (user decision R163): swc accepts ECMAScript's Unicode
+    // identifiers and whitespace; Rúnar takes only ASCII outside comments and
+    // string literals, as the TS reference's pre-scan does.
+    if let Some(i) = first_non_ascii_outside_ts_literals(source) {
+        let ch = source[i..].chars().next().unwrap_or('\u{fffd}');
+        let line = 1 + source[..i].matches('\n').count();
+        let start = source[..i].rfind(|c| c == '\n' || c == '\r').map_or(0, |p| p + 1);
+        let col: usize = source[start..i].chars().map(char::len_utf16).sum();
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line, col));
+        return ParseResult { contract: None, errors, source_size_err: None };
+    }
 
     // Set up SWC parser. Collect comments so the author-facing directives
     // `/** @embedAlways */` (#109) and `/** @sighash <FLAGS> */` (#123) — which
@@ -67,6 +229,18 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let cm: Lrc<SourceMap> = Lrc::new(SourceMap::default());
     let fm = cm.new_source_file(Lrc::new(FileName::Custom(file.to_string())), source.to_string());
     let comments = SingleThreadedComments::default();
+
+    // F-026: every numeric literal, extended over the [0-9A-Za-z_]
+    // characters glued to it, must be a TypeScript integer literal. `012`,
+    // `10_`, `1.5` and `0b102` are refused with the shared diagnostic (swc
+    // would otherwise read `1.5` as 1 and `012` as 10).
+    check_ts_numeric_literals(&fm, source, file, &mut errors);
+
+    // N-121: swc parses `this?.t` / `this?.m()` / `this.m?.()` as an OptChain
+    // and the conversion refused it with a Debug dump and no location.
+    // Optional chaining is disallowed; refuse it with the shared diagnostic.
+    check_ts_optional_chaining(&fm, source, file, &mut errors);
+
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {
             tsx: false,
@@ -77,9 +251,18 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         StringInput::from(&*fm),
         Some(&comments),
     );
-    let mut parser = Parser::new_from(lexer);
+    // F-213 layer 1: the guard ends the token stream once the AST swc is
+    // building gets too deep (or the parse stack runs low), so swc never
+    // recurses, or builds a tree, past what this stack segment holds.
+    let guarded = super::ts_nesting::GuardedTokens::new(lexer);
+    let too_deep = guarded.tripped_flag();
+    let mut parser = Parser::new_from(guarded);
 
-    let module = match parser.parse_module() {
+    let parsed = parser.parse_module();
+    if too_deep.get() {
+        return super::input_limits::nesting_refusal(None);
+    }
+    let module = match parsed {
         Ok(m) => m,
         Err(e) => {
             errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
@@ -87,51 +270,79 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         }
     };
 
+    // F-213 measure (A), over the whole module, before anything else walks it
+    // (the TS reference's tsParseNestingViolation).
+    if let Some(span) = super::ts_nesting::parse_nesting_violation(&module) {
+        let at = cm.lookup_char_pos(span.lo);
+        return super::input_limits::nesting_refusal(Some(SourceLocation {
+            file: file.to_string(),
+            line: at.line,
+            column: at.col_display + 1,
+        }));
+    }
+
     // Collect any parser errors
     for e in parser.take_errors() {
         errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
     }
 
-    // Find the class that extends SmartContract or StatefulSmartContract
-    let mut contract_class: Option<&ClassDecl> = None;
+    // Find the class that extends SmartContract, StatefulSmartContract, or
+    // UnsafeSmartContract. N-062: a single pass over `module.body` IN SOURCE
+    // ORDER, matching plain `class X extends ...`, `export class X extends
+    // ...`, AND `export default class X extends ...` — mirrors the TS
+    // reference, which calls `sourceFile.getClasses()` (document order,
+    // export-agnostic) and keeps the last match. The previous two-pass
+    // version (every non-exported class, then every exported class) silently
+    // refused export-default contracts (no arm matched `ExportDefaultDecl`
+    // at all) and could keep the wrong class whenever a plain class appeared
+    // later in the file than an exported one, since the exported pass always
+    // ran — and so always won the tie-break — last.
+    let mut contract_class: Option<&Class> = None;
+    let mut contract_ident: Option<String> = None;
     let mut detected_parent_class: &str = "SmartContract";
 
     for item in &module.body {
-        if let ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) = item {
-            if let Some(super_class) = &class_decl.class.super_class {
+        let candidate: Option<(&Class, Option<String>)> = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) => {
+                Some((&class_decl.class, Some(class_decl.ident.sym.to_string())))
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                if let Decl::Class(class_decl) = &export_decl.decl {
+                    Some((&class_decl.class, Some(class_decl.ident.sym.to_string())))
+                } else {
+                    None
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export_default)) => {
+                if let swc::DefaultDecl::Class(class_expr) = &export_default.decl {
+                    Some((
+                        &class_expr.class,
+                        class_expr.ident.as_ref().map(|i| i.sym.to_string()),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((class, ident)) = candidate {
+            if let Some(super_class) = &class.super_class {
                 if let Some(base_name) = get_base_class_name(super_class) {
                     if contract_class.is_some() {
                         errors.push(Diagnostic::error(
                             "Only one SmartContract subclass is allowed per file", None,
                         ));
                     }
-                    contract_class = Some(class_decl);
+                    contract_class = Some(class);
+                    contract_ident = ident;
                     detected_parent_class = base_name;
                 }
             }
         }
     }
 
-    // Also check export declarations
-    for item in &module.body {
-        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) = item {
-            if let Decl::Class(class_decl) = &export_decl.decl {
-                if let Some(super_class) = &class_decl.class.super_class {
-                    if let Some(base_name) = get_base_class_name(super_class) {
-                        if contract_class.is_some() {
-                            errors.push(Diagnostic::error(
-                                "Only one SmartContract subclass is allowed per file", None,
-                            ));
-                        }
-                        contract_class = Some(class_decl);
-                        detected_parent_class = base_name;
-                    }
-                }
-            }
-        }
-    }
-
-    let class_decl = match contract_class {
+    let class = match contract_class {
         Some(c) => c,
         None => {
             errors.push(Diagnostic::error("No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", None));
@@ -139,17 +350,21 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         }
     };
 
-    let contract_name = class_decl.ident.sym.to_string();
-    let class = &class_decl.class;
+    // TS reference: `contractClass.getName() ?? 'UnnamedContract'` (an
+    // anonymous `export default class extends ... { }` has no ident).
+    let contract_name = contract_ident.unwrap_or_else(|| "UnnamedContract".to_string());
 
     // Extract properties
-    let properties = parse_properties(class, file, &mut errors, &comments);
+    let properties = parse_properties(class, file, &mut errors, &comments, &cm);
 
     // Extract constructor
-    let constructor_node = parse_constructor(class, file, &mut errors);
+    let constructor_node = parse_constructor(class, file, &mut errors, &cm);
 
     // Extract methods
-    let methods = parse_methods(class, file, &mut errors, &comments);
+    let methods = parse_methods(class, file, &mut errors, &comments, &cm);
+
+    // N-199 (R75): a directive in the class body that no member reads.
+    report_lost_directives(class, source, fm.start_pos, &comments, file, &mut errors);
 
     let contract = ContractNode {
         name: contract_name,
@@ -196,6 +411,15 @@ fn default_loc(file: &str) -> SourceLocation {
     loc(file, 1, 0)
 }
 
+/// F-341: the real (line, column) of a byte position via SWC's source map,
+/// in the same convention F-337 established for statements — 1-based line,
+/// 1-based column in the parser's internal AST (`codegen/emit.rs` converts
+/// to the source map's 0-based column at emission time).
+fn real_loc(cm: &SourceMap, file: &str, lo: BytePos) -> SourceLocation {
+    let at = cm.lookup_char_pos(lo);
+    loc(file, at.line, at.col.0 + 1)
+}
+
 // ---------------------------------------------------------------------------
 // Properties
 // ---------------------------------------------------------------------------
@@ -205,6 +429,7 @@ fn parse_properties(
     file: &str,
     errors: &mut Vec<Diagnostic>,
     comments: &SingleThreadedComments,
+    cm: &SourceMap,
 ) -> Vec<PropertyNode> {
     let mut result = Vec::new();
 
@@ -231,7 +456,7 @@ fn parse_properties(
             };
 
             // Parse initializer if present (SWC ClassProp.value)
-            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors));
+            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors, cm));
 
             // Issue #109: a `/** @embedAlways */` (or `// @embedAlways`)
             // directive immediately preceding the field opts it out of DCE.
@@ -245,7 +470,7 @@ fn parse_properties(
                 readonly,
                 initializer,
                 embed_always,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, prop.span().lo),
                 synthetic_array_chain: None,
             });
         }
@@ -258,12 +483,17 @@ fn parse_properties(
 // Constructor
 // ---------------------------------------------------------------------------
 
-fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> MethodNode {
+fn parse_constructor(
+    class: &Class,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> MethodNode {
     for member in &class.body {
         if let ClassMember::Constructor(ctor) = member {
             let params = parse_constructor_params(&ctor.params, file, errors);
             let body = if let Some(ref block) = ctor.body {
-                parse_block_stmts(&block.stmts, file, errors)
+                parse_block_stmts(&block.stmts, file, errors, cm)
             } else {
                 Vec::new()
             };
@@ -274,7 +504,7 @@ fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) ->
                 body,
                 visibility: Visibility::Public,
                 sighash_type: None,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, ctor.span().lo),
             };
         }
     }
@@ -339,6 +569,7 @@ fn parse_methods(
     file: &str,
     errors: &mut Vec<Diagnostic>,
     comments: &SingleThreadedComments,
+    cm: &SourceMap,
 ) -> Vec<MethodNode> {
     let mut result = Vec::new();
 
@@ -352,7 +583,24 @@ fn parse_methods(
                 }
             };
 
+            // N-050: a static method is not a contract method; `public static`
+            // used to get a dispatch selector (an unsigned spend path).
+            if method.is_static {
+                errors.push(Diagnostic::error(
+                    static_method_message(&name),
+                    Some(real_loc(cm, file, method.span().lo)),
+                ));
+            }
+
             let params = parse_method_params(&method.function.params, file, errors);
+
+            // N-331: the AST keeps no return type, so an unknown name is refused here.
+            if let Some(ref ann) = method.function.return_type {
+                let ret = parse_type_node(&ann.type_ann, file, errors);
+                if let Some(msg) = unknown_return_type_message(&ret, &name, method.accessibility == Some(Accessibility::Public)) {
+                    errors.push(Diagnostic::error(msg, Some(real_loc(cm, file, method.span().lo))));
+                }
+            }
 
             let visibility = if method.accessibility == Some(Accessibility::Public) {
                 Visibility::Public
@@ -361,14 +609,14 @@ fn parse_methods(
             };
 
             let body = if let Some(ref block) = method.function.body {
-                parse_block_stmts(&block.stmts, file, errors)
+                parse_block_stmts(&block.stmts, file, errors, cm)
             } else {
                 Vec::new()
             };
 
             // Issue #123: `/** @sighash <FLAGS> */` directive → per-method type.
             let sighash_type =
-                parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors);
+                parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors, cm);
 
             result.push(MethodNode {
                 name,
@@ -376,7 +624,7 @@ fn parse_methods(
                 body,
                 visibility,
                 sighash_type,
-                source_location: default_loc(file),
+                source_location: real_loc(cm, file, method.span().lo),
             });
         }
     }
@@ -406,10 +654,103 @@ fn leading_comment_text(comments: &SingleThreadedComments, pos: BytePos) -> Opti
     )
 }
 
-/// True when `marker` (e.g. `@sighash`, `@embedAlways`) appears in `text`
-/// followed by a word boundary — mirroring the TS reference's `/@sighash\b/`
-/// and `/@embedAlways\b/` scans so an identifier like `sighashType` inside a
-/// comment does not trip detection.
+/// Byte spans (relative to the source text) of the leading comments SWC
+/// attaches at `pos` — exactly the comments `leading_comment_text` reads.
+fn leading_comment_spans(comments: &SingleThreadedComments, pos: BytePos, start: BytePos) -> Vec<(usize, usize)> {
+    comments
+        .get_leading(pos)
+        .unwrap_or_default()
+        .iter()
+        .map(|c| ((c.span.lo.0 - start.0) as usize, (c.span.hi.0 - start.0) as usize))
+        .collect()
+}
+
+/// N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker
+/// inside the contract class body that is not in the leading comments of a
+/// member of the kind that reads it (`@sighash` of a method, `@embedAlways` of
+/// a property). SWC, like ts-morph, never attaches a comment that shares a
+/// line with the preceding token, so such a directive used to be dropped
+/// silently. Markers match like the non-TS guard (`@sighash` anywhere,
+/// `@embedAlways` word-bounded); text outside the class braces is prose and is
+/// not scanned. Mirrors `reportLostDirectives` in the TS reference.
+fn report_lost_directives(
+    class: &Class,
+    source: &str,
+    start: BytePos,
+    comments: &SingleThreadedComments,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let bytes = source.as_bytes();
+    let rel = |p: BytePos| (p.0 - start.0) as usize;
+    // The body's `{`: the first one after the heritage clauses, skipping comments.
+    let mut i = rel(class.span.lo);
+    if let Some(sc) = &class.super_class {
+        i = i.max(rel(sc.span().hi));
+    }
+    if let Some(tp) = &class.super_type_params {
+        i = i.max(rel(tp.span.hi));
+    }
+    for imp in &class.implements {
+        i = i.max(rel(imp.span.hi));
+    }
+    while i < bytes.len() && bytes[i] != b'{' {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i = source[i + 2..].find("*/").map(|k| i + 2 + k + 2).unwrap_or(bytes.len());
+        } else {
+            i += 1;
+        }
+    }
+    let body_start = i + 1;
+    let body_end = rel(class.span.hi).saturating_sub(1);
+    if body_start >= body_end || body_end > bytes.len() {
+        return;
+    }
+
+    let mut method_spans = Vec::new();
+    let mut prop_spans = Vec::new();
+    for member in &class.body {
+        match member {
+            ClassMember::Method(m) => method_spans.extend(leading_comment_spans(comments, m.span().lo, start)),
+            ClassMember::ClassProp(p) => prop_spans.extend(leading_comment_spans(comments, p.span().lo, start)),
+            _ => {}
+        }
+    }
+
+    let body = &source[body_start..body_end];
+    let mut lost: Vec<(usize, &str)> = Vec::new();
+    for (marker, spans, bounded) in [("@sighash", &method_spans, false), ("@embedAlways", &prop_spans, true)] {
+        let mut from = 0;
+        while let Some(k) = body[from..].find(marker) {
+            let at = body_start + from + k;
+            from += k + 1;
+            if bounded {
+                let after = at + marker.len();
+                if after < bytes.len() && (bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_') {
+                    continue;
+                }
+            }
+            if !spans.iter().any(|&(s, e)| s <= at && at < e) {
+                lost.push((at, marker));
+            }
+        }
+    }
+    lost.sort_by_key(|&(at, _)| at);
+    for (at, marker) in lost {
+        let line = source[..at].matches('\n').count() + 1;
+        let col = at - source[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        errors.push(lex_error(&lost_directive_message(marker), file, line, col));
+    }
+}
+
+/// True when `marker` (e.g. `@embedAlways`) appears in `text` followed by a
+/// word boundary — mirroring the TS reference's `/@embedAlways\b/` scan. NOT
+/// used for the non-TS `@sighash` guard, which matches any occurrence of
+/// `@sighash`, glued or not (N-244; see `unsupported_directive_error`).
 fn directive_present(text: &str, marker: &str) -> bool {
     let bytes = text.as_bytes();
     let mut start = 0;
@@ -425,23 +766,58 @@ fn directive_present(text: &str, marker: &str) -> bool {
     false
 }
 
-/// Fail-closed guard for author-facing comment directives on non-TS surfaces.
+/// One non-TS surface: its extension, the human-readable surface name for the
+/// diagnostic, its format doc, the native spelling of each directive on it
+/// (N-093), and its parser. `.runar.ts` is intentionally absent: the default
+/// branch implements the comment directives. Mirrors the TS reference
+/// (01-parse.ts `NON_TS_SURFACES`).
+struct NonTsSurface {
+    ext: &'static str,
+    name: &'static str,
+    doc: &'static str,
+    sighash_spelling: &'static str,
+    embed_spelling: &'static str,
+    parse: fn(&str, Option<&str>) -> ParseResult,
+}
+
+const NON_TS_SURFACES: &[NonTsSurface] = &[
+    NonTsSurface { ext: ".runar.sol", name: "Solidity", doc: "solidity", sighash_spelling: "the function modifier sighash(<FLAGS>)", embed_spelling: "the property modifier embedAlways", parse: super::parser_sol::parse_solidity },
+    NonTsSurface { ext: ".runar.move", name: "Move", doc: "move", sighash_spelling: "the attribute #[sighash(<FLAGS>)]", embed_spelling: "the attribute #[embed_always]", parse: super::parser_move::parse_move },
+    NonTsSurface { ext: ".runar.rs", name: "Rust", doc: "rust", sighash_spelling: "the attribute #[sighash(<FLAGS>)]", embed_spelling: "the attribute #[embed_always]", parse: super::parser_rustmacro::parse_rust_dsl },
+    NonTsSurface { ext: ".runar.py", name: "Python", doc: "python", sighash_spelling: "@public(sighash=\"<FLAGS>\")", embed_spelling: "the wrapper type EmbedAlways[T]", parse: super::parser_python::parse_python },
+    NonTsSurface { ext: ".runar.go", name: "Go DSL", doc: "go", sighash_spelling: "the directive //runar:sighash <FLAGS>", embed_spelling: "the struct tag option runar:\"readonly,embedAlways\"", parse: super::parser_gocontract::parse_go_contract },
+    NonTsSurface { ext: ".runar.rb", name: "Ruby", doc: "ruby", sighash_spelling: "runar_sighash '<FLAGS>'", embed_spelling: "the prop option embed_always: true", parse: super::parser_ruby::parse_ruby },
+    NonTsSurface { ext: ".runar.zig", name: "Zig", doc: "zig", sighash_spelling: "the return type runar.Sighash(\"<FLAGS>\")", embed_spelling: "the type function runar.EmbedAlways(T)", parse: super::parser_zig::parse_zig },
+    NonTsSurface { ext: ".runar.java", name: "Java", doc: "java", sighash_spelling: "the annotation @Sighash(\"<FLAGS>\")", embed_spelling: "the annotation @EmbedAlways", parse: super::parser_java::parse_java },
+];
+
+/// Fail-closed guard for author-facing COMMENT directives on non-TS surfaces.
 /// `@sighash` (#123, per-method sighash type) and `@embedAlways` (#109,
-/// readonly-field DCE opt-out) are honoured only by the TypeScript (.runar.ts)
-/// parser, which reads leading trivia. The eight non-TS surface parsers ignore
-/// comments, so a directive there would be silently dropped and change signing
-/// / DCE semantics — reject rather than miscompile. Word-boundary matched (via
-/// `directive_present`) so an identifier like `sighashType` does not trip it.
-/// Returns a diagnostic message, or `None` when the source is clean.
-fn unsupported_directive_error(source: &str, surface_name: &str) -> Option<String> {
-    if directive_present(source, "@sighash") {
+/// readonly-field DCE opt-out) are read from comments only by the TypeScript
+/// (.runar.ts) parser, which reads leading trivia. The eight non-TS surfaces
+/// spell both directives natively instead (N-093, user decision R38: a
+/// modifier mirroring each surface's readonly idiom — see `NON_TS_SURFACES`),
+/// and their parsers ignore comments, so a comment directive there would be
+/// silently dropped and change signing / DCE semantics — reject rather than
+/// miscompile, and name the native spelling to use. None of the native
+/// spellings contains either marker, so this guard never trips on them.
+/// `@embedAlways` is word-boundary matched (via `directive_present`) so an
+/// identifier like `sighashType` does not trip it; `@sighash` is a plain
+/// substring match (N-244): N-039 made every occurrence of the marker a
+/// directive, so a glued `@sighashSINGLE|FORKID` is refused too, with the
+/// message every tier shares. Returns a diagnostic message, or `None` when the
+/// source is clean.
+fn unsupported_directive_error(source: &str, s: &NonTsSurface) -> Option<String> {
+    if source.contains("@sighash") {
         return Some(format!(
-            "@sighash directive (issue #123) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured"
+            "@sighash directive (issue #123) is not supported as a comment by the {} surface parser; write it as {} (see docs/formats/{}.md)",
+            s.name, s.sighash_spelling, s.doc
         ));
     }
     if directive_present(source, "@embedAlways") {
         return Some(format!(
-            "@embedAlways directive (issue #109) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured"
+            "@embedAlways directive (issue #109) is not supported as a comment by the {} surface parser; write it as {} (see docs/formats/{}.md)",
+            s.name, s.embed_spelling, s.doc
         ));
     }
     None
@@ -468,9 +844,12 @@ fn parse_sighash_on_method(
     visibility: &Visibility,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<i64> {
     let text = leading_comment_text(comments, pos)?;
-    if !directive_present(&text, "@sighash") {
+    // N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType`
+    // reach the extractor and are refused as malformed, not ignored as prose.
+    if !text.contains("@sighash") {
         return None;
     }
 
@@ -480,18 +859,31 @@ fn parse_sighash_on_method(
                 "@sighash directive on non-public method '{}' has no effect — only public methods are spending entry points",
                 name
             ),
-            Some(default_loc(file)),
+            Some(real_loc(cm, file, pos)),
         ));
         return None;
     }
 
+    // The marker is present (checked above), so extraction yields a value or
+    // an error — a malformed or duplicated directive is never "no directive"
+    // (F-039). `None` is unreachable here; treat it as malformed, fail-closed.
     match super::sighash_directive::extract_sighash_directive(&text) {
-        None => None,
         Some(Ok(value)) => Some(value),
+        None => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "Method '{}': {}",
+                    name,
+                    super::sighash_directive::SIGHASH_MALFORMED_ERROR
+                ),
+                Some(real_loc(cm, file, pos)),
+            ));
+            None
+        }
         Some(Err(msg)) => {
             errors.push(Diagnostic::error(
                 format!("Method '{}': {}", name, msg),
-                Some(default_loc(file)),
+                Some(real_loc(cm, file, pos)),
             ));
             None
         }
@@ -610,6 +1002,16 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -
 
                     let element = parse_type_node(&params[0], file, errors);
 
+                    // N-120: the TS reference reads the size with
+                    // parseInt(text, 10), which refuses a 0x/0o/0b spelling.
+                    if let Some(raw) = radix_prefixed_type_literal(&params[1]) {
+                        errors.push(Diagnostic::error(
+                            format!("FixedArray size must be a positive integer literal, got '{}'", raw),
+                            None,
+                        ));
+                        return TypeNode::Custom(type_name);
+                    }
+
                     // The second parameter should be a literal type for the length
                     let length = extract_type_literal_number(&params[1]);
                     if let Some(len) = length {
@@ -661,6 +1063,25 @@ fn ts_entity_name_to_string(entity: &TsEntityName) -> String {
 }
 
 /// Try to extract a literal number from a type node (e.g. `10` in `FixedArray<bigint, 10>`).
+/// N-120: the number literal type's text as written, when it carries a
+/// `0x` / `0o` / `0b` radix prefix (either case); N-307: or a `_` separator,
+/// or is a bigint literal (`2n`).
+fn radix_prefixed_type_literal(ts_type: &TsType) -> Option<String> {
+    match ts_type {
+        TsType::TsLitType(lit) => match &lit.lit {
+            TsLit::Number(n) => n.raw.as_ref().map(|r| r.to_string()).filter(|r| {
+                let b = r.as_bytes();
+                (b.len() > 1 && b[0] == b'0' && matches!(b[1], b'x' | b'X' | b'o' | b'O' | b'b' | b'B'))
+                    || r.contains('_') // N-307: a numeric separator (`1_0`)
+            }),
+            // N-307: a bigint suffix (`2n`).
+            TsLit::BigInt(n) => n.raw.as_ref().map(|r| r.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn extract_type_literal_number(ts_type: &TsType) -> Option<usize> {
     match ts_type {
         TsType::TsLitType(lit) => match &lit.lit {
@@ -675,45 +1096,98 @@ fn extract_type_literal_number(ts_type: &TsType) -> Option<usize> {
 // Statements
 // ---------------------------------------------------------------------------
 
-fn parse_block_stmts(stmts: &[Stmt], file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Statement> {
+fn parse_block_stmts(
+    stmts: &[Stmt],
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Vec<Statement> {
     let mut result = Vec::new();
     for stmt in stmts {
-        if let Some(parsed) = parse_statement(stmt, file, errors) {
+        if let Some(parsed) = parse_statement(stmt, file, errors, cm) {
             result.push(parsed);
         }
     }
     result
 }
 
-fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<Diagnostic>) -> Option<Statement> {
+fn parse_statement(
+    stmt: &Stmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Option<Statement> {
+    // F-337: every statement is located at its first character (1-based
+    // line and char column, the AST convention; codegen/emit.rs converts the
+    // column to the source map's 0-based one).
+    let mut parsed = parse_statement_at_default_loc(stmt, file, errors, cm);
+    if let Some(s) = parsed.as_mut() {
+        let at = cm.lookup_char_pos(stmt.span().lo);
+        *s.source_location_mut() = loc(file, at.line, at.col.0 + 1);
+    }
+    parsed
+}
+
+fn parse_statement_at_default_loc(
+    stmt: &Stmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Option<Statement> {
     match stmt {
-        Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors),
+        Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors, cm),
 
-        Stmt::Expr(expr_stmt) => parse_expression_statement(&expr_stmt.expr, file, errors),
+        Stmt::Expr(expr_stmt) => parse_expression_statement(&expr_stmt.expr, file, errors, cm),
 
-        Stmt::If(if_stmt) => Some(parse_if_statement(if_stmt, file, errors)),
+        Stmt::If(if_stmt) => Some(parse_if_statement(if_stmt, file, errors, cm)),
 
-        Stmt::For(for_stmt) => Some(parse_for_statement(for_stmt, file, errors)),
+        Stmt::For(for_stmt) => Some(parse_for_statement(for_stmt, file, errors, cm)),
 
-        Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors)),
+        Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors, cm)),
 
-        Stmt::Block(block) => {
-            // Flatten block statements
-            let stmts = parse_block_stmts(&block.stmts, file, errors);
-            // Return as individual statements by wrapping in a block-like structure
-            // For simplicity, we report an error -- blocks should be part of if/for
-            if stmts.is_empty() {
-                None
-            } else {
-                errors.push(Diagnostic::error("Standalone block statements are not supported; use if/for", None));
-                None
-            }
-        }
-
+        // F-064: every other kind — a bare block `{ ... }` (empty or not)
+        // included — is refused with the TS reference's diagnostic, never
+        // dropped. An empty bare block used to return None with no error.
         _ => {
-            errors.push(Diagnostic::error(format!("Unsupported statement kind: {:?}", stmt), None));
+            errors.push(Diagnostic::error(
+                format!("Unsupported statement kind: {}", ts_statement_kind_name(stmt)),
+                None,
+            ));
             None
         }
+    }
+}
+
+/// The `ts.SyntaxKind` name the TS reference reports for a statement, so every
+/// tier emits one shared "Unsupported statement kind: <name>" diagnostic.
+fn ts_statement_kind_name(stmt: &Stmt) -> &'static str {
+    match stmt {
+        Stmt::Block(_) => "Block",
+        Stmt::Empty(_) => "EmptyStatement",
+        Stmt::Debugger(_) => "DebuggerStatement",
+        Stmt::With(_) => "WithStatement",
+        Stmt::Return(_) => "ReturnStatement",
+        Stmt::Labeled(_) => "LabeledStatement",
+        Stmt::Break(_) => "BreakStatement",
+        Stmt::Continue(_) => "ContinueStatement",
+        Stmt::If(_) => "IfStatement",
+        Stmt::Switch(_) => "SwitchStatement",
+        Stmt::Throw(_) => "ThrowStatement",
+        Stmt::Try(_) => "TryStatement",
+        Stmt::While(_) => "WhileStatement",
+        Stmt::DoWhile(_) => "DoStatement",
+        Stmt::For(_) => "ForStatement",
+        Stmt::ForIn(_) => "ForInStatement",
+        Stmt::ForOf(_) => "ForOfStatement",
+        Stmt::Expr(_) => "ExpressionStatement",
+        Stmt::Decl(Decl::Class(_)) => "ClassDeclaration",
+        Stmt::Decl(Decl::Fn(_)) => "FunctionDeclaration",
+        Stmt::Decl(Decl::Var(_)) => "VariableStatement",
+        Stmt::Decl(Decl::TsInterface(_)) => "InterfaceDeclaration",
+        Stmt::Decl(Decl::TsTypeAlias(_)) => "TypeAliasDeclaration",
+        Stmt::Decl(Decl::TsEnum(_)) => "EnumDeclaration",
+        Stmt::Decl(Decl::TsModule(_)) => "ModuleDeclaration",
+        Stmt::Decl(_) => "VariableStatement",
     }
 }
 
@@ -734,6 +1208,7 @@ fn parse_variable_statement(
     var_decl: &VarDecl,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<Statement> {
     if var_decl.decls.is_empty() {
         return None;
@@ -784,7 +1259,7 @@ fn parse_variable_statement(
     let is_const = var_decl.kind == VarDeclKind::Const;
 
     let init = if let Some(ref init_expr) = decl.init {
-        parse_expression(init_expr, file, errors)
+        parse_expression(init_expr, file, errors, cm)
     } else {
         errors.push(Diagnostic::error(format!("Variable '{}' must have an initializer", name), None));
         Expression::BigIntLiteral { value: BigInt::from(0) }
@@ -813,13 +1288,14 @@ fn parse_expression_statement(
     expr: &Expr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Option<Statement> {
     // Check if this is an assignment expression (a = b, this.x = b)
     if let Expr::Assign(assign) = expr {
-        return Some(parse_assignment_expr(assign, file, errors));
+        return Some(parse_assignment_expr(assign, file, errors, cm));
     }
 
-    let expression = parse_expression(expr, file, errors);
+    let expression = parse_expression(expr, file, errors, cm);
     Some(Statement::ExpressionStatement {
         expression,
         source_location: default_loc(file),
@@ -830,12 +1306,13 @@ fn parse_assignment_expr(
     assign: &AssignExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
-    let target = parse_assign_target(&assign.left, file, errors);
+    let target = parse_assign_target(&assign.left, file, errors, cm);
 
     match assign.op {
         AssignOp::Assign => {
-            let value = parse_expression(&assign.right, file, errors);
+            let value = parse_expression(&assign.right, file, errors, cm);
             Statement::Assignment {
                 target,
                 value,
@@ -857,12 +1334,13 @@ fn parse_assignment_expr(
             };
 
             if let Some(bin_op) = bin_op {
-                let right = parse_expression(&assign.right, file, errors);
-                let target_for_rhs = parse_assign_target(&assign.left, file, errors);
+                let right = parse_expression(&assign.right, file, errors, cm);
+                let target_for_rhs = parse_assign_target(&assign.left, file, errors, cm);
                 let value = Expression::BinaryExpr {
                     op: bin_op,
                     left: Box::new(target_for_rhs),
                     right: Box::new(right),
+                    source_location: None,
                 };
                 Statement::Assignment {
                     target,
@@ -870,7 +1348,7 @@ fn parse_assignment_expr(
                     source_location: default_loc(file),
                 }
             } else {
-                let value = parse_expression(&assign.right, file, errors);
+                let value = parse_expression(&assign.right, file, errors, cm);
                 Statement::Assignment {
                     target,
                     value,
@@ -885,19 +1363,22 @@ fn parse_assign_target(
     target: &AssignTarget,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     match target {
         AssignTarget::Simple(simple) => match simple {
             SimpleAssignTarget::Ident(ident) => Expression::Identifier {
                 name: ident.id.sym.to_string(),
+                source_location: None,
             },
             SimpleAssignTarget::Member(member) => {
-                parse_member_expression(member, file, errors)
+                parse_member_expression(member, file, errors, cm)
             }
             _ => {
                 errors.push(Diagnostic::error("Unsupported assignment target", None));
                 Expression::Identifier {
                     name: "_error".to_string(),
+                    source_location: None,
                 }
             }
         },
@@ -905,19 +1386,25 @@ fn parse_assign_target(
             errors.push(Diagnostic::error("Destructuring assignment is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
+                source_location: None,
             }
         }
     }
 }
 
-fn parse_if_statement(if_stmt: &IfStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
-    let condition = parse_expression(&if_stmt.test, file, errors);
-    let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors);
+fn parse_if_statement(
+    if_stmt: &IfStmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Statement {
+    let condition = parse_expression(&if_stmt.test, file, errors, cm);
+    let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors, cm);
 
     let else_branch = if_stmt
         .alt
         .as_ref()
-        .map(|alt| parse_stmt_or_block(alt, file, errors));
+        .map(|alt| parse_stmt_or_block(alt, file, errors, cm));
 
     Statement::IfStatement {
         condition,
@@ -931,11 +1418,12 @@ fn parse_stmt_or_block(
     stmt: &Stmt,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Vec<Statement> {
     match stmt {
-        Stmt::Block(block) => parse_block_stmts(&block.stmts, file, errors),
+        Stmt::Block(block) => parse_block_stmts(&block.stmts, file, errors, cm),
         _ => {
-            if let Some(s) = parse_statement(stmt, file, errors) {
+            if let Some(s) = parse_statement(stmt, file, errors, cm) {
                 vec![s]
             } else {
                 Vec::new()
@@ -944,12 +1432,17 @@ fn parse_stmt_or_block(
     }
 }
 
-fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
+fn parse_for_statement(
+    for_stmt: &ForStmt,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Statement {
     // Parse initializer
     let init = if let Some(ref init_expr) = for_stmt.init {
         match init_expr {
             VarDeclOrExpr::VarDecl(var_decl) => {
-                if let Some(stmt) = parse_variable_statement(var_decl, file, errors) {
+                if let Some(stmt) = parse_variable_statement(var_decl, file, errors, cm) {
                     stmt
                 } else {
                     make_default_for_init(file)
@@ -970,7 +1463,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnost
 
     // Parse condition
     let condition = if let Some(ref cond) = for_stmt.test {
-        parse_expression(cond, file, errors)
+        parse_expression(cond, file, errors, cm)
     } else {
         errors.push(Diagnostic::error("For loop must have a condition", None));
         Expression::BoolLiteral { value: false }
@@ -978,7 +1471,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnost
 
     // Parse update
     let update = if let Some(ref upd) = for_stmt.update {
-        parse_for_update(upd, file, errors)
+        parse_for_update(upd, file, errors, cm)
     } else {
         errors.push(Diagnostic::error("For loop must have an update expression", None));
         Statement::ExpressionStatement {
@@ -988,7 +1481,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnost
     };
 
     // Parse body
-    let body = parse_stmt_or_block(&for_stmt.body, file, errors);
+    let body = parse_stmt_or_block(&for_stmt.body, file, errors, cm);
 
     Statement::ForStatement {
         init: Box::new(init),
@@ -1003,10 +1496,11 @@ fn parse_for_update(
     expr: &Expr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
     match expr {
         Expr::Update(update) => {
-            let operand = parse_expression(&update.arg, file, errors);
+            let operand = parse_expression(&update.arg, file, errors, cm);
             let is_increment = update.op == UpdateOp::PlusPlus;
             let expression = if is_increment {
                 Expression::IncrementExpr {
@@ -1025,7 +1519,7 @@ fn parse_for_update(
             }
         }
         _ => {
-            let expression = parse_expression(expr, file, errors);
+            let expression = parse_expression(expr, file, errors, cm);
             Statement::ExpressionStatement {
                 expression,
                 source_location: default_loc(file),
@@ -1038,11 +1532,12 @@ fn parse_return_statement(
     ret_stmt: &ReturnStmt,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Statement {
     let value = ret_stmt
         .arg
         .as_ref()
-        .map(|e| parse_expression(e, file, errors));
+        .map(|e| parse_expression(e, file, errors, cm));
 
     Statement::ReturnStatement {
         value,
@@ -1064,17 +1559,17 @@ fn make_default_for_init(file: &str) -> Statement {
 // Expressions
 // ---------------------------------------------------------------------------
 
-fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
+fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>, cm: &SourceMap) -> Expression {
     match expr {
-        Expr::Bin(bin) => parse_binary_expression(bin, file, errors),
+        Expr::Bin(bin) => parse_binary_expression(bin, file, errors, cm),
 
-        Expr::Unary(unary) => parse_unary_expression(unary, file, errors),
+        Expr::Unary(unary) => parse_unary_expression(unary, file, errors, cm),
 
-        Expr::Update(update) => parse_update_expression(update, file, errors),
+        Expr::Update(update) => parse_update_expression(update, file, errors, cm),
 
-        Expr::Call(call) => parse_call_expression(call, file, errors),
+        Expr::Call(call) => parse_call_expression(call, file, errors, cm),
 
-        Expr::Member(member) => parse_member_expression(member, file, errors),
+        Expr::Member(member) => parse_member_expression(member, file, errors, cm),
 
         Expr::SuperProp(super_prop) => {
             // super.x -- unlikely in Rúnar but handle gracefully
@@ -1082,14 +1577,16 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
                 SuperProp::Ident(ident) => Expression::MemberExpr {
                     object: Box::new(Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }),
                     property: ident.sym.to_string(),
                 },
                 SuperProp::Computed(comp) => {
-                    let _ = parse_expression(&comp.expr, file, errors);
+                    let _ = parse_expression(&comp.expr, file, errors, cm);
                     errors.push(Diagnostic::error("Computed super property access not supported", None));
                     Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }
                 }
             }
@@ -1097,6 +1594,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
 
         Expr::Ident(ident) => Expression::Identifier {
             name: ident.sym.to_string(),
+            source_location: Some(real_loc(cm, file, ident.span.lo)),
         },
 
         Expr::Lit(Lit::BigInt(bigint)) => {
@@ -1112,9 +1610,11 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
         }
 
         Expr::Lit(Lit::Num(num)) => {
-            // Plain numeric literal -- treat as bigint for Rúnar
+            // Plain numeric literal -- treat as bigint for Rúnar. N-028: read
+            // the exact source text, never swc's f64 `value`. An invalid
+            // literal was already refused by the F-026 pre-pass.
             Expression::BigIntLiteral {
-                value: BigInt::from(num.value as i128),
+                value: ts_num_literal_value(num).unwrap_or_else(|| BigInt::from(0)),
             }
         }
 
@@ -1124,6 +1624,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             // String literals are hex-encoded ByteString values
             Expression::ByteStringLiteral {
                 value: s.value.to_string(),
+                source_location: Some(real_loc(cm, file, s.span.lo)),
             }
         }
 
@@ -1132,19 +1633,21 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             if tpl.exprs.is_empty() && tpl.quasis.len() == 1 {
                 Expression::ByteStringLiteral {
                     value: tpl.quasis[0].raw.to_string(),
+                    source_location: Some(real_loc(cm, file, tpl.span.lo)),
                 }
             } else {
                 errors.push(Diagnostic::error("Template literals with expressions are not supported", None));
                 Expression::ByteStringLiteral {
                     value: String::new(),
+                    source_location: None,
                 }
             }
         }
 
         Expr::Cond(cond) => {
-            let condition = parse_expression(&cond.test, file, errors);
-            let consequent = parse_expression(&cond.cons, file, errors);
-            let alternate = parse_expression(&cond.alt, file, errors);
+            let condition = parse_expression(&cond.test, file, errors, cm);
+            let consequent = parse_expression(&cond.cons, file, errors, cm);
+            let alternate = parse_expression(&cond.alt, file, errors, cm);
             Expression::TernaryExpr {
                 condition: Box::new(condition),
                 consequent: Box::new(consequent),
@@ -1152,27 +1655,42 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             }
         }
 
-        Expr::Paren(paren) => parse_expression(&paren.expr, file, errors),
+        Expr::Paren(paren) => parse_expression(&paren.expr, file, errors, cm),
 
-        Expr::This(_) => Expression::Identifier {
+        Expr::This(this) => Expression::Identifier {
             name: "this".to_string(),
+            source_location: Some(real_loc(cm, file, this.span.lo)),
         },
 
         Expr::TsAs(as_expr) => {
-            // Type assertions: ignore the type, parse the expression
-            parse_expression(&as_expr.expr, file, errors)
+            // Type assertions: ignore the type, parse the expression. N-359:
+            // `number` is not a Rúnar type, so an assertion may not smuggle it
+            // past the declaration-site refusal; every other asserted type is
+            // erased, as in the other six tiers.
+            if let TsType::TsKeywordType(kw) = &*as_expr.type_ann {
+                if matches!(kw.kind, TsKeywordTypeKind::TsNumberKeyword) {
+                    parse_type_node(&as_expr.type_ann, file, errors);
+                }
+            }
+            parse_expression(&as_expr.expr, file, errors, cm)
+        }
+
+        Expr::TsConstAssertion(c) => {
+            // `expr as const`: the assertion is erased (N-359, parity with the
+            // other six tiers).
+            parse_expression(&c.expr, file, errors, cm)
         }
 
         Expr::TsNonNull(nn) => {
             // Non-null assertion: just parse the inner expression
-            parse_expression(&nn.expr, file, errors)
+            parse_expression(&nn.expr, file, errors, cm)
         }
 
         Expr::Assign(assign) => {
             // Assignment expression in expression context -- should be handled
             // at statement level, but in case it appears in an expression context
             errors.push(Diagnostic::error("Assignment expressions in expression context are not recommended", None));
-            let value = parse_expression(&assign.right, file, errors);
+            let value = parse_expression(&assign.right, file, errors, cm);
             value
         }
 
@@ -1183,7 +1701,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             for el in &arr.elems {
                 match el {
                     Some(swc::ExprOrSpread { spread: None, expr }) => {
-                        elements.push(parse_expression(expr, file, errors));
+                        elements.push(parse_expression(expr, file, errors, cm));
                     }
                     Some(_) => {
                         errors.push(Diagnostic::error(
@@ -1213,9 +1731,10 @@ fn parse_binary_expression(
     bin: &swc::BinExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let left = parse_expression(&bin.left, file, errors);
-    let right = parse_expression(&bin.right, file, errors);
+    let left = parse_expression(&bin.left, file, errors, cm);
+    let right = parse_expression(&bin.right, file, errors, cm);
 
     let op = match bin.op {
         swc::BinaryOp::Add => BinaryOp::Add,
@@ -1254,6 +1773,8 @@ fn parse_binary_expression(
         op,
         left: Box::new(left),
         right: Box::new(right),
+        // N-472: where the node starts, including a leading `(`.
+        source_location: Some(real_loc(cm, file, bin.span.lo)),
     }
 }
 
@@ -1261,8 +1782,9 @@ fn parse_unary_expression(
     unary: &SwcUnaryExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let operand = parse_expression(&unary.arg, file, errors);
+    let operand = parse_expression(&unary.arg, file, errors, cm);
 
     let op = match unary.op {
         swc::UnaryOp::Bang => UnaryOp::Not,
@@ -1277,6 +1799,8 @@ fn parse_unary_expression(
     Expression::UnaryExpr {
         op,
         operand: Box::new(operand),
+        // N-472: the operator token.
+        source_location: Some(real_loc(cm, file, unary.span.lo)),
     }
 }
 
@@ -1284,8 +1808,9 @@ fn parse_update_expression(
     update: &UpdateExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
-    let operand = parse_expression(&update.arg, file, errors);
+    let operand = parse_expression(&update.arg, file, errors, cm);
 
     if update.op == UpdateOp::PlusPlus {
         Expression::IncrementExpr {
@@ -1304,6 +1829,7 @@ fn parse_call_expression(
     call: &CallExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     // Special-case asm({ body, in_arity?, out_arity? }) — normalise the
     // object-literal argument into a CallExpr with three positional args
@@ -1322,14 +1848,16 @@ fn parse_call_expression(
     }
 
     let callee = match &call.callee {
-        Callee::Expr(e) => parse_expression(e, file, errors),
+        Callee::Expr(e) => parse_expression(e, file, errors, cm),
         Callee::Super(_) => Expression::Identifier {
             name: "super".to_string(),
+            source_location: None,
         },
         Callee::Import(_) => {
             errors.push(Diagnostic::error("Dynamic import is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
+                source_location: None,
             }
         }
     };
@@ -1337,7 +1865,7 @@ fn parse_call_expression(
     let args: Vec<Expression> = call
         .args
         .iter()
-        .map(|arg| parse_expression(&arg.expr, file, errors))
+        .map(|arg| parse_expression(&arg.expr, file, errors, cm))
         .collect();
 
     Expression::CallExpr {
@@ -1368,6 +1896,7 @@ fn parse_call_expression(
 fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
     let callee = Box::new(Expression::Identifier {
         name: "asm".to_string(),
+        source_location: None,
     });
 
     // Capture the generic type argument asm<T>({...}) if present, BEFORE
@@ -1431,16 +1960,18 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
                 Expr::Lit(Lit::Str(s)) => {
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: s.value.to_string(),
+                        source_location: None,
                     });
                 }
                 Expr::Tpl(tpl) if tpl.exprs.is_empty() && tpl.quasis.len() == 1 => {
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: tpl.quasis[0].raw.to_string(),
+                        source_location: None,
                     });
                 }
                 Expr::Array(arr) => {
                     let encoded = encode_asm_array_body(arr, errors);
-                    body_expr = Some(Expression::ByteStringLiteral { value: encoded });
+                    body_expr = Some(Expression::ByteStringLiteral { value: encoded, source_location: None });
                 }
                 other => {
                     errors.push(Diagnostic::error(
@@ -1452,6 +1983,7 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
                     ));
                     body_expr = Some(Expression::ByteStringLiteral {
                         value: String::new(),
+                        source_location: None,
                     });
                 }
             },
@@ -1484,6 +2016,7 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
         ));
         Expression::ByteStringLiteral {
             value: String::new(),
+            source_location: None,
         }
     });
     // Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects the
@@ -1633,6 +2166,26 @@ fn encode_asm_array_body(
     hex_str
 }
 
+/// N-028: the exact value of a plain `.runar.ts` number literal, read from its
+/// source text as the TS reference does (`tsLiteralValue`). swc's `value` is an
+/// f64 and rounds anything above 2^53.
+fn ts_num_literal_value(num: &swc::Number) -> Option<BigInt> {
+    num.raw.as_ref().and_then(|raw| parse_int_literal("ts", raw)).map(|l| l.value)
+}
+
+/// A `push(<number>)` value, or `None` with the TS reference's diagnostic.
+fn asm_push_num_value(num: &swc::Number, errors: &mut Vec<Diagnostic>) -> Option<BigInt> {
+    let v = ts_num_literal_value(num);
+    if v.is_none() {
+        let text = num.raw.as_ref().map(|r| r.to_string()).unwrap_or_else(|| num.value.to_string());
+        errors.push(Diagnostic::error(
+            format!("push() numeric argument must be an integer, got '{}'", text),
+            None,
+        ));
+    }
+    v
+}
+
 /// Encode a literal argument passed to push(...) inside an asm() body array.
 /// Returns the encoded hex string, or `None` if the literal is unrecognised
 /// (with a diagnostic pushed).
@@ -1640,7 +2193,8 @@ fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<
     use crate::codegen::emit::encode_push_int;
     match expr {
         Expr::Lit(Lit::Num(num)) => {
-            let (h, _) = encode_push_int(&BigInt::from(num.value as i128));
+            let v = asm_push_num_value(num, errors)?;
+            let (h, _) = encode_push_int(&v);
             Some(h)
         }
         Expr::Lit(Lit::BigInt(bi)) => {
@@ -1651,7 +2205,8 @@ fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<
         Expr::Unary(unary) if unary.op == swc::UnaryOp::Minus => {
             match unary.arg.as_ref() {
                 Expr::Lit(Lit::Num(num)) => {
-                    let (h, _) = encode_push_int(&BigInt::from(-(num.value as i128)));
+                    let v = asm_push_num_value(num, errors)?;
+                    let (h, _) = encode_push_int(&(-v));
                     Some(h)
                 }
                 Expr::Lit(Lit::BigInt(bi)) => {
@@ -1788,13 +2343,14 @@ fn parse_member_expression(
     member: &SwcMemberExpr,
     file: &str,
     errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
 ) -> Expression {
     let prop_name = match &member.prop {
         MemberProp::Ident(ident) => ident.sym.to_string(),
         MemberProp::Computed(comp) => {
             // Computed member access: obj[expr]
-            let object = parse_expression(&member.obj, file, errors);
-            let index = parse_expression(&comp.expr, file, errors);
+            let object = parse_expression(&member.obj, file, errors, cm);
+            let index = parse_expression(&comp.expr, file, errors, cm);
             return Expression::IndexAccess {
                 object: Box::new(object),
                 index: Box::new(index),
@@ -1807,14 +2363,15 @@ fn parse_member_expression(
     };
 
     // this.x -> PropertyAccess
-    if let Expr::This(_) = &*member.obj {
+    if let Expr::This(this) = &*member.obj {
         return Expression::PropertyAccess {
             property: prop_name,
+            source_location: Some(real_loc(cm, file, this.span.lo)),
         };
     }
 
     // General member access: obj.method
-    let object = parse_expression(&member.obj, file, errors);
+    let object = parse_expression(&member.obj, file, errors, cm);
     Expression::MemberExpr {
         object: Box::new(object),
         property: prop_name,
@@ -1848,6 +2405,15 @@ fn bigint_to_i128(bigint_lit: &swc::BigInt) -> i128 {
 /// - `.runar.java` -> Java parser
 /// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
+    let mut result = parse_source_dispatch(source, file_name);
+    // N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    if let Some(contract) = result.contract.as_mut() {
+        super::loop_condition::normalize_loop_conditions(contract);
+    }
+    result
+}
+
+fn parse_source_dispatch(source: &str, file_name: Option<&str>) -> ParseResult {
     // DoS-bound size guard. Reject oversized source BEFORE any
     // format-specific parser touches the input. BUG-008 follow-up.
     if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
@@ -1858,60 +2424,36 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
         };
     }
     let name = file_name.unwrap_or("contract.ts");
-    // Fail-closed directive guard: `@sighash` / `@embedAlways` are honoured only
-    // on the TypeScript (.runar.ts) surface; the eight non-TS surface parsers
-    // below ignore comments, so a directive there would be silently dropped.
-    // Reject rather than miscompile. The default TS branch is exempt.
-    if name.ends_with(".runar.sol") {
-        if let Some(msg) = unsupported_directive_error(source, "Solidity") {
-            return directive_guard_result(msg);
+    // Fail-closed directive guard: `@sighash` / `@embedAlways` COMMENTS are
+    // read only on the TypeScript (.runar.ts) surface; the eight non-TS surface
+    // parsers below ignore comments, so a comment directive there would be
+    // silently dropped. Reject rather than miscompile, naming the surface's
+    // native spelling (N-093). The default TS branch is exempt.
+    for s in NON_TS_SURFACES {
+        if name.ends_with(s.ext) {
+            if let Some(msg) = unsupported_directive_error(source, s) {
+                return directive_guard_result(msg);
+            }
+            let mut result = (s.parse)(source, file_name);
+            // N-344: an immutable `.runar.rs` `let` / `.runar.zig` `const` local
+            // cannot be reassigned (the other surfaces have no such spelling).
+            if s.ext == ".runar.rs" || s.ext == ".runar.zig" {
+                if let Some(contract) = result.contract.as_ref() {
+                    let errs = super::const_reassign::check_const_reassignment(contract);
+                    result.errors.extend(errs);
+                }
+            }
+            return result;
         }
-        return super::parser_sol::parse_solidity(source, file_name);
-    }
-    if name.ends_with(".runar.move") {
-        if let Some(msg) = unsupported_directive_error(source, "Move") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_move::parse_move(source, file_name);
-    }
-    if name.ends_with(".runar.rs") {
-        if let Some(msg) = unsupported_directive_error(source, "Rust") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_rustmacro::parse_rust_dsl(source, file_name);
-    }
-    if name.ends_with(".runar.py") {
-        if let Some(msg) = unsupported_directive_error(source, "Python") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_python::parse_python(source, file_name);
-    }
-    if name.ends_with(".runar.go") {
-        if let Some(msg) = unsupported_directive_error(source, "Go DSL") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_gocontract::parse_go_contract(source, file_name);
-    }
-    if name.ends_with(".runar.rb") {
-        if let Some(msg) = unsupported_directive_error(source, "Ruby") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_ruby::parse_ruby(source, file_name);
-    }
-    if name.ends_with(".runar.zig") {
-        if let Some(msg) = unsupported_directive_error(source, "Zig") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_zig::parse_zig(source, file_name);
-    }
-    if name.ends_with(".runar.java") {
-        if let Some(msg) = unsupported_directive_error(source, "Java") {
-            return directive_guard_result(msg);
-        }
-        return super::parser_java::parse_java(source, file_name);
     }
     // Default: TypeScript parser
-    parse(source, file_name)
+    let mut result = parse(source, file_name);
+    // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+    if let Some(contract) = result.contract.as_ref() {
+        let errs = super::const_reassign::check_const_reassignment(contract);
+        result.errors.extend(errs);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1924,7 +2466,7 @@ mod tests {
 
     #[test]
     fn test_parse_source_allows_non_directive_identifier() {
-        // A field named `sighashType` must NOT trip the word-boundary guard.
+        // A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard.
         let src = r#"
             class Counter extends SmartContract {
                 readonly sighashType: bigint;
@@ -2052,6 +2594,52 @@ mod tests {
         let c = r.contract.unwrap();
         let m = c.methods.iter().find(|m| m.name == "unlock").unwrap();
         assert_eq!(m.sighash_type, Some(0x43));
+    }
+
+    // N-199 (user decision R75): a `@sighash` / `@embedAlways` marker inside
+    // the contract class body that is not in the leading comments of the
+    // member kind that reads it (method / property) is refused with the shared
+    // message, located at the marker's `@` (1-based line, 0-based column as
+    // printed).
+    //
+    // Proves: the Rust TS-surface parser refuses each lost-directive shape the
+    // TS reference refuses (sighash-parse.test.ts, "N-199"), with the same text
+    // and location, and still accepts attached directives and prose outside the
+    // class body.
+    // Does not prove: cross-tier agreement (conformance/negatives/
+    // n199-lost-directive-parity.test.ts does) or non-ASCII column units.
+    #[test]
+    fn test_n199_lost_directive_refused() {
+        let stateful = |body: &str| format!(
+            "import {{ StatefulSmartContract }} from 'runar-lang';\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  constructor(n: bigint) {{ super(n); this.n = n; }}\n{}\n}}\n",
+            body
+        );
+        let bump = "  public bump(): void { this.addOutput(1000n, this.n); }";
+        let cases: Vec<(&str, String, &str)> = vec![
+            ("line comment sharing a line with the preceding method", stateful(&format!("  private foo(): void {{}} // @sighash SINGLE|FORKID\n{}", bump)), "@sighash"),
+            ("JSDoc sharing a line with the preceding method", stateful(&format!("  private foo(): void {{}} /** @sighash SINGLE|FORKID */\n{}", bump)), "@sighash"),
+            ("end of class body", stateful(&format!("{}\n  /** @sighash SINGLE|FORKID */", bump)), "@sighash"),
+            ("inside a method body", stateful("  public bump(): void {\n    // @sighash SINGLE|FORKID\n    this.addOutput(1000n, this.n);\n  }"), "@sighash"),
+            ("on a property", stateful(&format!("  /** @sighash SINGLE|FORKID */\n  readonly k: bigint = 1n;\n{}", bump)), "@sighash"),
+            ("above the constructor", format!("import {{ StatefulSmartContract }} from 'runar-lang';\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  /** @sighash SINGLE|FORKID */\n  constructor(n: bigint) {{ super(n); this.n = n; }}\n{}\n}}\n", bump), "@sighash"),
+            ("@embedAlways sharing a line with the preceding property", "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint; // @embedAlways\n  readonly tag: bigint;\n  constructor(a: bigint, tag: bigint) { super(a, tag); this.a = a; this.tag = tag; }\n  public go(x: bigint): void { assert(x == this.a); }\n}\n".to_string(), "@embedAlways"),
+            ("@embedAlways on a method", "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n  readonly a: bigint;\n  constructor(a: bigint) { super(a); this.a = a; }\n  /** @embedAlways */\n  public go(x: bigint): void { assert(x == this.a); }\n}\n".to_string(), "@embedAlways"),
+        ];
+        for (name, src, marker) in &cases {
+            let r = parse_source(src, Some("X.runar.ts"));
+            let idx = src.find(marker).unwrap();
+            let line = src[..idx].matches('\n').count() + 1;
+            let col = idx - src[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let want = format!("X.runar.ts:{}:{}: {}", line, col, lost_directive_message(marker));
+            assert_eq!(r.error_strings(), vec![want], "case: {}", name);
+        }
+
+        let control = format!("import {{ StatefulSmartContract }} from 'runar-lang';\n// File header prose: this contract uses @sighash SINGLE|FORKID and @embedAlways.\n/** Class doc: `@sighash` lives on bump, `@embedAlways` on tag. */\nexport class C extends StatefulSmartContract {{\n  n: bigint;\n  /** @embedAlways */\n  readonly tag: bigint;\n  constructor(n: bigint, tag: bigint) {{ super(n, tag); this.n = n; this.tag = tag; }}\n  private foo(): void {{}}\n  // @sighash SINGLE|FORKID\n{}\n}}\n", bump);
+        let r = parse_source(&control, Some("X.runar.ts"));
+        assert!(r.errors.is_empty(), "control: unexpected errors: {:?}", r.error_strings());
+        let c = r.contract.unwrap();
+        assert_eq!(c.methods.iter().find(|m| m.name == "bump").unwrap().sighash_type, Some(0x43));
+        assert!(c.properties.iter().find(|p| p.name == "tag").unwrap().embed_always);
     }
 
     #[test]
@@ -2531,6 +3119,96 @@ mod tests {
         assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
         let contract = result.contract.expect("exported class should be found");
         assert_eq!(contract.name, "Exported");
+    }
+
+    // N-062: `export default class X extends SmartContract` must be accepted,
+    // same as `class X ...` and `export class X ...`. Pre-fix, the parser only
+    // recognized `Stmt::Decl(Decl::Class)` and `ModuleDecl::ExportDecl`, so an
+    // export-default contract (the only class in the file) fell through to
+    // "No class extending ... found" even though the TS reference (which just
+    // calls `sourceFile.getClasses()`, export-agnostic) compiles it fine.
+    //
+    // Proves: a lone `export default class` contract parses with no errors
+    // and the right contract name.
+    // Does not prove: codegen bytes match the TS reference for this shape
+    // (covered by the `EXPORT_DEFAULT` shape added to
+    // `n011-ts-class-selection-vm.test.ts`), or anonymous `export default
+    // class extends SmartContract { ... }` (no name at all) — out of scope
+    // for this item.
+    #[test]
+    fn test_parse_export_default_contract() {
+        let source = r#"
+            import { SmartContract, assert } from 'runar-lang';
+
+            export default class Exported extends SmartContract {
+                readonly val: bigint;
+
+                constructor(val: bigint) {
+                    super(val);
+                }
+
+                public check() {
+                    assert(this.val > 0n);
+                }
+            }
+        "#;
+        let result = parse(source, Some("Exported.runar.ts"));
+        assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
+        let contract = result.contract.expect("export-default class should be found");
+        assert_eq!(contract.name, "Exported");
+    }
+
+    // N-062: the previous implementation ran two separate passes — all plain
+    // `class X ...` declarations first, then all exported declarations,
+    // regardless of where either actually appears in the file — so an
+    // exported class occurring BEFORE a plain class in the source could still
+    // win the "keep the last match" tie-break, contradicting the TS reference
+    // (which walks `sourceFile.getClasses()` in document order and keeps
+    // whichever matching class it sees last).
+    //
+    // Here `export class B` appears first and plain `class A` appears second;
+    // the TS reference, scanning in document order, keeps `A`. Pre-fix, Rust's
+    // non-exported-pass-then-exported-pass order always overwrote with the
+    // exported class last, keeping `B` — the wrong one.
+    //
+    // Proves: with two valid contract classes, Rust keeps the one that is
+    // LAST in source order (matching the TS reference), not the one found by
+    // whichever internal pass runs last.
+    // Does not prove: the diagnostic's reported location, or behavior with
+    // more than two valid classes (covered by existing `THREE_VALID`-style
+    // coverage in n011-ts-class-selection-vm.test.ts).
+    #[test]
+    fn test_export_order_keeps_last_in_source_order() {
+        let source = r#"
+            import { SmartContract, assert } from 'runar-lang';
+
+            export class B extends SmartContract {
+                constructor() {
+                    super();
+                }
+
+                public unlock(x: bigint) {
+                    assert(x === 1n);
+                }
+            }
+
+            class A extends SmartContract {
+                constructor() {
+                    super();
+                }
+
+                public unlock(x: bigint) {
+                    assert(x === 2n);
+                }
+            }
+        "#;
+        let result = parse(source, Some("Order.runar.ts"));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("Only one SmartContract subclass is allowed per file")),
+            "expected the 'only one' diagnostic: {:?}", result.errors
+        );
+        let contract = result.contract.expect("a contract should still be selected");
+        assert_eq!(contract.name, "A", "should keep the LAST class in source order, matching the TS reference");
     }
 
     // -----------------------------------------------------------------------

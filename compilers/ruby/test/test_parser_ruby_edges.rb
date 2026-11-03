@@ -178,6 +178,33 @@ class TestParserRubyEdges < Minitest::Test
     assert_equal 42, prop.initializer.value
   end
 
+  # F-206: 'default: -5' must parse as a single negative literal, matching
+  # the TS reference. This tier called parse_primary directly for the
+  # default-value expression, which has no unary-minus handling, and
+  # rejected '-' as unexpected.
+  def test_property_default_initializer_accepts_unary_minus
+    source = <<~RB
+      require 'runar'
+
+      class DefaultNeg < Runar::SmartContract
+        prop :count, Bigint, default: -5
+
+        runar_public x: Bigint
+        def check(x)
+          assert x + @count == x - 5
+        end
+      end
+    RB
+
+    result = parse(source)
+    assert_empty result.errors.map(&:format_message), result.error_strings.join('; ')
+    prop = result.contract.properties.first
+    assert_instance_of UnaryExpr, prop.initializer
+    assert_equal '-', prop.initializer.op
+    assert_instance_of BigIntLiteral, prop.initializer.operand
+    assert_equal 5, prop.initializer.operand.value
+  end
+
   def test_property_no_initializer
     source = <<~RB
       require 'runar'
@@ -431,10 +458,22 @@ class TestParserRubyEdges < Minitest::Test
         # No end, no methods, no constructor
     RB
 
-    # Must NOT raise — the parser may recover (auto-generate ctor, etc.) or
-    # report diagnostics. Either is acceptable as long as it terminates.
+    # Must NOT raise. N-319: the class `end` is required, so every tier
+    # reports the shared "missing closing 'end'" diagnostic; the TS reference
+    # (01-parse-ruby.ts) still returns the partial contract named `Broken`
+    # with property `x` and no methods (constructor auto-generated). Ruby must
+    # agree on that specific recovered shape, not merely avoid raising — a stub that
+    # always returns an empty/wrong-named contract would still pass the old
+    # assertion-free body but fails these checks.
+    # Does not prove: anything about method bodies (this fixture has none).
     begin
-      parse(source)
+      result = parse(source)
+      assert_equal 1, result.errors.size
+      assert_includes result.errors.first.message, "missing closing 'end'"
+      refute_nil result.contract
+      assert_equal 'Broken', result.contract.name
+      assert_equal %w[x], result.contract.properties.map(&:name)
+      assert_empty result.contract.methods
     rescue StandardError => e
       flunk "parser crashed on malformed source: #{e.class}: #{e.message}"
     end
@@ -443,8 +482,8 @@ class TestParserRubyEdges < Minitest::Test
   def test_garbage_input_does_not_crash
     begin
       result = parse('@@@ not ruby at all $$$', 'garbage.runar.rb')
-      assert(result.contract.nil? || !result.errors.empty?,
-             'expected diagnostics for garbage input')
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed on garbage input: #{e.class}: #{e.message}"
     end
@@ -467,8 +506,8 @@ class TestParserRubyEdges < Minitest::Test
     # Missing type after `prop :x,` should produce a diagnostic without crashing.
     begin
       result = parse(source)
-      bad = result.contract.nil? || !result.errors.empty?
-      assert bad, 'expected diagnostics for prop without type'
+      # F-376: require an actual diagnostic, not a silent nil-contract pass.
+      refute_empty result.errors, 'expected diagnostics for prop without type'
     rescue StandardError => e
       flunk "parser crashed on missing prop type: #{e.class}: #{e.message}"
     end

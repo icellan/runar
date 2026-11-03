@@ -26,5 +26,12 @@ export default defineConfig({
       '**/.claude/**',
       '**/.worktrees/**',
     ],
+    // vitest 2 never failed a long SYNCHRONOUS test on its timeout; vitest 5
+    // does. Many suites here are long and synchronous (full-corpus compiles,
+    // ScriptVM sweeps, coverage-matrix --check): the longest single test ran
+    // 127 s on CI under vitest 2, and spawn-per-test suites slow down further
+    // when turbo runs several packages at once. A real hang still fails.
+    testTimeout: 300_000,
+    hookTimeout: 300_000,
   },
 });

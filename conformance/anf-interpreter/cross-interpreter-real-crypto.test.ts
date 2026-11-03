@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import {
   AssertionFailureError,
 } from '../../packages/runar-sdk/src/index.js';
 import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
+import { enforceDriverGate } from './driver-gate.js';
 
 // Real-crypto counterpart to cross-interpreter.test.ts and
 // cross-interpreter-strict.test.ts.
@@ -16,16 +17,30 @@ import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
 // each per-SDK driver invoked with `--mode=on-chain`. The mode performs:
 //
 //   - Real ECDSA verify of `checkSig(sig, pk)` against the supplied 32-byte
-//     sighash. SEC1 secp256k1 pubkey, DER signature with optional trailing
-//     sighash type byte.
-//   - Real iterative `checkMultiSig(sigs, pks)` (left-to-right consume,
-//     greedy pubkey-match — Bitcoin's OP_CHECKMULTISIG semantic).
+//     sighash. SEC1 secp256k1 pubkey, DER signature followed by one sighash
+//     type byte (checksig format; bare DER aborts, as in Spend, N-255).
+//   - Real `checkMultiSig(sigs, pks)` as Spend runs OP_CHECKMULTISIG, with
+//     the encoding gates and NULLFAIL (N-259, pinned by
+//     ./checkmultisig-onchain.test.ts).
 //   - Real `checkPreimage(preimage)`: hash256(preimage) byte-equal to
 //     the sighash.
 //
 // On a falsy `assert(...)` predicate, every driver MUST emit:
 //
 //   { "error": "AssertionFailureError", "methodName": "<m>", "bindingName": "<b>" }
+//
+// Where the script itself ABORTS — N-198: a non-empty signature that does not
+// verify, which a node rejects under NULLFAIL (BIP146) instead of pushing
+// false — each tier signals it through its N-197 opcode-abort channel, which
+// this file normalises to one envelope:
+//
+//   { "error": "ScriptAbort", "methodName": "<m>" }
+//
+// from: a thrown non-assert Error carrying "OP_CHECKSIG aborts" (TS, and a
+// non-zero exit with it on stderr for Go / Python / Ruby / Java); a non-zero
+// exit with `ScriptNumberError` on stderr (Zig, which has no message
+// channel); or an AssertionFailureError whose binding is the `checkSig` CALL
+// rather than an `assert` (Rust).
 //
 // On success it emits `{ state, dataOutputs, rawOutputs }` — same shape as
 // strict + lenient. The TS reference is stamped first; every per-SDK
@@ -38,8 +53,6 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
 const EXPECTED_DIR = join(__dirname, 'expected-real-crypto');
 const DRIVERS_DIR = join(__dirname, 'drivers');
-
-const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
   case: string;
@@ -62,11 +75,19 @@ interface AssertFailureOutput {
   bindingName: string;
 }
 
-type CaseOutput = SuccessOutput | AssertFailureOutput;
+interface ScriptAbortOutput {
+  error: 'ScriptAbort';
+  methodName: string;
+}
+
+type CaseOutput = SuccessOutput | AssertFailureOutput | ScriptAbortOutput;
 
 function isFailureOutput(v: CaseOutput): v is AssertFailureOutput {
   return (v as AssertFailureOutput).error === 'AssertionFailureError';
 }
+
+/** The diagnostic every message-channel tier puts on an OP_CHECKSIG abort. */
+const CHECKSIG_ABORT = /OP_CHECKSIG aborts/;
 
 function decodeBigints(v: unknown): unknown {
   if (typeof v === 'string' && /^-?\d+n$/.test(v)) {
@@ -157,6 +178,8 @@ describe('ANF real-crypto parity (TS SDK)', () => {
             methodName: e.methodName,
             bindingName: e.bindingName,
           };
+        } else if (e instanceof Error && CHECKSIG_ABORT.test(e.message)) {
+          actual = { error: 'ScriptAbort', methodName: input.methodName };
         } else {
           throw e;
         }
@@ -253,28 +276,41 @@ function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
   const argv = cfg.prefix ? [...cfg.prefix, cfg.binary, '--mode=on-chain', inputFile] : [cfg.binary, '--mode=on-chain', inputFile];
   const cmd = argv[0]!;
   const args = argv.slice(1);
-  const out = execFileSync(cmd, args, {
+  const r = spawnSync(cmd, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     cwd: REPO_ROOT,
     timeout: 60_000,
     encoding: 'utf8',
   });
-  const trimmed = out.trim();
+  const input = JSON.parse(readFileSync(inputFile, 'utf8')) as CaseInput;
+  const stderr = r.stderr ?? '';
+  if (r.status !== 0) {
+    // An opcode abort (see the header). Anything else is a real driver error.
+    const aborted = cfg.name === 'zig' ? /ScriptNumberError/.test(stderr) : CHECKSIG_ABORT.test(stderr);
+    if (aborted && (r.stdout ?? '').trim() === '') {
+      return { error: 'ScriptAbort', methodName: input.methodName };
+    }
+    throw new Error(`${cfg.name} on-chain driver exited ${r.status}: ${stderr}`);
+  }
+  const trimmed = (r.stdout ?? '').trim();
   if (!trimmed) {
     throw new Error(`${cfg.name} on-chain driver produced empty stdout`);
   }
-  return JSON.parse(trimmed) as CaseOutput;
+  const out = JSON.parse(trimmed) as CaseOutput;
+  // Rust's opcode-abort channel is an AssertionFailureError at the aborting
+  // CALL binding; an `assert` binding there is a genuine assert failure.
+  if (cfg.name === 'rust' && isFailureOutput(out)) {
+    const method = loadAnf(input.case).methods.find(m => m.name === out.methodName);
+    const binding = method?.body.find(b => b.name === out.bindingName);
+    if (binding?.value.kind === 'call' && binding.value.func === 'checkSig') {
+      return { error: 'ScriptAbort', methodName: out.methodName };
+    }
+  }
+  return out;
 }
-
-const requireAll = IS_CI || process.env.RUNAR_ANF_DRIVERS_STRICT === '1';
 
 const missingDrivers: DriverConfig[] = driverConfigs.filter(c => !isDriverAvailable(c));
-if (requireAll && missingDrivers.length > 0) {
-  throw new Error(
-    `ANF real-crypto-parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
-    missingDrivers.map(c => `  - ${c.name}: ${c.setupHint}`).join('\n'),
-  );
-}
+enforceDriverGate('ANF real-crypto-parity', missingDrivers, process.env);
 
 for (const cfg of driverConfigs) {
   describe.skipIf(!isDriverAvailable(cfg))(`ANF real-crypto parity (${cfg.name} SDK)`, () => {

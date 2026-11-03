@@ -3,6 +3,7 @@
 require 'spec_helper'
 require 'runar/sdk'
 require 'json'
+require 'digest'
 
 # Convert a UTF-8 string to hex.
 def utf8_to_hex(str)
@@ -542,6 +543,70 @@ RSpec.describe Runar::SDK::GorillaPoolProvider do
       %i[get_inscriptions_by_address get_inscription get_bsv20_balance
          get_bsv20_utxos get_bsv21_balance get_bsv21_utxos].each do |method|
         expect(provider).to respond_to(method)
+      end
+    end
+  end
+
+  # F-027: GorillaPool's GET /tx/{txid} is binary, not the JSON `vout[].value`
+  # the old decoder (with its `< 1000 -> BTC` guess) expected. get_transaction
+  # now fetches GET /tx/{txid}/raw and reads each output's 8-byte LE satoshis.
+  # Proves: the shared recorded vectors (conformance/sdk-gorillapool) decode
+  # exactly (a real 1-sat output is 1 sat; 999/1000/1e12/2.1e15 exact) and a
+  # body hashing to another txid is rejected. Does NOT prove the live API still
+  # serves /tx/{txid}/raw (recorded 2026-09-27).
+  describe '#get_transaction (F-027 recorded raw-tx vectors)' do
+    vectors_path = File.expand_path('../../../../conformance/sdk-gorillapool/vectors.json', __dir__)
+    vectors = JSON.parse(File.read(vectors_path))
+
+    # Stub Net::HTTP so `path` answers 200 with `body` (binary) and anything else 404.
+    def stub_gorillapool(path, body)
+      fake = Object.new
+      fake.define_singleton_method(:use_ssl=) { |_v| nil }
+      fake.define_singleton_method(:request) do |req|
+        resp = if req.path == path
+                 Net::HTTPOK.new('1.1', '200', 'OK')
+               else
+                 Net::HTTPNotFound.new('1.1', '404', 'Not Found')
+               end
+        resp.instance_variable_set(:@read, true)
+        resp.instance_variable_set(:@body, req.path == path ? body : '{"message":"Not Found"}')
+        resp
+      end
+      allow(Net::HTTP).to receive(:new).and_return(fake)
+    end
+
+    sha256_of_hex = ->(h) { Digest::SHA256.hexdigest([h].pack('H*')) }
+
+    vectors['vectors'].each do |v|
+      it "decodes #{v['name']}" do
+        stub_gorillapool("/api/tx/#{v['txid']}/raw", [v['responseHex']].pack('H*'))
+        tx = described_class.new.get_transaction(v['txid'])
+        exp = v['expected']
+        expect(tx.txid).to eq(v['txid'])
+        expect(tx.version).to eq(exp['version'])
+        expect(tx.locktime).to eq(exp['locktime'])
+        expect(tx.raw).to eq(v['responseHex'])
+        expect(tx.inputs.length).to eq(exp['inputCount'])
+        fi = exp['firstInput']
+        in0 = tx.inputs[0]
+        expect([in0.txid, in0.output_index, in0.sequence]).to eq([fi['txid'], fi['outputIndex'], fi['sequence']])
+        expect(in0.script.length).to eq(2 * fi['scriptLen'])
+        expect(sha256_of_hex.call(in0.script)).to eq(fi['scriptSha256'])
+        expect(tx.outputs.map(&:satoshis)).to eq(exp['outputs'].map { |o| o['satoshis'] })
+        tx.outputs.zip(exp['outputs']).each do |got, want|
+          expect(got.satoshis).to be_an(Integer)
+          expect(got.script.length).to eq(2 * want['scriptLen'])
+          expect(sha256_of_hex.call(got.script)).to eq(want['scriptSha256'])
+        end
+      end
+    end
+
+    vectors['rejection_vectors'].each do |rv|
+      it "rejects #{rv['name']}" do
+        src = vectors['vectors'].find { |v| v['name'] == rv['responseOf'] }
+        stub_gorillapool("/api/tx/#{rv['requestedTxid']}/raw", [src['responseHex']].pack('H*'))
+        expect { described_class.new.get_transaction(rv['requestedTxid']) }
+          .to raise_error(RuntimeError, /txid mismatch/)
       end
     end
   end

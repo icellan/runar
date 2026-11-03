@@ -45,10 +45,26 @@ const comment = readFileSync(join(repoRoot, LIMITS_FILE), 'utf8')
   .join(' ')
   .replace(/\s+/g, ' ');
 
+/**
+ * N-314 (user decision R144, "exempt fixture"): conformance fixtures whose
+ * script no SDK ever loads, so `MAX_STRING_BYTES` — a bound on what the SDKs
+ * and IR loaders accept — does not govern them. Each one must be Go-only
+ * (`compilers` allowlist without ts) AND an approved sdk-output omission; the
+ * guard below checks both, so the exemption cannot quietly cover a fixture an
+ * SDK does read. The headroom assertions run on the largest REMAINING script.
+ */
+const NOT_SDK_LOADED: Record<string, string> = {
+  'bn254-pairing':
+    'Go-only BN254 four-pair pairing check (~4.7 MB script, 9,445,004 hex chars, above MAX_STRING_BYTES); ' +
+    'stateless with no constructor slots, omitted from sdk-output, executed only on @bsv/sdk Spend by ' +
+    'conformance/witnesses/real-crypto/bn254-pairing.json',
+};
+
 /** The largest file matching `name` under conformance/tests, by byte size. */
 function largestFixtureFile(name: string): { fixture: string; bytes: number } {
   let best = { fixture: '', bytes: -1 };
   for (const d of readdirSync(conformanceTests)) {
+    if (d in NOT_SDK_LOADED) continue;
     const p = join(conformanceTests, d, name);
     if (!existsSync(p)) continue;
     const bytes = statSync(p).size;
@@ -68,6 +84,27 @@ function num(s: string): number {
 }
 
 describe('R-305: the MAX_STRING_BYTES justification is measured, not asserted', () => {
+  it('every NOT_SDK_LOADED exemption is a Go-only fixture that no SDK loads (N-314)', () => {
+    expect(Object.keys(NOT_SDK_LOADED).sort()).toEqual(['bn254-pairing']);
+    const omissions = (
+      JSON.parse(
+        readFileSync(join(repoRoot, 'conformance', 'sdk-output', 'coverage-allowlist.json'), 'utf8'),
+      ) as { approvedOmissions: Record<string, string> }
+    ).approvedOmissions;
+    for (const [fixture, reason] of Object.entries(NOT_SDK_LOADED)) {
+      expect(reason.length).toBeGreaterThan(20);
+      const cfg = JSON.parse(readFileSync(join(conformanceTests, fixture, 'source.json'), 'utf8')) as {
+        compilers?: string[];
+      };
+      expect(cfg.compilers, `${fixture}: needs a compilers allowlist`).toBeDefined();
+      expect(cfg.compilers).not.toContain('ts');
+      expect(fixture in omissions, `${fixture}: must be an approved sdk-output omission`).toBe(true);
+      expect(existsSync(join(repoRoot, 'conformance', 'sdk-output', 'tests', fixture, 'input.json'))).toBe(false);
+      // Honesty: the exemption is only needed because it really exceeds the bound.
+      expect(hexChars(fixture)).toBeGreaterThan(InputLimits.MAX_STRING_BYTES);
+    }
+  });
+
   const claim = comment.match(
     /largest checked-in script is `conformance\/tests\/([a-z0-9-]+)\/expected-script\.hex`: ([\d,]+) script bytes = ([\d,]+) hex characters, which is ([\d.]+)% of this bound\. Real headroom is ([\d.]+)×/,
   );

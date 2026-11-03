@@ -136,7 +136,9 @@ class TestEcCodegen < Minitest::Test
     # byte accessors have no selector to fool -- each returns a value derived
     # injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
     # number rather than a colliding one.
-    "ecAdd"              =>  8297,
+    # N-110: ecAdd 8297 -> 8309 (+12), the tangent y = 0 guard: three deep picks
+    # (push <n>, OP_PICK) + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY.
+    "ecAdd"              =>  8309,
     # R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
     # ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
     # the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd

@@ -86,23 +86,35 @@ describe('getLockingScript — constructor slot splicing', () => {
     expect(lockingScript).toBe(expected);
   });
 
-  it('falls back to append when artifact has no constructorSlots (backward compat)', () => {
+  it('R84: a ctor arg with no constructorSlots entry is never appended (not spliced, not tacked on)', () => {
+    // Previously this fell back to appending the raw arg to the end of the
+    // script ("backward compat" for pre-slot-splicing artifacts). That shape
+    // — constructorSlots absent, abi.constructor.params non-empty — is
+    // byte-identical to what TODAY's compiler emits when every ctor-needed
+    // property is eliminated by DCE (no method ever reads it), so the old
+    // fallback silently deployed a script that was NOT the compiled
+    // template: the appended bytes leave extra items on the stack and the
+    // spend fails the consensus clean-stack rule (see
+    // n013-dce-eliminated-ctor-args.test.ts, which proves this against the
+    // real `@bsv/sdk` Spend oracle). R84: drop the fallback, matching the
+    // Java SDK, which never had it — an arg with no slot is simply not
+    // spliced anywhere, and the deployed script equals the template.
     const artifact = makeArtifact({
       script: '76a90088ac',
       abi: {
         constructor: { params: [{ name: 'pubKeyHash', type: 'Addr' }] },
         methods: [{ name: 'unlock', params: [], isPublic: true }],
       },
-      // No constructorSlots — old artifact format
+      // No constructorSlots.
     });
 
     const pubKeyHash = 'ab'.repeat(20);
     const contract = new RunarContract(artifact, [pubKeyHash]);
     const lockingScript = contract.getLockingScript();
 
-    // Old behavior: args appended to end of script
-    const encodedHash = '14' + pubKeyHash; // 14 = 20 in hex
-    expect(lockingScript).toBe('76a90088ac' + encodedHash);
+    // New behavior (R84): nothing is appended; the deployed script is
+    // exactly the compiled template.
+    expect(lockingScript).toBe('76a90088ac');
   });
 
   it('splices a bigint constructor arg correctly', () => {
@@ -145,5 +157,75 @@ describe('getLockingScript — constructor slot splicing', () => {
     // 42 = 0x2a, script number encoding: 01 2a (1-byte length prefix + value)
     // The OP_0 at byte 0 stays untouched
     expect(lockingScript).toBe('0093' + '012a' + '88');
+  });
+
+  it('N-081: throws a named error instead of splicing "undefined" when a constructorSlots paramIndex is out of range', () => {
+    // The constructor only checks `constructorArgs.length === abi.constructor.params.length`
+    // (see contract.ts ~L499) — it never cross-checks that every
+    // constructorSlots[].paramIndex actually falls within that range. A
+    // malformed or hostile artifact (hand-crafted JSON, or a buggy producer)
+    // can declare a slot with a paramIndex past the end of constructorArgs
+    // and slip through that check untouched: there is exactly 1 ctor arg
+    // (index 0) below, matching the 1 ABI param, but the slot references
+    // paramIndex 1.
+    //
+    // Before the fix, buildCodeScript's `encodeArg(this.constructorArgs[slot.paramIndex])`
+    // read `constructorArgs[1]` -> `undefined`, and encodeArg's fallback
+    // (`encodePushData(String(value))`) silently spliced the literal bytes
+    // of the string "undefined" into the deployed locking script hex
+    // instead of refusing. This proves the fix fails closed with a named
+    // error instead.
+    //
+    // What this does NOT prove: it does not cover the two other sites in
+    // this file that index `constructorArgs[slot.paramIndex]` without the
+    // same guard (`adjustCodeSepOffset`, used by `getSubscriptForSigning` /
+    // `computeOpPushTxWithCodeSep`, and `_resolvedCodeSepSlotValues` — the
+    // latter is already shielded on this path because `buildCodeScript`
+    // runs the now-guarded constructor-slot loop first, but
+    // `adjustCodeSepOffset` is independently reachable and still unguarded).
+    // It also does not cover the pre-existing `constructorArgs.length !==
+    // abi.constructor.params.length` check (contract.ts ~L499), which this
+    // test deliberately satisfies so the new guard is what's under test,
+    // nor the equivalent code path in the other six SDKs.
+    const artifact = makeArtifact({
+      script: '009c69',
+      abi: {
+        constructor: { params: [{ name: 'threshold', type: 'bigint' }] },
+        methods: [{ name: 'check', params: [], isPublic: true }],
+      },
+      constructorSlots: [{ paramIndex: 1, byteOffset: 0 }],
+    });
+
+    const contract = new RunarContract(artifact, [1000n]);
+    expect(() => contract.getLockingScript()).toThrow(/paramIndex/i);
+  });
+
+  it('N-223: throws a named error from adjustCodeSepOffset, reached WITHOUT going through buildCodeScript', () => {
+    // N-081's test above only proves the guard inside buildCodeScript's
+    // constructor-slot loop. This test proves the gap that commit's own
+    // message named as unproven: `adjustCodeSepOffset` is reached from
+    // `getSubscriptForSigning` (used to trim the subscript for BIP-143
+    // signing) via a route that never calls buildCodeScript first — a fresh,
+    // not-yet-deployed contract has `_codeScript === null`, so
+    // getSubscriptForSigning falls straight to the
+    // `this.adjustCodeSepOffset(codeSepIdx)` branch.
+    //
+    // The artifact declares codeSeparatorIndex = 2, so the constructor slot
+    // at byteOffset 0 (< 2) is read inside adjustCodeSepOffset's shift loop.
+    // Before the fix this read `constructorArgs[1]` -> `undefined` and
+    // `encodeArg` silently turned that into the literal bytes of
+    // "undefined" spliced into the computed shift, instead of refusing.
+    const artifact = makeArtifact({
+      script: '00ab9c69', // OP_0(slot) OP_CODESEPARATOR OP_NUMEQUAL OP_VERIFY
+      abi: {
+        constructor: { params: [{ name: 'threshold', type: 'bigint' }] },
+        methods: [{ name: 'check', params: [], isPublic: true }],
+      },
+      constructorSlots: [{ paramIndex: 1, byteOffset: 0 }],
+      codeSeparatorIndex: 2,
+    });
+
+    const contract = new RunarContract(artifact, [1000n]);
+    expect(() => contract.getSubscriptForSigning(artifact.script, 0)).toThrow(/paramIndex/i);
   });
 });

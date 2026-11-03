@@ -64,4 +64,39 @@ RSpec.describe 'Runar::SDK BIP-143 cross-tier interop' do
                     "#{name}: TS reference signature does not verify under this tier's digest"
     end
   end
+
+  # F-137: LocalSigner's pure-Ruby backend (the only one that runs in this
+  # tier, see R-213 in local_signer.rb) signed via BIP143.bip143_sighash, a
+  # second preimage builder that never got the issue-#123 fix: it digested
+  # every prevout / sequence / output whatever the sighash flags said. Only
+  # the compute_op_push_tx builder was checked above, so the divergence was
+  # invisible.
+  #
+  # Proves: for every fixture scenario, including all six FORKID modes
+  # (0x41/42/43/c1/c2/c3) on the shared 2-in/2-out tx signing input 1, the
+  # signer's digest equals the TS (@bsv/sdk) reference digestHex, and the
+  # signer's full signature (RFC-6979, priv=1, so deterministic) is
+  # byte-identical to the TS sigHex.
+  # Does not prove: anything about the never-taken bsv-sdk gem backend, or
+  # that the node accepts the signature (the fixture is TS + Go go-sdk
+  # cross-checked, not broadcast).
+  it 'LocalSigner signs every scenario byte-identically to the TS reference' do
+    stub_const('Runar::SDK::LocalSigner::BSV_SDK_AVAILABLE', false)
+    signer = Runar::SDK::LocalSigner.new(fixture['signer_priv_hex'])
+    expect(signer.get_public_key).to eq(fixture['signer_pub_hex'])
+
+    fixture['scenarios'].each do |s|
+      name = s['scenario']
+      parsed = Runar::SDK::BIP143.parse_raw_tx([s['unsignedTxHex']].pack('H*'))
+      digest = Runar::SDK::BIP143.bip143_sighash(
+        parsed, s['inputIndex'], [s['prevScriptHex']].pack('H*'), s['prevValueSats'], s['sighashFlags']
+      )
+      expect(digest.unpack1('H*')).to eq(s['digestHex']),
+                                      "#{name}: BIP143.bip143_sighash diverges from TS reference"
+
+      sig = signer.sign(s['unsignedTxHex'], s['inputIndex'], s['prevScriptHex'],
+                        s['prevValueSats'], s['sighashFlags'])
+      expect(sig).to eq(s['sigHex']), "#{name}: LocalSigner signature diverges from TS reference"
+    end
+  end
 end

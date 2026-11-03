@@ -147,10 +147,15 @@ class R025FieldPreservationTest {
         String single = PipelineTestSupport.hex(
             sighashSrc("/** @sighash SINGLE|FORKID */", ARRAY_PROP), "Boardy.runar.ts");
         String dflt = PipelineTestSupport.hex(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts");
-        assertEquals(dflt.length(), single.length(), "sighash mode must not resize the script");
+        // N-038 (R64): the SINGLE continuation also drops the change segment and
+        // its params, which shrinks the script and shifts stack depths from
+        // byte 486 on; the pure flag swap is checked over the prologue before
+        // that (the binding flag at 394), the preimage-type assert const
+        // (`01<mode>9d`, flag at 522) in place.
+        assertTrue(single.length() < dflt.length(), "SINGLE drops the change segment");
 
         List<Integer> moved = new ArrayList<>();
-        for (int i = 0; i + 1 < single.length(); i += 2) {
+        for (int i = 0; i + 1 < 2 * 486; i += 2) {
             String s = single.substring(i, i + 2);
             String d = dflt.substring(i, i + 2);
             if (!s.equals(d)) {
@@ -159,8 +164,11 @@ class R025FieldPreservationTest {
                 moved.add(i / 2);
             }
         }
-        assertEquals(List.of(394, 522), moved,
-            "expected exactly the two 0x41->0x43 sighash bytes; got " + moved);
+        assertEquals(List.of(394), moved,
+            "expected exactly the 0x41->0x43 binding flag byte in the prologue; got " + moved);
+        assertEquals("01419d", dflt.substring(2 * 521, 2 * 524));
+        assertEquals("01439d", single.substring(2 * 521, 2 * 524),
+            "the preimage-type assert const carries the declared mode");
     }
 
     // ------------------------------------------------------------------

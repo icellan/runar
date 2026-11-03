@@ -44,6 +44,8 @@ import hashlib
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from runar._ripemd160 import ripemd160_digest
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -87,9 +89,10 @@ class OnChainCryptoContext:
       and ECDSA-verifying against this sighash. Any mismatch returns ``False``,
       tripping the enclosing ``assert(...)`` and raising
       :class:`AssertionFailureError`.
-    * verifies ``checkMultiSig(sigs, pks)`` by iterating signatures
-      left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
-      ``OP_CHECKMULTISIG``.
+    * verifies ``checkMultiSig(sigs, pks)`` as ``OP_CHECKMULTISIG`` does: last
+      signature against last key first, the same encoding gates on every
+      examined pair, NULLFAIL on a failing check with a non-empty signature
+      (N-259, see :func:`_verify_multi_sig`).
     * verifies ``checkPreimage(preimage)`` by computing
       ``hash256(preimage) == SHA256(SHA256(preimage))`` and byte-comparing it
       to this sighash — the on-chain ``OP_PUSH_TX`` semantic.
@@ -134,7 +137,7 @@ class _StrictCtx:
     authoritative mode used by :func:`execute_on_chain_authoritative`).
     """
 
-    __slots__ = ("method_name", "real_crypto")
+    __slots__ = ("method_name", "real_crypto", "mocked_prologue_asserts")
 
     def __init__(
         self,
@@ -143,6 +146,83 @@ class _StrictCtx:
     ) -> None:
         self.method_name = method_name
         self.real_crypto = real_crypto
+        # F-164 (round 2): identity set (by ``id()`` -- dicts aren't
+        # hashable, so this is the identity-equivalent of the TS
+        # reference's ``Set<ANFValue>`` object-reference check) of the
+        # auto-injected prologue's two assert VALUE dicts (checkPreimage's
+        # assert + the sighash-type assert). Populated by ``_run_method``
+        # only in plain strict mode (``real_crypto is None``); left empty
+        # for ``execute_on_chain_authoritative``, which keeps enforcing
+        # both for real.
+        self.mocked_prologue_asserts: set = set()
+
+
+def _detect_auto_injected_prologue_asserts(body: List[dict]) -> set:
+    """Python port of the TS reference's
+    ``detectAutoInjectedPrologueAsserts`` (packages/runar-sdk/src/anf-interpreter.ts)
+    -- see that function's doc comment for the full rationale. Structural
+    (shape/position-based, NOT binding-name-based) detection of the fixed
+    8-binding sequence ``compilers/python/runar_compiler/frontend/anf_lower.py``'s
+    stateful-prologue emitter injects at the START of every public
+    StatefulSmartContract method::
+
+        [0] load_param txPreimage
+        [1] check_preimage(preimage: [0])
+        [2] assert([1])                              <- mocked in strict mode
+        [3] load_param txPreimage
+        [4] call extractSigHashType([3])
+        [5] load_const <declared sighash mode>
+        [6] bin_op === ([4], [5])
+        [7] assert([6])                              <- mocked in strict mode
+
+    This sequence can only appear at index 0 of a method body -- the
+    compiler emits it before a single line of developer code, so a
+    user-written assert (even one that also calls ``extractSigHashType``)
+    is lowered AFTER it, at a later index, and is never matched here.
+
+    We don't mark these two ANF nodes with the existing
+    ``isAutoInjectedStateCheck`` field the way the exit-time
+    continuation-hash assert is marked: that field is part of the
+    serialized ANF IR, and setting it on the prologue asserts would add a
+    key to ``conformance/tests/*/expected-ir.json`` for every stateful
+    fixture -- a compiler-golden move this item must not cause.
+    """
+    if len(body) < 8:
+        return set()
+    b0, b1, b2, b3, b4, b5, b6, b7 = body[0:8]
+
+    def is_load_tx_preimage(b: dict) -> bool:
+        v = b.get('value', {})
+        return v.get('kind') == 'load_param' and v.get('name') == 'txPreimage'
+
+    if not is_load_tx_preimage(b0):
+        return set()
+    v1, v2, v3, v4, v5, v6, v7 = (b.get('value', {}) for b in (b1, b2, b3, b4, b5, b6, b7))
+    if v1.get('kind') != 'check_preimage' or v1.get('preimage') != b0['name']:
+        return set()
+    if v2.get('kind') != 'assert' or v2.get('value') != b1['name']:
+        return set()
+    if not is_load_tx_preimage(b3):
+        return set()
+    if (
+        v4.get('kind') != 'call'
+        or v4.get('func') != 'extractSigHashType'
+        or not v4.get('args')
+        or v4['args'][0] != b3['name']
+    ):
+        return set()
+    if v5.get('kind') != 'load_const':
+        return set()
+    if (
+        v6.get('kind') != 'bin_op'
+        or v6.get('op') != '==='
+        or v6.get('left') != b4['name']
+        or v6.get('right') != b5['name']
+    ):
+        return set()
+    if v7.get('kind') != 'assert' or v7.get('value') != b6['name']:
+        return set()
+    return {id(v2), id(v7)}
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +283,7 @@ def compute_new_state(
     current_state: dict,
     args: dict,
     constructor_args: list = None,
+    intent: Optional[_IntentCtx] = None,
 ) -> dict:
     """Compute the new state after executing a contract method.
 
@@ -212,12 +293,16 @@ def compute_new_state(
         current_state: Current contract state (property name -> value).
         args: Method arguments (param name -> value).
         constructor_args: Constructor arg values (declaration order) for readonly fields.
+        intent: R67 -- optional witness/mock-preimage context. Pass one with
+            ``mock_preimage_bytes['scriptCode']`` set to give
+            ``extractScriptCode`` the contract's real codePart instead of
+            the historical empty dummy.
 
     Returns:
         The updated state (merged with current_state).
     """
     state, _, _ = compute_new_state_and_data_outputs(
-        anf, method_name, current_state, args, constructor_args,
+        anf, method_name, current_state, args, constructor_args, intent=intent,
     )
     return state
 
@@ -229,6 +314,7 @@ def compute_new_state_and_data_outputs(
     args: dict,
     constructor_args: list = None,
     ordered_outputs: Optional[List[dict]] = None,
+    intent: Optional[_IntentCtx] = None,
 ) -> Tuple[dict, list, list]:
     """Like :func:`compute_new_state` but also returns data + raw outputs.
 
@@ -264,7 +350,7 @@ def compute_new_state_and_data_outputs(
     """
     return _run_method(
         anf, method_name, current_state, args, constructor_args, strict=None,
-        ordered_outputs=ordered_outputs,
+        ordered_outputs=ordered_outputs, intent=intent,
     )
 
 
@@ -589,10 +675,24 @@ def _run_method(
     implicit_params = {'_changePKH', '_changeAmount', '_newAmount', 'txPreimage'}
     for param in method.get('params', []):
         pname = param['name']
-        if pname in implicit_params:
+        # F-024 (R14): a caller that knows the continuation's satoshis binds
+        # ``_newAmount`` (what ``continuationAmount()`` reads), and one that
+        # knows the spent UTXO's satoshis passes them as an INTEGER
+        # ``txPreimage`` (a real preimage is bytes / hex), which
+        # ``extractAmount`` then returns.
+        caller_bound = pname in args and (
+            pname == '_newAmount'
+            or (pname == 'txPreimage' and isinstance(args[pname], int) and not isinstance(args[pname], bool))
+        )
+        if pname in implicit_params and not caller_bound:
             continue
         if pname in args:
             env[pname] = args[pname]
+        elif pname.endswith('@local') and pname[: -len('@local')] in args:
+            # N-360: a property-named public param the method reassigns is
+            # bound in the ANF under its ``<name>@local`` slot; the caller's
+            # args (and the ABI) use the source name.
+            env[pname] = args[pname[: -len('@local')]]
 
     # Track state mutations, data outputs, and raw outputs.
     # ``raw_outputs`` collects ``add_raw_output`` entries; the simulator does
@@ -601,6 +701,16 @@ def _run_method(
     state_delta: Dict[str, Any] = {}
     data_outputs: List[dict] = []
     raw_outputs: List[dict] = []
+
+    # F-164 (round 2): compute the mocked-prologue-assert identity set once
+    # per method, for plain strict mode only (on-chain mode keeps enforcing
+    # both prologue asserts for real, unchanged). Each _StrictCtx is
+    # freshly constructed per top-level call (execute_strict et al.), so
+    # mutating it here is safe.
+    if strict is not None and strict.real_crypto is None:
+        strict.mocked_prologue_asserts = _detect_auto_injected_prologue_asserts(
+            method.get('body', []),
+        )
 
     # Walk bindings. In strict mode an AssertionFailureError raised from any
     # nested if/loop/private-method call propagates up out of this function
@@ -972,6 +1082,16 @@ def _eval_value(
         if strict is not None:
             if value.get('isAutoInjectedStateCheck') is True:
                 return None
+            # F-164 (round 2): the auto-injected prologue's checkPreimage
+            # assert and sighash-type assert (detected structurally -- see
+            # _detect_auto_injected_prologue_asserts) are mocked in plain
+            # strict mode, matching PROTOCOL.md's documented "crypto
+            # built-ins still mock-return true" contract. Never populated
+            # for execute_on_chain_authoritative (_run_method only sets it
+            # when real_crypto is None), so on-chain mode keeps enforcing
+            # both for real.
+            if id(value) in strict.mocked_prologue_asserts:
+                return None
             pred_ref = value.get('value', '')
             pred = env.get(pred_ref)
             if not _is_truthy(pred):
@@ -1044,19 +1164,28 @@ def _eval_value(
             ordered_outputs.append({'kind': 'raw', 'satoshis': sats, 'script': script_hex})
         return None
 
-    # On-chain-only operations -- skip in simulation. ``check_preimage`` can
-    # only be mocked once the caller supplies an intent/witness context (i.e.
-    # is genuinely simulating a concrete spend): then mock-return ``True`` so
-    # the strict-mode ``assert(check_preimage(...))`` the stateful-contract
-    # prologue emits doesn't trip. With no witness context the preimage is
-    # unverifiable off-chain, so return a falsy value and let strict mode
-    # report the failure at the prologue assert -- matching the
-    # TS/Go/Rust/Ruby/Zig tiers (and the pinned cross-interpreter strict
-    # goldens). Real verification belongs in ``execute_on_chain_authoritative``.
+    # F-164: mirrors the ``checkPreimage`` call-path case (mock True unless a
+    # real-crypto context is active) -- same mock/real split, regardless of
+    # whether an intent/witness context is also present. PROTOCOL.md and the
+    # TS reference's doc comments document that ``checkPreimage`` (along
+    # with ``checkSig`` / ``checkMultiSig``) mock-returns ``True`` in strict
+    # mode; only ``execute_on_chain_authoritative`` performs real
+    # verification.
     if kind == 'check_preimage':
-        return True if intent is not None else None
+        real_crypto = strict.real_crypto if strict is not None else None
+        if real_crypto is None:
+            return True
+        pre_ref = value.get('preimage', '')
+        return _verify_preimage(env.get(pre_ref), real_crypto.sighash)
     if kind in ('deserialize_state', 'get_state_script'):
         return None
+    # N-259: the element values, in order. Its only consumer is
+    # ``checkMultiSig``, which lenient mode mocks to ``True`` and on-chain mode
+    # verifies over these lists; returning ``None`` made on-chain
+    # ``checkMultiSig`` answer ``False`` for every input, a valid multisig
+    # included.
+    if kind == 'array_literal':
+        return [env.get(ref) for ref in value.get('elements', [])]
 
     return None
 
@@ -1078,10 +1207,14 @@ def _eval_bin_op(op: str, left: Any, right: Any, result_type: Optional[str] = No
         return l - r
     if op == '*':
         return l * r
+    # N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+    # post-state to compute (same refusal as safediv / safemod / divmod).
     if op == '/':
-        return 0 if r == 0 else _truncate_div(l, r)
+        return _abort_div(l, r, 'OP_DIV')
     if op == '%':
-        return 0 if r == 0 else _truncate_mod(l, r)
+        if r == 0:
+            raise ValueError('OP_MOD: modulo by zero')
+        return _truncate_mod(l, r)
     if op in ('==', '==='):
         return l == r
     if op in ('!=', '!=='):
@@ -1110,8 +1243,19 @@ def _eval_bin_op(op: str, left: Any, right: Any, result_type: Optional[str] = No
 
 
 def _truncate_div(a: int, b: int) -> int:
-    """Integer division truncating toward zero (matching JS/Bitcoin semantics)."""
-    return int(a / b) if (a < 0) != (b < 0) and a % b != 0 else a // b
+    """Integer division truncating toward zero (matching JS/Bitcoin semantics).
+
+    Exact integer arithmetic: a float quotient (``int(a / b)``) loses the low
+    digits once the operands pass 2^53 (F-134)."""
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+
+def _abort_div(a: int, b: int, name: str) -> int:
+    """OP_DIV as a builtin uses it: truncating, and a zero divisor aborts."""
+    if b == 0:
+        raise ValueError(f'{name}: division by zero')
+    return _truncate_div(a, b)
 
 
 def _truncate_mod(a: int, b: int) -> int:
@@ -1169,7 +1313,29 @@ def _eval_call(
             return True
         sig = args[0] if len(args) > 0 else None
         pk = args[1] if len(args) > 1 else None
-        return _verify_ecdsa(sig, pk, real_crypto.sighash)
+        # N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+        # encoding; it does not push false. Answering False let
+        # `checkSig(a, A) or checkSig(b, B)` take the other arm and accept a
+        # spend the chain aborts on. ValueError is this module's opcode-abort
+        # signal (F-134).
+        reason = _check_sig_encoding_error(sig, pk)
+        if reason is not None:
+            raise ValueError(
+                f'checkSig: {reason} — OP_CHECKSIG aborts the script on a malformed '
+                'signature or public key encoding, it does not push false'
+            )
+        ok = _verify_ecdsa(sig, pk, real_crypto.sighash)
+        # N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that does
+        # not verify aborts the script; only an empty one pushes false. So the
+        # arm of `checkSig(a, A) or checkSig(b, B)` that must fail takes an
+        # empty signature (EMPTY_SIG, issue #106). Spend has no NULLFAIL.
+        if not ok and len(_to_byte_array(sig) or b'') > 0:
+            raise ValueError(
+                'checkSig: the signature is non-empty and does not verify (NULLFAIL) — '
+                'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push '
+                'false; the arm that must fail takes an empty signature (EMPTY_SIG)'
+            )
+        return ok
     if func == 'checkMultiSig':
         if real_crypto is None:
             return True
@@ -1205,10 +1371,23 @@ def _eval_call(
         return _bin2num_int(str(args[0] or ''))
     if func == 'cat':
         return str(args[0] or '') + str(args[1] or '')
+    # R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+    # OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+    # REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+    # [0, size(data)] or `length` is outside [0, size(data) - start], which
+    # collapses to: start<0, length<0, or start+length>size(data). This
+    # used to clamp via Python slicing; `extractScriptCode` now supplies a
+    # realistic scriptCode (R67) so the one caller that fed this an empty
+    # placeholder (FungibleToken.merge) no longer hits the abort path
+    # either.
     if func == 'substr':
         hex_str = str(args[0] or '')
         start = int(_to_int(args[1]))
         length = int(_to_int(args[2]))
+        if start < 0 or length < 0 or (start + length) * 2 > len(hex_str):
+            raise ValueError(
+                f'substr: start {start}, length {length} is outside a {len(hex_str) // 2}-byte value'
+            )
         return hex_str[start * 2:(start + length) * 2]
     if func == 'reverseBytes':
         hex_str = str(args[0] or '')
@@ -1217,6 +1396,41 @@ def _eval_call(
     if func == 'len':
         hex_str = str(args[0] or '')
         return len(hex_str) // 2
+    # F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+    # whenever the computed split position is outside [0, size(data)] --
+    # `left` splits at `length` directly, `right` splits at
+    # `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+    # lowerRight). A negative or past-the-end `length` must raise, never
+    # return a clamped value.
+    if func == 'left':
+        hex_str = str(args[0] or '')
+        length = int(_to_int(args[1]))
+        if length < 0 or length * 2 > len(hex_str):
+            raise ValueError(f'left: length {length} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[:length * 2]
+    if func == 'right':
+        hex_str = str(args[0] or '')
+        length = int(_to_int(args[1]))
+        if length < 0 or length * 2 > len(hex_str):
+            raise ValueError(f'right: length {length} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[len(hex_str) - length * 2:]
+    # N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+    # RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+    # Unmodelled before this (fell through to `return None`), the same bug
+    # shape F-274 fixed for `left`/`right`.
+    #
+    # `substr` above is deliberately NOT given this abort check: its
+    # default `extractScriptCode` mock is `''`, and FungibleToken's `merge`
+    # method computes `substr(sc, 0, 1)` on that placeholder during
+    # off-chain state derivation -- a POSITIVE overflow this check would
+    # have to reject, breaking state derivation for every token-ft-shaped
+    # contract (escalated, not fixed here).
+    if func == 'split':
+        hex_str = str(args[0] or '')
+        index = int(_to_int(args[1]))
+        if index < 0 or index * 2 > len(hex_str):
+            raise ValueError(f'split: index {index} is outside a {len(hex_str) // 2}-byte value')
+        return hex_str[index * 2:]
 
     # Math builtins
     if func == 'abs':
@@ -1228,15 +1442,21 @@ def _eval_call(
     if func == 'within':
         x = _to_int(args[0])
         return x >= _to_int(args[1]) and x < _to_int(args[2])
+    # The division-shaped builtins and pow/sqrt ABORT where the compiled
+    # script aborts (zero divisor in OP_DIV/OP_MOD, the pow exponent guard,
+    # the sqrt domain guards) instead of inventing a value; ValueError is
+    # this module's opcode-abort signal (F-134).
     if func == 'safediv':
-        d = _to_int(args[1])
-        return 0 if d == 0 else _truncate_div(_to_int(args[0]), d)
+        return _abort_div(_to_int(args[0]), _to_int(args[1]), 'safediv')
     if func == 'safemod':
         d = _to_int(args[1])
-        return 0 if d == 0 else _truncate_mod(_to_int(args[0]), d)
+        if d == 0:
+            raise ValueError('safemod: modulo by zero')
+        return _truncate_mod(_to_int(args[0]), d)
     if func == 'clamp':
         v, lo, hi = _to_int(args[0]), _to_int(args[1]), _to_int(args[2])
-        return lo if v < lo else hi if v > hi else v
+        # The script is OP_MAX then OP_MIN: min(max(v, lo), hi) (N-030).
+        return min(max(v, lo), hi)
     if func == 'sign':
         v = _to_int(args[0])
         return 1 if v > 0 else -1 if v < 0 else 0
@@ -1244,11 +1464,17 @@ def _eval_call(
         base = _to_int(args[0])
         exp = _to_int(args[1])
         if exp < 0:
-            return 0
+            raise ValueError('pow: negative exponent')
+        if exp > 32:
+            raise ValueError('pow: exponent outside the supported domain (exp > 32)')
         return base ** exp
     if func == 'sqrt':
         v = _to_int(args[0])
-        if v <= 0:
+        if v < 0:
+            raise ValueError('sqrt: negative input')
+        if v >= 1 << 495:
+            raise ValueError('sqrt: input outside the supported domain (n >= 2^495)')
+        if v == 0:
             return 0
         x = v
         y = (x + 1) // 2
@@ -1258,29 +1484,24 @@ def _eval_call(
         return x
     if func == 'gcd':
         a, b = abs(_to_int(args[0])), abs(_to_int(args[1]))
-        while b:
+        # The script unrolls exactly 256 Euclid steps (N-030).
+        for _ in range(256):
+            if not b:
+                break
             a, b = b, a % b
         return a
     if func == 'divmod':
-        a = _to_int(args[0])
-        b = _to_int(args[1])
-        if b == 0:
-            return 0
-        return _truncate_div(a, b)
+        return _abort_div(_to_int(args[0]), _to_int(args[1]), 'divmod')
     if func == 'log2':
         v = _to_int(args[0])
+        # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
         if v <= 0:
-            return 0
-        bits = 0
-        x = v
-        while x > 1:
-            x >>= 1
-            bits += 1
-        return bits
+            raise ValueError('log2: non-positive input')
+        return v.bit_length() - 1
     if func == 'bool':
         return 1 if _is_truthy(args[0]) else 0
     if func == 'mulDiv':
-        return _truncate_div(_to_int(args[0]) * _to_int(args[1]), _to_int(args[2]))
+        return _abort_div(_to_int(args[0]) * _to_int(args[1]), _to_int(args[2]), 'mulDiv')
     if func == 'percentOf':
         return _truncate_div(_to_int(args[0]) * _to_int(args[1]), 10000)
 
@@ -1294,6 +1515,9 @@ def _eval_call(
             return intent.mock_preimage_bytes['outputHash'].hex()
         return '00' * 32
     if func == 'extractAmount':
+        # F-024 (R14): an integer ``txPreimage`` is the caller-supplied input amount.
+        if args and isinstance(args[0], int) and not isinstance(args[0], bool):
+            return args[0]
         if intent is not None and 'amount' in intent.mock_preimage:
             return intent.mock_preimage['amount']
         return '00' * 32
@@ -1329,6 +1553,15 @@ def _eval_call(
         if intent is not None and 'outpoint' in intent.mock_preimage_bytes:
             return intent.mock_preimage_bytes['outpoint'].hex()
         return '00' * 36
+    # R67: the contract's own real codePart when the caller supplied it
+    # (see `_IntentCtx.mock_preimage_bytes`'s doc comment) -- contract.py's
+    # `prepare_call` always supplies it now. Falls back to the historical
+    # empty dummy for a bare `compute_new_state` call with no intent
+    # (e.g. a hand-built ANF probe in a test).
+    if func == 'extractScriptCode':
+        if intent is not None and 'scriptCode' in intent.mock_preimage_bytes:
+            return intent.mock_preimage_bytes['scriptCode'].hex()
+        return ''
 
     return None
 
@@ -1402,9 +1635,9 @@ def _hash_fn(name: str, input_val: Any) -> str:
     if name == 'hash256':
         return hashlib.sha256(hashlib.sha256(data).digest()).hexdigest()
     if name == 'ripemd160':
-        return hashlib.new('ripemd160', data).hexdigest()
+        return ripemd160_digest(data).hex()
     if name == 'hash160':
-        return hashlib.new('ripemd160', hashlib.sha256(data).digest()).hexdigest()
+        return ripemd160_digest(hashlib.sha256(data).digest()).hex()
     return ''
 
 
@@ -1773,6 +2006,53 @@ def _normalize_pubkey_to_compressed(pk_bytes: bytes) -> Optional[bytes]:
     return None
 
 
+def _check_sig_encoding_error(sig_val: Any, pk_val: Any) -> Optional[str]:
+    """N-197: why ``OP_CHECKSIG`` would ABORT the whole script on these
+    operands, or ``None`` when it would run and push a boolean.
+
+    Mirrors ``@bsv/sdk`` ``Spend``'s ``checkSignatureEncoding`` then
+    ``checkPublicKeyEncoding`` (version-1 rules): a non-empty signature must be
+    strict DER (BIP66) with a low S; the public key -- checked even when the
+    signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes behind
+    0x04 and decode to a curve point. An empty signature, or a well-formed one
+    that does not verify, is not an encoding abort (``Spend`` has no NULLFAIL;
+    it pushes false); the ``checkSig`` call site applies NULLFAIL after
+    verification (N-198). A non-empty signature is in checksig format, DER
+    followed by exactly one sighash-type byte, as ``Spend`` requires: bare DER
+    with no sighash byte aborts (N-255). Operands that are not bytes at all
+    are left to :func:`_verify_ecdsa`.
+    """
+    sig_bytes = _to_byte_array(sig_val)
+    pk_bytes = _to_byte_array(pk_val)
+    if sig_bytes is None or pk_bytes is None:
+        return None
+    from runar.ec import EC_N, EC_P
+    from runar.ecdsa import _decompress_pubkey, _parse_der_signature
+    if len(sig_bytes) > 0:
+        if len(sig_bytes) < 2 or len(sig_bytes) != sig_bytes[1] + 3:
+            return 'the signature is not strict DER'
+        parsed = _parse_der_signature(sig_bytes)
+        if parsed is None:
+            return 'the signature is not strict DER'
+        if not 1 <= parsed[1] <= EC_N >> 1:
+            return 'the signature does not have a low S value'
+    n = len(pk_bytes)
+    prefix = pk_bytes[0] if n > 0 else None
+    if not ((prefix in (0x02, 0x03) and n == 33) or (prefix == 0x04 and n == 65)):
+        return 'the public key is not a 33-byte compressed or 65-byte uncompressed key'
+    if n == 33:
+        try:
+            _decompress_pubkey(pk_bytes)
+        except ValueError:
+            return 'the public key is not a point on secp256k1'
+    else:
+        x = int.from_bytes(pk_bytes[1:33], 'big')
+        y = int.from_bytes(pk_bytes[33:65], 'big')
+        if x >= EC_P or y >= EC_P or (y * y - x * x * x - 7) % EC_P != 0:
+            return 'the public key is not a point on secp256k1'
+    return None
+
+
 def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
     """Real ECDSA verify against a 32-byte sighash.
 
@@ -1781,7 +2061,10 @@ def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
     or 65-byte uncompressed). The signature is verified directly against the
     raw 32-byte sighash (the on-chain ``OP_CHECKSIG`` semantic — the VM does
     NOT re-hash before verifying). Returns ``False`` on any parse error or
-    signature mismatch.
+    signature mismatch. The ``checkSig`` call site first applies
+    :func:`_check_sig_encoding_error` and aborts on a malformed encoding, as
+    ``OP_CHECKSIG`` does (N-197); so does ``checkMultiSig``, per examined pair
+    (N-259).
     """
     sig_bytes = _to_byte_array(sig_val)
     pk_bytes = _to_byte_array(pk_val)
@@ -1800,25 +2083,49 @@ def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
 
 
 def _verify_multi_sig(sigs_val: Any, pks_val: Any, sighash: bytes) -> bool:
-    """OP_CHECKMULTISIG semantic: iterate sigs left-to-right, consume pks
-    greedily. Returns ``True`` iff every signature finds a matching pubkey.
+    """N-259: ``OP_CHECKMULTISIG`` as ``@bsv/sdk`` ``Spend`` runs it over the
+    compiled layout ``0 <sig1..sigN> N <pk1..pkM> M``.
+
+    The LAST signature is examined against the LAST key first and both lists
+    are walked toward the first. Each examined pair passes the N-197 encoding
+    gates first and a malformed one aborts (a pair never reached is never
+    checked); a signature that verifies consumes its key, a key is consumed
+    either way, and the check fails once fewer keys remain than signatures.
+    N > M aborts, as in ``Spend``. NULLFAIL (BIP146, N-198): a failing check
+    with ANY non-empty signature aborts on a node (``Spend`` has no NULLFAIL);
+    only an all-empty one returns ``False``. ``ValueError`` is this module's
+    opcode-abort signal (F-134).
     """
     if not isinstance(sigs_val, list) or not isinstance(pks_val, list):
         return False
     if len(sigs_val) > len(pks_val):
-        return False
-    pk_idx = 0
-    for sig in sigs_val:
-        matched = False
-        while pk_idx < len(pks_val):
-            ok = _verify_ecdsa(sig, pks_val[pk_idx], sighash)
-            pk_idx += 1
-            if ok:
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
+        raise ValueError(
+            f'checkMultiSig: {len(sigs_val)} signatures for {len(pks_val)} public keys — '
+            'OP_CHECKMULTISIG aborts the script when there are more signatures than keys'
+        )
+    isig = len(sigs_val) - 1
+    ikey = len(pks_val) - 1
+    success = True
+    while success and isig >= 0:
+        reason = _check_sig_encoding_error(sigs_val[isig], pks_val[ikey])
+        if reason is not None:
+            raise ValueError(
+                f'checkMultiSig: {reason} — OP_CHECKMULTISIG aborts the script on a malformed '
+                'signature or public key encoding, it does not push false'
+            )
+        if len(_to_byte_array(sigs_val[isig]) or b'') > 0 and _verify_ecdsa(
+                sigs_val[isig], pks_val[ikey], sighash):
+            isig -= 1
+        ikey -= 1
+        if isig > ikey:  # fewer keys left than signatures
+            success = False
+    if not success and any(len(_to_byte_array(s) or b'') > 0 for s in sigs_val):
+        raise ValueError(
+            'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — '
+            'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push '
+            'false; a multisig that must fail takes empty signatures (EMPTY_SIG)'
+        )
+    return success
 
 
 def _verify_preimage(preimage_val: Any, sighash: bytes) -> bool:

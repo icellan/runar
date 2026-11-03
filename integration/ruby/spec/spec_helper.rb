@@ -13,9 +13,9 @@ require 'base64'
 require 'digest'
 require 'json'
 require 'net/http'
+require 'open3'
 require 'openssl'
 require 'securerandom'
-require 'shellwords'
 require 'uri'
 
 require 'runar/sdk'
@@ -211,51 +211,40 @@ module IntegrationHelpers
   # Compilation helper
   # ---------------------------------------------------------------------------
 
-  # Compile a contract from a path relative to the project root.
+  # Compile a contract from a path relative to the project root with the
+  # native Ruby compiler (compilers/ruby), regardless of the source's
+  # format extension — `runar-compiler-ruby` dispatches its parser by
+  # filename extension the same way every other tier's frontend does, so
+  # a `.runar.ts` source is parsed by the Ruby compiler's own TS-surface
+  # parser, not shelled out to Node.
   #
-  # Uses the native Ruby compiler for .runar.rb files and falls back to the
-  # TypeScript reference compiler (via Node.js) for all other formats.
-  # The Ruby compiler's TS parser has known codegen divergences for complex
-  # contracts (e.g. TicTacToe), so the TS compiler remains the gold standard
-  # for .runar.ts sources until conformance is verified.
+  # F-276: this used to fall back to the TypeScript reference compiler
+  # (via Node.js) for every non-`.runar.rb` source, on the belief that the
+  # Ruby compiler's TS parser had codegen divergences for complex contracts
+  # (e.g. TicTacToe) serious enough to need a different gold standard. An
+  # offline proof (tests/f276-integration-source-parity.test.ts) compiled
+  # all 29 distinct source paths this integration suite references with
+  # both compilers and diffed the resulting `script` hex: all 29 —
+  # including TicTacToe and StateCovenant — match byte-for-byte. The
+  # claimed divergence did not reproduce; the fallback was retired rather
+  # than carried forward unverified.
   #
   # @param rel_path [String] path relative to PROJECT_ROOT
   # @return [Runar::SDK::RunarArtifact]
   # @raise [RuntimeError] if compilation fails
   def compile_contract(rel_path)
     abs_path = File.join(PROJECT_ROOT, rel_path)
+    compiler_bin = File.join(PROJECT_ROOT, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
+    # Capture stdout and stderr separately: stdout is machine-readable
+    # artifact JSON, which a merged `2>&1` capture corrupts if the child
+    # `ruby` process (spawned from inside `bundle exec rspec`, which sets
+    # RUBYOPT / BUNDLE_GEMFILE) prints anything to stderr — e.g. the
+    # "already initialized constant Gem::Platform::*" warnings a nested
+    # Bundler re-activation emits on some Ruby/Bundler version pairings.
+    stdout, stderr, status = Open3.capture3('ruby', compiler_bin, '--source', abs_path)
+    raise "Compilation failed for #{rel_path}:\n#{stderr}" unless status.success?
 
-    if rel_path.end_with?('.runar.rb')
-      compiler_bin = File.join(PROJECT_ROOT, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
-      output = `ruby #{Shellwords.escape(compiler_bin)} --source #{Shellwords.escape(abs_path)} 2>&1`
-      status = Process.last_status
-      raise "Compilation failed for #{rel_path}:\n#{output}" unless status&.success?
-    else
-      # Use the TypeScript reference compiler for non-Ruby sources.
-      # The Ruby compiler's TS parser has known codegen divergences for complex
-      # contracts (e.g. TicTacToe), so the TS compiler remains the gold standard
-      # for .runar.ts sources until full cross-format conformance is verified.
-      file_name = File.basename(rel_path)
-      script = <<~JS
-        (async () => {
-          const { compile } = await import('#{PROJECT_ROOT}/packages/runar-compiler/dist/index.js');
-          const fs = await import('fs');
-          const source = fs.readFileSync(#{abs_path.inspect}, 'utf-8');
-          const result = compile(source, { fileName: #{file_name.inspect} });
-          if (!result.success) { console.error(result.diagnostics); process.exit(1); }
-          const json = JSON.stringify(result.artifact, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v);
-          process.stdout.write(json);
-        })();
-      JS
-
-      node_bin = ENV['NODE_BIN'] || `which node 2>/dev/null`.strip
-      node_bin = 'node' if node_bin.empty?
-      output = `#{node_bin} -e #{Shellwords.escape(script)} 2>&1`
-      status = Process.last_status
-      raise "Compilation failed for #{rel_path}:\n#{output}" unless status&.success?
-    end
-
-    Runar::SDK::RunarArtifact.from_json(output)
+    Runar::SDK::RunarArtifact.from_json(stdout)
   end
 
   # ---------------------------------------------------------------------------

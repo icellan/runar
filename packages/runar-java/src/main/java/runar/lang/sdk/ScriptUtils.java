@@ -68,12 +68,7 @@ public final class ScriptUtils {
     public static DecodedPush decodePushDataState(String hex, int offset) {
         need(hex, offset, 2, "push opcode");
         int opcode;
-        try {
-            opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                "deserializeState: non-hex byte at offset " + (offset / 2) + " in the state section");
-        }
+        opcode = hexByteAt(hex, offset, "deserializeState");
         if (opcode <= 75) {
             int dataLen = opcode * 2;
             need(hex, offset, 2 + dataLen, "push payload");
@@ -81,15 +76,15 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4c) {
             need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
-            int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
+            int length = hexByteAt(hex, offset + 2, "deserializeState");
             int dataLen = length * 2;
             need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
             need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
-            int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
+            int lo = hexByteAt(hex, offset + 2, "deserializeState");
+            int hi = hexByteAt(hex, offset + 4, "deserializeState");
             int length = lo | (hi << 8);
             int dataLen = length * 2;
             need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
@@ -97,13 +92,16 @@ public final class ScriptUtils {
         }
         if (opcode == 0x4e) {
             need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
-            int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
-            int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
-            int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
-            int length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-            int dataLen = length * 2;
-            need(hex, offset, 10 + dataLen, "OP_PUSHDATA4 payload");
+            int b0 = hexByteAt(hex, offset + 2, "deserializeState");
+            int b1 = hexByteAt(hex, offset + 4, "deserializeState");
+            int b2 = hexByteAt(hex, offset + 6, "deserializeState");
+            int b3 = hexByteAt(hex, offset + 8, "deserializeState");
+            // N-317: unsigned, in long. As a signed int, b3 >= 0x40 overflowed
+            // dataLen negative, slipped past need and threw a raw
+            // StringIndexOutOfBoundsException.
+            long length = (b0 | (b1 << 8) | (b2 << 16)) + ((long) b3 << 24);
+            need(hex, offset, 10 + length * 2, "OP_PUSHDATA4 payload");
+            int dataLen = (int) (length * 2);
             return new DecodedPush(hex.substring(offset + 10, offset + 10 + dataLen), 10 + dataLen);
         }
         // Not a push opcode at all — encodePushDataState can never emit one, so
@@ -116,12 +114,35 @@ public final class ScriptUtils {
     }
 
     /**
+     * N-320: reads the byte at hex offset {@code at} as two ASCII hex digits,
+     * else throws {@link IllegalArgumentException}. {@code Integer.parseInt}
+     * accepts a leading '+' or '-', so "-1" read as -1 — a negative push length
+     * that slipped past {@link #need} and threw StringIndexOutOfBoundsException
+     * — and its NumberFormatException is not the typed refusal either.
+     */
+    private static int hexByteAt(String hex, int at, String what) {
+        int hi = at >= 0 && at < hex.length() ? hexDigit(hex.charAt(at)) : -1;
+        int lo = at >= 0 && at + 1 < hex.length() ? hexDigit(hex.charAt(at + 1)) : -1;
+        if (hi < 0 || lo < 0) {
+            throw new IllegalArgumentException(what + ": non-hex byte at hex offset " + at);
+        }
+        return hi * 16 + lo;
+    }
+
+    private static int hexDigit(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    /**
      * Asserts {@code chars} hex chars are available from {@code offset}, else
      * fails closed (C2). Without this every branch above was a bare
      * {@code substring} that threw a raw {@link StringIndexOutOfBoundsException}
      * on a short third-party blob.
      */
-    private static void need(String hex, int offset, int chars, String what) {
+    private static void need(String hex, int offset, long chars, String what) {
         if (offset + chars > hex.length()) {
             throw new IllegalArgumentException(String.format(
                 "deserializeState: truncated state — %s runs past the end of the state section "
@@ -189,9 +210,19 @@ public final class ScriptUtils {
      * {@code opcode <= 75} branch and correctly decodes as the empty byte
      * array, since the encoder no longer emits {@code OP_0} for a 1-byte
      * {@code 0x00} payload.
+     *
+     * @throws IllegalArgumentException if the opcode byte itself, an
+     *     OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs
+     *     past the end of {@code hex} (F-238 — this used to throw a raw
+     *     {@link StringIndexOutOfBoundsException} or silently return a
+     *     short/empty payload, like {@link #decodePushDataState} did before
+     *     C2; a provider-supplied deployed script is untrusted input and a
+     *     truncated push must never come back as a quietly-wrong value).
      */
     public static DecodedPush decodePushData(String hex, int offset) {
-        int opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
+        need(hex, offset, 2, "push opcode");
+        int opcode;
+        opcode = hexByteAt(hex, offset, "decodePushData");
         if (opcode >= 0x51 && opcode <= 0x60) {  // OP_1..OP_16
             return new DecodedPush(String.format("%02x", opcode - 0x50), 2);
         }
@@ -200,27 +231,37 @@ public final class ScriptUtils {
         }
         if (opcode <= 75) {
             int dataLen = opcode * 2;
+            need(hex, offset, 2 + dataLen, "push payload");
             return new DecodedPush(hex.substring(offset + 2, offset + 2 + dataLen), 2 + dataLen);
         }
         if (opcode == 0x4c) {
-            int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
+            need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
+            int length = hexByteAt(hex, offset + 2, "decodePushData");
             int dataLen = length * 2;
+            need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
-            int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
+            need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
+            int lo = hexByteAt(hex, offset + 2, "decodePushData");
+            int hi = hexByteAt(hex, offset + 4, "decodePushData");
             int length = lo | (hi << 8);
             int dataLen = length * 2;
+            need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
             return new DecodedPush(hex.substring(offset + 6, offset + 6 + dataLen), 6 + dataLen);
         }
         if (opcode == 0x4e) {
-            int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
-            int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
-            int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
-            int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
-            int length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-            int dataLen = length * 2;
+            need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
+            int b0 = hexByteAt(hex, offset + 2, "decodePushData");
+            int b1 = hexByteAt(hex, offset + 4, "decodePushData");
+            int b2 = hexByteAt(hex, offset + 6, "decodePushData");
+            int b3 = hexByteAt(hex, offset + 8, "decodePushData");
+            // N-317: unsigned, in long. As a signed int, b3 >= 0x40 overflowed
+            // dataLen negative, slipped past need and threw a raw
+            // StringIndexOutOfBoundsException.
+            long length = (b0 | (b1 << 8) | (b2 << 16)) + ((long) b3 << 24);
+            need(hex, offset, 10 + length * 2, "OP_PUSHDATA4 payload");
+            int dataLen = (int) (length * 2);
             return new DecodedPush(hex.substring(offset + 10, offset + 10 + dataLen), 10 + dataLen);
         }
         return new DecodedPush("", 2);
@@ -268,41 +309,166 @@ public final class ScriptUtils {
     }
 
     /**
-     * Walks a hex-encoded script and returns the offset of the last
-     * OP_RETURN (0x6a) at an opcode boundary, or -1. Skips push data
-     * so inner 0x6a bytes are not matched.
+     * Walks a hex-encoded script and returns the offset of the first
+     * OP_RETURN (0x6a) found at an opcode boundary, or -1. Skips push
+     * data so inner 0x6a bytes are not matched. Stops immediately on the
+     * first match rather than continuing to look for a later one — that
+     * is correct here, not a shortcut: the on-chain interpreter itself
+     * stops at the first OP_RETURN it executes, and the compiler emits
+     * exactly one separator (codePart + OP_RETURN + stateBytes), so
+     * "first" and "last" coincide for every script this method will
+     * ever see. The name is kept for parity with the other six SDKs,
+     * which all implement the same first-match walk.
      */
     public static int findLastOpReturn(String scriptHex) {
-        int offset = 0;
+        // N-317: long, so a hostile OP_PUSHDATA4 length cannot overflow the
+        // offset negative (StringIndexOutOfBoundsException).
+        long offset = 0;
         int length = scriptHex.length();
         while (offset + 2 <= length) {
-            int opcode = Integer.parseInt(scriptHex.substring(offset, offset + 2), 16);
-            if (opcode == 0x6a) return offset;
+            int at = (int) offset;
+            int opcode = hexByteAt(scriptHex, at, "findLastOpReturn");
+            if (opcode == 0x6a) return at;
             if (opcode >= 0x01 && opcode <= 0x4b) {
                 offset += 2 + opcode * 2;
             } else if (opcode == 0x4c) {
                 if (offset + 4 > length) break;
-                int pushLen = Integer.parseInt(scriptHex.substring(offset + 2, offset + 4), 16);
+                int pushLen = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
                 offset += 4 + pushLen * 2;
             } else if (opcode == 0x4d) {
                 if (offset + 6 > length) break;
-                int lo = Integer.parseInt(scriptHex.substring(offset + 2, offset + 4), 16);
-                int hi = Integer.parseInt(scriptHex.substring(offset + 4, offset + 6), 16);
+                int lo = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
+                int hi = hexByteAt(scriptHex, at + 4, "findLastOpReturn");
                 int pushLen = lo | (hi << 8);
                 offset += 6 + pushLen * 2;
             } else if (opcode == 0x4e) {
                 if (offset + 10 > length) break;
-                int b0 = Integer.parseInt(scriptHex.substring(offset + 2, offset + 4), 16);
-                int b1 = Integer.parseInt(scriptHex.substring(offset + 4, offset + 6), 16);
-                int b2 = Integer.parseInt(scriptHex.substring(offset + 6, offset + 8), 16);
-                int b3 = Integer.parseInt(scriptHex.substring(offset + 8, offset + 10), 16);
-                int pushLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                int b0 = hexByteAt(scriptHex, at + 2, "findLastOpReturn");
+                int b1 = hexByteAt(scriptHex, at + 4, "findLastOpReturn");
+                int b2 = hexByteAt(scriptHex, at + 6, "findLastOpReturn");
+                int b3 = hexByteAt(scriptHex, at + 8, "findLastOpReturn");
+                long pushLen = (b0 | (b1 << 8) | (b2 << 16)) + ((long) b3 << 24);
                 offset += 10 + pushLen * 2;
             } else {
                 offset += 2;
             }
         }
         return -1;
+    }
+
+    /**
+     * Determines whether {@code scriptHex} was produced from {@code artifact}
+     * regardless of the constructor args used (port of TS
+     * {@code matchesArtifact}). Every constructor slot and codeSepIndex slot is
+     * one variable script element; a {@code codePartLenSlots} field must equal
+     * the little-endian length of the code part being matched (everything
+     * before the state section, inscription envelope included).
+     *
+     * @throws IllegalArgumentException if {@code scriptHex} is not a
+     *     well-formed sequence of push elements at the offsets the artifact
+     *     expects (F-238)
+     */
+    public static boolean matchesArtifact(RunarArtifact artifact, String scriptHex) {
+        // N-317: refuse anything that is not whole bytes of hex up front, so
+        // no reader below sees a partial byte and every tier makes the same call.
+        if (!isHexBytes(scriptHex)) {
+            throw new IllegalArgumentException("matchesArtifact: script is not an even-length hex string");
+        }
+        String codeHex = scriptHex;
+        if (artifact.stateFields() != null && !artifact.stateFields().isEmpty()) {
+            int opReturnPos = findLastOpReturn(scriptHex);
+            if (opReturnPos != -1) codeHex = scriptHex.substring(0, opReturnPos);
+        }
+
+        String template = artifact.scriptHex();
+        // N-316: compare literally only when the template has no slot of ANY kind.
+        if (artifact.constructorSlots().isEmpty() && artifact.codeSepIndexSlots().isEmpty()
+            && artifact.codePartLenSlots().isEmpty()) {
+            return codeHex.equals(template);
+        }
+
+        java.util.TreeSet<Integer> offsets = new java.util.TreeSet<>();
+        for (RunarArtifact.ConstructorSlot s : artifact.constructorSlots()) offsets.add(s.byteOffset());
+        for (RunarArtifact.CodeSepIndexSlot s : artifact.codeSepIndexSlots()) offsets.add(s.byteOffset());
+
+        java.util.Set<Integer> lenFields = new java.util.HashSet<>();
+        for (RunarArtifact.CodePartLenSlot s : artifact.codePartLenSlots()) lenFields.add(s.byteOffset() * 2);
+        String deployedLen = toLittleEndian32(codeHex.length() / 2);
+        final String code = codeHex;
+
+        int templatePos = 0;
+        int codePos = 0;
+        // N-318: the element read at each placeholder, keyed by template byte offset.
+        java.util.Map<Integer, String> elems = new java.util.HashMap<>();
+        for (int byteOffset : offsets) {
+            int slotHexOffset = byteOffset * 2;
+            int segLen = slotHexOffset - templatePos;
+            if (codePos + segLen > code.length()) return false;
+            if (!segmentMatches(template, code, lenFields, deployedLen, templatePos, slotHexOffset, codePos)) {
+                return false;
+            }
+            templatePos = slotHexOffset + 2;
+            int elemOffset = codePos + segLen;
+            codePos = elemOffset + decodePushData(code, elemOffset).hexCharsConsumed();
+            elems.put(byteOffset, code.substring(elemOffset, codePos));
+        }
+        if (!(code.length() - codePos == template.length() - templatePos
+            && segmentMatches(template, code, lenFields, deployedLen, templatePos, template.length(), codePos))) {
+            return false;
+        }
+
+        // N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+        // pushScriptNumber(codeSepIndex + shift) there
+        // (ContractScript.resolvedCodeSepSlots), shift = the growth of every
+        // constructor slot before codeSepIndex plus that of every earlier
+        // codeSep slot before it. The matcher does not know the constructor
+        // args, so their growth is taken from the elements actually read.
+        java.util.List<RunarArtifact.CodeSepIndexSlot> sepSlots = new java.util.ArrayList<>(artifact.codeSepIndexSlots());
+        sepSlots.sort(java.util.Comparator.comparingInt(RunarArtifact.CodeSepIndexSlot::byteOffset));
+        java.util.List<int[]> resolved = new java.util.ArrayList<>(); // {byteOffset, width}
+        for (RunarArtifact.CodeSepIndexSlot slot : sepSlots) {
+            long shift = 0;
+            for (RunarArtifact.ConstructorSlot cs : artifact.constructorSlots()) {
+                if (cs.byteOffset() < slot.codeSepIndex()) shift += elems.get(cs.byteOffset()).length() / 2 - 1;
+            }
+            for (int[] prev : resolved) {
+                if (prev[0] < slot.codeSepIndex()) shift += prev[1] - 1;
+            }
+            String expected = ContractScript.pushScriptNumber(java.math.BigInteger.valueOf(slot.codeSepIndex() + shift));
+            if (!expected.equals(elems.get(slot.byteOffset()))) return false;
+            resolved.add(new int[] {slot.byteOffset(), expected.length() / 2});
+        }
+        return true;
+    }
+
+    /** True when {@code hex} is an even-length string of hex digits (N-317). */
+    public static boolean isHexBytes(String hex) {
+        if (hex.length() % 2 != 0) return false;
+        for (int i = 0; i < hex.length(); i++) {
+            char c = hex.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
+    }
+
+    private static boolean segmentMatches(
+        String template, String code, java.util.Set<Integer> lenFields, String deployedLen,
+        int tStart, int tEnd, int cStart
+    ) {
+        int t = tStart;
+        int c = cStart;
+        while (t < tEnd) {
+            if (lenFields.contains(t)) {
+                if (c + 8 > code.length() || !code.startsWith(deployedLen, c)) return false;
+                t += 8;
+                c += 8;
+                continue;
+            }
+            if (c >= code.length() || template.charAt(t) != code.charAt(c)) return false;
+            t++;
+            c++;
+        }
+        return true;
     }
 
     /**
@@ -326,6 +492,18 @@ public final class ScriptUtils {
             pkh = HEX.formatHex(h);
         }
         return "76a914" + pkh + "88ac";
+    }
+
+    /**
+     * N-426: shared cross-SDK refusal text, byte-identical in all seven SDKs
+     * (conformance/sdk-call/n426-change-address-guard.json). A stateful covenant rebuilds its
+     * change output from {@code _changePKH} = hash160(changePubKey ?? signer pubkey), so a
+     * {@code changeAddress} naming a different key builds a spend the network rejects.
+     */
+    public static String changeAddressMismatchMessage(String changeAddress) {
+        return "changeAddress " + changeAddress + " does not match the change key the covenant enforces "
+            + "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); "
+            + "pass changePubKey for that address";
     }
 
     public static boolean isHex(String s) {

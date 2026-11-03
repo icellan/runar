@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,6 +20,12 @@ import (
 //   - compilers/go/compiler/compiler.go — option threaded through to codegen.
 //   - compilers/go/codegen/stack.go — receives params via
 //     `LowerToStackOptions.SP1FriParams` (-> `loweringContext.sp1FriParams`).
+//
+// F-007: CompileFromSource now always refuses verifySP1FRI (the verifier is
+// not implemented for v1). Each test below first asserts that refusal, then
+// runs its original script assertions against the test-only
+// lowerSP1FriPocBypassingRefusal, which emits the same bytes CompileFromSource
+// did before the refusal became unconditional.
 //
 // These tests exercise the full path
 // `compiler.CompileFromSource(path, CompileOptions{SP1FriParams: ...})` —
@@ -83,16 +90,11 @@ func emitProductionBodyHex(t *testing.T, params codegen.SP1FriVerifierParams) st
 // must take this path.
 func TestSp1Fri_CompileFromSource_DefaultParams(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
-	artifact, err := CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("CompileFromSource(default): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+	if _, err := CompileFromSource(contractPath); err == nil {
+		t.Fatal("F-007: CompileFromSource(default) compiled verifySP1FRI; v1 must refuse")
 	}
-	if artifact == nil {
-		t.Fatal("expected non-nil artifact")
-	}
-	if artifact.ContractName != "Sp1FriVerifierPoc" {
-		t.Errorf("contractName: got %q want %q", artifact.ContractName, "Sp1FriVerifierPoc")
-	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, nil).ScriptHex}
 	if artifact.Script == "" {
 		t.Fatal("expected non-empty Script")
 	}
@@ -144,15 +146,11 @@ func TestSp1Fri_CompileFromSource_DefaultParams(t *testing.T) {
 func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
 	preset := SP1FriPresetMust("evm-guest")
-	artifact, err := CompileFromSource(contractPath, CompileOptions{
-		SP1FriParams: preset,
-	})
-	if err != nil {
-		t.Fatalf("CompileFromSource(evm-guest preset): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+	if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: preset}); err == nil {
+		t.Fatal("F-007: CompileFromSource(evm-guest preset) compiled verifySP1FRI; v1 must refuse")
 	}
-	if artifact == nil {
-		t.Fatal("expected non-nil artifact")
-	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, preset).ScriptHex}
 	if artifact.Script == "" {
 		t.Fatal("expected non-empty Script")
 	}
@@ -192,10 +190,7 @@ func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 	// larger than the PoC default — the production tuple unrolls 10
 	// commit-phase rounds and 100 query-derive ops vs. PoC's 1 round and
 	// 2 query-derive ops.
-	defaultArtifact, err := CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("CompileFromSource(default) for size comparison: %v", err)
-	}
+	defaultArtifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, nil).ScriptHex}
 	defaultBytes := len(defaultArtifact.Script) / 2
 	if scriptBytes <= defaultBytes {
 		t.Errorf("production-preset script (%d B) should be larger than default (%d B)",
@@ -224,12 +219,12 @@ func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 func TestSp1Fri_CompileFromSource_PresetByteEqualsCodegen(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
 	preset := SP1FriPresetMust("evm-guest")
-	artifact, err := CompileFromSource(contractPath, CompileOptions{
-		SP1FriParams: preset,
-	})
-	if err != nil {
-		t.Fatalf("CompileFromSource(evm-guest): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1; byte-equality checked on the
+	// test-only lowering.
+	if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: preset}); err == nil {
+		t.Fatal("F-007: CompileFromSource(evm-guest) compiled verifySP1FRI; v1 must refuse")
 	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, preset).ScriptHex}
 	bodyHex := emitProductionBodyHex(t, *preset)
 	if bodyHex == "" {
 		t.Fatal("emitProductionBodyHex returned empty hex")
@@ -277,22 +272,23 @@ func TestSp1Fri_AllPresetsCompile(t *testing.T) {
 	}
 
 	sizes := make(map[string]int, len(presets))
+	scripts := make(map[string]string, len(presets))
 	for _, name := range presets {
 		t.Run(name, func(t *testing.T) {
 			preset, err := SP1FriPreset(name)
 			if err != nil {
 				t.Fatalf("SP1FriPreset(%q): %v", name, err)
 			}
-			artifact, err := CompileFromSource(contractPath, CompileOptions{
-				SP1FriParams: &preset,
-			})
-			if err != nil {
-				t.Fatalf("CompileFromSource(preset=%q): %v", name, err)
+			// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+			if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: &preset}); err == nil {
+				t.Fatalf("F-007: CompileFromSource(preset=%q) compiled verifySP1FRI; v1 must refuse", name)
 			}
-			if artifact == nil || artifact.Script == "" {
+			artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, &preset).ScriptHex}
+			if artifact.Script == "" {
 				t.Fatalf("preset %q produced empty artifact/script", name)
 			}
 			sizes[name] = len(artifact.Script) / 2
+			scripts[name] = artifact.Script
 			t.Logf("preset=%q script size=%d B (~%d KB)",
 				name, sizes[name], sizes[name]/1024)
 		})
@@ -305,6 +301,15 @@ func TestSp1Fri_AllPresetsCompile(t *testing.T) {
 			t.Errorf("evm-guest and production-100 are aliases but produced "+
 				"different script sizes: %d vs %d", sizes["evm-guest"], sizes["production-100"])
 		}
+	}
+
+	// F-375: the size-only check above cannot tell two scripts of equal
+	// length but different content apart — it would pass a hand-crafted
+	// case that diverges in content while coinciding in length. Compare
+	// the full script content too (see presetAliasMismatch and its
+	// regression guard TestSp1Fri_PresetAliasMismatch_CatchesContentDivergenceAtEqualSize).
+	if msg := presetAliasMismatch("evm-guest", "production-100", scripts); msg != "" {
+		t.Error(msg)
 	}
 
 	// Fallback ordering sanity: production-100 > production-64 > production-16
@@ -321,6 +326,76 @@ func TestSp1Fri_AllPresetsCompile(t *testing.T) {
 			t.Errorf("production-64 (%d B) should be larger than production-16 (%d B)",
 				sizes["production-64"], sizes["production-16"])
 		}
+	}
+}
+
+// presetAliasMismatch reports a non-empty diagnostic when the two named
+// preset-alias scripts in `scripts` diverge in content, or "" when they
+// match (or when either side is missing/empty, mirroring the `!= 0` /
+// `!= ""` guards elsewhere in this file that let a failed sub-test skip
+// the alias check rather than cascade into a bogus one).
+//
+// F-375: comparing only script LENGTH (len(a)/2 == len(b)/2, as the
+// superseded check did) cannot tell apart two scripts that happen to
+// share a byte length but differ in content. This compares full content
+// instead — see TestSp1Fri_PresetAliasMismatch_CatchesContentDivergenceAtEqualSize.
+func presetAliasMismatch(aliasA, aliasB string, scripts map[string]string) string {
+	a, b := scripts[aliasA], scripts[aliasB]
+	if a == "" || b == "" {
+		return ""
+	}
+	if a != b {
+		firstDiff := -1
+		for i := 0; i < len(a) && i < len(b); i++ {
+			if a[i] != b[i] {
+				firstDiff = i
+				break
+			}
+		}
+		return fmt.Sprintf("%s and %s are aliases but produced different script content "+
+			"(%d bytes each, first divergent hex-char offset %d)",
+			aliasA, aliasB, len(a)/2, firstDiff)
+	}
+	return ""
+}
+
+// TestSp1Fri_PresetAliasMismatch_CatchesContentDivergenceAtEqualSize is a
+// regression guard for F-375 (CL-GAP-014): TestSp1Fri_AllPresetsCompile's
+// alias check previously compared only sizes[...] (int byte lengths)
+// between the "evm-guest" and "production-100" presets, never the
+// artifact.Script content itself — a hand-crafted pair of scripts with
+// the same byte length but different content would pass that check
+// undetected. This test hand-crafts exactly such a pair (same hex length,
+// one differing hex digit) and asserts presetAliasMismatch reports the
+// divergence.
+//
+// What this proves: that the alias check wired into
+// TestSp1Fri_AllPresetsCompile can distinguish two equal-length,
+// different-content scripts — the specific defect class CL-GAP-014
+// identified.
+// What this does not prove: that the real "evm-guest" / "production-100"
+// presets can ever actually diverge in practice. They can't today —
+// options.go:117 resolves both names through the literal same `case`
+// label, so they are always byte-identical by construction. This test
+// guards against a future regression (e.g. someone splitting that case
+// into two arms with a typo) that preserves script length while breaking
+// content equality.
+func TestSp1Fri_PresetAliasMismatch_CatchesContentDivergenceAtEqualSize(t *testing.T) {
+	const scriptA = "deadbeef00112233"
+	const scriptB = "deadbeef00112234" // same length, last hex digit differs
+	if len(scriptA) != len(scriptB) {
+		t.Fatalf("test setup bug: hand-crafted scripts must be equal length")
+	}
+
+	scripts := map[string]string{
+		"evm-guest":      scriptA,
+		"production-100": scriptB,
+	}
+
+	if msg := presetAliasMismatch("evm-guest", "production-100", scripts); msg == "" {
+		t.Fatal("expected presetAliasMismatch to catch a same-size, different-content " +
+			"preset divergence; it reported no mismatch (size-only comparison does not " +
+			"detect content divergence at equal length)")
 	}
 }
 

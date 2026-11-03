@@ -18,12 +18,16 @@ import os
 import sys
 
 from runar_compiler.compiler import (
+    source_loc_to_wire,
     CompilationError,
     artifact_to_json,
     compile_from_ir,
     compile_from_source_collecting_warnings,
     compile_source_to_ir,
+    compile_source_to_ir_collecting_warnings,
 )
+from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.ir.types import SourceLocation
 
 
 # GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
@@ -121,13 +125,27 @@ def main() -> None:
         metavar="PATH",
         help="After a successful compile, write artifact.sourceMap JSON to this path",
     )
+    parser.add_argument(
+        "--no-source-map",
+        dest="no_source_map",
+        action="store_true",
+        help="Omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)",
+    )
 
     args = parser.parse_args()
+
+    # N-445: refuse the contradictory pair rather than silently dropping one.
+    if args.no_source_map and args.emit_source_map:
+        print(
+            "Error: --no-source-map and --emit-source-map are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if not args.ir and not args.source:
         print(
             "Usage: runar-compiler-python [--ir <path> | --source <path>] "
-            "[--output <path>] [--hex] [--asm] [--emit-ir]",
+            "[--output <path>] [--hex] [--asm] [--emit-ir] [--no-source-map]",
             file=sys.stderr,
         )
         print("", file=sys.stderr)
@@ -137,6 +155,15 @@ def main() -> None:
         )
         print(
             "Phase 2: Compile from source to Bitcoin Script (--source).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+    # Ruby F-335). Previously --source was run and --ir silently ignored.
+    if args.source and args.ir:
+        print(
+            "Error: --source and --ir are mutually exclusive; pass exactly one",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -155,7 +182,11 @@ def main() -> None:
             sys.exit(1)
         try:
             src = _read_file(args.source)
-            parse_result = _parse_source(src, args.source)
+            # F-213: parse + validate with the same recursion headroom as a
+            # full compile (see input_limits.COMPILE_RECURSION_LIMIT).
+            from runar_compiler.frontend.input_limits import recursion_headroom
+            with recursion_headroom():
+                parse_result = _parse_source(src, args.source)
             if parse_result.errors:
                 print(
                     "parse errors:\n  " + "\n  ".join(parse_result.error_strings()),
@@ -165,7 +196,8 @@ def main() -> None:
             if parse_result.contract is None:
                 print(f"parse error: no contract found in {args.source}", file=sys.stderr)
                 sys.exit(1)
-            valid = _validate(parse_result.contract)
+            with recursion_headroom():
+                valid = _validate(parse_result.contract)
             if valid.errors:
                 print(
                     "validation errors:\n  " + "\n  ".join(valid.error_strings()),
@@ -183,13 +215,23 @@ def main() -> None:
         print("parser ok")
         return
 
-    # Handle --emit-ir: dump ANF IR JSON and exit
+    # Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS --emit-source-map
+    # was also requested. The source map is only populated by the full
+    # compile (stack-lowering + emit), which this IR-only snapshot never
+    # runs, so an unconditional return here used to silently drop the
+    # --emit-source-map file with no diagnostic (F-255, same bug as Go's
+    # F-183). When --emit-source-map is also set we fall through — the same
+    # way --emit-ir-to already does — into the normal compile below so the
+    # source map gets populated and written; emit_ir_handled then stops us
+    # before the final hex/asm/artifact output, since --emit-ir's contract
+    # is "stdout carries only the IR".
+    emit_ir_handled = False
     if args.emit_ir:
         if not args.source:
             print("--emit-ir requires --source", file=sys.stderr)
             sys.exit(1)
         try:
-            program = compile_source_to_ir(
+            program, ir_warnings = compile_source_to_ir_collecting_warnings(
                 args.source,
                 disable_constant_folding=args.disable_constant_folding,
             )
@@ -206,7 +248,15 @@ def main() -> None:
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
         print(ir_json)
-        return
+        if not args.emit_source_map:
+            # F-220: this early return skips the full compile, which is where
+            # warnings are otherwise printed, so print them here. When
+            # --emit-source-map is set we fall through and the full compile
+            # prints them; printing here too would print each one twice.
+            for w in ir_warnings:
+                print(f"warning: {w}", file=sys.stderr)
+            return
+        emit_ir_handled = True
 
     # Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
     # file, then fall through to the normal compile below. The conformance
@@ -262,6 +312,10 @@ def main() -> None:
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
 
+    # N-445: --no-source-map drops the sourceMap key from the artifact.
+    if args.no_source_map:
+        artifact.source_map = None
+
     # Determine output
     if args.hex:
         output = artifact.script
@@ -298,6 +352,12 @@ def main() -> None:
             f.write("\n")
         print(f"Source map written to {args.emit_source_map}", file=sys.stderr)
 
+    # --emit-ir already printed the IR above; having fallen through only to
+    # populate and write the source map, stop here rather than also print
+    # the full hex/asm/artifact output.
+    if emit_ir_handled:
+        return
+
     # Write output
     if args.output:
         with open(args.output, "w") as f:
@@ -318,24 +378,22 @@ _FIELD_ALIASES = {
     "else_": "else",
     "value_ref": "value",
     "raw_value": "value",
+    # F-065 / F-088: the schema spells it `sigHashType` (the ABI's spelling),
+    # not the mechanical camelCase `sighashType`.
+    "sighash_type": "sigHashType",
 }
 
 # Fields that should be excluded from IR output (internal decoded fields)
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
-    "source_loc",  # debug-only, not part of conformance
-    # In-memory carrier for the artifact's top-level parentClass field.
-    # Excluded from --emit-ir so it never affects cross-tier ANF parity.
-    "parent_class",
     # Issue #109 (@embedAlways): compiler-internal DCE opt-out flag on
     # load_prop. The Zig reference keeps it out of the emitted IR too, so
     # excluding it here keeps the cross-tier ANF bytes identical.
     "preserve",
-    # N-094 / issue #123: in-memory carrier for the method's declared @sighash
-    # mode. The ANF wire format carries the mode on the `check_preimage` node's
-    # `sighashFlag` instead; the ANFMethod schema is additionalProperties:false,
-    # so emitting it here makes the whole program fail validateANF.
-    "sighash_type",
+    # F-038: `parent_class` and `sighash_type` are NOT excluded. They are wire
+    # data (anf-ir.schema.json `parentClass` / `ANFMethod.sigHashType`): an
+    # --emit-ir -> --ir round trip that dropped them produced an artifact with
+    # no parentClass and no abi sigHashType, both of which the SDK signs by.
 })
 
 
@@ -367,6 +425,8 @@ def _anf_to_camel_dict(obj: object) -> object:
     import json as _json
     from dataclasses import fields, is_dataclass
     if is_dataclass(obj) and not isinstance(obj, type):
+        if isinstance(obj, SourceLocation):
+            return source_loc_to_wire(obj)
         d: dict = {}
         has_raw_value = False
         kind_val = getattr(obj, "kind", None)
@@ -399,6 +459,14 @@ def _anf_to_camel_dict(obj: object) -> object:
             # (`skip_serializing_if`) do, so the ANF of a FixedArray-free
             # contract keeps the bytes the goldens were stamped with.
             if f.name == "synthetic_array_chain" and not v:
+                continue
+            # F-038: parentClass is always set by the source path; an IR
+            # loaded without it (pre-F-038) re-emits without it.
+            if f.name == "parent_class" and not v:
+                continue
+            # F-065 / F-088: omit the default ALL|FORKID (0x41) so explicit
+            # `@sighash ALL|FORKID` and no directive emit identical ANF.
+            if f.name == "sighash_type" and v == SIGHASH_DEFAULT:
                 continue
             key = _snake_key(f.name)
             d[key] = _anf_to_camel_dict(v)
@@ -496,6 +564,8 @@ def _run_debug_subcommand(argv: list[str]) -> None:
     status = "pass" if vm.is_success else "fail"
     final_stack = _format_stack(vm.current_stack, args.max_stack_bytes)
     print(f"final: {status}  ops={step_n}  stack={final_stack}")
+    if not vm.is_success:
+        sys.exit(1)  # F-221: a failing script must not exit 0
 
 
 def _format_stack(stack: list, max_bytes: int) -> str:

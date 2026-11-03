@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compile } from '../index.js';
+import { compile, parse, lowerToANF } from '../index.js';
 
 /**
  * R-127 / CL-BUG-171 — an output intrinsic inside a loop body is silently
@@ -179,5 +179,79 @@ describe('R-127 output intrinsics inside a loop body', () => {
     this.count = acc + n;
   }`);
     expect(compileResult(src).success).toBe(true);
+  });
+});
+
+/**
+ * N-006 / CL-BUG-186 — the lowering backstop behind R-127.
+ *
+ * R-127 is a syntactic search in pass 2. `lowerToANF` is a public export, so
+ * `parse()` -> `lowerToANF()` -> `compileFromANF()` reaches pass 4 having run
+ * no validator at all, and `lowerForStatement` used to drop the body
+ * sub-context's output refs without a word: the loop's outputs were built but
+ * left out of the continuation hash. The on-chain consequence (a spend that
+ * drops the loop payouts is ACCEPTED) is proven in
+ * packages/runar-testing/src/__tests__/f005-go-loop-output-continuation.test.ts.
+ *
+ * What this proves: pass 4 itself refuses a loop whose body registered an
+ * output ref, with R-127's shared diagnostic, whatever let the contract past
+ * passes 1-3; and it still lowers a loop with no output in it.
+ * What it does not prove: anything about the emitted bytes.
+ */
+describe('N-006 lowering backstop: lowerToANF without validation', () => {
+  const lowerUnvalidated = (source: string): string | undefined => {
+    const p = parse(source, 'Fan.runar.ts');
+    expect(p.errors).toEqual([]);
+    try {
+      lowerToANF(p.contract!);
+      return undefined;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  };
+
+  it('refuses addRawOutput hidden in an array literal in a loop body', () => {
+    const refusal = lowerUnvalidated(contract(`
+  public fan(n: bigint) {
+    this.addOutput(1000n, this.count + 1n);
+    for (let i = 0n; i < 2n; i++) {
+      const xs = [this.addRawOutput(n, num2bin(i, 4n))];
+    }
+  }`).replace("import { StatefulSmartContract, assert }", "import { StatefulSmartContract, assert, num2bin }"));
+    expect(refusal, 'lowerToANF accepted an output intrinsic inside a loop body').toBeDefined();
+    expect(refusal).toContain("Output intrinsic 'addRawOutput' cannot be called inside a loop body.");
+  });
+
+  it('refuses addOutput and addDataOutput directly in a loop body', () => {
+    const out = lowerUnvalidated(contract(`
+  public fan(n: bigint) {
+    this.addOutput(1000n, this.count);
+    for (let i = 0n; i < 2n; i++) {
+      this.addOutput(1000n, this.count + i);
+    }
+    assert(n > 0n);
+  }`));
+    expect(out).toContain("Output intrinsic 'addOutput' cannot be called inside a loop body.");
+    const data = lowerUnvalidated(contract(`
+  public fan(n: bigint) {
+    for (let i = 0n; i < 2n; i++) {
+      if (i < n) {
+        this.addDataOutput(0n, num2bin(i, 4n));
+      }
+    }
+    this.count = this.count + 1n;
+  }`).replace("import { StatefulSmartContract, assert }", "import { StatefulSmartContract, assert, num2bin }"));
+    expect(data).toContain("Output intrinsic 'addDataOutput' cannot be called inside a loop body.");
+  });
+
+  it('control: a loop with no output intrinsic still lowers', () => {
+    expect(lowerUnvalidated(contract(`
+  public fan(n: bigint) {
+    let acc: bigint = 0n;
+    for (let i = 0n; i < 2n; i++) {
+      acc = acc + n;
+    }
+    this.addOutput(1000n, this.count + acc);
+  }`))).toBeUndefined();
   });
 });

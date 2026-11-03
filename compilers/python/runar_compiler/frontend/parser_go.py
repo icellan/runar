@@ -6,6 +6,8 @@ Hand-written tokenizer + recursive descent parser for Go contract syntax.
 
 from __future__ import annotations
 
+import re
+
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
@@ -17,7 +19,23 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    go_bare_string_literal_message,
+    invalid_escape_sequence_message,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
+from runar_compiler.frontend.sighash_directive import (
+    lost_directive_message,
+    resolve_native_sighash,
+    unknown_go_directive_message,
+)
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +90,15 @@ TOK_BACKTICK_STRING = 44
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw")
 
     def __init__(self, kind: int, value: str, line: int, col: int):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # N-435: TOK_STRING only -- the Go string's bytes, one per latin-1 char.
+        self.raw = None
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +150,6 @@ _GO_BIGINTBIG_OPS = {
 # Native Go types that map to Runar types
 _GO_NATIVE_TYPE_MAP: dict[str, str] = {
     "int64": "bigint",
-    "int": "bigint",
     "bool": "boolean",
 }
 
@@ -203,6 +222,7 @@ _GO_BUILTIN_MAP: dict[str, str] = {
     "ExtractPrevOutputScript": "extractPrevOutputScript",
     "RequireOutputP2PKH":      "requireOutputP2PKH",
     "CurrentBlockHeight":      "currentBlockHeight",
+    "ContinuationAmount":      "continuationAmount",
     "AddOutput": "addOutput",
     "AddRawOutput": "addRawOutput",
     "AddDataOutput": "addDataOutput",
@@ -277,25 +297,53 @@ def _go_field_to_camel(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
 def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize_go(source: str) -> list[Token]:
+class _GoDirective:
+    """N-093: a Go DSL directive comment ``//runar:<name> <args>`` (Go's own
+    ``//go:`` convention: no space after ``//``). ``token_index`` is the index
+    of the first source token after the comment (an auto-inserted semicolon is
+    not a source token), so a directive attaches to the declaration that
+    follows it, with only comments and blank lines in between."""
+    __slots__ = ("name", "args", "token_index", "line", "column")
+
+    def __init__(self, name: str, args: str, token_index: int, line: int, column: int):
+        self.name = name
+        self.args = args
+        self.token_index = token_index
+        self.line = line
+        self.column = column
+
+
+_GO_SIGHASH_ARGS_RE = re.compile(r"[ \t][A-Za-z0-9_| \t]*")
+
+
+def _tokenize_go(
+    source: str,
+    lex: list | None = None,
+    file_name: str = "",
+    directives: list[_GoDirective] | None = None,
+) -> list[Token]:
     """Tokenize Go source code.
 
     Go uses automatic semicolon insertion: a newline acts as a semicolon
     after certain tokens (identifiers, numbers, closing brackets, ++, --).
     We insert TOK_SEMICOLON in those cases and skip other newlines.
     """
+    directives = directives if directives is not None else []
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -331,6 +379,11 @@ def _tokenize_go(source: str) -> list[Token]:
                 TOK_RPAREN, TOK_RBRACKET, TOK_RBRACE,
                 TOK_PLUSPLUS, TOK_MINUSMINUS,
             ):
+                # N-093: an inserted semicolon is not a source token, so a
+                # directive pointing here points past it.
+                for d in directives:
+                    if d.token_index == len(tokens):
+                        d.token_index += 1
                 tokens.append(Token(TOK_SEMICOLON, ";", cur_line, cur_col))
             continue
 
@@ -342,8 +395,16 @@ def _tokenize_go(source: str) -> list[Token]:
 
         # Line comment
         if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            start = i
             while i < n and source[i] != "\n" and source[i] != "\r":
                 i += 1
+            # N-093: `//runar:<name> <args>` is a directive, not prose.
+            text = source[start:i]
+            if text.startswith("//runar:"):
+                body = text[len("//runar:"):]
+                m = re.match(r"[^ \t]*", body)
+                name = m.group(0) if m else ""
+                directives.append(_GoDirective(name, body[len(name):], len(tokens), line, col))
             continue
 
         # Block comment
@@ -367,6 +428,7 @@ def _tokenize_go(source: str) -> list[Token]:
 
         # Backtick strings (raw string literals, used for struct tags)
         if ch == "`":
+            start_line = line
             i += 1
             col += 1
             start = i
@@ -378,9 +440,13 @@ def _tokenize_go(source: str) -> list[Token]:
                     col += 1
                 i += 1
             val = source[start:i]
+            # F-011: a raw string may span lines, so only end of file leaves
+            # it unterminated.
             if i < n:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, start_line, start_col))
             tokens.append(Token(TOK_BACKTICK_STRING, val, line, start_col))
             continue
 
@@ -389,35 +455,40 @@ def _tokenize_go(source: str) -> list[Token]:
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != '"':
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != '"' and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == '"':
                 i += 1
                 col += 1
-            # Process escape sequences to get the raw string value
-            processed = _process_go_string_escapes(val)
-            tokens.append(Token(TOK_STRING, processed, line, start_col))
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
+            # N-437: decode with Go's string-literal rules; an escape Go
+            # refuses is refused here too.
+            processed, raw_bytes, esc_err = _decode_go_string(val)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
+            string_tok = Token(TOK_STRING, processed, line, start_col)
+            string_tok.raw = raw_bytes
+            tokens.append(string_tok)
             continue
 
-        # Numbers
-        if ch.isdigit():
-            start = i
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                i += 2
-                col += 2
-                while i < n and _is_hex_digit(source[i]):
-                    i += 1
-                    col += 1
-            else:
-                while i < n and (source[i].isdigit() or source[i] == "_"):
-                    i += 1
-                    col += 1
-            num_str = source[start:i].replace("_", "")
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("go", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
             tokens.append(Token(TOK_NUMBER, num_str, line, start_col))
             continue
 
@@ -492,7 +563,9 @@ def _tokenize_go(source: str) -> list[Token]:
             col += 1
             continue
 
-        # Skip unknown characters
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line, start_col))
         i += 1
         col += 1
 
@@ -500,42 +573,70 @@ def _tokenize_go(source: str) -> list[Token]:
     return tokens
 
 
-def _process_go_string_escapes(s: str) -> str:
-    """Process Go string escape sequences and return the literal value."""
-    result: list[str] = []
+_GO_SIMPLE_ESCAPES = {
+    "a": "\x07", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+    "v": "\v", "\\": "\\", '"': '"',
+}
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _decode_go_string(s: str) -> tuple[str, str, str | None]:
+    """Decode the body of a Go interpreted string literal (N-437).
+
+    Returns ``(val, raw, error)`` following https://go.dev/ref/spec#String_literals.
+    ``raw`` is the Go string's BYTES, one latin-1 char per byte: literal text
+    and ``\\u``/``\\U`` escapes are UTF-8 encoded, ``\\xNN`` and ``\\NNN``
+    (octal, at most 255) are the single byte. ``val`` keeps one char per
+    escape for the bare-literal (hex) path. ``error`` is the shared
+    invalid-escape diagnostic for an escape Go refuses.
+    """
+    val: list[str] = []
+    raw: list[str] = []
     i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s):
-            c = s[i + 1]
-            if c == "n":
-                result.append("\n")
-                i += 2
-            elif c == "t":
-                result.append("\t")
-                i += 2
-            elif c == "r":
-                result.append("\r")
-                i += 2
-            elif c == "\\":
-                result.append("\\")
-                i += 2
-            elif c == '"':
-                result.append('"')
-                i += 2
-            elif c == "x" and i + 3 < len(s):
-                hex_val = s[i + 2:i + 4]
-                try:
-                    result.append(chr(int(hex_val, 16)))
-                except ValueError:
-                    result.append(s[i:i + 4])
-                i += 4
-            else:
-                result.append(s[i])
-                i += 1
-        else:
-            result.append(s[i])
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c != "\\":
+            val.append(c)
+            raw.append(c.encode("utf-8").decode("latin-1"))
             i += 1
-    return "".join(result)
+            continue
+        e = s[i + 1] if i + 1 < n else ""
+        if e in _GO_SIMPLE_ESCAPES and e != "":
+            val.append(_GO_SIMPLE_ESCAPES[e])
+            raw.append(_GO_SIMPLE_ESCAPES[e])
+            i += 2
+        elif e == "x":
+            h = s[i + 2:i + 4]
+            if len(h) != 2 or any(d not in _HEX_DIGITS for d in h):
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\x")
+            val.append(chr(int(h, 16)))
+            raw.append(chr(int(h, 16)))
+            i += 4
+        elif e in ("u", "U"):
+            width = 4 if e == "u" else 8
+            h = s[i + 2:i + 2 + width]
+            ok = len(h) == width and all(d in _HEX_DIGITS for d in h)
+            cp = int(h, 16) if ok else -1
+            if cp < 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + e)
+            ch = chr(cp)
+            val.append(ch)
+            raw.append(ch.encode("utf-8").decode("latin-1"))
+            i += 2 + width
+        elif e != "" and "0" <= e <= "7":
+            j = i + 1
+            while j < n and j < i + 4 and "0" <= s[j] <= "7":
+                j += 1
+            run = s[i + 1:j]
+            if len(run) < 3 or int(run, 8) > 0xFF:
+                return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + run)
+            val.append(chr(int(run, 8)))
+            raw.append(chr(int(run, 8)))
+            i += 4
+        else:
+            return "".join(val), "".join(raw), invalid_escape_sequence_message("\\" + e)
+    return "".join(val), "".join(raw), None
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +649,58 @@ class _GoParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # N-448: token indexes of string literals whose bare use is legal (the
+        # opcode body of runar.Asm).
+        self.bare_literal_ok: set[int] = set()
         self.receiver_name: str = ""
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+        # N-056: id() -> node of every expression operand (atoms); holding the
+        # node keeps its id() from being reused.
+        self._go_atoms: dict[int, Expression] = {}
+        # N-233: id() -> (node, location of its first token) of every operand
+        # _parse_unary returns, so the N-056 refusal can be anchored where the
+        # TS reference anchors it (the ambiguous expression's leftmost operand).
+        self._go_starts: dict[int, tuple[Expression, SourceLocation]] = {}
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
+        # N-093: every `//runar:` directive in the file, in source order, and
+        # the id() of those attached to a func.
+        self.directives: list[_GoDirective] = []
+        self._consumed_directives: set[int] = set()
+
+    def _take_sighash_directives(self, token_index: int) -> list[str | None]:
+        """N-093: the flag specs of the `//runar:sighash` directives attached
+        to the declaration starting at token ``token_index`` (``None`` for a
+        malformed one)."""
+        specs: list[str | None] = []
+        for d in self.directives:
+            if d.token_index != token_index or d.name != "sighash":
+                continue
+            self._consumed_directives.add(id(d))
+            ok = len(d.args) == 0 or _GO_SIGHASH_ARGS_RE.fullmatch(d.args) is not None
+            specs.append(d.args if ok else None)
+        return specs
+
+    def _report_stray_directives(self) -> None:
+        """N-093: refuse every directive that is unknown or attached to no func."""
+        for d in self.directives:
+            if id(d) in self._consumed_directives:
+                continue
+            msg = (
+                lost_directive_message("@sighash") if d.name == "sighash"
+                else unknown_go_directive_message(d.name + d.args)
+            )
+            self.errors.append(Diagnostic(
+                message=msg, severity=Severity.ERROR,
+                loc=SourceLocation(file=self.file_name, line=d.line, column=d.column)))
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _go_field_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -625,17 +777,20 @@ class _GoParser:
                     size = 0
                     self.add_error(f"line {size_tok.line}: array size must be integer")
                 self.expect(TOK_RBRACKET)
-                elem_type = self.parse_type()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_type()
                 return FixedArrayType(element=elem_type, length=size)
             else:
                 # []Type -- slice, treat as the element type
                 self.expect(TOK_RBRACKET)
-                return self.parse_type()
+                with self._nest.nested(self.loc):
+                    return self.parse_type()
 
         # Pointer type: *Type (skip the star)
         if self.check(TOK_STAR):
             self.advance()
-            return self.parse_type()
+            with self._nest.nested(self.loc):
+                return self.parse_type()
 
         tok = self.peek()
         if tok.kind != TOK_IDENT:
@@ -676,7 +831,8 @@ class _GoParser:
         contract_name = ""
         parent_class = ""
         properties: list[PropertyNode] = []
-        methods: list[MethodNode] = []
+        # (method, Go spelling of its name, receiver type or None)
+        funcs: list[tuple[MethodNode, str, str | None]] = []
         struct_found = False
 
         while not self.check(TOK_EOF):
@@ -687,21 +843,39 @@ class _GoParser:
             if self.check_ident("type"):
                 result = self._parse_type_decl()
                 if result is not None:
-                    cname, pclass, props = result
+                    cname, pclass, props, struct_loc = result
+                    if struct_found:
+                        # F-010: exactly one contract struct; never merged.
+                        self.add_error(go_multiple_contracts_message(contract_name, cname))
+                        continue
                     contract_name = cname
                     parent_class = pclass
                     properties = props
+                    # N-490: the synthesized constructor is anchored at the
+                    # contract's `struct` keyword, not a fake 1:1.
+                    ctor_loc = struct_loc
                     struct_found = True
             elif self.check_ident("func"):
-                method = self._parse_func_decl(contract_name)
-                if method is not None:
-                    methods.append(method)
+                func = self._parse_func_decl()
+                if func is not None:
+                    funcs.append(func)
             else:
                 # Skip unknown top-level declarations
                 self.advance()
+        self._report_stray_directives()
 
         if not struct_found:
             return None
+
+        # F-010: a method whose receiver (value or pointer) is not the
+        # contract type is refused -- checked once the whole file is read, so
+        # a method declared before the contract struct is judged the same way.
+        methods: list[MethodNode] = []
+        for method, go_name, recv_type in funcs:
+            if recv_type is not None and recv_type != contract_name:
+                self.add_error(go_foreign_receiver_message(go_name, recv_type, contract_name))
+                continue
+            methods.append(method)
 
         # Extract init() method as property initializers, if present.
         # init() is a special private method that sets default values.
@@ -732,7 +906,7 @@ class _GoParser:
                     callee=Identifier(name="super"),
                     args=super_args,
                 ),
-                source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                source_location=ctor_loc,
             ),
         ]
         for prop in uninit_props:
@@ -740,7 +914,7 @@ class _GoParser:
                 AssignmentStmt(
                     target=PropertyAccessExpr(property=prop.name),
                     value=Identifier(name=prop.name),
-                    source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                    source_location=ctor_loc,
                 )
             )
 
@@ -753,7 +927,7 @@ class _GoParser:
                 params=constructor_params,
                 body=constructor_body,
                 visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                source_location=ctor_loc,
             ),
             methods=methods,
             source_file=self.file_name,
@@ -783,16 +957,17 @@ class _GoParser:
             if self.check(TOK_STRING):
                 self.advance()  # path
 
-    def _parse_type_decl(self) -> tuple[str, str, list[PropertyNode]] | None:
+    def _parse_type_decl(self) -> tuple[str, str, list[PropertyNode], SourceLocation] | None:
         """Parse a type declaration.
 
-        Returns (contractName, parentClass, properties) if a contract struct
-        is found, or None otherwise.
+        Returns (contractName, parentClass, properties, location of the
+        `struct` keyword) if a contract struct is found, or None otherwise.
         """
         self.expect_ident("type")
         name_tok = self.expect(TOK_IDENT)
         type_name = name_tok.value
 
+        struct_loc = self.loc()
         if not self.match_ident("struct"):
             # Not a struct -- skip to end of declaration
             self._skip_to_semicolon_or_brace()
@@ -837,19 +1012,27 @@ class _GoParser:
                 # Parse the type
                 field_type = self.parse_type()
 
-                # Check for struct tag
+                # Check for struct tag. The `runar` key holds comma-separated
+                # options (N-093): `readonly`, and `embedAlways` -- the native
+                # spelling of the `@embedAlways` directive -- in any order.
                 readonly = False
+                embed_always = False
                 if self.check(TOK_BACKTICK_STRING):
                     tag_tok = self.advance()
-                    if 'runar:"readonly"' in tag_tok.value:
+                    runar_tag = re.search(r'(?:^|\s)runar:"([^"]*)"', tag_tok.value)
+                    options = [o.strip() for o in runar_tag.group(1).split(",")] if runar_tag else []
+                    if "readonly" in options:
                         readonly = True
+                    if "embedAlways" in options:
+                        embed_always = True
 
                 for fname in field_names:
-                    prop_name = _go_field_to_camel(fname)
+                    prop_name = self.declare(fname)
                     properties.append(PropertyNode(
                         name=prop_name,
                         type=field_type,
                         readonly=readonly,
+                        embed_always=embed_always,
                         source_location=field_loc,
                     ))
 
@@ -865,7 +1048,7 @@ class _GoParser:
         if not parent_class:
             return None
 
-        return (type_name, parent_class, properties)
+        return (type_name, parent_class, properties, struct_loc)
 
     def _is_embed_field(self) -> bool:
         """Look ahead to check if the current position is an embedded type field.
@@ -907,15 +1090,21 @@ class _GoParser:
             return sel_tok.value
         return f"{pkg_tok.value}.{sel_tok.value}"
 
-    def _parse_func_decl(self, contract_name: str) -> MethodNode | None:
-        """Parse a func declaration (method or standalone function)."""
+    def _parse_func_decl(self) -> tuple[MethodNode, str, str | None] | None:
+        """Parse a func declaration (method or standalone function).
+
+        Returns (method, Go spelling of its name, receiver type or None for a
+        free function); parse_file checks the receiver type (F-010).
+        """
         location = self.loc()
+        # N-093: the `//runar:sighash` directives directly above this func.
+        func_token_index = self.pos
         self.expect_ident("func")
 
         # Check for receiver: func (recv *Type) Name(params) retType { ... }
         has_receiver = False
-        is_contract_method = False
         receiver_name = ""
+        receiver_type: str | None = None
 
         if self.check(TOK_LPAREN):
             # Could be receiver or function params -- look ahead
@@ -926,14 +1115,19 @@ class _GoParser:
                 # Parse receiver
                 self.expect(TOK_LPAREN)
                 recv_tok = self.expect(TOK_IDENT)
-                receiver_name = recv_tok.value
-                # Skip the *TypeName
-                self.match(TOK_STAR)
-                type_tok = self.expect(TOK_IDENT)
+                if self.check(TOK_RPAREN):
+                    # N-018: unnamed receiver `(Type)` -- the only
+                    # identifier is the type. Real Go forbids referencing
+                    # it in the method body at all, so no name is bound.
+                    receiver_name = ""
+                    receiver_type = recv_tok.value
+                else:
+                    receiver_name = recv_tok.value
+                    # Skip the *TypeName
+                    self.match(TOK_STAR)
+                    type_tok = self.expect(TOK_IDENT)
+                    receiver_type = type_tok.value
                 self.expect(TOK_RPAREN)
-
-                if type_tok.value == contract_name:
-                    is_contract_method = True
             else:
                 self.pos = saved
 
@@ -948,47 +1142,60 @@ class _GoParser:
             self.receiver_name = ""
 
         # Determine visibility
-        if has_receiver and is_contract_method:
+        if has_receiver:
             visibility = "public" if func_name[0].isupper() else "private"
-        elif not has_receiver:
-            # Standalone functions: skip exported ones, init, main
+        else:
+            # Standalone functions: skip init and main. F-010: an exported
+            # standalone function is a private helper, as in the TS reference.
             if func_name in ("init", "main"):
-                self._skip_func_body()
-                return None
-            if func_name[0].isupper():
-                # Exported standalone function -- skip (not a contract method)
+                # N-300: a //runar:sighash above it is refused as on a private
+                # func, with the same diagnostic as the TS reference (which
+                # parses these as private helpers).
+                skipped = resolve_native_sighash(
+                    func_name, False, self._take_sighash_directives(func_token_index),
+                )
+                if skipped is not None and skipped.error is not None:
+                    self.errors.append(Diagnostic(message=skipped.error, severity=Severity.ERROR, loc=location))
                 self._skip_func_body()
                 return None
             visibility = "private"
-        else:
-            # Method on a different type -- skip
-            self._skip_func_body()
-            return None
 
-        method_name = _go_field_to_camel(func_name)
+        method_name = self.declare(func_name)
 
         # Parse parameters
         params = self._parse_func_params()
 
         # Parse optional return type
         if not self.check(TOK_LBRACE):
-            self._skip_return_type()
+            self._check_return_type(method_name, location, visibility == "public")
 
         # Parse body
         body = self._parse_block()
 
-        return MethodNode(
-            name=method_name,
-            params=params,
-            body=body,
-            visibility=visibility,
-            source_location=location,
+        sighash = resolve_native_sighash(
+            method_name, visibility == "public", self._take_sighash_directives(func_token_index),
+        )
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
+
+        return (
+            MethodNode(
+                name=method_name,
+                params=params,
+                body=body,
+                visibility=visibility,
+                sighash_type=sighash.value if sighash is not None else None,
+                source_location=location,
+            ),
+            func_name,
+            receiver_type,
         )
 
     def _looks_like_receiver(self) -> bool:
         """Look ahead from LPAREN to decide if this is a method receiver.
 
-        A receiver looks like: (name *Type) or (name Type)
+        A receiver looks like: (name *Type), (name Type), or -- N-018 -- the
+        unnamed form (Type), which has only the type and no receiver name.
         A regular param list would have different structure.
         """
         saved = self.pos
@@ -998,9 +1205,11 @@ class _GoParser:
             self.pos = saved
             return False
 
-        self.advance()  # skip receiver name
+        self.advance()  # skip receiver name (or the type, if unnamed)
 
-        # After receiver name, expect * or IDENT (the type), then RPAREN
+        # After the receiver name, expect * or IDENT (the type), then
+        # RPAREN. An unnamed receiver `(Type)` has only the type: RPAREN
+        # comes right away.
         if self.check(TOK_STAR):
             self.advance()
             if self.check(TOK_IDENT):
@@ -1018,6 +1227,11 @@ class _GoParser:
                 result = self.check(TOK_IDENT)
                 self.pos = saved
                 return result
+        elif self.check(TOK_RPAREN):
+            self.advance()
+            result = self.check(TOK_IDENT)
+            self.pos = saved
+            return result
 
         self.pos = saved
         return False
@@ -1049,7 +1263,7 @@ class _GoParser:
 
             for pname in param_names:
                 params.append(ParamNode(
-                    name=_go_field_to_camel(pname),
+                    name=self.declare(pname),
                     type=param_type,
                 ))
 
@@ -1095,6 +1309,29 @@ class _GoParser:
             return tok.value[0].islower()
 
         return tok.value[0].islower()
+
+    def _check_return_type(self, method_name: str, location: SourceLocation, is_public: bool = False) -> None:
+        """Consume a return type specification before the function body.
+
+        The AST keeps no return type, so N-331 refuses an unknown type name
+        here, where it is spelled (single type or a parenthesised result list,
+        named or not).
+        """
+        if self.check(TOK_LPAREN):
+            self.advance()
+            while not self.check(TOK_RPAREN) and not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
+                nxt = self.tokens[self.pos + 1].kind if self.pos + 1 < len(self.tokens) else TOK_EOF
+                if self.check(TOK_IDENT) and nxt not in (TOK_DOT, TOK_COMMA, TOK_RPAREN):
+                    self.advance()  # result name
+                reject_unknown_return_type(self.errors, self.parse_type(), method_name, location, is_public)
+                if not self.match(TOK_COMMA):
+                    break
+            self.expect(TOK_RPAREN)
+        else:
+            reject_unknown_return_type(self.errors, self.parse_type(), method_name, location, is_public)
+        # Anything left before the body is not a type to check.
+        while not self.check(TOK_LBRACE) and not self.check(TOK_EOF):
+            self.advance()
 
     def _skip_return_type(self) -> None:
         """Skip a return type specification before the function body."""
@@ -1156,18 +1393,54 @@ class _GoParser:
         stmts: list[Statement] = []
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-            self.skip_semicolons()
+            self._skip_statement_separators()
             if self.check(TOK_RBRACE) or self.check(TOK_EOF):
                 break
+            # N-153: a `{` cannot start a statement (no block statement, and
+            # not a brace composite literal). Refuse it, as the TS reference
+            # does, and skip the balanced braces.
+            if self.check(TOK_LBRACE):
+                self.add_error("Unexpected token in expression: '{'")
+                depth = 0
+                while True:
+                    kind = self.advance().kind
+                    if kind == TOK_LBRACE:
+                        depth += 1
+                    elif kind == TOK_RBRACE:
+                        depth -= 1
+                    if depth <= 0 or self.check(TOK_EOF):
+                        break
+                continue
             stmt = self._parse_statement()
             if stmt is not None:
                 stmts.append(stmt)
 
         self.expect(TOK_RBRACE)
-        self.skip_semicolons()
+        self._skip_statement_separators()
         return stmts
 
+    def _skip_statement_separators(self) -> None:
+        """N-153: a ``;`` that ends a statement on the same line separates it
+        from the next one (what go/parser accepts; an inserted newline ``;``
+        always does). Any other ``;`` -- at the start of a block, after another
+        ``;``, or on a later line than the token before it -- is an EMPTY
+        statement, which the TS reference and the Go tier refuse."""
+        while self.check(TOK_SEMICOLON):
+            prev = self.tokens[self.pos - 1] if self.pos > 0 else None
+            separates = (
+                prev is not None
+                and prev.kind not in (TOK_LBRACE, TOK_SEMICOLON)
+                and prev.line == self.peek().line
+            )
+            if not separates:
+                self.add_error("Unexpected token in expression: ';'")
+            self.advance()
+
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # if statement
@@ -1203,7 +1476,8 @@ class _GoParser:
             if self.check_ident("if"):
                 # else if -> nested IfStmt in else
                 elif_loc = self.loc()
-                elif_stmt = self._parse_if(elif_loc)
+                with self._nest.nested(self.loc):
+                    elif_stmt = self._parse_if(elif_loc)
                 else_block = [elif_stmt]
             else:
                 else_block = self._parse_block()
@@ -1296,13 +1570,13 @@ class _GoParser:
         value: Expression | None = None
         if not self.check(TOK_SEMICOLON) and not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             value = self._parse_expression()
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return ReturnStmt(value=value, source_location=loc)
 
     def _parse_var_decl(self, loc: SourceLocation) -> Statement:
         self.expect_ident("var")
         name_tok = self.expect(TOK_IDENT)
-        var_name = _go_field_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if not self.check(TOK_ASSIGN):
@@ -1315,7 +1589,7 @@ class _GoParser:
         if init is None:
             init = BigIntLiteral(value=0)
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return VariableDeclStmt(
             name=var_name,
             type=type_node,
@@ -1327,7 +1601,7 @@ class _GoParser:
     def _parse_const_decl(self, loc: SourceLocation) -> Statement:
         self.expect_ident("const")
         name_tok = self.expect(TOK_IDENT)
-        var_name = _go_field_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if not self.check(TOK_ASSIGN):
@@ -1336,7 +1610,7 @@ class _GoParser:
         self.expect(TOK_ASSIGN)
         init = self._parse_expression()
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return VariableDeclStmt(
             name=var_name,
             type=type_node,
@@ -1349,11 +1623,12 @@ class _GoParser:
         self, loc: SourceLocation, consume_semicolons: bool = True,
     ) -> Statement | None:
         """Parse an expression statement, assignment, short var decl, or inc/dec."""
+        target_tok = self.peek()
         expr = self._parse_expression()
         if expr is None:
             self.advance()
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return None
 
         # Short variable declaration: name := expr
@@ -1362,8 +1637,10 @@ class _GoParser:
             name = ""
             if isinstance(expr, Identifier):
                 name = expr.name
+                if target_tok.kind == TOK_IDENT:
+                    self.declared.append((target_tok.value, name))
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return VariableDeclStmt(
                 name=name,
                 mutable=True,
@@ -1375,7 +1652,7 @@ class _GoParser:
         if self.match(TOK_ASSIGN):
             value = self._parse_expression()
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Compound assignments: +=, -=, *=, /=, %=
@@ -1390,156 +1667,207 @@ class _GoParser:
             if self.match(kind):
                 right = self._parse_expression()
                 if consume_semicolons:
-                    self.skip_semicolons()
+                    self.match(TOK_SEMICOLON)
                 value = BinaryExpr(op=bin_op, left=expr, right=right)
                 return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Increment/decrement: expr++ or expr--
         if self.match(TOK_PLUSPLUS):
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return ExpressionStmt(
                 expr=IncrementExpr(operand=expr, prefix=False),
                 source_location=loc,
             )
         if self.match(TOK_MINUSMINUS):
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return ExpressionStmt(
                 expr=DecrementExpr(operand=expr, prefix=False),
                 source_location=loc,
             )
 
         if consume_semicolons:
-            self.skip_semicolons()
+            self.match(TOK_SEMICOLON)
         return ExpressionStmt(expr=expr, source_location=loc)
 
     # -- Expression parsing --------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_or()
+        with self._nest.nested(self.loc):
+            expr = self._parse_or()
+        # N-056: refuse an unparenthesised operand edge that groups differently
+        # under Go precedence; nested ( ... ) groups were checked by their own
+        # _parse_expression call and are atoms here.
+        atoms = self._go_atoms
+        work = [expr]
+        while work:
+            e = work.pop()
+            if not isinstance(e, BinaryExpr) or id(e) in atoms:
+                continue
+            edges = []
+            if isinstance(e.left, BinaryExpr) and id(e.left) not in atoms:
+                edges.append((e.left, e.left.op, e.op))
+            if isinstance(e.right, BinaryExpr) and id(e.right) not in atoms:
+                edges.append((e.right, e.op, e.right.op))
+            for child, first, second in edges:
+                if is_go_ambiguous_precedence(first, second):
+                    leftmost = e
+                    while isinstance(leftmost, BinaryExpr) and id(leftmost) not in atoms:
+                        leftmost = leftmost.left
+                    start = self._go_starts.get(id(leftmost))
+                    self.errors.append(Diagnostic(
+                        message=go_ambiguous_precedence_message(first, second),
+                        severity=Severity.ERROR,
+                        loc=start[1] if start else None,
+                    ))
+                    return expr
+                work.append(child)
+        return expr
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_or()
         while self.match(TOK_AMPAMP):
             right = self._parse_bitwise_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_xor()
         while self.match(TOK_PIPE):
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_and()
         while self.match(TOK_CARET):
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif self.match(TOK_NOTEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_additive()
         while True:
             if self.match(TOK_LSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match(TOK_RSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_additive(self) -> Expression:
+        start = self.loc()
         left = self._parse_multiplicative()
         while True:
             if self.match(TOK_PLUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match(TOK_MINUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_multiplicative(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        start = self.loc()
+        expr = self._parse_unary_operand()
+        self._go_starts[id(expr)] = (expr, start)
+        return expr
+
+    def _parse_unary_operand(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
-            return UnaryExpr(op="-", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="-", operand=operand, source_location=op_loc)
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         if self.match(TOK_CARET):
             # Go uses ^ as bitwise NOT (unary)
-            operand = self._parse_unary()
-            return UnaryExpr(op="~", operand=operand)
-        return self._parse_postfix()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="~", operand=operand, source_location=op_loc)
+        expr = self._parse_postfix()
+        self._go_atoms[id(expr)] = expr  # N-056: an operand is an atom
+        return expr
 
     def _parse_postfix(self) -> Expression:
         expr = self._parse_primary()
@@ -1587,12 +1915,15 @@ class _GoParser:
         return expr
 
     def _is_receiver(self, name: str) -> bool:
-        """Check if the given name is the method receiver (e.g. 'c', 'self')."""
-        if self.receiver_name and name == self.receiver_name:
-            return True
-        if name in ("c", "self"):
-            return True
-        return False
+        """Check if the given name is the method receiver.
+
+        N-018: this must be an exact match on the actual declared receiver
+        name, never a hardcoded "c"/"self" -- that wrongly turned ANY
+        same-spelled parameter or local into a self-reference even when the
+        receiver was named something else, or unnamed (self.receiver_name
+        == "", which real Go forbids referencing at all).
+        """
+        return bool(self.receiver_name) and name == self.receiver_name
 
     def _parse_primary(self) -> Expression:
         tok = self.peek()
@@ -1602,10 +1933,19 @@ class _GoParser:
             self.advance()
             return _parse_number(tok.value)
 
-        # String literal
-        if tok.kind == TOK_STRING:
+        # String literal. N-448: a bare non-empty literal is refused (natively
+        # ASCII text, to the compiler hex). Exempt: "" and a runar.Asm body.
+        # N-439: a raw (backtick) literal is its text verbatim with carriage
+        # returns discarded (Go spec), then goes through the hex check.
+        if tok.kind == TOK_STRING or tok.kind == TOK_BACKTICK_STRING:
+            idx = self.pos
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            value = tok.value if tok.kind == TOK_STRING else tok.value.replace("\r", "")
+            if value != "" and idx not in self.bare_literal_ok:
+                self.errors.append(Diagnostic(
+                    message=go_bare_string_literal_message(value), severity=Severity.ERROR,
+                    loc=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)))
+            return ByteStringLiteral(value=value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         # Identifier
         if tok.kind == TOK_IDENT:
@@ -1646,17 +1986,45 @@ class _GoParser:
                             right=args[1],
                         )
 
+                # N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+                if sel_name == "HexToBytes" and self.check(TOK_LPAREN):
+                    nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+                    nxt2 = self.tokens[self.pos + 2] if self.pos + 2 < len(self.tokens) else None
+                    if (nxt is not None and nxt.kind in (TOK_STRING, TOK_BACKTICK_STRING)
+                            and nxt2 is not None and nxt2.kind == TOK_RPAREN):
+                        self.advance()  # '('
+                        self.advance()  # literal
+                        self.advance()  # ')'
+                        return ByteStringLiteral(
+                            value=nxt.value if nxt.kind == TOK_STRING else nxt.value.replace("\r", ""),
+                            source_location=SourceLocation(file=self.file_name, line=nxt.line, column=nxt.col))
+                    self.errors.append(Diagnostic(
+                        message="runar.HexToBytes expects a single string literal argument",
+                        severity=Severity.ERROR,
+                        loc=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)))
+
+                # N-448: the first argument of runar.Asm(...) is an opcode body.
+                if sel_name == "Asm" and self.check(TOK_LPAREN):
+                    nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+                    if nxt is not None and nxt.kind in (TOK_STRING, TOK_BACKTICK_STRING):
+                        self.bare_literal_ok.add(self.pos + 1)
+
                 # runar.ByteString("literal") -> ByteStringLiteral (hex-encoded bytes);
                 # runar.ByteString(variable) -> unwrap (type conversion no-op).
                 if sel_name == "ByteString" and self.check(TOK_LPAREN):
                     saved_pos = self.pos
                     self.advance()  # consume '('
-                    if self.check(TOK_STRING):
+                    if self.check(TOK_STRING) or self.check(TOK_BACKTICK_STRING):
                         str_tok = self.advance()
                         if self.check(TOK_RPAREN):
                             self.advance()  # consume ')'
-                            # Hex-encode raw bytes of the string literal.
-                            hex_str = str_tok.value.encode("latin-1", errors="replace").hex()
+                            if str_tok.kind == TOK_BACKTICK_STRING:
+                                # N-437: a raw string is its text verbatim as
+                                # UTF-8, carriage returns discarded (Go spec).
+                                hex_str = str_tok.value.replace("\r", "").encode("utf-8").hex()
+                            else:
+                                # Hex-encode the Go string's bytes (N-435).
+                                hex_str = (str_tok.raw if str_tok.raw is not None else str_tok.value).encode("latin-1", errors="replace").hex()
                             return ByteStringLiteral(value=hex_str)
                     # Fall back: restore and parse as args for type-conversion unwrap.
                     self.pos = saved_pos
@@ -1697,9 +2065,9 @@ class _GoParser:
 
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=converted), args=args)
+                return CallExpr(callee=Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=converted)
+            return Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         # Parenthesized expression
         if tok.kind == TOK_LPAREN:
@@ -1781,7 +2149,8 @@ class _GoParser:
         elements: list[Expression] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             if self.check(TOK_LBRACE):
-                elements.append(self._parse_go_brace_literal())
+                with self._nest.nested(self.loc):
+                    elements.append(self._parse_go_brace_literal())
             else:
                 elements.append(self._parse_expression())
             if not self.match(TOK_COMMA):
@@ -1815,10 +2184,90 @@ def _parse_number(s: str) -> Expression:
 # Public API
 # ---------------------------------------------------------------------------
 
+# F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser (TS
+# reference: goNoContractMessage / goMultipleContractsMessage /
+# goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source"
+
+
+def go_multiple_contracts_message(first: str, second: str) -> str:
+    return (
+        f"multiple Rúnar contract structs found in Go source: '{first}' and '{second}'; "
+        "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract "
+        "or runar.UnsafeSmartContract"
+    )
+
+
+def go_foreign_receiver_message(method: str, receiver_type: str, contract: str) -> str:
+    return (
+        f"method '{method}' has receiver type '{receiver_type}', not the contract type "
+        f"'{contract}'; methods on other types are not allowed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+# ---------------------------------------------------------------------------
+#
+# Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+# (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+# BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+# prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which the
+# schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as `&` over a
+# prefix `^`, i.e. `&`.
+
+_GO_PRECEDENCE_CLASS = {
+    "*": "mul", "/": "mul", "%": "mul",
+    "<<": "shift", ">>": "shift",
+    "&": "and",
+    "+": "add", "-": "add",
+    "|": "or", "^": "xor",
+    "<": "rel", "<=": "rel", ">": "rel", ">=": "rel",
+    "===": "eq", "!==": "eq",
+    "&&": "land", "||": "lor",
+}
+
+GO_AMBIGUOUS_PRECEDENCE_PAIRS = frozenset({
+    ("shift", "mul"), ("shift", "add"),
+    ("and", "mul"), ("and", "shift"), ("and", "add"), ("and", "rel"), ("and", "eq"),
+    ("add", "shift"), ("add", "and"),
+    ("or", "add"), ("or", "xor"), ("or", "rel"), ("or", "eq"),
+    ("xor", "add"), ("xor", "rel"), ("xor", "eq"),
+    ("rel", "and"), ("rel", "or"), ("rel", "xor"),
+    ("eq", "and"), ("eq", "or"), ("eq", "xor"), ("eq", "rel"),
+})
+
+
+def is_go_ambiguous_precedence(first: str, second: str) -> bool:
+    pair = (_GO_PRECEDENCE_CLASS.get(first), _GO_PRECEDENCE_CLASS.get(second))
+    return pair in GO_AMBIGUOUS_PRECEDENCE_PAIRS
+
+
+def go_ambiguous_precedence_message(first: str, second: str) -> str:
+    go = {"===": "==", "!==": "!="}
+    return (
+        f"ambiguous operator precedence in .runar.go: `a {go.get(first, first)} b "
+        f"{go.get(second, second)} c` groups differently under Go precedence than in "
+        f"Rúnar's other surfaces; add parentheses"
+    )
+
+
 def parse_go(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_go_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_go_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Go-syntax Runar contract (.runar.go)."""
     p = _GoParser(file_name)
-    p.tokens = _tokenize_go(source)
+    p.tokens = _tokenize_go(source, lex, file_name, p.directives)
     p.pos = 0
 
     try:
@@ -1827,8 +2276,9 @@ def parse_go(source: str, file_name: str) -> ParseResult:
         return ParseResult(errors=[Diagnostic(message=f"Go parse error: {e}", severity=Severity.ERROR)])
 
     if contract is None and not p.errors:
-        p.errors.append("no Runar contract struct found in Go source")
+        p.add_error(GO_NO_CONTRACT_MESSAGE)
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

@@ -64,54 +64,57 @@ def _decompress_pubkey(pk_bytes: bytes) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_der_signature(der_bytes: bytes) -> tuple[int, int] | None:
+def _parse_der_signature(der_bytes: bytes, sighash_byte: bool = True) -> tuple[int, int] | None:
     """Parse a DER-encoded ECDSA signature into (r, s) integers.
 
     DER format: 0x30 [total_len] 0x02 [r_len] [r_bytes] 0x02 [s_len] [s_bytes]
 
-    Also handles a trailing sighash byte (Bitcoin convention): if the actual
-    length exceeds the declared DER length by 1, the last byte is stripped.
+    Strict DER, the BIP66 rule a node applies to every OP_CHECKSIG signature
+    (F-242): the SEQUENCE length covers exactly r and s, both INTEGERs are
+    non-empty, non-negative (top bit clear unless behind a 0x00 pad) and
+    minimally encoded, and nothing follows s. Any other encoding of the same
+    (r, s) returns None, so one signature has exactly one byte string.
+
+    With ``sighash_byte`` (the default, Bitcoin convention) one trailing
+    sighash type byte after the SEQUENCE is dropped first. Pass False for bare
+    DER, e.g. a signed envelope.
     """
-    if len(der_bytes) < 8:
+    if len(der_bytes) < 2:
+        return None
+    if sighash_byte and len(der_bytes) == der_bytes[1] + 3:
+        der_bytes = der_bytes[:-1]
+
+    n = len(der_bytes)
+    if n < 8 or n > 72:
+        return None
+    if der_bytes[0] != 0x30 or der_bytes[1] != n - 2:
         return None
 
-    if der_bytes[0] != 0x30:
+    r_len = der_bytes[3]
+    if der_bytes[2] != 0x02 or r_len == 0 or 5 + r_len >= n:
+        return None
+    s_len = der_bytes[5 + r_len]
+    if der_bytes[4 + r_len] != 0x02 or s_len == 0:
+        return None
+    if r_len + s_len + 6 != n:
         return None
 
-    declared_len = der_bytes[1]
-    expected_pure_der = declared_len + 2
-
-    # Strip trailing sighash byte if present
-    if len(der_bytes) == expected_pure_der + 1:
-        der_bytes = der_bytes[:expected_pure_der]
-    elif len(der_bytes) != expected_pure_der:
+    r_bytes = der_bytes[4:4 + r_len]
+    s_bytes = der_bytes[6 + r_len:]
+    if not (_is_canonical_der_integer(r_bytes) and _is_canonical_der_integer(s_bytes)):
         return None
 
-    idx = 2
+    return int.from_bytes(r_bytes, 'big'), int.from_bytes(s_bytes, 'big')
 
-    # Parse r
-    if idx >= len(der_bytes) or der_bytes[idx] != 0x02:
-        return None
-    idx += 1
-    r_len = der_bytes[idx]
-    idx += 1
-    if idx + r_len > len(der_bytes):
-        return None
-    r = int.from_bytes(der_bytes[idx:idx + r_len], 'big')
-    idx += r_len
 
-    # Parse s
-    if idx >= len(der_bytes) or der_bytes[idx] != 0x02:
-        return None
-    idx += 1
-    s_len = der_bytes[idx]
-    idx += 1
-    if idx + s_len > len(der_bytes):
-        return None
-    s = int.from_bytes(der_bytes[idx:idx + s_len], 'big')
-    idx += s_len
-
-    return r, s
+def _is_canonical_der_integer(b: bytes) -> bool:
+    """A DER INTEGER body is canonical for an unsigned value when it is not
+    negative (top bit clear) and carries no superfluous leading 0x00."""
+    if b[0] & 0x80:
+        return False
+    if len(b) > 1 and b[0] == 0x00 and not (b[1] & 0x80):
+        return False
+    return True
 
 
 def _encode_der_signature(r: int, s: int) -> bytes:
@@ -143,7 +146,9 @@ def _encode_der_signature(r: int, s: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def ecdsa_verify(sig_bytes: bytes, pk_bytes: bytes, msg_hash: bytes) -> bool:
+def ecdsa_verify(
+    sig_bytes: bytes, pk_bytes: bytes, msg_hash: bytes, sighash_byte: bool = True
+) -> bool:
     """Verify an ECDSA signature over a message hash.
 
     Standard ECDSA verification:
@@ -155,6 +160,9 @@ def ecdsa_verify(sig_bytes: bytes, pk_bytes: bytes, msg_hash: bytes) -> bool:
 
     Args:
         sig_bytes: DER-encoded signature (with optional trailing sighash byte)
+        sighash_byte: accept one trailing sighash type byte (default True, the
+            OP_CHECKSIG convention). The signed envelope passes False: its
+            signature is bare DER.
         pk_bytes: 33-byte compressed public key
         msg_hash: 32-byte SHA-256 hash of the message
 
@@ -162,7 +170,7 @@ def ecdsa_verify(sig_bytes: bytes, pk_bytes: bytes, msg_hash: bytes) -> bool:
         True if the signature is valid, False otherwise.
     """
     try:
-        parsed = _parse_der_signature(sig_bytes)
+        parsed = _parse_der_signature(sig_bytes, sighash_byte)
         if parsed is None:
             return False
         r, s = parsed

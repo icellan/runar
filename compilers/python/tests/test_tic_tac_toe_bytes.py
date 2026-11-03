@@ -8,7 +8,7 @@ from TS/Go/Rust on contracts with position-dispatch patterns (nested
 All 6 Rúnar compilers must produce byte-identical Bitcoin Script for the
 same canonical TypeScript source. For the canonical TicTacToe contracts
 (both v1 hand-rolled and v2 FixedArray), the expected locking script size
-is **7796 bytes** (15592 hex chars). Independent changes moved this
+is **7798 bytes** (15596 hex chars). Independent changes moved this
 number and all of them are recorded, because a merged count that only
 mentions one of them is how a pin stops meaning anything.
 
@@ -72,7 +72,11 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-EXPECTED_BYTES = 7796  # W1: +18 bytes, six 32-bit-extractor zero-pad sites
+# F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly). N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
+# N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
+# N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
+# N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
+EXPECTED_BYTES = 7798  # W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17; N-045: +8; N-216: -2; N-376: -54 (18 ROT^3 runs); N-397: -3
 
 
 def _byte_len(hex_str: str) -> int:

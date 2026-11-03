@@ -173,54 +173,43 @@ class TestCompiler < Minitest::Test
   end
 
   # ------------------------------------------------------------------
-  # All 28 conformance golden-file tests
+  # Conformance golden-file tests (F-328)
   # ------------------------------------------------------------------
-  # Each test loads the source (preferring .runar.ts, falling back to
-  # .runar.zig for tests that only have Zig sources), compiles via the
-  # Ruby compiler, and compares the hex output to expected-script.hex.
+  # Each test compiles the fixture's .runar.ts source via the Ruby
+  # compiler's in-process API and compares the hex output to
+  # expected-script.hex.
+  #
+  # F-328: the fixture list used to be a hand-maintained, 28-entry
+  # hard-coded hash that silently excluded every conformance fixture
+  # added after it was written (56 of 84 ruby-eligible fixtures untested
+  # by the time this was fixed; the corpus has grown from 72 to 88 since
+  # the gap was reported). CONFORMANCE_TESTS is now derived from the
+  # conformance/tests corpus itself, honoring each fixture's source.json
+  # "compilers" allowlist (conformance/README.md "Per-fixture compiler
+  # allowlist") the same way test_conformance_goldens.rb's
+  # read_compiler_allowlist (F-264) and the TS runner do: a fixture that
+  # opts ruby out is skipped (no test generated), not silently dropped by
+  # omission from an unrelated list.
+  #
+  # Every fixture in the corpus ships a .runar.ts source (verified across
+  # all 88 as of this fix), so there is no longer a need for the old
+  # per-fixture extension table or its .runar.zig fallback -- that
+  # fallback predated the source.json migration that gave every fixture a
+  # TS source and is no longer reachable.
+  CONFORMANCE_TESTS = Dir.children(CONFORMANCE_DIR)
+                          .select { |name| File.directory?(File.join(CONFORMANCE_DIR, name)) }
+                          .reject { |name| ConformanceFixture.compiler_excluded?(name, 'ruby') }
+                          .sort
+                          .freeze
 
-  # Map: test_dir_name => source_file_name
-  CONFORMANCE_TESTS = {
-    'arithmetic'          => 'arithmetic.runar.ts',
-    'auction'             => 'auction.runar.zig',
-    'basic-p2pkh'         => 'basic-p2pkh.runar.ts',
-    'blake3'              => 'blake3.runar.zig',
-    'boolean-logic'       => 'boolean-logic.runar.ts',
-    'bounded-loop'        => 'bounded-loop.runar.ts',
-    'convergence-proof'   => 'convergence-proof.runar.ts',
-    'covenant-vault'      => 'covenant-vault.runar.zig',
-    'ec-demo'             => 'ec-demo.runar.ts',
-    'ec-primitives'       => 'ec-primitives.runar.ts',
-    'escrow'              => 'escrow.runar.zig',
-    'function-patterns'   => 'function-patterns.runar.ts',
-    'if-else'             => 'if-else.runar.ts',
-    'if-without-else'     => 'if-without-else.runar.ts',
-    'math-demo'           => 'math-demo.runar.ts',
-    'multi-method'        => 'multi-method.runar.ts',
-    'oracle-price'        => 'oracle-price.runar.ts',
-    'post-quantum-slhdsa' => 'post-quantum-slhdsa.runar.ts',
-    'post-quantum-wallet' => 'post-quantum-wallet.runar.ts',
-    'post-quantum-wots'   => 'post-quantum-wots.runar.ts',
-    'property-initializers' => 'property-initializers.runar.ts',
-    'schnorr-zkp'         => 'schnorr-zkp.runar.zig',
-    'sphincs-wallet'      => 'sphincs-wallet.runar.ts',
-    'stateful'            => 'stateful.runar.ts',
-    'stateful-bytestring' => 'stateful-bytestring.runar.ts',
-    'stateful-counter'    => 'stateful-counter.runar.ts',
-    'token-ft'            => 'token-ft.runar.zig',
-    'token-nft'           => 'token-nft.runar.zig',
-  }.freeze
-
-  CONFORMANCE_TESTS.each do |test_dir, source_file|
+  CONFORMANCE_TESTS.each do |test_dir|
     method_name = "test_conformance_#{test_dir.gsub('-', '_')}"
-    # Derive extension from the legacy source-file name (e.g. "foo.runar.ts" → ".runar.ts").
-    ext = source_file[/\.runar\.[a-z]+\z/]
 
     define_method(method_name) do
       hex_path = File.join(CONFORMANCE_DIR, test_dir, 'expected-script.hex')
       assert File.exist?(hex_path), "expected-script.hex missing for #{test_dir}"
 
-      source_path = ConformanceFixture.resolve(test_dir, ext)
+      source_path = ConformanceFixture.resolve(test_dir, '.runar.ts')
       expected_hex = File.read(hex_path).strip
 
       artifact = RunarCompiler.compile_from_source(source_path, disable_constant_folding: true)
@@ -303,5 +292,37 @@ class TestCompiler < Minitest::Test
     artifact = compile_rb_source(source, 'BoolAlias.runar.rb')
     assert_equal 'BoolAlias', artifact.contract_name
     assert artifact.script.length > 0, "script should be non-empty"
+  end
+
+  # F-328 regression guard: every ruby-eligible conformance fixture must
+  # have a generated test_conformance_<fixture> method in this file. This
+  # is the permanent check that CONFORMANCE_TESTS can't silently regress
+  # back into a stale hard-coded subset (the original defect) -- e.g. if
+  # someone reverts to a literal array/hash, or the glob/allowlist logic
+  # breaks and quietly drops fixtures.
+  #
+  # What this proves: for every fixture directory under conformance/tests
+  # whose source.json "compilers" allowlist does not exclude "ruby", a
+  # test_conformance_<fixture> method is defined on this class -- i.e.
+  # the corpus, not a hand-maintained list, determines what gets tested.
+  #
+  # What this does NOT prove: that those generated tests pass (that's
+  # test_conformance_<fixture> itself, run elsewhere in this same file),
+  # nor anything about the .runar.rb format or ANF IR for these fixtures
+  # -- that full-corpus, allowlist-aware, IR+hex comparison is
+  # test_conformance_goldens.rb's test_conformance_goldens_ruby (F-264),
+  # which this test deliberately does not duplicate.
+  def test_conformance_tests_covers_every_ruby_eligible_fixture
+    eligible = Dir.children(CONFORMANCE_DIR)
+                   .select { |name| File.directory?(File.join(CONFORMANCE_DIR, name)) }
+                   .reject { |name| ConformanceFixture.compiler_excluded?(name, 'ruby') }
+                   .sort
+
+    missing = eligible.reject do |name|
+      self.class.method_defined?("test_conformance_#{name.gsub('-', '_')}")
+    end
+
+    assert_empty missing,
+                 "ruby-eligible conformance fixtures with no generated test_compiler.rb test: #{missing.join(', ')}"
   end
 end

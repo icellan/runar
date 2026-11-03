@@ -282,8 +282,8 @@ fn walk_stmt(
 /// property access (mirrors the TS `calleeName`).
 fn callee_name(callee: &Expression) -> Option<&str> {
     match callee {
-        Expression::Identifier { name } => Some(name.as_str()),
-        Expression::PropertyAccess { property } => Some(property.as_str()),
+        Expression::Identifier { name, .. } => Some(name.as_str()),
+        Expression::PropertyAccess { property, .. } => Some(property.as_str()),
         Expression::MemberExpr { property, .. } => Some(property.as_str()),
         _ => None,
     }

@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:integration": "vitest run"
+    "test:integration": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "runar-compiler": "workspace:*",
@@ -15,6 +16,6 @@
     "@bsv/sdk": "^2.0.7"
   },
   "devDependencies": {
-    "vitest": "^2.1.0"
+    "vitest": "^5.1.0"
   }
 }

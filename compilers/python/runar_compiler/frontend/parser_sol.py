@@ -17,7 +17,16 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, assert_ast_nesting, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type
+from runar_compiler.frontend.sighash_directive import resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -116,20 +125,23 @@ def _is_hex_digit(ch: str) -> bool:
 
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_" or ch == "$"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_" or ch == "$")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_" or ch == "$"
+    return ch.isascii() and (ch.isalnum() or ch == "_" or ch == "$")
 
 
 # ---------------------------------------------------------------------------
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenize Solidity-like source into a flat token list."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -189,22 +201,35 @@ def _tokenize(source: str) -> list[Token]:
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
+                # N-019: this surface has no quoted literal; a terminated one
+                # is refused as an unexpected character (as the TS reference).
+                lex.append(lex_error("Unexpected character '%s'" % quote, file_name, line, start_col))
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
         # Numbers (and hex byte string literals: 0x... -> ByteString)
         if "0" <= ch <= "9":
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
+            # Hex byte string (lowercase x only, as the TS reference).
+            if ch == "0" and i + 1 < n and source[i + 1] == "x":
                 i += 2
                 col += 2
                 hex_start = i
@@ -213,15 +238,11 @@ def _tokenize(source: str) -> list[Token]:
                     col += 1
                 tokens.append(Token(TOK_HEXSTRING, source[hex_start:i], line, start_col))
                 continue
-            start = i
-            while i < n and "0" <= source[i] <= "9":
-                i += 1
-                col += 1
-            # Skip trailing 'n' for bigint literals (from TS syntax)
-            if i < n and source[i] == "n":
-                i += 1
-                col += 1
-            tokens.append(Token(TOK_NUMBER, source[start:i], line, start_col))
+            # F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+            end, value, _, _ = lex_number("sol", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
+            tokens.append(Token(TOK_NUMBER, value, line, start_col))
             continue
 
         # Identifiers and keywords
@@ -293,7 +314,9 @@ def _tokenize(source: str) -> list[Token]:
             col += 1
             continue
 
-        # Skip unknown characters
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line, start_col))
         i += 1
         col += 1
 
@@ -311,6 +334,8 @@ class _SolParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -320,6 +345,11 @@ class _SolParser:
     def peek(self) -> Token:
         if self.pos < len(self.tokens):
             return self.tokens[self.pos]
+        return Token(TOK_EOF, "", 0, 0)
+
+    def _peek_at(self, n: int) -> Token:
+        if self.pos + n < len(self.tokens):
+            return self.tokens[self.pos + n]
         return Token(TOK_EOF, "", 0, 0)
 
     def advance(self) -> Token:
@@ -381,6 +411,8 @@ class _SolParser:
             self.match(TOK_SEMICOLON)
 
         # contract Name is ParentClass {
+        # N-490: a synthesized constructor is anchored at the `contract` keyword.
+        contract_loc = self.loc()
         if not self.match_ident("contract"):
             raise ValueError("expected 'contract' keyword")
 
@@ -397,7 +429,10 @@ class _SolParser:
             "StatefulSmartContract",
             "UnsafeSmartContract",
         ):
-            raise ValueError(f"unknown parent class: {parent_class}")
+            raise ValueError(
+                f"unknown parent class: '{parent_class}', expected SmartContract, "
+                "StatefulSmartContract, or UnsafeSmartContract"
+            )
 
         self.expect(TOK_LBRACE)
 
@@ -428,7 +463,7 @@ class _SolParser:
             # constructor compiled in ts/go/zig/ruby and failed here and in
             # java, while rust refused it at parse time. Mirrors
             # compilers/go/frontend/parser_sol.go:495-530.
-            loc = SourceLocation(file=self.file_name, line=1, column=0)
+            loc = contract_loc
             uninit = [prop for prop in properties if prop.initializer is None]
             params = [ParamNode(name=prop.name, type=prop.type) for prop in uninit]
             body: list[Statement] = [
@@ -479,11 +514,22 @@ class _SolParser:
         type_name = type_tok.value
         prop_type = self._parse_sol_fixed_array_suffix(_parse_sol_type(type_name))
 
-        # Check for immutable keyword
+        # Modifiers, any order: ``immutable`` (readonly) and N-093's
+        # ``embedAlways`` (the native spelling of the ``@embedAlways``
+        # directive). An ``embedAlways`` directly followed by ``;`` or ``=`` is
+        # the property NAME, not a modifier.
         is_readonly = False
-        if self.check_ident("immutable"):
-            self.advance()
-            is_readonly = True
+        embed_always = False
+        while True:
+            if self.check_ident("immutable"):
+                self.advance()
+                is_readonly = True
+                continue
+            if self.check_ident("embedAlways") and self._peek_at(1).kind not in (TOK_SEMICOLON, TOK_ASSIGN):
+                self.advance()
+                embed_always = True
+                continue
+            break
 
         # Property name
         name_tok = self.expect(TOK_IDENT)
@@ -501,6 +547,7 @@ class _SolParser:
             type=prop_type,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=location,
         )
 
@@ -531,7 +578,7 @@ class _SolParser:
     def parse_sol_constructor(self, properties: list[PropertyNode]) -> MethodNode:
         location = self.loc()
         self.expect_ident("constructor")
-        params = self.parse_sol_params()
+        params = self.parse_sol_params(strip_underscore=True)
         body = self.parse_sol_block()
 
         # Build proper constructor body with super() call and assignments
@@ -592,10 +639,16 @@ class _SolParser:
 
         params = self.parse_sol_params()
 
-        # Parse visibility modifiers
+        # Parse visibility modifiers, and N-093's ``sighash(FLAGS)`` (the
+        # native spelling of the ``@sighash`` directive), in any order. FLAGS
+        # must be identifiers separated by ``|``; any other token makes the
+        # spelling malformed.
         visibility = "private"
+        sighash_specs: list[str | None] = []
+        pending_ret = None
         while (
-            self.check_ident("public")
+            (self.check_ident("sighash") and self._peek_at(1).kind == TOK_LPAREN)
+            or self.check_ident("public")
             or self.check_ident("private")
             or self.check_ident("external")
             or self.check_ident("internal")
@@ -605,12 +658,20 @@ class _SolParser:
             or self.check_ident("payable")
         ):
             tok = self.advance()
+            if tok.value == "sighash":
+                sighash_specs.append(self._parse_sighash_flag_tokens())
+                continue
             if tok.value in ("public", "external"):
                 visibility = "public"
             # Skip 'returns (Type)' clause
             if tok.value == "returns":
                 if self.check(TOK_LPAREN):
                     self.advance()
+                    # N-331: the AST keeps no return type; an unknown name is refused.
+                    # N-332: checked after the modifier loop, because
+                    # ``public`` may follow ``returns (...)``.
+                    if self.check(TOK_IDENT):
+                        pending_ret = _parse_sol_type(self.peek().value)
                     depth = 1
                     while depth > 0 and not self.check(TOK_EOF):
                         if self.check(TOK_LPAREN):
@@ -619,19 +680,52 @@ class _SolParser:
                             depth -= 1
                         self.advance()
 
+        if pending_ret is not None:
+            reject_unknown_return_type(self.errors, pending_ret, name, location, visibility == "public")
+
         body = self.parse_sol_block()
+
+        sighash = resolve_native_sighash(name, visibility == "public", sighash_specs)
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
 
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         )
 
+    def _parse_sighash_flag_tokens(self) -> str | None:
+        """N-093: ``( IDENT ( '|' IDENT )* )`` after ``sighash`` -> the flag
+        text, or ``None`` when anything else appears inside the parentheses.
+        Always consumes through the matching ``)`` so a malformed spelling does
+        not derail parsing."""
+        self.expect(TOK_LPAREN)
+        text = ""
+        ok = True
+        depth = 1
+        while not self.check(TOK_EOF):
+            t = self.peek()
+            if t.kind == TOK_LPAREN:
+                depth += 1
+            if t.kind == TOK_RPAREN:
+                depth -= 1
+                if depth == 0:
+                    break
+            if t.kind in (TOK_IDENT, TOK_PIPE):
+                text += t.value
+            else:
+                ok = False
+            self.advance()
+        self.expect(TOK_RPAREN)
+        return text if ok else None
+
     # -- Parameter parsing: (Type name, Type name, ...) ---------------------
 
-    def parse_sol_params(self) -> list[ParamNode]:
+    def parse_sol_params(self, strip_underscore: bool = False) -> list[ParamNode]:
         self.expect(TOK_LPAREN)
         params: list[ParamNode] = []
 
@@ -650,8 +744,10 @@ class _SolParser:
 
             name_tok = self.expect(TOK_IDENT)
             param_name = name_tok.value
-            # Strip leading underscore if present (Solidity convention)
-            if param_name.startswith("_"):
+            # Strip leading underscore (Solidity convention) for CONSTRUCTOR
+            # params only, whose body parse_sol_constructor renames. Method
+            # params keep their name verbatim, as in TS 01-parse-sol.ts (F-200).
+            if strip_underscore and param_name.startswith("_"):
                 param_name = param_name[1:]
 
             params.append(
@@ -679,6 +775,10 @@ class _SolParser:
     # -- Statement parsing ---------------------------------------------------
 
     def parse_sol_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_sol_statement_inner()
+
+    def _parse_sol_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         # require(...) -> assert(...)
@@ -754,7 +854,8 @@ class _SolParser:
         if self.match_ident("else"):
             if self.check_ident("if"):
                 # else if -- recurse
-                else_stmt = self._parse_if(self.loc())
+                with self._nest.nested(self.loc):
+                    else_stmt = self._parse_if(self.loc())
                 else_block = [else_stmt]
             else:
                 else_block = self.parse_sol_block()
@@ -878,7 +979,8 @@ class _SolParser:
     # -- Expression parsing (recursive descent with precedence) --------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -892,130 +994,146 @@ class _SolParser:
         return expr
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_or()
         while self.match(TOK_AMPAMP):
             right = self._parse_bitwise_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_xor()
         while self.match(TOK_PIPE):
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_and()
         while self.match(TOK_CARET):
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif self.match(TOK_NOTEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_additive()
         while True:
             if self.match(TOK_LSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match(TOK_RSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_additive(self) -> Expression:
+        start = self.loc()
         left = self._parse_multiplicative()
         while True:
             if self.match(TOK_PLUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match(TOK_MINUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_multiplicative(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
-            return UnaryExpr(op="-", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="-", operand=operand, source_location=op_loc)
         if self.match(TOK_TILDE):
-            operand = self._parse_unary()
-            return UnaryExpr(op="~", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="~", operand=operand, source_location=op_loc)
         # Prefix increment/decrement
         if self.match(TOK_PLUSPLUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return IncrementExpr(operand=operand, prefix=True)
         if self.match(TOK_MINUSMINUS):
-            operand = self._parse_unary()
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
             return DecrementExpr(operand=operand, prefix=True)
         return self._parse_postfix()
 
@@ -1072,11 +1190,11 @@ class _SolParser:
 
         if tok.kind == TOK_HEXSTRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_STRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_IDENT:
             self.advance()
@@ -1093,9 +1211,9 @@ class _SolParser:
             # Function call
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=name), args=args)
+                return CallExpr(callee=Identifier(name=name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=name)
+            return Identifier(name=name, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()
@@ -1148,9 +1266,9 @@ def _sol_rename_identifiers_in_expr(expr: Expression, rename_map: dict[str, str]
         new_name = rename_map.get(expr.name)
         return Identifier(name=new_name) if new_name else expr
     if isinstance(expr, BinaryExpr):
-        return BinaryExpr(op=expr.op, left=rn(expr.left), right=rn(expr.right))
+        return BinaryExpr(op=expr.op, left=rn(expr.left), right=rn(expr.right), source_location=expr.source_location)
     if isinstance(expr, UnaryExpr):
-        return UnaryExpr(op=expr.op, operand=rn(expr.operand))
+        return UnaryExpr(op=expr.op, operand=rn(expr.operand), source_location=expr.source_location)
     if isinstance(expr, CallExpr):
         return CallExpr(callee=rn(expr.callee), args=[rn(a) for a in expr.args])
     if isinstance(expr, MemberExpr):
@@ -1239,9 +1357,9 @@ def _rewrite_bare_props(
             return PropertyAccessExpr(property=expr.name)
         return expr
     if isinstance(expr, BinaryExpr):
-        return BinaryExpr(op=expr.op, left=rw(expr.left), right=rw(expr.right))
+        return BinaryExpr(op=expr.op, left=rw(expr.left), right=rw(expr.right), source_location=expr.source_location)
     if isinstance(expr, UnaryExpr):
-        return UnaryExpr(op=expr.op, operand=rw(expr.operand))
+        return UnaryExpr(op=expr.op, operand=rw(expr.operand), source_location=expr.source_location)
     if isinstance(expr, CallExpr):
         # Bare method call: computeThreshold(a, b) -> this.computeThreshold(a, b)
         if isinstance(expr.callee, Identifier) and expr.callee.name in method_names:
@@ -1254,6 +1372,13 @@ def _rewrite_bare_props(
         return TernaryExpr(condition=rw(expr.condition), consequent=rw(expr.consequent), alternate=rw(expr.alternate))
     if isinstance(expr, IndexAccessExpr):
         return IndexAccessExpr(object=rw(expr.object), index=rw(expr.index))
+    # F-201: as TS resolvePropertyAccess — `count++` / `count.x` reach the property.
+    if isinstance(expr, MemberExpr):
+        return MemberExpr(object=rw(expr.object), property=expr.property)
+    if isinstance(expr, IncrementExpr):
+        return IncrementExpr(operand=rw(expr.operand), prefix=expr.prefix)
+    if isinstance(expr, DecrementExpr):
+        return DecrementExpr(operand=rw(expr.operand), prefix=expr.prefix)
     return expr
 
 
@@ -1331,9 +1456,21 @@ def _rewrite_contract_props(contract: ContractNode) -> None:
 
 
 def parse_sol(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_sol_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_sol_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Solidity-syntax Runar contract (.runar.sol)."""
     p = _SolParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:
@@ -1342,6 +1479,8 @@ def parse_sol(source: str, file_name: str) -> ParseResult:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
     if contract is not None:
+        # F-213: measure (B) before the recursive property rewrite walks the tree.
+        assert_ast_nesting(contract)
         _rewrite_contract_props(contract)
 
     if p.errors:

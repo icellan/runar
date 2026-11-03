@@ -156,7 +156,94 @@ if amount > threshold {
 
 Go does not have a ternary operator. Use if/else blocks to achieve the same effect. The compiler may optimize simple if/else patterns to `OP_IF`/`OP_ELSE`/`OP_ENDIF`.
 
+### Operator Precedence
+
+The Go tier parses `.runar.go` with Go's own five-level operator precedence
+(`* / % << >> & &^` binds tighter than `+ - | ^`, which binds tighter than the
+comparisons, then `&&`, then `||`). TypeScript and the other five tiers parse
+`.runar.go` with the C-style ladder Rúnar uses on every other surface
+(`* / %` > `+ -` > `<< >>` > relational > equality > `&` > `^` > `|` > `&&` >
+`||`). The two ladders agree on most operator pairs, but for some pairs an
+unparenthesised `x OP1 y OP2 z` groups left under one scheme and right under
+the other — e.g. `a + b << c` is `a + (b << c)` under Go precedence but
+`(a + b) << c` under the C ladder; `a & b == c` is `(a & b) == c` under Go but
+`a & (b == c)` under the C ladder (and the latter does not even type-check).
+
+Since N-056 (per user decision R51), all seven compilers refuse an
+unparenthesised `.runar.go` expression wherever the two schemes would group it
+differently, with one shared diagnostic:
+
+```
+ambiguous operator precedence in .runar.go: `a <op1> b <op2> c` groups differently
+under Go precedence than in Rúnar's other surfaces; add parentheses
+```
+
+The refused combinations are the adjacent-operator-class pairs on which the
+two ladders disagree (classes: `mul` = `* / %`, `add` = `+ -`, `shift` =
+`<< >>`, `and` = `&`, `xor` = `^`, `or` = `|`, `rel` = `< <= > >=`, `eq` =
+`== !=`; `&&`/`||` never conflict with anything):
+
+| First operator's class | Second operator's class is one of |
+|---|---|
+| `shift` | `mul`, `add` |
+| `and` | `mul`, `shift`, `add`, `rel`, `eq` |
+| `add` | `shift`, `and` |
+| `or` | `add`, `xor`, `rel`, `eq` |
+| `xor` | `add`, `rel`, `eq` |
+| `rel` | `and`, `or`, `xor` |
+| `eq` | `and`, `or`, `xor`, `rel` |
+
+Add parentheses to disambiguate — whichever grouping you parenthesise, both
+spellings compile once the grouping is explicit:
+
+```go
+// Refused: ambiguous operator precedence in .runar.go: `a + b << c` groups
+// differently under Go precedence than in Rúnar's other surfaces; add
+// parentheses
+runar.Assert((a + b << 2) == c.T)
+
+// Accepted: parenthesised, so the grouping is unambiguous (and matches what
+// Go itself would do with this source)
+runar.Assert((a + (b << 2)) == c.T)
+```
+
+Expressions where the two schemes already agree — most operator pairs —
+compile unparenthesised exactly as before.
+
 ---
+
+## Compiler Directives
+
+```go
+type Directives struct {
+	runar.SmartContract
+	PubKeyHash runar.Addr       `runar:"readonly"`
+	DeployTag  runar.ByteString `runar:"readonly,embedAlways"`   // @embedAlways
+}
+
+//runar:sighash SINGLE|FORKID
+func (c *Directives) SpendSingle(sig runar.Sig, pubKey runar.PubKey) { ... }   // @sighash
+```
+
+- `embedAlways` is an option of the `runar` struct tag. The tag holds
+  comma-separated options in any order (`readonly`, `embedAlways`).
+- `//runar:sighash FLAGS` is a directive comment in Go's own `//go:` style: no
+  space after `//`, on its own line above the method. Other comment lines may
+  sit between it and the `func`. It must be followed by a space and the flag
+  list. `//runar:` with any other name, or a `//runar:sighash` not followed by a
+  method, is an error. (`// runar:sighash`, with a space, is an ordinary
+  comment.)
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/go/compiler-directives/` for a worked
+port of both (N-093).
 
 ## Type Mapping
 
@@ -176,6 +263,31 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.Point` | `Point` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
+
+### ByteString literals
+
+A bare string literal used as a ByteString value is **refused**. Natively
+(`go test`) `"006a"` is four ASCII bytes, while the compiler used to read it as
+the two hex bytes `00 6a`, so one source meant two different programs. Spell the
+value explicitly:
+
+| You mean | Write | Natively | Compiles to |
+|---|---|---|---|
+| the hex bytes `00 6a` | `runar.HexToBytes("006a")` | decodes hex (panics on odd length or a non-hex digit) | `OP_PUSH 00 6a` |
+| the ASCII text `hi` | `runar.ByteString("hi")` | the string's bytes | `OP_PUSH 68 69` |
+
+```go
+c.P2pkhPrefix = runar.HexToBytes("1976a914")   // not  c.P2pkhPrefix = "1976a914"
+```
+
+The refusal covers `ByteString` and every subtype (`PubKey`, `Sig`, `Addr`,
+`Ripemd160Hash`, `Sha256Digest`, `Point`, ...). Every tier prints the same
+diagnostic, `file:line:col: bare string literal "006a" is ambiguous in .runar.go
+source: ...`, at the literal's opening quote. Still legal: the empty string `""`
+(zero bytes either way) and the opcode body of `runar.Asm("51", 0, 1)`, which is
+not a ByteString value. The argument of `runar.HexToBytes` is read with Go's
+string-literal rules (escapes decoded, a backtick literal verbatim) and the
+decoded text must be hex.
 
 ### Integers wider than int64
 
@@ -525,6 +637,8 @@ type Auction struct {
 
 func (c *Auction) Bid(bidder runar.PubKey, bidAmount int64) {
     runar.Assert(bidAmount > c.HighestBid)
+    // The bid must be paid into the pot (continuation = prior pot + bid).
+    runar.Assert(runar.ContinuationAmount() >= runar.ExtractAmount(c.TxPreimage)+bidAmount)
     runar.Assert(runar.ExtractLocktime(c.TxPreimage) < c.Deadline)
 
     c.HighestBidder = bidder
@@ -652,6 +766,10 @@ Go uses PascalCase for exported identifiers. The parser converts to camelCase fo
 | `ReleaseBySeller` (method) | `releaseBySeller` (method) |
 
 Unexported identifiers (lowercase first letter) are kept as-is.
+
+### Identifier Collision Rule
+
+The PascalCase to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `K` and `k` both become `k`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling is fine.
 
 ### Constructor
 

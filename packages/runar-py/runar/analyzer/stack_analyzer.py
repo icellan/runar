@@ -49,6 +49,8 @@ _STACK_EFFECTS: dict = {
     0x88: (2, 0),  # OP_EQUALVERIFY
     0x8b: (1, 1),  # OP_1ADD
     0x8c: (1, 1),  # OP_1SUB
+    0x8d: (1, 1),  # OP_2MUL (Chronicle)
+    0x8e: (1, 1),  # OP_2DIV (Chronicle)
     0x8f: (1, 1),  # OP_NEGATE
     0x90: (1, 1),  # OP_ABS
     0x91: (1, 1),  # OP_NOT
@@ -81,6 +83,11 @@ _STACK_EFFECTS: dict = {
     0xad: (2, 0),  # OP_CHECKSIGVERIFY
     0xae: (3, 1),  # OP_CHECKMULTISIG
     0xaf: (3, 0),  # OP_CHECKMULTISIGVERIFY
+    0xb3: (3, 1),  # OP_SUBSTR (Chronicle): buf, offset, len -> substring
+    0xb4: (2, 1),  # OP_LEFT (Chronicle): buf, len -> prefix
+    0xb5: (2, 1),  # OP_RIGHT (Chronicle): buf, len -> suffix
+    0xb6: (2, 1),  # OP_LSHIFTNUM (Chronicle): value, bits -> value << bits
+    0xb7: (2, 1),  # OP_RSHIFTNUM (Chronicle): value, bits -> value >> bits
 }
 
 

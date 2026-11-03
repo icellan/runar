@@ -148,11 +148,23 @@ describe('Tier 1: examples coverage matrix', () => {
     ).toEqual([]);
   });
 
+  // N-474: the pathological examples used to be emitted as skipped cases —
+  // eight permanently skipped tests that asserted nothing and inflated every
+  // run's skip count. They are not generated at all now; what IS asserted is
+  // that the exclusion list names only live examples, so it cannot quietly
+  // outlive (or misspell) the contracts it exempts. The baseline half — an
+  // excluded id must have no coverage-baseline.json row — is the `stale`
+  // check above, since `liveIds` omits them.
+  it('PATHOLOGICAL_DECOMPILE names only live examples', () => {
+    const all = new Set(files.map(f => relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '')));
+    expect([...PATHOLOGICAL_DECOMPILE].filter(id => !all.has(id)).sort()).toEqual([]);
+  });
+
   for (const f of files) {
     const id = relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '');
+    if (PATHOLOGICAL_DECOMPILE.has(id)) continue;
     const expected = baseline.get(id)?.outcome;
-    const testFn = PATHOLOGICAL_DECOMPILE.has(id) ? it.skip : it;
-    testFn(`${id}: outcome should remain ${expected ?? '<unlisted>'}`, () => {
+    it(`${id}: outcome should remain ${expected ?? '<unlisted>'}`, () => {
       expect(
         expected,
         `${id} has no coverage-baseline.json row — classify it and add one`,

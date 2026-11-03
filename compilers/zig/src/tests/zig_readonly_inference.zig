@@ -41,7 +41,7 @@ fn parseInferred(
     for (r.errors) |err| std.debug.print("PARSE ERROR: {s}\n", .{err});
     try testing.expectEqual(@as(usize, 0), r.errors.len);
     const c = r.contract.?;
-    readonly_inference.applyMutationInference(
+    try readonly_inference.applyMutationInference(
         arena,
         c.parent_class,
         c.properties,
@@ -265,6 +265,54 @@ test "mutation nested inside if / for bodies is found" {
     try testing.expect(propByName(c, "untouched").readonly);
 }
 
+test "F-393: a local that shadows a readonly property name must not flip it to mutable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // `limit` is a property with no default and no explicit runar.Readonly
+    // -- rule 3 (assignment) is the only thing that can make it mutable.
+    // `bump` declares a LOCAL also named `limit` and reassigns THAT local
+    // (`limit = limit + 1;`, target_is_property == false, per
+    // `types.targetIsProperty` / `parse_zig.zig`'s `parseExpressionStatement`)
+    // -- `self.limit` is never written anywhere. The property must stay
+    // readonly: a bare-name collision with a local is not a property write
+    // (see `validate.zig`'s `checkReadonlyWrites`, which keys off
+    // `target_is_property` for exactly this reason, and the Go reference
+    // `collectZigMutatedProperties`, which only records a target that type-
+    // asserts to `PropertyAccessExpr`).
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const Shadow = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\
+        \\    limit: i64,
+        \\    count: i64 = 0,
+        \\
+        \\    pub fn init(limit: i64, count: i64) Shadow {
+        \\        return .{ .limit = limit, .count = count };
+        \\    }
+        \\
+        \\    pub fn bump(self: *Shadow, amount: i64) void {
+        \\        var limit: i64 = amount;
+        \\        limit = limit + 1;
+        \\        runar.assert(limit > 0);
+        \\        self.count += 1;
+        \\        self.addOutput(1000, self.count);
+        \\    }
+        \\};
+    ;
+
+    const c = try parseInferred(arena.allocator(), source, &.{});
+    // expectEqual (not expect) so a failure prints "expected true, found
+    // false" instead of a bare boolean -- the zig test binary bundles 1290
+    // tests in one process and dumps a stale error-return-trace alongside
+    // any failure, so a self-describing message is the only reliable signal
+    // of WHY this test failed.
+    try testing.expectEqual(true, propByName(c, "limit").readonly);
+    try testing.expectEqual(false, propByName(c, "count").readonly);
+}
+
 test "SmartContract fields stay readonly regardless of assignment" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -292,4 +340,89 @@ test "SmartContract fields stay readonly regardless of assignment" {
 
     const c = try parseInferred(arena.allocator(), source, &.{});
     try testing.expect(propByName(c, "pubKeyHash").readonly);
+}
+
+test "N-219: a property mutated only in a for-loop's update clause is inferred mutable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Targets `applyMutationInference` directly rather than through
+    // `parse_zig.zig`: `collectInStmt`'s `.for_stmt` arm only ever walked
+    // `s.body`, never `s.update` (the continue/update clause recorded by
+    // `ForStmt.update` -- see N-061 in `ir/types.zig`), so a property
+    // assigned EXCLUSIVELY there was invisible to inference no matter which
+    // surface parser built the AST. `count` is assigned ONLY by `update`;
+    // the loop body makes no assignment at all, so a pass run finding it
+    // mutable proves the update clause, not the body, was walked.
+    var update_stmt = types.Statement{ .assign = .{
+        .target = "count",
+        .value = .{ .literal_int = 1 },
+        .target_is_property = true,
+    } };
+    var for_body = [_]types.Statement{};
+    var method_body = [_]types.Statement{
+        .{ .for_stmt = .{
+            .var_name = "i",
+            .init_value = 0,
+            .bound = 3,
+            .body = &for_body,
+            .update = &update_stmt,
+        } },
+    };
+    var methods = [_]types.MethodNode{
+        .{ .name = "tick", .is_public = true, .params = &.{}, .body = &method_body },
+    };
+    var props = [_]types.PropertyNode{
+        .{ .name = "count", .type_info = .bigint, .readonly = true },
+    };
+
+    try readonly_inference.applyMutationInference(
+        a,
+        .stateful_smart_contract,
+        &props,
+        &methods,
+        &.{},
+    );
+
+    try testing.expect(!props[0].readonly);
+}
+
+test "N-219: applyMutationInference propagates an allocation failure instead of swallowing it" {
+    // Every `out.put(...)` inside this module used to end in `catch {}`
+    // (ZIG-R-06) -- the same swallowed-OOM bug class as R-297
+    // (`r297_lowering_allocation_failures.zig`), scoped to this module. Under
+    // real memory pressure a stateful contract's mutation facts were
+    // silently dropped rather than reported, which can flip a mutable
+    // property back to readonly and drop its state continuation with no
+    // diagnostic.
+    //
+    // `std.testing.FailingAllocator` fails its target allocation and EVERY
+    // ONE AFTER it (see r297's comment on why `fail_index` is not a one-shot
+    // instrument) -- irrelevant here: this test only needs the FIRST
+    // allocation `applyMutationInference` makes to fail, and asserts that
+    // failure is returned rather than swallowed.
+    var backing = std.heap.ArenaAllocator.init(testing.allocator);
+    defer backing.deinit();
+    var failing = std.testing.FailingAllocator.init(backing.allocator(), .{ .fail_index = 0 });
+
+    var method_body = [_]types.Statement{
+        .{ .assign = .{ .target = "count", .value = .{ .literal_int = 1 }, .target_is_property = true } },
+    };
+    var methods = [_]types.MethodNode{
+        .{ .name = "tick", .is_public = true, .params = &.{}, .body = &method_body },
+    };
+    var props = [_]types.PropertyNode{
+        .{ .name = "count", .type_info = .bigint, .readonly = true },
+    };
+
+    const result = readonly_inference.applyMutationInference(
+        failing.allocator(),
+        .stateful_smart_contract,
+        &props,
+        &methods,
+        &.{},
+    );
+
+    try testing.expectError(error.OutOfMemory, result);
 }

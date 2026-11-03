@@ -23,6 +23,9 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
+require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -77,6 +80,19 @@ module RunarCompiler
       TOK_INDENT      = 43
       TOK_DEDENT      = 44
       TOK_NEWLINE     = 45
+
+      # N-053: the non-name tokens that can begin an expression (mirrors the
+      # TS reference's PY_EXPRESSION_START), the keywords the TS reference
+      # lexes as their own tokens that begin neither a statement form nor an
+      # expression, and the source text of tokens that have none.
+      PY_EXPR_START_KINDS = [
+        TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_LPAREN, TOK_LBRACKET,
+        TOK_MINUS, TOK_TILDE, TOK_BANG
+      ].freeze
+      PY_NON_EXPR_KEYWORDS = %w[class def elif else in range from import].freeze
+      PY_TOKEN_NAMES = {
+        TOK_INDENT => "INDENT", TOK_DEDENT => "DEDENT", TOK_NEWLINE => "NEWLINE", TOK_EOF => "eof"
+      }.freeze
     end
 
     # A single token produced by the Python tokenizer.
@@ -181,8 +197,11 @@ module RunarCompiler
         stripped = stripped[1..]
       end
 
-      # General snake_case to camelCase
-      parts = stripped.split("_")
+      # General snake_case to camelCase. `-1` keeps trailing empty fields:
+      # without it `tmp__` (-> `tmp_` after the strip above) split to ["tmp"]
+      # and came back as `tmp_`, where the reference and the other five tiers
+      # say `tmp` (F-017).
+      parts = stripped.split("_", -1)
       return stripped if parts.length <= 1
 
       result = parts[0]
@@ -198,25 +217,83 @@ module RunarCompiler
     # Byte string helpers
     # -----------------------------------------------------------------------
 
-    def self.py_byte_string_to_hex(s)
-      result = +""
-      i = 0
-      while i < s.length
-        if s[i] == "\\" && i + 1 < s.length
-          if s[i + 1] == "x" && i + 3 < s.length
-            result << s[i + 2, 2]
-            i += 4
-            next
-          elsif s[i + 1] == "0"
-            result << "00"
-            i += 2
-            next
-          end
-        end
-        result << format("%02x", s[i].ord)
-        i += 1
+    # F-203: the single-character escapes CPython defines for bytes and str.
+    PY_SIMPLE_ESCAPES = {
+      "\\" => 0x5c, "'" => 0x27, '"' => 0x22, "a" => 0x07, "b" => 0x08,
+      "f" => 0x0c, "n" => 0x0a, "r" => 0x0d, "t" => 0x09, "v" => 0x0b
+    }.freeze
+
+    def self.py_octal?(c)
+      !c.nil? && c >= "0" && c <= "7"
+    end
+
+    def self.py_hex_digit?(c)
+      !c.nil? && c.match?(/\A[0-9a-fA-F]\z/)
+    end
+
+    # F-203: decode the body of a .runar.py quoted literal (the text between
+    # the quotes) the way CPython decodes a bytes (`bytes` true) or str
+    # literal — the TS reference's decodePyLiteral. Returns
+    # [decoded text, bytes as hex (meaningful for bytes only), first refusal or
+    # nil]. A body ending in a lone backslash only arises for an unterminated
+    # literal, already refused; it is dropped. \xHH keeps its two hex digits
+    # verbatim in the hex so the literal's spelling reaches the IR unchanged.
+    def self.decode_py_literal(body, bytes)
+      # Decoded values >= 0x80 must join the text in an encoding that can hold
+      # them whether the source was read as UTF-8 or as raw bytes.
+      enc = body.encoding == Encoding::UTF_8 ? Encoding::UTF_8 : Encoding::ASCII_8BIT
+      text = String.new(encoding: enc)
+      hex = +""
+      push = lambda do |v|
+        text << v.chr(enc)
+        hex << format("%02x", v)
       end
-      result
+      i = 0
+      while i < body.length
+        c = body[i]
+        return [text, hex, PY_BYTES_NON_ASCII] if bytes && c.ord >= 0x80
+        if c != "\\"
+          text << (enc == Encoding::UTF_8 ? c : c.b)
+          hex << format("%02x", c.ord) if bytes
+          i += 1
+          next
+        end
+        break if i + 1 >= body.length
+
+        e = body[i + 1]
+        simple = PY_SIMPLE_ESCAPES[e]
+        if simple
+          push.call(simple)
+          i += 2
+          next
+        end
+        if py_octal?(e)
+          j = i + 1
+          j += 1 while j < body.length && j < i + 4 && py_octal?(body[j])
+          v = body[(i + 1)...j].to_i(8)
+          return [text, hex, Frontend.invalid_escape_sequence_message(body[i...j])] if v > 0xff
+
+          push.call(v)
+          i = j
+          next
+        end
+        if e == "x"
+          unless py_hex_digit?(body[i + 2]) && py_hex_digit?(body[i + 3])
+            return [text, hex, Frontend.invalid_escape_sequence_message("\\x")]
+          end
+
+          text << body[(i + 2), 2].to_i(16).chr(enc)
+          hex << body[(i + 2), 2]
+          i += 4
+          next
+        end
+        return [text, hex, PY_BYTES_NON_ASCII] if bytes && e.ord >= 0x80
+
+        # Anything else — including str's \N{..}, \u and \U, which the
+        # surface does not support — is refused.
+        return [text, hex, Frontend.invalid_escape_sequence_message("\\" + e)]
+      end
+      [text, hex, nil]
     end
 
     # -----------------------------------------------------------------------
@@ -263,12 +340,13 @@ module RunarCompiler
     # NEWLINE tokens are emitted at the end of each significant line.
     # -----------------------------------------------------------------------
 
-    def self.tokenize_python(source)
+    def self.tokenize_python(source, lex = [], file_name = "")
       tokens = []
       lines = source.split("\n", -1)
       indent_stack = [0]
       paren_depth = 0
       in_triple_quote = nil
+      triple_start = nil # F-011: [line, col] of the open triple-quoted string
 
       lines.each_with_index do |raw_line, line_idx|
         line_num = line_idx + 1
@@ -292,6 +370,7 @@ module RunarCompiler
           close_idx = stripped.index(quote, 3)
           if close_idx.nil?
             in_triple_quote = quote
+            triple_start = [line_num, line.length - stripped.length + 1]
           end
           next
         end
@@ -311,11 +390,11 @@ module RunarCompiler
 
           if indent > indent_stack.last
             indent_stack.push(indent)
-            tokens << PythonToken.new(kind: PythonTokens::TOK_INDENT, value: "", line: line_num, col: 1)
+            tokens << PythonToken.new(kind: PythonTokens::TOK_INDENT, value: "", line: line_num, col: 0)
           elsif indent < indent_stack.last
             while indent_stack.length > 1 && indent_stack.last > indent
               indent_stack.pop
-              tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: line_num, col: 1)
+              tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: line_num, col: 0)
             end
           end
         end
@@ -325,7 +404,7 @@ module RunarCompiler
 
         while pos < line.length
           ch = line[pos]
-          col = pos + 1
+          col = pos
 
           # Whitespace within line
           if ch == " " || ch == "\t"
@@ -355,8 +434,16 @@ module RunarCompiler
               pos += 1
             end
             val = line[start...pos]
-            pos += 1 if pos < line.length
-            hex_val = py_byte_string_to_hex(val)
+            # F-011: a single-line literal that reaches the line break is
+            # unterminated; it must never run on into the next line.
+            if pos < line.length
+              pos += 1
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
+            # F-203: escapes decode as in CPython.
+            _text, hex_val, err = decode_py_literal(val, true)
+            lex << Frontend.lex_error(err, file_name, line_num, col) if err
             tokens << PythonToken.new(kind: PythonTokens::TOK_HEXSTRING, value: hex_val, line: line_num, col: col)
             next
           end
@@ -372,6 +459,7 @@ module RunarCompiler
                 pos = close_idx + 3
               else
                 in_triple_quote = triple
+                triple_start = [line_num, col]
                 break
               end
               next
@@ -379,17 +467,20 @@ module RunarCompiler
             # Single-quote string
             quote = ch
             pos += 1
-            val = +""
+            start = pos
             while pos < line.length && line[pos] != quote
-              if line[pos] == "\\" && pos + 1 < line.length
-                pos += 1
-                val << line[pos]
-              else
-                val << line[pos]
-              end
+              pos += 1 if line[pos] == "\\"
               pos += 1
             end
-            pos += 1 if pos < line.length
+            body = line[start...pos]
+            if pos < line.length
+              pos += 1
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col) # F-011
+            end
+            # F-203: a str literal decodes the same escapes as CPython does.
+            val, _hex, err = decode_py_literal(body, false)
+            lex << Frontend.lex_error(err, file_name, line_num, col) if err
             tokens << PythonToken.new(kind: PythonTokens::TOK_STRING, value: val, line: line_num, col: col)
             next
           end
@@ -492,20 +583,9 @@ module RunarCompiler
             next
           end
 
-          # Numbers
+          # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
           if ch >= "0" && ch <= "9"
-            start = pos
-            if ch == "0" && pos + 1 < line.length && (line[pos + 1] == "x" || line[pos + 1] == "X")
-              pos += 2
-              while pos < line.length && "0123456789abcdefABCDEF".include?(line[pos])
-                pos += 1
-              end
-            else
-              while pos < line.length && ((line[pos] >= "0" && line[pos] <= "9") || line[pos] == "_")
-                pos += 1
-              end
-            end
-            num_str = line[start...pos].delete("_")
+            pos, num_str, = IntLiteral.lex_number("py", line, pos, lex, file_name, line_num, col)
             tokens << PythonToken.new(kind: PythonTokens::TOK_NUMBER, value: num_str, line: line_num, col: col)
             next
           end
@@ -534,23 +614,31 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown
+          # N-033: a character the TS reference does not tokenize (`;`, `{`,
+          # `}`, `$`, `?`, ...) is refused, never skipped.
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line_num, col)
           pos += 1
         end
 
         # Emit NEWLINE at end of significant line (only outside parens)
         if paren_depth == 0
-          tokens << PythonToken.new(kind: PythonTokens::TOK_NEWLINE, value: "", line: line_num, col: line.length + 1)
+          tokens << PythonToken.new(kind: PythonTokens::TOK_NEWLINE, value: "", line: line_num, col: line.length)
         end
+      end
+
+      # F-011: a triple-quoted string still open at end of file swallowed
+      # every line after it; refuse it instead.
+      if in_triple_quote
+        lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, triple_start[0], triple_start[1])
       end
 
       # Emit remaining DEDENTs
       while indent_stack.length > 1
         indent_stack.pop
-        tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: lines.length, col: 1)
+        tokens << PythonToken.new(kind: PythonTokens::TOK_DEDENT, value: "", line: lines.length, col: 0)
       end
 
-      tokens << PythonToken.new(kind: PythonTokens::TOK_EOF, value: "", line: lines.length + 1, col: 1)
+      tokens << PythonToken.new(kind: PythonTokens::TOK_EOF, value: "", line: lines.length + 1, col: 0)
       tokens
     end
 
@@ -559,6 +647,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class PythonParser
+      include InputLimits::NestingCounter
+
       include PythonTokens
 
       INT64_MAX = 9_223_372_036_854_775_807
@@ -569,9 +659,38 @@ module RunarCompiler
         @tokens = []
         @pos = 0
         @errors = []
+        # N-046: the locals already bound in the current method, so a later
+        # `name = expr` of one of them is emitted as an AssignmentStmt, not a
+        # fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+        # existing local inside a loop body or an if-arm IS an assignment; ANF
+        # lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+        # binding's name. Snapshot/restored around if-branches and loop bodies
+        # exactly as the Ruby parser's @declared_locals.
+        @declared_locals = Set.new
+      end
+
+      # N-046: `name = init` is an assignment when the method already bound
+      # +name+, otherwise a declaration.
+      def bind_local(name, type, init, location)
+        if @declared_locals.include?(name)
+          return AssignmentStmt.new(target: Identifier.new(name: name), value: init, source_location: location)
+        end
+        @declared_locals.add(name)
+        VariableDeclStmt.new(name: name, type: type, mutable: true, init: init, source_location: location)
       end
 
       attr_accessor :tokens, :pos, :errors
+
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.py_convert_name(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
 
       # -- Error helpers ----------------------------------------------------
 
@@ -699,8 +818,8 @@ module RunarCompiler
         skip_newlines
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          add_error("Unknown parent class: #{parent_class}")
-          raise "Unknown parent class: #{parent_class}"
+          add_error("unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract")
+          raise "unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
         end
 
         properties = []
@@ -711,18 +830,29 @@ module RunarCompiler
           skip_newlines
           break if check(TOK_DEDENT) || check(TOK_EOF)
 
+          # `pass` is a valid (empty) class-body statement.
+          if check_ident("pass")
+            advance
+            expect_statement_end
+            next
+          end
+
           # Decorators
           decorators = []
+          sighash_specs = []
           while check(TOK_AT)
             advance # '@'
             dec_name = advance.value
             decorators << dec_name
+            # N-093: `@public(sighash="FLAGS")` is the native spelling of the
+            # `@sighash` directive.
+            sighash_specs.concat(parse_public_decorator_args) if dec_name == "public" && check(TOK_LPAREN)
             skip_newlines
           end
 
           # Method definition
           if check_ident("def")
-            method = parse_method_def(decorators)
+            method = parse_method_def(decorators, sighash_specs)
             if method.name == "constructor"
               constructor = method
             else
@@ -742,11 +872,20 @@ module RunarCompiler
             next
           end
 
-          # Skip unknown
-          advance
+          # N-033: any other token is refused, never skipped.
+          refuse_class_body_token
         end
 
         match_tok(TOK_DEDENT)
+
+        # N-410: nothing but blank lines may follow the class (N-004 did this
+        # for .runar.rb); a method or class after it used to be dropped unread.
+        skip_newlines
+        unless check(TOK_EOF)
+          trailing = peek
+          text = PY_TOKEN_NAMES.fetch(trailing.kind, trailing.value)
+          @errors << Frontend.lex_error(Frontend.unexpected_token_after_class_message(text), @file_name, trailing.line, trailing.col)
+        end
 
         # Auto-generate constructor if not provided
         constructor ||= auto_generate_constructor(properties)
@@ -763,31 +902,46 @@ module RunarCompiler
 
       # -- Property parsing --------------------------------------------------
 
+      # N-033: a class-body token that begins no property, method, decorator
+      # or `pass` is refused at that token (N-004's diagnostic), and the rest
+      # of its line is skipped.
+      def refuse_class_body_token
+        tok = advance
+        text = tok.kind == TOK_INDENT ? "INDENT" : tok.value
+        @errors << Frontend.lex_error(Frontend.unexpected_class_body_token_message(text), @file_name, tok.line, tok.col)
+        advance until check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
+      end
+
       def parse_property(parent_class)
         location = loc
         name_tok = advance
         raw_name = name_tok.value
 
         unless check(TOK_COLON)
-          # Not a property — skip rest of line
-          until check(TOK_NEWLINE) || check(TOK_EOF) || check(TOK_DEDENT)
-            advance
-          end
+          # N-033: not a property — a stray identifier line is refused.
+          @pos -= 1
+          refuse_class_body_token
           return nil
         end
         advance # ':'
 
-        # Parse type (possibly Readonly[T])
+        # Parse type (possibly Readonly[T]). N-093: `EmbedAlways[T]` is the
+        # native spelling of the `@embedAlways` directive; the two wrappers
+        # compose in either order.
         is_readonly = false
-        if check_ident("Readonly")
-          is_readonly = true
-          advance # 'Readonly'
+        embed_always = false
+        wrappers = 0
+        while check_ident("Readonly") || check_ident("EmbedAlways")
+          if advance.value == "Readonly"
+            is_readonly = true
+          else
+            embed_always = true
+          end
           expect(TOK_LBRACKET)
-          type_node = parse_type
-          expect(TOK_RBRACKET)
-        else
-          type_node = parse_type
+          wrappers += 1
         end
+        type_node = parse_type
+        wrappers.times { expect(TOK_RBRACKET) }
 
         # In stateless contracts (SmartContract and UnsafeSmartContract), all
         # properties are readonly.
@@ -800,16 +954,15 @@ module RunarCompiler
           initializer = parse_expression
         end
 
-        # Skip rest of line
-        until check(TOK_NEWLINE) || check(TOK_EOF) || check(TOK_DEDENT)
-          advance
-        end
+        # F-026: the field declaration ends at its line break.
+        expect_statement_end
 
         PropertyNode.new(
-          name: Frontend.py_convert_name(raw_name),
+          name: declare(raw_name),
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: location
         )
       end
@@ -823,7 +976,7 @@ module RunarCompiler
         # FixedArray[T, N]
         if raw_name == "FixedArray" && check(TOK_LBRACKET)
           advance # '['
-          elem_type = parse_type
+          elem_type = nested { parse_type }
           expect(TOK_COMMA)
           size_tok = expect(TOK_NUMBER)
           size = begin
@@ -840,12 +993,55 @@ module RunarCompiler
 
       # -- Method definition -------------------------------------------------
 
-      def parse_method_def(decorators)
+      # N-093: the argument list of `@public(...)`. The only argument is the
+      # keyword `sighash=<str>`; each one yields its string, and any other
+      # argument (positional, another keyword, a non-str value) yields nil,
+      # which is refused as a malformed spelling.
+      def parse_public_decorator_args
+        specs = []
+        expect(TOK_LPAREN)
+        while !check(TOK_RPAREN) && !check(TOK_NEWLINE) && !check(TOK_EOF)
+          is_sighash_kw = check_ident("sighash") && @tokens[@pos + 1]&.kind == TOK_EQ
+          if is_sighash_kw
+            advance # 'sighash'
+            advance # '='
+          end
+          # One argument value: up to the next top-level ',' or ')'.
+          first = peek
+          count = 0
+          depth = 0
+          while !check(TOK_NEWLINE) && !check(TOK_EOF)
+            k = peek.kind
+            break if (k == TOK_COMMA || k == TOK_RPAREN) && depth.zero?
+
+            depth += 1 if k == TOK_LPAREN || k == TOK_LBRACKET
+            depth -= 1 if k == TOK_RPAREN || k == TOK_RBRACKET
+            advance
+            count += 1
+          end
+          specs << (is_sighash_kw && count == 1 && first.kind == TOK_STRING ? first.value : nil)
+          break unless match_tok(TOK_COMMA)
+        end
+        expect(TOK_RPAREN)
+        specs
+      end
+
+      def parse_method_def(decorators, sighash_specs = [])
         location = loc
         expect_ident("def")
 
         name_tok = advance
         raw_name = name_tok.value
+
+        # N-050: @staticmethod / @classmethod declare a class-level function,
+        # not a contract method; `@public @staticmethod` used to be an entry point.
+        if decorators.include?("staticmethod") || decorators.include?("classmethod")
+          @errors << Diagnostic.new(message: Frontend.static_method_message(raw_name),
+                                    severity: Severity::ERROR, loc: location)
+        end
+
+        # N-046: reset local tracking for this method's scope.
+        @declared_locals = Set.new
 
         expect(TOK_LPAREN)
         params = parse_params
@@ -853,7 +1049,12 @@ module RunarCompiler
 
         # Optional return type: -> Type
         if match_tok(TOK_ARROW)
-          parse_type # consume and discard
+          # The AST keeps no return type; N-331 refuses an unknown name. `None`
+          # is Python's spelling of "returns nothing".
+          ret_type = parse_type
+          unless ret_type.is_a?(CustomType) && ret_type.name == "None"
+            Frontend.reject_unknown_return_type(@errors, ret_type, raw_name, location, decorators.include?("public"))
+          end
         end
 
         expect(TOK_COLON)
@@ -866,6 +1067,11 @@ module RunarCompiler
 
         # Determine if this is the constructor
         if raw_name == "__init__"
+          # N-093: the constructor is not a spending entry point.
+          unless sighash_specs.empty?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                      severity: Severity::ERROR, loc: location)
+          end
           return MethodNode.new(
             name: "constructor",
             params: params,
@@ -876,14 +1082,20 @@ module RunarCompiler
         end
 
         is_public = decorators.include?("public")
-        method_name = Frontend.py_convert_name(raw_name)
+        method_name = declare(raw_name)
+
+        sighash = SighashDirective.resolve_native_sighash(method_name, is_public, sighash_specs)
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
 
         MethodNode.new(
           name: method_name,
           params: params,
           body: body,
           visibility: is_public ? "public" : "private",
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
       end
 
@@ -915,7 +1127,7 @@ module RunarCompiler
           end
 
           params << ParamNode.new(
-            name: Frontend.py_convert_name(raw_name),
+            name: declare(raw_name),
             type: type_node || CustomType.new(name: "unknown")
           )
 
@@ -969,13 +1181,30 @@ module RunarCompiler
 
           stmt = parse_statement
           stmts << stmt if stmt
+          expect_statement_end
           skip_newlines
         end
 
         stmts
       end
 
+      # F-026: a simple statement ends at its line break; compound statements
+      # end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+      # `lim = 0b1010` parsed as `lim = 0` plus a second statement `b1010`.
+      def expect_statement_end
+        return if check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
+        return if @pos.positive? && [TOK_NEWLINE, TOK_DEDENT].include?(@tokens[@pos - 1].kind)
+
+        t = peek
+        @errors << Frontend.lex_error(PY_STATEMENT_LINE_BREAK, @file_name, t.line, t.col)
+        advance until check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
+      end
+
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # assert statement: assert expr
@@ -1016,14 +1245,26 @@ module RunarCompiler
           return parse_self_statement(location)
         end
 
+        # N-053: a statement must start with a name or a token that can begin
+        # an expression; anything else (a stray `elif`, `from`, `@`, an
+        # unexpected indent, ...) is refused with the shared diagnostic.
+        tok = peek
+        if (tok.kind == TOK_IDENT && PY_NON_EXPR_KEYWORDS.include?(tok.value)) ||
+           (tok.kind != TOK_IDENT && !PY_EXPR_START_KINDS.include?(tok.kind))
+          advance
+          text = PY_TOKEN_NAMES.fetch(tok.kind, tok.value)
+          @errors << Frontend.lex_error(Frontend.unsupported_statement_message(text), @file_name, tok.line, tok.col)
+          return nil
+        end
+
         # Variable declaration or expression statement
         if check(TOK_IDENT)
           return parse_ident_statement(location)
         end
 
-        # Skip unknown
-        advance
-        nil
+        # N-053: a token that can begin an expression begins an expression
+        # statement.
+        ExpressionStmt.new(expr: parse_expression, source_location: location)
       end
 
       def parse_assert_statement(location)
@@ -1044,7 +1285,10 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = @declared_locals.dup
         then_block = parse_statements
+        @declared_locals = locals_before.dup
         match_tok(TOK_DEDENT)
         skip_newlines
 
@@ -1052,13 +1296,15 @@ module RunarCompiler
 
         if check_ident("elif")
           elif_loc = loc
-          else_block = [parse_elif_statement(elif_loc)]
+          else_block = [nested { parse_elif_statement(elif_loc) }]
+          @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance # 'else'
           expect(TOK_COLON)
           skip_newlines
           expect(TOK_INDENT)
           else_block = parse_statements
+          @declared_locals = locals_before.dup
           match_tok(TOK_DEDENT)
         end
 
@@ -1076,7 +1322,10 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = @declared_locals.dup
         then_block = parse_statements
+        @declared_locals = locals_before.dup
         match_tok(TOK_DEDENT)
         skip_newlines
 
@@ -1084,13 +1333,15 @@ module RunarCompiler
 
         if check_ident("elif")
           elif_loc = loc
-          else_block = [parse_elif_statement(elif_loc)]
+          else_block = [nested { parse_elif_statement(elif_loc) }]
+          @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance
           expect(TOK_COLON)
           skip_newlines
           expect(TOK_INDENT)
           else_block = parse_statements
+          @declared_locals = locals_before.dup
           match_tok(TOK_DEDENT)
         end
 
@@ -1128,7 +1379,7 @@ module RunarCompiler
         expect_ident("for")
 
         iter_tok = advance
-        var_name = Frontend.py_convert_name(iter_tok.value)
+        var_name = declare(iter_tok.value)
 
         expect_ident("in")
         expect_ident("range")
@@ -1171,7 +1422,12 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: the loop variable and the body's first bindings are body-local;
+        # a rebinding of the loop variable inside the body is an assignment.
+        locals_before_body = @declared_locals.dup
+        @declared_locals.add(var_name)
         body = parse_statements
+        @declared_locals = locals_before_body
         match_tok(TOK_DEDENT)
 
         init = VariableDeclStmt.new(
@@ -1287,13 +1543,8 @@ module RunarCompiler
                  else
                    BigIntLiteral.new(value: 0)
                  end
-          return VariableDeclStmt.new(
-            name: Frontend.py_convert_name(raw_name),
-            type: type_node,
-            mutable: true,
-            init: init,
-            source_location: location
-          )
+          # N-046: rebinding a local of this method is an assignment in Python.
+          return bind_local(declare(raw_name), type_node, init, location)
         end
 
         # Simple name = expr (variable declaration without type)
@@ -1301,12 +1552,8 @@ module RunarCompiler
           advance # ident
           advance # '='
           value = parse_expression
-          return VariableDeclStmt.new(
-            name: Frontend.py_convert_name(raw_name),
-            mutable: true,
-            init: value,
-            source_location: location
-          )
+          # N-046: rebinding a local of this method is an assignment in Python.
+          return bind_local(declare(raw_name), nil, value, location)
         end
 
         # Parse as expression first
@@ -1358,7 +1605,7 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       # Python conditional: expr if cond else alternate
@@ -1368,74 +1615,81 @@ module RunarCompiler
           advance # 'if'
           condition = parse_or
           expect_ident("else")
-          alternate = parse_ternary
+          alternate = nested { parse_ternary }
           return TernaryExpr.new(condition: condition, consequent: expr, alternate: alternate)
         end
         expr
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match_tok(TOK_PIPEPIPE) # 'or' mapped to TOK_PIPEPIPE
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_not
         while match_tok(TOK_AMPAMP) # 'and' mapped to TOK_AMPAMP
           right = parse_not
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_not
+        op_loc = loc
         if match_tok(TOK_BANG) # 'not' mapped to TOK_BANG
-          operand = parse_not
-          return UnaryExpr.new(op: "!", operand: operand)
+          operand = nested { parse_not }
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
         parse_bitwise_or
       end
 
       def parse_bitwise_or
+        start = loc
         left = parse_bitwise_xor
         while match_tok(TOK_PIPE)
           right = parse_bitwise_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_xor
+        start = loc
         left = parse_bitwise_and
         while match_tok(TOK_CARET)
           right = parse_bitwise_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_and
+        start = loc
         left = parse_equality
         while match_tok(TOK_AMP)
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif match_tok(TOK_BANGEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1444,20 +1698,21 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
             right = parse_shift
-            left = BinaryExpr.new(op: "<", left: left, right: right)
+            left = BinaryExpr.new(op: "<", left: left, right: right, source_location: start)
           elsif match_tok(TOK_LTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: "<=", left: left, right: right)
+            left = BinaryExpr.new(op: "<=", left: left, right: right, source_location: start)
           elsif match_tok(TOK_GT)
             right = parse_shift
-            left = BinaryExpr.new(op: ">", left: left, right: right)
+            left = BinaryExpr.new(op: ">", left: left, right: right, source_location: start)
           elsif match_tok(TOK_GTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: ">=", left: left, right: right)
+            left = BinaryExpr.new(op: ">=", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1466,14 +1721,15 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match_tok(TOK_LSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: "<<", left: left, right: right)
+            left = BinaryExpr.new(op: "<<", left: left, right: right, source_location: start)
           elsif match_tok(TOK_RSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: ">>", left: left, right: right)
+            left = BinaryExpr.new(op: ">>", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1482,14 +1738,15 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match_tok(TOK_PLUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "+", left: left, right: right)
+            left = BinaryExpr.new(op: "+", left: left, right: right, source_location: start)
           elsif match_tok(TOK_MINUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "-", left: left, right: right)
+            left = BinaryExpr.new(op: "-", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1498,20 +1755,21 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match_tok(TOK_STAR)
             right = parse_unary
-            left = BinaryExpr.new(op: "*", left: left, right: right)
+            left = BinaryExpr.new(op: "*", left: left, right: right, source_location: start)
           elsif match_tok(TOK_SLASHSLASH) # Python // -> / in AST
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif match_tok(TOK_SLASH)
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif match_tok(TOK_PERCENT)
             right = parse_unary
-            left = BinaryExpr.new(op: "%", left: left, right: right)
+            left = BinaryExpr.new(op: "%", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1520,19 +1778,32 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match_tok(TOK_MINUS)
-          operand = parse_unary
-          return UnaryExpr.new(op: "-", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "-", operand: operand, source_location: op_loc)
         end
         if match_tok(TOK_TILDE)
-          operand = parse_unary
-          return UnaryExpr.new(op: "~", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "~", operand: operand, source_location: op_loc)
         end
         if match_tok(TOK_BANG)
-          operand = parse_unary
-          return UnaryExpr.new(op: "!", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
-        parse_postfix
+        parse_power
+      end
+
+      # `**` is the documented spelling of the builtin `pow(base, exp)`
+      # (docs/formats/python.md): right-associative, tighter than a unary minus
+      # on its left, with a unary operand allowed on its right.
+      def parse_power
+        base = parse_postfix
+        if match_tok(TOK_STARSTAR)
+          exp = nested { parse_unary }
+          return CallExpr.new(callee: Identifier.new(name: "pow"), args: [base, exp])
+        end
+        base
       end
 
       def parse_postfix
@@ -1628,13 +1899,13 @@ module RunarCompiler
         # Hex string literal
         if tok.kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # String literal
         if tok.kind == TOK_STRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Array literal: [expr, ...]
@@ -1660,7 +1931,7 @@ module RunarCompiler
               expect(TOK_LPAREN)
               str_tok = advance
               expect(TOK_RPAREN)
-              return ByteStringLiteral.new(value: str_tok.value)
+              return ByteStringLiteral.new(value: str_tok.value, source_location: SourceLocation.new(file: @file_name, line: str_tok.line, column: str_tok.col))
             else
               @pos = saved_pos
             end
@@ -1686,7 +1957,7 @@ module RunarCompiler
           advance
           raw_name = tok.value
           name = Frontend.py_convert_name(raw_name)
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         add_error("line #{tok.line}: unexpected token #{tok.value.inspect}")
@@ -1717,18 +1988,32 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_python(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_python_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_python_tokens(source, file_name, lex)
       p = PythonParser.new(file_name)
-      p.tokens = tokenize_python(source)
+      p.tokens = tokenize_python(source, lex, file_name)
       p.pos = 0
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

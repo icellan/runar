@@ -1,7 +1,7 @@
 from runar import (
     StatefulSmartContract, PubKey, Sig, ByteString, Bigint, Readonly,
     public, assert_, check_sig, extract_output_hash, hash256, hash160,
-    num2bin, cat,
+    extract_amount, continuation_amount, num2bin, cat,
 )
 
 
@@ -52,6 +52,11 @@ class TicTacToe(StatefulSmartContract):
     def join(self, opponent_pk: PubKey, sig: Sig):
         assert_(self.status == 0)
         assert_(check_sig(sig, opponent_pk))
+        # Player O must pay exactly the bet (N-027): the continuation holds the
+        # input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        # payout methods pay out. The compiler's own `>= input` floor alone would
+        # let O join for free.
+        assert_(continuation_amount() == extract_amount(self.tx_preimage) + self.bet_amount)
         self.player_o = opponent_pk
         self.status = 1
         self.turn = 1

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'json'
 
 # Test vectors generated from the Python reference implementation (runar/ecdsa.py).
 # All expected values were produced by running packages/runar-py with the same keys.
@@ -104,6 +105,43 @@ RSpec.describe Runar::ECDSA do
       expect(result).not_to be_nil
       r, = result
       expect(r).to eq(0xe2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df0)
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # F-242 (CL-BUG-160): strict DER (BIP66). The parser used to accept bytes
+  # left over inside the SEQUENCE and an INTEGER whose top bit is set without
+  # the 0x00 sign pad, so several byte strings verified as one signature.
+  # conformance/sdk-der/vectors.json holds the cross-tier vectors: every
+  # ok=false entry re-encodes a valid signature's (r, s), so only the encoding
+  # can make it fail.
+  #
+  # Proves: parse_der_signature returns nil for every malformed encoding and
+  # the canonical (r, s) for every control, and ECDSA.verify reaches the
+  # fixture verdict. Does not prove: anything about the curve arithmetic, or
+  # about P-256/P-384 (nist_ecdsa.rb parses DER through OpenSSL).
+  # -------------------------------------------------------------------------
+  describe 'strict DER (F-242)' do
+    der_vectors_path = File.expand_path('../../../../../conformance/sdk-der/vectors.json', __FILE__)
+    der_fixture = JSON.parse(File.read(der_vectors_path))
+
+    it 'carries both accepted controls and refused encodings' do
+      oks = der_fixture['vectors'].map { |v| v['ok'] }
+      expect(oks).to include(true)
+      expect(oks).to include(false)
+    end
+
+    der_fixture['vectors'].each do |v|
+      it "#{v['ok'] ? 'accepts' : 'refuses'} #{v['id']}" do
+        parsed = described_class.parse_der_signature(v['sig'])
+        if v['ok']
+          expect(parsed).to eq(described_class.parse_der_signature(v['canonical_sig']))
+          expect(parsed).not_to be_nil
+        else
+          expect(parsed).to be_nil, "#{v['id']}: parsed to #{parsed.inspect}"
+        end
+        expect(described_class.verify(v['digest'], v['sig'], der_fixture['pubkey'])).to be(v['ok'])
+      end
     end
   end
 
@@ -263,6 +301,42 @@ RSpec.describe Runar::ECDSA do
       bob_pub_hex = described_class.pub_key_from_priv_key(BOB_PRIV_HEX)
       expect(described_class.verify(TEST_DIGEST_HEX, bob_sig_hex, bob_pub_hex)).to be true
       expect(described_class.verify(TEST_DIGEST_HEX, bob_sig_hex, ALICE_PUB_HEX)).to be false
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # F-138: the low-S rule is opt-out, not gone
+  # -------------------------------------------------------------------------
+  # The signed envelope verifies with low_s: false (the TS reference accepts
+  # high-S there). Every other caller — check_sig, the ANF interpreter — keeps
+  # BIP-62's rule by default. Proves both halves on one (r, s) / (r, N - s)
+  # pair from conformance/sdk-envelope/fixtures.json; says nothing about
+  # whether a Bitcoin node would relay either.
+  describe '.ecdsa_verify low_s option' do
+    let(:payload) { '{"expiresAt":1700000030000,"kind":"hello","n":7,"nonce":1700000000000}' }
+    let(:digest) { Digest::SHA256.digest(payload) }
+    let(:pk) { ['0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'].pack('H*') }
+    let(:low_s_sig) do
+      ['3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e52' \
+       '02201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31'].pack('H*')
+    end
+    let(:high_s_sig) do
+      ['3046022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e52' \
+       '022100e307deab2c8784b1045b630792ea83f084b1df3f21618d9107cd9d570a522510'].pack('H*')
+    end
+
+    it 'rejects the high-S form by default and accepts the low-S form' do
+      expect(described_class.ecdsa_verify(low_s_sig, pk, digest)).to be true
+      expect(described_class.ecdsa_verify(high_s_sig, pk, digest)).to be false
+    end
+
+    it 'accepts the high-S form with low_s: false' do
+      expect(described_class.ecdsa_verify(high_s_sig, pk, digest, low_s: false)).to be true
+    end
+
+    it 'still rejects a high-S signature over a different digest with low_s: false' do
+      other = Digest::SHA256.digest("#{payload} ")
+      expect(described_class.ecdsa_verify(high_s_sig, pk, other, low_s: false)).to be false
     end
   end
 end

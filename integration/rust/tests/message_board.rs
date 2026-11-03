@@ -26,7 +26,7 @@ fn test_message_board_deploy_and_post() {
     let artifact = compile_contract(SOURCE_PATH);
 
     let mut provider = create_provider();
-    let (signer, _wallet) = create_funded_wallet(&mut provider);
+    let (signer, wallet) = create_funded_wallet(&mut provider);
 
     // Inspect the constructor params to construct deploy args.
     // MessageBoard typically takes a counter or root; pass conservative
@@ -38,9 +38,12 @@ fn test_message_board_deploy_and_post() {
         .iter()
         .map(|p| match p.param_type.as_str() {
             "bigint" => SdkValue::Int(0),
-            "ByteString" | "Addr" | "PubKey" | "Sig" => {
-                SdkValue::Bytes("00".repeat(32))
-            }
+            // Fixed-width types get their declared width: the SDK refuses a
+            // wrong-width PubKey / Addr (N-045). The owner is the funded
+            // wallet's key, as in the other tiers' message-board tests.
+            "PubKey" => SdkValue::Bytes(wallet.pub_key_hex.clone()),
+            "Addr" => SdkValue::Bytes("00".repeat(20)),
+            "ByteString" | "Sig" => SdkValue::Bytes("00".repeat(32)),
             "boolean" => SdkValue::Bool(false),
             _ => SdkValue::Bytes("".to_string()),
         })

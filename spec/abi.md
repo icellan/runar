@@ -405,22 +405,23 @@ State fields:
 
 ### 7.4 Implicit Parameters for Stateful Contracts
 
-Stateful contract public methods have **two implicit parameters** injected by the compiler that do not appear in the source code but **must** be provided by the SDK/caller when constructing the unlocking script:
+Stateful contract public methods have **one implicit parameter** injected by the compiler that does not appear in the source code but **must** be provided by the SDK/caller when constructing the unlocking script:
 
 | Parameter | Type | Description |
 |---|---|---|
 | `txPreimage` | `SigHashPreimage` | The sighash preimage for BIP-143. Used by the compiler-injected `checkPreimage` call to verify the transaction context. |
-| `_opPushTxSig` | `Sig` | An ECDSA signature that validates the preimage via the OP_PUSH_TX pattern. This proves the preimage is authentic. |
 
-**Unlocking script layout:** The `_opPushTxSig` implicit parameter is pushed first (ending up at the bottom of the stack), followed by the user-declared parameters in declaration order, and finally `txPreimage` on top. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
+**Unlocking script layout:** the OP_PUSH_TX signature that authenticates `txPreimage` is derived ON-CHAIN from the preimage itself (the compiler-injected `checkPreimage` binding lowers to a fixed `OP_CHECKSIGVERIFY` against the well-known generator-point key) — the spender never supplies it. The unlocking script is therefore, in order: an optional `_codePart` (only for methods that build continuation outputs), the user-declared parameters in declaration order, `_changePKH`/`_changeAmount`/`_newAmount` where applicable, and finally `txPreimage`, followed by the method selector on multi-method contracts. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
 
 ```
-<_opPushTxSig> <amount> <txPreimage>
+<amount> <txPreimage>
 ```
 
-The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3). The `_opPushTxSig` parameter is not listed in the ABI because it is consumed internally by the OP_PUSH_TX mechanism in the locking script and is not visible at the ABI level. The SDK must always provide `_opPushTxSig` as the bottom-most stack item and `txPreimage` as the top-most stack item when calling any stateful contract method.
+The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3) and is the top-most stack item.
 
 **Note:** The `txPreimage` parameter name uses the compiler-internal name `txPreimage` (not `preimage`). This matches the implicit parameter registered during ANF lowering.
+
+**History:** an earlier revision of this section (pre-BUG-100) described a second implicit parameter, `_opPushTxSig`, pushed as the bottom-most stack item. BUG-100's fix moved signature derivation on-chain, removing that stack slot; an SDK that still pushes a spender-supplied `_opPushTxSig` value produces an unlocking script with one extra item and fails.
 
 ---
 

@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Set;
 
 import runar.lang.sdk.RunarArtifact;
+import runar.lang.sdk.RunarContract;
 import runar.lang.sdk.RunarArtifact.ABIMethod;
 import runar.lang.sdk.RunarArtifact.ABIParam;
 import runar.lang.sdk.RunarArtifact.StateField;
@@ -412,11 +413,41 @@ public final class TypedContractGenerator {
             b.append("        return inner.callWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
+            // Non-terminal stateful: thread both newState and satoshis
+            // (continuation-amount override, N-144) through to the rich
+            // CallOptions overload so StatefulCallOptions.satoshis is no
+            // longer a silent no-op.
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".newState() : null;\n");
-            b.append("        return inner.call(\"").append(methodName)
-                .append("\", callArgs, stateUpdates, provider, signer);\n");
+            b.append("        Long satoshisOverride = ")
+                .append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".satoshis() != null ? ")
+                .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
+            b.append("        String changeAddr = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changeAddress() : null;\n");
+            b.append("        String changePubKey = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changePubKey() : null;\n");
+            // N-430: StatefulCallOptions.outputs (List<OutputSpec>) is converted
+            // to the SDK's CallOptions.OutputSpec list, like the terminal path
+            // converts TerminalOutput.
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.OutputSpec> sdkSpecs = null;\n");
+            b.append("        if (").append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".outputs() != null) {\n");
+            b.append("            sdkSpecs = new java.util.ArrayList<>();\n");
+            b.append("            for (OutputSpec o : ").append(optionsArgName).append(".outputs()) {\n");
+            b.append("                sdkSpecs.add(new runar.lang.sdk.CallOptions.OutputSpec(o.satoshis(), o.state()));\n");
+            b.append("            }\n");
+            b.append("        }\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
+            b.append("                && changeAddr == null && changePubKey == null && sdkSpecs == null)\n");
+            b.append("            ? null\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey).withOutputs(sdkSpecs);\n");
+            b.append("        return inner.callWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
             // Stateless terminal — outputs is optional. When non-null,
             // route through the rich CallOptions overload; otherwise the
@@ -453,11 +484,39 @@ public final class TypedContractGenerator {
             b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
+            // Same option threading as emitInnerCall (N-144), so the prepared
+            // tx honours StatefulCallOptions.satoshis like call() does (N-145).
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".newState() : null;\n");
-            b.append("        return inner.prepareCall(\"").append(methodName)
-                .append("\", callArgs, stateUpdates, provider, signer);\n");
+            b.append("        Long satoshisOverride = ")
+                .append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".satoshis() != null ? ")
+                .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
+            b.append("        String changeAddr = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changeAddress() : null;\n");
+            b.append("        String changePubKey = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".changePubKey() : null;\n");
+            // N-430: StatefulCallOptions.outputs (List<OutputSpec>) is converted
+            // to the SDK's CallOptions.OutputSpec list, like the terminal path
+            // converts TerminalOutput.
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.OutputSpec> sdkSpecs = null;\n");
+            b.append("        if (").append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".outputs() != null) {\n");
+            b.append("            sdkSpecs = new java.util.ArrayList<>();\n");
+            b.append("            for (OutputSpec o : ").append(optionsArgName).append(".outputs()) {\n");
+            b.append("                sdkSpecs.add(new runar.lang.sdk.CallOptions.OutputSpec(o.satoshis(), o.state()));\n");
+            b.append("            }\n");
+            b.append("        }\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null\n");
+            b.append("                && changeAddr == null && changePubKey == null && sdkSpecs == null)\n");
+            b.append("            ? null\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride)\n");
+            b.append("                .withChangeAddress(changeAddr).withChangePubKey(changePubKey).withOutputs(sdkSpecs);\n");
+            b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
             b.append("        if (").append(optionsArgName).append(" != null) {\n");
             b.append("            java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");
@@ -543,10 +602,8 @@ public final class TypedContractGenerator {
     private static boolean isTerminal(ABIMethod m, boolean isStateful) {
         if (!isStateful) return true;
         if (m.isTerminal() != null) return m.isTerminal();
-        for (ABIParam p : m.params()) {
-            if ("_changePKH".equals(p.name())) return false;
-        }
-        return true;
+        // N-038: a SIGHASH_SINGLE method continues without declaring `_changePKH`.
+        return !m.hasContinuation();
     }
 
     /** Drop-in parity with TS/Go {@code classifyParams}. */
@@ -555,11 +612,9 @@ public final class TypedContractGenerator {
         for (ABIParam p : params) {
             boolean hidden = "Sig".equals(p.type())
                 || (isStateful && "SigHashPreimage".equals(p.type()));
-            boolean internal = isStateful
-                && ("SigHashPreimage".equals(p.type())
-                    || "_changePKH".equals(p.name())
-                    || "_changeAmount".equals(p.name())
-                    || "_newAmount".equals(p.name()));
+            // Same predicate as RunarContract.call's arity check (F-245):
+            // stateful continuation params + intent-intrinsic witnesses.
+            boolean internal = RunarContract.isSdkSuppliedParam(p.name(), p.type(), isStateful);
             out.add(new ClassifiedParam(p.name(), p.type(), hidden, internal));
         }
         return out;

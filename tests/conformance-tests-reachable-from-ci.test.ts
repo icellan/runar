@@ -30,6 +30,21 @@
  * `conformance` working directory (`npx vitest run negatives/`) — so both are
  * accepted here. A future third form needs adding, and the failure message
  * says so rather than leaving the next person to guess.
+ *
+ * F-279 / CL-GAP-129: `haystack()` used to fold the ENTIRE root package.json
+ * text into the evidence pool, so a script's own command string vouched for
+ * itself regardless of whether any workflow ever ran that script —
+ * `conformance:wire-primitives` made `conformance/wire-primitives.test.ts`
+ * (Requirement #4's register gate) look reachable while nothing invoked
+ * `pnpm run conformance:wire-primitives`. `reachablePackageScriptCommands()`
+ * now scopes the pool to commands of scripts a workflow actually invokes
+ * (directly, or transitively through another invoked script). This proves
+ * that a dead `pnpm run <script>` definition can no longer manufacture a
+ * false "reachable" verdict for the test files inside it. It does NOT prove
+ * every conceivable invocation syntax is covered (a workflow could invoke a
+ * script through a form `invokesScript()` doesn't recognize, e.g. a
+ * composite action or a Makefile target) — new forms still need adding here,
+ * same as the existing `isReachable()` caveat above.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -61,6 +76,62 @@ function conformanceTestFiles(): string[] {
     .sort();
 }
 
+/** Escape a literal string for use inside a RegExp. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** True if `name` is invoked as an npm/pnpm/yarn script somewhere in `blob`. */
+function invokesScript(name: string, blob: string): boolean {
+  const esc = escapeRe(name);
+  return new RegExp(`(^|[\\s"'\`&;|])(pnpm|npm|yarn)(\\s+run)?\\s+${esc}($|[\\s"'\`&;|])`, 'm').test(
+    blob,
+  );
+}
+
+/**
+ * The root package.json's script COMMANDS, but only for scripts that some
+ * workflow actually invokes by name (`pnpm run <name>` / `npm run <name>` /
+ * `yarn <name>`) — directly, or transitively through another invoked
+ * script's own command text (e.g. `conformance:all` chains dozens of others
+ * with `&&`).
+ *
+ * Returning the whole package.json TEXT instead (as this used to) lets a
+ * script's own definition vouch for itself: the command string
+ * `"npx vitest run conformance/wire-primitives.test.ts"` always contains the
+ * path it runs, whether or not any workflow ever invokes that script. That
+ * is exactly how `conformance:wire-primitives` made
+ * `conformance/wire-primitives.test.ts` look reachable while no workflow
+ * ran it (CL-GAP-129 / F-279) — the mere existence of the script entry
+ * satisfied the old, unscoped check.
+ */
+function reachablePackageScriptCommands(workflowBlob: string): string[] {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const scripts = pkg.scripts ?? {};
+  const names = Object.keys(scripts);
+
+  const invoked = new Set<string>();
+  const queue: string[] = [];
+  for (const name of names) {
+    if (invokesScript(name, workflowBlob)) {
+      invoked.add(name);
+      queue.push(name);
+    }
+  }
+  while (queue.length > 0) {
+    const cmd = scripts[queue.pop()!]!;
+    for (const name of names) {
+      if (!invoked.has(name) && invokesScript(name, cmd)) {
+        invoked.add(name);
+        queue.push(name);
+      }
+    }
+  }
+  return [...invoked].map((name) => scripts[name]!);
+}
+
 /**
  * Only lines that actually INVOKE vitest count.
  *
@@ -70,13 +141,17 @@ function conformanceTestFiles(): string[] {
  * it is the same substring-matching mistake this guard exists to expose.
  */
 function haystack(): string {
-  const texts = [readFileSync(join(ROOT, 'package.json'), 'utf8')];
+  const texts: string[] = [];
   for (const f of readdirSync(WORKFLOWS)) {
     const p = join(WORKFLOWS, f);
     if (statSync(p).isFile()) texts.push(readFileSync(p, 'utf8'));
   }
   const cp = join(ROOT, 'conformance', 'package.json');
   if (existsSync(cp)) texts.push(readFileSync(cp, 'utf8'));
+
+  // Only the commands of root package.json scripts a workflow actually
+  // invokes count — see reachablePackageScriptCommands().
+  texts.push(...reachablePackageScriptCommands(texts.join('\n')));
 
   // A vitest invocation can span lines: YAML folded scalars (`run: >`) put the
   // command on one line and its arguments on following, more-indented ones. A

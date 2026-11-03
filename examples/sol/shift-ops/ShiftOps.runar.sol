@@ -9,11 +9,11 @@ contract ShiftOps is SmartContract {
         a = _a;
     }
 
-    /// @notice Apply left shift and right shift, then sanity-check the results.
-    function testShift() public {
+    /// @notice Apply left shift and right shift, then check the caller-supplied results.
+    function testShift(bigint expectedLeft, bigint expectedRight) public {
         bigint left = this.a << 3;
         bigint right = this.a >> 2;
-        require(left >= 0 || left < 0);
-        require(right >= 0 || right < 0);
+        require(left == expectedLeft);
+        require(right == expectedRight);
     }
 }

@@ -17,7 +17,17 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, SourceNestingError, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +96,17 @@ TOK_DOTDOT = 69
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw", "neg_only")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, raw: str = "", neg_only: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # F-026: a number token's text as written, and whether it is valid
+        # only under a unary minus.
+        self.raw = raw
+        self.neg_only = neg_only
 
 
 # ---------------------------------------------------------------------------
@@ -265,13 +279,14 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     chars = source
     n = len(chars)
     pos = 0
     line = 1
-    col = 1
+    col = 0
 
     while pos < n:
         ch = chars[pos]
@@ -280,7 +295,7 @@ def _tokenize(source: str) -> list[Token]:
         if ch in (" ", "\t", "\r", "\n"):
             if ch == "\n":
                 line += 1
-                col = 1
+                col = 0
             else:
                 col += 1
             pos += 1
@@ -297,9 +312,12 @@ def _tokenize(source: str) -> list[Token]:
             pos += 2
             col += 2
             while pos + 1 < n:
+                # N-406: a newline resets the column; it is not counted again.
                 if chars[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
+                    pos += 1
+                    continue
                 if chars[pos] == "*" and chars[pos + 1] == "/":
                     pos += 2
                     col += 2
@@ -376,7 +394,8 @@ def _tokenize(source: str) -> list[Token]:
             continue
 
         # Hex literal: 0x...
-        if ch == "0" and pos + 1 < n and chars[pos + 1] in ("x", "X"):
+        # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+        if ch == "0" and pos + 1 < n and chars[pos + 1] == "x":
             pos += 2
             col += 2
             start = pos
@@ -393,33 +412,43 @@ def _tokenize(source: str) -> list[Token]:
             col += 1
             start = pos
             while pos < n and chars[pos] != '"':
+                # A backslash escapes the next character (as in the TS
+                # reference), so `\"` does not close the literal.
+                if chars[pos] == "\\" and pos + 1 < n:
+                    pos += 1
+                    col += 1
                 if chars[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
             val = chars[start:pos]
+            # F-011: Rust strings may span lines, so only end of file leaves
+            # one unterminated.
             if pos < n:
                 pos += 1  # skip closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, l, c))
             tokens.append(Token(TOK_HEX_STRING, val, l, c))
             continue
 
-        # Number
-        if ch.isdigit():
-            start = pos
-            while pos < n and (chars[pos].isdigit() or chars[pos] == "_"):
-                pos += 1
-                col += 1
-            val = chars[start:pos].replace("_", "")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust integer
+        # literal (a lowercase `0x` was taken above as a ByteString).
+        if "0" <= ch <= "9":
+            end, val, lit, raw = lex_number("rs", chars, pos, lex, file_name, l, c)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, val, l, c, raw, bool(lit and lit.neg_only)))
             continue
 
         # Identifier / keyword
-        if ch.isalpha() or ch == "_":
+        # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        # as an unexpected character.
+        if ch.isascii() and (ch.isalpha() or ch == "_"):
             start = pos
-            while pos < n and (chars[pos].isalnum() or chars[pos] == "_"):
+            while pos < n and chars[pos].isascii() and (chars[pos].isalnum() or chars[pos] == "_"):
                 pos += 1
                 col += 1
             word = chars[start:pos]
@@ -441,7 +470,9 @@ def _tokenize(source: str) -> list[Token]:
                 tokens.append(Token(TOK_IDENT, word, l, c))
             continue
 
-        # Unknown character -- skip
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, l, c))
         pos += 1
         col += 1
 
@@ -459,6 +490,17 @@ class _RustParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -499,6 +541,38 @@ class _RustParser:
         return SourceLocation(file=self.file_name, line=tok.line, column=tok.col)
 
     # -- Attribute parsing ---------------------------------------------------
+
+    def _parse_directive_attribute(self) -> tuple[str, str | None, str, SourceLocation]:
+        """N-093: classify a field/method attribute as one of the two
+        directives. ``#[embed_always]`` and ``#[sighash(FLAGS)]`` (optionally
+        ``runar::``-qualified) are the native spellings of ``@embedAlways`` /
+        ``@sighash``. Returns ``(kind, flags, content, loc)`` where ``kind`` is
+        ``"embed_always"``, ``"sighash"`` or ``"other"``; for ``sighash``,
+        ``flags`` is the ``|``-joined identifier list, or ``None`` when the
+        parentheses are missing or hold any other token. ``content`` is the
+        compact attribute text exactly as ``parse_attribute`` returns it."""
+        loc = self.loc()
+        start = self.pos
+        content = self.parse_attribute()
+        toks = self.tokens[start + 1:self.pos - 1]  # inside `#[` ... `]`
+        i = 0
+        if (
+            len(toks) >= 2 and toks[0].kind == TOK_IDENT and toks[0].value == "runar"
+            and toks[1].kind == TOK_COLONCOLON
+        ):
+            i = 2
+        name = toks[i].value if i < len(toks) and toks[i].kind == TOK_IDENT else ""
+        rest = toks[i + 1:]
+        if name == "embed_always" and not rest:
+            return ("embed_always", None, content, loc)
+        if name == "sighash":
+            inner = rest[1:-1]
+            ok = (
+                len(rest) >= 2 and rest[0].kind == TOK_LPAREN and rest[-1].kind == TOK_RPAREN
+                and all(t.kind in (TOK_IDENT, TOK_PIPE) for t in inner)
+            )
+            return ("sighash", "".join(t.value for t in inner) if ok else None, content, loc)
+        return ("other", None, content, loc)
 
     def parse_attribute(self) -> str:
         """Parse #[...] attribute content. The #[ token is already current."""
@@ -543,7 +617,8 @@ class _RustParser:
         # Ruby tiers build.
         if tok.kind == TOK_LBRACKET:
             self.advance()
-            element = self.parse_rust_type()
+            with self._nest.nested(self.loc):
+                element = self.parse_rust_type()
             self.expect(TOK_SEMI)
             length_tok = self.expect(TOK_NUMBER)
             try:
@@ -561,7 +636,8 @@ class _RustParser:
             # Handle FixedArray<T, N> syntax (Vec<T> is not FixedArray)
             if name == "FixedArray" and self.check(TOK_LT):
                 self.advance()  # consume <
-                elem_type = self.parse_rust_type()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_rust_type()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
                 try:
@@ -605,6 +681,9 @@ class _RustParser:
         contract_name = ""
         parent_class = "SmartContract"
         methods: list[MethodNode] = []
+        # N-490: the synthesized constructor is anchored at the contract's
+        # `struct` keyword, not a fake 1:0.
+        ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
 
         while not self.check(TOK_EOF):
             # Attribute: #[...]
@@ -624,6 +703,7 @@ class _RustParser:
                     # Parse struct
                     if self.check(TOK_PUB):
                         self.advance()
+                    ctor_loc = self.loc()
                     self.expect(TOK_STRUCT)
 
                     name_tok = self.peek()
@@ -634,11 +714,21 @@ class _RustParser:
                     self.expect(TOK_LBRACE)
 
                     while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-                        # Check for #[readonly] attribute on field
+                        # Field attributes, any number and order: #[readonly],
+                        # and N-093's #[embed_always] (the native spelling of
+                        # `@embedAlways`). A #[sighash(...)] here annotates
+                        # nothing and is refused.
                         readonly = False
-                        if self.check(TOK_HASH_BRACKET):
-                            field_attr = self.parse_attribute()
-                            if field_attr == "readonly":
+                        embed_always = False
+                        while self.check(TOK_HASH_BRACKET):
+                            kind, _, field_attr, attr_loc = self._parse_directive_attribute()
+                            if kind == "embed_always":
+                                embed_always = True
+                            elif kind == "sighash":
+                                self.errors.append(Diagnostic(
+                                    message=lost_directive_message("@sighash"),
+                                    severity=Severity.ERROR, loc=attr_loc))
+                            elif field_attr == "readonly":
                                 readonly = True
 
                         # Skip optional `pub` visibility modifier
@@ -655,12 +745,13 @@ class _RustParser:
                             self.match_tok(TOK_COMMA)
 
                             # Skip txPreimage — implicit stateful param, not a contract property
-                            camel_name = _snake_to_camel(field_name)
+                            camel_name = self.declare(field_name)
                             if camel_name != "txPreimage":
                                 properties.append(PropertyNode(
                                     name=camel_name,
                                     type=field_type,
                                     readonly=readonly,
+                                    embed_always=embed_always,
                                     source_location=field_loc,
                                 ))
                         else:
@@ -685,12 +776,14 @@ class _RustParser:
             else:
                 self.advance()
 
-        # Determine parent class from property mutability
-        if any(not p.readonly for p in properties):
+        # Determine parent class from property mutability. The explicit
+        # `#[runar::unsafe_contract]` attribute is authoritative and must
+        # not be silently overridden by this structural inference (F-204).
+        if parent_class != "UnsafeSmartContract" and any(not p.readonly for p in properties):
             parent_class = "StatefulSmartContract"
 
         if not contract_name:
-            self.add_error("No Runar contract struct found")
+            self.add_error("no Rúnar contract struct found in Rust source")
             return ContractNode(
                 name="",
                 parent_class=parent_class,
@@ -698,7 +791,7 @@ class _RustParser:
                 constructor=MethodNode(
                     name="constructor",
                     visibility="public",
-                    source_location=SourceLocation(file=self.file_name, line=1, column=1),
+                    source_location=SourceLocation(file=self.file_name, line=1, column=0),
                 ),
                 methods=methods,
                 source_file=self.file_name,
@@ -709,6 +802,12 @@ class _RustParser:
         final_methods: list[MethodNode] = []
         for m in methods:
             if m.name == "init" and len(m.params) == 0:
+                # N-093: init() is not a spending entry point, so a #[sighash]
+                # on it would be dropped with the method.
+                if m.sighash_type is not None:
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=m.source_location))
                 for stmt in m.body:
                     if isinstance(stmt, AssignmentStmt) and isinstance(stmt.target, PropertyAccessExpr):
                         for prop in properties:
@@ -721,7 +820,6 @@ class _RustParser:
 
         # Build auto-generated constructor (only non-initialized properties)
         uninit_props = [p for p in properties if p.initializer is None]
-        ctor_loc = SourceLocation(file=self.file_name, line=1, column=1)
 
         # super(...) call as first statement
         super_args: list[Expression] = [
@@ -780,9 +878,18 @@ class _RustParser:
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             # #[public] is no longer supported — `pub fn` marks public methods.
+            # N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            # #[embed_always] on a method annotates nothing and is refused.
+            sighash_specs: list[str | None] = []
             while self.check(TOK_HASH_BRACKET):
-                method_attr = self.parse_attribute()
-                if method_attr == "public":
+                kind, flags, method_attr, attr_loc = self._parse_directive_attribute()
+                if kind == "sighash":
+                    sighash_specs.append(flags)
+                elif kind == "embed_always":
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@embedAlways"),
+                        severity=Severity.ERROR, loc=attr_loc))
+                elif method_attr == "public":
                     self.add_error(
                         "#[public] is no longer supported — use 'pub fn' "
                         "for public methods"
@@ -792,7 +899,20 @@ class _RustParser:
             if self.check(TOK_PUB):
                 self.advance()
                 visibility = "public"
-            methods.append(self.parse_function(visibility))
+            if not self.check(TOK_FN):
+                for _ in sighash_specs:
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=self.loc()))
+                sighash_specs = []
+            method = self.parse_function(visibility)
+            sighash = resolve_native_sighash(method.name, visibility == "public", sighash_specs)
+            if sighash is not None and sighash.error is not None:
+                self.errors.append(Diagnostic(
+                    message=sighash.error, severity=Severity.ERROR, loc=method.source_location))
+            elif sighash is not None:
+                method.sighash_type = sighash.value
+            methods.append(method)
 
         self.expect(TOK_RBRACE)
         return methods
@@ -810,10 +930,11 @@ class _RustParser:
         else:
             self.advance()
 
-        name = _snake_to_camel(raw_name)
+        name = self.declare(raw_name)
 
         self.expect(TOK_LPAREN)
         params: list[ParamNode] = []
+        has_self = False
 
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
             # Skip &self, &mut self
@@ -822,10 +943,12 @@ class _RustParser:
                 if self.check(TOK_MUT):
                     self.advance()
                 if self.check(TOK_SELF):
+                    has_self = True
                     self.advance()
                     self.match_tok(TOK_COMMA)
                     continue
             if self.check(TOK_SELF):
+                has_self = True
                 self.advance()
                 self.match_tok(TOK_COMMA)
                 continue
@@ -842,7 +965,7 @@ class _RustParser:
                         self.advance()
                 param_type = self.parse_rust_type()
                 params.append(ParamNode(
-                    name=_snake_to_camel(param_name),
+                    name=self.declare(param_name),
                     type=param_type,
                 ))
             else:
@@ -851,12 +974,20 @@ class _RustParser:
 
         self.expect(TOK_RPAREN)
 
+        # N-050: a `pub fn` without a self receiver is an associated (static)
+        # function, not a contract method. A private one stays a helper (R9).
+        if visibility == "public" and not has_self:
+            self.errors.append(Diagnostic(
+                message=static_method_message(raw_name),
+                severity=Severity.ERROR, loc=func_loc))
+
         # Optional return type
         has_return_type = False
         if self.check(TOK_ARROW):
             has_return_type = True
             self.advance()
-            self.parse_rust_type()
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            reject_unknown_return_type(self.errors, self.parse_rust_type(), raw_name, func_loc, visibility == "public")
 
         self.expect(TOK_LBRACE)
         body: list[Statement] = []
@@ -882,6 +1013,10 @@ class _RustParser:
     # -- Statement parsing ---------------------------------------------------
 
     def parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         stmt_loc = self.loc()
 
         # assert!(expr)
@@ -923,7 +1058,7 @@ class _RustParser:
 
             var_name = "unknown"
             if self.peek().kind == TOK_IDENT:
-                var_name = _snake_to_camel(self.peek().value)
+                var_name = self.declare(self.peek().value)
                 self.advance()
             else:
                 self.advance()
@@ -988,7 +1123,7 @@ class _RustParser:
             self.advance()
             var_name = "i"
             if self.peek().kind == TOK_IDENT:
-                var_name = _snake_to_camel(self.peek().value)
+                var_name = self.declare(self.peek().value)
                 self.advance()
 
             self.expect(TOK_IN)
@@ -1142,124 +1277,148 @@ class _RustParser:
     # -- Expression parsing (precedence climbing) ----------------------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_or()
+        with self._nest.nested(self.loc):
+            return self._parse_or()
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match_tok(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_or()
         while self.match_tok(TOK_AMPAMP):
             right = self._parse_bit_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_xor()
         while self.match_tok(TOK_PIPE):
             right = self._parse_bit_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bit_and()
         while self.match_tok(TOK_CARET):
             right = self._parse_bit_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bit_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match_tok(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match_tok(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_BANGEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match_tok(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_add_sub()
         while True:
             if self.match_tok(TOK_LSHIFT):
                 right = self._parse_add_sub()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_RSHIFT):
                 right = self._parse_add_sub()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_add_sub(self) -> Expression:
+        start = self.loc()
         left = self._parse_mul_div()
         while True:
             if self.match_tok(TOK_PLUS):
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_MINUS):
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_mul_div(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match_tok(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match_tok(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match_tok(TOK_BANG):
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="!", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_MINUS):
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            # F-026: a signed-suffix minimum (`128i8`) is legal under this
+            # minus, through parentheses, as rustc's overflowing_literals lint.
+            k = self.pos
+            while k < len(self.tokens) and self.tokens[k].kind == TOK_LPAREN:
+                k += 1
+            opens = k - self.pos
+            if k < len(self.tokens) and self.tokens[k].kind == TOK_NUMBER and self.tokens[k].neg_only:
+                if all(k + j < len(self.tokens) and self.tokens[k + j].kind == TOK_RPAREN for j in range(1, opens + 1)):
+                    self.tokens[k].neg_only = False
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="-", operand=self._parse_unary(), source_location=op_loc)
         if self.match_tok(TOK_TILDE):
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self.loc):
+                return UnaryExpr(op="~", operand=self._parse_unary(), source_location=op_loc)
         # & and &mut are borrow operators -- ignore them for AST purposes
         if self.check(TOK_AMP):
             self.advance()
@@ -1334,6 +1493,8 @@ class _RustParser:
         tok = self.peek()
 
         if tok.kind == TOK_NUMBER:
+            if tok.neg_only:
+                self.errors.append(lex_error(invalid_integer_literal("rs", tok.raw), self.file_name, tok.line, tok.col))
             self.advance()
             try:
                 val = int(tok.value)
@@ -1343,7 +1504,7 @@ class _RustParser:
 
         if tok.kind == TOK_HEX_STRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_TRUE:
             self.advance()
@@ -1369,7 +1530,7 @@ class _RustParser:
         if tok.kind == TOK_IDENT:
             self.advance()
             mapped = _map_rust_builtin(tok.value)
-            return Identifier(name=mapped)
+            return Identifier(name=mapped, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         self.add_error(
             f"unsupported token {tok.value!r} (kind {tok.kind}) "
@@ -1395,16 +1556,31 @@ class _RustParser:
 # ---------------------------------------------------------------------------
 
 def parse_rust(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_rust_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_rust_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Rust-syntax Runar contract (.runar.rs)."""
     p = _RustParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:
         contract = p.parse_contract()
+    except (SourceNestingError, RecursionError):
+        raise  # F-213: with_nesting_limit turns these into the shared diagnostic
     except Exception as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

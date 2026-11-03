@@ -115,8 +115,13 @@ class TestParserMove < Minitest::Test
     MOVE
 
     result = parse(source, 'bad.runar.move')
-    invalid = result.contract.nil? || !result.errors.empty?
-    assert invalid, 'expected errors for invalid Move-style syntax'
+    # F-376: must require a diagnostic, not accept a silent nil-contract +
+    # empty-errors outcome as "invalid" — `contract.nil? || !errors.empty?`
+    # is satisfied by a parser that silently drops the contract without
+    # reporting anything. Proves a diagnostic was actually produced; does
+    # not independently check contract.nil? (this parser recovers with a
+    # non-nil contract plus errors for this input).
+    refute_empty result.errors, 'expected errors for invalid Move-style syntax'
   end
 
   # ---------------------------------------------------------------------------

@@ -152,6 +152,22 @@ describe('codegen/common', () => {
       };
       expect(isTerminalMethod(method, true)).toBe(false);
     });
+
+    it('N-038: a SINGLE method with no change params and no isTerminal flag is a continuation', () => {
+      // A stateful SIGHASH_SINGLE method declares no _changePKH (BIP-143 SINGLE
+      // does not commit the change output), and the compiler writes isTerminal
+      // only when true, so the _changePKH fallback alone misreads it as terminal.
+      for (const sigHashType of [0x43, 0xc3]) {
+        const method = {
+          name: 'bump',
+          params: [{ name: 'txPreimage', type: 'SigHashPreimage' }],
+          isPublic: true,
+          sigHashType,
+        };
+        expect(isTerminalMethod(method, true)).toBe(false);
+        expect(isTerminalMethod({ ...method, isTerminal: true }, true)).toBe(true);
+      }
+    });
   });
 
   describe('classifyParams', () => {

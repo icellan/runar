@@ -38,6 +38,8 @@ module RunarCompiler
       "else_" => "else",
       "value_ref" => "value",
       "raw_value" => "value",
+      # F-065 / F-088: the schema's (and the artifact ABI's) spelling.
+      "sighash_type" => "sigHashType",
     }.freeze
 
     # Fields deliberately kept OUT of the emitted ANF IR JSON. Everything a
@@ -47,19 +49,15 @@ module RunarCompiler
     IR_EXCLUDED_FIELDS = Set.new([
       # Decoded constant values; the wire carries the raw "value" instead.
       "const_string", "const_big_int", "const_bool", "const_int",
-      # Debug-only source positions, not part of conformance.
-      "source_loc",
-      # In-memory carrier for the artifact's top-level parentClass field.
-      "parent_class",
       # Issue #109 (@embedAlways): compiler-internal DCE opt-out on load_prop.
       # The Zig reference keeps it out of the emitted IR too.
       "preserve",
-      # N-094 / issue #123: in-memory carrier for the method's declared
-      # @sighash mode. The ANF wire format carries the mode on the
-      # check_preimage node's sighashFlag instead; the ANFMethod schema is
-      # additionalProperties:false, so emitting it fails validateANF.
-      "sighash_type",
     ]).freeze
+    # F-038 / F-065: +parent_class+ and the method +sighash_type+ used to be
+    # listed above as in-memory carriers. They are wire data now (declared in
+    # the schema), so an --emit-ir -> --ir round trip keeps the artifact's
+    # parentClass and abi sigHashType; see +_anf_to_camel_dict+ for when each
+    # is omitted.
 
     module_function
 
@@ -134,18 +132,44 @@ module RunarCompiler
         opts.on("--emit-source-map PATH", "After a successful compile, write artifact.sourceMap JSON to PATH") do |path|
           options[:emit_source_map] = path
         end
+
+        opts.on("--no-source-map", "Omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)") do
+          options[:no_source_map] = true
+        end
       end
 
       parser.parse!(argv)
 
+      # N-445: refuse the contradictory pair rather than silently dropping one.
+      if options[:no_source_map] && options[:emit_source_map]
+        $stderr.puts "Error: --no-source-map and --emit-source-map are mutually exclusive"
+        exit 1
+      end
+
       if !options[:ir] && !options[:source]
         $stderr.puts(
           "Usage: runar-compiler-ruby [--ir <path> | --source <path>] " \
-          "[--output <path>] [--hex] [--asm] [--emit-ir]"
+          "[--output <path>] [--hex] [--asm] [--emit-ir] [--no-source-map]"
         )
         $stderr.puts ""
         $stderr.puts "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir)."
         $stderr.puts "Phase 2: Compile from source to Bitcoin Script (--source)."
+        exit 1
+      end
+
+      # F-335: --source and --ir are mutually exclusive input modes. The old
+      # code picked --source silently whenever both were set (no
+      # diagnostic); refuse the combination instead, matching the Go tier's
+      # F-183 fix (compilers/go/main.go).
+      if options[:source] && options[:ir]
+        $stderr.puts "Error: --source and --ir are mutually exclusive; pass exactly one"
+        exit 1
+      end
+
+      # N-220: --hex and --asm are mutually exclusive output modes, matching
+      # the Go tier's F-183 refusal. The old code preferred --hex silently.
+      if options[:hex] && options[:asm]
+        $stderr.puts "Error: --hex and --asm are mutually exclusive; pass exactly one"
         exit 1
       end
 
@@ -177,7 +201,17 @@ module RunarCompiler
         return
       end
 
-      # Handle --emit-ir: dump ANF IR JSON and exit
+      # Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS
+      # --emit-source-map was also requested. The source map is only
+      # populated by the full compile (stack-lowering + emit), which this
+      # IR-only snapshot never runs, so an unconditional return here used to
+      # silently drop the --emit-source-map file with no diagnostic (F-255,
+      # same bug as Go's F-183). When --emit-source-map is also set we fall
+      # through — the same way --emit-ir-to already does — into the normal
+      # compile below so the source map gets populated and written;
+      # emit_ir_handled then stops us before the final hex/asm/artifact
+      # output, since --emit-ir's contract is "stdout carries only the IR".
+      emit_ir_handled = false
       if options[:emit_ir]
         unless options[:source]
           $stderr.puts "--emit-ir requires --source"
@@ -185,7 +219,7 @@ module RunarCompiler
         end
 
         begin
-          program = RunarCompiler.compile_source_to_ir(
+          program, ir_warnings = RunarCompiler.compile_source_to_ir_collecting_warnings(
             options[:source],
             disable_constant_folding: disable_cf
           )
@@ -197,7 +231,15 @@ module RunarCompiler
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
         ir_json = JSON.pretty_generate(_anf_to_camel_dict(program))
         puts ir_json
-        return
+        unless options[:emit_source_map]
+          # F-220: this early return skips the full compile, which is where
+          # warnings are otherwise printed, so print them here. When
+          # --emit-source-map is set we fall through and the full compile
+          # prints them; printing here too would print each one twice.
+          ir_warnings.each { |w| $stderr.puts "warning: #{w}" }
+          return
+        end
+        emit_ir_handled = true
       end
 
       # Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
@@ -252,6 +294,9 @@ module RunarCompiler
       # but the artifact bytes.
       warnings.each { |w| $stderr.puts "warning: #{w}" }
 
+      # N-445: --no-source-map drops the sourceMap key from the artifact.
+      artifact.source_map = nil if options[:no_source_map]
+
       # Determine output
       if options[:hex]
         output = artifact.script
@@ -292,6 +337,11 @@ module RunarCompiler
         File.write(sm_path, JSON.pretty_generate({ "mappings" => mappings }) + "\n")
         $stderr.puts "Source map written to #{sm_path}"
       end
+
+      # --emit-ir already printed the IR above; having fallen through only
+      # to populate and write the source map, stop here rather than also
+      # print the full hex/asm/artifact output.
+      return if emit_ir_handled
 
       # Write output
       if options[:output]
@@ -347,6 +397,10 @@ module RunarCompiler
 
           v = obj[member_name]
           next if v.nil?
+          # F-038: "" is the unset parentClass (IR loaded without one).
+          next if name_str == "parent_class" && v.empty?
+          # F-065: the default ALL|FORKID is omitted, as in the artifact ABI.
+          next if name_str == "sighash_type" && v == Frontend::SighashDirective::SIGHASH_DEFAULT
 
           # raw_value is the canonical Go JSON "value" field -- parse and emit its content
           if name_str == "raw_value"

@@ -1,0 +1,164 @@
+{
+  "fixture_version": 1,
+  "notes": "N-320: state-reading paths over the N-317 hostile scripts. Each entry names a case in hostile.json (same artifacts, same script = prefix + repeat*count + suffix). state = extractStateFromScript(artifacts.stateful, script): null, the decoded state (bigint fields as decimal strings), or 'malformed' (the tier's typed malformed-script error). fromUtxo = RunarContract.fromUtxo(artifacts[case.artifact], utxo with that script), and fromTxId over a provider serving it where the tier does not delegate to fromUtxo: 'ok' or 'malformed'. A script that is not even-length ASCII hex is malformed before anything reads it; a stateful artifact over a script with no state section is malformed (C10), not a contract carrying constructor-initial state. Any other exception, panic or timeout is a failure. Replayed by all 7 SDKs within a CPU-time budget.",
+  "cases": [
+    {
+      "name": "stateful-genuine",
+      "state": {
+        "balance": "8721"
+      },
+      "fromUtxo": "ok"
+    },
+    {
+      "name": "stateful-odd-length-code-part",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-odd-length-state",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-non-hex-at-slot",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-partial-hex-at-slot",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-non-hex-in-state",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-non-ascii",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-truncated-pushdata1",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-truncated-pushdata1-payload",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-truncated-pushdata2",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-truncated-pushdata4",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-pushdata4-high-bit-length",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-pushdata4-ffffffff-length",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-push-runs-past-end",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-push-swallows-next-segment",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-empty",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-shorter-than-template",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-ends-at-slot",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-wrong-code-part-length",
+      "state": {
+        "balance": "8721"
+      },
+      "fromUtxo": "ok"
+    },
+    {
+      "name": "stateful-large-genuine",
+      "state": {
+        "balance": "8721"
+      },
+      "fromUtxo": "ok"
+    },
+    {
+      "name": "stateful-large-high-bit-pushdata4",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateful-large-zeros",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-genuine",
+      "state": null,
+      "fromUtxo": "ok"
+    },
+    {
+      "name": "stateless-genuine-with-trailer",
+      "state": {
+        "balance": "8721"
+      },
+      "fromUtxo": "ok"
+    },
+    {
+      "name": "stateless-non-hex",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-odd-length",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-non-ascii",
+      "state": "malformed",
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-pushdata4-high-bit-length",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-pushdata4-0x40-length",
+      "state": null,
+      "fromUtxo": "malformed"
+    },
+    {
+      "name": "stateless-large-high-bit-pushdata4",
+      "state": null,
+      "fromUtxo": "malformed"
+    }
+  ]
+}

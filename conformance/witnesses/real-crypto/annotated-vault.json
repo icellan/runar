@@ -1,0 +1,175 @@
+{
+  "fixture": "annotated-vault",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "N-044: memo (mutable ByteString) is serialized BEFORE owner (mutable PubKey) and balance, so the on-chain reader must decode memo's PUSHDATA length to find owner. Before the fix every tier read that length with bare OP_BIN2NUM (signed): a 128-byte memo (4c 80) read as length 0 and the memo's first 33 bytes became owner. Memos below begin with bob's (the stranger's) compressed pubkey, the attack shape. The owner is alice throughout. N-045: owner (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. No method takes a fixed-width argument, so the WideHash attack has no entry point here; every accept spend above re-proves the honest path through the new check.",
+  "goldenHashes": {
+    "expected-script.hex": "e6ec684d920d133ab52fb0021c0ddb94d824508fb0535667b1b93eecb209beb3",
+    "expected-ir.json": "7f29a7527f49a1be1e7f88a45a2bead2f4db794f55e4618b43607f3d321b7603"
+  },
+  "constructorArgs": [
+    "eeeeeeeeeeeeeeeeeeee",
+    {
+      "$pubkey": "alice"
+    },
+    "1000n"
+  ],
+  "spends": [
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "expect": "accept",
+      "note": "owner withdraw with a 10-byte memo",
+      "expectedState": {
+        "memo": "0xeeeeeeeeeeeeeeeeeeee",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "signerKey": "bob",
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "control: the stranger cannot withdraw with a short memo"
+    },
+    {
+      "method": "annotate",
+      "args": [
+        "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f350000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "signerKey": "bob",
+      "expect": "accept",
+      "note": "anyone may annotate: the stranger writes a 128-byte memo that begins with their own pubkey; owner and balance are carried through",
+      "expectedState": {
+        "memo": "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f350000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f350000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        {
+          "$pubkey": "alice"
+        },
+        "1000n"
+      ],
+      "signerKey": "bob",
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-044 ATTACK: on-chain memo is 128 bytes beginning with bob's pubkey. Pre-fix the reader took memo as EMPTY and owner as bob, so bob's withdraw was ACCEPTED. The fixed reader reads length 128 and owner stays alice"
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f350000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        {
+          "$pubkey": "alice"
+        },
+        "1000n"
+      ],
+      "expect": "accept",
+      "note": "N-044: the real owner's withdraw with the same 128-byte memo (pre-fix: REJECTED, the owner read as bob)",
+      "expectedState": {
+        "memo": "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f350000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        {
+          "$pubkey": "alice"
+        },
+        "1000n"
+      ],
+      "expect": "accept",
+      "note": "N-044: a 129-byte memo (4c 81) read as -1 pre-fix and OP_SPLIT aborted, bricking the UTXO for the owner too",
+      "expectedState": {
+        "memo": "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        {
+          "$pubkey": "alice"
+        },
+        "1000n"
+      ],
+      "expect": "accept",
+      "note": "N-044: a 255-byte memo (4c ff), last PUSHDATA1 length",
+      "expectedState": {
+        "memo": "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f3500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        {
+          "$pubkey": "alice"
+        },
+        "1000n"
+      ],
+      "expect": "accept",
+      "note": "N-044: a 256-byte memo takes the PUSHDATA2 frame (4d 00 01)",
+      "expectedState": {
+        "memo": "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f3500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "owner": {
+          "$pubkey": "alice"
+        },
+        "balance": "1000n"
+      }
+    },
+    {
+      "method": "withdraw",
+      "args": [
+        null
+      ],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output: the covenant must bind the carried-through state"
+    }
+  ]
+}

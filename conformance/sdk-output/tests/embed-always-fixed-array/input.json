@@ -1,0 +1,72 @@
+{
+  "artifact": {
+    "version": "runar-v1.0.0-rc.1",
+    "compilerVersion": "1.0.0-rc.1",
+    "contractName": "EmbedTags",
+    "parentClass": "SmartContract",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "pubKeyHash",
+            "type": "Addr"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "unlock",
+          "params": [
+            {
+              "name": "sig",
+              "type": "Sig"
+            },
+            {
+              "name": "pubKey",
+              "type": "PubKey"
+            },
+            {
+              "name": "amount",
+              "type": "bigint"
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    },
+    "script": "57595b537a59a2695379a90088547a547aac777777",
+    "constructorSlots": [
+      {
+        "paramIndex": 0,
+        "byteOffset": 11,
+        "name": "pubKeyHash",
+        "type": "Addr",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 20,
+        "fixedPushHeaderBytes": 1
+      }
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 11,
+          "slot": "pubKeyHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
+  },
+  "constructorArgs": [
+    {
+      "type": "Addr",
+      "value": "751e76e8199196d454941c45d1b3a323f1433bd6"
+    }
+  ]
+}

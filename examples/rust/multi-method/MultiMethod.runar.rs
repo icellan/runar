@@ -1,11 +1,11 @@
 use runar::prelude::*;
 
 #[runar::contract]
-struct MultiMethod {
+pub struct MultiMethod {
     #[readonly]
-    owner: PubKey,
+    pub owner: PubKey,
     #[readonly]
-    backup: PubKey,
+    pub backup: PubKey,
 }
 
 impl MultiMethod {
@@ -16,10 +16,10 @@ impl MultiMethod {
     pub fn spend_with_owner(&self, sig: Sig, amount: Int) {
         let threshold = self.compute_threshold(amount, 2);
         assert!(threshold > 10);
-        assert!(check_sig(sig, self.owner));
+        assert!(check_sig(&sig, &self.owner));
     }
 
     pub fn spend_with_backup(&self, sig: Sig) {
-        assert!(check_sig(sig, self.backup));
+        assert!(check_sig(&sig, &self.backup));
     }
 }

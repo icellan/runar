@@ -41,10 +41,10 @@ pub const ConditionalDataOutput = struct {
     /// The compiler must register the if's value as a DATA output
     /// ref (not a state output ref) so that the parent method's
     /// continuation hash keeps `computeStateOutput`.
-    pub fn pay(self: *ConditionalDataOutput, flag: bool, payload: runar.ByteString) void {
+    pub fn pay(self: *ConditionalDataOutput, ctx: runar.StatefulContext, flag: bool, payload: runar.ByteString) void {
         self.amount = self.amount + 1;
         if (flag) {
-            self.addDataOutput(0, payload);
+            ctx.addDataOutput(0, payload);
         }
         runar.assert(true);
     }

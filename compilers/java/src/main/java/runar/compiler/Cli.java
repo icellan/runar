@@ -14,7 +14,6 @@ import runar.compiler.canonical.Jcs;
 import runar.compiler.frontend.ParserDispatch;
 import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
-import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLoader;
@@ -23,9 +22,11 @@ import runar.compiler.passes.AnfOptimize;
 import runar.compiler.passes.ConstantFold;
 import runar.compiler.passes.Emit;
 import runar.compiler.passes.ExpandFixedArrays;
+import runar.compiler.passes.SighashDirective;
 import runar.compiler.passes.Peephole;
 import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
+import runar.compiler.passes.StatefulScaffold;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
 
@@ -87,6 +88,13 @@ public final class Cli {
         if (parsed.help || (parsed.source == null && parsed.ir == null)) {
             printUsage(out);
             return parsed.help ? 0 : 2;
+        }
+
+        // N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+        // Ruby F-335). This used to run --ir and silently ignore --source.
+        if (parsed.source != null && parsed.ir != null) {
+            err.println("Error: --source and --ir are mutually exclusive; pass exactly one");
+            return 2;
         }
 
         if (parsed.ir != null) {
@@ -221,7 +229,7 @@ public final class Cli {
         // runs independently of --emit-ir / --hex, so one invocation can produce
         // several artefacts; with no other output flag it is the sole output.
         if (parsed.emitArtifact != null) {
-            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact);
+            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact, parsed.noSourceMap);
             if (rc != 0) return rc;
             if (!parsed.emitIr && !parsed.hex) return 0;
         }
@@ -370,12 +378,13 @@ public final class Cli {
             if (rc != 0) return rc;
         }
 
-        // R-007: --emit-artifact also runs on the IR path. parentClass is not
-        // carried in the ANF IR JSON in ANY tier (it is `json:"-"` in Go), so
-        // the field is omitted here exactly as Go's CompileFromIR omits it; the
-        // SDK falls back to `stateFields non-empty` (RunarArtifact#parentStateful).
+        // R-007: --emit-artifact also runs on the IR path. F-038: parentClass is
+        // wire data in the ANF IR (every tier emits it), so the IR-path artifact
+        // carries the same parentClass as the source-path one. IR written before
+        // F-038 has none; the field is then omitted and the SDK falls back to
+        // `stateFields non-empty` (RunarArtifact#parentStateful).
         if (parsed.emitArtifact != null) {
-            int rc = writeArtifact(anf, null, parsed.emitArtifact);
+            int rc = writeArtifact(anf, anf.parentClass(), parsed.emitArtifact, parsed.noSourceMap);
             if (rc != 0) return rc;
             if (!parsed.emitIr && !parsed.hex) return 0;
         }
@@ -411,23 +420,17 @@ public final class Cli {
      * ({@code compilers/go/compiler/compiler.go#assembleArtifact}) and are what
      * {@code packages/runar-java}'s {@code RunarArtifact.fromJson} reads.
      *
-     * <p><b>Known gaps vs. the Go assembler</b> (each degrades gracefully — the
-     * SDK treats the field as absent):
-     * <ul>
-     *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
-     *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
-     *       which therefore stays silent for Java-built artifacts.</li>
-     *   <li>{@code sigHashType} — Java's {@code AnfMethod} carries no
-     *       {@code @sighash} directive field (Go keeps it in-memory only), so a
-     *       non-default sighash mode is not published to the ABI.</li>
-     *   <li>{@code fixedArray} regrouping — Java's {@code AnfProperty} carries
-     *       no synthetic-array chain, so expanded FixedArray siblings appear as
-     *       individual ABI params / state fields rather than one logical entry.</li>
-     * </ul>
+     * <p>N-152: {@code asm} (the emitter's disassembly column, byte-for-byte the
+     * TS spelling) and {@code sourceMap} are written like every other tier writes
+     * them. Both used to be omitted.
+     *
+     * <p>{@code fixedArray} regrouping on both {@code stateFields} (N-086) and
+     * {@code abi.constructor.params} (N-229) is handled by
+     * {@link StateFieldRegroup}.
      *
      * <p>Returns 0 on success, non-zero on failure.
      */
-    private int writeArtifact(AnfProgram anf, String parentClass, String path) {
+    private int writeArtifact(AnfProgram anf, String parentClass, String path, boolean noSourceMap) {
         PassLocation.clear();
         try {
             StackProgram stack = StackLower.run(anf);
@@ -435,29 +438,49 @@ public final class Cli {
             Emit.EmitResultFull emit = Emit.runResultFull(optimised);
 
             // Constructor params: every property WITHOUT a compile-time default
-            // (initialised properties are not constructor arguments).
-            List<AnfProperty> ctorProps = new ArrayList<>();
-            for (AnfProperty p : anf.properties()) {
-                if (p.initialValue() == null) ctorProps.add(p);
-            }
+            // (initialised properties are not constructor arguments). N-229: a
+            // FixedArray property's expanded scalar leaves (pass 3b) are
+            // regrouped back into one `fixedArray`-tagged entry here, the way
+            // every other tier's assembler does — see StateFieldRegroup#runCtor.
+            List<StateFieldRegroup.Grouped> ctorProps = StateFieldRegroup.runCtor(anf.properties());
             // State fields: the mutable properties. `index` is the property's
             // position in declaration order (matching constructor arg order),
             // NOT a sequential mutable counter — the SDK relies on that.
+            // N-086: a FixedArray property's expanded scalar leaves (pass 3b)
+            // are regrouped back into one `fixedArray`-tagged entry here, the
+            // way every other tier's assembler does — see StateFieldRegroup.
             List<String> stateFieldJson = new ArrayList<>();
-            for (int i = 0; i < anf.properties().size(); i++) {
-                AnfProperty p = anf.properties().get(i);
-                if (p.readonly()) continue;
-                StringBuilder sf = new StringBuilder();
-                sf.append("{\"name\": ").append(jsonString(p.name()))
-                    .append(", \"type\": ").append(jsonString(p.type()))
-                    .append(", \"index\": ").append(i);
-                if (p.initialValue() != null) {
-                    sf.append(", \"initialValue\": ").append(Jcs.stringify(p.initialValue()));
+            for (StateFieldRegroup.Grouped sf : StateFieldRegroup.run(anf.properties())) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("{\"name\": ").append(jsonString(sf.name()))
+                    .append(", \"type\": ").append(jsonString(sf.type()))
+                    .append(", \"index\": ").append(sf.index());
+                if (sf.initialValue() != null) {
+                    sb.append(", \"initialValue\": ").append(Jcs.stringify(sf.initialValue()));
                 }
-                sf.append('}');
-                stateFieldJson.add(sf.toString());
+                if (sf.fixedArray() != null) {
+                    sb.append(", \"fixedArray\": {\"elementType\": ")
+                        .append(jsonString(sf.fixedArray().elementType()))
+                        .append(", \"length\": ").append(sf.fixedArray().length())
+                        .append(", \"syntheticNames\": [");
+                    List<String> names = sf.fixedArray().syntheticNames();
+                    for (int k = 0; k < names.size(); k++) {
+                        if (k > 0) sb.append(", ");
+                        sb.append(jsonString(names.get(k)));
+                    }
+                    sb.append("]}");
+                }
+                sb.append('}');
+                stateFieldJson.add(sb.toString());
             }
-            boolean isStateful = !stateFieldJson.isEmpty();
+            boolean hasStateFields = !stateFieldJson.isEmpty();
+            // N-139: statefulness follows parentClass (the TS reference rule for
+            // isTerminal and anf), so a StatefulSmartContract with zero mutable
+            // fields keeps both. An IR input without parentClass falls back to
+            // the state fields (the loader requires parentClass for any of those).
+            boolean isStateful = (parentClass == null || parentClass.isEmpty())
+                ? hasStateFields
+                : "StatefulSmartContract".equals(parentClass);
 
             Map<String, AnfMethod> privateMethods = StackLower.privateMethodMap(anf);
             List<String> methodJson = new ArrayList<>();
@@ -467,20 +490,40 @@ public final class Cli {
                 mb.append("{\"name\": ").append(jsonString(m.name())).append(", \"params\": [");
                 for (int i = 0; i < m.params().size(); i++) {
                     if (i > 0) mb.append(", ");
-                    mb.append("{\"name\": ").append(jsonString(m.params().get(i).name()))
+                    // N-360: a reassigned property-named public param is bound in
+                    // the ANF under its `<name>@local` slot; the ABI keeps the
+                    // source name the caller passes.
+                    String abiName = m.params().get(i).name();
+                    if (m.isPublic() && abiName.endsWith("@local")) {
+                        abiName = abiName.substring(0, abiName.length() - "@local".length());
+                    }
+                    mb.append("{\"name\": ").append(jsonString(abiName))
                         .append(", \"type\": ").append(jsonString(m.params().get(i).type()))
                         .append('}');
                 }
                 mb.append("], \"isPublic\": ").append(m.isPublic());
                 // Stateful public methods without a _changePKH param are terminal
-                // (they do not build a state continuation output).
-                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")) {
+                // (they do not build a state continuation output) — except under
+                // a SIGHASH_SINGLE base, where a continuing method takes no
+                // change params either (N-038), so the continuation is read off
+                // the body.
+                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")
+                    && (StatefulScaffold.includesChange(true, m.sighashType())
+                        || !StatefulScaffold.hasContinuation(anf.methods(), m))) {
                     mb.append(", \"isTerminal\": true");
                 }
                 // Issue #100: authoritative _codePart decision from stack lowering.
                 if (m.isPublic()
                     && StackLower.methodRequiresCodePart(m, anf.properties(), privateMethods)) {
                     mb.append(", \"usesCodePart\": true");
+                }
+                // F-079 / issue #123: publish a non-default @sighash mode so the
+                // SDK builds the BIP-143 preimage under the flags the covenant
+                // asserts. Omitted for the default (0x41), after usesCodePart —
+                // Go's ABIMethod key order.
+                if (m.isPublic() && m.sighashType() != null
+                    && m.sighashType() != SighashDirective.SIGHASH_DEFAULT) {
+                    mb.append(", \"sigHashType\": ").append(m.sighashType());
                 }
                 mb.append('}');
                 methodJson.add(mb.toString());
@@ -497,15 +540,29 @@ public final class Cli {
             b.append("  \"abi\": {\n    \"constructor\": {\n      \"params\": [");
             for (int i = 0; i < ctorProps.size(); i++) {
                 if (i > 0) b.append(", ");
-                b.append("{\"name\": ").append(jsonString(ctorProps.get(i).name()))
-                    .append(", \"type\": ").append(jsonString(ctorProps.get(i).type()))
-                    .append('}');
+                StateFieldRegroup.Grouped cp = ctorProps.get(i);
+                b.append("{\"name\": ").append(jsonString(cp.name()))
+                    .append(", \"type\": ").append(jsonString(cp.type()));
+                if (cp.fixedArray() != null) {
+                    b.append(", \"fixedArray\": {\"elementType\": ")
+                        .append(jsonString(cp.fixedArray().elementType()))
+                        .append(", \"length\": ").append(cp.fixedArray().length())
+                        .append(", \"syntheticNames\": [");
+                    List<String> names = cp.fixedArray().syntheticNames();
+                    for (int k = 0; k < names.size(); k++) {
+                        if (k > 0) b.append(", ");
+                        b.append(jsonString(names.get(k)));
+                    }
+                    b.append("]}");
+                }
+                b.append('}');
             }
             b.append("]\n    },\n    \"methods\": [");
             appendJoined(b, methodJson);
             b.append("]\n  },\n");
             b.append("  \"script\": ").append(jsonString(emit.scriptHex())).append(",\n");
-            if (isStateful) {
+            b.append("  \"asm\": ").append(jsonString(emit.scriptAsm())).append(",\n");
+            if (hasStateFields) {
                 b.append("  \"stateFields\": [");
                 appendJoined(b, stateFieldJson);
                 b.append("],\n");
@@ -530,6 +587,16 @@ public final class Cli {
                 appendJoined(b, slots);
                 b.append("],\n");
             }
+            // N-051: deploy-time SIZE(_codePart) length fields, omitted when empty.
+            if (!emit.codePartLenSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.CodePartLenSlot s : emit.codePartLenSlots()) {
+                    slots.add("{\"byteOffset\": " + s.byteOffset() + "}");
+                }
+                b.append("  \"codePartLenSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
             // -1 is the "no OP_CODESEPARATOR emitted" sentinel; omit the field.
             if (emit.codeSeparatorIndex() >= 0) {
                 b.append("  \"codeSeparatorIndex\": ").append(emit.codeSeparatorIndex()).append(",\n");
@@ -541,6 +608,34 @@ public final class Cli {
                     b.append(emit.codeSeparatorIndices().get(i));
                 }
                 b.append("],\n");
+            }
+            // N-151: asm() raw-bytes spans for the analyzer, omitted when empty
+            // (matches the TS assembler).
+            if (!emit.rawScriptSpans().isEmpty()) {
+                List<String> spans = new ArrayList<>();
+                for (Emit.RawScriptSpan s : emit.rawScriptSpans()) {
+                    spans.add("{\"offset\": " + s.offset()
+                        + ", \"length\": " + s.length()
+                        + ", \"inArity\": " + s.inArity()
+                        + ", \"outArity\": " + s.outArity() + "}");
+                }
+                b.append("  \"rawScriptSpans\": [");
+                appendJoined(b, spans);
+                b.append("],\n");
+            }
+            // N-152: opcode-to-source mappings, omitted when empty (matches Go).
+            // sourceFile is repo-relative POSIX, as in the --emit-source-map file.
+            if (!noSourceMap && !emit.sourceMap().isEmpty()) {
+                List<String> maps = new ArrayList<>();
+                for (Emit.SourceMapping m : emit.sourceMap()) {
+                    maps.add("{\"opcodeIndex\": " + m.opcodeIndex()
+                        + ", \"sourceFile\": " + jsonString(repoRelativeFileName(m.sourceFile()))
+                        + ", \"line\": " + m.line()
+                        + ", \"column\": " + m.column() + "}");
+                }
+                b.append("  \"sourceMap\": {\"mappings\": [");
+                appendJoined(b, maps);
+                b.append("]},\n");
             }
             b.append("  \"buildTimestamp\": ").append(jsonString(buildTimestamp()));
             // Stateful artifacts always carry the ANF so the SDK can auto-compute
@@ -624,12 +719,12 @@ public final class Cli {
      */
     public static AnfProgram optimizeAnf(AnfProgram anf, boolean disableConstantFolding) {
         if (!disableConstantFolding) {
-            anf = ConstantFold.run(anf);
+            anf = ConstantFold.runAndPrune(anf);
         }
         // AnfOptimize delegates internally to {@link Dce#eliminateDead} for
-        // dead-binding cleanup after any EC rewrite. The standalone Dce class
-        // exists as the canonical, named DCE pass module mirroring Zig's
-        // compilers/zig/src/passes/dce.zig.
+        // dead-binding cleanup, but only as part of the EC rewrite: no path
+        // here calls Dce.run on its own, so a program with no EC call is not
+        // DCE'd (F-275).
         anf = AnfOptimize.run(anf);
         return anf;
     }
@@ -661,6 +756,7 @@ public final class Cli {
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
         stream.println("  --emit-source-map <path>     write the artifact's sourceMap JSON to <path>");
+        stream.println("  --no-source-map              omit the sourceMap key from the artifact");
         stream.println("  --emit-artifact <path>       write the deployable artifact JSON to <path>");
         stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
@@ -682,8 +778,13 @@ public final class Cli {
     // Or to terminate: {"id": <int>, "shutdown": true}
     //
     // Response shape (one JSON object per line):
-    //   {"id": <int>, "ok": true, "ir": "<canonical-json>", "hex": "<hex>"}
+    //   {"id": <int>, "ok": true, "ir": "<canonical-json>", "hex": "<hex>",
+    //    "warnings": ["<message>", ...]}
     //   {"id": <int>, "ok": false, "error": "<message>"}
+    // "warnings" (F-187 / CX-BUG-048) carries Validate.run's advisory
+    // messages verbatim (no "warning: " prefix — that's a CLI stderr-line
+    // convention, not part of the message). Omitted entirely when there are
+    // none; present on the --parse-only response shape too.
     //
     // The daemon uses ONLY ASCII / UTF-8 in JSON values; strings are escaped
     // with the minimal set required by RFC 8259 (\\, \", \n, \r, \t, control
@@ -730,7 +831,10 @@ public final class Cli {
         return 0;
     }
 
-    private String serveRequest(DaemonRequest req) {
+    // Package-private (not private) so CliWarningsTest can drive it directly
+    // with a hand-built DaemonRequest instead of a real stdin/stdout round
+    // trip through runDaemon()'s hardcoded System.in.
+    String serveRequest(DaemonRequest req) {
         if (req.source == null || req.source.isEmpty()) {
             return "{\"id\":" + req.id + ",\"ok\":false,\"error\":"
                 + jsonString("missing source path") + "}";
@@ -738,14 +842,22 @@ public final class Cli {
         try {
             String src = Files.readString(Path.of(req.source));
             ContractNode contract = ParserDispatch.parse(src, req.source);
-            Validate.run(contract);
+            // F-187 (CX-BUG-048): Validate.run returns its warnings the same
+            // way the CLI path above (CL-BUG-104) already consumes them; this
+            // call used to discard the return value, so a daemon client had
+            // no way to see e.g. a "StatefulSmartContract has no mutable
+            // properties" advisory. Carried through to both response shapes
+            // below via the "warnings" field.
+            List<String> warnings = Validate.run(contract);
             // parseOnly short-circuit: skip everything past validate. Used
             // by the conformance runner's --parser-only mode so the
             // universal frontend coverage check doesn't pay for the full
             // pipeline.
             if (req.parseOnly) {
                 StringBuilder b = new StringBuilder(96);
-                b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true}");
+                b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true");
+                appendWarnings(b, warnings);
+                b.append('}');
                 return b.toString();
             }
             // N-106: same order as compileSource above — Typecheck first, then
@@ -768,12 +880,35 @@ public final class Cli {
             b.append("{\"id\":").append(req.id).append(",\"ok\":true");
             if (req.emitIr || (!req.hex)) b.append(",\"ir\":").append(jsonString(irJson));
             if (req.hex) b.append(",\"hex\":").append(jsonString(hexStr));
+            appendWarnings(b, warnings);
             b.append('}');
             return b.toString();
         } catch (Throwable t) {
             String msg = t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "(no message)" : t.getMessage());
             return "{\"id\":" + req.id + ",\"ok\":false,\"error\":" + jsonString(msg) + "}";
         }
+    }
+
+    /**
+     * Appends a {@code ,"warnings":[...]} field to a daemon response being
+     * built, or nothing if there are no warnings — so existing consumers
+     * that don't look for the field see no change in shape. Strings are the
+     * raw {@link Validate#run} messages, with no "warning: " prefix: that
+     * prefix is a stderr-line convention from the CLI path (matching the
+     * Rust/Zig tiers' log output), not part of the message text itself.
+     */
+    private static void appendWarnings(StringBuilder b, List<String> warnings) {
+        if (warnings.isEmpty()) {
+            return;
+        }
+        b.append(",\"warnings\":[");
+        for (int i = 0; i < warnings.size(); i++) {
+            if (i > 0) {
+                b.append(',');
+            }
+            b.append(jsonString(warnings.get(i)));
+        }
+        b.append(']');
     }
 
     /** Minimal JSON string escaper. */
@@ -919,6 +1054,9 @@ public final class Cli {
         // GAP-002: when non-null, after compile finishes write the
         // sourceMap object ({"mappings":[...]}) to this path.
         String emitSourceMap;
+        // N-445: omit the artifact's sourceMap key. Mutually exclusive with
+        // --emit-source-map.
+        boolean noSourceMap;
         // When non-null, write the canonical ANF JSON (the same bytes
         // --emit-ir prints) to this path and CONTINUE, so a single process
         // can hand back both the IR and the script hex. Used by the
@@ -954,12 +1092,16 @@ public final class Cli {
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
                     case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
+                    case "--no-source-map" -> out.noSourceMap = true;
                     case "--emit-artifact" -> out.emitArtifact = requireValue(list, "--emit-artifact");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;
                     default -> throw new CliError("unknown flag: " + arg);
                 }
+            }
+            if (out.noSourceMap && out.emitSourceMap != null) {
+                throw new CliError("--no-source-map and --emit-source-map are mutually exclusive");
             }
             return out;
         }

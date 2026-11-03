@@ -31,26 +31,33 @@ final class OpcodeConcerns {
     }
 
     /**
-     * Match JS {@code Number.prototype.toFixed(1)} semantics: round to one
-     * decimal place using IEEE-754 banker's rounding (round-half-to-even).
-     * Spec §5.1 canonical formula: {@code k = round_half_to_even(n * 10 / 1024) / 10}.
+     * Match JS {@code Number.prototype.toFixed(1)} semantics. Per ECMA-262,
+     * {@code toFixed} picks the integer {@code n} for which
+     * {@code n / 10 - value} is closest to zero; if two values of
+     * {@code n} are equally close (an exact tie), it picks the LARGER one.
+     * That is round-half-up (ties away from zero for our non-negative
+     * inputs), not IEEE-754 round-half-to-even — verified live:
+     * {@code node -e "console.log((500992/1024).toFixed(1))"} prints
+     * {@code "489.3"}, where round-half-to-even would give {@code "489.2"}.
+     * {@code value} here is always {@code scriptSizeBytes / 1024}, which is
+     * exact in a double (1024 is a power of two), so the tie can only come
+     * from the decimal rounding step itself, which {@link Math#round} — a
+     * {@code floor(x + 0.5)} ties-toward-+Infinity rounding — reproduces
+     * exactly for non-negative {@code x}.
      */
     static String jsToFixed1(double value) {
-        // Java's printf "%.1f" uses HALF_UP. We need HALF_EVEN. Use
-        // Math.rint (round-half-to-even) on (value * 10) and divide.
         double scaled = value * 10.0;
-        double rounded = Math.rint(scaled);
+        long rounded = Math.round(scaled);
         long intPart;
         long fracPart;
         if (rounded < 0) {
-            long abs = (long) (-rounded);
+            long abs = -rounded;
             intPart = -(abs / 10);
             fracPart = abs % 10;
             return intPart + "." + fracPart;
         }
-        long abs = (long) rounded;
-        intPart = abs / 10;
-        fracPart = abs % 10;
+        intPart = rounded / 10;
+        fracPart = rounded % 10;
         return intPart + "." + fracPart;
     }
 }

@@ -32,8 +32,11 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { checkReturnType, invalidEscapeSequenceMessage, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { identifierCollisionMessage } from './snake-to-camel.js';
+import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash, unknownGoDirectiveMessage } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -58,6 +61,8 @@ type TokenType =
 interface GoToken extends Token {
   type: string; // TokenType (widened for ParserCore compatibility)
   value: string;
+  /** 'string' tokens only (N-435): the Go string's bytes, one per char. */
+  bytes?: string;
   line: number;
   column: number;
 }
@@ -70,15 +75,90 @@ const KEYWORDS = new Map<string, TokenType>([
   ['true', 'true'], ['false', 'false'],
 ]);
 
-function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): GoToken[] {
+/**
+ * N-093: a Go DSL directive comment `//runar:<name> <args>` (Go's own
+ * `//go:` convention: no space after `//`). `tokenIndex` is the index of the
+ * first token after the comment, so a directive attaches to the declaration
+ * that follows it, with only comments and blank lines in between.
+ */
+interface GoDirective {
+  name: string;
+  args: string;
+  tokenIndex: number;
+  line: number;
+  column: number;
+}
+
+/**
+ * N-437: decode the body of a Go interpreted string literal with Go's rules
+ * (https://go.dev/ref/spec#String_literals). `bytes` is the Go string's BYTES,
+ * one per char (latin-1 style): literal text and `\u`/`\U` escapes are UTF-8
+ * encoded, `\xNN` and `\NNN` (octal, at most 255) are the single byte.
+ * `val` keeps the one-char-per-escape shape the bare-literal (hex) path reads.
+ * An escape Go refuses sets `error` (the shared invalid-escape diagnostic).
+ */
+function decodeGoStringBody(body: string): { val: string; bytes: string; error?: string } {
+  let val = '';
+  let bytes = '';
+  let lit = '';
+  const flush = () => {
+    for (const b of new TextEncoder().encode(lit)) bytes += String.fromCharCode(b);
+    lit = '';
+  };
+  const SIMPLE: Record<string, string> = {
+    a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', '"': '"',
+  };
+  const fail = (esc: string) => { flush(); return { val, bytes, error: invalidEscapeSequenceMessage(esc) }; };
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i]!;
+    if (c !== '\\') { val += c; lit += c; i++; continue; }
+    const e = body[i + 1] ?? '';
+    const simple = SIMPLE[e];
+    if (simple !== undefined) { val += simple; lit += simple; i += 2; continue; }
+    if (e === 'x') {
+      const h = body.slice(i + 2, i + 4);
+      if (!/^[0-9a-fA-F]{2}$/.test(h)) return fail('\\x');
+      const b = parseInt(h, 16);
+      val += String.fromCharCode(b); flush(); bytes += String.fromCharCode(b);
+      i += 4; continue;
+    }
+    if (e === 'u' || e === 'U') {
+      const n = e === 'u' ? 4 : 8;
+      const h = body.slice(i + 2, i + 2 + n);
+      const cp = h.length === n && /^[0-9a-fA-F]+$/.test(h) ? parseInt(h, 16) : -1;
+      if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return fail('\\' + e);
+      const ch = String.fromCodePoint(cp);
+      val += ch; lit += ch;
+      i += 2 + n; continue;
+    }
+    if (e >= '0' && e <= '7') {
+      const run = /^[0-7]{1,3}/.exec(body.slice(i + 1))![0];
+      if (run.length < 3 || parseInt(run, 8) > 0xff) return fail('\\' + run);
+      const b = parseInt(run, 8);
+      val += String.fromCharCode(b); flush(); bytes += String.fromCharCode(b);
+      i += 4; continue;
+    }
+    return fail('\\' + (e === '' ? '' : String.fromCodePoint(body.codePointAt(i + 1)!)));
+  }
+  flush();
+  return { val, bytes };
+}
+
+function tokenize(
+  source: string,
+  file: string,
+  errors: CompilerDiagnostic[],
+  directives: GoDirective[] = [],
+): GoToken[] {
   const tokens: GoToken[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
 
@@ -102,7 +182,15 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
 
     // Line comments
     if (ch === '/' && peekN(1) === '/') {
+      const start = pos;
       while (pos < source.length && peek() !== '\n') advance();
+      // N-093: `//runar:<name> <args>` is a directive, not prose.
+      const text = source.slice(start, pos).replace(/\r$/, '');
+      if (text.startsWith('//runar:')) {
+        const body = text.slice('//runar:'.length);
+        const m = /^[^ \t]*/.exec(body)!;
+        directives.push({ name: m[0], args: body.slice(m[0].length), tokenIndex: tokens.length, line: l, column: c });
+      }
       continue;
     }
 
@@ -123,7 +211,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
       while (pos < source.length && peek() !== '`') {
         val += advance();
       }
+      // F-011: a raw string may span lines, so only end of file leaves it
+      // unterminated.
       if (pos < source.length) advance(); // consume closing backtick
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('backtick', val, l, c);
       continue;
     }
@@ -158,57 +249,39 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
 
     // String literal
     if (ch === '"') {
-      let val = '';
+      let body = '';
       advance(); // consume opening quote
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Go interpreted string cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
-          advance(); // skip backslash
+          body += advance(); // backslash
           const esc = peek();
-          if (esc === 'n') { val += '\n'; advance(); }
-          else if (esc === 't') { val += '\t'; advance(); }
-          else if (esc === 'r') { val += '\r'; advance(); }
-          else if (esc === '0') { val += '\0'; advance(); }
-          else if (esc === '\\') { val += '\\'; advance(); }
-          else if (esc === '"') { val += '"'; advance(); }
-          else if (esc === 'x') {
-            advance(); // consume 'x'
-            const h1 = peek();
-            const h2 = source[pos + 1] ?? '';
-            if (/[0-9a-fA-F]/.test(h1) && /[0-9a-fA-F]/.test(h2)) {
-              advance(); advance();
-              val += String.fromCharCode(parseInt(h1 + h2, 16));
-            } else {
-              val += '\\x';
-            }
-          }
-          else { val += advance(); }
+          if (esc === '\n' || esc === '') break;
+          body += advance();
         } else {
-          val += advance();
+          body += advance();
         }
       }
-      if (pos < source.length) advance(); // consume closing quote
-      add('string', val, l, c);
+      if (peek() === '"') advance(); // consume closing quote
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
+      // N-437: the body is decoded with Go's string-literal rules; an escape
+      // Go refuses is refused here too.
+      const dec = decodeGoStringBody(body);
+      if (dec.error !== undefined) errors.push(makeDiagnostic(dec.error, 'error', { file, line: l, column: c }));
+      add('string', dec.val, l, c);
+      tokens[tokens.length - 1]!.bytes = dec.bytes;
       continue;
     }
 
-    // Hex literal: 0x...
-    if (ch === '0' && peekN(1) === 'x') {
-      let val = '';
-      advance(); advance(); // consume 0x
-      while (pos < source.length && /[0-9a-fA-F]/.test(peek())) {
-        val += advance();
-      }
-      add('hexstring', val, l, c);
-      continue;
-    }
-
-    // Number
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Go integer
+    // literal, `0x` included (Go reads it as an integer, not a ByteString).
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        val += advance();
-      }
-      add('number', val.replace(/_/g, ''), l, c);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('go', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('go', text), 'error', { file, line: l, column: c }));
+      add('number', lit ? lit.value.toString() : '0', l, c);
       continue;
     }
 
@@ -261,7 +334,7 @@ function goToCamel(name: string): string {
 
 const GO_TYPE_MAP: Record<string, string> = {
   Int: 'bigint', Bigint: 'bigint', BigintBig: 'bigint',
-  Bool: 'boolean', bool: 'boolean', int: 'bigint',
+  Bool: 'boolean', bool: 'boolean', int64: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
   Ripemd160: 'Ripemd160', Ripemd160Hash: 'Ripemd160', Addr: 'Addr',
@@ -341,6 +414,7 @@ export const GO_BUILTIN_MAP: Record<string, string> = {
   ExtractPrevOutputScript: 'extractPrevOutputScript',
   RequireOutputP2PKH: 'requireOutputP2PKH',
   CurrentBlockHeight: 'currentBlockHeight',
+  ContinuationAmount: 'continuationAmount',
   // Output construction
   AddOutput: 'addOutput', AddRawOutput: 'addRawOutput', AddDataOutput: 'addDataOutput',
   GetStateScript: 'getStateScript',
@@ -450,6 +524,45 @@ class GoParser extends ParserCore<GoToken> {
    */
   private contractName = '';
 
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = goToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
+  /** N-093: every `//runar:` directive in the file, in source order. */
+  directives: GoDirective[] = [];
+  private consumedDirectives = new Set<GoDirective>();
+
+  /**
+   * N-093: the flag specs of the `//runar:sighash` directives attached to the
+   * declaration starting at token `tokenIndex` (`null` for a malformed one).
+   */
+  private takeSighashDirectives(tokenIndex: number): Array<string | null> {
+    const specs: Array<string | null> = [];
+    for (const d of this.directives) {
+      if (d.tokenIndex !== tokenIndex || d.name !== 'sighash') continue;
+      this.consumedDirectives.add(d);
+      specs.push(d.args.length === 0 || /^[ \t][A-Za-z0-9_| \t]*$/.test(d.args) ? d.args : null);
+    }
+    return specs;
+  }
+
+  /** N-093: refuse every directive that is unknown or attached to no func. */
+  private reportStrayDirectives(): void {
+    for (const d of this.directives) {
+      if (this.consumedDirectives.has(d)) continue;
+      const loc = { file: this.file, line: d.line, column: d.column };
+      const msg = d.name === 'sighash' ? lostDirectiveMessage('@sighash') : unknownGoDirectiveMessage(d.name + d.args);
+      this.errors.push(makeDiagnostic(msg, 'error', loc));
+    }
+  }
+
   parse(): ParseResult {
     // Skip `package contract`
     if (this.current().type === 'package') {
@@ -460,28 +573,52 @@ class GoParser extends ParserCore<GoToken> {
     // Skip `import runar "..."`
     this.skipImports();
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
-    const properties: PropertyNode[] = [];
-    const methods: MethodNode[] = [];
+    const structs: Array<ReturnType<GoParser['parseStructDecl']>> = [];
+    const funcs: Array<ReturnType<GoParser['parseFuncDecl']>> = [];
 
     // Parse top-level declarations
     while (this.current().type !== 'eof') {
       if (this.current().type === 'type') {
-        // struct declaration
-        const result = this.parseStructDecl();
-        if (result) {
-          this.contractName = result.name;
-          parentClass = result.parentClass;
-          properties.push(...result.properties);
-        }
+        structs.push(this.parseStructDecl());
       } else if (this.current().type === 'func') {
-        const method = this.parseFuncDecl();
-        if (method) {
-          methods.push(method);
-        }
+        funcs.push(this.parseFuncDecl());
       } else {
         this.advance(); // skip unknown top-level tokens
       }
+    }
+    this.reportStrayDirectives();
+
+    // F-010: the contract is THE struct embedding a Rúnar base class — never
+    // "the last struct in the file". Any other struct is ignored, and a
+    // method whose receiver is not the contract type is refused: before this
+    // rule an exported method on a helper type became a public entry point.
+    const contracts = structs.filter(s => s.embedsBase);
+    const contractStruct = contracts[0];
+    if (contractStruct === undefined) {
+      this.errors.push(makeDiagnostic(goNoContractMessage(), 'error'));
+      return { contract: null, errors: this.errors };
+    }
+    for (const extra of contracts.slice(1)) {
+      this.errors.push(makeDiagnostic(goMultipleContractsMessage(contractStruct.name, extra.name), 'error'));
+    }
+    this.contractName = contractStruct.name;
+    const parentClass = contractStruct.parentClass;
+    const properties: PropertyNode[] = [...contractStruct.properties];
+    const methods: MethodNode[] = [];
+    for (const f of funcs) {
+      if (f.receiverType !== null && f.receiverType !== this.contractName) {
+        this.errors.push(makeDiagnostic(
+          goForeignReceiverMessage(f.goName, f.receiverType, this.contractName), 'error', f.method.sourceLocation));
+        continue;
+      }
+      // N-018: a free `init`/`main` is not an ordinary private helper. Real
+      // Go reserves both names for the package initializer / entry point,
+      // which can never be called as a function; the Go/Rust/Python/Java
+      // tiers already skip it here (see their equivalent loop).
+      if (f.receiverType === null && (f.goName === 'init' || f.goName === 'main')) {
+        continue;
+      }
+      methods.push(f.method);
     }
 
     // Process init() method: extract property initializers
@@ -505,8 +642,9 @@ class GoParser extends ParserCore<GoToken> {
       }
     }
 
-    // Build auto-generated constructor
-    const loc: SourceLocation = { file: this.file, line: 1, column: 1 };
+    // Build auto-generated constructor, anchored at the contract's `struct`
+    // keyword (N-490), not a fake 1:0.
+    const loc: SourceLocation = contractStruct.structLoc;
     const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
@@ -543,6 +681,11 @@ class GoParser extends ParserCore<GoToken> {
       methods: finalMethods,
       sourceFile: this.file,
     };
+
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
 
     return { contract, errors: this.errors };
   }
@@ -581,14 +724,20 @@ class GoParser extends ParserCore<GoToken> {
     name: string;
     parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     properties: PropertyNode[];
-  } | null {
+    /** F-010: embeds runar.SmartContract / StatefulSmartContract / UnsafeSmartContract. */
+    embedsBase: boolean;
+    /** N-490: the `struct` keyword, where the synthesized constructor is anchored. */
+    structLoc: SourceLocation;
+  } {
     this.expect('type');
     const nameToken = this.expect('ident');
     const name = nameToken.value;
-    this.expect('struct');
+    const structToken = this.expect('struct');
+    const structLoc: SourceLocation = { file: this.file, line: structToken.line, column: structToken.column };
     this.expect('{');
 
     let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
+    let embedsBase = false;
     const properties: PropertyNode[] = [];
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
@@ -606,6 +755,10 @@ class GoParser extends ParserCore<GoToken> {
         } else if (embedName === 'UnsafeSmartContract') {
           parentClass = 'UnsafeSmartContract';
         }
+        if (embedName === 'SmartContract' || embedName === 'StatefulSmartContract' ||
+            embedName === 'UnsafeSmartContract') {
+          embedsBase = true;
+        }
         continue;
       }
 
@@ -622,29 +775,34 @@ class GoParser extends ParserCore<GoToken> {
       // Parse type
       const propType = this.parseGoType();
 
-      // Check for struct tag
+      // Check for struct tag. The `runar` key holds comma-separated options
+      // (N-093): `readonly`, and `embedAlways` — the native spelling of the
+      // `@embedAlways` directive — in any order.
       let readonly = false;
+      let embedAlways = false;
       if (this.current().type === 'backtick') {
         const tagValue = this.current().value;
-        if (tagValue.includes('runar:"readonly"')) {
-          readonly = true;
-        }
+        const runarTag = /(?:^|\s)runar:"([^"]*)"/.exec(tagValue);
+        const options = runarTag ? runarTag[1]!.split(',').map((o) => o.trim()) : [];
+        if (options.includes('readonly')) readonly = true;
+        if (options.includes('embedAlways')) embedAlways = true;
         this.advance();
       }
 
       for (const fieldName of fieldNames) {
         properties.push({
           kind: 'property',
-          name: goToCamel(fieldName),
+          name: this.declare(fieldName),
           type: propType,
           readonly,
+          ...(embedAlways ? { embedAlways: true } : {}),
           sourceLocation: propLoc,
         });
       }
     }
     this.expect('}');
 
-    return { name, parentClass, properties };
+    return { name, parentClass, properties, embedsBase, structLoc };
   }
 
   // -----------------------------------------------------------------------
@@ -674,7 +832,7 @@ class GoParser extends ParserCore<GoToken> {
       this.advance();
       const length = parseInt(this.expect('number').value, 10);
       this.expect(']');
-      const element = this.parseGoType();
+      const element = this.nest.nested(this.loc(), () => this.parseGoType());
       return { kind: 'fixed_array_type', element, length };
     }
 
@@ -687,13 +845,21 @@ class GoParser extends ParserCore<GoToken> {
   // Function/method declaration
   // -----------------------------------------------------------------------
 
-  private parseFuncDecl(): MethodNode | null {
+  /**
+   * Parse one `func` declaration. `receiverType` is the receiver's type name
+   * (`*` stripped) or null for a free function; `parse()` checks it against
+   * the contract struct once the whole file has been read (F-010).
+   */
+  private parseFuncDecl(): { method: MethodNode; goName: string; receiverType: string | null } {
     const location = this.loc();
+    // N-093: the `//runar:sighash` directives directly above this func.
+    const funcTokenIndex = this.pos;
     this.expect('func');
 
     // Check for receiver: (c *Type)
     let hasReceiver = false;
     let recvName = '';
+    let receiverType: string | null = null;
 
     if (this.current().type === '(') {
       // This is a method with a receiver
@@ -701,8 +867,14 @@ class GoParser extends ParserCore<GoToken> {
       recvName = this.expect('ident').value;
       // Skip '*'
       if (this.current().type === '*') this.advance();
-      // Skip type name
-      if (this.current().type === 'ident') this.advance();
+      // Type name. An unnamed receiver `(Type)` has only the type.
+      receiverType = '';
+      if (this.current().type === 'ident') {
+        receiverType = this.advance().value;
+      } else if (this.current().type === ')') {
+        receiverType = recvName;
+        recvName = '';
+      }
       this.expect(')');
       hasReceiver = true;
     }
@@ -767,7 +939,7 @@ class GoParser extends ParserCore<GoToken> {
       const pType = this.parseGoType();
 
       for (const pName of paramNames) {
-        params.push({ kind: 'param', name: goToCamel(pName), type: pType });
+        params.push({ kind: 'param', name: this.declare(pName), type: pType });
       }
 
       if (this.current().type === ',') this.advance();
@@ -776,8 +948,12 @@ class GoParser extends ParserCore<GoToken> {
 
     // Optional return type
     if (this.current().type !== '{') {
-      // Skip return type: could be runar.Bigint, bool, etc.
-      this.parseGoType();
+      // The AST keeps no return type: could be runar.Bigint, bool, etc.
+      // N-331 refuses an unknown name.
+      // N-332: an exported method with a receiver is a public entry point.
+      const isEntryPoint = hasReceiver && funcName.length > 0 &&
+        funcName[0]! === funcName[0]!.toUpperCase() && funcName[0]! !== funcName[0]!.toLowerCase();
+      checkReturnType(this.parseGoType(), funcName, location, this.errors, isEntryPoint);
     }
 
     // Body
@@ -785,6 +961,7 @@ class GoParser extends ParserCore<GoToken> {
     const body: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       body.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 
@@ -799,15 +976,25 @@ class GoParser extends ParserCore<GoToken> {
     }
 
     // Convert method name from Go PascalCase to Rúnar camelCase
-    const name = goToCamel(funcName);
+    const name = this.declare(funcName);
+
+    const sighash = resolveNativeSighash(name, visibility === 'public', this.takeSighashDirectives(funcTokenIndex));
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
 
     return {
-      kind: 'method',
-      name,
-      params,
-      body,
-      visibility,
-      sourceLocation: location,
+      method: {
+        kind: 'method',
+        name,
+        params,
+        body,
+        visibility,
+        ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+        sourceLocation: location,
+      },
+      goName: funcName,
+      receiverType,
     };
   }
 
@@ -816,13 +1003,53 @@ class GoParser extends ParserCore<GoToken> {
   // -----------------------------------------------------------------------
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  /**
+   * N-154: a `;` that ends a statement on the same line separates it from
+   * the next one (`a := 1; b := 2`, `runar.Assert(x);`), as go/parser
+   * accepts. Any other `;` — after another `;`, or on a later line than the
+   * statement it would end (where Go has already inserted one) — is an
+   * EMPTY statement, which stays refused (N-153). Called only between the
+   * statements of a block, never in a `for` header.
+   */
+  private skipStatementSeparators(): void {
+    while (this.current().type === ';') {
+      const prev = this.tokens[this.pos - 1];
+      const separates = prev !== undefined && prev.type !== '{' && prev.type !== ';' && prev.line === this.current().line;
+      if (!separates) {
+        this.errors.push(makeDiagnostic(`Unexpected token in expression: ';'`, 'error', this.loc()));
+      }
+      this.advance();
+    }
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
+
+    // N-153: a `{` cannot start a statement. Rúnar has no block statement,
+    // and reading it as a brace composite literal accepted `{ x, f(x) }`
+    // (not Go) while refusing real Go blocks for unrelated reasons. Refuse
+    // it and skip the balanced braces. Composite literals in expression
+    // position are unaffected.
+    if (this.current().type === '{') {
+      this.errors.push(makeDiagnostic(`Unexpected token in expression: '{'`, 'error', location));
+      let depth = 0;
+      do {
+        const t = this.advance().type;
+        if (t === '{') depth++;
+        else if (t === '}') depth--;
+      } while (depth > 0 && this.current().type !== 'eof');
+      return { kind: 'expression_statement', expression: { kind: 'bigint_literal', value: 0n }, sourceLocation: location };
+    }
 
     // return
     if (this.current().type === 'return') {
       this.advance();
-      // Return value is optional; if the next token is '}' there's no value
-      const value = this.current().type !== '}' ? this.parseExpression() : undefined;
+      // Return value is optional; if the next token is '}' (or, N-154, a
+      // `;` separator) there's no value
+      const value = this.current().type !== '}' && this.current().type !== ';' ? this.parseExpression() : undefined;
       return { kind: 'return_statement', value, sourceLocation: location };
     }
 
@@ -839,7 +1066,7 @@ class GoParser extends ParserCore<GoToken> {
     // var declaration: var name Type = expr
     if (this.current().type === 'var') {
       this.advance();
-      const varName = goToCamel(this.expect('ident').value);
+      const varName = this.declare(this.expect('ident').value);
       const varType = this.parseGoType();
       this.expect('=');
       const init = this.parseExpression();
@@ -856,7 +1083,7 @@ class GoParser extends ParserCore<GoToken> {
     // Short variable declaration: name := expr
     // We need to distinguish: ident := expr  vs  expr (which starts with ident)
     if (this.current().type === 'ident' && this.tokens[this.pos + 1]?.type === ':=') {
-      const varName = goToCamel(this.advance().value);
+      const varName = this.declare(this.advance().value);
       this.advance(); // skip ':='
       const init = this.parseExpression();
       return {
@@ -961,6 +1188,7 @@ class GoParser extends ParserCore<GoToken> {
     const thenBranch: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       thenBranch.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 
@@ -969,12 +1197,13 @@ class GoParser extends ParserCore<GoToken> {
       this.advance();
       if (this.current().type === 'if') {
         // else if — parse as nested if_statement in the else branch
-        elseBranch = [this.parseIfStatement()];
+        elseBranch = [this.nest.nested(this.loc(), () => this.parseIfStatement())];
       } else {
         this.expect('{');
         elseBranch = [];
         while (this.current().type !== '}' && this.current().type !== 'eof') {
           elseBranch.push(this.parseStatement());
+          this.skipStatementSeparators();
         }
         this.expect('}');
       }
@@ -993,7 +1222,7 @@ class GoParser extends ParserCore<GoToken> {
       initStmt = this.parseStatement();
     } else {
       // Short variable declaration: name := expr
-      const initName = goToCamel(this.expect('ident').value);
+      const initName = this.declare(this.expect('ident').value);
       this.expect(':=');
       const initValue = this.parseExpression();
       initStmt = {
@@ -1054,6 +1283,7 @@ class GoParser extends ParserCore<GoToken> {
     const body: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       body.push(this.parseStatement());
+      this.skipStatementSeparators();
     }
     this.expect('}');
 
@@ -1070,6 +1300,41 @@ class GoParser extends ParserCore<GoToken> {
   // -----------------------------------------------------------------------
   // Expression parsing — ParserCore abstract methods
   // -----------------------------------------------------------------------
+
+  /** N-056: operands returned by parseUnary (parenthesised groups, calls). */
+  private goAtoms = new WeakSet<Expression>();
+  /** N-448: string tokens whose bare use is legal (the opcode body of runar.Asm). */
+  private bareLiteralOk = new WeakSet<GoToken>();
+
+  /**
+   * N-056: ParserCore builds the C ladder; go/parser (the Go tier) builds Go
+   * precedence. Refuse any unparenthesised parent/child operator edge on which
+   * the two schemes group differently, so every tier compiles the same tree.
+   * Nested parenthesised groups are checked by their own parseExpression call.
+   */
+  protected parseExpression(): Expression {
+    const expr = super.parseExpression();
+    const work: Expression[] = [expr];
+    while (work.length > 0) {
+      const e = work.pop()!;
+      if (e.kind !== 'binary_expr' || this.goAtoms.has(e)) continue;
+      const edges: Array<[Expression, string, string]> = [];
+      if (e.left.kind === 'binary_expr' && !this.goAtoms.has(e.left)) edges.push([e.left, e.left.op, e.op]);
+      if (e.right.kind === 'binary_expr' && !this.goAtoms.has(e.right)) edges.push([e.right, e.op, e.right.op]);
+      for (const [child, first, second] of edges) {
+        if (isGoAmbiguousPrecedence(first, second)) {
+          this.errors.push(makeDiagnostic(
+            goAmbiguousPrecedenceMessage(first, second),
+            'error',
+            e.sourceLocation,
+          ));
+          return expr;
+        }
+        work.push(child);
+      }
+    }
+    return expr;
+  }
 
   /**
    * Override parsePostfixChain to apply goToCamel conversion on member
@@ -1114,26 +1379,29 @@ class GoParser extends ParserCore<GoToken> {
   }
 
   protected parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '^') {
       // Go uses ^ as bitwise NOT (complement) when used as unary prefix
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
 
     let expr = this.parsePrimary();
     expr = this.parsePostfixChain(expr, this.selfNames);
+    this.goAtoms.add(expr);
     return expr;
   }
 
@@ -1149,13 +1417,22 @@ class GoParser extends ParserCore<GoToken> {
     // Hex string literal
     if (t.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
-    // String literal — used for hex-encoded ByteString values in Go contracts
-    if (t.type === 'string') {
+    // String literal. N-448: a bare non-empty literal is REFUSED — natively it
+    // is ASCII text while the compiler reads hex. The hex spelling is
+    // runar.HexToBytes("..."); the empty string is exempt (zero bytes either
+    // way) and so is the opcode body of runar.Asm(...) (see bareLiteralOk).
+    if (t.type === 'string' || t.type === 'backtick') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      // N-439: a raw (backtick) literal is its text verbatim with carriage
+      // returns discarded (Go spec), then goes through the same hex check.
+      const value = t.type === 'backtick' ? t.value.replace(/\r/g, '') : t.value;
+      if (value !== '' && !this.bareLiteralOk.has(t)) {
+        this.errors.push(makeDiagnostic(goBareStringLiteralMessage(value), 'error', { file: this.file, line: t.line, column: t.column }));
+      }
+      return { kind: 'bytestring_literal', value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Boolean literals
@@ -1246,18 +1523,49 @@ class GoParser extends ParserCore<GoToken> {
         // runar.ByteString(variable) falls through to the generic type cast
         // unwrap below.
         if (memberName === 'ByteString' && this.current().type === '(' &&
-            this.tokens[this.pos + 1]?.type === 'string' &&
+            (this.tokens[this.pos + 1]?.type === 'string' || this.tokens[this.pos + 1]?.type === 'backtick') &&
             this.tokens[this.pos + 2]?.type === ')') {
           this.advance(); // '('
           const strTok = this.advance(); // consume string
           this.advance(); // ')'
-          // Hex-encode the raw bytes of the string literal (tokenizer has
-          // already decoded Go escape sequences like \x00 into real bytes).
+          // Hex-encode the Go string's bytes (N-435: UTF-8 for literal text,
+          // the raw byte for a \xNN escape — what `[]byte(s)` yields in Go).
+          // N-437: a backtick raw string is its text verbatim as UTF-8, with
+          // carriage returns discarded (Go spec, raw string literals).
+          const bytes = strTok.type === 'backtick'
+            ? Array.from(new TextEncoder().encode(strTok.value.replace(/\r/g, '')), (b) => String.fromCharCode(b)).join('')
+            : (strTok as GoToken).bytes ?? strTok.value;
           let hex = '';
-          for (let i = 0; i < strTok.value.length; i++) {
-            hex += strTok.value.charCodeAt(i).toString(16).padStart(2, '0');
+          for (let i = 0; i < bytes.length; i++) {
+            hex += bytes.charCodeAt(i).toString(16).padStart(2, '0');
           }
           return { kind: 'bytestring_literal', value: hex };
+        }
+
+        // N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling of a
+        // ByteString literal (runar-go decodes it natively). The argument must
+        // be one string literal; it is read exactly as a bare literal was
+        // before (Go-decoded, then hex).
+        if (memberName === 'HexToBytes' && this.current().type === '(') {
+          const argTok = this.tokens[this.pos + 1];
+          if ((argTok?.type === 'string' || argTok?.type === 'backtick') && this.tokens[this.pos + 2]?.type === ')') {
+            this.advance(); // '('
+            this.advance(); // literal
+            this.advance(); // ')'
+            return { kind: 'bytestring_literal', value: argTok.type === 'backtick' ? argTok.value.replace(/\r/g, '') : argTok.value, sourceLocation: { file: this.file, line: argTok.line, column: argTok.column } };
+          }
+          this.errors.push(makeDiagnostic(
+            'runar.HexToBytes expects a single string literal argument',
+            'error',
+            { file: this.file, line: t.line, column: t.column },
+          ));
+        }
+
+        // N-448: the first argument of runar.Asm(...) is an opcode body, not a
+        // ByteString value, so a bare literal there stays legal.
+        if (memberName === 'Asm' && this.current().type === '(') {
+          const bodyTok = this.tokens[this.pos + 1];
+          if (bodyTok && (bodyTok.type === 'string' || bodyTok.type === 'backtick')) this.bareLiteralOk.add(bodyTok);
         }
 
         // Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.
@@ -1291,7 +1599,7 @@ class GoParser extends ParserCore<GoToken> {
       if (this.selfNames.has(t.value)) {
         return { kind: 'identifier', name: t.value };
       }
-      return { kind: 'identifier', name: goToCamel(t.value) };
+      return { kind: 'identifier', name: goToCamel(t.value), sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Go surface syntax can start an expression with this
@@ -1315,7 +1623,7 @@ class GoParser extends ParserCore<GoToken> {
     const elements: Expression[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       if (this.current().type === '{') {
-        elements.push(this.parseGoBraceLiteral());
+        elements.push(this.nest.nested(this.loc(), () => this.parseGoBraceLiteral()));
       } else {
         elements.push(this.parseExpression());
       }
@@ -1324,6 +1632,74 @@ class GoParser extends ParserCore<GoToken> {
     this.expect('}');
     return { kind: 'array_literal', elements };
   }
+}
+
+// ---------------------------------------------------------------------------
+// F-010 diagnostics — every tier's .runar.go parser emits these verbatim.
+// ---------------------------------------------------------------------------
+
+/** N-448 — every tier's .runar.go parser emits this verbatim. */
+export function goBareStringLiteralMessage(lit: string): string {
+  return `bare string literal "${lit}" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex — ` +
+    `write runar.HexToBytes("${lit}") for hex bytes or runar.ByteString("${lit}") for the text`;
+}
+
+export function goNoContractMessage(): string {
+  return 'no Rúnar contract struct found in Go source';
+}
+
+export function goMultipleContractsMessage(first: string, second: string): string {
+  return `multiple Rúnar contract structs found in Go source: '${first}' and '${second}'; ` +
+    'exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract';
+}
+
+export function goForeignReceiverMessage(method: string, receiverType: string, contract: string): string {
+  return `method '${method}' has receiver type '${receiverType}', not the contract type '${contract}'; ` +
+    'methods on other types are not allowed';
+}
+
+// ---------------------------------------------------------------------------
+// N-056 — ambiguous operator precedence on .runar.go (every tier, verbatim)
+// ---------------------------------------------------------------------------
+//
+// Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`.
+// C ladder (every other surface): MulDiv > AddSub > Shift > Comparison >
+// Equality > BitAnd > BitXor > BitOr > And > Or.
+// For `x OP1 y OP2 z` a scheme groups left iff prec(OP1) >= prec(OP2). The
+// ordered (OP1 class, OP2 class) pairs on which the schemes disagree are
+// below: 23 class pairs, 72 operator pairs. `&^` is `&` over `~` in both.
+
+const GO_PRECEDENCE_CLASS: Record<string, string> = {
+  '*': 'mul', '/': 'mul', '%': 'mul',
+  '<<': 'shift', '>>': 'shift',
+  '&': 'and',
+  '+': 'add', '-': 'add',
+  '|': 'or', '^': 'xor',
+  '<': 'rel', '<=': 'rel', '>': 'rel', '>=': 'rel',
+  '==': 'eq', '!=': 'eq', '===': 'eq', '!==': 'eq',
+  '&&': 'land', '||': 'lor',
+};
+
+export const GO_AMBIGUOUS_PRECEDENCE_PAIRS: ReadonlySet<string> = new Set([
+  'shift mul', 'shift add',
+  'and mul', 'and shift', 'and add', 'and rel', 'and eq',
+  'add shift', 'add and',
+  'or add', 'or xor', 'or rel', 'or eq',
+  'xor add', 'xor rel', 'xor eq',
+  'rel and', 'rel or', 'rel xor',
+  'eq and', 'eq or', 'eq xor', 'eq rel',
+]);
+
+export function isGoAmbiguousPrecedence(first: string, second: string): boolean {
+  const a = GO_PRECEDENCE_CLASS[first];
+  const b = GO_PRECEDENCE_CLASS[second];
+  return a !== undefined && b !== undefined && GO_AMBIGUOUS_PRECEDENCE_PAIRS.has(`${a} ${b}`);
+}
+
+export function goAmbiguousPrecedenceMessage(first: string, second: string): string {
+  const go = (op: string) => (op === '===' ? '==' : op === '!==' ? '!=' : op);
+  return `ambiguous operator precedence in .runar.go: \`a ${go(first)} b ${go(second)} c\` ` +
+    `groups differently under Go precedence than in Rúnar's other surfaces; add parentheses`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,7 +1712,9 @@ export function parseGoSource(source: string, fileName?: string): ParseResult {
   assertSourceWithinLimits(source, 'parseGoSource');
   const file = fileName ?? 'contract.runar.go';
   const errors: CompilerDiagnostic[] = [];
-  const tokens = tokenize(source, file, errors);
+  const directives: GoDirective[] = [];
+  const tokens = tokenize(source, file, errors, directives);
   const parser = new GoParser(tokens, file, errors);
-  return parser.parse();
+  parser.directives = directives;
+  return withNestingLimit(file, () => parser.parse());
 }

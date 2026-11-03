@@ -72,45 +72,25 @@ func TestWhatsOnChainProvider_FeeRate(t *testing.T) {
 // GetTransaction
 // ---------------------------------------------------------------------------
 
+// N-041: GetTransaction used GET /tx/hash/{txid}, whose JSON has no "hex"
+// field (Raw was always empty) and float BTC values. This test served a
+// synthetic /tx/hash body with an invented "hex" field; it now serves the
+// recorded raw tx from conformance/sdk-woc/contract-utxo-tx-vectors.json at
+// /tx/{txid}/hex and checks the same fields plus Raw.
 func TestWhatsOnChainProvider_GetTransaction(t *testing.T) {
-	txid := strings.Repeat("ab", 32)
+	c := loadWocN041Vectors(t).GetTransaction.Cases[0]
+	txid := c.Txid
 
 	provider, server := newTestWoCProvider(func(w http.ResponseWriter, r *http.Request) {
-		expectedPath := "/tx/hash/" + txid
+		expectedPath := "/tx/" + txid + "/hex"
 		if r.URL.Path != expectedPath {
 			t.Errorf("unexpected path: got %q, want %q", r.URL.Path, expectedPath)
 		}
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		resp := map[string]interface{}{
-			"txid":    txid,
-			"version": 1,
-			"vin": []map[string]interface{}{
-				{
-					"txid":      strings.Repeat("11", 32),
-					"vout":      0,
-					"scriptSig": map[string]interface{}{"hex": "47ab"},
-					"sequence":  0xffffffff,
-				},
-			},
-			"vout": []map[string]interface{}{
-				{
-					"value":        0.001,
-					"n":            0,
-					"scriptPubKey": map[string]interface{}{"hex": "76a91400000000000000000000000000000000000000008ac"},
-				},
-				{
-					"value":        0.005,
-					"n":            1,
-					"scriptPubKey": map[string]interface{}{"hex": "a914bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb87"},
-				},
-			},
-			"locktime": 0,
-			"hex":      "0100000000",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, c.RawTxHex)
 	})
 	defer server.Close()
 
@@ -124,19 +104,20 @@ func TestWhatsOnChainProvider_GetTransaction(t *testing.T) {
 	if len(data.Outputs) != 2 {
 		t.Fatalf("expected 2 outputs, got %d", len(data.Outputs))
 	}
-	// 0.001 BSV * 1e8 = 100000 sats
-	if data.Outputs[0].Satoshis != 100000 {
-		t.Fatalf("expected first output 100000 sats, got %d", data.Outputs[0].Satoshis)
+	if data.Outputs[0].Satoshis != 1 {
+		t.Fatalf("expected first output 1 sat, got %d", data.Outputs[0].Satoshis)
 	}
-	// 0.005 BSV * 1e8 = 500000 sats
-	if data.Outputs[1].Satoshis != 500000 {
-		t.Fatalf("expected second output 500000 sats, got %d", data.Outputs[1].Satoshis)
+	if data.Outputs[1].Satoshis != 99575 {
+		t.Fatalf("expected second output 99575 sats, got %d", data.Outputs[1].Satoshis)
 	}
-	if len(data.Inputs) != 1 {
-		t.Fatalf("expected 1 input, got %d", len(data.Inputs))
+	if len(data.Inputs) != 2 {
+		t.Fatalf("expected 2 inputs, got %d", len(data.Inputs))
 	}
 	if data.Inputs[0].Sequence != 0xffffffff {
 		t.Errorf("unexpected sequence: %d", data.Inputs[0].Sequence)
+	}
+	if data.Raw != c.RawTxHex {
+		t.Errorf("Raw = %q, want the served hex", data.Raw)
 	}
 }
 
@@ -160,30 +141,21 @@ func TestWhatsOnChainProvider_GetTransaction_HTTPError(t *testing.T) {
 // GetUtxos
 // ---------------------------------------------------------------------------
 
+// F-040: the listing has no locking script, so GetUtxos also fetches
+// /tx/{txid}/hex per UTXO. This test used synthetic txids with no raw tx
+// behind them and never checked Script (it was always ""); it now serves the
+// recorded listing + raw txs from conformance/sdk-woc/vectors.json.
 func TestWhatsOnChainProvider_GetUtxos(t *testing.T) {
-	address := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	v := loadWocF040Vectors(t)
+	address := v.Address
+	serve := wocF040Handler(address, v.UnspentBody, v.RawTxHex)
 
 	provider, server := newTestWoCProvider(func(w http.ResponseWriter, r *http.Request) {
 		expectedPath := "/address/" + address + "/unspent"
-		if r.URL.Path != expectedPath {
+		if r.URL.Path != expectedPath && !wocF040TxHexPath.MatchString(r.URL.Path) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		entries := []map[string]interface{}{
-			{
-				"tx_hash": strings.Repeat("aa", 32),
-				"tx_pos":  0,
-				"value":   1000000,
-				"height":  700000,
-			},
-			{
-				"tx_hash": strings.Repeat("bb", 32),
-				"tx_pos":  1,
-				"value":   5000000,
-				"height":  700001,
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
+		serve(w, r)
 	})
 	defer server.Close()
 
@@ -194,11 +166,11 @@ func TestWhatsOnChainProvider_GetUtxos(t *testing.T) {
 	if len(utxos) != 2 {
 		t.Fatalf("expected 2 UTXOs, got %d", len(utxos))
 	}
-	if utxos[0].Txid != strings.Repeat("aa", 32) || utxos[0].Satoshis != 1000000 || utxos[0].OutputIndex != 0 {
-		t.Errorf("unexpected utxo[0]: %+v", utxos[0])
-	}
-	if utxos[1].Txid != strings.Repeat("bb", 32) || utxos[1].Satoshis != 5000000 || utxos[1].OutputIndex != 1 {
-		t.Errorf("unexpected utxo[1]: %+v", utxos[1])
+	for i, want := range v.Expected {
+		u := utxos[i]
+		if u.Txid != want.Txid || u.Satoshis != want.Satoshis || u.OutputIndex != want.OutputIndex || u.Script != want.Script {
+			t.Errorf("unexpected utxo[%d]: %+v", i, u)
+		}
 	}
 }
 
@@ -206,24 +178,22 @@ func TestWhatsOnChainProvider_GetUtxos(t *testing.T) {
 // GetContractUtxo
 // ---------------------------------------------------------------------------
 
+// N-041: the /script/{h}/unspent listing has no locking script, so
+// GetContractUtxo returned Script "". This test used a synthetic txid with no
+// raw tx behind it and never checked Script; it now serves the recorded
+// listing + raw tx from conformance/sdk-woc/contract-utxo-tx-vectors.json.
 func TestWhatsOnChainProvider_GetContractUtxo_Found(t *testing.T) {
-	scriptHash := strings.Repeat("cd", 32)
+	cu := loadWocN041Vectors(t).ContractUtxo
+	scriptHash := cu.ScriptHash
+	listing := cu.LegacyBody
+	serve := wocN041Handler(wocN041Routes("/script/"+scriptHash+"/unspent", &listing, cu.RawTxHex))
 
 	provider, server := newTestWoCProvider(func(w http.ResponseWriter, r *http.Request) {
 		expectedPath := "/script/" + scriptHash + "/unspent"
-		if r.URL.Path != expectedPath {
+		if r.URL.Path != expectedPath && !wocF040TxHexPath.MatchString(r.URL.Path) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		entries := []map[string]interface{}{
-			{
-				"tx_hash": strings.Repeat("ee", 32),
-				"tx_pos":  3,
-				"value":   42000,
-				"height":  800000,
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
+		serve(w, r)
 	})
 	defer server.Close()
 
@@ -234,7 +204,8 @@ func TestWhatsOnChainProvider_GetContractUtxo_Found(t *testing.T) {
 	if utxo == nil {
 		t.Fatal("expected utxo, got nil")
 	}
-	if utxo.Txid != strings.Repeat("ee", 32) || utxo.Satoshis != 42000 || utxo.OutputIndex != 3 {
+	want := cu.ExpectedLegacy
+	if utxo.Txid != want.Txid || utxo.Satoshis != want.Satoshis || utxo.OutputIndex != want.OutputIndex || utxo.Script != want.Script {
 		t.Errorf("unexpected utxo: %+v", utxo)
 	}
 }

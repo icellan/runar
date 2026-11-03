@@ -1343,6 +1343,48 @@ function accumulateStmtIR(target: string, op: '+' | '-', term: Expr): Stmt {
   };
 }
 
+type IrLoopBounds = Pick<Extract<Stmt, { kind: 'for' }>, 'start' | 'bound' | 'op' | 'step'>;
+
+/**
+ * Bounds for one IR loop running 1..`maxCount` iterations. Narrow (default):
+ * `start..start+count` ascending, unit step, `<`. Wide: additionally `<=`
+ * (bound = last value taken) and countdowns `>` / `>=` with step -1, whose
+ * start is at least `count` so the counter stays non-negative. Each form's
+ * iteration count is exactly `count`, so every loop terminates and the
+ * unrolled size matches the narrow form.
+ */
+function arbIrLoopBounds(maxCount: number, wide: boolean): fc.Arbitrary<IrLoopBounds> {
+  const ascending = fc
+    .tuple(
+      fc.integer({ min: 0, max: 2 }),
+      fc.integer({ min: 1, max: maxCount }),
+      wide ? fc.constantFrom('<' as const, '<=' as const) : fc.constant('<' as const),
+    )
+    .map(([start, count, op]): IrLoopBounds => ({
+      start: BigInt(start),
+      bound: BigInt(op === '<' ? start + count : start + count - 1),
+      op,
+      step: 1,
+    }));
+  if (!wide) return ascending;
+  const countdown = fc
+    .tuple(
+      fc.integer({ min: 0, max: 2 }),
+      fc.integer({ min: 1, max: maxCount }),
+      fc.constantFrom('>' as const, '>=' as const),
+    )
+    .map(([extra, count, op]): IrLoopBounds => {
+      const start = count + extra;
+      return {
+        start: BigInt(start),
+        bound: BigInt(op === '>' ? start - count : start - count + 1),
+        op,
+        step: -1,
+      };
+    });
+  return fc.oneof(ascending, countdown);
+}
+
 /**
  * A loop block of the requested shape: carrier declarations, the (possibly
  * nested) loop, and a terminal assert reading every carrier so the loop result
@@ -1351,6 +1393,7 @@ function accumulateStmtIR(target: string, op: '+' | '-', term: Expr): Stmt {
 function arbIrLoopBlock(
   shape: IrLoopShape,
   bigintVars: string[],
+  wideLoops = false,
 ): fc.Arbitrary<Stmt[]> {
   const carriers = irLoopShapeCarriers(shape);
   const nested = shape === 'nested-cross-read';
@@ -1362,9 +1405,11 @@ function arbIrLoopBlock(
   return fc
     .tuple(
       fc.tuple(...carriers.map(() => arbBigintExprIR(bigintVars, 1))),
-      // Bounds: ascending, unit step, half-open — the cross-tier subset.
-      fc.tuple(fc.integer({ min: 0, max: 2 }), fc.integer({ min: 1, max: 3 })),
-      fc.tuple(fc.integer({ min: 0, max: 2 }), fc.integer({ min: 1, max: 2 })),
+      // Default: ascending, unit step, half-open — the cross-tier subset the
+      // native renderers can express. `wideLoops` also draws countdowns and
+      // closed bounds (see `arbIrLoopBounds`).
+      arbIrLoopBounds(3, wideLoops),
+      arbIrLoopBounds(2, wideLoops),
       fc.constantFrom('+' as const, '-' as const),
       fc.constantFrom('+' as const, '-' as const),
       arbLoopTermIR(bigintVars, iterVars),
@@ -1389,19 +1434,13 @@ function arbIrLoopBlock(
       const innerLoop: Stmt = {
         kind: 'for',
         iterVar: 'k1',
-        start: BigInt(innerB[0]),
-        bound: BigInt(innerB[0] + innerB[1]),
-        op: '<',
-        step: 1,
+        ...innerB,
         body,
       };
       const loop: Stmt = {
         kind: 'for',
         iterVar: 'k0',
-        start: BigInt(outerB[0]),
-        bound: BigInt(outerB[0] + outerB[1]),
-        op: '<',
-        step: 1,
+        ...outerB,
         body: nested ? [innerLoop] : body,
       };
       return [...decls, loop, readClause];
@@ -1417,6 +1456,7 @@ function arbMethodIR(
   config: GeneratorConfig,
   forceBranchShape?: BranchShape,
   forceLoopShape?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedMethod> {
   return fc.tuple(
     fc.integer({ min: 0, max: 9 }).map((n) => `method${n}`),
@@ -1453,7 +1493,7 @@ function arbMethodIR(
       .chain((shape) => arbBranchBlockIR(shape, bigintVars, boolVars, []));
     const loopBlock = fc
       .constantFrom(...(forceLoopShape ? [forceLoopShape] : IR_LOOP_SHAPES))
-      .chain((shape) => arbIrLoopBlock(shape, bigintVars));
+      .chain((shape) => arbIrLoopBlock(shape, bigintVars, wideLoops));
 
     return fc.tuple(
       fc.array(arbVarDeclStmtIR(bigintVars), { minLength: 0, maxLength: 2 }),
@@ -1489,6 +1529,7 @@ function arbStatefulMethodIR(
   config: GeneratorConfig,
   forceBranchShape?: BranchShape,
   forceLoopShape?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedMethod> {
   const mutableProps = properties.filter((p) => !p.readonly);
 
@@ -1527,7 +1568,7 @@ function arbStatefulMethodIR(
       .chain((shape) => arbBranchBlockIR(shape, bigintVars, boolVars, mutableBigintProps));
     const loopBlock = fc
       .constantFrom(...(forceLoopShape ? [forceLoopShape] : IR_LOOP_SHAPES))
-      .chain((shape) => arbIrLoopBlock(shape, bigintVars));
+      .chain((shape) => arbIrLoopBlock(shape, bigintVars, wideLoops));
 
     return fc.tuple(
       // State mutations
@@ -1619,6 +1660,7 @@ function dedupeMethodNames(methods: GeneratedMethod[]): GeneratedMethod[] {
 function arbGeneratedContractOf(
   forceBranchShape?: BranchShape,
   forceLoopShape?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedContract> {
   return fc
   .tuple(
@@ -1641,7 +1683,7 @@ function arbGeneratedContractOf(
     }
 
     return fc
-      .array(arbMethodIR(properties, DEFAULT_CONFIG, forceBranchShape, forceLoopShape), {
+      .array(arbMethodIR(properties, DEFAULT_CONFIG, forceBranchShape, forceLoopShape, wideLoops), {
         minLength: 1,
         maxLength: DEFAULT_CONFIG.maxMethods,
       })
@@ -1668,13 +1710,25 @@ export const arbGeneratedContract: fc.Arbitrary<GeneratedContract> = arbGenerate
 export function arbGeneratedContractWithShape(
   branch?: BranchShape,
   loop?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedContract> {
-  return arbGeneratedContractOf(branch, loop);
+  return arbGeneratedContractOf(branch, loop, wideLoops);
 }
+
+/**
+ * `arbGeneratedContract` with countdown (`step: -1`, `>` / `>=`) and closed
+ * (`<=`) loop bounds also drawn. NOT the default: the native Go / Rust /
+ * Python / Zig / Ruby renderers have no surface form for these, so only the
+ * `--ir` fuzzer's `ts` render strategy (TypeScript source + the Java renderer)
+ * can compile them in every tier.
+ */
+export const arbGeneratedContractWideLoops: fc.Arbitrary<GeneratedContract> =
+  arbGeneratedContractOf(undefined, undefined, true);
 
 function arbGeneratedStatefulContractOf(
   forceBranchShape?: BranchShape,
   forceLoopShape?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedContract> {
   return fc
   .tuple(
@@ -1707,7 +1761,7 @@ function arbGeneratedStatefulContractOf(
 
     return fc
       .array(
-        arbStatefulMethodIR(properties, DEFAULT_CONFIG, forceBranchShape, forceLoopShape),
+        arbStatefulMethodIR(properties, DEFAULT_CONFIG, forceBranchShape, forceLoopShape, wideLoops),
         {
           minLength: 1,
           maxLength: DEFAULT_CONFIG.maxMethods,
@@ -1790,6 +1844,139 @@ function ensureEveryMutablePropertyIsWritten(
 }
 
 /**
+ * N-400 — opt-in generator option that reaches the three ANF kinds no fuzzer
+ * drew: `add_raw_output`, `add_data_output` and `method_call` (a call to a
+ * private method). Wrap any contract arbitrary with it; the DEFAULT
+ * arbitraries are untouched, so every fixed-seed corpus stays byte-stable.
+ *
+ * Per contract, independently (each with probability 1/2):
+ *   - a private `helper0(a: bigint)` method plus a call to it from a public
+ *     method. Stateful: the helper writes a mutable bigint property (the
+ *     shape of `conformance/tests/private-helper-outputs`); stateless: it
+ *     asserts. The call precedes every other statement of the caller.
+ *   - stateless only: `UnsafeSmartContract` with a terminal
+ *     `asm({ body, in_arity: 0, out_arity: 1 })` (ANF `raw_script`), appended
+ *     to a drawn public method. The contract's `parentClass` becomes
+ *     `UnsafeSmartContract`; nothing else about it changes.
+ *   - stateful only: `this.addDataOutput(sats, payloadBs)` and
+ *     `this.addRawOutput(sats, scriptBs)`, each reading a `ByteString`
+ *     parameter appended to a drawn public method and placed LAST (after any
+ *     explicit `addOutput`, so declaration order is the draw order).
+ * Stateless contracts get no output intrinsic: both are stateful-only.
+ */
+export function withExtraKinds(
+  base: fc.Arbitrary<GeneratedContract>,
+): fc.Arbitrary<GeneratedContract> {
+  return base.chain((contract) =>
+    fc
+      .tuple(
+        fc.boolean(), // private helper + call
+        fc.boolean(), // addDataOutput
+        fc.boolean(), // addRawOutput
+        fc.nat(), // which public method receives the call
+        fc.nat(), // which public method receives the data output
+        fc.nat(), // which public method receives the raw output
+        fc.constantFrom(0n, 1n, 1000n),
+        fc.constantFrom(0n, 1n, 1000n),
+        fc.boolean(), // asm raw_script (stateless only)
+        fc.nat(), // which public method receives the asm
+        fc.constantFrom('51', '52', '00', '5a'),
+      )
+      .chain(([doHelper, doData, doRaw, callIdx, dataIdx, rawIdx, dataSats, rawSats, doAsm, asmIdx, asmBody]) => {
+        const stateful = contract.parentClass === 'StatefulSmartContract';
+        // Deep-copy the methods: the base arbitrary's value must not be mutated.
+        const methods: GeneratedMethod[] = contract.methods.map((m) => ({
+          ...m,
+          params: [...m.params],
+          body: [...m.body],
+        }));
+        const publics = methods.filter((m) => m.visibility === 'public');
+        const pick = (i: number): GeneratedMethod => publics[i % publics.length]!;
+
+        let helper: GeneratedMethod | undefined;
+        let callArg: fc.Arbitrary<Expr> | undefined;
+        if (doHelper) {
+          const target = pick(callIdx);
+          const mutableBigint = contract.properties.find((p) => !p.readonly && p.type === 'bigint');
+          const helperParam: GeneratedParam = { name: 'delta', type: 'bigint' };
+          const ref: Expr = { kind: 'var_ref', name: 'delta' };
+          helper = {
+            name: 'helper0',
+            visibility: 'private',
+            params: [helperParam],
+            body:
+              stateful && mutableBigint
+                ? [
+                    {
+                      kind: 'assign',
+                      target: mutableBigint.name,
+                      value: {
+                        kind: 'binary',
+                        op: '+',
+                        left: { kind: 'property_ref', name: mutableBigint.name },
+                        right: ref,
+                      },
+                      isProperty: true,
+                    },
+                  ]
+                : [
+                    {
+                      kind: 'assert',
+                      condition: {
+                        kind: 'binary',
+                        op: '>',
+                        left: { kind: 'binary', op: '+', left: ref, right: { kind: 'bigint_literal', value: 1n } },
+                        right: ref,
+                      },
+                    },
+                  ],
+            mutatesState: stateful && !!mutableBigint,
+          };
+          const vars = [
+            ...contract.properties.filter((p) => p.type === 'bigint').map((p) => `this.${p.name}`),
+            ...target.params.filter((p) => p.type === 'bigint').map((p) => p.name),
+          ];
+          callArg = arbBigintExprIR(vars, 1);
+        }
+
+        const finish = (arg: Expr | undefined): GeneratedContract => {
+          if (helper && arg) {
+            const target = pick(callIdx);
+            target.body.unshift({ kind: 'method_call', name: helper.name, args: [arg] });
+            if (helper.mutatesState) target.mutatesState = true;
+            methods.push(helper);
+          }
+          if (stateful && doData) {
+            const m = pick(dataIdx);
+            m.params.push({ name: 'payloadBs', type: 'ByteString' });
+            m.body.push({
+              kind: 'add_data_output',
+              satoshis: dataSats,
+              script: { kind: 'var_ref', name: 'payloadBs' },
+            });
+          }
+          if (stateful && doRaw) {
+            const m = pick(rawIdx);
+            m.params.push({ name: 'scriptBs', type: 'ByteString' });
+            m.body.push({
+              kind: 'add_raw_output',
+              satoshis: rawSats,
+              script: { kind: 'var_ref', name: 'scriptBs' },
+            });
+          }
+          let parentClass = contract.parentClass;
+          if (!stateful && doAsm) {
+            pick(asmIdx).body.push({ kind: 'raw_script', body: asmBody, inArity: 0n, outArity: 1n });
+            parentClass = 'UnsafeSmartContract';
+          }
+          return { ...contract, parentClass, methods };
+        };
+        return callArg ? callArg.map((a) => finish(a)) : fc.constant(finish(undefined));
+      }),
+  );
+}
+
+/**
  * Generate a random stateful GeneratedContract IR.
  */
 export const arbGeneratedStatefulContract: fc.Arbitrary<GeneratedContract> =
@@ -1799,9 +1986,14 @@ export const arbGeneratedStatefulContract: fc.Arbitrary<GeneratedContract> =
 export function arbGeneratedStatefulContractWithShape(
   branch?: BranchShape,
   loop?: IrLoopShape,
+  wideLoops = false,
 ): fc.Arbitrary<GeneratedContract> {
-  return arbGeneratedStatefulContractOf(branch, loop);
+  return arbGeneratedStatefulContractOf(branch, loop, wideLoops);
 }
+
+/** The stateful counterpart of `arbGeneratedContractWideLoops`. */
+export const arbGeneratedStatefulContractWideLoops: fc.Arbitrary<GeneratedContract> =
+  arbGeneratedStatefulContractOf(undefined, undefined, true);
 
 // ===========================================================================
 // Tri-modal execution-oracle generator (issue #124)

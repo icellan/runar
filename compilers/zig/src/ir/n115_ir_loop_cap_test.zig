@@ -35,9 +35,11 @@ const types = @import("types.zig");
 /// below differs from the control in exactly one field — the same discipline
 /// `conformance/negatives/ir/I07-loop-count-over-max.ir.json` follows against
 /// the `bounded-loop` golden.
+// N-071: the body closes with `_ok = true; assert(_ok)`, because a public
+// method must end with an assert.
 fn irJson(allocator: std.mem.Allocator, count: i64) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Bounded","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"loop","count":{d},"iterVar":"i","body":[{{"name":"t1","value":{{"kind":"load_const","value":0}}}}]}}}}]}}]}}
+        \\{{"contractName":"Bounded","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"loop","count":{d},"iterVar":"i","body":[{{"name":"t1","value":{{"kind":"load_const","value":0}}}}]}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{count});
 }
 

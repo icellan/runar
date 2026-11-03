@@ -41,12 +41,20 @@
 //! - snake_case identifiers -> camelCase in AST
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::{
+    lex_error, static_method_message, unexpected_class_body_token_message,
+    unexpected_token_after_class_message, unsupported_statement_message,
+    UNTERMINATED_STRING_LITERAL,
+};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -57,20 +65,53 @@ use std::collections::HashMap;
 pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
     use super::diagnostic::Diagnostic;
 
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_ruby_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_ruby`], on the parse stack segment.
+fn parse_ruby_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
+    use super::diagnostic::Diagnostic;
     let file = file_name.unwrap_or("contract.runar.rb");
     let mut str_errors: Vec<String> = Vec::new();
 
-    let tokens = tokenize(source);
-    let mut parser = RbParser::new(tokens, file, &mut str_errors);
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    let (tokens, positions) = tokenize(source, file, &mut lex_errors);
+    let mut parser = RbParser::new(tokens, positions, file, &mut str_errors);
 
     let contract = parser.parse_contract();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
+    // N-004: nothing may follow the class's `end`.
+    if contract.is_some() {
+        parser.skip_newlines();
+        if *parser.peek() != Token::Eof {
+            let trailing = rb_token_text(parser.peek());
+            parser.errors.push(unexpected_token_after_class_message(&trailing));
+        }
+    }
+    let collision = parser.idents.collision_diagnostic();
 
-    let errors = str_errors
-        .into_iter()
-        .map(|msg| Diagnostic::error(msg, None))
-        .collect();
+    let mut errors: Vec<Diagnostic> = lex_errors;
+    errors.extend(str_errors.into_iter().map(|msg| Diagnostic::error(msg, None)));
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +256,7 @@ fn map_builtin_name(name: &str) -> String {
 fn map_rb_type(name: &str) -> &str {
     match name {
         "Bigint" | "Integer" | "Int" => "bigint",
-        "Boolean" => "boolean",
+        "Boolean" | "Bool" => "boolean",
         "ByteString" => "ByteString",
         "PubKey" => "PubKey",
         "Sig" => "Sig",
@@ -318,18 +359,106 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+/// A token's source text, for a diagnostic (N-053).
+fn rb_token_text(tok: &Token) -> String {
+    match tok {
+        Token::Class => "class".into(),
+        Token::Def => "def".into(),
+        Token::If => "if".into(),
+        Token::Elsif => "elsif".into(),
+        Token::Else => "else".into(),
+        Token::Unless => "unless".into(),
+        Token::For => "for".into(),
+        Token::In => "in".into(),
+        Token::End => "end".into(),
+        Token::Return => "return".into(),
+        Token::And => "and".into(),
+        Token::Or => "or".into(),
+        Token::Require => "require".into(),
+        Token::Do => "do".into(),
+        Token::Symbol(name) => name.clone(),
+        Token::Ident(name) => name.clone(),
+        Token::NumberLit(n) => n.to_string(),
+        Token::TrueLit => "true".into(),
+        Token::FalseLit => "false".into(),
+        Token::Plus => "+".into(),
+        Token::Star => "*".into(),
+        Token::Slash => "/".into(),
+        Token::Percent => "%".into(),
+        Token::DoubleStar => "**".into(),
+        Token::EqEq => "==".into(),
+        Token::NotEq => "!=".into(),
+        Token::Lt => "<".into(),
+        Token::Le => "<=".into(),
+        Token::Gt => ">".into(),
+        Token::Ge => ">=".into(),
+        Token::LShift => "<<".into(),
+        Token::RShift => ">>".into(),
+        Token::AndAnd => "&&".into(),
+        Token::OrOr => "||".into(),
+        Token::BitAnd => "&".into(),
+        Token::BitOr => "|".into(),
+        Token::BitXor => "^".into(),
+        Token::Eq => "=".into(),
+        Token::PlusEq => "+=".into(),
+        Token::MinusEq => "-=".into(),
+        Token::StarEq => "*=".into(),
+        Token::SlashEq => "/=".into(),
+        Token::PercentEq => "%=".into(),
+        Token::DotDotDot => "...".into(),
+        Token::DotDot => "..".into(),
+        Token::Question => "?".into(),
+        Token::ColonColon => "::".into(),
+        Token::RParen => ")".into(),
+        Token::RBracket => "]".into(),
+        Token::Colon => ":".into(),
+        Token::Comma => ",".into(),
+        Token::Dot => ".".into(),
+        other => format!("{:?}", other),
+    }
+}
+
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(
+    source: &str,
+    file: &str,
+    errors: &mut Vec<super::diagnostic::Diagnostic>,
+) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    let mut positions: Vec<(usize, usize)> = Vec::new();
+    let mut at: (usize, usize) = (1, 0);
     let lines: Vec<&str> = source.split('\n').collect();
     let mut paren_depth: usize = 0;
+    // Line number of an open `=begin` embedded document, or 0.
+    let mut block_comment_start: usize = 0;
 
-    for raw_line in &lines {
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
         // Strip trailing \r
         let line = if raw_line.ends_with('\r') {
             &raw_line[..raw_line.len() - 1]
         } else {
             raw_line
         };
+
+        // N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+        // own). `=begin` / `=end` open and close a block comment only at
+        // column 0 and only as a whole word (followed by whitespace or end of
+        // line). Every line from `=begin` through `=end` is a comment. Before
+        // this, a method "commented out" this way compiled as a live spend
+        // path and the `end` of `=end` closed the class early.
+        if block_comment_start != 0 {
+            if is_embedded_doc_marker(line, "=end") {
+                block_comment_start = 0;
+            }
+            continue;
+        }
+        if is_embedded_doc_marker(line, "=begin") {
+            block_comment_start = line_num;
+            continue;
+        }
 
         // Skip blank lines and comment-only lines
         let stripped = line.trim_start();
@@ -342,6 +471,9 @@ fn tokenize(source: &str) -> Vec<Token> {
         let mut pos = start_offset;
 
         while pos < chars.len() {
+            // Tokens pushed by the previous iteration started at `at`.
+            positions.resize(tokens.len(), at);
+            at = (line_num, pos + 1);
             let ch = chars[pos];
 
             // Whitespace within line
@@ -368,7 +500,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                     let name: String = chars[start..pos].iter().collect();
                     tokens.push(Token::Ivar(name));
                 } else {
-                    // bare @ — unlikely but handle gracefully
+                    // N-214: a bare `@` became an identifier named `@`, refused
+                    // only by the type checker, at the wrong place. The TS
+                    // reference lexes it as its own token and refuses it in the
+                    // expression; refuse it here with TS's diagnostic.
+                    errors.push(lex_error("Unexpected token in expression: '@'", file, line_num, start - 1));
                     tokens.push(Token::Ident("@".to_string()));
                 }
                 continue;
@@ -608,6 +744,7 @@ fn tokenize(source: &str) -> Vec<Token> {
 
             // Single-quoted string literals: hex ByteStrings
             if ch == '\'' {
+                let open_col = pos;
                 pos += 1;
                 let mut val = String::new();
                 while pos < chars.len() && chars[pos] != '\'' {
@@ -622,6 +759,10 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::HexStringLit(val));
                 continue;
@@ -629,6 +770,7 @@ fn tokenize(source: &str) -> Vec<Token> {
 
             // Double-quoted string literals
             if ch == '"' {
+                let open_col = pos;
                 pos += 1;
                 let mut val = String::new();
                 while pos < chars.len() && chars[pos] != '"' {
@@ -643,46 +785,27 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::StringLit(val));
                 continue;
             }
 
-            // Numbers (decimal and hex)
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
             if ch.is_ascii_digit() {
-                let mut num_str = String::new();
-                if ch == '0'
-                    && pos + 1 < chars.len()
-                    && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
-                {
-                    // Hex number
-                    num_str.push_str("0x");
-                    pos += 2;
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_hexdigit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
+                let end = scan_number_end(&chars, pos);
+                let text: String = chars[pos..end].iter().collect();
+                let val = match parse_int_literal("rb", &text) {
+                    Some(lit) => lit.value,
+                    None => {
+                        errors.push(lex_error(&invalid_integer_literal("rb", &text), file, line_num, pos));
+                        BigInt::from(0)
                     }
-                } else {
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_digit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
-                    }
-                }
-                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
-                        .unwrap_or_else(|_| BigInt::from(0))
-                } else {
-                    <BigInt as Num>::from_str_radix(&num_str, 10)
-                        .unwrap_or_else(|_| BigInt::from(0))
                 };
+                pos = end;
                 tokens.push(Token::NumberLit(val));
                 continue;
             }
@@ -727,9 +850,12 @@ fn tokenize(source: &str) -> Vec<Token> {
                 continue;
             }
 
-            // Skip unrecognised characters
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, line_num, pos));
             pos += 1;
         }
+        positions.resize(tokens.len(), at);
 
         // Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0 {
@@ -737,8 +863,30 @@ fn tokenize(source: &str) -> Vec<Token> {
         }
     }
 
+    if block_comment_start != 0 {
+        errors.push(lex_error(
+            &format!(
+                "unterminated '=begin' block comment starting at line {}: missing '=end'",
+                block_comment_start
+            ),
+            file,
+            block_comment_start,
+            0,
+        ));
+    }
+
     tokens.push(Token::Eof);
-    tokens
+    positions.resize(tokens.len(), at);
+    (tokens, positions)
+}
+
+/// Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
+/// whole word: followed by ASCII whitespace (Ruby's `\s`) or end of line.
+fn is_embedded_doc_marker(line: &str, marker: &str) -> bool {
+    match line.strip_prefix(marker) {
+        None => false,
+        Some(rest) => matches!(rest.bytes().next(), None | Some(b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -747,22 +895,66 @@ fn tokenize(source: &str) -> Vec<Token> {
 
 struct RbParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<String>,
     /// Track locally declared variables per method scope to distinguish decl from assignment.
     declared_locals: std::collections::HashSet<String>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: super::identifier_collision::DeclaredIdents,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> RbParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<String>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<String>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
             declared_locals: std::collections::HashSet::new(),
+            idents: Default::default(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn peek(&self) -> &Token {
@@ -814,11 +1006,18 @@ impl<'a> RbParser<'a> {
         matches!(self.peek(), Token::Ident(ref n) if n == name)
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -872,7 +1071,7 @@ impl<'a> RbParser<'a> {
             && parent_class != "UnsafeSmartContract"
         {
             self.errors.push(format!(
-                "Unknown parent class: {}",
+                "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
                 parent_class
             ));
             return None;
@@ -885,6 +1084,7 @@ impl<'a> RbParser<'a> {
         // Pending visibility/param types for the next method
         let mut pending_visibility: Option<Visibility> = None;
         let mut pending_param_types: Option<HashMap<String, TypeNode>> = None;
+        let mut pending_sighash: Vec<Option<String>> = Vec::new();
 
         while *self.peek() != Token::End && *self.peek() != Token::Eof {
             self.skip_newlines();
@@ -897,6 +1097,24 @@ impl<'a> RbParser<'a> {
                 if let Some(prop) = self.parse_prop(&parent_class) {
                     properties.push(prop);
                 }
+                self.skip_newlines();
+                continue;
+            }
+
+            // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+            // `@sighash` directive; it applies to the next `def`.
+            if self.check_ident("runar_sighash") {
+                self.advance(); // 'runar_sighash'
+                let arg = self.peek().clone();
+                let mut count = 0;
+                while *self.peek() != Token::Newline && *self.peek() != Token::Eof {
+                    self.advance();
+                    count += 1;
+                }
+                pending_sighash.push(match arg {
+                    Token::StringLit(v) | Token::HexStringLit(v) if count == 1 => Some(v),
+                    _ => None,
+                });
                 self.skip_newlines();
                 continue;
             }
@@ -924,22 +1142,50 @@ impl<'a> RbParser<'a> {
                     &pending_visibility,
                     &pending_param_types,
                 );
+                let mut method = method;
                 if method.name == "constructor" {
+                    // N-093: the constructor is not a spending entry point.
+                    for _ in &pending_sighash {
+                        self.errors.push(lost_directive_message("@sighash"));
+                    }
                     constructor = Some(method);
                 } else {
+                    match resolve_native_sighash(&method.name, method.visibility == Visibility::Public, &pending_sighash) {
+                        Some(Ok(v)) => method.sighash_type = Some(v),
+                        Some(Err(msg)) => self.errors.push(msg),
+                        None => {}
+                    }
                     methods.push(method);
                 }
                 pending_visibility = None;
                 pending_param_types = None;
+                pending_sighash.clear();
                 self.skip_newlines();
                 continue;
             }
 
-            // Skip unknown tokens
-            self.advance();
+            // Ruby's bare visibility markers are no-ops here (visibility
+            // comes from `runar_public`); examples/ruby uses them.
+            if self.check_ident("private") || self.check_ident("public") {
+                self.advance();
+                continue;
+            }
+
+            // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+            let stray = self.advance();
+            self.errors.push(unexpected_class_body_token_message(&rb_token_text(&stray)));
         }
 
-        self.match_tok(&Token::End); // end of class
+        // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+        for _ in &pending_sighash {
+            self.errors.push(lost_directive_message("@sighash"));
+        }
+
+        // N-319: the class `end` is required; EOF here means it is missing.
+        if !self.match_tok(&Token::End) {
+            self.errors
+                .push("unterminated class: missing closing 'end'".to_string());
+        }
 
         // Auto-generate constructor if not provided
         let mut constructor =
@@ -1089,10 +1335,27 @@ impl<'a> RbParser<'a> {
         // Check for optional trailing options: readonly: true/false, default: <literal>
         // Multiple options are comma-separated and may appear in any order.
         let mut is_readonly = false;
+        let mut embed_always = false;
         let mut initializer: Option<Expression> = None;
+        let mut option_error = false;
         while *self.peek() == Token::Comma {
             self.advance(); // ','
-            if self.check_ident("readonly") {
+            if self.check_ident("embed_always") {
+                // N-093: the native spelling of the `@embedAlways` directive.
+                self.advance(); // 'embed_always'
+                self.expect(&Token::Colon);
+                if *self.peek() == Token::TrueLit {
+                    self.advance();
+                    embed_always = true;
+                } else if *self.peek() == Token::FalseLit {
+                    self.advance();
+                    embed_always = false;
+                } else {
+                    self.bad_boolean_prop_option("embed_always");
+                    option_error = true;
+                    break;
+                }
+            } else if self.check_ident("readonly") {
                 self.advance(); // 'readonly'
                 self.expect(&Token::Colon);
                 if *self.peek() == Token::TrueLit {
@@ -1101,15 +1364,43 @@ impl<'a> RbParser<'a> {
                 } else if *self.peek() == Token::FalseLit {
                     self.advance();
                     is_readonly = false;
+                } else {
+                    self.bad_boolean_prop_option("readonly");
+                    option_error = true;
+                    break;
                 }
             } else if self.check_ident("default") {
                 self.advance(); // 'default'
                 self.expect(&Token::Colon);
-                initializer = Some(self.parse_unary());
+                if *self.peek() == Token::NilLit {
+                    // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+                    self.errors.push("prop default 'nil' is not a literal (expected a number, true, false or a hex string)".to_string());
+                    self.advance(); // 'nil'
+                } else {
+                    initializer = Some(self.parse_unary());
+                }
             } else {
-                // Unknown trailing option -- stop parsing options
+                // N-301: an unknown option (e.g. a typo of `embed_always`) is
+                // refused, never silently dropped. Same text in all seven tiers.
+                let tok_text = rb_token_text(self.peek());
+                self.errors.push(format!(
+                    "unknown prop option '{}' (expected readonly, embed_always or default)",
+                    tok_text
+                ));
+                option_error = true;
                 break;
             }
+        }
+
+        // N-413: nothing may follow the type or an option value except `,`
+        // (the next option) or end of line, so `default: 1 + 2` is refused
+        // rather than silently truncated to its first operand. Same text in
+        // all seven tiers.
+        if !option_error && *self.peek() != Token::Newline && *self.peek() != Token::Eof {
+            self.errors.push(format!(
+                "unexpected '{}' in prop declaration (expected ',' or end of line)",
+                rb_token_text(self.peek())
+            ));
         }
 
         // In stateless contracts (SmartContract and UnsafeSmartContract), all
@@ -1127,13 +1418,13 @@ impl<'a> RbParser<'a> {
         }
 
         Some(PropertyNode {
-            name: snake_to_camel(&raw_name),
+            name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
             prop_type: type_node,
             readonly: is_readonly,
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         })
     }
 
@@ -1141,13 +1432,28 @@ impl<'a> RbParser<'a> {
     // Types
     // -----------------------------------------------------------------------
 
+    /// N-313: `readonly:` and `embed_always:` take a literal `true` or `false`.
+    /// Any other value is refused, never silently dropped. Same text in all
+    /// seven tiers.
+    fn bad_boolean_prop_option(&mut self, option: &str) {
+        let got = if *self.peek() == Token::Newline || *self.peek() == Token::Eof {
+            "<end of line>".to_string()
+        } else {
+            rb_token_text(self.peek())
+        };
+        self.errors.push(format!(
+            "invalid value '{}' for prop option '{}' (expected true or false)",
+            got, option
+        ));
+    }
+
     fn parse_type(&mut self) -> TypeNode {
         let raw_name = self.expect_ident();
 
         // Check for FixedArray[T, N]
         if raw_name == "FixedArray" && *self.peek() == Token::LBracket {
             self.advance(); // '['
-            let element = self.parse_type();
+            let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
             self.expect(&Token::Comma);
             let length = match self.advance() {
                 Token::NumberLit(n) => n.to_usize().unwrap_or(0),
@@ -1181,9 +1487,10 @@ impl<'a> RbParser<'a> {
         pending_visibility: &Option<Visibility>,
         pending_param_types: &Option<HashMap<String, TypeNode>>,
     ) -> MethodNode {
+        let def_loc = self.loc();
         self.expect(&Token::Def);
 
-        let raw_name = match self.advance() {
+        let mut raw_name = match self.advance() {
             Token::Ident(name) => name,
             other => {
                 self.errors
@@ -1191,6 +1498,16 @@ impl<'a> RbParser<'a> {
                 "_error".to_string()
             }
         };
+
+        // N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        // method, not a contract method.
+        if *self.peek() == Token::Dot {
+            self.advance(); // '.'
+            if let Token::Ident(name) = self.advance() {
+                raw_name = name;
+            }
+            self.errors.push(static_method_message(&raw_name));
+        }
 
         // Reset local variable tracking for this method scope
         self.declared_locals.clear();
@@ -1219,13 +1536,13 @@ impl<'a> RbParser<'a> {
                 params,
                 body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: def_loc,
                 sighash_type: None,
             };
         }
 
         let is_public = pending_visibility.as_ref() == Some(&Visibility::Public);
-        let method_name = snake_to_camel(&raw_name);
+        let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         MethodNode {
             name: method_name,
@@ -1236,7 +1553,7 @@ impl<'a> RbParser<'a> {
             } else {
                 Visibility::Private
             },
-            source_location: self.loc(),
+            source_location: def_loc,
             sighash_type: None,
         }
     }
@@ -1249,7 +1566,7 @@ impl<'a> RbParser<'a> {
 
         while *self.peek() != Token::RParen && *self.peek() != Token::Eof {
             let raw_name = self.expect_ident();
-            let camel_name = snake_to_camel(&raw_name);
+            let camel_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
             // Look up the type from the preceding runar_public/params declaration
             let param_type = if let Some(ref types) = param_types {
@@ -1305,6 +1622,17 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         match self.peek().clone() {
             // assert statement: assert expr
             Token::Assert => Some(self.parse_assert_statement()),
@@ -1330,8 +1658,29 @@ impl<'a> RbParser<'a> {
             // Variable declaration or expression statement
             Token::Ident(_) => Some(self.parse_ident_statement()),
 
-            _ => {
+            // N-053: a token that can begin an expression begins an
+            // expression statement (a private helper's last one is its
+            // implicit return value). Skipping it dropped `!` / `(` / literals.
+            Token::NumberLit(_)
+            | Token::StringLit(_)
+            | Token::HexStringLit(_)
+            | Token::TrueLit
+            | Token::FalseLit
+            | Token::NilLit
+            | Token::LParen
+            | Token::LBracket
+            | Token::Minus
+            | Token::Tilde
+            | Token::Bang
+            | Token::Not => Some(Statement::ExpressionStatement {
+                expression: self.parse_expression(),
+                source_location: self.loc(),
+            }),
+
+            // N-053: any other token is refused.
+            tok => {
                 self.advance();
+                self.errors.push(unsupported_statement_message(&rb_token_text(&tok)));
                 None
             }
         }
@@ -1344,6 +1693,7 @@ impl<'a> RbParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1371,7 +1721,8 @@ impl<'a> RbParser<'a> {
 
         let else_branch = if *self.peek() == Token::Elsif {
             // elsif -> else { if ... }
-            let res = Some(vec![self.parse_elsif_statement()]);
+            // F-213: elsif is an `if` statement of the else branch (+1).
+            let res = self.nested(Some(Vec::new()), |p| Some(vec![p.parse_elsif_statement()]));
             self.declared_locals = locals_before_then.clone();
             res
         } else if *self.peek() == Token::Else {
@@ -1395,6 +1746,8 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_elsif_statement(&mut self) -> Statement {
+        // F-337: located at the `elsif` token (parse_statement never sees it).
+        let loc = self.loc();
         self.advance(); // consume 'elsif'
         let condition = self.parse_expression();
         self.skip_newlines();
@@ -1405,7 +1758,8 @@ impl<'a> RbParser<'a> {
         self.declared_locals = locals_before_then.clone();
 
         let else_branch = if *self.peek() == Token::Elsif {
-            let res = Some(vec![self.parse_elsif_statement()]);
+            // F-213: elsif is an `if` statement of the else branch (+1).
+            let res = self.nested(Some(Vec::new()), |p| Some(vec![p.parse_elsif_statement()]));
             self.declared_locals = locals_before_then.clone();
             res
         } else if *self.peek() == Token::Else {
@@ -1425,7 +1779,7 @@ impl<'a> RbParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 
@@ -1442,6 +1796,7 @@ impl<'a> RbParser<'a> {
         let condition = Expression::UnaryExpr {
             op: UnaryOp::Not,
             operand: Box::new(raw_condition),
+            source_location: None,
         };
 
         Statement::IfStatement {
@@ -1456,7 +1811,7 @@ impl<'a> RbParser<'a> {
         self.advance(); // consume 'for'
 
         let raw_var = self.expect_ident();
-        let var_name = snake_to_camel(&raw_var);
+        let var_name = self.idents.declare(&raw_var, snake_to_camel(&raw_var));
 
         self.expect(&Token::In);
 
@@ -1535,11 +1890,13 @@ impl<'a> RbParser<'a> {
             op: cmp_op,
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
+                source_location: None,
             }),
             right: Box::new(end_expr),
+            source_location: None,
         };
 
-        let update_operand = Box::new(Expression::Identifier { name: var_name });
+        let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
         let update = Statement::ExpressionStatement {
             expression: if descending {
                 Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -1591,6 +1948,7 @@ impl<'a> RbParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args,
                 asm_return_type: None,
@@ -1601,6 +1959,7 @@ impl<'a> RbParser<'a> {
 
     fn parse_ivar_statement(&mut self) -> Statement {
         // @var = expr | @var[i] = expr | @var += expr | @var as expression
+        let start = self.pos;
         let raw_name = match self.advance() {
             Token::Ivar(name) => name,
             _ => "_error".to_string(),
@@ -1608,14 +1967,17 @@ impl<'a> RbParser<'a> {
         let prop_name = snake_to_camel(&raw_name);
         let mut target = Expression::PropertyAccess {
             property: prop_name,
+            source_location: None,
         };
 
         // Consume index-access postfixes on the LHS so `@var[i] = expr`
         // is recognised as an assignment statement.
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::LBracket {
             self.advance();
             let index = self.parse_expression();
             self.expect(&Token::RBracket);
+            if !self.grow(&mut dt, &target, &[&index]) { break; }
             target = Expression::IndexAccess {
                 object: Box::new(target),
                 index: Box::new(index),
@@ -1649,6 +2011,7 @@ impl<'a> RbParser<'a> {
                 op: bin_op,
                 left: Box::new(target.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target,
@@ -1657,11 +2020,14 @@ impl<'a> RbParser<'a> {
             };
         }
 
-        // Expression statement (e.g. @var.method(...))
-        let expr = self.parse_postfix_from(target);
-
+        // Expression statement (@var on its own line, @var.method(...), or a
+        // private helper's implicit return such as `@x + 1`). N-053: re-parse
+        // from the ivar as a whole expression; continuing only the postfix
+        // chain left `+ 1` behind, and the statement dispatcher skipped it.
+        drop(target);
+        self.pos = start;
         Statement::ExpressionStatement {
-            expression: expr,
+            expression: self.parse_expression(),
             source_location: self.loc(),
         }
     }
@@ -1681,12 +2047,12 @@ impl<'a> RbParser<'a> {
             self.advance(); // consume ident
             self.advance(); // consume '='
             let value = self.parse_expression();
-            let camel_name = snake_to_camel(&raw_name);
+            let camel_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
             if self.declared_locals.contains(&camel_name) {
                 // Already declared: this is an assignment
                 return Statement::Assignment {
-                    target: Expression::Identifier { name: camel_name },
+                    target: Expression::Identifier { name: camel_name, source_location: None },
                     value,
                     source_location: self.loc(),
                 };
@@ -1733,6 +2099,7 @@ impl<'a> RbParser<'a> {
                 op: bin_op,
                 left: Box::new(expr.clone()),
                 right: Box::new(rhs),
+                source_location: None,
             };
             return Statement::Assignment {
                 target: expr,
@@ -1753,7 +2120,7 @@ impl<'a> RbParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     /// Ruby ternary: `condition ? consequent : alternate`
@@ -1776,40 +2143,50 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or || *self.peek() == Token::OrOr {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_not();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::And || *self.peek() == Token::AndAnd {
             self.advance();
             let right = self.parse_not();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_not(&mut self) -> Expression {
+        let op_loc = self.loc();
         if *self.peek() == Token::Not || *self.peek() == Token::Bang {
             self.advance();
-            let operand = self.parse_not();
+            let operand = self.nested(zero(), |p| p.parse_not());
             Expression::UnaryExpr {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
+                source_location: Some(op_loc.clone()),
             }
         } else {
             self.parse_bit_or()
@@ -1817,69 +2194,87 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // == maps to ===
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     // != maps to !==
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1889,43 +2284,53 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1935,25 +2340,31 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::LShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::RShift => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1963,25 +2374,31 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1991,34 +2408,42 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -2028,29 +2453,33 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Bang => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             _ => self.parse_power(),
@@ -2063,10 +2492,12 @@ impl<'a> RbParser<'a> {
 
         if *self.peek() == Token::DoubleStar {
             self.advance();
-            let exp = self.parse_power(); // right-recursive for right-associativity
+            // right-recursive for right-associativity; F-213: +1.
+            let exp = self.nested(zero(), |p| p.parse_power());
             Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "pow".to_string(),
+                    source_location: None,
                 }),
                 args: vec![base, exp],
                 asm_return_type: None,
@@ -2083,6 +2514,7 @@ impl<'a> RbParser<'a> {
 
     /// Parse postfix operations (method calls, property access, indexing) from a given expression.
     fn parse_postfix_from(&mut self, mut expr: Expression) -> Expression {
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek().clone() {
                 Token::Dot => {
@@ -2093,12 +2525,16 @@ impl<'a> RbParser<'a> {
                     // Check if it's a method call
                     if *self.peek() == Token::LParen {
                         let args = self.parse_call_args();
+                        // F-213: the member node, then the call around it.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &[]) || !self.grow(&mut dt, &expr, &arg_refs) { break; }
                         // Handle property_access.method(...)
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
                             expr = Expression::CallExpr {
                                 callee: Box::new(Expression::MemberExpr {
                                     object: Box::new(Expression::Identifier {
                                         name: "this".to_string(),
+                                        source_location: None,
                                     }),
                                     property: prop,
                                 }),
@@ -2117,9 +2553,11 @@ impl<'a> RbParser<'a> {
                         }
                     } else {
                         // Property access
-                        if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                            expr = Expression::PropertyAccess { property: prop };
+                        if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                            expr = Expression::PropertyAccess { property: prop, source_location: None };
+                            dt = DepthTracker::new();
                         } else {
+                            if !self.grow(&mut dt, &expr, &[]) { break; }
                             expr = Expression::MemberExpr {
                                 object: Box::new(expr),
                                 property: prop,
@@ -2129,6 +2567,8 @@ impl<'a> RbParser<'a> {
                 }
                 Token::LParen => {
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -2139,6 +2579,7 @@ impl<'a> RbParser<'a> {
                     self.advance();
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -2152,33 +2593,41 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
-            Token::NilLit => Expression::BigIntLiteral { value: BigInt::from(0) },
-            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::NilLit => {
+                // N-416: `nil` is not a Rúnar value; refused, never read as 0.
+                self.errors.push("'nil' is not a Rúnar value (use a number, true, false or a hex string)".to_string());
+                Expression::BigIntLiteral { value: BigInt::from(0) }
+            }
+            Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::Ivar(name) => {
                 // @var -> property access
                 let prop_name = snake_to_camel(&name);
                 Expression::PropertyAccess {
                     property: prop_name,
+                    source_location: None,
                 }
             }
             Token::Ident(name) => {
                 let mapped = map_builtin_name(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: Some(lit_loc) }
             }
             Token::Assert => {
                 // assert used as expression (unusual but handle it)
                 Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }
             }
             Token::Super => {
                 Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }
             }
             Token::LParen => {
@@ -2244,12 +2693,14 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
+            source_location: None,
         })
         .collect();
     body.push(Statement::ExpressionStatement {
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2266,9 +2717,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: p.name.clone(),
+                source_location: None,
             },
             source_location: SourceLocation {
                 file: file.to_string(),
@@ -2292,6 +2745,11 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     }
 }
 
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
+}
+
 // ---------------------------------------------------------------------------
 // Bare method call rewriter
 // ---------------------------------------------------------------------------
@@ -2310,9 +2768,9 @@ fn rewrite_expr(expr: &mut Expression, method_names: &std::collections::HashSet<
             for arg in args.iter_mut() {
                 rewrite_expr(arg, method_names);
             }
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if method_names.contains(name) {
-                    *callee = Box::new(Expression::PropertyAccess { property: name.clone() });
+                    *callee = Box::new(Expression::PropertyAccess { property: name.clone(), source_location: None });
                 }
             } else {
                 rewrite_expr(callee.as_mut(), method_names);
@@ -2512,6 +2970,34 @@ end
         assert_eq!(contract.methods.len(), 1);
         assert_eq!(contract.methods[0].name, "transfer");
         assert_eq!(contract.methods[0].params.len(), 4);
+    }
+
+    // F-206: 'Bool' must alias to boolean exactly like 'Boolean' does. The
+    // native Ruby tier's own reference parser (parser_ruby.rb) already maps
+    // both spellings; this tier's map_rb_type only had 'Boolean'.
+    #[test]
+    fn test_parse_bool_type_alias() {
+        let source = r#"
+require 'runar'
+
+class Flag < Runar::SmartContract
+  prop :flag, Bool
+
+  runar_public
+  def check
+    assert @flag
+  end
+end
+"#;
+
+        let result = parse_ruby(source, Some("Flag.runar.rb"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.properties.len(), 1);
+        match &contract.properties[0].prop_type {
+            TypeNode::Primitive(PrimitiveTypeName::Boolean) => {}
+            other => panic!("expected 'Bool' to map to Primitive(Boolean), got {:?}", other),
+        }
     }
 
     #[test]

@@ -42,13 +42,23 @@ export interface Provider {
 /**
  * Report a failure that is deliberately non-fatal (R-273).
  *
- * Four paths in this SDK — two overlay submissions, the funding broadcast and
- * the BEEF parse after deploy — are fire-and-forget by design: the caller's
- * transaction is already broadcast, and an indexing or caching failure must not
- * turn a successful spend into a thrown error. They were written as
- * `.catch(() => {})` and `catch { /* non-fatal *\/ }`, which is the intent
- * correctly expressed and the evidence thrown away: an overlay that is down
- * looks exactly like an overlay that is fine.
+ * The two overlay submissions in wallet-provider.ts are fire-and-forget by
+ * design: the caller's transaction is already broadcast, and an indexing
+ * failure must not turn a successful spend into a thrown error. They were
+ * written as `.catch(() => {})`, which is the intent correctly expressed and
+ * the evidence thrown away: an overlay that is down looks exactly like an
+ * overlay that is fine.
+ *
+ * (F-248: `WalletProvider.ensureFunding`'s funding-tx broadcast and BEEF
+ * parse used to be on this list too, but that broadcastTx call is the only
+ * attempt the method makes to get the funding tx onto the network — unlike
+ * the overlay submissions above, there is no earlier successful broadcast to
+ * fall back on, so a failure there is now fatal to `ensureFunding`'s
+ * guarantee instead of routed through this function. N-168 made the
+ * identical call for `RunarContract.deployWithWallet`'s deploy-tx broadcast
+ * and BEEF parse, for the same reason: that call is the only attempt
+ * `deployWithWallet` makes to get the deploy tx onto the network and to
+ * learn which vout it landed on.)
  *
  * `console.warn` is what the rest of this SDK already uses for advisory
  * failures (contract.ts and providers/mock.ts), so these now match.

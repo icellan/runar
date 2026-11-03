@@ -68,6 +68,8 @@ const STACK_EFFECTS: Record<number, [pops: number, pushes: number]> = {
   // Arithmetic
   [Opcode.OP_1ADD]: [1, 1],
   [Opcode.OP_1SUB]: [1, 1],
+  [Opcode.OP_2MUL]: [1, 1],  // Chronicle
+  [Opcode.OP_2DIV]: [1, 1],  // Chronicle
   [Opcode.OP_NEGATE]: [1, 1],
   [Opcode.OP_ABS]: [1, 1],
   [Opcode.OP_NOT]: [1, 1],
@@ -102,6 +104,13 @@ const STACK_EFFECTS: Record<number, [pops: number, pushes: number]> = {
   [Opcode.OP_CHECKSIGVERIFY]: [2, 0],
   [Opcode.OP_CHECKMULTISIG]: [3, 1],     // minimum: dummy + 1 key + 1 sig -> result
   [Opcode.OP_CHECKMULTISIGVERIFY]: [3, 0],
+
+  // Chronicle splice / numeric shift (arities per the @bsv/sdk interpreter, Spend.ts)
+  [Opcode.OP_SUBSTR]: [3, 1],     // buf, offset, len -> substring
+  [Opcode.OP_LEFT]: [2, 1],       // buf, len -> prefix
+  [Opcode.OP_RIGHT]: [2, 1],      // buf, len -> suffix
+  [Opcode.OP_LSHIFTNUM]: [2, 1],  // value, bits -> value << bits
+  [Opcode.OP_RSHIFTNUM]: [2, 1],  // value, bits -> value >> bits
 };
 
 /**

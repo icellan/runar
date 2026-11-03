@@ -40,6 +40,7 @@ import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.rs} (Rust proc-macro DSL) source into a Rúnar
@@ -82,9 +83,24 @@ public final class RustParser {
 
     /** Parse Rust DSL source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         State state = new State(filename);
-        state.tokens = tokenize(source);
-        ContractNode contract = parseContract(state);
+        List<String> lex = new ArrayList<>();
+        state.tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(() -> parseContract(state), ParseException::new);
+        String collision = state.idents.message();
+        if (collision != null) state.errors.add(collision);
+        // N-344: a `let` without `mut` cannot be reassigned.
+        state.errors.addAll(ConstReassign.check(contract, state.constDecls, filename));
         if (!state.errors.isEmpty()) {
             // Report first error to mirror Python behaviour where the caller
             // surfaces diagnostics; for the Java parser surface we promote
@@ -199,6 +215,10 @@ public final class RustParser {
         final String value;
         final int line;
         final int col;
+        /** F-026: a number token's text as written. */
+        String raw;
+        /** F-026: a signed-suffix minimum (`128i8`), legal only under a unary minus. */
+        boolean negOnly;
 
         Token(int kind, String value, int line, int col) {
             this.kind = kind;
@@ -333,12 +353,12 @@ public final class RustParser {
         return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
     }
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int n = source.length();
         int pos = 0;
         int line = 1;
-        int col = 1;
+        int col = 0;
 
         while (pos < n) {
             char ch = source.charAt(pos);
@@ -347,7 +367,7 @@ public final class RustParser {
             if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
                 if (ch == '\n') {
                     line++;
-                    col = 1;
+                    col = 0;
                 } else {
                     col++;
                 }
@@ -368,9 +388,12 @@ public final class RustParser {
                 pos += 2;
                 col += 2;
                 while (pos + 1 < n) {
+                    // N-406: a newline resets the column; it is not counted again.
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
+                        pos++;
+                        continue;
                     }
                     if (source.charAt(pos) == '*' && source.charAt(pos + 1) == '/') {
                         pos += 2;
@@ -431,8 +454,9 @@ public final class RustParser {
                 continue;
             }
 
-            // Hex literal
-            if (ch == '0' && pos + 1 < n && (source.charAt(pos + 1) == 'x' || source.charAt(pos + 1) == 'X')) {
+            // Hex literal (lowercase x only, as the TS reference: `0X` is an
+            // invalid integer)
+            if (ch == '0' && pos + 1 < n && source.charAt(pos + 1) == 'x') {
                 pos += 2;
                 col += 2;
                 int start = pos;
@@ -451,46 +475,54 @@ public final class RustParser {
                 col++;
                 int start = pos;
                 while (pos < n && source.charAt(pos) != '"') {
+                    // A backslash escapes the next character (as in the TS
+                    // reference), so `\"` does not close the literal.
+                    if (source.charAt(pos) == '\\' && pos + 1 < n) {
+                        pos++;
+                        col++;
+                    }
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
                     } else {
                         col++;
                     }
                     pos++;
                 }
                 String val = source.substring(start, Math.min(pos, n));
+                // F-011: Rust strings may span lines, so only end of file
+                // leaves one unterminated.
                 if (pos < n) {
                     pos++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, startLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_HEX_STRING, val, startLine, startCol));
                 continue;
             }
 
-            // Number
+            // Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+            // integer literal (a lowercase `0x` was taken above as a ByteString).
             if (ch >= '0' && ch <= '9') {
-                int start = pos;
-                while (pos < n) {
-                    char d = source.charAt(pos);
-                    if ((d >= '0' && d <= '9') || d == '_') {
-                        pos++;
-                        col++;
-                    } else {
-                        break;
-                    }
-                }
-                String val = source.substring(start, pos).replace("_", "");
-                tokens.add(new Token(TOK_NUMBER, val, startLine, startCol));
+                IntLiteral.Scan sc = IntLiteral.lex("rs", source, pos, lex, filename, startLine, startCol);
+                col += sc.end() - pos;
+                pos = sc.end();
+                Token t = new Token(TOK_NUMBER, sc.value(), startLine, startCol);
+                t.raw = sc.raw();
+                t.negOnly = sc.lit() != null && sc.lit().negOnly();
+                tokens.add(t);
                 continue;
             }
 
             // Identifier / keyword
-            if (Character.isLetter(ch) || ch == '_') {
+            // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+            // refused as an unexpected character.
+            if (LexDiag.isAsciiLetter(ch) || ch == '_') {
                 int start = pos;
                 while (pos < n) {
                     char d = source.charAt(pos);
-                    if (Character.isLetterOrDigit(d) || d == '_') {
+                    if (LexDiag.isAsciiLetter(d) || (d >= '0' && d <= '9') || d == '_') {
                         pos++;
                         col++;
                     } else {
@@ -520,7 +552,9 @@ public final class RustParser {
                 continue;
             }
 
-            // Unknown char — skip
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, startLine, startCol, "Unexpected character '" + ch + "'"));
             pos++;
             col++;
         }
@@ -567,6 +601,13 @@ public final class RustParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-344: the declarations read as {@code let} without {@code mut} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
 
         State(String filename) {
             this.filename = filename;
@@ -621,6 +662,54 @@ public final class RustParser {
     // Attribute parsing
     // -----------------------------------------------------------------
 
+    /**
+     * N-093: one field/method attribute classified as one of the two
+     * directives. {@code kind} is {@code "embed_always"}, {@code "sighash"}
+     * ({@code flags} = the {@code |}-joined identifier list, {@code null} when
+     * malformed) or {@code "other"} ({@code content} = the compact attribute
+     * text, exactly as {@link #parseAttribute} returns it).
+     */
+    private record DirectiveAttr(String kind, String flags, String content) {}
+
+    /**
+     * N-093: parse one attribute and classify it. {@code #[embed_always]} and
+     * {@code #[sighash(FLAGS)]} (optionally {@code runar::}-qualified) are the
+     * native spellings of {@code @embedAlways} / {@code @sighash}. For
+     * {@code sighash}, the flags are the {@code |}-joined identifier list, or
+     * {@code null} when the parentheses are missing or hold any other token.
+     * Mirrors parseDirectiveAttribute in the TS reference (01-parse-rust.ts).
+     */
+    private static DirectiveAttr parseDirectiveAttribute(State s) {
+        int start = s.pos;
+        String content = parseAttribute(s);
+        int end = Math.max(s.pos - 1, start + 1); // the closing `]`
+        List<Token> toks = s.tokens.subList(start + 1, end); // inside `#[` ... `]`
+        int i = 0;
+        if (toks.size() >= 2 && toks.get(0).kind == TOK_IDENT && toks.get(0).value.equals("runar")
+            && toks.get(1).kind == TOK_COLONCOLON) {
+            i = 2;
+        }
+        String name = i < toks.size() && toks.get(i).kind == TOK_IDENT ? toks.get(i).value : "";
+        List<Token> rest = toks.subList(Math.min(i + 1, toks.size()), toks.size());
+        if (name.equals("embed_always") && rest.isEmpty()) {
+            return new DirectiveAttr("embed_always", null, content);
+        }
+        if (name.equals("sighash")) {
+            boolean ok = rest.size() >= 2 && rest.get(0).kind == TOK_LPAREN
+                && rest.get(rest.size() - 1).kind == TOK_RPAREN;
+            StringBuilder text = new StringBuilder();
+            if (ok) {
+                for (Token t : rest.subList(1, rest.size() - 1)) {
+                    if (t.kind == TOK_IDENT) text.append(t.value);
+                    else if (t.kind == TOK_PIPE) text.append('|');
+                    else ok = false;
+                }
+            }
+            return new DirectiveAttr("sighash", ok ? text.toString() : null, content);
+        }
+        return new DirectiveAttr("other", null, content);
+    }
+
     /** Parse {@code #[...]}. The {@code #[} token is the current peek. */
     private static String parseAttribute(State s) {
         s.advance(); // consume #[
@@ -670,7 +759,7 @@ public final class RustParser {
         // build.
         if (tok.kind == TOK_LBRACKET) {
             s.advance();
-            TypeNode element = parseRustType(s);
+            TypeNode element = s.nest.nested(() -> parseRustType(s));
             s.expect(TOK_SEMI);
             Token lengthTok = s.expect(TOK_NUMBER);
             int length;
@@ -691,7 +780,7 @@ public final class RustParser {
             // FixedArray<T, N>
             if (name.equals("FixedArray") && s.check(TOK_LT)) {
                 s.advance(); // <
-                TypeNode element = parseRustType(s);
+                TypeNode element = s.nest.nested(() -> parseRustType(s));
                 s.expect(TOK_COMMA);
                 Token sizeTok = s.expect(TOK_NUMBER);
                 int size;
@@ -746,6 +835,9 @@ public final class RustParser {
         String contractName = "";
         ParentClass parentClass = ParentClass.SMART_CONTRACT;
         List<MethodNode> methods = new ArrayList<>();
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:0.
+        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 0);
 
         while (!s.check(TOK_EOF)) {
             if (s.check(TOK_HASH_BRACKET)) {
@@ -762,6 +854,7 @@ public final class RustParser {
 
                     // Parse struct
                     if (s.check(TOK_PUB)) s.advance();
+                    ctorLoc = s.loc();
                     s.expect(TOK_STRUCT);
 
                     Token nameTok = s.peek();
@@ -773,10 +866,19 @@ public final class RustParser {
                     s.expect(TOK_LBRACE);
 
                     while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
+                        // Field attributes, any number and order: #[readonly],
+                        // and N-093's #[embed_always] (the native spelling of
+                        // `@embedAlways`). A #[sighash(...)] here annotates
+                        // nothing and is refused.
                         boolean readonly = false;
-                        if (s.check(TOK_HASH_BRACKET)) {
-                            String fieldAttr = parseAttribute(s);
-                            if (fieldAttr.equals("readonly")) {
+                        boolean embedAlways = false;
+                        while (s.check(TOK_HASH_BRACKET)) {
+                            DirectiveAttr fieldAttr = parseDirectiveAttribute(s);
+                            if (fieldAttr.kind().equals("embed_always")) {
+                                embedAlways = true;
+                            } else if (fieldAttr.kind().equals("sighash")) {
+                                s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                            } else if (fieldAttr.content().equals("readonly")) {
                                 readonly = true;
                             }
                         }
@@ -792,7 +894,7 @@ public final class RustParser {
                             TypeNode fieldType = parseRustType(s);
                             s.matchTok(TOK_COMMA);
 
-                            String camelName = snakeToCamel(fieldName);
+                            String camelName = s.idents.declare(fieldName, snakeToCamel(fieldName));
                             // Skip txPreimage — implicit stateful param
                             if (!camelName.equals("txPreimage")) {
                                 properties.add(new PropertyNode(
@@ -801,7 +903,8 @@ public final class RustParser {
                                     readonly,
                                     null,
                                     fieldLoc,
-                                    null
+                                    null,
+                                    embedAlways
                                 ));
                             }
                         } else {
@@ -838,8 +941,8 @@ public final class RustParser {
         }
 
         if (contractName.isEmpty()) {
-            s.addError("No Runar contract struct found");
-            SourceLocation loc = new SourceLocation(s.filename, 1, 1);
+            s.addError("no Rúnar contract struct found in Rust source");
+            SourceLocation loc = new SourceLocation(s.filename, 1, 0);
             return new ContractNode(
                 "",
                 parentClass,
@@ -855,6 +958,11 @@ public final class RustParser {
         Map<String, Expression> initOverrides = new HashMap<>();
         for (MethodNode m : methods) {
             if (m.name().equals("init") && m.params().isEmpty()) {
+                // N-093: init() is not a spending entry point, so a #[sighash]
+                // on it would be dropped with the method.
+                if (m.sighashType() != null) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                }
                 for (Statement stmt : m.body()) {
                     if (stmt instanceof AssignmentStatement as
                         && as.target() instanceof PropertyAccessExpr pa) {
@@ -873,7 +981,7 @@ public final class RustParser {
                 if (init != null) {
                     updated.add(new PropertyNode(
                         p.name(), p.type(), p.readonly(), init,
-                        p.sourceLocation(), p.syntheticArrayChain()
+                        p.sourceLocation(), p.syntheticArrayChain(), p.embedAlways()
                     ));
                 } else {
                     updated.add(p);
@@ -884,7 +992,6 @@ public final class RustParser {
         methods = finalMethods;
 
         // Build auto-generated constructor (only properties without initializers).
-        SourceLocation ctorLoc = new SourceLocation(s.filename, 1, 1);
         List<PropertyNode> uninit = new ArrayList<>();
         for (PropertyNode p : properties) {
             if (p.initializer() == null) uninit.add(p);
@@ -939,9 +1046,16 @@ public final class RustParser {
 
         while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
             // #[public] is no longer supported — `pub fn` marks public methods.
+            // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            // #[embed_always] on a method annotates nothing and is refused.
+            List<String> sighashSpecs = new ArrayList<>();
             while (s.check(TOK_HASH_BRACKET)) {
-                String methodAttr = parseAttribute(s);
-                if (methodAttr.equals("public")) {
+                DirectiveAttr methodAttr = parseDirectiveAttribute(s);
+                if (methodAttr.kind().equals("sighash")) {
+                    sighashSpecs.add(methodAttr.flags());
+                } else if (methodAttr.kind().equals("embed_always")) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@embedAlways"));
+                } else if (methodAttr.content().equals("public")) {
                     s.addError("#[public] is no longer supported — use 'pub fn' for public methods");
                 }
             }
@@ -951,7 +1065,22 @@ public final class RustParser {
                 s.advance();
                 visibility = Visibility.PUBLIC;
             }
-            methods.add(parseFunction(s, visibility));
+            if (!s.check(TOK_FN)) {
+                for (int k = 0; k < sighashSpecs.size(); k++) {
+                    s.addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                }
+                sighashSpecs.clear();
+            }
+            MethodNode method = parseFunction(s, visibility);
+            SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                method.name(), visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                s.addError(sighash.error());
+            } else if (sighash != null) {
+                method = new MethodNode(method.name(), method.params(), method.body(), method.visibility(),
+                    method.sourceLocation(), sighash.value());
+            }
+            methods.add(method);
         }
 
         s.expect(TOK_RBRACE);
@@ -973,10 +1102,11 @@ public final class RustParser {
         } else {
             s.advance();
         }
-        String name = snakeToCamel(rawName);
+        String name = s.idents.declare(rawName, snakeToCamel(rawName));
 
         s.expect(TOK_LPAREN);
         List<ParamNode> params = new ArrayList<>();
+        boolean hasSelf = false;
 
         while (!s.check(TOK_RPAREN) && !s.check(TOK_EOF)) {
             // &self / &mut self
@@ -984,12 +1114,14 @@ public final class RustParser {
                 s.advance();
                 if (s.check(TOK_MUT)) s.advance();
                 if (s.check(TOK_SELF)) {
+                    hasSelf = true;
                     s.advance();
                     s.matchTok(TOK_COMMA);
                     continue;
                 }
             }
             if (s.check(TOK_SELF)) {
+                hasSelf = true;
                 s.advance();
                 s.matchTok(TOK_COMMA);
                 continue;
@@ -1005,7 +1137,7 @@ public final class RustParser {
                     if (s.check(TOK_MUT)) s.advance();
                 }
                 TypeNode paramType = parseRustType(s);
-                params.add(new ParamNode(snakeToCamel(paramName), paramType));
+                params.add(new ParamNode(s.idents.declare(paramName, snakeToCamel(paramName)), paramType));
             } else {
                 s.advance();
             }
@@ -1014,11 +1146,19 @@ public final class RustParser {
 
         s.expect(TOK_RPAREN);
 
+        // N-050: a `pub fn` without a self receiver is an associated (static)
+        // function, not a contract method. A private one stays a helper (R9).
+        if (visibility == Visibility.PUBLIC && !hasSelf) {
+            s.addError(LexDiag.staticMethod(rawName));
+        }
+
         boolean hasReturnType = false;
         if (s.check(TOK_ARROW)) {
             hasReturnType = true;
             s.advance();
-            parseRustType(s);
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            String unknownReturn = LexDiag.unknownReturnType(parseRustType(s), rawName, visibility == Visibility.PUBLIC);
+            if (unknownReturn != null) s.addError(unknownReturn);
         }
 
         s.expect(TOK_LBRACE);
@@ -1046,6 +1186,10 @@ public final class RustParser {
     // -----------------------------------------------------------------
 
     private static Statement parseStatement(State s) {
+        return s.nest.nested(() -> parseStatementInner(s));
+    }
+
+    private static Statement parseStatementInner(State s) {
         SourceLocation stmtLoc = s.loc();
 
         // assert!(expr)
@@ -1080,13 +1224,13 @@ public final class RustParser {
         // let [mut] name [: type] = expr;
         if (s.check(TOK_LET)) {
             s.advance();
-            s.matchTok(TOK_MUT); // mutability flag — Rúnar AST has no field for this; the
-                                  // ast PropertyNode tracks readonliness, but VariableDeclStatement
-                                  // has no `mutable` slot, matching JavaParser behaviour.
+            // The Rúnar AST has no mutability slot on VariableDeclStatement, so a
+            // `let` without `mut` is remembered by identity in constDecls (N-344).
+            boolean isMut = s.matchTok(TOK_MUT);
 
             String varName = "unknown";
             if (s.peek().kind == TOK_IDENT) {
-                varName = snakeToCamel(s.peek().value);
+                varName = s.idents.declare(s.peek().value, snakeToCamel(s.peek().value));
                 s.advance();
             } else {
                 s.advance();
@@ -1103,7 +1247,9 @@ public final class RustParser {
             s.expect(TOK_EQ);
             Expression init = parseExpression(s);
             s.matchTok(TOK_SEMI);
-            return new VariableDeclStatement(varName, varType, init, stmtLoc);
+            VariableDeclStatement decl = new VariableDeclStatement(varName, varType, init, stmtLoc);
+            if (!isMut) s.constDecls.add(decl);
+            return decl;
         }
 
         // if
@@ -1143,7 +1289,7 @@ public final class RustParser {
             s.advance();
             String varName = "i";
             if (s.peek().kind == TOK_IDENT) {
-                varName = snakeToCamel(s.peek().value);
+                varName = s.idents.declare(s.peek().value, snakeToCamel(s.peek().value));
                 s.advance();
             }
 
@@ -1294,63 +1440,69 @@ public final class RustParser {
     // -----------------------------------------------------------------
 
     private static Expression parseExpression(State s) {
-        return parseOr(s);
+        return s.nest.nested(() -> parseOr(s));
     }
 
     private static Expression parseOr(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseAnd(s);
         while (s.matchTok(TOK_PIPEPIPE)) {
             Expression right = parseAnd(s);
-            left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseAnd(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitOr(s);
         while (s.matchTok(TOK_AMPAMP)) {
             Expression right = parseBitOr(s);
-            left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitOr(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitXor(s);
         while (s.matchTok(TOK_PIPE)) {
             Expression right = parseBitXor(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitXor(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseBitAnd(s);
         while (s.matchTok(TOK_CARET)) {
             Expression right = parseBitAnd(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
         }
         return left;
     }
 
     private static Expression parseBitAnd(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseEquality(s);
         while (s.matchTok(TOK_AMP)) {
             Expression right = parseEquality(s);
-            left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+            left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
         }
         return left;
     }
 
     private static Expression parseEquality(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseComparison(s);
         while (true) {
             if (s.matchTok(TOK_EQEQ)) {
                 Expression right = parseComparison(s);
-                left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
             } else if (s.matchTok(TOK_BANGEQ)) {
                 Expression right = parseComparison(s);
-                left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
             } else {
                 break;
             }
@@ -1359,20 +1511,21 @@ public final class RustParser {
     }
 
     private static Expression parseComparison(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseShift(s);
         while (true) {
             if (s.matchTok(TOK_LT)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
             } else if (s.matchTok(TOK_LTEQ)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
             } else if (s.matchTok(TOK_GT)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
             } else if (s.matchTok(TOK_GTEQ)) {
                 Expression right = parseShift(s);
-                left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
             } else {
                 break;
             }
@@ -1381,14 +1534,15 @@ public final class RustParser {
     }
 
     private static Expression parseShift(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseAddSub(s);
         while (true) {
             if (s.matchTok(TOK_LSHIFT)) {
                 Expression right = parseAddSub(s);
-                left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
             } else if (s.matchTok(TOK_RSHIFT)) {
                 Expression right = parseAddSub(s);
-                left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
             } else {
                 break;
             }
@@ -1397,14 +1551,15 @@ public final class RustParser {
     }
 
     private static Expression parseAddSub(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseMulDiv(s);
         while (true) {
             if (s.matchTok(TOK_PLUS)) {
                 Expression right = parseMulDiv(s);
-                left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
             } else if (s.matchTok(TOK_MINUS)) {
                 Expression right = parseMulDiv(s);
-                left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
             } else {
                 break;
             }
@@ -1413,17 +1568,18 @@ public final class RustParser {
     }
 
     private static Expression parseMulDiv(State s) {
+        SourceLocation start = s.loc();
         Expression left = parseUnary(s);
         while (true) {
             if (s.matchTok(TOK_STAR)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
             } else if (s.matchTok(TOK_SLASH)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
             } else if (s.matchTok(TOK_PERCENT)) {
                 Expression right = parseUnary(s);
-                left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
             } else {
                 break;
             }
@@ -1432,14 +1588,27 @@ public final class RustParser {
     }
 
     private static Expression parseUnary(State s) {
+        SourceLocation opLoc = s.loc();
         if (s.matchTok(TOK_BANG)) {
-            return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary(s));
+            return new UnaryExpr(Expression.UnaryOp.NOT, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.matchTok(TOK_MINUS)) {
-            return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary(s));
+            // F-026: a signed-suffix minimum (`128i8`) is legal under this
+            // minus, through parentheses, as rustc's overflowing_literals lint.
+            int k = s.pos;
+            while (k < s.tokens.size() && s.tokens.get(k).kind == TOK_LPAREN) k++;
+            int opens = k - s.pos;
+            if (k < s.tokens.size() && s.tokens.get(k).kind == TOK_NUMBER && s.tokens.get(k).negOnly) {
+                boolean closed = true;
+                for (int j = 1; j <= opens; j++) {
+                    if (k + j >= s.tokens.size() || s.tokens.get(k + j).kind != TOK_RPAREN) closed = false;
+                }
+                if (closed) s.tokens.get(k).negOnly = false;
+            }
+            return new UnaryExpr(Expression.UnaryOp.NEG, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.matchTok(TOK_TILDE)) {
-            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary(s));
+            return new UnaryExpr(Expression.UnaryOp.BIT_NOT, s.nest.nested(() -> parseUnary(s)), opLoc);
         }
         if (s.check(TOK_AMP)) {
             // & or &mut — borrow operators, no AST node.
@@ -1507,6 +1676,7 @@ public final class RustParser {
         Token tok = s.peek();
 
         if (tok.kind == TOK_NUMBER) {
+            if (tok.negOnly) s.errors.add(LexDiag.at(s.filename, tok.line, tok.col, IntLiteral.invalid("rs", tok.raw)));
             s.advance();
             BigInteger value;
             try {
@@ -1519,7 +1689,7 @@ public final class RustParser {
 
         if (tok.kind == TOK_HEX_STRING) {
             s.advance();
-            return new ByteStringLiteral(tok.value);
+            return new ByteStringLiteral(tok.value, new SourceLocation(s.filename, tok.line, tok.col));
         }
 
         if (tok.kind == TOK_TRUE) {
@@ -1550,7 +1720,7 @@ public final class RustParser {
 
         if (tok.kind == TOK_IDENT) {
             s.advance();
-            return new Identifier(mapBuiltinName(tok.value));
+            return new Identifier(mapBuiltinName(tok.value), new SourceLocation(s.filename, tok.line, tok.col));
         }
 
         s.addError("unsupported token \"" + tok.value + "\" (kind " + tok.kind

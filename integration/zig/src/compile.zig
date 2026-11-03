@@ -17,6 +17,10 @@ pub fn compileContract(allocator: std.mem.Allocator, source_path: []const u8) !r
 
     const result = try runar_frontend.compileSource(allocator, source, file_name);
     defer allocator.free(result.script_hex);
+    defer {
+        for (result.warnings) |line| allocator.free(line);
+        allocator.free(result.warnings);
+    }
 
     if (result.artifact_json) |json| {
         defer allocator.free(json);

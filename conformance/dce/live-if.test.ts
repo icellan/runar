@@ -9,6 +9,7 @@ import {
   compileHex,
   missingTierIds,
 } from '../negatives/tier-harness.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-140 — dead-code elimination deleted a LIVE `if`, on all seven tiers.
@@ -78,7 +79,7 @@ describe('N-140 DCE must not delete a live branch', () => {
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true' || process.env.RUNAR_CONFORMANCE_STRICT) {
+    if (isCiEnv(process.env) || process.env.RUNAR_CONFORMANCE_STRICT) {
       expect(
         missing,
         `these tiers have no toolchain: ${missing.join(', ')}. The matrix ` +

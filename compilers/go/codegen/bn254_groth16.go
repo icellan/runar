@@ -525,6 +525,22 @@ func emitWAG2AddAffine(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, rPrefix, un
 	t.copyToTop(tPrefix+"_x_1", pfx+"tx1")
 	bn254Fp2Sub(t, pfx+"qx0", pfx+"qx1", pfx+"tx0", pfx+"tx1", pfx+"xdf_0", pfx+"xdf_1")
 
+	// Assert Qx ≠ Tx: abort unless (Qx − Tx) mod p is a nonzero Fp2
+	// element. Without this, T == Q makes both differences zero and the
+	// gradient check below holds for every λ, so the "sum" would be the
+	// attacker-chosen λ² − 2·Tx. Reduce first: the subtraction may be
+	// unreduced (or a nonzero multiple of p) under modThreshold.
+	t.copyToTop(pfx+"xdf_0", pfx+"xnz0")
+	t.copyToTop(pfx+"xdf_1", pfx+"xnz1")
+	bn254FieldMod(t, pfx+"xnz0", pfx+"xnz0r")
+	bn254FieldMod(t, pfx+"xnz1", pfx+"xnz1r")
+	t.toTop(pfx + "xnz0r")
+	t.toTop(pfx + "xnz1r")
+	t.rawBlock([]string{pfx + "xnz0r", pfx + "xnz1r"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+
 	// Verify: λ · (Qx − Tx) == (Qy − Ty) in Fp2. This consumes the
 	// numerator/denominator slots and leaves λ under pfx+"lam".
 	emitWitnessGradientVerifyFp2(t, lamPrefix, pfx+"xdf", pfx+"ydf", pfx+"lam")
@@ -582,9 +598,11 @@ func emitWAG2AddAffine(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, rPrefix, un
 // Soundness note: for a well-formed witness, each intermediate T_i has
 // Ty ≠ 0 (since P ∈ G2 with r ∤ i · k for 0 < i ≤ k) and each addition
 // step has Qx ≠ Tx (since i·P ≠ ±P for i ∈ (1, r)). For a forged P, the
-// gradient check fails at the first 2-torsion or x-collision step (see
-// helper docstrings above). The final equality with ψ(P) is the primary
-// soundness gate.
+// script aborts at the first 2-torsion step (the doubling gradient check
+// has no solution) or x-collision step: T = −P fails the chord gradient
+// check, and T = P — where λ·0 == 0 holds for any λ — is caught by the
+// explicit Qx ≠ Tx assertion in emitWAG2AddAffine. The final equality
+// with ψ(P) is the primary soundness gate.
 func emitWAG2FixedScalarMul(t *BN254Tracker, basePrefix string, k *big.Int, gradientPrefix, rPrefix string) {
 	if k.Sign() <= 0 {
 		panic("emitWAG2FixedScalarMul: scalar must be positive")
@@ -1798,6 +1816,16 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 	// prover could supply any on-curve G1 point as prepared_inputs and the
 	// pairing would pass for a matching proof. Binding to config.IC pins
 	// the public-inputs to VK-specific domain values.
+	//
+	// Every pub_i is first ASSERTED canonical, 0 <= pub_i < r (N-035,
+	// user decision R86a). The MSM binding reduces mod r, so without this
+	// a spender could push pub_i + k*r (or a negative representative):
+	// the proof would still bind, but groth16PublicInput(i), the pins of
+	// CompileGroth16WA and the txid would all see a different number than
+	// the one the proof is about. Rejecting non-canonical scalars makes
+	// the witness value itself the one canonical value, as gnark
+	// (PublicInputNotInField) and SP1's Solidity verifier require.
+	emitWAGroth16PublicInputRangeCheck(t)
 	emitWAGroth16MSMBind(t, config)
 
 	// Step 3: Set up the 3 pairing pairs (identical to the raw variant).
@@ -1895,6 +1923,23 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 	t.nm = append(t.nm, "_ok")
 }
 
+// emitWAGroth16PublicInputRangeCheck asserts 0 <= _pub_i < r for each of
+// the 5 witness-supplied public-input scalars (OP_WITHIN is min-inclusive,
+// max-exclusive) and aborts the script otherwise. The slots are left in
+// place, untouched.
+func emitWAGroth16PublicInputRangeCheck(t *BN254Tracker) {
+	for i := 0; i < 5; i++ {
+		chk := "_pub_rc_" + itoa(i)
+		t.copyToTop("_pub_"+string(rune('0'+i)), chk)
+		t.pushBigInt("_pub_rc_lo", big.NewInt(0))
+		t.pushBigInt("_pub_rc_hi", bn254CurveR)
+		t.rawBlock([]string{chk, "_pub_rc_lo", "_pub_rc_hi"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
+}
+
 // emitWAGroth16MSMBind recomputes the Groth16 prepared-inputs accumulator
 // on-chain and asserts it matches the prover-supplied _pi_x, _pi_y.
 //
@@ -1918,7 +1963,8 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 // must be handled explicitly for the MSM-binding preamble to match
 // computePreparedInputs off-chain.
 //
-// Implementation: each term is wrapped in OP_IF guarded by (pub_i != 0).
+// Implementation: each term is wrapped in OP_IF guarded by
+// (pub_i mod r != 0) — the scalar is reduced first, see the loop body.
 // In the non-zero branch we run the existing scalar-mul + affine-add and
 // then use the altstack to clean up the intermediate garbage so both
 // branches leave the same stack shape. In the zero branch we just drop
@@ -1949,11 +1995,25 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		t.pushBigInt(bxName, config.IC[i+1][0])
 		t.pushBigInt(byName, config.IC[i+1][1])
 
-		// Compute the OP_IF condition: flag = (pub_i != 0). OP_0NOTEQUAL
+		// Reduce a COPY of pub_i into [0, r-1] (F-036). The scalar is
+		// witness-supplied, and the +3r ladder in emitG1ScalarMulNamed is
+		// only sound on that interval (see EmitBN254G1ScalarMul). The
+		// zero flag below must test the REDUCED value too: pub_i = r is
+		// 0 mod r, and routing it through the non-zero branch runs the
+		// ladder into the point at infinity. The off-chain SDK
+		// (bn254witness.computePreparedInputs) reduces the same way, so
+		// on-chain and off-chain agree on every witness. The raw _pub_i
+		// slot is left untouched: it is what groth16PublicInput(i) exposes.
+		kRawName := pfx + "k_raw_" + itoa(i)
+		kName := pfx + "k_" + itoa(i)
+		t.copyToTop(scalarName, kRawName)
+		bn254EmitScalarReduce(t, kRawName, kName)
+
+		// Compute the OP_IF condition: flag = (k_i != 0). OP_0NOTEQUAL
 		// collapses any nonzero bigint to 1 and 0 to 0.
 		chkName := pfx + "chk_" + itoa(i)
 		isNzName := pfx + "is_nz_" + itoa(i)
-		t.copyToTop(scalarName, chkName)
+		t.copyToTop(kName, chkName)
 		t.rawBlock([]string{chkName}, isNzName, func(e func(StackOp)) {
 			e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
 		})
@@ -1981,7 +2041,7 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		newAccX := pfx + "new_acc_x_" + itoa(i)
 		newAccY := pfx + "new_acc_y_" + itoa(i)
 
-		emitG1ScalarMulNamed(nz, bxName, byName, scalarName, txName, tyName)
+		emitG1ScalarMulNamed(nz, bxName, byName, kName, txName, tyName)
 		emitG1AffineAddNamed(nz, accXName, accYName, txName, tyName, newAccX, newAccY)
 
 		// Rename the new acc coords to the stable names so both branches
@@ -2000,10 +2060,14 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		nz.toTop(accXName)
 		nz.toAlt()
 
+		// The reduced scalar is only copied by the ladder; consume it.
+		nz.toTop(kName)
+		nz.drop()
+
 		// Drop every intermediate left on the main stack. After this,
 		// the main stack matches the pre-iteration state with the old
-		// acc_x / acc_y / bx / by consumed (length branchLen - 4).
-		dropTarget := branchLen - 4
+		// acc_x / acc_y / bx / by / k consumed (length branchLen - 5).
+		dropTarget := branchLen - 5
 		for len(nz.nm) > dropTarget {
 			nz.drop()
 		}
@@ -2013,7 +2077,8 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		nz.fromAlt(accYName)
 
 		// ------------------------------------------------------------------
-		// Zero branch: acc unchanged; discard the pushed IC base point.
+		// Zero branch: acc unchanged; discard the reduced scalar and the
+		// pushed IC base point.
 		// ------------------------------------------------------------------
 		var zeroOps []StackOp
 		zeroEmit := func(op StackOp) { zeroOps = append(zeroOps, op) }
@@ -2022,6 +2087,8 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		zr.qAtBottom = t.qAtBottom
 		zr.modThreshold = t.modThreshold
 
+		zr.toTop(kName)
+		zr.drop()
 		zr.toTop(byName)
 		zr.drop()
 		zr.toTop(bxName)
@@ -2075,6 +2142,11 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 //
 // This mirrors EmitBN254G1ScalarMul but operates directly on named raw-Fp
 // coordinates on the tracker instead of the 64-byte Point blob form.
+//
+// PRECONDITION: the scalar is already in [0, r-1]. Unlike
+// EmitBN254G1ScalarMul this ladder does not reduce it, because its only
+// caller (emitWAGroth16MSMBind) must reduce BEFORE its zero test anyway and
+// passes the reduced value here (F-036).
 func emitG1ScalarMulNamed(t *BN254Tracker, bxName, byName, scalarName, resultXName, resultYName string) {
 	// Rename base (bx, by) to the names the Jacobian add/double helpers
 	// expect: ax / ay (affine base point).

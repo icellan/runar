@@ -16,10 +16,13 @@ from abc import ABC, abstractmethod
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from runar._ripemd160 import ripemd160_digest
+from runar.sdk.oppushtx import _bip143_preimage
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
 from runar.sdk.deployment import build_p2pkh_script
+from runar.sdk.local_signer import _base58check_encode
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,53 @@ class WalletClient(ABC):
 
 MAINNET_ARC_URL = 'https://arc.gorillapool.io'
 """The default ARC broadcaster. A MAINNET endpoint — see R-179."""
+
+
+#: ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+#: accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+#: containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+_ARC_REJECTED_TX_STATUSES = frozenset({
+    'DOUBLE_SPEND_ATTEMPTED', 'REJECTED', 'INVALID', 'MALFORMED', 'MINED_IN_STALE_BLOCK',
+})
+
+
+def _check_arc_accepted(body: bytes, local_txid: str) -> str:
+    """Validate a 2xx ARC ``/v1/tx`` body (F-042).
+
+    Returns ARC's txid only when ARC accepted the transaction and that txid is
+    ``local_txid``; raises RuntimeError otherwise.
+    """
+    text = body.decode('utf-8', errors='replace')
+    try:
+        result = json.loads(text)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        raise RuntimeError(f'WalletProvider: ARC broadcast returned a non-JSON body: {text}')
+
+    status = result.get('status')
+    if isinstance(status, (int, float)) and not isinstance(status, bool) and not 200 <= status <= 299:
+        detail = f"{result.get('title') or ''} {result.get('detail') or ''}".strip()
+        raise RuntimeError(f'WalletProvider: ARC broadcast failed (status {status}): {detail}')
+
+    tx_status = result.get('txStatus')
+    tx_status = tx_status if isinstance(tx_status, str) else ''
+    extra_info = result.get('extraInfo')
+    extra_info = extra_info if isinstance(extra_info, str) else ''
+    if (tx_status.upper() in _ARC_REJECTED_TX_STATUSES or 'ORPHAN' in tx_status.upper()
+            or 'ORPHAN' in extra_info.upper()):
+        raise RuntimeError(
+            f'WalletProvider: ARC did not accept the transaction (txStatus {tx_status}): {extra_info}'
+        )
+
+    arc_txid = result.get('txid')
+    if not isinstance(arc_txid, str) or not arc_txid:
+        raise RuntimeError(f'WalletProvider: ARC broadcast response carries no txid: {text}')
+    if arc_txid.lower() != local_txid:
+        raise RuntimeError(
+            f'WalletProvider: ARC reported txid {arc_txid} but the transaction sent has txid {local_txid}'
+        )
+    return local_txid
 
 
 class WalletProvider(Provider):
@@ -195,7 +245,9 @@ class WalletProvider(Provider):
             if not out.get('spendable', False):
                 continue
             locking_script = out.get('locking_script', '')
-            if locking_script and locking_script != expected_script:
+            # N-043: an output without a usable script is dropped (fail-closed,
+            # matching the TypeScript reference).
+            if not locking_script or locking_script != expected_script:
                 continue
 
             outpoint = out.get('outpoint', '')
@@ -206,7 +258,7 @@ class WalletProvider(Provider):
                 txid=txid,
                 output_index=int(vout_str),
                 satoshis=out.get('satoshis', 0),
-                script=locking_script or expected_script,
+                script=locking_script,
             ))
 
         return utxos
@@ -241,6 +293,7 @@ class WalletProvider(Provider):
             raw_hex = tx.hex()
 
         raw_bytes = bytes.fromhex(raw_hex)
+        local_txid = hashlib.sha256(hashlib.sha256(raw_bytes).digest()).digest()[::-1].hex()
         url = f'{self.arc_url}/v1/tx'
         req = Request(
             url,
@@ -250,16 +303,22 @@ class WalletProvider(Provider):
         )
         try:
             resp = urlopen(req, timeout=30)
-            result = json.loads(resp.read())
-            txid = result.get('txid', '')
-            if txid:
-                self._tx_cache[txid] = raw_hex
-            return txid
+            body = resp.read()
         except HTTPError as e:
             body = e.read().decode('utf-8', errors='replace')
             raise RuntimeError(
                 f'WalletProvider: ARC broadcast failed ({e.code}): {body}'
             ) from e
+        except (OSError, ValueError) as e:
+            # URLError (connection refused, DNS), TimeoutError, etc.
+            raise RuntimeError(
+                f'WalletProvider: ARC broadcast to {url} failed, the transaction '
+                f'was NOT broadcast: {e}'
+            ) from e
+
+        txid = _check_arc_accepted(body, local_txid)
+        self._tx_cache[txid] = raw_hex
+        return txid
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
         """Contract UTXOs are typically managed by overlay services, not the wallet."""
@@ -346,12 +405,12 @@ class WalletSigner(Signer):
         return pub_key
 
     def get_address(self) -> str:
-        """Return the hash160 of the public key as 40-char hex."""
+        """Return the mainnet Base58Check P2PKH address, like LocalSigner (F-146)."""
         pub_key_hex = self.get_public_key()
         pub_key_bytes = bytes.fromhex(pub_key_hex)
         sha256_hash = hashlib.sha256(pub_key_bytes).digest()
-        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
-        return ripemd160_hash.hex()
+        ripemd160_hash = ripemd160_digest(sha256_hash)
+        return _base58check_encode(b'\x00' + ripemd160_hash)
 
     def sign(
         self,
@@ -368,9 +427,16 @@ class WalletSigner(Signer):
 
         Returns the DER-encoded signature with sighash byte appended, hex-encoded.
         """
+        # F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if not subscript:
+            raise ValueError(
+                f'WalletSigner: refusing to sign input {input_index} with an empty subscript '
+                '(scriptCode); pass the locking script of the UTXO being spent'
+            )
         flag = sighash_type if sighash_type is not None else self.SIGHASH_ALL_FORKID
 
-        # 1. Compute BIP-143 preimage
+        # 1. Compute BIP-143 preimage (F-137: the SDK's one builder, in oppushtx)
         tx_bytes = bytes.fromhex(tx_hex)
         tx = _parse_raw_tx(tx_bytes)
         subscript_bytes = bytes.fromhex(subscript)
@@ -413,52 +479,6 @@ class WalletSigner(Signer):
 
 def _sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
-
-
-def _bip143_preimage(
-    tx: dict,
-    input_index: int,
-    subscript: bytes,
-    satoshis: int,
-    sighash_type: int = 0x41,
-) -> bytes:
-    # hashPrevouts
-    prevouts = b''
-    for inp in tx['inputs']:
-        prevouts += inp['prev_txid_bytes'] + struct.pack('<I', inp['prev_output_index'])
-    hash_prevouts = _sha256d(prevouts)
-
-    # hashSequence
-    sequences = b''
-    for inp in tx['inputs']:
-        sequences += struct.pack('<I', inp['sequence'])
-    hash_sequence = _sha256d(sequences)
-
-    # hashOutputs
-    outputs_data = b''
-    for out in tx['outputs']:
-        outputs_data += struct.pack('<Q', out['satoshis'])
-        outputs_data += _encode_varint_bytes(len(out['script']))
-        outputs_data += out['script']
-    hash_outputs = _sha256d(outputs_data)
-
-    # Build preimage
-    inp = tx['inputs'][input_index]
-    preimage = b''
-    preimage += struct.pack('<I', tx['version'])
-    preimage += hash_prevouts
-    preimage += hash_sequence
-    preimage += inp['prev_txid_bytes']
-    preimage += struct.pack('<I', inp['prev_output_index'])
-    preimage += _encode_varint_bytes(len(subscript))
-    preimage += subscript
-    preimage += struct.pack('<Q', satoshis)
-    preimage += struct.pack('<I', inp['sequence'])
-    preimage += hash_outputs
-    preimage += struct.pack('<I', tx['locktime'])
-    preimage += struct.pack('<I', sighash_type)
-
-    return preimage
 
 
 def _parse_raw_tx(data: bytes) -> dict:
@@ -520,17 +540,6 @@ def _parse_raw_tx(data: bytes) -> dict:
         'outputs': outputs,
         'locktime': locktime,
     }
-
-
-def _encode_varint_bytes(n: int) -> bytes:
-    if n < 0xfd:
-        return bytes([n])
-    elif n <= 0xffff:
-        return b'\xfd' + struct.pack('<H', n)
-    elif n <= 0xffffffff:
-        return b'\xfe' + struct.pack('<I', n)
-    else:
-        return b'\xff' + struct.pack('<Q', n)
 
 
 def _parse_raw_tx_to_data(txid: str, raw_hex: str) -> TransactionData:

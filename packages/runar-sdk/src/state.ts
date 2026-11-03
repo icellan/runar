@@ -13,6 +13,8 @@
 
 import type { StateField, RunarArtifact } from 'runar-ir-schema';
 import { STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { MalformedScriptError } from './errors.js';
+import { isHexBytes } from './script-utils.js';
 
 /**
  * Serialize a set of state values into a hex-encoded Bitcoin Script data
@@ -235,6 +237,11 @@ export function extractStateFromScript(
   artifact: RunarArtifact,
   scriptHex: string,
 ): Record<string, unknown> | null {
+  // N-320: the script is untrusted (fromUtxo / fromTxId). Refuse anything that
+  // is not whole bytes of hex before any reader sees it — the N-317 rule.
+  if (!isHexBytes(scriptHex)) {
+    throw new MalformedScriptError('extractStateFromScript: script is not an even-length hex string');
+  }
   if (!artifact.stateFields || artifact.stateFields.length === 0) {
     return null;
   }
@@ -250,11 +257,19 @@ export function extractStateFromScript(
 }
 
 /**
- * Walk the script hex as Bitcoin Script opcodes to find the last OP_RETURN
- * (0x6a) at a real opcode boundary. Unlike `lastIndexOf('6a')`, this
- * properly skips push data so it won't match 0x6a bytes inside data payloads.
+ * Walk the script hex as Bitcoin Script opcodes and return the first
+ * OP_RETURN (0x6a) found at a real opcode boundary. Unlike
+ * `indexOf('6a')`, this properly skips push data so it won't match 0x6a
+ * bytes inside data payloads. The walk stops immediately on the first
+ * match rather than continuing to look for a later one — that is correct
+ * here, not a shortcut: the on-chain interpreter itself stops at the
+ * first OP_RETURN it executes, and the compiler emits exactly one
+ * separator (`codePart + OP_RETURN + stateBytes`), so "first" and "last"
+ * coincide for every script this function will ever see. The name is
+ * kept for parity with the other six SDKs, which all implement the same
+ * first-match walk.
  *
- * Returns the hex-char offset of the last OP_RETURN, or -1 if not found.
+ * Returns the hex-char offset of the OP_RETURN, or -1 if not found.
  */
 export function findLastOpReturn(scriptHex: string): number {
   let offset = 0;
@@ -289,7 +304,9 @@ export function findLastOpReturn(scriptHex: string): number {
       const b1 = parseInt(scriptHex.slice(offset + 4, offset + 6), 16);
       const b2 = parseInt(scriptHex.slice(offset + 6, offset + 8), 16);
       const b3 = parseInt(scriptHex.slice(offset + 8, offset + 10), 16);
-      const pushLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+      // N-317: unsigned. A signed `b3 << 24` made lengths >= 0x80000000
+      // negative, walking `offset` backwards forever on a 27-byte script.
+      const pushLen = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
       offset += 10 + pushLen * 2;
     } else {
       // All other opcodes (OP_0, OP_1..OP_16, OP_IF, OP_ADD, etc.)
@@ -305,6 +322,35 @@ export function findLastOpReturn(scriptHex: string): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+ * Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+ * that is not a hex string of exactly its declared width. The state reader
+ * slices each such field at its declared width, so a wrong-width value
+ * written into a state section (or passed as the argument a covenant copies
+ * into one) shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22`
+ * is read back as root = R, owner = pubkey. The compiled covenant refuses such
+ * a continuation on chain (`OP_SIZE <width> OP_NUMEQUALVERIFY`); this is the
+ * off-chain refusal, so the SDK never builds one. No-op for every other type.
+ */
+export function assertFixedWidthValue(value: unknown, type: string, what: string): void {
+  const width = STATE_FIELD_WIDTHS[type];
+  if (width?.encoding !== 'raw') return;
+  if (typeof value !== 'string' || !/^[0-9a-fA-F]*$/.test(value) || value.length !== width.size * 2) {
+    const got =
+      typeof value === 'string'
+        ? /^[0-9a-fA-F]*$/.test(value) && value.length % 2 === 0
+          ? `${value.length / 2} bytes`
+          : 'a non-hex string'
+        : typeof value;
+    throw new Error(
+      `${what} (${type}) must be exactly ${width.size} bytes of hex, got ${got}. ` +
+        `A wrong-width ${type} shifts every later state field when the ` +
+        `contract's on-chain reader slices it at ${width.size} bytes.`,
+    );
+  }
+}
+
+/**
  * Encode a state field as raw bytes (no push opcode wrapper) matching the
  * compiler's OP_NUM2BIN-based fixed-width serialization.
  * The result is raw hex bytes that are concatenated after OP_RETURN.
@@ -312,15 +358,36 @@ export function findLastOpReturn(scriptHex: string): number {
 function encodeStateValue(value: unknown, type: string, label = '?'): string {
   switch (type) {
     case 'int':
-    case 'bigint': {
+    case 'bigint':
+    // F-035: bigint aliases, stored by every compiler as the same 8-byte
+    // OP_NUM2BIN word (STATE_FIELD_WIDTHS: num2bin-le8).
+    case 'RabinSig':
+    case 'RabinPubKey': {
+      // N-084: only an integer, or a decimal integer string (optionally with
+      // the JSON "n" suffix, e.g. "0n", "1000n"), is a num2bin value. BigInt()
+      // alone coerces `true` to 1n and '' / '  ' to 0n and '0x10' to 16n,
+      // writing a number the caller never supplied into the state section.
       let n: bigint;
       if (typeof value === 'bigint') {
         n = value;
-      } else if (typeof value === 'string' && value.endsWith('n')) {
-        // BigInt string from JSON without reviver (e.g. "0n", "1000n")
-        n = BigInt(value.slice(0, -1));
+      } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+        n = BigInt(value);
+      } else if (typeof value === 'string' && /^-?[0-9]+n?$/.test(value)) {
+        n = BigInt(value.endsWith('n') ? value.slice(0, -1) : value);
       } else {
-        n = BigInt(value as number);
+        const got =
+          typeof value === 'string'
+            ? 'a non-decimal string'
+            : value === null
+              ? 'null'
+              : typeof value === 'number'
+                ? 'a non-integer number'
+                : typeof value;
+        throw new Error(
+          `serializeState: state field "${label}" (${type}) must be an integer ` +
+            `or a decimal integer string, got ${got}. Serializing anything else ` +
+            `would write a number the caller never supplied into the state section.`,
+        );
       }
       return encodeNum2Bin(n, 8, label);
     }
@@ -364,6 +431,8 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
               `the contract's own on-chain reader cannot parse.`,
           );
         }
+        // N-045: a wrong-width value shifts every later field for the reader.
+        assertFixedWidthValue(value, type, `serializeState: state field "${label}"`);
         return String(value);
       }
       // Variable-length types (bytes, ByteString, etc.): use push-data

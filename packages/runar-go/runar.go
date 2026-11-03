@@ -17,6 +17,7 @@ package runar
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -77,6 +78,20 @@ type Bool = bool
 
 // ByteString is an arbitrary byte sequence.
 type ByteString string
+
+// HexToBytes returns the bytes a hex string spells. It is the explicit hex
+// spelling of a ByteString literal in a .runar.go contract: the compiler reads
+// runar.HexToBytes("006a") as the two bytes 00 6a, and so does this function,
+// whereas a bare "006a" is four ASCII bytes natively and is refused by the
+// compiler (N-448). Odd length or a non-hex digit panics, as the Zig
+// runar.hexToBytes does at compile time.
+func HexToBytes(hexStr string) ByteString {
+	b, err := hex.DecodeString(hexStr)
+	if err != nil {
+		panic("runar.HexToBytes: " + err.Error())
+	}
+	return ByteString(b)
+}
 
 // PubKey is a public key (compressed or uncompressed).
 type PubKey = ByteString
@@ -495,16 +510,13 @@ func blake3Round(s *[16]uint32, m *[16]uint32) {
 // length for blake3Hash, or 64 for a full-block compress. Output is 32
 // little-endian bytes.
 func blake3CompressImpl(cv, block []byte, blockLen uint32) []byte {
+	// N-161: refuse wrong operand sizes, matching the on-chain F-114 guard
+	// and the TS interpreter (no silent pad / truncate).
 	if len(cv) != 32 {
-		// Defensive: pad / truncate to 32 bytes so a misuse doesn't panic.
-		fixed := make([]byte, 32)
-		copy(fixed, cv)
-		cv = fixed
+		panic(fmt.Sprintf("blake3Compress: chaining value must be 32 bytes, got %d", len(cv)))
 	}
 	if len(block) != 64 {
-		fixed := make([]byte, 64)
-		copy(fixed, block)
-		block = fixed
+		panic(fmt.Sprintf("blake3Compress: block must be 64 bytes, got %d", len(block)))
 	}
 
 	var h [8]uint32
@@ -566,8 +578,10 @@ func Blake3Hash(message ByteString) ByteString {
 	}
 	padded := make([]byte, 64)
 	msg := []byte(message)
+	// The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+	// padding size), so the mock must fail too rather than truncate.
 	if len(msg) > 64 {
-		msg = msg[:64]
+		panic(fmt.Sprintf("blake3Hash: message must be <= 64 bytes, got %d", len(msg)))
 	}
 	copy(padded, msg)
 	return ByteString(blake3CompressImpl(cv, padded, uint32(len(msg))))
@@ -684,6 +698,11 @@ func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
 	if len(state) != 32 {
 		panic("Sha256Finalize: state must be 32 bytes")
 	}
+	// The compiled script's two-block path pads to 120 bytes and aborts on a
+	// longer tail; returning a truncated digest here would never match it (F-142).
+	if len(remaining) > 119 {
+		panic("Sha256Finalize: remaining must be 0-119 bytes")
+	}
 
 	// Start padding: append 0x80
 	padded := append([]byte(nil), []byte(remaining)...)
@@ -721,14 +740,17 @@ func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
 // ExtractLocktime returns 0 in test mode.
 func ExtractLocktime(p SigHashPreimage) int64 { return 0 }
 
-// ExtractOutputHash returns the first 32 bytes of the preimage in test mode.
-// Tests set TxPreimage = Hash256(expectedOutputBytes) so the assertion
-// Hash256(outputs) == ExtractOutputHash(TxPreimage) passes.
-// Falls back to 32 zero bytes when the preimage is unset (nil/empty).
+// ExtractOutputHash returns the preimage's hashOutputs field in test mode:
+// the 32 bytes ending 8 bytes before the end (end-relative, matching the
+// compiled opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT
+// OP_DROP). Falls back to 32 zero bytes when the preimage is unset or
+// shorter than 40 bytes.
+// N-246: this used to echo the leading 32 bytes (nVersion + most of
+// hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188).
 func ExtractOutputHash(p SigHashPreimage) Sha256Digest {
-	if len(p) >= 32 {
+	if len(p) >= 40 {
 		result := make([]byte, 32)
-		copy(result, p[:32])
+		copy(result, p[len(p)-40:len(p)-8])
 		return Sha256Digest(result)
 	}
 	return Sha256Digest(make([]byte, 32))
@@ -793,6 +815,27 @@ func RequireOutputP2PKH(outputIndex int64, pubkeyHash ByteString, amount int64) 
 // CurrentBlockHeight is the test-mode stub for the locktime-as-height
 // shorthand. On-chain the compiler desugars to ExtractLocktime(txPreimage).
 func CurrentBlockHeight() int64 { return 0 }
+
+// ContinuationAmount is the test-mode stub for the read-only view of the
+// satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
+// compiler lowers it to the injected `_newAmount` witness, which it has
+// already bound to `>= ExtractAmount(txPreimage)`. Returns 10000 — the mock
+// input amount ExtractAmount returns, i.e. an honest continuation — unless a
+// test has set another value with SetMockContinuationAmount.
+func ContinuationAmount() int64 { return mockContinuationAmount }
+
+var mockContinuationAmount int64 = 10000
+
+// SetMockContinuationAmount sets what ContinuationAmount returns in test mode
+// and returns a func that restores the previous value. ExtractAmount stays
+// 10000, so a native test of an author rule such as
+// `ContinuationAmount() == ExtractAmount(c.TxPreimage) + bet` sets 10000 + bet
+// for the paying call and anything else for a non-paying one (N-027).
+func SetMockContinuationAmount(v int64) (restore func()) {
+	prev := mockContinuationAmount
+	mockContinuationAmount = v
+	return func() { mockContinuationAmount = prev }
+}
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -1016,14 +1059,15 @@ func BigintBigMul(a, b *big.Int) *big.Int {
 
 // BigintBigMod returns a mod b using truncated semantics (Go's `%` on
 // signed integers), matching Script's OP_MOD. For the classical
-// non-negative remainder use Safemod's big variant. Returns 0 when b
-// is zero to mirror the int64 divmod helper's graceful path.
+// non-negative remainder use Safemod's big variant. Panics when b is
+// zero (nil counts as zero): OP_MOD aborts the script, so there is no
+// value to return (N-102; same as Safemod).
 func BigintBigMod(a, b *big.Int) *big.Int {
 	if a == nil {
 		a = new(big.Int)
 	}
 	if b == nil || b.Sign() == 0 {
-		return new(big.Int)
+		panic("BigintBigMod: modulo by zero")
 	}
 	q := new(big.Int).Quo(a, b) // truncated quotient
 	r := new(big.Int).Mul(q, b)
@@ -1031,14 +1075,15 @@ func BigintBigMod(a, b *big.Int) *big.Int {
 }
 
 // BigintBigDiv returns a / b using truncated semantics (Go's integer
-// division), matching Script's OP_DIV. Returns 0 when b is zero to
-// mirror safediv's graceful path rather than panicking.
+// division), matching Script's OP_DIV. Panics when b is zero (nil counts
+// as zero): OP_DIV aborts the script, so there is no value to return
+// (N-102; same as Safediv).
 func BigintBigDiv(a, b *big.Int) *big.Int {
 	if a == nil {
 		a = new(big.Int)
 	}
 	if b == nil || b.Sign() == 0 {
-		return new(big.Int)
+		panic("BigintBigDiv: division by zero")
 	}
 	return new(big.Int).Quo(a, b)
 }
@@ -1228,15 +1273,11 @@ func Safemod(a, b int64) int64 {
 	return a % b
 }
 
-// Clamp constrains value to the range [lo, hi].
+// Clamp constrains value to the range [lo, hi]. The compiled script is
+// `<value> <lo> OP_MAX <hi> OP_MIN`, i.e. min(max(value, lo), hi), so with
+// lo > hi, hi wins (N-030).
 func Clamp(value, lo, hi int64) int64 {
-	if value < lo {
-		return lo
-	}
-	if value > hi {
-		return hi
-	}
-	return value
+	return Min(Max(value, lo), hi)
 }
 
 // Sign returns -1, 0, or 1 depending on the sign of n.
@@ -1255,6 +1296,11 @@ func Sign(n int64) int64 {
 func Pow(base, exp int64) int64 {
 	if exp < 0 {
 		panic("pow: negative exponent")
+	}
+	// The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+	// for any exponent above 32, even where the power is trivial (F-134).
+	if exp > 32 {
+		panic("pow: exponent outside the supported domain (exp > 32)")
 	}
 	r := PowBig(big.NewInt(base), big.NewInt(exp))
 	if !r.IsInt64() {
@@ -1349,15 +1395,23 @@ func Gcd(a, b int64) int64 {
 	return r.Int64()
 }
 
-// GcdBig computes the greatest common divisor in arbitrary precision.
+// GcdBig computes the greatest common divisor in arbitrary precision, as the
+// compiled script does: exactly 256 unrolled Euclid steps on |a|, |b|. When
+// those are not enough (operands beyond ~2^177) the script returns the partial
+// remainder, not the gcd, and so does this (N-030). Any int64 pair needs far
+// fewer steps, so Gcd is the true gcd.
 func GcdBig(a, b *big.Int) *big.Int {
-	if a == nil {
-		a = new(big.Int)
+	x, y := new(big.Int), new(big.Int)
+	if a != nil {
+		x.Abs(a)
 	}
-	if b == nil {
-		b = new(big.Int)
+	if b != nil {
+		y.Abs(b)
 	}
-	return new(big.Int).GCD(nil, nil, new(big.Int).Abs(a), new(big.Int).Abs(b))
+	for i := 0; i < 256 && y.Sign() != 0; i++ {
+		x, y = y, new(big.Int).Rem(x, y)
+	}
+	return x
 }
 
 // Divmod returns the quotient of a / b.
@@ -1368,19 +1422,17 @@ func Divmod(a, b int64) int64 {
 	return a / b
 }
 
-// Log2 returns the approximate floor(log2(n)).
+// Log2 returns the exact floor(log2(n)). It panics for n <= 0, where the
+// compiled script aborts (N-103).
 func Log2(n int64) int64 {
-	if n <= 0 {
-		return 0
-	}
 	return Log2Big(big.NewInt(n))
 }
 
-// Log2Big returns floor(log2(n)) for any *big.Int > 0. Returns 0 for
-// n <= 0, matching Log2's defensive behavior.
+// Log2Big returns the exact floor(log2(n)) for any *big.Int > 0. It panics
+// for n <= 0, where the compiled script aborts (N-103).
 func Log2Big(n *big.Int) int64 {
 	if n == nil || n.Sign() <= 0 {
-		return 0
+		panic("log2: non-positive input")
 	}
 	return int64(n.BitLen() - 1)
 }

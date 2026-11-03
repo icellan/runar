@@ -117,7 +117,10 @@ RSpec.describe 'BRC-100 WalletClient live endpoint', :integration do
     expect(pub_key).not_to be_empty
     # Compressed secp256k1 public keys are 66 hex chars starting with 02 or 03.
     expect(pub_key.length).to eq(66)
-    expect(pub_key[0, 2]).to be_in(%w[02 03])
+    # N-480: was `be_in(%w[02 03])`, which is not an RSpec matcher (it is a dynamic
+    # predicate matcher that calls String#in?, an ActiveSupport method this suite does not
+    # load) — it raised on the first run this spec ever had. Same assertion, real matcher.
+    expect(%w[02 03]).to include(pub_key[0, 2])
     expect(pub_key).to match(/\A[0-9a-fA-F]+\z/)
 
     # list_outputs should return an array (may be empty on a fresh wallet).
@@ -127,19 +130,6 @@ RSpec.describe 'BRC-100 WalletClient live endpoint', :integration do
       expect(out).to be_a(Hash)
       # Require at least one of the canonical fields to confirm shape.
       expect(out.keys.map(&:to_s)).to include('outpoint').or include('satoshis').or include('lockingScript')
-    end
-  end
-end
-
-# Sentinel example so the suite shows discovered-but-skipped (rather than empty)
-# in rspec output when RUNAR_WALLET_ENDPOINT is unset. Mirrors the second
-# describe block in packages/runar-sdk/src/__tests__/wallet-client.spec.ts.
-# rubocop:disable RSpec/DescribeClass
-RSpec.describe 'BRC-100 WalletClient live endpoint (skipped)' do
-  # rubocop:enable RSpec/DescribeClass
-  it 'is skipped — set RUNAR_WALLET_ENDPOINT to a BRC-100 wallet URL to enable' do
-    if ENV['RUNAR_WALLET_ENDPOINT'].to_s.empty?
-      skip 'RUNAR_WALLET_ENDPOINT not set — set it to a BRC-100 wallet URL to enable'
     end
   end
 end

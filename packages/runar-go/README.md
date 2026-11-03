@@ -45,6 +45,8 @@ import runar "github.com/icellan/runar/packages/runar-go"
 
 Requires Go 1.26+. The SDK depends on `github.com/bsv-blockchain/go-sdk` for ECDSA, BIP-143 sighash, and transaction primitives, on `golang.org/x/crypto/ripemd160` for hash160, and on `github.com/icellan/runar/compilers/go` for the frontend wrapper used by `CompileCheck`. The exact dependency list is in [go.mod](go.mod).
 
+> **Supported build path: `go.work`, not standalone `go get`.** `go.mod`'s `require` on `github.com/icellan/runar/compilers/go` and that module's own imports back into this package form a cross-module cycle that, today, is resolved only inside this monorepo's checkout, by the root `go.work` file's `use` directives for both modules. The `go get` command above — and any standalone (`GOWORK=off`) build — is **not** currently supported: the pinned `compilers/go` version is not a published tag, and this module's latest published tag predates `bn254witness` (imported by `compilers/go`'s non-test source, `compiler/groth16_wa.go`) and `sp1fri` (imported only by `compilers/go`'s own test files). If you're working inside this repo, build and test via `go.work` (the default when you `cd` into any workspace member); publishing tags that close the cycle for out-of-tree consumers is tracked separately as N-204.
+
 > Note on terminology used throughout this README: the canonical concepts (Artifact, Contract, Provider, Signer, Wallet, Call, PreparedCall, State, UTXO, Inscription) are defined once in [Section 3](#3-core-concepts) and referred to thereafter.
 
 ---
@@ -263,7 +265,7 @@ Important details:
 
 - `PrepareCall` already signs the **funding** P2PKH inputs and the **additional contract inputs** (when present) using the provided signer. Only the primary contract input's `Sig` parameters are left as 72-byte placeholders — those are the slots in `prepared.SigIndices`.
 - `Sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against; `Preimage` is the full preimage. External signers ECDSA-sign `Sighash` **directly**, with no further hashing.
-- `OpPushTxSig` is the OP_PUSH_TX DER signature over the same preimage, signed with the well-known `k=1` private key. The SDK computes this for stateful contracts; it is exposed on `PreparedCall` for inspection.
+- `PreparedCall` has no `OpPushTxSig` field: post-BUG-100 the OP_PUSH_TX signature over the preimage is derived ON-CHAIN (against the well-known `k=1` generator-point key), so there is no spender-supplied signature to inspect.
 - `FinalizeCall` re-injects the real signatures, broadcasts, and returns the same `(txid, *TransactionData, error)` tuple as `Call`.
 
 ### 7.3. BRC-100 wallet signing (`WalletProvider` + `WalletSigner`)
@@ -582,7 +584,7 @@ The reference end-to-end test for `Counter` is [`integration/go/counter_test.go`
 
 The integration suite uses `RPCProvider` (or `NewRegtestRPCProvider` for auto-mining) and the helpers in [`integration/go/helpers/`](../../integration/go/helpers) to fund wallets and sign with the test SDK. The same harness ships in [`integration/`](../../integration) for all seven SDKs.
 
-The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 70 fixtures.
+The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 80 fixtures.
 
 ---
 
@@ -628,7 +630,7 @@ provider, err := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
 
 The network must be exactly `"mainnet"` or `"testnet"`. Any other value — including the empty string — returns an error rather than defaulting, so a typo can never silently point the SDK at live mainnet.
 
-Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. Note that WoC does not return locking scripts in its UTXO list response, so `GetUtxos(...).Script` will be empty — fetch the parent transaction with `GetTransaction` if you need the script.
+Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. WoC's UTXO list response has no locking scripts, so `GetUtxos` fetches each UTXO's transaction from `/tx/{txid}/hex`, checks that it hashes to the txid and that the listed output and value exist, and returns the real `Script`. It returns an error rather than an empty script (F-040).
 
 ### `GorillaPoolProvider`
 
@@ -1157,7 +1159,7 @@ func (g *Groth16WAContract) CurrentUTXO() *UTXO
 func (g *Groth16WAContract) SetCurrentUTXO(u *UTXO)
 func (g *Groth16WAContract) LockingScript() string
 func (g *Groth16WAContract) Connect(provider Provider, signer Signer)
-func (g *Groth16WAContract) Deploy(provider Provider, signer Signer, opts DeployOptions) (string, *TransactionData, error)
+func (g *Groth16WAContract) Deploy(provider Provider, signer Signer, ownerPubKeyHex string, opts DeployOptions) (string, *TransactionData, error)
 func (g *Groth16WAContract) CallWithWitness(
 	provider Provider, signer Signer,
 	w *bn254witness.Witness,
@@ -1165,7 +1167,7 @@ func (g *Groth16WAContract) CallWithWitness(
 ) (string, *TransactionData, error)
 ```
 
-Wrapper for artifacts produced by the `runarc groth16-wa` compiler backend. The verifying key is baked into the locking script at compile time, so deploy is just "send funds to this script", and spend takes a raw witness bundle (`*bn254witness.Witness`) instead of an ABI-encoded arg list. **Panics** if constructed with a nil artifact or one that lacks `Groth16WA` metadata. [sdk_groth16.go](sdk_groth16.go).
+Wrapper for artifacts produced by the `runarc groth16-wa` compiler backend. The verifying key is baked into the locking script at compile time; the owner public key is spliced in at `Deploy` (required — an empty or invalid key, or an artifact compiled without the owner slot, is an error). Spend takes a raw witness bundle (`*bn254witness.Witness`) instead of an ABI-encoded arg list, and `CallWithWitness` appends the signer's signature over the spend: the script opens with `<ownerPubKey> OP_CHECKSIGVERIFY`, so the signer must hold the owner key, and an observed witness cannot be replayed into another transaction. **Panics** if constructed with a nil artifact or one that lacks `Groth16WA` metadata. [sdk_groth16.go](sdk_groth16.go).
 
 #### `Groth16WAMeta`
 
@@ -1349,11 +1351,10 @@ type Point = ByteString
 
 ```go
 type PreparedCall struct {
-	Sighash     string  // 64-char hex; BIP-143 hash external signers sign
-	Preimage    string  // hex; full BIP-143 preimage
-	OpPushTxSig string  // hex; OP_PUSH_TX DER sig (empty if not needed)
-	TxHex       string  // hex; built TX
-	SigIndices  []int   // user-visible arg positions awaiting external Sig values
+	Sighash    string  // 64-char hex; BIP-143 hash external signers sign
+	Preimage   string  // hex; full BIP-143 preimage
+	TxHex      string  // hex; built TX
+	SigIndices []int   // user-visible arg positions awaiting external Sig values
 	// ... unexported fields consumed by FinalizeCall
 }
 ```
@@ -1591,6 +1592,8 @@ func (tw *TokenWallet) Merge() (string, error)
 
 Convenience wrapper for fungible-token contracts that have a `transfer(sig, to)` method and a `balance` / `supply` / `amount` state field. [sdk_token_wallet.go](sdk_token_wallet.go).
 
+> **Deprecated and unsafe (N-239):** `Transfer` and `Merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/go/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 #### `ToBool`
 
 ```go
@@ -1744,7 +1747,7 @@ A: `NewLocalSigner` derives an `AddressString` with `mainnet=true`. If you need 
 
 **Q: `WhatsOnChainProvider.GetUtxos` returns UTXOs with empty `Script`.**
 
-A: Documented limitation — WoC's `/address/{addr}/unspent` endpoint does not include locking scripts. Fetch the parent transaction with `GetTransaction(utxo.Txid)` if you need the script.
+A: No longer: WoC's `/address/{addr}/unspent` endpoint has no locking scripts, so since F-040 `GetUtxos` reads each script from the verified `/tx/{txid}/hex` and returns an error if it cannot. `GetContractUtxo` still returns an empty `Script`.
 
 **Q: I want to use the SDK in async / concurrent code.**
 

@@ -83,7 +83,7 @@ module RunarCompiler
         "SHA2_192s" => _slh_mk(24, 63, 7, 14, 17),
         "SHA2_192f" => _slh_mk(24, 66, 22, 8, 33),
         "SHA2_256s" => _slh_mk(32, 64, 8, 14, 22),
-        "SHA2_256f" => _slh_mk(32, 68, 17, 8, 35),
+        "SHA2_256f" => _slh_mk(32, 68, 17, 9, 35),
       }.freeze
 
       # =================================================================
@@ -1082,8 +1082,22 @@ module RunarCompiler
           _emit_reverse_n(4).each { |op_| e.call(op_) }
         end
 
+        # F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about half
+        # of all signatures it is >= 2^63 and its minimal script-number
+        # encoding needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in 9
+        # bytes and drop the trailing (little-endian) 0x00 sign byte. Only the
+        # first conversion needs it: per-layer indices are shifted right by h'.
+        tree_addr_first_proc = lambda do |e|
+          e.call(_make_stack_op(op: "push", value: _big_int_push(9)))
+          e.call(_make_stack_op(op: "opcode", code: "OP_NUM2BIN"))
+          e.call(_make_stack_op(op: "push", value: _big_int_push(8)))
+          e.call(_make_stack_op(op: "opcode", code: "OP_SPLIT"))
+          e.call(_make_stack_op(op: "drop"))
+          _emit_reverse_n(8).each { |op_| e.call(op_) }
+        end
+
         t.copy_to_top("treeIdx", "_ti8")
-        t.raw_block(["_ti8"], "treeAddr8", &tree_addr_proc)
+        t.raw_block(["_ti8"], "treeAddr8", &(p.h - hp >= 64 ? tree_addr_first_proc : tree_addr_proc))
 
         t.copy_to_top("leafIdx", "_li4")
         t.raw_block(["_li4"], "keypair4", &keypair_addr_proc)

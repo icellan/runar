@@ -224,8 +224,10 @@ class SolParserTest {
     // require with message argument
     // -----------------------------------------------------------------
 
+    // N-019: the .sol surface has no quoted literal (the TS reference refuses it),
+    // so a require message is refused as an unexpected character, not dropped.
     @Test
-    void requireWithMessageDropsMessage() throws SolParser.ParseException {
+    void requireWithMessageIsRefused() {
         String src = """
             contract R is SmartContract {
                 int immutable x;
@@ -235,11 +237,9 @@ class SolParserTest {
                 }
             }
             """;
-        ContractNode c = SolParser.parse(src, "R.runar.sol");
-        ExpressionStatement stmt = (ExpressionStatement) c.methods().get(0).body().get(0);
-        CallExpr call = (CallExpr) stmt.expression();
-        assertEquals("assert", ((Identifier) call.callee()).name());
-        assertEquals(1, call.args().size(), "second require arg should be dropped");
+        SolParser.ParseException e = assertThrows(SolParser.ParseException.class,
+            () -> SolParser.parse(src, "R.runar.sol"));
+        assertTrue(e.getMessage().contains("Unexpected character '\"'"), e.getMessage());
     }
 
     // -----------------------------------------------------------------

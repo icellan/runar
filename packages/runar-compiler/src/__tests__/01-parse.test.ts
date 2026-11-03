@@ -724,6 +724,74 @@ describe('Pass 1: Parse', () => {
       const cmp = assertCall.args[0] as BinaryExpr;
       expect(cmp.op).toBe('===');
     });
+
+    // F-064. Every statement kind outside spec/grammar.md §9 must be REFUSED
+    // with the shared "Unsupported statement kind: <TS SyntaxKind name>"
+    // diagnostic, never dropped. The Go tier dropped all of these silently;
+    // the reference itself mishandled the bare block: `parseStatements` took
+    // the FIRST nested Block's statements in place of the method body, so
+    // `assert(x > this.a); { assert(true); }` parsed as `assert(true)` alone
+    // and the guard vanished. Proves: parse() refuses each kind and never
+    // substitutes a nested block for the body. Does not prove: later passes
+    // or other tiers (conformance/negatives/N130+ gates those).
+    describe('unsupported statement kinds (F-064)', () => {
+      const wrap = (stmt: string) => `
+        class C extends SmartContract {
+          readonly a: bigint;
+          constructor(a: bigint) { super(a); this.a = a; }
+          public unlock(x: bigint) {
+            ${stmt}
+            assert(x > this.a);
+          }
+        }
+      `;
+      const cases: Array<[string, string]> = [
+        ['while (x > 0n) { assert(false); }', 'WhileStatement'],
+        ['do { assert(false); } while (x > 0n);', 'DoStatement'],
+        ['switch (x) { case 1n: assert(false); break; default: assert(false); }', 'SwitchStatement'],
+        ['outer: for (let i = 0n; i < 2n; i++) { assert(false); }', 'LabeledStatement'],
+        ['try { assert(false); } catch (e) { assert(false); }', 'TryStatement'],
+        ['throw x;', 'ThrowStatement'],
+        ['for (const k in this) { assert(false); }', 'ForInStatement'],
+        ['for (const k of [x]) { assert(false); }', 'ForOfStatement'],
+        ['{ assert(false); }', 'Block'],
+        [';', 'EmptyStatement'],
+        ['assert(x > 1n);;', 'EmptyStatement'],
+        ['const y = x;;', 'EmptyStatement'],
+        ['break;', 'BreakStatement'],
+        ['continue;', 'ContinueStatement'],
+        ['class Inner { }', 'ClassDeclaration'],
+        ['function inner(): void { assert(false); }', 'FunctionDeclaration'],
+        ['debugger;', 'DebuggerStatement'],
+        ['with (x) { assert(false); }', 'WithStatement'],
+      ];
+      for (const [stmt, kind] of cases) {
+        it(`refuses ${kind}`, () => {
+          const errors = parse(wrap(stmt)).errors.filter(e => e.severity === 'error');
+          expect(errors.map(e => e.message)).toContain(`Unsupported statement kind: ${kind}`);
+        });
+      }
+
+      it('never substitutes a nested bare block for the method body', () => {
+        const source = `
+          class C extends SmartContract {
+            readonly a: bigint;
+            constructor(a: bigint) { super(a); this.a = a; }
+            public unlock(x: bigint) {
+              assert(x > this.a);
+              { assert(true); }
+            }
+          }
+        `;
+        const result = parse(source);
+        const errors = result.errors.filter(e => e.severity === 'error');
+        expect(errors.map(e => e.message)).toContain('Unsupported statement kind: Block');
+        const body = result.contract!.methods[0]!.body;
+        expect(body.length).toBe(1);
+        const call = (body[0] as ExpressionStatement).expression as CallExpr;
+        expect((call.args[0] as BinaryExpr).op).toBe('>');
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -870,9 +938,18 @@ describe('Pass 1: Parse', () => {
       expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
       const method = result.contract!.methods[0]!;
       const assignStmt = method.body[0]!;
-      if (assignStmt.kind === 'assignment') {
-        expect(assignStmt.target).toEqual(assignStmt.value.kind === 'binary_expr' ? assignStmt.value.left : null);
-      }
+      // F-226: every structural expectation is unconditional. The old body
+      // asserted only inside `if (assignStmt.kind === 'assignment')` and never
+      // checked the operator, so a parser that dropped the statement's kind or
+      // lowered `-=` to `+` kept this test green. Proves `this.count -= 1n`
+      // parses to `this.count = this.count - 1n` with the target reused as the
+      // left operand; does not prove anything about the other compound ops.
+      expect(assignStmt.kind).toBe('assignment');
+      if (assignStmt.kind !== 'assignment') return;
+      expect(assignStmt.value.kind).toBe('binary_expr');
+      if (assignStmt.value.kind !== 'binary_expr') return;
+      expect(assignStmt.value.op).toBe('-');
+      expect(assignStmt.target).toEqual(assignStmt.value.left);
     });
   });
 

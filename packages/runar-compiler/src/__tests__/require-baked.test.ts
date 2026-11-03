@@ -130,3 +130,81 @@ describe('requireBaked is opt-in', () => {
     expect(result.artifact!.constructorSlots!.find(s => s.name === 'tokenId')).toBeUndefined();
   });
 });
+
+/**
+ * F-111: the pre-fold reference check alone is not enough in baked mode.
+ * Constant folding (ANF) and stack-level folding/peephole can erase the only
+ * push of a baked required value — e.g. `this.source * 0n === 0n` folds to
+ * `OP_0 OP_0 OP_NUMEQUALVERIFY` — leaving no commitment to it in the script.
+ *
+ * Proves: for each refuter body, in both baked modes (property initializer and
+ * constructorArgs), compilation FAILS with the shared diagnostic; legitimate
+ * baked/template uses still compile and the baked value's push is present.
+ * Does NOT prove: that a surviving push is semantically load-bearing (a
+ * value that is pushed and compared still counts as committed), nor anything
+ * about non-TS tiers (requireBaked is a TS-compiler-only option).
+ */
+describe('requireBaked survives optimization (F-111)', () => {
+  const mk = (mode: 'init' | 'args' | 'template', body: string) => `
+import { SmartContract, assert } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly source: bigint${mode === 'init' ? ' = 1n' : ''};
+
+  constructor(${mode === 'init' ? '' : 'source: bigint'}) {
+    super(${mode === 'init' ? '' : 'source'});
+    ${mode === 'init' ? '' : 'this.source = source;'}
+  }
+
+  public m(x: bigint) {
+    ${body}
+    assert(x >= 0n);
+  }
+}
+`;
+  const opts = (mode: 'init' | 'args' | 'template') => ({
+    fileName: 'C.runar.ts',
+    requireBaked: ['source'],
+    ...(mode === 'args' ? { constructorArgs: { source: 1n } } : {}),
+  });
+
+  const ERASING_BODIES = [
+    'assert(this.source * 0n === 0n);',
+    'assert(this.source - this.source === 0n);',
+    'const k = this.source; assert(k + 1n > 1n);',
+  ];
+
+  for (const mode of ['init', 'args'] as const) {
+    for (const body of ERASING_BODIES) {
+      it(`FAILS when optimization erases the baked commitment (${mode}): ${body}`, () => {
+        const result = compile(mk(mode, body), opts(mode));
+        expect(result.success, result.artifact?.asm).toBe(false);
+        expect(result.artifact).toBeUndefined();
+        expect(result.diagnostics.map(d => d.message).join('\n')).toMatch(
+          /requireBaked property 'source' has no on-chain commitment after optimization/,
+        );
+      });
+    }
+
+    it(`passes when the baked value survives (${mode}): assert(this.source >= 1n)`, () => {
+      const result = compile(mk(mode, 'assert(this.source >= 1n);'), opts(mode));
+      expect(result.success, JSON.stringify(result.diagnostics)).toBe(true);
+      expect(result.artifact!.asm).toMatch(/^OP_1 OP_1 OP_GREATERTHANOREQUAL/);
+    });
+
+    it(`erasing bodies still compile without requireBaked (${mode}) — opt-in`, () => {
+      const { requireBaked: _unused, ...rest } = opts(mode);
+      void _unused;
+      const result = compile(mk(mode, ERASING_BODIES[0]!), rest);
+      expect(result.success, JSON.stringify(result.diagnostics)).toBe(true);
+    });
+  }
+
+  for (const body of ERASING_BODIES) {
+    it(`template mode keeps the constructor slot: ${body}`, () => {
+      const result = compile(mk('template', body), opts('template'));
+      expect(result.success, JSON.stringify(result.diagnostics)).toBe(true);
+      expect(result.artifact!.constructorSlots!.map(s => s.name)).toContain('source');
+    });
+  }
+});

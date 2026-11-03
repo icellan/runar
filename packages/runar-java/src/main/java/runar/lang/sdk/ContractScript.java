@@ -67,17 +67,34 @@ public final class ContractScript {
         List<Object> constructorArgs,
         Inscription inscription
     ) {
+        String envelope = inscription == null ? "" : inscription.toEnvelopeHex();
+        // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
+        return buildCodeScript(artifact, constructorArgs, inscription) + envelope;
+    }
+
+    /**
+     * The spliced code script WITHOUT the ordinals envelope: the template with
+     * every constructor-arg / codeSepIndex placeholder substituted and every
+     * N-051 {@code codePartLenSlots} field set to the deployed code-part
+     * length. The envelope is part of {@code _codePart}, so when
+     * {@code inscription} is non-null its length is counted in that value even
+     * though its bytes are not returned. Parity target: TS
+     * {@code RunarContract.buildCodeScript}.
+     */
+    static String buildCodeScript(
+        RunarArtifact artifact,
+        List<Object> constructorArgs,
+        Inscription inscription
+    ) {
         String tpl = artifact.scriptHex();
 
         // Build the unified list of template slot substitutions (constructor args
         // + codeSepIndex slots), then apply them in descending template
         // byte-offset order so each splice preserves earlier offsets. Mirrors
         // the Go SDK's `buildCodeScript`.
-        record Sub(int byteOffset, String encoded) {}
         List<Sub> subs = new ArrayList<>();
         for (ConstructorSlot slot : artifact.constructorSlots()) {
-            if (slot.paramIndex() >= constructorArgs.size()) continue;
-            Object arg = constructorArgs.get(slot.paramIndex());
+            Object arg = resolveConstructorArg(artifact, constructorArgs, slot.paramIndex());
             subs.add(new Sub(
                 slot.byteOffset(),
                 encodeConstructorArg(arg, paramType(artifact, slot.paramIndex()))
@@ -96,12 +113,72 @@ public final class ContractScript {
             workingHex.replace(hexOffset, hexOffset + 2, sub.encoded());
         }
 
-        StringBuilder script = new StringBuilder(workingHex.toString());
-        // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
-        if (inscription != null) {
-            script.append(inscription.toEnvelopeHex());
+        // N-051: the deploy-time code-part length pins. The inscription
+        // envelope, when present, is part of `_codePart`.
+        int envelopeLen = inscription == null ? 0 : inscription.toEnvelopeHex().length() / 2;
+        return patchCodePartLenSlots(
+            artifact, workingHex.toString(), subs, (long) workingHex.length() / 2 + envelopeLen);
+    }
+
+    /** One template placeholder substitution: the 1-byte OP_0 at {@code byteOffset} becomes {@code encoded}. */
+    record Sub(int byteOffset, String encoded) {}
+
+    /**
+     * N-051 — write the deployed code-part length into every
+     * {@code codePartLenSlots} field of a spliced code script.
+     *
+     * <p>The compiler cannot know the deployed length of a code part that bakes
+     * a variable-width readonly constructor arg (a ByteString, a bigint), so the
+     * {@code SIZE(_codePart)} equality pin carries a 4-byte little-endian field
+     * the SDK fills in. The field is fixed-width, so writing it changes no
+     * length and no offset. A wrong or missing value is fail-safe on chain
+     * (honest spends fail OP_NUMEQUAL); it is never a lower bound.
+     *
+     * @param spliced     the template with every OP_0 placeholder substituted
+     * @param subs        those substitutions, by TEMPLATE byte offset (each
+     *                    replaced one placeholder byte with {@code encoded})
+     * @param codePartLen the deployed code-part length in bytes, including any
+     *                    inscription envelope
+     */
+    static String patchCodePartLenSlots(
+        RunarArtifact artifact,
+        String spliced,
+        List<Sub> subs,
+        long codePartLen
+    ) {
+        List<RunarArtifact.CodePartLenSlot> slots = artifact.codePartLenSlots();
+        if (slots.isEmpty()) return spliced;
+        if (codePartLen < 0 || codePartLen > 0x7fffffffL) {
+            throw new IllegalArgumentException(
+                "patchCodePartLenSlots: code part length " + codePartLen + " does not fit the 4-byte pin field");
         }
-        return script.toString();
+        StringBuilder le = new StringBuilder(8);
+        for (int i = 0; i < 4; i++) le.append(String.format("%02x", (codePartLen >> (8 * i)) & 0xff));
+        String tpl = artifact.scriptHex();
+        StringBuilder out = new StringBuilder(spliced);
+        for (RunarArtifact.CodePartLenSlot slot : slots) {
+            int off = slot.byteOffset();
+            // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+            // OP_VERIFY` here; anything else means the descriptor does not
+            // describe this script.
+            boolean shaped = off >= 1
+                && (off + 7) * 2 <= tpl.length()
+                && tpl.startsWith("04", (off - 1) * 2)
+                && tpl.startsWith("819c69", (off + 4) * 2);
+            if (!shaped) {
+                throw new IllegalArgumentException(
+                    "patchCodePartLenSlots: " + artifact.contractName() + " codePartLenSlots entry at byteOffset "
+                        + off + " does not point at a verify_code_part_len length field "
+                        + "(corrupted or mismatched artifact)");
+            }
+            int shift = 0;
+            for (Sub sub : subs) {
+                if (sub.byteOffset() < off) shift += sub.encoded().length() / 2 - 1;
+            }
+            int at = (off + shift) * 2;
+            out.replace(at, at + 8, le.toString());
+        }
+        return out.toString();
     }
 
     /** Extracts the code portion of a locking script (everything before the last OP_RETURN). */
@@ -186,6 +263,26 @@ public final class ContractScript {
         var params = artifact.abi().constructor().params();
         if (paramIndex < 0 || paramIndex >= params.size()) return "bigint";
         return params.get(paramIndex).type();
+    }
+
+    /**
+     * N-223: shared out-of-range guard for every {@code constructorArgs.get(paramIndex)}
+     * read reachable from a {@link ConstructorSlot}. The constructor only checks
+     * {@code constructorArgs.size() == abi.constructor.params.size()} — it never
+     * cross-checks that every slot's {@code paramIndex} actually falls within that
+     * range. Before this fix, {@link #buildCodeScript}, {@link #resolvedCodeSepSlots},
+     * and {@code RunarContract#adjustCodeSepOffset} each silently SKIPPED a slot
+     * whose {@code paramIndex} was out of range (the placeholder byte stayed
+     * unfilled, or the offset shift was simply wrong) instead of refusing. Parity
+     * target: TS {@code RunarContract#resolveConstructorArg} (N-081 / N-223).
+     */
+    static Object resolveConstructorArg(RunarArtifact artifact, List<Object> constructorArgs, int paramIndex) {
+        if (paramIndex < 0 || paramIndex >= constructorArgs.size()) {
+            throw new IllegalArgumentException(
+                "RunarContract: constructorSlots entry for " + artifact.contractName() + " has out-of-range "
+                    + "paramIndex " + paramIndex + " (constructorArgs has " + constructorArgs.size() + " entries)");
+        }
+        return constructorArgs.get(paramIndex);
     }
 
     // ------------------------------------------------------------------
@@ -329,10 +426,11 @@ public final class ContractScript {
         byte[] le = ScriptUtils.hexToBytes(leHex);
         boolean neg = (le[le.length - 1] & 0x80) != 0;
         le[le.length - 1] &= 0x7f;
-        BigInteger mag = BigInteger.ZERO;
-        for (int i = le.length - 1; i >= 0; i--) {
-            mag = mag.shiftLeft(8).or(BigInteger.valueOf(le[i] & 0xff));
-        }
+        // N-320: one conversion. Shifting a byte in at a time is quadratic: a
+        // 1 MiB constructor arg held fromUtxo past the CPU budget.
+        byte[] be = new byte[le.length];
+        for (int i = 0; i < le.length; i++) be[i] = le[le.length - 1 - i];
+        BigInteger mag = new BigInteger(1, be);
         return neg ? mag.negate() : mag;
     }
 
@@ -366,9 +464,9 @@ public final class ContractScript {
             // Shift from constructor-arg expansions that land before this slot's
             // code-separator position in the template.
             for (ConstructorSlot cs : artifact.constructorSlots()) {
-                if (cs.byteOffset() < slot.codeSepIndex() && cs.paramIndex() < constructorArgs.size()) {
+                if (cs.byteOffset() < slot.codeSepIndex()) {
                     String encoded = encodeConstructorArg(
-                        constructorArgs.get(cs.paramIndex()),
+                        resolveConstructorArg(artifact, constructorArgs, cs.paramIndex()),
                         paramType(artifact, cs.paramIndex())
                     );
                     shift += encoded.length() / 2 - 1;

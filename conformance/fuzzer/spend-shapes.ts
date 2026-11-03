@@ -7,10 +7,10 @@
  * ------------------------
  * `packages/runar-testing/src/fuzzer/generator.ts` (`arbGeneratedContract` /
  * `arbGeneratedStatefulContract`) drives the PARITY fuzzers: its contract IR
- * (`contract-ir.ts`) has no `addOutput` node, no readonly constructor-slot
- * modelling, and — decisively — no way to state what the post-spend state
- * SHOULD be. Its consumers only ever compare tier-vs-tier hex or
- * interpreter-vs-VM accept/reject, so it never needed one.
+ * (`contract-ir.ts`) has no readonly constructor-slot modelling, and —
+ * decisively — no way to state what the post-spend state SHOULD be. Its
+ * consumers only ever compare tier-vs-tier hex or interpreter-vs-VM
+ * accept/reject, so it never needed one.
  *
  * A Spend-oracle needs the opposite: a small, fully-modelled construct space
  * where the generator KNOWS the answer before the compiler is invoked. This

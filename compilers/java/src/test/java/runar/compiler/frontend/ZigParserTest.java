@@ -2,6 +2,7 @@ package runar.compiler.frontend;
 
 import java.math.BigInteger;
 import org.junit.jupiter.api.Test;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
 import runar.compiler.ir.ast.BinaryExpr;
@@ -17,6 +18,7 @@ import runar.compiler.ir.ast.ParentClass;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
 import runar.compiler.ir.ast.PropertyAccessExpr;
+import runar.compiler.ir.ast.PropertyNode;
 import runar.compiler.ir.ast.ReturnStatement;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
@@ -160,6 +162,37 @@ class ZigParserTest {
         assertEquals(Expression.BinaryOp.ADD, rhs.op());
         assertEquals("count", ((PropertyAccessExpr) rhs.left()).property());
         assertEquals(BigInteger.ONE, ((BigIntLiteral) rhs.right()).value());
+    }
+
+    // N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+    // packages/runar-zig) for EC coordinates. Proves: it lowers to the same
+    // AST bigint as runar.Bigint, for a property and a parameter. Does NOT
+    // prove the native u256 runtime or any codegen.
+    @Test
+    void parsesBigintBigAsBigint() throws ZigParser.ParseException {
+        String src = """
+            const runar = @import("runar");
+
+            pub const BigCoord = struct {
+                pub const Contract = runar.SmartContract;
+
+                x: runar.BigintBig,
+
+                pub fn init(x: runar.BigintBig) BigCoord {
+                    return .{ .x = x };
+                }
+
+                pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+                    runar.assert(self.x == y);
+                }
+            };
+            """;
+        ContractNode c = ZigParser.parse(src, "BigCoord.runar.zig");
+        assertEquals(1, c.properties().size());
+        assertEquals(new PrimitiveType(PrimitiveTypeName.BIGINT), c.properties().get(0).type());
+        MethodNode check = c.methods().stream().filter(m -> m.name().equals("check")).findFirst().orElseThrow();
+        assertEquals(1, check.params().size());
+        assertEquals(new PrimitiveType(PrimitiveTypeName.BIGINT), check.params().get(0).type());
     }
 
     @Test
@@ -369,5 +402,116 @@ class ZigParserTest {
             () -> ZigParser.parse(src, "C.runar.zig"));
         assertTrue(e.getMessage().toLowerCase().contains("for"),
             "error must mention unsupported for-loop: " + e.getMessage());
+    }
+
+    // -----------------------------------------------------------------------
+    // F-207: bare `&`, `[_]T{...}`, and the stale property-initializer strip
+    // -----------------------------------------------------------------------
+
+    @Test
+    void bareAmpersandStripsToOperand() throws ZigParser.ParseException {
+        // A bare `&` (not part of `&.{...}`) is Zig's address-of operator
+        // used for slice coercion. It must be stripped and the real
+        // operand parsed -- exactly like `&.{...}`, like the TS
+        // reference, and like parse_zig.zig -- never manufacture a
+        // garbage Identifier("&") or desync the token stream.
+        String src = """
+            const runar = @import("runar");
+
+            pub const AmpPrefix = struct {
+                pub const Contract = runar.SmartContract;
+
+                t: i64,
+
+                pub fn init(t: i64) AmpPrefix {
+                    return .{ .t = t };
+                }
+
+                pub fn unlock(self: AmpPrefix, x: i64) void {
+                    runar.assert(&x == self.t);
+                }
+            };
+            """;
+        ContractNode c = ZigParser.parse(src, "AmpPrefix.runar.zig");
+        MethodNode unlock = c.methods().get(0);
+        CallExpr call = (CallExpr) ((ExpressionStatement) unlock.body().get(0)).expression();
+        BinaryExpr cond = (BinaryExpr) call.args().get(0);
+        Identifier left = (Identifier) cond.left();
+        assertEquals("x", left.name());
+    }
+
+    @Test
+    void inferredLengthArrayLiteral() throws ZigParser.ParseException {
+        // `[_]T{...}` is Zig's typed array literal with inferred length.
+        // It must parse as a single ArrayLiteralExpr with the given
+        // elements -- not decompose into unrelated garbage statements.
+        String src = """
+            const runar = @import("runar");
+
+            pub const InferredArray = struct {
+                pub const Contract = runar.SmartContract;
+
+                pk1: runar.PubKey,
+                pk2: runar.PubKey,
+                pk3: runar.PubKey,
+
+                pub fn init(pk1: runar.PubKey, pk2: runar.PubKey, pk3: runar.PubKey) InferredArray {
+                    return .{ .pk1 = pk1, .pk2 = pk2, .pk3 = pk3 };
+                }
+
+                pub fn unlock(self: *const InferredArray, sig1: runar.Sig, sig2: runar.Sig) void {
+                    runar.assert(runar.checkMultiSig(
+                        &[_]runar.Sig{ sig1, sig2 },
+                        &.{ self.pk1, self.pk2, self.pk3 },
+                    ));
+                }
+            };
+            """;
+        ContractNode c = ZigParser.parse(src, "InferredArray.runar.zig");
+        MethodNode unlock = c.methods().get(0);
+        assertEquals(1, unlock.body().size());
+        CallExpr call = (CallExpr) ((ExpressionStatement) unlock.body().get(0)).expression();
+        CallExpr multiSigCall = (CallExpr) call.args().get(0);
+        ArrayLiteralExpr sigArray = (ArrayLiteralExpr) multiSigCall.args().get(0);
+        assertEquals(2, sigArray.elements().size());
+    }
+
+    @Test
+    void ctorParamNameCollisionDoesNotStripUnrelatedProperty() throws ZigParser.ParseException {
+        // The parser must not strip a property's initializer merely
+        // because its NAME matches some constructor PARAMETER name. The
+        // centralized rule (AnfLower.java's constructorAssignedProperties)
+        // is keyed on the actual constructor ASSIGNMENT, not a name
+        // coincidence -- matching the TS reference, which removed this
+        // parser-level strip for exactly this reason. Here ctor param
+        // `lo` is assigned to the DIFFERENT property `renamed`; the `lo`
+        // PROPERTY is never touched by the constructor at all and must
+        // keep its own literal initializer.
+        String src = """
+            const runar = @import("runar");
+
+            pub const InitSurvives = struct {
+                pub const Contract = runar.StatefulSmartContract;
+
+                lo: i64 = 99,
+                renamed: i64 = 0,
+
+                pub fn init(lo: i64) InitSurvives {
+                    return .{ .renamed = lo };
+                }
+
+                pub fn bump(self: *InitSurvives, delta: i64) void {
+                    self.renamed = self.renamed + delta;
+                    self.addOutput(1000, self.lo, self.renamed);
+                }
+            };
+            """;
+        ContractNode c = ZigParser.parse(src, "InitSurvives.runar.zig");
+        PropertyNode loProp = c.properties().stream()
+            .filter(p -> p.name().equals("lo"))
+            .findFirst()
+            .orElseThrow();
+        assertNotNull(loProp.initializer());
+        assertEquals(BigInteger.valueOf(99), ((BigIntLiteral) loProp.initializer()).value());
     }
 }

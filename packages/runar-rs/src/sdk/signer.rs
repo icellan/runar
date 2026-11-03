@@ -4,6 +4,8 @@ use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 
+use super::oppushtx::{bip143_preimage, parse_raw_tx, sha256d};
+
 // ---------------------------------------------------------------------------
 // Signer trait
 // ---------------------------------------------------------------------------
@@ -77,13 +79,13 @@ impl LocalSigner {
 impl Signer for LocalSigner {
     fn get_public_key(&self) -> Result<String, String> {
         let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(true); // compressed
+        let point = verifying_key.to_sec1_point(true); // compressed
         Ok(bytes_to_hex(point.as_bytes()))
     }
 
     fn get_address(&self) -> Result<String, String> {
         let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(true);
+        let point = verifying_key.to_sec1_point(true);
         let pubkey_bytes = point.as_bytes();
 
         // P2PKH address = Base58Check(0x00 + RIPEMD160(SHA256(compressed_pubkey)))
@@ -106,9 +108,18 @@ impl Signer for LocalSigner {
     ) -> Result<String, String> {
         let flag = sig_hash_type.unwrap_or(SIGHASH_ALL_FORKID);
 
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.is_empty() {
+            return Err(format!(
+                "LocalSigner: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
+
         let tx_bytes = hex_to_bytes(tx_hex)
             .map_err(|e| format!("LocalSigner: invalid tx hex: {}", e))?;
-        let tx = parse_raw_tx(&tx_bytes)?;
+        let tx = parse_raw_tx(&tx_bytes).map_err(|e| format!("LocalSigner: {}", e))?;
 
         if input_index >= tx.inputs.len() {
             return Err(format!(
@@ -120,7 +131,8 @@ impl Signer for LocalSigner {
         let subscript_bytes = hex_to_bytes(subscript)
             .map_err(|e| format!("LocalSigner: invalid subscript hex: {}", e))?;
 
-        let sighash = bip143_sighash(&tx, input_index, &subscript_bytes, satoshis as u64, flag);
+        // F-137: the SDK's one BIP-143 builder (oppushtx.rs).
+        let sighash = sha256d(&bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, flag));
 
         let (sig, _) = self.signing_key.sign_prehash(&sighash)
             .map_err(|e| format!("LocalSigner: ECDSA signing failed: {}", e))?;
@@ -129,188 +141,6 @@ impl Signer for LocalSigner {
         let mut result = der_bytes.as_bytes().to_vec();
         result.push(flag as u8);
         Ok(bytes_to_hex(&result))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BIP-143 sighash computation
-// ---------------------------------------------------------------------------
-
-fn sha256d(data: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(data);
-    let second = Sha256::digest(first);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&second);
-    out
-}
-
-fn bip143_sighash(
-    tx: &ParsedTx,
-    input_index: usize,
-    subscript: &[u8],
-    satoshis: u64,
-    sig_hash_type: u32,
-) -> [u8; 32] {
-    // hashPrevouts = SHA256d(all outpoints)
-    let mut prevouts_data = Vec::new();
-    for inp in &tx.inputs {
-        prevouts_data.extend_from_slice(&inp.prev_txid_bytes);
-        prevouts_data.extend_from_slice(&inp.prev_output_index.to_le_bytes());
-    }
-    let hash_prevouts = sha256d(&prevouts_data);
-
-    // hashSequence = SHA256d(all sequences)
-    let mut sequence_data = Vec::new();
-    for inp in &tx.inputs {
-        sequence_data.extend_from_slice(&inp.sequence.to_le_bytes());
-    }
-    let hash_sequence = sha256d(&sequence_data);
-
-    // hashOutputs = SHA256d(all outputs)
-    let mut outputs_data = Vec::new();
-    for out in &tx.outputs {
-        outputs_data.extend_from_slice(&out.satoshis.to_le_bytes());
-        write_var_int(&mut outputs_data, out.script.len() as u64);
-        outputs_data.extend_from_slice(&out.script);
-    }
-    let hash_outputs = sha256d(&outputs_data);
-
-    // BIP-143 preimage
-    let input = &tx.inputs[input_index];
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&tx.version.to_le_bytes());
-    preimage.extend_from_slice(&hash_prevouts);
-    preimage.extend_from_slice(&hash_sequence);
-    preimage.extend_from_slice(&input.prev_txid_bytes);
-    preimage.extend_from_slice(&input.prev_output_index.to_le_bytes());
-    write_var_int(&mut preimage, subscript.len() as u64);
-    preimage.extend_from_slice(subscript);
-    preimage.extend_from_slice(&satoshis.to_le_bytes());
-    preimage.extend_from_slice(&input.sequence.to_le_bytes());
-    preimage.extend_from_slice(&hash_outputs);
-    preimage.extend_from_slice(&tx.locktime.to_le_bytes());
-    preimage.extend_from_slice(&sig_hash_type.to_le_bytes());
-
-    sha256d(&preimage)
-}
-
-// ---------------------------------------------------------------------------
-// Minimal raw transaction parser
-// ---------------------------------------------------------------------------
-
-struct ParsedInput {
-    prev_txid_bytes: [u8; 32], // raw internal byte order
-    prev_output_index: u32,
-    sequence: u32,
-}
-
-struct ParsedOutput {
-    satoshis: u64,
-    script: Vec<u8>,
-}
-
-struct ParsedTx {
-    version: u32,
-    inputs: Vec<ParsedInput>,
-    outputs: Vec<ParsedOutput>,
-    locktime: u32,
-}
-
-fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
-    let mut offset = 0;
-
-    let read = |offset: &mut usize, n: usize| -> Result<&[u8], String> {
-        if *offset + n > bytes.len() {
-            return Err("LocalSigner: transaction hex too short".to_string());
-        }
-        let slice = &bytes[*offset..*offset + n];
-        *offset += n;
-        Ok(slice)
-    };
-
-    let read_u32_le = |offset: &mut usize| -> Result<u32, String> {
-        let b = read(offset, 4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-
-    let read_u64_le = |offset: &mut usize| -> Result<u64, String> {
-        let b = read(offset, 8)?;
-        Ok(u64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
-    };
-
-    let read_var_int = |offset: &mut usize| -> Result<u64, String> {
-        let first = read(offset, 1)?[0];
-        match first {
-            0..=0xfc => Ok(first as u64),
-            0xfd => {
-                let b = read(offset, 2)?;
-                Ok(u16::from_le_bytes([b[0], b[1]]) as u64)
-            }
-            0xfe => {
-                let b = read(offset, 4)?;
-                Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64)
-            }
-            0xff => {
-                let b = read(offset, 8)?;
-                Ok(u64::from_le_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ]))
-            }
-        }
-    };
-
-    let version = read_u32_le(&mut offset)?;
-
-    let input_count = read_var_int(&mut offset)?;
-    let mut inputs = Vec::new();
-    for _ in 0..input_count {
-        let txid_slice = read(&mut offset, 32)?;
-        let mut prev_txid_bytes = [0u8; 32];
-        prev_txid_bytes.copy_from_slice(txid_slice);
-        let prev_output_index = read_u32_le(&mut offset)?;
-        let script_len = read_var_int(&mut offset)?;
-        let _ = read(&mut offset, script_len as usize)?; // skip scriptSig
-        let sequence = read_u32_le(&mut offset)?;
-        inputs.push(ParsedInput {
-            prev_txid_bytes,
-            prev_output_index,
-            sequence,
-        });
-    }
-
-    let output_count = read_var_int(&mut offset)?;
-    let mut outputs = Vec::new();
-    for _ in 0..output_count {
-        let satoshis = read_u64_le(&mut offset)?;
-        let script_len = read_var_int(&mut offset)?;
-        let script = read(&mut offset, script_len as usize)?.to_vec();
-        outputs.push(ParsedOutput { satoshis, script });
-    }
-
-    let locktime = read_u32_le(&mut offset)?;
-
-    Ok(ParsedTx {
-        version,
-        inputs,
-        outputs,
-        locktime,
-    })
-}
-
-fn write_var_int(buf: &mut Vec<u8>, n: u64) {
-    if n < 0xfd {
-        buf.push(n as u8);
-    } else if n <= 0xffff {
-        buf.push(0xfd);
-        buf.extend_from_slice(&(n as u16).to_le_bytes());
-    } else if n <= 0xffff_ffff {
-        buf.push(0xfe);
-        buf.extend_from_slice(&(n as u32).to_le_bytes());
-    } else {
-        buf.push(0xff);
-        buf.extend_from_slice(&n.to_le_bytes());
     }
 }
 
@@ -415,6 +245,14 @@ impl Signer for ExternalSigner {
         satoshis: i64,
         sig_hash_type: Option<u32>,
     ) -> Result<String, String> {
+        // N-041: the subscript is the BIP-143 scriptCode. An empty one yields
+        // a signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if subscript.is_empty() {
+            return Err(format!(
+                "ExternalSigner.sign: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
         (self.sign_fn)(tx_hex, input_index, subscript, satoshis, sig_hash_type)
     }
 }
@@ -497,6 +335,18 @@ mod tests {
              00000000",
             "00".repeat(32)
         )
+    }
+
+    // F-040: an empty subscript (what WoC's get_utxos used to return) is the
+    // BIP-143 scriptCode of a signature no OP_CHECKSIG accepts, so sign must
+    // refuse it. Proves the refusal; the Spend.validate harm demo is in TS.
+    #[test]
+    fn f040_local_signer_refuses_empty_subscript() {
+        let signer = LocalSigner::new(PRIV_KEY_1).unwrap();
+        let err = signer
+            .sign(&minimal_tx_hex(), 0, "", 1000, None)
+            .expect_err("LocalSigner.sign with an empty subscript must fail");
+        assert!(err.contains("empty subscript"), "error: {}", err);
     }
 
     // --- Constructor ---
@@ -651,5 +501,25 @@ mod tests {
         assert_eq!(signer.get_public_key().unwrap(), "02aabb");
         assert_eq!(signer.get_address().unwrap(), "myaddr");
         assert_eq!(signer.sign("tx", 0, "51", 100, None).unwrap(), "sig_hex");
+    }
+
+    // N-041: ExternalSigner passed an empty subscript (BIP-143 scriptCode)
+    // straight to its callback. Proves it now refuses one without calling out;
+    // does not prove anything about what the external signer does.
+    #[test]
+    fn n041_external_signer_refuses_empty_subscript() {
+        let called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let c = called.clone();
+        let signer = ExternalSigner::new(
+            || Ok("02aabb".to_string()),
+            || Ok("myaddr".to_string()),
+            move |_tx, _idx, _sub, _sats, _sht| {
+                c.set(true);
+                Ok("sig_hex".to_string())
+            },
+        );
+        let err = signer.sign("tx", 0, "", 100, None).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
+        assert!(!called.get(), "callback invoked with an empty subscript");
     }
 }

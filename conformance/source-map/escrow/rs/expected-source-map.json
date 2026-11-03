@@ -31,24 +31,6 @@
       "column": 8
     },
     {
-      "opcodeIndex": 10,
-      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
-      "line": 42,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 11,
-      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
-      "line": 42,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 12,
-      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
-      "line": 42,
-      "column": 8
-    },
-    {
       "opcodeIndex": 13,
       "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
       "line": 48,
@@ -74,12 +56,6 @@
     },
     {
       "opcodeIndex": 17,
-      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
-      "line": 49,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 18,
       "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
       "line": 49,
       "column": 8

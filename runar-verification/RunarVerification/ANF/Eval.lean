@@ -673,7 +673,7 @@ def params128f : SlhDsaParams := mkParams 16 66 22 6  33
 def params192s : SlhDsaParams := mkParams 24 63 7  14 17
 def params192f : SlhDsaParams := mkParams 24 66 22 8  33
 def params256s : SlhDsaParams := mkParams 32 64 8  14 22
-def params256f : SlhDsaParams := mkParams 32 68 17 8  35
+def params256f : SlhDsaParams := mkParams 32 68 17 9  35
 
 /-- Read byte `i` of `b`, or `0` if out of bounds. -/
 @[inline] def byteAt (b : ByteArray) (i : Nat) : Nat :=
@@ -1055,7 +1055,7 @@ def verifySLHDSA_SHA2_192f (msg sig pk : ByteArray) : Bool :=
 def verifySLHDSA_SHA2_256s (msg sig pk : ByteArray) : Bool :=
   SlhDsa.slhDsaVerifyImpl SlhDsa.params256s msg sig pk
 
-/-- FIPS 205 SLH-DSA-SHA2-256f verifier (n=32, h=68, d=17, a=8, k=35). -/
+/-- FIPS 205 SLH-DSA-SHA2-256f verifier (n=32, h=68, d=17, a=9, k=35). -/
 def verifySLHDSA_SHA2_256f (msg sig pk : ByteArray) : Bool :=
   SlhDsa.slhDsaVerifyImpl SlhDsa.params256f msg sig pk
 
@@ -1920,7 +1920,7 @@ def evalValue (s : State) : ANFValue → EvalResult (Value × State)
       -- carry the compiled artifact's `codePart`, so it returns an
       -- opaque payload.
       .ok (.vOpaque ByteArray.empty, s)
-  | .checkPreimage preimage => do
+  | .checkPreimage preimage _ => do
       let pv ← lookupRef s preimage
       match pv.asBytes? with
       | some bytes => .ok (.vBool (Crypto.checkPreimage bytes), s)
@@ -2183,7 +2183,7 @@ def evalValueP (methods : List ANFMethod) (s : State) : ANFValue → EvalResult 
       return (v, s.setProp name v)
   | .getStateScript =>
       .ok (.vOpaque ByteArray.empty, s)
-  | .checkPreimage preimage => do
+  | .checkPreimage preimage _ => do
       let pv ← lookupRef s preimage
       match pv.asBytes? with
       | some bytes => .ok (.vBool (Crypto.checkPreimage bytes), s)
@@ -2318,7 +2318,7 @@ theorem evalValueP_eq_evalValue_of_noMethodCall
     | assert ref => intro _; rw [evalValueP, evalValue]
     | updateProp name ref => intro _; rw [evalValueP, evalValue]
     | getStateScript => intro _; rw [evalValueP, evalValue]
-    | checkPreimage preimage => intro _; rw [evalValueP, evalValue]
+    | checkPreimage preimage _ => intro _; rw [evalValueP, evalValue]
     | deserializeState preimage => intro _; rw [evalValueP, evalValue]
     | addOutput sats sv pre => intro _; rw [evalValueP, evalValue]
     | addRawOutput sats sb => intro _; rw [evalValueP, evalValue]

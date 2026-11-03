@@ -32,6 +32,26 @@
  *     auto-injected `checkPreimage` + `OP_CODESEPARATOR` + (optional) user
  *     `checkSig`, i.e. the exact BUG-100 on-chain state binding.
  *
+ * What the stateful witness checks WITHOUT trusting the SDK (N-211), and what
+ * it still takes from it. Both transactions are built by `RunarContract`, so
+ * the oracle shares the SDK's transaction modelling; it is independent of it
+ * only where stated here:
+ *   - the verdict: `Spend` recomputes the real BIP-143 sighash from the raw
+ *     transaction, so an SDK-built preimage, continuation state or output set
+ *     that disagrees with the compiled script is rejected, whatever the SDK
+ *     believed. `tamperOutput` shows that binding is not vacuous;
+ *   - the state VALUE, when the spec pins `expectedState` (decoded from the
+ *     call tx's bytes, compared with a hand-written value by the caller);
+ *   - the fields the spec controls — spent outpoint, nLockTime, input-0
+ *     nSequence, deploy and continuation amounts — audited from the raw
+ *     transaction against the options (`auditCallShape` / `auditDeployShape`).
+ * Still SDK-modelled and seen only through the verdict: the unlocking-script
+ * layout and its implicit parameters (`_changePKH`, `_changeAmount`,
+ * `_newAmount`, preimage, `_codePart`, selector), the change output and fee,
+ * funding-input choice, and the deploy's constructor-argument splicing and
+ * initial-state serialisation. A mistake there that still yields a
+ * consensus-valid transaction is NOT detected by this oracle.
+ *
  * A near-miss (wrong key, or a tampered continuation output) MUST make `Spend`
  * reject. Because the ANF interpreter models crypto with mocks it cannot model
  * a crypto rejection, so a crypto near-miss is asserted as a script-only
@@ -43,7 +63,6 @@ import {
   PrivateKey,
   LockingScript,
   UnlockingScript,
-  Spend,
   Transaction,
   Hash,
   TransactionSignature,
@@ -58,9 +77,11 @@ import {
   detachUnlockingScript,
 } from 'runar-sdk';
 import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
+import { STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 import { TestContract } from '../test-contract.js';
 import { TEST_KEYS } from '../test-keys.js';
 import { encodeScriptNumber, hexToBytes, bytesToHex } from '../vm/utils.js';
+import { newConsensusSpend, CONSENSUS_SPEND_CONTEXT } from '../consensus-spend.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,6 +155,11 @@ function privateKeyOf(name: string): PrivateKey {
 
 function encodePushData(data: Uint8Array): Uint8Array {
   if (data.length === 0) return new Uint8Array([0x00]);
+  // Minimal push (consensus MINIMALDATA): a single byte 0x01..0x10 is OP_1..OP_16
+  // and 0x81 is OP_1NEGATE. Same stack item as the 1-byte data push, which the
+  // strict Spend rejects (F-055).
+  if (data.length === 1 && data[0]! >= 0x01 && data[0]! <= 0x10) return new Uint8Array([0x50 + data[0]!]);
+  if (data.length === 1 && data[0] === 0x81) return new Uint8Array([0x4f]);
   if (data.length <= 75) {
     const r = new Uint8Array(1 + data.length);
     r[0] = data.length;
@@ -207,6 +233,13 @@ export interface StatelessSignedOptions {
   constructorArgs: Record<string, bigint | boolean | string>;
   /** Run the ANF interpreter too (source-vs-script agreement). Default true. */
   checkInterpreter?: boolean;
+  /**
+   * Near-miss knob: rebuild the unlocking script from the encoded pushes (one
+   * hex push per arg, then the method selector when there is one). Used to
+   * hand the engine a deliberately malformed witness (non-push-only,
+   * non-minimal push, high-S, extra stack item) of an otherwise valid spend.
+   */
+  tamperUnlocking?: (pushesHex: string[]) => string;
 }
 
 function findPublicMethod(artifact: RunarArtifact, name: string): ABIMethod {
@@ -244,17 +277,13 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
   // subscript is the whole script). All checkSig / checkMultiSig ops in a
   // single-input spend sign this same digest.
   const scope = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
+  // F-055: version 1 (CONSENSUS_SPEND_CONTEXT), the version every SDK-built
+  // transaction carries; version 2 would put the Spend below in relaxed mode.
   const preimageBytes = TransactionSignature.formatBytes({
-    sourceTXID: '00'.repeat(32),
-    sourceOutputIndex: 0,
-    sourceSatoshis: 100000,
-    transactionVersion: 2,
+    ...CONSENSUS_SPEND_CONTEXT,
     otherInputs: [],
     outputs: [],
-    inputIndex: 0,
     subscript: lockingScript,
-    inputSequence: 0xffffffff,
-    lockTime: 0,
     scope,
   });
   // OP_CHECKSIG computes hash256(preimage) = sha256(sha256(preimage)); sign()
@@ -284,25 +313,21 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
   if (publicIdx !== -1 && publicMethods.length > 1) {
     pushes.push(encodePushData(encodeScriptNumber(BigInt(publicIdx))));
   }
-  const unlockingHex = bytesToHex(concat(pushes));
+  const unlockingHex = opts.tamperUnlocking
+    ? opts.tamperUnlocking(pushes.map(bytesToHex))
+    : bytesToHex(concat(pushes));
 
   // Execute on the real @bsv/sdk Spend interpreter.
   let vmAccepted = false;
   let vmError: string | undefined;
   let reachedEngine = false;
   try {
-    const spend = new Spend({
-      sourceTXID: '00'.repeat(32),
-      sourceOutputIndex: 0,
-      sourceSatoshis: 100000,
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
       lockingScript,
-      transactionVersion: 2,
       otherInputs: [],
       outputs: [],
       unlockingScript: UnlockingScript.fromHex(unlockingHex),
-      inputIndex: 0,
-      inputSequence: 0xffffffff,
-      lockTime: 0,
     });
     // The engine is now running: a subsequent false/throw is a genuine script
     // rejection, not a harness error before the guard ran.
@@ -346,6 +371,79 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
 }
 
 // ---------------------------------------------------------------------------
+// Precompiled-hex execution (N-314)
+// ---------------------------------------------------------------------------
+
+export interface PrecompiledHexOptions {
+  /** The committed locking script (e.g. a fixture's `expected-script.hex`). */
+  scriptHex: string;
+  /** The committed ANF IR (`expected-ir.json`) — read ONLY for the public
+   *  methods' parameter types (unlocking-push encoding) and dispatch order. */
+  irJson: string;
+  method: string;
+  args: (bigint | boolean | Uint8Array)[];
+}
+
+/**
+ * Execute PRECOMPILED script bytes on the real `@bsv/sdk` Spend (strict,
+ * version-1 consensus rules) — no compiler runs. This is the oracle for a
+ * fixture whose codegen exists only in a non-TS tier (the Go-only BN254
+ * family): the committed golden is executed exactly as stamped, so its
+ * accept/reject verdict is evidence about those bytes and not about a fresh
+ * TS compile of the same source.
+ *
+ * Refused (throws) rather than guessed: an IR with properties or a non-
+ * `SmartContract` parent (its golden would be a template with constructor
+ * slots, or need a tx-context preimage, neither of which this runner builds),
+ * an unknown method, or an arg-count mismatch.
+ */
+export function runPrecompiledHexSpend(opts: PrecompiledHexOptions): RealExecResult {
+  const ir = JSON.parse(opts.irJson) as {
+    parentClass?: string;
+    properties?: unknown[];
+    methods: { name: string; isPublic: boolean; params: ABIParam[] }[];
+  };
+  if (ir.parentClass !== 'SmartContract' || (ir.properties ?? []).length > 0) {
+    throw new Error(
+      'runPrecompiledHexSpend: only a constructor-less SmartContract golden is the complete ' +
+        `locking script (parentClass=${ir.parentClass}, ${(ir.properties ?? []).length} properties)`,
+    );
+  }
+  const publicMethods = ir.methods.filter((m) => m.isPublic);
+  const publicIdx = publicMethods.findIndex((m) => m.name === opts.method);
+  if (publicIdx === -1) throw new Error(`runPrecompiledHexSpend: no public method '${opts.method}'`);
+  const method = publicMethods[publicIdx]!;
+  if (opts.args.length !== method.params.length) {
+    throw new Error(
+      `arg count mismatch for ${opts.method}: IR declares ${method.params.length}, got ${opts.args.length}`,
+    );
+  }
+  const pushes = method.params.map((param, i) => encodeConcrete(opts.args[i]!, param));
+  if (publicMethods.length > 1) pushes.push(encodePushData(encodeScriptNumber(BigInt(publicIdx))));
+
+  const lockingHex = opts.scriptHex.trim().toLowerCase();
+  const unlockingHex = bytesToHex(concat(pushes));
+  let vmAccepted = false;
+  let vmError: string | undefined;
+  let reachedEngine = false;
+  try {
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
+      lockingScript: LockingScript.fromHex(lockingHex),
+      otherInputs: [],
+      outputs: [],
+      unlockingScript: UnlockingScript.fromHex(unlockingHex),
+    });
+    reachedEngine = true;
+    vmAccepted = spend.validate();
+  } catch (e) {
+    vmAccepted = false;
+    vmError = e instanceof Error ? e.message : String(e);
+  }
+  return { vmAccepted, vmError, lockingHex, unlockingHex, reachedEngine };
+}
+
+// ---------------------------------------------------------------------------
 // Stateful continuation execution (BUG-100 class)
 // ---------------------------------------------------------------------------
 
@@ -380,6 +478,95 @@ export interface StatefulSpendOptions {
   /** Near-miss: after building a valid call, tamper the continuation output so
    *  the on-chain checkPreimage binding must fail. */
   tamperOutput?: boolean;
+  /** Satoshis the deploy locks in the contract output (SDK default when
+   *  unset). F-024: a value-conservation spec needs an input worth more than
+   *  the continuation it tries to build. */
+  deploySatoshis?: number;
+  /**
+   * N-045 near-miss: build the CALL with an "attacker SDK" that believes the
+   * named fixed-width types have these byte widths (e.g. `{ Sha256: 33 }`).
+   * The SDK refuses a wrong-width fixed-width argument or state value
+   * (defence in depth), but an attacker is not bound by our SDK, so a spec
+   * that wants the covenant's own on-chain width check to be the thing that
+   * rejects needs this. Implemented by temporarily overriding the shared
+   * `STATE_FIELD_WIDTHS` entries — the only table those SDK refusals consult —
+   * for the duration of the call; the deploy is unaffected. The bytes built
+   * are exactly what a hand-built transaction would carry.
+   */
+  attackerFieldWidths?: Record<string, number>;
+  /**
+   * N-051 near-miss: claim a TRUNCATED `_codePart`. After the honest deploy,
+   * the call is built as if the contract's code part ended at byte `at` of
+   * the first occurrence of the readonly value `within` (hex) in the deployed
+   * code — a byte that must be 0x6a, so clause 8b's `rest[0] == 0x6a` is
+   * satisfied by the script's own bytes. The unlocking `_codePart` push and
+   * the continuation (`claimed || 6a || state`) both use the claimed prefix;
+   * the sighash still commits to the real deployed script. Only the
+   * `SIZE(_codePart)` equality pin can reject it.
+   */
+  truncatedCodePart?: { within: string; at: number };
+  /**
+   * F-134-FU near-miss: build the CALL as an attacker who does not run the
+   * SDK's local ANF interpreter and instead commits the continuation state
+   * named here (merged over the pre-call state; `{}` keeps it unchanged).
+   *
+   * Since F-134 the SDK interpreter refuses wherever the compiled script would
+   * abort (pow exponent > 32, zero divisor, ...), so `RunarContract.call`
+   * never builds such a transaction. That is the right default for users, but
+   * an attacker is not bound by our SDK, and a spec that wants the SCRIPT's
+   * own guard to be the thing that rejects needs the transaction to exist.
+   * Implemented by hiding `artifact.anf` for the duration of the call (the
+   * one input the SDK's pre-check reads) and passing the state as `newState`;
+   * the deploy is unaffected and `anf` is restored afterwards. Data/raw
+   * outputs the method would add are NOT built on this path. Choose the
+   * state the guard-less script would commit, so the guard is the only thing
+   * that can reject.
+   */
+  attackerNewState?: Record<string, unknown>;
+}
+
+/** Run `fn` with the artifact's ANF hidden from the SDK when `attacker` is
+ *  set (see `StatefulSpendOptions.attackerNewState`). */
+async function withoutLocalInterpreter<T>(
+  artifact: { anf?: unknown },
+  attacker: boolean,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!attacker) return fn();
+  const saved = artifact.anf;
+  if (saved === undefined) {
+    throw new Error('attackerNewState: artifact has no ANF, so there is no SDK pre-check to bypass');
+  }
+  artifact.anf = undefined;
+  try {
+    return await fn();
+  } finally {
+    artifact.anf = saved;
+  }
+}
+
+/** Run `fn` with the named STATE_FIELD_WIDTHS entries overridden (see
+ *  `StatefulSpendOptions.attackerFieldWidths`). */
+async function withAttackerFieldWidths<T>(
+  widths: Record<string, number> | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!widths) return fn();
+  const table = STATE_FIELD_WIDTHS as Record<string, { size: number; encoding: string }>;
+  const saved = new Map<string, { size: number; encoding: string } | undefined>();
+  for (const [type, size] of Object.entries(widths)) {
+    const orig = table[type];
+    if (orig?.encoding !== 'raw') {
+      throw new Error(`attackerFieldWidths: ${type} is not a raw fixed-width state type`);
+    }
+    saved.set(type, orig);
+    table[type] = { size, encoding: orig.encoding };
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [type, orig] of saved) table[type] = orig!;
+  }
 }
 
 function mutateLastByte(hex: string): string {
@@ -411,7 +598,10 @@ function validateSpend(
         : o.lockingScript;
     return { lockingScript: script, satoshis: o.satoshis ?? 0 };
   });
-  const spend = new Spend({
+  // F-055: `newConsensusSpend` refuses a version > 1 transaction rather than
+  // judge it under @bsv/sdk's relaxed rule set. The version cannot simply be
+  // overridden to 1 here: it is part of the BIP-143 preimage the spend signed.
+  const spend = newConsensusSpend({
     sourceTXID: input.sourceTXID!,
     sourceOutputIndex: input.sourceOutputIndex,
     sourceSatoshis: sourceOutput.satoshis!,
@@ -464,6 +654,52 @@ export function validateContractInput(
   return validateSpend(tx, inputIdx, sourceTx, sourceOutputIdx, false);
 }
 
+/**
+ * N-211: SDK-independent audit of the transaction fields a stateful witness
+ * spec controls. `runStatefulSpend` builds both transactions through
+ * `RunarContract`, and the Spend verdict alone cannot tell "the SDK built the
+ * tx the spec asked for" from "the SDK built some other tx that is also
+ * valid" (e.g. a `call()` that ignores `satoshis` keeps the old amount, which
+ * the `>=` value rule accepts). These checks read the raw `@bsv/sdk`
+ * transaction and compare it with `opts` only — no `runar-sdk` helper is
+ * consulted — and throw on mismatch.
+ */
+function shapeFault(msg: string): never {
+  throw new Error(`N-211 SDK tx-shape audit: ${msg}`);
+}
+
+function auditDeployShape(deployTx: Transaction, opts: StatefulSpendOptions): void {
+  const out = deployTx.outputs[0];
+  if (!out) shapeFault('deploy tx has no output 0 (the contract output)');
+  if (opts.deploySatoshis !== undefined && out.satoshis !== opts.deploySatoshis) {
+    shapeFault(`deploy output 0 carries ${out.satoshis} sats, spec asked for ${opts.deploySatoshis}`);
+  }
+}
+
+function auditCallShape(callTx: Transaction, deployTx: Transaction, opts: StatefulSpendOptions): void {
+  const in0 = callTx.inputs[0];
+  if (!in0) shapeFault('call tx has no input 0 (the contract input)');
+  const deployTxid = deployTx.id('hex');
+  if (in0.sourceTXID !== deployTxid || in0.sourceOutputIndex !== 0) {
+    shapeFault(`call input 0 spends ${in0.sourceTXID}:${in0.sourceOutputIndex}, not the deployed ${deployTxid}:0`);
+  }
+  const wantLockTime = opts.lockTime ?? 0;
+  if (callTx.lockTime !== wantLockTime) {
+    shapeFault(`call tx nLockTime is ${callTx.lockTime}, spec asked for ${wantLockTime}`);
+  }
+  // A non-zero nLockTime is only enforced by consensus when some input is
+  // non-final, hence the 0xfffffffe default; an explicit `sequence` wins.
+  const wantSequence = opts.sequence ?? (wantLockTime !== 0 ? 0xfffffffe : 0xffffffff);
+  if ((in0.sequence ?? 0xffffffff) !== wantSequence) {
+    shapeFault(`call input 0 nSequence is ${in0.sequence}, spec asked for ${wantSequence}`);
+  }
+  if (opts.satoshis !== undefined && callTx.outputs[0]?.satoshis !== opts.satoshis) {
+    shapeFault(
+      `continuation output 0 carries ${callTx.outputs[0]?.satoshis} sats, spec asked for ${opts.satoshis}`,
+    );
+  }
+}
+
 export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<RealExecResult> {
   const compiled = compile(opts.source, { fileName: opts.fileName });
   if (!compiled.artifact) {
@@ -503,8 +739,23 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
   });
 
   const contract = new RunarContract(artifact, opts.constructorArgs);
-  await contract.deploy(provider, signer, {});
+  await contract.deploy(provider, signer, opts.deploySatoshis !== undefined ? { satoshis: opts.deploySatoshis } : {});
   const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
+  auditDeployShape(deployTx, opts);
+
+  if (opts.truncatedCodePart) {
+    const trueCode = contract.getCodePartHex();
+    const at = trueCode.indexOf(opts.truncatedCodePart.within.toLowerCase());
+    if (at < 0 || at % 2 !== 0) {
+      throw new Error('truncatedCodePart: readonly value not found in the deployed code part');
+    }
+    const cut = at / 2 + opts.truncatedCodePart.at;
+    if (trueCode.slice(cut * 2, cut * 2 + 2) !== '6a') {
+      throw new Error(`truncatedCodePart: deployed byte ${cut} is not 0x6a`);
+    }
+    // The SDK takes `_codePart` and the continuation's code from `_codeScript`.
+    (contract as unknown as { _codeScript: string })._codeScript = trueCode.slice(0, cut * 2);
+  }
 
   let vmAccepted = false;
   let vmError: string | undefined;
@@ -530,11 +781,15 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
       sequence?: number;
       satoshis?: number;
       dryRun?: boolean;
+      newState?: Record<string, unknown>;
     } = { dryRun: true };
+    if (opts.attackerNewState !== undefined) callOpts.newState = opts.attackerNewState;
     if (opts.lockTime !== undefined) callOpts.locktime = opts.lockTime;
     if (opts.sequence !== undefined) callOpts.sequence = opts.sequence;
     if (opts.satoshis !== undefined) callOpts.satoshis = opts.satoshis;
-    await contract.call(opts.method, opts.args, provider, signer, callOpts);
+    await withAttackerFieldWidths(opts.attackerFieldWidths, () =>
+      withoutLocalInterpreter(artifact, opts.attackerNewState !== undefined, () =>
+        contract.call(opts.method, opts.args, provider, signer, callOpts)));
     callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
     // We have a broadcast call tx to validate: a subsequent reject is a genuine
     // script-guard rejection, not an SDK error before the guard ran (audit #12).
@@ -564,6 +819,11 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
       reachedEngine = true;
     }
   }
+
+  // N-211: outside the verdict try/catch on purpose — a mismatch is a harness
+  // fault (the SDK built a different tx from the one the spec describes) and
+  // must not be laundered into `vmAccepted = false`.
+  if (callTx) auditCallShape(callTx, deployTx, opts);
 
   // Independent readback of the state VALUE: decode the continuation output's
   // state straight from the on-chain call tx bytes (byte layout only, NOT the

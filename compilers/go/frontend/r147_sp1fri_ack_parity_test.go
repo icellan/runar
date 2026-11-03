@@ -20,6 +20,11 @@ import "testing"
 // Frontend parity is this project's first invariant, and a directive honoured
 // on seven of nine surfaces is a violation of it whichever direction the odd
 // ones lean.
+//
+// F-007 removed the directive (and stampSP1FriAck) outright: the SP1 FRI
+// verifier is not implemented for v1 and is refused on every surface. The
+// tests below keep the per-surface sources and now pin that the old directive
+// is inert on each of them.
 
 const ackDirective = "// @acknowledgeUnsoundSP1FriVerifier\n"
 
@@ -71,32 +76,59 @@ export class P extends SmartContract {
 	}
 }
 
-func TestR147_AckDirectiveIsHonouredOnEverySurface(t *testing.T) {
+// withSP1FriCall appends `assert(verifySP1FRI(a, a, a))` to the contract's
+// first method, so the refusal can be checked on the AST each surface produced.
+func withSP1FriCall(c *ContractNode) *ContractNode {
+	call := ExpressionStmt{Expr: CallExpr{
+		Callee: Identifier{Name: "assert"},
+		Args: []Expression{CallExpr{
+			Callee: Identifier{Name: "verifySP1FRI"},
+			Args:   []Expression{Identifier{Name: "a"}, Identifier{Name: "a"}, Identifier{Name: "a"}},
+		}},
+	}}
+	c.Methods[0].Body = append(c.Methods[0].Body, call)
+	return c
+}
+
+func sp1Refused(c *ContractNode) bool {
+	for _, d := range Validate(c).Errors {
+		if containsSubstr(d.Message, "not implemented for v1") {
+			return true
+		}
+	}
+	return false
+}
+
+// Was TestR147_AckDirectiveIsHonouredOnEverySurface.
+// F-007: rewritten to expect refusal — the directive was removed for v1, so on every surface it must open nothing.
+func TestR147_AckDirectiveIsInertOnEverySurface(t *testing.T) {
 	for ext, c := range ackSources() {
 		res := ParseSource([]byte(c.src), c.file)
-		if res == nil || res.Contract == nil {
-			t.Fatalf("%s: parse produced no contract: %+v", ext, res)
+		if res == nil || res.Contract == nil || len(res.Errors) > 0 {
+			t.Fatalf("%s: a source carrying the old directive must still parse: %+v", ext, res)
 		}
-		if !res.Contract.AckUnsoundSP1Fri {
-			t.Errorf("%s: @acknowledgeUnsoundSP1FriVerifier was not recorded. "+
-				"The stamp is applied to the parse RESULT so it is independent of "+
-				"which surface parser ran — a branch that returns without it makes "+
-				"the directive unhonourable on that surface alone.", ext)
+		if !sp1Refused(withSP1FriCall(res.Contract)) {
+			t.Errorf("%s: @acknowledgeUnsoundSP1FriVerifier stood the verifySP1FRI refusal down; "+
+				"F-007 removed that override on every surface", ext)
 		}
 	}
 }
 
-// The control: no directive, no stamp. Without this the test above would pass
-// against a stamp that is always true.
-func TestR147_NoDirectiveMeansNoAck(t *testing.T) {
+// Was TestR147_NoDirectiveMeansNoAck — the control. F-007: rewritten to expect refusal without the directive too,
+// so the test above cannot pass against a refusal that only fires when the directive is present.
+func TestR147_NoDirectiveStillRefused(t *testing.T) {
 	for ext, c := range ackSources() {
 		clean := c.src[len(ackDirective):]
 		res := ParseSource([]byte(clean), c.file)
 		if res == nil || res.Contract == nil {
 			t.Fatalf("%s: parse produced no contract", ext)
 		}
-		if res.Contract.AckUnsoundSP1Fri {
-			t.Errorf("%s: ack recorded for a source that carries no directive", ext)
+		// Checked first: withSP1FriCall mutates the contract.
+		if sp1Refused(res.Contract) {
+			t.Errorf("%s: refusal fired for a contract that does not call verifySP1FRI", ext)
+		}
+		if !sp1Refused(withSP1FriCall(res.Contract)) {
+			t.Errorf("%s: verifySP1FRI was not refused", ext)
 		}
 	}
 }

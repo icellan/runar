@@ -66,7 +66,9 @@ SUPPORTED_KEYS = [
     ("SHA2_192s", 256948),
     ("SHA2_192f", 741052),
     ("SHA2_256s", 350411),
-    ("SHA2_256f", 699576),
+    # F-034: 256f now uses FIPS 205's FORS height a=9 (one more auth level per
+    # FORS tree) and a 9-byte first tree-address encoding: 699576 -> 703277.
+    ("SHA2_256f", 703277),
 ])
 def test_op_count(key, expected):
     ops: list[StackOp] = []
@@ -135,3 +137,29 @@ def test_emitter_is_deterministic():
 def test_slh_params_table_is_complete():
     for key in SUPPORTED_KEYS:
         assert key in SLH_PARAMS, f"missing SLH params: {key}"
+
+
+# ---------------------------------------------------------------------------
+# F-034: parameter table vs FIPS 205 Table 2. SHA2_256f shipped FORS height
+# a=8 (48,736-byte signature) in all 7 tiers; FIPS 205 says a=9 (49,856 bytes),
+# so the compiled verifier rejected every honest 256f signature at its OP_SIZE
+# gate. Proves the table and the emitted exact-length gate; does NOT prove a
+# real signature verifies (that is the real-crypto witness
+# conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("key,dims,sig_len", [
+    ("SHA2_128s", (16, 63, 7, 9, 12, 14), 7856),
+    ("SHA2_128f", (16, 66, 22, 3, 6, 33), 17088),
+    ("SHA2_192s", (24, 63, 7, 9, 14, 17), 16224),
+    ("SHA2_192f", (24, 66, 22, 3, 8, 33), 35664),
+    ("SHA2_256s", (32, 64, 8, 8, 14, 22), 29792),
+    ("SHA2_256f", (32, 68, 17, 4, 9, 35), 49856),
+])
+def test_params_match_fips205_table2(key, dims, sig_len):
+    p = SLH_PARAMS[key]
+    assert (p.n, p.h, p.d, p.hp, p.a, p.k) == dims
+    ops: list[StackOp] = []
+    emit_verify_slh_dsa(ops.append, key)
+    i = next(i for i, o in enumerate(ops) if o.op == "opcode" and o.code == "OP_SIZE")
+    assert ops[i + 1].op == "push" and ops[i + 1].value.big_int == sig_len

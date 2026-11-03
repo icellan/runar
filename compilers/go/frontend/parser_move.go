@@ -13,6 +13,15 @@ import (
 
 // ParseMove parses a Move-style Rúnar contract and produces the standard AST.
 func ParseMove(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseMoveSurface(source, fileName) })
+}
+
+func parseMoveSurface(source []byte, fileName string) *ParseResult {
 	p := &moveParser{
 		fileName: fileName,
 	}
@@ -25,6 +34,7 @@ func ParseMove(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -83,7 +93,17 @@ const (
 	moveTokArrow     // ->
 	moveTokShl       // <<
 	moveTokShr       // >>
+	moveTokHash      // `#` directly before `[` (N-093 attribute opener)
 )
+
+// moveAttribute (N-093) is one parsed `#[...]` attribute (see parseAttributes).
+// kind is "embed_always" or "sighash"; flags is the sighash flag text, nil
+// when malformed.
+type moveAttribute struct {
+	kind  string
+	flags *string
+	loc   SourceLocation
+}
 
 type moveToken struct {
 	kind  moveTokenKind
@@ -101,6 +121,12 @@ type moveParser struct {
 	tokens   []moveToken
 	pos      int
 	errors   []Diagnostic
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *moveParser) addError(msg string) {
@@ -171,14 +197,31 @@ func (p *moveParser) tokenize(source string) []moveToken {
 
 		startCol := col
 
+		// N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+		// A `#` not followed by `[` is refused below like any unknown character.
+		if ch == '#' && i+1 < len(source) && source[i+1] == '[' {
+			tokens = append(tokens, moveToken{kind: moveTokHash, value: "#", line: line, col: startCol})
+			i++
+			col++
+			continue
+		}
+
 		// String literals
 		if ch == '"' || ch == '\'' {
 			quote := ch
 			i++
 			col++
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: a literal that reaches a line break (escaped or not) or
+			// end of file is unterminated; it must never run on into the
+			// following lines.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -186,9 +229,14 @@ func (p *moveParser) tokenize(source string) []moveToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+				// N-019: this surface has no quoted literal; a terminated one
+				// is refused as an unexpected character (as the TS reference).
+				p.errors = append(p.errors, lexDiag(fmt.Sprintf("Unexpected character '%c'", quote), p.fileName, line, startCol))
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
 			tokens = append(tokens, moveToken{kind: moveTokString, value: val, line: line, col: startCol})
 			continue
@@ -196,40 +244,32 @@ func (p *moveParser) tokenize(source string) []moveToken {
 
 		// Numbers
 		if ch >= '0' && ch <= '9' {
-			start := i
-			isHex := false
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				isHex = true
+			if ch == '0' && i+1 < len(source) && source[i+1] == 'x' {
+				// F-026: a lowercase `0x` is a ByteString literal on this
+				// surface, whatever its length (as the TS reference; an odd
+				// length is refused downstream).
 				i += 2
 				col += 2
+				hexStart := i
 				for i < len(source) && moveIsHexDigit(source[i]) {
 					i++
 					col++
 				}
+				tokens = append(tokens, moveToken{kind: moveTokString, value: source[hexStart:i], line: line, col: startCol})
+				continue
+			}
+			// F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			value := "0"
+			if lit := parseIntLiteral("move", text); lit != nil {
+				value = lit.Value.String()
 			} else {
-				for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-					i++
-					col++
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("move", text), p.fileName, line, startCol))
 			}
-			// Skip trailing 'u8', 'u64', etc.
-			if !isHex && i < len(source) && source[i] == 'u' {
-				i++
-				col++
-				for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-					i++
-					col++
-				}
-			}
-			// Hex literals with even digit count → ByteString; otherwise a numeric literal.
-			if isHex {
-				hexDigits := source[start+2 : i]
-				if len(hexDigits) > 0 && len(hexDigits)%2 == 0 {
-					tokens = append(tokens, moveToken{kind: moveTokString, value: hexDigits, line: line, col: startCol})
-					continue
-				}
-			}
-			tokens = append(tokens, moveToken{kind: moveTokNumber, value: source[start:i], line: line, col: startCol})
+			tokens = append(tokens, moveToken{kind: moveTokNumber, value: value, line: line, col: startCol})
 			continue
 		}
 
@@ -365,8 +405,12 @@ func (p *moveParser) tokenize(source string) []moveToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-214: an unrecognised character (including a `#` not followed by
+		// `[`) is refused, as the TS reference does, rather than skipped:
+		// skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, startCol)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 
@@ -460,13 +504,16 @@ func snakeToCamel(s string) string {
 	if len(parts) <= 1 {
 		return s
 	}
-	result := parts[0]
+	var result strings.Builder
+	result.Grow(len(s))
+	result.WriteString(parts[0])
 	for _, part := range parts[1:] {
 		if len(part) > 0 {
-			result += string(unicode.ToUpper(rune(part[0]))) + part[1:]
+			result.WriteRune(unicode.ToUpper(rune(part[0])))
+			result.WriteString(part[1:])
 		}
 	}
-	return result
+	return result.String()
 }
 
 // moveBuiltinMap maps Move-style snake_case builtins to Rúnar camelCase.
@@ -592,6 +639,11 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	isUnsafe := p.matchIdent("unsafe")
 
 	// module Name { ... }
+	// N-490: the synthesized constructor is anchored at the first struct's
+	// `struct` keyword (the `resource` token when it stands alone), or at
+	// `module` when the contract declares no struct.
+	ctorLoc := p.loc()
+	sawStruct := false
 	if !p.matchIdent("module") {
 		return nil, fmt.Errorf("expected 'module' keyword")
 	}
@@ -610,6 +662,13 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	}
 
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
+		// N-093: attributes before a function (`#[sighash(...)]`). Anything
+		// else they precede reads neither directive, so each one is refused.
+		attrs := p.parseAttributes()
+		if len(attrs) > 0 && !p.checkIdent("public") && !p.checkIdent("fun") {
+			p.reportLostAttributes(attrs)
+		}
+
 		// Skip use declarations inside the module
 		if p.checkIdent("use") {
 			p.skipUseDecl()
@@ -619,11 +678,19 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 		// resource struct or struct
 		if p.checkIdent("resource") || p.checkIdent("struct") {
 			isStateful := p.checkIdent("resource")
+			kindLoc := p.loc()
 			if isStateful {
 				p.advance() // skip "resource"
 				if !isUnsafe {
 					parentClass = "StatefulSmartContract"
 				}
+				if p.checkIdent("struct") {
+					kindLoc = p.loc()
+				}
+			}
+			if !sawStruct {
+				sawStruct = true
+				ctorLoc = kindLoc
 			}
 			props := p.parseMoveStruct()
 			properties = append(properties, props...)
@@ -632,7 +699,7 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 
 		// public fun or fun
 		if p.checkIdent("public") || p.checkIdent("fun") {
-			method, hasMutRecv := p.parseMoveFunction()
+			method, hasMutRecv := p.parseMoveFunction(attrs)
 			if hasMutRecv && !isUnsafe {
 				parentClass = "StatefulSmartContract"
 			}
@@ -647,7 +714,7 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	p.expect(moveTokRBrace)
 
 	// Build constructor from properties
-	constructor := p.buildMoveConstructor(properties)
+	constructor := p.buildMoveConstructor(properties, ctorLoc)
 
 	return &ContractNode{
 		Name:        moduleName,
@@ -689,8 +756,18 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 
 	var props []PropertyNode
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
+		// N-093: `#[embed_always]` before a field is the native spelling of
+		// `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+		embedAlways := false
+		for _, attr := range p.parseAttributes() {
+			if attr.kind == "embed_always" {
+				embedAlways = true
+			} else {
+				p.reportLostAttributes([]moveAttribute{attr})
+			}
+		}
 		nameTok := p.expect(moveTokIdent)
-		fieldName := snakeToCamel(nameTok.value)
+		fieldName := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 		p.expect(moveTokColon)
 
@@ -717,6 +794,7 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 			Type:           typeNode,
 			Readonly:       readonly,
 			Initializer:    initializer,
+			EmbedAlways:    embedAlways,
 			SourceLocation: p.loc(),
 		})
 
@@ -799,7 +877,7 @@ func (p *moveParser) parseMoveTypeNode() TypeNode {
 	// FixedArray<T, N> — nestable. Closes split `>>` shift tokens.
 	if name == "FixedArray" && p.check(moveTokLt) {
 		p.advance() // <
-		inner := p.parseMoveTypeNode()
+		inner := nested(&p.nest, p.loc(), p.parseMoveTypeNode)
 		p.expect(moveTokComma)
 		lenTok := p.expect(moveTokNumber)
 		length := 0
@@ -818,7 +896,7 @@ func (p *moveParser) parseMoveTypeNode() TypeNode {
 	if name == "vector" && p.check(moveTokLt) {
 		p.advance() // <
 		// Skip the inner type entirely — we don't model dynamic-length vectors.
-		p.parseMoveTypeNode()
+		nested(&p.nest, p.loc(), p.parseMoveTypeNode)
 		p.consumeMoveGenericClose()
 		return PrimitiveType{Name: "ByteString"}
 	}
@@ -876,7 +954,87 @@ func (p *moveParser) consumeMoveGenericClose() {
 // Function parsing
 // ---------------------------------------------------------------------------
 
-func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
+// parseAttributes (N-093) parses `#[...]` attributes. Only `#[embed_always]`
+// and `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+// otherwise be ignored). For `sighash`, flags is the `|`-joined identifier
+// list, or nil when the parentheses hold anything else or are missing.
+// Mirrors parseAttributes in the TS reference (01-parse-move.ts).
+func (p *moveParser) parseAttributes() []moveAttribute {
+	var attrs []moveAttribute
+	for p.check(moveTokHash) {
+		loc := p.loc()
+		p.advance()
+		p.expect(moveTokLBracket)
+		name := ""
+		if p.check(moveTokIdent) {
+			name = p.advance().value
+		}
+		var flags *string
+		hasArgs := false
+		if p.check(moveTokLParen) {
+			hasArgs = true
+			p.advance()
+			text := ""
+			ok := true
+			depth := 1
+			for !p.check(moveTokEOF) {
+				t := p.peek()
+				if t.kind == moveTokLParen {
+					depth++
+				}
+				if t.kind == moveTokRParen {
+					depth--
+					if depth == 0 {
+						break
+					}
+				}
+				if t.kind == moveTokIdent || t.kind == moveTokPipe {
+					text += t.value
+				} else {
+					ok = false
+				}
+				p.advance()
+			}
+			p.expect(moveTokRParen)
+			if ok {
+				flags = nativeSighashSpec(text)
+			}
+		}
+		for !p.check(moveTokRBracket) && !p.check(moveTokEOF) {
+			p.advance()
+		}
+		p.expect(moveTokRBracket)
+		switch {
+		case name == "embed_always" && !hasArgs:
+			attrs = append(attrs, moveAttribute{kind: "embed_always", loc: loc})
+		case name == "sighash":
+			attrs = append(attrs, moveAttribute{kind: "sighash", flags: flags, loc: loc})
+		default:
+			shown := name
+			if hasArgs {
+				shown += "(...)"
+			}
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: unknownMoveAttributeMessage(shown), Severity: SeverityError, Loc: &errLoc})
+		}
+	}
+	return attrs
+}
+
+// reportLostAttributes (N-093) refuses each attribute that annotates nothing
+// that reads it.
+func (p *moveParser) reportLostAttributes(attrs []moveAttribute) {
+	for _, attr := range attrs {
+		directive := "@embedAlways"
+		if attr.kind == "sighash" {
+			directive = "@sighash"
+		}
+		errLoc := attr.loc
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg(directive), Severity: SeverityError, Loc: &errLoc})
+	}
+}
+
+func (p *moveParser) parseMoveFunction(attrs []moveAttribute) (MethodNode, bool) {
 	loc := p.loc()
 	visibility := "private"
 
@@ -895,14 +1053,17 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 	p.expectIdent("fun")
 
 	nameTok := p.expect(moveTokIdent)
-	name := snakeToCamel(nameTok.value)
+	name := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 	params, hasMutRecv := p.parseMoveParams()
 
 	// Optional return type: : Type
 	hasReturnType := false
 	if p.match(moveTokColon) {
-		p.parseMoveTypeName() // skip return type name
+		// The AST keeps no return type; N-331 refuses an unknown name.
+		if d := UnknownReturnTypeDiagnostic(p.parseMoveTypeNode(), name, loc, visibility == "public"); d != nil {
+			p.errors = append(p.errors, *d)
+		}
 		hasReturnType = true
 	}
 
@@ -924,11 +1085,30 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 		}
 	}
 
+	// N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+	// annotates nothing.
+	var lost []moveAttribute
+	var sighashSpecs []*string
+	for _, a := range attrs {
+		if a.kind == "sighash" {
+			sighashSpecs = append(sighashSpecs, a.flags)
+		} else {
+			lost = append(lost, a)
+		}
+	}
+	p.reportLostAttributes(lost)
+	sighashType, sighashErr := resolveNativeSighash(name, visibility == "public", sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
+
 	return MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}, hasMutRecv
 }
@@ -984,7 +1164,7 @@ func (p *moveParser) parseMoveParams() ([]ParamNode, bool) {
 		// If param was a reference and there's no type (malformed), skip
 		_ = isRef
 
-		camelName := snakeToCamel(paramName)
+		camelName := p.idents.declare(paramName, snakeToCamel(paramName))
 		params = append(params, ParamNode{
 			Name: camelName,
 			Type: moveMapType(typeName),
@@ -1089,7 +1269,8 @@ func isMoveWhileStub(stmt ForStmt) bool {
 // ForStmt, reporting false when the pair is not a representable counting loop.
 func foldMoveCountingWhile(decl VariableDeclStmt, stub ForStmt) (Statement, bool) {
 	iterName := decl.Name
-	cond, ok := stub.Condition.(BinaryExpr)
+	// N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+	cond, ok := normalizeLoopCondition(stub.Condition, iterName).(BinaryExpr)
 	if !ok {
 		return nil, false
 	}
@@ -1197,6 +1378,10 @@ func (p *moveParser) reportUnfoldedMoveWhiles(stmts []Statement) {
 // ---------------------------------------------------------------------------
 
 func (p *moveParser) parseMoveStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseMoveStatementInner)
+}
+
+func (p *moveParser) parseMoveStatementInner() Statement {
 	loc := p.loc()
 
 	// let [mut] name [: Type] = expr;
@@ -1240,7 +1425,7 @@ func (p *moveParser) parseMoveLetDecl(loc SourceLocation) Statement {
 	}
 
 	nameTok := p.expect(moveTokIdent)
-	varName := snakeToCamel(nameTok.value)
+	varName := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 	var typeNode TypeNode
 	if p.match(moveTokColon) {
@@ -1322,7 +1507,8 @@ func (p *moveParser) parseMoveIf(loc SourceLocation) Statement {
 	var elseBlock []Statement
 	if p.matchIdent("else") {
 		if p.checkIdent("if") {
-			elseStmt := p.parseMoveIf(p.loc())
+			elseLoc := p.loc()
+			elseStmt := nested(&p.nest, elseLoc, func() Statement { return p.parseMoveIf(elseLoc) })
 			elseBlock = []Statement{elseStmt}
 		} else {
 			elseBlock = p.parseMoveBlock()
@@ -1427,63 +1613,69 @@ func (p *moveParser) parseMoveExprStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *moveParser) parseMoveExpression() Expression {
-	return p.parseMoveOr()
+	return nested(&p.nest, p.loc(), p.parseMoveOr)
 }
 
 func (p *moveParser) parseMoveOr() Expression {
+	start := p.loc()
 	left := p.parseMoveAnd()
 	for p.match(moveTokPipePipe) {
 		right := p.parseMoveAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveAnd() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseOr()
 	for p.match(moveTokAmpAmp) {
 		right := p.parseMoveBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseXor()
 	for p.match(moveTokPipe) {
 		right := p.parseMoveBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseMoveBitwiseAnd()
 	for p.match(moveTokCaret) {
 		right := p.parseMoveBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseMoveEquality()
 	for p.match(moveTokAmp) {
 		right := p.parseMoveEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *moveParser) parseMoveEquality() Expression {
+	start := p.loc()
 	left := p.parseMoveComparison()
 	for {
 		if p.match(moveTokEqEq) {
 			right := p.parseMoveComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(moveTokNotEq) {
 			right := p.parseMoveComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1492,20 +1684,21 @@ func (p *moveParser) parseMoveEquality() Expression {
 }
 
 func (p *moveParser) parseMoveComparison() Expression {
+	start := p.loc()
 	left := p.parseMoveShift()
 	for {
 		if p.match(moveTokLt) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokLtEq) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokGt) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokGtEq) {
 			right := p.parseMoveShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1514,14 +1707,15 @@ func (p *moveParser) parseMoveComparison() Expression {
 }
 
 func (p *moveParser) parseMoveShift() Expression {
+	start := p.loc()
 	left := p.parseMoveAdditive()
 	for {
 		if p.match(moveTokShl) {
 			right := p.parseMoveAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokShr) {
 			right := p.parseMoveAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1530,14 +1724,15 @@ func (p *moveParser) parseMoveShift() Expression {
 }
 
 func (p *moveParser) parseMoveAdditive() Expression {
+	start := p.loc()
 	left := p.parseMoveMultiplicative()
 	for {
 		if p.match(moveTokPlus) {
 			right := p.parseMoveMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokMinus) {
 			right := p.parseMoveMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1546,17 +1741,18 @@ func (p *moveParser) parseMoveAdditive() Expression {
 }
 
 func (p *moveParser) parseMoveMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseMoveUnary()
 	for {
 		if p.match(moveTokStar) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokSlash) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(moveTokPercent) {
 			right := p.parseMoveUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1565,29 +1761,30 @@ func (p *moveParser) parseMoveMultiplicative() Expression {
 }
 
 func (p *moveParser) parseMoveUnary() Expression {
+	opLoc := p.loc()
 	if p.match(moveTokBang) {
-		operand := p.parseMoveUnary()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(moveTokMinus) {
-		operand := p.parseMoveUnary()
-		return UnaryExpr{Op: "-", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(moveTokTilde) {
-		operand := p.parseMoveUnary()
-		return UnaryExpr{Op: "~", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseMoveUnary)
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	// Skip & (reference) — it's a no-op in the Rúnar context
 	if p.match(moveTokAmp) {
 		if p.matchIdent("mut") {
 			// &mut expr — skip both
 		}
-		return p.parseMoveUnary()
+		return nested(&p.nest, p.loc(), p.parseMoveUnary)
 	}
 	// Dereference * — also a no-op
 	if p.check(moveTokStar) && p.isDeref() {
 		p.advance()
-		return p.parseMoveUnary()
+		return nested(&p.nest, p.loc(), p.parseMoveUnary)
 	}
 	return p.parseMovePostfix()
 }
@@ -1656,7 +1853,7 @@ func (p *moveParser) parseMovePrimary() Expression {
 		return parseMoveNumber(tok.value)
 	case moveTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case moveTokIdent:
 		p.advance()
 		name := tok.value
@@ -1699,10 +1896,10 @@ func (p *moveParser) parseMovePrimary() Expression {
 					args = args[1:]
 				}
 			}
-			return CallExpr{Callee: Identifier{Name: mappedName}, Args: args}
+			return CallExpr{Callee: Identifier{Name: mappedName, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: mappedName}
+		return Identifier{Name: mappedName, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 
 	case moveTokLParen:
 		p.advance()
@@ -1766,7 +1963,7 @@ func parseMoveNumber(s string) Expression {
 // Constructor builder
 // ---------------------------------------------------------------------------
 
-func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode {
+func (p *moveParser) buildMoveConstructor(properties []PropertyNode, ctorLoc SourceLocation) MethodNode {
 	// Only non-initialized properties become constructor params
 	var uninitProps []PropertyNode
 	for _, prop := range properties {
@@ -1791,7 +1988,7 @@ func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode 
 				Callee: Identifier{Name: "super"},
 				Args:   superArgs,
 			},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		},
 	}
 
@@ -1799,17 +1996,15 @@ func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode 
 		body = append(body, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},
-			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			SourceLocation: ctorLoc,
 		})
 	}
 
 	return MethodNode{
-		Name:       "constructor",
-		Params:     params,
-		Body:       body,
-		Visibility: "public",
-		SourceLocation: SourceLocation{
-			File: p.fileName, Line: 1, Column: 0,
-		},
+		Name:           "constructor",
+		Params:         params,
+		Body:           body,
+		Visibility:     "public",
+		SourceLocation: ctorLoc,
 	}
 }

@@ -175,6 +175,39 @@ class OtherVar extends SmartContract {
     expect(r.diags).toMatch(/must advance the loop variable by one/);
   });
 
+  // N-116: an update that names the iterator (or a literal) without advancing
+  // it. The validator used to wave these through as the "no-op sentinel" the
+  // while-shaped parsers synthesize, and `extractLoopStep` then inferred +1
+  // from the comparison direction -- so a source loop that never terminates
+  // (i stays 3 forever) unrolled to two laps over i = 3, 4. These tests prove
+  // the refusal, with the shared R-065 sentence, on the Zig continue
+  // expression and the TS for-update surfaces. They do NOT prove anything
+  // about while loops whose update lives in the body (those keep their
+  // placeholder iterator and are refused by the condition rule instead).
+  it('N-116: rejects a Zig continue expression that only reads the iterator', () => {
+    const source = example('examples/zig/bounded-loop/BoundedLoop.runar.zig')
+      .replace('var i: i64 = 0;', 'var i: i64 = 3;')
+      .replace('while (i < 5) : (i += 1)', 'while (i < 5) : (i)');
+    const r = compileSource(source, 'BoundedLoop.runar.zig');
+    expect(
+      r.ok,
+      `\`: (i)\` never advances i, so the source loop never terminates; it compiled to ${r.hex}`,
+    ).toBe(false);
+    expect(r.diags).toMatch(/must advance the loop variable by one/);
+  });
+
+  it('N-116: rejects a for-update that only reads the iterator', () => {
+    const r = compileSource(tsWithUpdate('i'), 'UpdateProbe.runar.ts');
+    expect(r.ok, '`for (...; i)` does not advance i').toBe(false);
+    expect(r.diags).toMatch(/must advance the loop variable by one/);
+  });
+
+  it('N-116: rejects a for-update that is a bare literal', () => {
+    const r = compileSource(tsWithUpdate('0n'), 'UpdateProbe.runar.ts');
+    expect(r.ok, '`for (...; 0n)` does not advance i').toBe(false);
+    expect(r.diags).toMatch(/must advance the loop variable by one/);
+  });
+
   // -------------------------------------------------------------------------
   // Controls: every shape that compiles today must still compile, byte-identical
   // -------------------------------------------------------------------------

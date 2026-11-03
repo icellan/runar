@@ -259,7 +259,7 @@ theorem lowerValueP_eq_lowerValue_structuralCall
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
-  | checkPreimage _ => simp [structuralCallValue] at h
+  | checkPreimage _ _ => simp [structuralCallValue] at h
   | deserializeState _ => simp [structuralCallValue] at h
   | addOutput _ _ _ => simp [structuralCallValue] at h
   | addRawOutput _ _ => simp [structuralCallValue] at h
@@ -468,7 +468,7 @@ theorem evalValue_structuralCallValue_ok
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
-  | checkPreimage _ => simp [structuralCallValue] at h
+  | checkPreimage _ _ => simp [structuralCallValue] at h
   | deserializeState _ => simp [structuralCallValue] at h
   | addOutput _ _ _ => simp [structuralCallValue] at h
   | addRawOutput _ _ => simp [structuralCallValue] at h
@@ -2302,37 +2302,47 @@ theorem runMethod_gcd_singleton_d1d0_isSome
 
 end GcdWrappers
 
-/-! ## A4 math/byte bounded-loop builtin — `log2`
+/-! ## A4 math/byte builtin — `log2` (N-103 exact lowering)
 
-`lowerValueP`'s `.call "log2"` arm (`Stack/Lower.lean:3065-3098`)
-emits, for a single arg `n`:
+`lowerValueP`'s `.call "log2"` arm (`Stack/Lower.lean`, mirroring TS
+`lowerLog2` in `05-stack-lower.ts`, N-103 / user decision R86) emits, after
+the operand load, the branch-free read of the operand's minimal encoding:
 
 ```
-  <loadN> <push 0>                              -- input counter
-  64 × [OP_SWAP OP_DUP OP_1 OP_GREATERTHAN
-        OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
-        OP_SWAP]
-  OP_NIP                                         -- counter
+  OP_BIN2NUM                              n        (minimal re-encoding)
+  OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+  OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+  OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte)
+  OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+  7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+  OP_NIP                                  b + #{c : t >= c}
 ```
 
-The ANF spec (`ANF/Eval.lean#log2Int`) is `Nat.log2 i.toNat`, which
-by definition terminates in `Nat.log2 n + 1` halvings. The codegen's
-fixed 64 unrolled iterations dominates this for any input fitting in
-64 bits (well in excess of practical operands).
+The ANF spec (`ANF/Eval.lean#log2Int`) is `Nat.log2 i.toNat` and refuses
+`n <= 0` (`log2 expects positive input`); the lowering aborts on the same
+inputs at `OP_VERIFY`, so the `isSome` obligation is stated under `0 < n`.
 
-For an `.isSome`-only obligation we sidestep the convergence proof
-entirely and prove only that **every intermediate iteration stays in
-the structural shape `[Int, Int, rest]`**. This is the exact
-fuel-sufficiency obligation: each `OP_DIV`'s divisor is the literal
-`2` (non-zero by construction), so no `divByZero` ever fires.
+**N-384.** Until N-384 this section proved `isSome` for the pre-N-103
+64-iteration loop, so after N-103 no lowered method satisfied its
+`hLowering` hypothesis and the theorem was vacuous. Re-proving it needed
+`OP_SIZE` / `OP_SPLIT` / `OP_BIN2NUM` to accept a numeric element the way
+real Script does (every stack element is a byte vector; a number is its
+minimal sign-magnitude little-endian encoding). `Stack/Eval.lean` now gives
+exactly those three opcodes that reading — `asBytesNum?` for `OP_SIZE` /
+`OP_SPLIT`, the identity for `OP_BIN2NUM` on a numeric element — and leaves
+`asBytes?` (and so `OP_EQUAL`, `OP_CAT`, the hashes, `OP_CHECKSIG`)
+unchanged. The bounded proof below then walks the 44 straight-line ops: the
+only facts it needs are `0 < n` (for `OP_VERIFY`) and
+`0 < (encodeMinimalLE n).size` (so the `OP_SPLIT` index `s-1` is a valid
+non-negative index).
 
 Per PATH2_PLAN §2.1, the only hypotheses used are input-side:
 * `agreesTagged` on the initial state;
-* a concrete operand lookup giving `n`'s value;
-* `loadRef` shape facts;
+* a concrete operand lookup giving `n`'s value, and `0 < n`;
+* the per-method `hLowering` structural fact;
 * freshness of the binding name.
 
-No conclusion-restating hypothesis. No new axioms.
+No conclusion-restating hypothesis. No new axioms, no `native_decide`.
 -/
 
 section Log2Wrappers
@@ -2346,329 +2356,232 @@ attribute [local irreducible]
   RunarVerification.Stack.Peephole.passAllInner15
 
 open RunarVerification.Stack.Eval
-  (stepNonIf_opcode stepNonIf_swap stepNonIf_push_bigint
-   applyDup applyNip applySwap runOpcode asBool? asInt? stepNonIf)
-open RunarVerification.Stack.Sim
-  (runOpcode_DIV_intInt_nonzero runOpcode_GREATERTHAN_intInt
-   runOpcode_1ADD_int runOpcode_NIP_deep run_dup_nonEmpty)
+  (stepNonIf_opcode stepNonIf asBytesNum?_vBigint asBytes?_vBigint_ne_zero
+   asNonNegativeNat? asInt? popN runOps_nil)
 
-/-- A single bit-scan iteration of integer `log2`, exactly as emitted
-by `lowerValueP`'s `.call "log2"` arm: swap, dup, compare to 1; if
-greater than 1, halve the input and increment the counter; final swap. -/
-private def log2IterOps : List StackOp :=
-  [ StackOp.swap
+/-- The first 15 ops of the `log2` body (everything before the scan). -/
+private def log2HeadOps : List StackOp :=
+  [ StackOp.opcode "OP_BIN2NUM"
   , StackOp.opcode "OP_DUP"
-  , StackOp.push (.bigint 1)
+  , StackOp.push (.bigint 0)
   , StackOp.opcode "OP_GREATERTHAN"
-  , StackOp.ifOp
-      [ StackOp.push (.bigint 2)
-      , StackOp.opcode "OP_DIV"
-      , StackOp.swap
-      , StackOp.opcode "OP_1ADD"
-      , StackOp.swap ]
-      none
-  , StackOp.swap ]
+  , StackOp.opcode "OP_VERIFY"
+  , StackOp.opcode "OP_SIZE"
+  , StackOp.opcode "OP_1SUB"
+  , StackOp.opcode "OP_TUCK"
+  , StackOp.opcode "OP_SPLIT"
+  , StackOp.opcode "OP_NIP"
+  , StackOp.opcode "OP_BIN2NUM"
+  , StackOp.opcode "OP_SWAP"
+  , StackOp.push (.bigint 8)
+  , StackOp.opcode "OP_MUL"
+  , StackOp.opcode "OP_1SUB" ]
 
-/-- Single-iteration `runOps` reduction for `log2IterOps` on a stack
-whose top two slots are `[counter, input, rest]` (both bigints).
-Yields some `[counter', input', rest]` (both bigints). The precise
-values depend on whether `input > 1`. -/
-private theorem runOps_log2Iter_eq
-    (s : StackState) (counter input : Int) (rest : List Value)
-    (hStk : s.stack = .vBigint counter :: .vBigint input :: rest) :
-    ∃ counter' input' : Int,
-      runOps log2IterOps s
-        = Except.ok { s with stack := .vBigint counter' :: .vBigint input' :: rest } := by
-  -- Step 1: swap. Stack [counter, input, rest] → [input, counter, rest].
-  let s1 : StackState := { s with stack := .vBigint input :: .vBigint counter :: rest }
-  have hS1stk : s1.stack = .vBigint input :: .vBigint counter :: rest := rfl
-  have hSwap1 : stepNonIf .swap s = Except.ok s1 := by
-    show applySwap s = Except.ok s1
-    unfold applySwap; rw [hStk]
-  -- Step 2: OP_DUP. Stack [input, counter, rest] → [input, input, counter, rest].
-  let s2 : StackState := s1.push (.vBigint input)
-  have hS2stk : s2.stack = .vBigint input :: .vBigint input :: .vBigint counter :: rest := by
-    show (s1.push (.vBigint input)).stack = _
-    unfold StackState.push; rw [hS1stk]
-  have hDup : runOpcode "OP_DUP" s1 = Except.ok s2 := by
-    show applyDup s1 = Except.ok s2
-    unfold applyDup; rw [hS1stk]
-  -- Step 3: push 1. Stack → [1, input, input, counter, rest].
-  let s3 : StackState := s2.push (.vBigint 1)
-  have hS3stk : s3.stack = .vBigint 1 :: .vBigint input :: .vBigint input :: .vBigint counter :: rest := by
-    show (s2.push (.vBigint 1)).stack = _
-    unfold StackState.push; rw [hS2stk]
-  -- Step 4: OP_GREATERTHAN. Pops 1 and input; pushes decide(input > 1).
-  -- runOpcode_GREATERTHAN_intInt: hStk : s.stack = .vBigint b :: .vBigint a :: rest
-  --   gives `.ok ({ s with stack := rest }.push (.vBool (decide (a > b))))`.
-  -- Here b = 1, a = input. rest = .vBigint input :: .vBigint counter :: rest.
-  have hGT := runOpcode_GREATERTHAN_intInt s3 input 1
-                (.vBigint input :: .vBigint counter :: rest) hS3stk
-  let s4 : StackState := ({ s3 with stack := .vBigint input :: .vBigint counter :: rest }.push
-                          (.vBool (decide (input > 1))))
-  have hS4stk : s4.stack
-      = .vBool (decide (input > 1)) :: .vBigint input :: .vBigint counter :: rest := by
-    show (({ s3 with stack := .vBigint input :: .vBigint counter :: rest }.push
-              (.vBool (decide (input > 1)))).stack) = _
-    unfold StackState.push; rfl
-  -- Step 5: ifOp. Branch on decide(input > 1).
-  by_cases hGTcase : input > 1
-  · -- True branch: run [push 2, OP_DIV, swap, OP_1ADD, swap], then final swap.
-    -- s4.pop? = some (.vBool true, post-state).
-    let s4Pop : StackState :=
-      { s4 with stack := .vBigint input :: .vBigint counter :: rest }
-    have hS4PopStk : s4Pop.stack = .vBigint input :: .vBigint counter :: rest := rfl
-    have hPopS4 : s4.pop? = some (.vBool (decide (input > 1)), s4Pop) := by
-      unfold StackState.pop?; rw [hS4stk]
-    have hDec : decide (input > 1) = true := by simp [hGTcase]
-    -- Inner body reduces.
-    -- push 2 on s4Pop → [2, input, counter, rest].
-    let sB1 : StackState := s4Pop.push (.vBigint 2)
-    have hSB1stk : sB1.stack = .vBigint 2 :: .vBigint input :: .vBigint counter :: rest := by
-      show (s4Pop.push (.vBigint 2)).stack = _
-      unfold StackState.push; rw [hS4PopStk]
-    -- OP_DIV: pops 2 and input → input/2.
-    have h2nz : (2 : Int) ≠ 0 := by decide
-    have hDiv := runOpcode_DIV_intInt_nonzero sB1 input 2
-                  (.vBigint counter :: rest) hSB1stk h2nz
-    let sB2 : StackState := ({ sB1 with stack := .vBigint counter :: rest }.push
-                              (.vBigint (input / 2)))
-    have hSB2stk : sB2.stack = .vBigint (input / 2) :: .vBigint counter :: rest := by
-      show (({ sB1 with stack := .vBigint counter :: rest }.push
-                (.vBigint (input / 2))).stack) = _
-      unfold StackState.push; rfl
-    -- swap: stack [input/2, counter, rest] → [counter, input/2, rest].
-    let sB3 : StackState := { sB2 with stack := .vBigint counter :: .vBigint (input / 2) :: rest }
-    have hSB3stk : sB3.stack = .vBigint counter :: .vBigint (input / 2) :: rest := rfl
-    have hSwapB1 : stepNonIf .swap sB2 = Except.ok sB3 := by
-      show applySwap sB2 = Except.ok sB3
-      unfold applySwap; rw [hSB2stk]
-    -- OP_1ADD: counter → counter+1.
-    have hOneAdd := runOpcode_1ADD_int sB3 counter (.vBigint (input / 2) :: rest) hSB3stk
-    let sB4 : StackState := ({ sB3 with stack := .vBigint (input / 2) :: rest }.push
-                              (.vBigint (counter + 1)))
-    have hSB4stk : sB4.stack = .vBigint (counter + 1) :: .vBigint (input / 2) :: rest := by
-      show (({ sB3 with stack := .vBigint (input / 2) :: rest }.push
-                (.vBigint (counter + 1))).stack) = _
-      unfold StackState.push; rfl
-    -- swap: stack [counter+1, input/2, rest] → [input/2, counter+1, rest].
-    let sB5 : StackState := { sB4 with stack := .vBigint (input / 2) :: .vBigint (counter + 1) :: rest }
-    have hSB5stk : sB5.stack = .vBigint (input / 2) :: .vBigint (counter + 1) :: rest := rfl
-    have hSwapB2 : stepNonIf .swap sB4 = Except.ok sB5 := by
-      show applySwap sB4 = Except.ok sB5
-      unfold applySwap; rw [hSB4stk]
-    -- Now compose the inner branch reduction.
-    have hInner :
-        runOps [StackOp.push (.bigint 2), StackOp.opcode "OP_DIV", StackOp.swap,
-                StackOp.opcode "OP_1ADD", StackOp.swap] s4Pop
-          = Except.ok sB5 := by
-      unfold runOps
-      rw [stepNonIf_push_bigint]
-      show runOps (StackOp.opcode "OP_DIV" :: StackOp.swap
-                    :: StackOp.opcode "OP_1ADD" :: StackOp.swap :: []) sB1 = _
-      unfold runOps
-      rw [stepNonIf_opcode, hDiv]
-      show runOps (StackOp.swap :: StackOp.opcode "OP_1ADD" :: StackOp.swap :: []) sB2 = _
-      unfold runOps
-      rw [hSwapB1]
-      show runOps (StackOp.opcode "OP_1ADD" :: StackOp.swap :: []) sB3 = _
-      unfold runOps
-      rw [stepNonIf_opcode, hOneAdd]
-      show runOps (StackOp.swap :: []) sB4 = _
-      unfold runOps
-      rw [hSwapB2]
-      simp [runOps]
-    -- Step 6: final swap on sB5. Stack [input/2, counter+1, rest] → [counter+1, input/2, rest].
-    let sFinal : StackState := { sB5 with stack := .vBigint (counter + 1) :: .vBigint (input / 2) :: rest }
-    have hSFinalStk : sFinal.stack = .vBigint (counter + 1) :: .vBigint (input / 2) :: rest := rfl
-    have hSwapFinal : stepNonIf .swap sB5 = Except.ok sFinal := by
-      show applySwap sB5 = Except.ok sFinal
-      unfold applySwap; rw [hSB5stk]
-    refine ⟨counter + 1, input / 2, ?_⟩
-    show runOps (StackOp.swap :: StackOp.opcode "OP_DUP" :: StackOp.push (.bigint 1)
-                  :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp [.push (.bigint 2), .opcode "OP_DIV", .swap,
-                                    .opcode "OP_1ADD", .swap] none
-                  :: StackOp.swap :: []) s = _
-    unfold runOps
-    rw [hSwap1]
-    show runOps (StackOp.opcode "OP_DUP" :: StackOp.push (.bigint 1)
-                  :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp _ none :: StackOp.swap :: []) s1 = _
-    unfold runOps
-    rw [stepNonIf_opcode, hDup]
-    show runOps (StackOp.push (.bigint 1) :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp _ none :: StackOp.swap :: []) s2 = _
-    unfold runOps
-    rw [stepNonIf_push_bigint]
-    show runOps (StackOp.opcode "OP_GREATERTHAN" :: StackOp.ifOp _ none
-                  :: StackOp.swap :: []) s3 = _
-    unfold runOps
-    rw [stepNonIf_opcode, hGT]
-    show runOps (StackOp.ifOp _ none :: StackOp.swap :: []) s4 = _
-    unfold runOps
-    rw [hPopS4]
-    show (match asBool? (Value.vBool (decide (input > 1))) with
-          | some true =>
-              match runOps [.push (.bigint 2), .opcode "OP_DIV", .swap,
-                            .opcode "OP_1ADD", .swap] s4Pop with
-              | .error e => Except.error e
-              | .ok s''  => runOps [StackOp.swap] s''
-          | some false => runOps [StackOp.swap] s4Pop
-          | none => Except.error _) = _
-    rw [show asBool? (Value.vBool (decide (input > 1))) = some (decide (input > 1)) from rfl]
-    rw [hDec]
-    rw [hInner]
-    show runOps [StackOp.swap] sB5 = _
-    unfold runOps
-    rw [hSwapFinal]
-    simp [runOps]
-    rfl
-  · -- False branch: skip inner body; just do final swap.
-    have hDec : decide (input > 1) = false := by simp [hGTcase]
-    let s4Pop : StackState :=
-      { s4 with stack := .vBigint input :: .vBigint counter :: rest }
-    have hS4PopStk : s4Pop.stack = .vBigint input :: .vBigint counter :: rest := rfl
-    have hPopS4 : s4.pop? = some (.vBool (decide (input > 1)), s4Pop) := by
-      unfold StackState.pop?; rw [hS4stk]
-    -- After false ifOp, stack is `[input, counter, rest]` (s4Pop).
-    -- Then final swap → `[counter, input, rest]`.
-    let sFinal : StackState := { s4Pop with stack := .vBigint counter :: .vBigint input :: rest }
-    have hSFinalStk : sFinal.stack = .vBigint counter :: .vBigint input :: rest := rfl
-    have hSwapFinal : stepNonIf .swap s4Pop = Except.ok sFinal := by
-      show applySwap s4Pop = Except.ok sFinal
-      unfold applySwap; rw [hS4PopStk]
-    refine ⟨counter, input, ?_⟩
-    show runOps (StackOp.swap :: StackOp.opcode "OP_DUP" :: StackOp.push (.bigint 1)
-                  :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp [.push (.bigint 2), .opcode "OP_DIV", .swap,
-                                    .opcode "OP_1ADD", .swap] none
-                  :: StackOp.swap :: []) s = _
-    unfold runOps
-    rw [hSwap1]
-    show runOps (StackOp.opcode "OP_DUP" :: StackOp.push (.bigint 1)
-                  :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp _ none :: StackOp.swap :: []) s1 = _
-    unfold runOps
-    rw [stepNonIf_opcode, hDup]
-    show runOps (StackOp.push (.bigint 1) :: StackOp.opcode "OP_GREATERTHAN"
-                  :: StackOp.ifOp _ none :: StackOp.swap :: []) s2 = _
-    unfold runOps
-    rw [stepNonIf_push_bigint]
-    show runOps (StackOp.opcode "OP_GREATERTHAN" :: StackOp.ifOp _ none
-                  :: StackOp.swap :: []) s3 = _
-    unfold runOps
-    rw [stepNonIf_opcode, hGT]
-    show runOps (StackOp.ifOp _ none :: StackOp.swap :: []) s4 = _
-    unfold runOps
-    rw [hPopS4]
-    show (match asBool? (Value.vBool (decide (input > 1))) with
-          | some true =>
-              match runOps [.push (.bigint 2), .opcode "OP_DIV", .swap,
-                            .opcode "OP_1ADD", .swap] s4Pop with
-              | .error e => Except.error e
-              | .ok s''  => runOps [StackOp.swap] s''
-          | some false => runOps [StackOp.swap] s4Pop
-          | none => Except.error _) = _
-    rw [show asBool? (Value.vBool (decide (input > 1))) = some (decide (input > 1)) from rfl]
-    rw [hDec]
-    show runOps [StackOp.swap] s4Pop = _
-    unfold runOps
-    rw [hSwapFinal]
-    simp [runOps]
-    rfl
+/-- One comparison of the top-byte scan, against the constant `c`. -/
+private def log2ScanOps (c : Int) : List StackOp :=
+  [ StackOp.opcode "OP_OVER"
+  , StackOp.push (.bigint c)
+  , StackOp.opcode "OP_GREATERTHANOREQUAL"
+  , StackOp.opcode "OP_ADD" ]
 
-/-- Inductive composition: after `k` log2-iterations starting from a
-stack `[counter, input, rest]` with both bigints, the stack carries
-some `[counter', input', rest]` (both bigints). -/
-private theorem runOps_log2Iters_isOk
-    (k : Nat) (s : StackState) (counter input : Int) (rest : List Value)
-    (hStk : s.stack = .vBigint counter :: .vBigint input :: rest) :
-    ∃ counter' input' : Int,
-      runOps ((List.range k).flatMap (fun _ => log2IterOps)) s
-        = Except.ok { s with stack := .vBigint counter' :: .vBigint input' :: rest } := by
-  induction k generalizing s counter input with
-  | zero =>
-      refine ⟨counter, input, ?_⟩
-      simp [List.range_zero, List.flatMap_nil, runOps]
-      cases s with
-      | mk stack altstack outputs props preimage =>
-          simp at hStk
-          simp [hStk]
-  | succ k ih =>
-      obtain ⟨c1, i1, hIter⟩ := runOps_log2Iter_eq s counter input rest hStk
-      let sMid : StackState := { s with stack := .vBigint c1 :: .vBigint i1 :: rest }
-      have hSMidStk : sMid.stack = .vBigint c1 :: .vBigint i1 :: rest := rfl
-      obtain ⟨c', i', hRest⟩ := ih sMid c1 i1 hSMidStk
-      refine ⟨c', i', ?_⟩
-      have hRange :
-          ((List.range (k + 1)).flatMap (fun _ => log2IterOps))
-            = log2IterOps ++ ((List.range k).flatMap (fun _ => log2IterOps)) := by
-        rw [List.range_succ_eq_map, List.flatMap_cons]
-        congr 1
-        rw [List.flatMap_map]
-      rw [hRange, runOps_append, hIter]
-      have hBridge :
-          (({ sMid with stack := .vBigint c' :: .vBigint i' :: rest } : StackState))
-            = ({ s with stack := .vBigint c' :: .vBigint i' :: rest } : StackState) := rfl
-      rw [← hBridge]
-      exact hRest
+/-- The op list `lowerValueP`'s `.call "log2"` arm emits after the operand
+load: head, the seven-comparison scan, and the trailing `OP_NIP`. -/
+private def log2BodyOps : List StackOp :=
+  log2HeadOps ++ ([1, 2, 4, 8, 16, 32, 64].flatMap log2ScanOps ++ [StackOp.opcode "OP_NIP"])
 
-/-- The full log2 body emitted by `lowerValueP`'s `.call "log2"`
-lowering: prelude `[push 0]` + 64 bit-scan iterations + trailer
-`[OP_NIP]`. Applied to a stack `[input, rest]` with `input` a bigint,
-it succeeds and pushes some bigint counter on top of `rest`. -/
-private theorem runOps_log2Body_isOk
-    (s : StackState) (input : Int) (rest : List Value)
-    (hStk : s.stack = .vBigint input :: rest) :
-    ∃ result : Int,
-      runOps
-        (StackOp.push (.bigint 0)
-          :: ((List.range 64).flatMap (fun _ => log2IterOps))
-          ++ [StackOp.opcode "OP_NIP"]) s
-        = Except.ok ({ s with stack := rest }.push (.vBigint result)) := by
-  -- push 0: stack [input, rest] → [0, input, rest].
-  let s1 : StackState := s.push (.vBigint 0)
-  have hS1stk : s1.stack = .vBigint 0 :: .vBigint input :: rest := by
-    show (s.push (.vBigint 0)).stack = _
-    unfold StackState.push; rw [hStk]
-  -- 64 iters from stack [0, input, rest].
-  obtain ⟨counter', input', hRunIters⟩ :=
-    runOps_log2Iters_isOk 64 s1 0 input rest hS1stk
-  let sIter : StackState := { s1 with stack := .vBigint counter' :: .vBigint input' :: rest }
-  have hSIterStk : sIter.stack = .vBigint counter' :: .vBigint input' :: rest := rfl
-  -- OP_NIP: removes second-from-top → stack [counter', rest].
-  have hNip := runOpcode_NIP_deep sIter (.vBigint counter') (.vBigint input') rest hSIterStk
-  refine ⟨counter', ?_⟩
-  -- Compose all steps.
-  show runOps (StackOp.push (.bigint 0) :: (((List.range 64).flatMap (fun _ => log2IterOps))
-                  ++ [StackOp.opcode "OP_NIP"])) s = _
-  unfold runOps
-  rw [stepNonIf_push_bigint]
-  show runOps (((List.range 64).flatMap (fun _ => log2IterOps))
-                  ++ [StackOp.opcode "OP_NIP"]) s1 = _
-  rw [runOps_append, hRunIters]
-  show runOps [StackOp.opcode "OP_NIP"] sIter = _
-  unfold runOps
-  rw [stepNonIf_opcode, hNip]
-  show runOps [] _ = _
-  unfold runOps
-  -- Final state: { sIter with stack := .vBigint counter' :: rest }
-  --   vs `({ s with stack := rest }.push (.vBigint counter'))`.
-  -- The former projects sIter's non-stack fields; sIter = { s1 with stack := ... }
-  -- and s1 = s.push 0, both share s's non-stack fields. The latter has the same
-  -- non-stack fields (from s) and stack `.vBigint counter' :: rest`. Equal.
+/-- A non-zero integer's minimal Script-number encoding is non-empty. -/
+private theorem encodeMinimalLE_size_pos {n : Int} (hn : n ≠ 0) :
+    0 < (encodeMinimalLE n).size := by
+  have hb : absToBytesLE n.natAbs ≠ [] := by
+    rw [absToBytesLE, dif_neg (Int.natAbs_ne_zero.mpr hn)]
+    simp
+  obtain ⟨last, revBody, hrev⟩ : ∃ l r, (absToBytesLE n.natAbs).reverse = l :: r := by
+    cases h : (absToBytesLE n.natAbs).reverse with
+    | nil => exact absurd (List.reverse_eq_nil_iff.mp h) hb
+    | cons l r => exact ⟨l, r, rfl⟩
+  unfold encodeMinimalLE
+  rw [if_neg hn]
+  simp only [hrev]
+  split
+  · simp [ByteArray.size]
+  · split
+    · simp [ByteArray.size]
+    · simp [ByteArray.size, List.length_pos_iff, hb]
+
+/-- One straight-line step of `runOps`. -/
+private theorem log2Run_cons (op : StackOp) (ops : List StackOp) (s s' : StackState)
+    (hNotIf : ∀ thn els, op ≠ .ifOp thn els)
+    (h : stepNonIf op s = .ok s') :
+    runOps (op :: ops) s = runOps ops s' := by
+  rw [RunarVerification.Stack.Sim.runOps_cons_nonIf_eq op ops s hNotIf, h]
+
+/-! ### Per-op steps on a stack of the shape the `log2` body sees -/
+
+private theorem log2Run_push (s : StackState) (ops : List StackOp) (i : Int)
+    (R : List Value) :
+    runOps (.push (.bigint i) :: ops) { s with stack := R }
+      = runOps ops { s with stack := .vBigint i :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_dup (s : StackState) (ops : List StackOp) (v : Value)
+    (R : List Value) :
+    runOps (.opcode "OP_DUP" :: ops) { s with stack := v :: R }
+      = runOps ops { s with stack := v :: v :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_nip (s : StackState) (ops : List StackOp) (a b : Value)
+    (R : List Value) :
+    runOps (.opcode "OP_NIP" :: ops) { s with stack := a :: b :: R }
+      = runOps ops { s with stack := a :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_swap (s : StackState) (ops : List StackOp) (a b : Value)
+    (R : List Value) :
+    runOps (.opcode "OP_SWAP" :: ops) { s with stack := a :: b :: R }
+      = runOps ops { s with stack := b :: a :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_over (s : StackState) (ops : List StackOp) (a b : Value)
+    (R : List Value) :
+    runOps (.opcode "OP_OVER" :: ops) { s with stack := a :: b :: R }
+      = runOps ops { s with stack := b :: a :: b :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_tuck (s : StackState) (ops : List StackOp) (a b : Value)
+    (R : List Value) :
+    runOps (.opcode "OP_TUCK" :: ops) { s with stack := a :: b :: R }
+      = runOps ops { s with stack := a :: b :: a :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_verify_true (s : StackState) (ops : List StackOp)
+    (R : List Value) :
+    runOps (.opcode "OP_VERIFY" :: ops) { s with stack := .vBool true :: R }
+      = runOps ops { s with stack := R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_1sub (s : StackState) (ops : List StackOp) (i : Int)
+    (R : List Value) :
+    runOps (.opcode "OP_1SUB" :: ops) { s with stack := .vBigint i :: R }
+      = runOps ops { s with stack := .vBigint (i - 1) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_mul (s : StackState) (ops : List StackOp) (a b : Int)
+    (R : List Value) :
+    runOps (.opcode "OP_MUL" :: ops) { s with stack := .vBigint b :: .vBigint a :: R }
+      = runOps ops { s with stack := .vBigint (a * b) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_gt (s : StackState) (ops : List StackOp) (a b : Int)
+    (R : List Value) :
+    runOps (.opcode "OP_GREATERTHAN" :: ops) { s with stack := .vBigint b :: .vBigint a :: R }
+      = runOps ops { s with stack := .vBool (decide (a > b)) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+private theorem log2Run_gte (s : StackState) (ops : List StackOp) (a b : Int)
+    (R : List Value) :
+    runOps (.opcode "OP_GREATERTHANOREQUAL" :: ops)
+        { s with stack := .vBigint b :: .vBigint a :: R }
+      = runOps ops { s with stack := .vBool (decide (a ≥ b)) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+/-- `OP_ADD` of the comparison's boolean onto the running bit count
+(`asInt?` reads a boolean as 0/1). -/
+private theorem log2Run_add_bool (s : StackState) (ops : List StackOp) (p : Bool)
+    (a : Int) (R : List Value) :
+    runOps (.opcode "OP_ADD" :: ops) { s with stack := .vBool p :: .vBigint a :: R }
+      = runOps ops { s with stack := .vBigint (a + if p then 1 else 0) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
+
+/-- `OP_BIN2NUM` on a non-zero numeric element is the identity (N-384). -/
+private theorem log2Run_bin2num_int (s : StackState) (ops : List StackOp) (n : Int)
+    (R : List Value) (hn : n ≠ 0) :
+    runOps (.opcode "OP_BIN2NUM" :: ops) { s with stack := .vBigint n :: R }
+      = runOps ops { s with stack := .vBigint n :: R } := by
+  refine log2Run_cons _ _ _ _ (by intro _ _ h; cases h) ?_
+  rw [stepNonIf_opcode, RunarVerification.Stack.Sim.runOpcode_BIN2NUM_def]
+  simp only [StackState.pop?, asBytes?_vBigint_ne_zero hn]
   rfl
 
-/-- Method-level wrapper for a single-binding `log2(n)` body at depth
-0 in copy mode (`loadRef` emits `[.dup]`). Discharges
-`runMethod ... .isSome` via the bounded bit-scan fuel-sufficiency
-proof above.
+private theorem log2Run_bin2num_bytes (s : StackState) (ops : List StackOp)
+    (b : ByteArray) (R : List Value) :
+    runOps (.opcode "OP_BIN2NUM" :: ops) { s with stack := .vBytes b :: R }
+      = runOps ops { s with stack := .vBigint (decodeMinimalLE b) :: R } :=
+  log2Run_cons _ _ _ _ (by intro _ _ h; cases h) rfl
 
-`hLowering` is an input-side structural fact: the raw body ops emitted
-by `lowerMethodUserRawOps` for this single-`log2(n)`-binding shape are
-exactly the literal op list. Per-fixture this discharges by `rfl` /
-`native_decide`. -/
+/-- `OP_SIZE` on a numeric element reads its minimal encoding (N-384). -/
+private theorem log2Run_size_int (s : StackState) (ops : List StackOp) (n : Int)
+    (R : List Value) :
+    runOps (.opcode "OP_SIZE" :: ops) { s with stack := .vBigint n :: R }
+      = runOps ops
+          { s with stack := .vBigint (encodeMinimalLE n).size :: .vBigint n :: R } := by
+  refine log2Run_cons _ _ _ _ (by intro _ _ h; cases h) ?_
+  rw [stepNonIf_opcode, RunarVerification.Stack.Sim.runOpcode_SIZE_def]
+  simp only [asBytesNum?_vBigint]
+  rfl
+
+/-- `OP_SPLIT` of a numeric element's minimal encoding at an in-range
+index (N-384). The suffix ends up on top. -/
+private theorem log2Run_split_int (s : StackState) (ops : List StackOp) (k : Nat)
+    (n : Int) (R : List Value) (hk : k ≤ (encodeMinimalLE n).size) :
+    runOps (.opcode "OP_SPLIT" :: ops)
+        { s with stack := .vBigint (k : Int) :: .vBigint n :: R }
+      = runOps ops { s with stack := .vBytes ((encodeMinimalLE n).extract k (encodeMinimalLE n).size) :: .vBytes ((encodeMinimalLE n).extract 0 k) :: R } := by
+  refine log2Run_cons _ _ _ _ (by intro _ _ h; cases h) ?_
+  rw [stepNonIf_opcode, RunarVerification.Stack.Sim.runOpcode_SPLIT_def]
+  have hNonneg : ¬ ((k : Int) < 0) := Int.not_lt.2 (Int.natCast_nonneg k)
+  have hNotPast : ¬ (encodeMinimalLE n).size < k := Nat.not_lt_of_ge hk
+  simp [popN, StackState.pop?, asNonNegativeNat?, asInt?, hNonneg, hNotPast,
+    StackState.push]
+
+/-- The seven-comparison scan keeps the shape `[count, topByte, rest]`. -/
+private theorem log2Run_scan (cs : List Int) (s : StackState) (ops : List StackOp)
+    (b t : Int) (R : List Value) :
+    ∃ b' : Int,
+      runOps (cs.flatMap log2ScanOps ++ ops)
+          { s with stack := .vBigint b :: .vBigint t :: R }
+        = runOps ops { s with stack := .vBigint b' :: .vBigint t :: R } := by
+  induction cs generalizing b with
+  | nil => exact ⟨b, by simp⟩
+  | cons c cs ih =>
+      obtain ⟨b', hb'⟩ := ih (b + if decide (t ≥ c) then 1 else 0)
+      refine ⟨b', ?_⟩
+      rw [List.flatMap_cons, List.append_assoc]
+      simp only [log2ScanOps, List.cons_append, List.nil_append]
+      rw [log2Run_over, log2Run_push, log2Run_gte, log2Run_add_bool]
+      exact hb'
+
+/-- The full `log2` body on `[n, rest]` with `0 < n` succeeds and leaves
+some integer on top of `rest`. -/
+private theorem runOps_log2Body_isOk (s : StackState) (n : Int) (R : List Value)
+    (hPos : 0 < n) :
+    ∃ r : Int, runOps log2BodyOps { s with stack := .vBigint n :: R }
+      = .ok { s with stack := .vBigint r :: R } := by
+  have hn : n ≠ 0 := Int.ne_of_gt hPos
+  have hd : decide (n > 0) = true := decide_eq_true hPos
+  have hSz := encodeMinimalLE_size_pos hn
+  have hIdx : ((encodeMinimalLE n).size : Int) - 1
+      = (((encodeMinimalLE n).size - 1 : Nat) : Int) := by
+    omega
+  have hLe : (encodeMinimalLE n).size - 1 ≤ (encodeMinimalLE n).size := Nat.sub_le _ _
+  unfold log2BodyOps log2HeadOps
+  simp only [List.cons_append, List.nil_append]
+  rw [log2Run_bin2num_int _ _ _ _ hn, log2Run_dup, log2Run_push, log2Run_gt, hd,
+    log2Run_verify_true, log2Run_size_int, log2Run_1sub, log2Run_tuck, hIdx,
+    log2Run_split_int _ _ _ _ _ hLe, log2Run_nip, log2Run_bin2num_bytes,
+    log2Run_swap, log2Run_push, log2Run_mul, log2Run_1sub]
+  obtain ⟨b', hb'⟩ := log2Run_scan [1, 2, 4, 8, 16, 32, 64] s [StackOp.opcode "OP_NIP"] _ _ R
+  rw [hb', log2Run_nip]
+  exact ⟨b', by simp [runOps_nil]⟩
+
+/-- Method-level wrapper for a single-binding `log2(n)` body whose operand
+sits at depth 0 and is consumed in place (its last use), so `loadRefLive`
+emits nothing and the raw body ops are exactly `log2BodyOps`. Discharges
+`runMethod ... .isSome` via the straight-line walk above.
+
+`hPos : 0 < nVal` is required: the lowering aborts at `OP_VERIFY` for
+`n <= 0` (the ANF spec refuses the same inputs). `hLowering` is an
+input-side structural fact; `lowerMethodUserRawOps_log2MethodN384` below
+discharges it for a concrete method without `native_decide`. -/
 theorem runMethod_log2_singleton_d0_isSome
     (contractName : String) (props : List ANFProperty)
     (methods : List ANFMethod) (m : ANFMethod)
@@ -2678,6 +2591,7 @@ theorem runMethod_log2_singleton_d0_isSome
     (hAgrees : agreesTagged ((n, k_n) :: tsm_rest) initialAnf initialStack)
     (hLookupN : lookupAnfByKind initialAnf (n, k_n) = some (.vBigint nVal))
     (_hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hPos : 0 < nVal)
     (hMem : m ∈ methods)
     (hPublic : m.isPublic = true)
     (hUnique :
@@ -2687,12 +2601,7 @@ theorem runMethod_log2_singleton_d0_isSome
     (hNoCode : bindingsUseCodePart m.body = false)
     (hNoTerminalAssert : bodyEndsInAssert m.body = false)
     (hNoDeserialize : bindingsUseDeserializeState m.body = false)
-    (hLowering :
-      lowerMethodUserRawOps methods props m
-        = StackOp.dup
-          :: (StackOp.push (.bigint 0)
-              :: ((List.range 64).flatMap (fun _ => log2IterOps))
-              ++ [StackOp.opcode "OP_NIP"])) :
+    (hLowering : lowerMethodUserRawOps methods props m = log2BodyOps) :
     (Stack.Eval.runMethod
         (Stack.Lower.lower
           { contractName := contractName, properties := props, methods := methods })
@@ -2720,33 +2629,71 @@ theorem runMethod_log2_singleton_d0_isSome
           exact (Option.some.inj hAt0).symm
         exact ⟨rest, by rw [hVeq]⟩
   obtain ⟨rest, hStk⟩ := hStkShape
-  -- First op: `.dup` (= loadRef at depth 0) duplicates nVal on top.
-  let s1 : StackState := initialStack.push (.vBigint nVal)
-  have hS1stk : s1.stack = .vBigint nVal :: .vBigint nVal :: rest := by
-    show (initialStack.push (.vBigint nVal)).stack = _
-    unfold StackState.push; rw [hStk]
-  have hDup : runOps [StackOp.dup] initialStack = Except.ok s1 :=
-    run_dup_nonEmpty initialStack (.vBigint nVal) rest hStk
-  -- Then the log2 body fires on the duplicated state. The body lemma takes
-  -- the stack [nVal, .vBigint nVal :: rest] and produces
-  -- `({ s1 with stack := .vBigint nVal :: rest }.push (.vBigint counter'))`.
-  obtain ⟨result, hRunBody⟩ :=
-    runOps_log2Body_isOk s1 nVal (.vBigint nVal :: rest) hS1stk
-  -- Compose: dup ++ body.
-  have hRunAll :
-      runOps (StackOp.dup
-        :: (StackOp.push (.bigint 0)
-            :: ((List.range 64).flatMap (fun _ => log2IterOps))
-            ++ [StackOp.opcode "OP_NIP"])) initialStack
-        = Except.ok (({ s1 with stack := .vBigint nVal :: rest }).push (.vBigint result)) := by
-    show runOps ([StackOp.dup] ++ (StackOp.push (.bigint 0)
-            :: ((List.range 64).flatMap (fun _ => log2IterOps))
-            ++ [StackOp.opcode "OP_NIP"])) initialStack = _
-    rw [runOps_append, hDup]
-    simp only [RunarVerification.Stack.Eval.match_Except_ok_runOps]
-    exact hRunBody
-  rw [hRunAll]
+  have hS : initialStack = { initialStack with stack := .vBigint nVal :: rest } := by
+    cases initialStack
+    simp only at hStk
+    simp [hStk]
+  rw [hS]
+  obtain ⟨r, hRun⟩ := runOps_log2Body_isOk initialStack nVal rest hPos
+  rw [hRun]
   simp [Except.toOption]
+
+/-! ### N-384 — non-vacuity witness for `runMethod_log2_singleton_d0_isSome`
+
+`log2MethodN384` is the smallest real method that calls `log2`: one public
+method, one `bigint` param `n`, body `r := log2(n)`. Its operand is consumed
+in place (last use at index 0), so the lowering is the bare N-103 body with
+no load prefix. `lowerMethodUserRawOps_log2MethodN384` computes that lowering
+from `lowerBindingsP` (no `native_decide`), and the `example` below feeds it
+to the wrapper as `hLowering`.
+
+What this proves: the wrapper's `hLowering` hypothesis is satisfied by a
+method the lowerer actually produces, so the `isSome` conclusion is no longer
+vacuous for the current lowering; with the remaining hypotheses (alignment,
+operand lookup, `0 < nVal`) it yields a successful Stack run.
+What it does not prove: the run's result equals `Nat.log2 n` (this is an
+`isSome` obligation only), or anything about methods with more bindings, a
+copy-mode operand load, or the deployed bytes. -/
+private def log2MethodN384 : ANFMethod :=
+  { name := "f", params := [{ name := "n", type := .bigint }],
+    body := [.mk "r" (.call "log2" ["n"])], isPublic := true }
+
+private theorem lowerMethodUserRawOps_log2MethodN384 :
+    lowerMethodUserRawOps [log2MethodN384] [] log2MethodN384
+      = log2BodyOps := by
+  unfold lowerMethodUserRawOps
+  have hDepthTop : StackMap.depth? ([some "n"]) "n" = some 0 := by
+    unfold StackMap.depth? List.findIdx? List.findIdx?.go; simp
+  have hExt : isExtractor "log2" = false := by decide +kernel
+  simp only [log2MethodN384]
+  rw [lowerBindingsP]
+  unfold lowerValueP
+  simp [hDepthTop, loadRefLive, bringToTop, listContains, isLastUse,
+    computeLastUses, computeLastUses.go, StackMap.popN, StackMap.push,
+    lowerBindingsP, hExt, Stack.Lower.lastUsesLookup, Stack.Lower.lastUsesUpdate,
+    Stack.Lower.collectRefs, log2BodyOps, log2HeadOps, log2ScanOps]
+
+example (initialAnf : State) (initialStack : StackState)
+    (tsm_rest : TaggedStackMap) (nVal : Int)
+    (hAgrees : agreesTagged (("n", .param) :: tsm_rest) initialAnf initialStack)
+    (hLookupN : lookupAnfByKind initialAnf ("n", .param) = some (.vBigint nVal))
+    (hFresh : freshIn "r" ("n" :: untagSm tsm_rest))
+    (hPos : 0 < nVal) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := "C", properties := [], methods := [log2MethodN384] })
+        log2MethodN384.name initialStack).toOption.isSome :=
+  runMethod_log2_singleton_d0_isSome "C" [] [log2MethodN384] log2MethodN384
+    initialAnf initialStack "r" "n" .param tsm_rest nVal hAgrees hLookupN hFresh
+    (hPos := hPos)
+    (hMem := by simp)
+    (hPublic := rfl)
+    (hUnique := by intro m' hm' _ _; simpa using hm')
+    (hNoPreimage := by simp [log2MethodN384, bindingsUseCheckPreimage])
+    (hNoCode := by simp [log2MethodN384, bindingsUseCodePart])
+    (hNoTerminalAssert := by simp [log2MethodN384, bodyEndsInAssert])
+    (hNoDeserialize := by simp [log2MethodN384, bindingsUseDeserializeState])
+    (hLowering := lowerMethodUserRawOps_log2MethodN384)
 
 end Log2Wrappers
 
@@ -4358,8 +4305,8 @@ theorem mathByteSingleArgShapeBool_iff :
           apply mathByteShape_false_of_notSingleCall bn .getStateScript src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
-      | .checkPreimage p =>
-          apply mathByteShape_false_of_notSingleCall bn (.checkPreimage p) src rest tsm
+      | .checkPreimage p f =>
+          apply mathByteShape_false_of_notSingleCall bn (.checkPreimage p f) src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
       | .deserializeState p =>
@@ -5635,7 +5582,7 @@ theorem mathByteEmitNoNip_of_noLenFragment :
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a =>
+      | .checkPreimage a _ =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5700,7 +5647,7 @@ theorem bindingsUseCheckPreimage_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5751,7 +5698,7 @@ theorem collectRawSlots_nil_of_noLen :
         | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-        | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+        | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5801,7 +5748,7 @@ theorem bindingsUseCodePart_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5845,7 +5792,7 @@ theorem bindingsUseDeserializeState_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5893,7 +5840,7 @@ theorem bodyEndsInAssert_false_of_noLen :
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage a _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape

@@ -321,3 +321,72 @@ func TestSLHDSA_SelfConsistency(t *testing.T) {
 		t.Error("SLHVerify accepted a tampered self-produced signature")
 	}
 }
+
+// TestSLHVerify_RejectsNonCanonicalSignatureLength (F-232) pins that
+// SLHVerify accepts ONLY a signature of the parameter set's exact FIPS 205
+// length n + k*(1+a)*n + d*(len+h')*n — the same length the on-chain verifier
+// enforces with OP_SIZE <len> OP_EQUALVERIFY (slh-dsa-codegen.ts, BUG-011).
+//
+// Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector) and
+// SLH-DSA-SHA2-128f (self-signed), the honest signature verifies, while the
+// same signature with one appended 0x00 byte, with 32 appended bytes, or with
+// its last byte removed is rejected. Before F-232 every length guard was a
+// lower bound, so the appended variants verified true.
+// Does not prove: anything about the 192/256 parameter sets beyond sharing
+// the same guard, nor that the on-chain script rejects these inputs (that is
+// covered by the codegen's own tests).
+func TestSLHVerify_RejectsNonCanonicalSignatureLength(t *testing.T) {
+	type sigCase struct {
+		name         string
+		params       SLHParams
+		msg, sig, pk []byte
+	}
+	var cases []sigCase
+
+	var kat slhDsaKAT
+	readVendoredKAT(t, "slh-dsa-acvp-kat.json", &kat)
+	for _, v := range kat.Vectors {
+		if v.ParamSet != "SLH-DSA-SHA2-128s" {
+			continue
+		}
+		pk, _ := hex.DecodeString(v.Pk)
+		msg, _ := hex.DecodeString(v.Message)
+		sig, _ := hex.DecodeString(v.Signature)
+		cases = append(cases, sigCase{"128s-acvp", SLH_SHA2_128s, msg, sig, pk})
+	}
+	if len(cases) == 0 {
+		t.Fatal("no SLH-DSA-SHA2-128s ACVP vector found")
+	}
+
+	seed := make([]byte, 3*SLH_SHA2_128f.N)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	kp := SLHKeygen(SLH_SHA2_128f, seed)
+	msg128f := []byte("F-232 exact-length probe")
+	cases = append(cases, sigCase{"128f-self", SLH_SHA2_128f, msg128f, SLHSign(SLH_SHA2_128f, msg128f, kp.SK), kp.PK})
+
+	tail32 := make([]byte, 32)
+	for i := range tail32 {
+		tail32[i] = byte(0xA5 ^ (i * 37))
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if !SLHVerify(c.params, c.msg, c.sig, c.pk) {
+				t.Fatal("honest signature rejected")
+			}
+			withByte := append(append([]byte{}, c.sig...), 0x00)
+			if SLHVerify(c.params, c.msg, withByte, c.pk) {
+				t.Error("SLHVerify accepted sig||0x00 (trailing garbage)")
+			}
+			with32 := append(append([]byte{}, c.sig...), tail32...)
+			if SLHVerify(c.params, c.msg, with32, c.pk) {
+				t.Error("SLHVerify accepted sig||32 trailing bytes")
+			}
+			if SLHVerify(c.params, c.msg, c.sig[:len(c.sig)-1], c.pk) {
+				t.Error("SLHVerify accepted a signature truncated by one byte")
+			}
+		})
+	}
+}

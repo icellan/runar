@@ -289,3 +289,20 @@ export function requireOutputP2PKH(
 export function currentBlockHeight(): bigint {
   return compilerStub('currentBlockHeight');
 }
+
+/**
+ * The satoshis the spending transaction puts in this contract's NEXT state
+ * UTXO — a read-only view of the compiler-injected `_newAmount` witness.
+ *
+ * Only valid in a public `StatefulSmartContract` method that continues
+ * through the default single-output continuation (it mutates state or emits
+ * a data output, and never calls `addOutput`/`addRawOutput`). The compiler
+ * already asserts `continuationAmount() >= extractAmount(this.txPreimage)`
+ * there, so the contract's value can grow (a deposit paid by a funding input)
+ * but never shrink. Use it to state a stricter rule, e.g.
+ * `assert(continuationAmount() === extractAmount(this.txPreimage) + bet)`.
+ * It is a value, not a variable: it cannot be assigned.
+ */
+export function continuationAmount(): bigint {
+  return compilerStub('continuationAmount');
+}

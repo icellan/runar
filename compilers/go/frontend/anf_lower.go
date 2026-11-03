@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/icellan/runar/compilers/go/ir"
@@ -26,6 +27,9 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	// Mirrors the TS reference compiler's liftBranchUpdateProps (04-anf-lower.ts line 50).
 	for i := range methods {
 		methods[i].Body = liftBranchUpdateProps(methods[i].Body)
+		if methods[i].IsPublic {
+			dropTerminalIfResults(methods[i].Body)
+		}
 	}
 
 	return &ir.ANFProgram{
@@ -51,72 +55,18 @@ func isByteType(typeName string) bool {
 	return byteStringSubtypes[typeName]
 }
 
-// Preimage field extractors that return BYTES (ByteString / Sha256).
+// isByteReturningBuiltin reports whether the builtin `name` returns a
+// ByteString-family value.
 //
-// N-054: this list is a transcription of the returnType the type checker
-// already records for these builtins in typecheck.go, and the stack lowerer
-// agrees with it byte for byte: lowerExtractor ends the split sequence with
-// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
-// none of the ones that are.
-//
-// So an extractor listed here leaves a byte string on the stack and must be
-// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-// leaves a minimally-encoded script NUMBER and must be compared with
-// OP_NUMEQUAL and added with OP_ADD.
-//
-// Getting it backwards is a correctness defect in both directions. OP_EQUAL
-// on a number is over-strict -- it rejects a witness that encodes the same
-// value with different bytes (0400 for 4), i.e. it refuses a valid spend.
-// OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing high-order
-// zero bytes and negative zero compare equal to values they are not
-// byte-equal to, i.e. a covenant bypass.
-//
-// This replaces a strings.HasPrefix(name, "extract") test that swept the six
-// numeric extractors in with the byte ones.
-var byteReturningExtractors = map[string]bool{
-	"extractHashPrevouts":     true,
-	"extractHashSequence":     true,
-	"extractOutpoint":         true,
-	"extractScriptCode":       true,
-	"extractOutputHash":       true,
-	"extractOutputs":          true,
-	"extractPrevOutputScript": true,
-}
-
-var byteReturningFunctions = map[string]bool{
-	"sha256":               true,
-	"ripemd160":            true,
-	"hash160":              true,
-	"hash256":              true,
-	"cat":                  true,
-	"substr":               true,
-	"num2bin":              true,
-	"reverseBytes":         true,
-	"left":                 true,
-	"right":                true,
-	"int2str":              true,
-	"toByteString":         true,
-	"pack":                 true,
-	"ecAdd":                true,
-	"ecMul":                true,
-	"ecMulGen":             true,
-	"ecNegate":             true,
-	"ecMakePoint":          true,
-	"ecEncodeCompressed":   true,
-	"p256Add":              true,
-	"p256Mul":              true,
-	"p256MulGen":           true,
-	"p256Negate":           true,
-	"p256EncodeCompressed": true,
-	"p384Add":              true,
-	"p384Mul":              true,
-	"p384MulGen":           true,
-	"p384Negate":           true,
-	"p384EncodeCompressed": true,
-	"sha256Compress":       true,
-	"sha256Finalize":       true,
-	"blake3Compress":       true,
-	"blake3Hash":           true,
+// N-347: this is read off the returnType column of typecheck.go's
+// builtinFunctions, not a second hand-written list. Two such lists lived here
+// and drifted: N-054 (a name-prefix test swept the six numeric extractors in)
+// and N-345 / N-347 (byte-returning builtins left out — merkleRootSha256,
+// merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul — so `===`
+// on two of their results compiled to OP_NUMEQUAL). Do not reintroduce one.
+func isByteReturningBuiltin(name string) bool {
+	sig, ok := builtinFunctions[name]
+	return ok && isByteType(sig.returnType)
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
@@ -125,13 +75,18 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return true
 
 	case Identifier:
+		// N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+		// binding, never by the parameter or property it shadows.
+		if renamed, ok := ctx.scopeRenames[e.Name]; ok {
+			return ctx.localByteVars[renamed]
+		}
 		if t, ok := ctx.getParamType(e.Name); ok && isByteType(t) {
 			return true
 		}
 		if t, ok := ctx.getPropertyType(e.Name); ok && isByteType(t) {
 			return true
 		}
-		if ctx.localByteVars[e.Name] {
+		if ctx.localByteVars[ctx.localName(e.Name)] {
 			return true
 		}
 		return false
@@ -156,10 +111,7 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 			if id.Name == "asm" {
 				return e.AsmReturnType == "ByteString"
 			}
-			if byteReturningFunctions[id.Name] {
-				return true
-			}
-			if byteReturningExtractors[id.Name] {
+			if isByteReturningBuiltin(id.Name) {
 				return true
 			}
 		}
@@ -408,6 +360,16 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 		// emit load_prop regardless of param registration.
 		for _, p := range method.Params {
 			methodCtx.addParam(p.Name)
+			// N-016: a private helper's parameter is not part of any ABI, so one
+			// that shadows a property is bound under the collision-proof local
+			// name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+			// the body REASSIGNS is renamed too — its rebinding is merged out of
+			// an if by name, where a property result of the same name would
+			// capture it. The ABI keeps the source name either way.
+			if methodCtx.isProperty(p.Name) &&
+				(method.Visibility == "private" || statementsReassign(method.Body, p.Name)) {
+				methodCtx.renamePrivateParamTo(p.Name, methodCtx.localName(p.Name))
+			}
 		}
 
 		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
@@ -417,12 +379,20 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// output must therefore inject the same continuation params
 			// as if the public body did so directly.
 			eff := sideEffects[method.Name]
-			shape := ContinuationShapeFor(eff)
+			// N-038: under a SINGLE base the change output is not committed,
+			// so the method takes no _changePKH / _changeAmount and the
+			// continuation hash carries no change segment.
+			sighashMode := SighashDefault
+			if method.SighashType != nil {
+				sighashMode = *method.SighashType
+			}
+			shape := ContinuationShapeForSighash(eff, sighashMode)
 			needsChangeOutput := shape.NeedsChange
+			includesChange := shape.IncludesChange
 			needsNewAmount := shape.NeedsNewAmount
 
 			// Register implicit parameters
-			if needsChangeOutput {
+			if includesChange {
 				methodCtx.addParam("_changePKH", "Ripemd160")
 				methodCtx.addParam("_changeAmount", "bigint")
 			}
@@ -434,11 +404,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// Issue #123: the declared per-method sighash mode (default
 			// ALL|FORKID). Drives BOTH the OP_PUSH_TX binding flag (so the
 			// derived sig re-computes the tx sighash under this mode) AND the
-			// runtime preimage-type assert.
-			sighashMode := SighashDefault
-			if method.SighashType != nil {
-				sighashMode = *method.SighashType
-			}
+			// runtime preimage-type assert. (sighashMode resolved above.)
 			isDefaultSighash := sighashMode == SighashDefault
 
 			// Inject checkPreimage(txPreimage) at the start.
@@ -514,6 +480,23 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// param injection. Both must agree or the deployed locking
 			// script will not match the auto-injected parameter list.
 			if needsChangeOutput {
+				// F-024 (R14): the default single-output continuation carries
+				// the spender-chosen `_newAmount` into the new state UTXO.
+				// Without this check a spender sets `_newAmount = 1` and pays
+				// the rest of the input value to their own change output — the
+				// committed outputs then match the covenant's hash exactly.
+				// Value may grow (a deposit) but never shrink below the input
+				// amount. addOutput/addRawOutput methods size their outputs
+				// explicitly and terminal methods have no continuation.
+				// Mirrors 04-anf-lower.ts binding for binding.
+				if len(addOutputRefs) == 0 {
+					amountPreimageRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+					inputAmountRef := methodCtx.emit(makeCall("extractAmount", []string{amountPreimageRef}))
+					newAmountCheckRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
+					amountOkRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: ">=", Left: newAmountCheckRef, Right: inputAmountRef})
+					methodCtx.emit(makeAssert(amountOkRef))
+				}
+
 				// Build the P2PKH change output for hashOutputs verification.
 				//
 				// Issue #116: the SDK's BuildCallTransaction OMITS the change
@@ -525,22 +508,36 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 				// no-op) when zero, reproducing the omission. For any change > 0
 				// the hashed bytes are unchanged; only the emitted script gains
 				// the guard.
-				changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
-				changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
-				zeroRef := methodCtx.emit(makeLoadConstInt(big.NewInt(0)))
-				changeNonZeroRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: changeAmountRef, Right: zeroRef})
-				changeThenCtx := methodCtx.subContext()
-				changeThenCtx.emit(makeCall("buildChangeOutput", []string{changePKHRef, changeAmountRef}))
-				methodCtx.syncCounter(changeThenCtx)
-				changeElseCtx := methodCtx.subContext()
-				changeElseCtx.emit(makeLoadConstString(""))
-				methodCtx.syncCounter(changeElseCtx)
-				changeOutputRef := methodCtx.emit(ir.ANFValue{
-					Kind: "if",
-					Cond: changeNonZeroRef,
-					Then: changeThenCtx.bindings,
-					Else: changeElseCtx.bindings,
-				})
+				//
+				// N-038: under a SIGHASH_SINGLE base (includesChange false) the
+				// change output is not committed — hashOutputs =
+				// hash256(output[inputIndex]) — so no change segment is built and
+				// the hash covers the method's own output(s) only.
+				changeOutputRef := ""
+				if includesChange {
+					changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
+					changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
+					zeroRef := methodCtx.emit(makeLoadConstInt(big.NewInt(0)))
+					changeNonZeroRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "!==", Left: changeAmountRef, Right: zeroRef})
+					changeThenCtx := methodCtx.subContext()
+					changeThenCtx.emit(makeCall("buildChangeOutput", []string{changePKHRef, changeAmountRef}))
+					methodCtx.syncCounter(changeThenCtx)
+					changeElseCtx := methodCtx.subContext()
+					changeElseCtx.emit(makeLoadConstString(""))
+					methodCtx.syncCounter(changeElseCtx)
+					changeOutputRef = methodCtx.emit(ir.ANFValue{
+						Kind: "if",
+						Cond: changeNonZeroRef,
+						Then: changeThenCtx.bindings,
+						Else: changeElseCtx.bindings,
+					})
+				}
+				catChange := func(acc string) string {
+					if changeOutputRef == "" {
+						return acc
+					}
+					return methodCtx.emit(makeCall("cat", []string{acc, changeOutputRef}))
+				}
 
 				if len(addOutputRefs) > 0 {
 					// Multi-output continuation: concat all state outputs, then
@@ -552,7 +549,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					for _, dataRef := range addDataOutputRefs {
 						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
 					}
-					accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
+					accumulated = catChange(accumulated)
 					hashRef := methodCtx.emit(makeCall("hash256", []string{accumulated}))
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef2}))
@@ -570,7 +567,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					for _, dataRef := range addDataOutputRefs {
 						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
 					}
-					allOutputs := methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
+					allOutputs := catChange(accumulated)
 					hashRef := methodCtx.emit(makeCall("hash256", []string{allOutputs}))
 					preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
@@ -581,7 +578,10 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 			// Build augmented params list for ABI
 			augmentedParams := lowerParams(method.Params)
-			if needsChangeOutput {
+			for i := range augmentedParams {
+				augmentedParams[i].Name = methodCtx.paramSlot(augmentedParams[i].Name)
+			}
+			if includesChange {
 				augmentedParams = append(augmentedParams,
 					ir.ANFParam{Name: "_changePKH", Type: "Ripemd160"},
 					ir.ANFParam{Name: "_changeAmount", Type: "bigint"},
@@ -623,6 +623,9 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			}
 			methodCtx.lowerStatements(method.Body)
 			augmented := lowerParams(method.Params)
+			for i := range augmented {
+				augmented[i].Name = methodCtx.paramSlot(augmented[i].Name)
+			}
 			// Private methods can also call the intent intrinsics; capture
 			// their auto-injected witness params so a public method that
 			// inlines this private picks them up via the shared methodScope.
@@ -697,6 +700,17 @@ type lowerCtx struct {
 	addOutputRefs     []string           // tracks addOutput / addRawOutput binding refs (state outputs)
 	addDataOutputRefs []string           // tracks addDataOutput binding refs — data outputs are included in the continuation hash AFTER state outputs and BEFORE the change output
 	localAliases      map[string]string  // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
+	// N-016: private-helper params renamed because they shadow a property,
+	// and loop variables in scope whose name is a property's. Nil until used.
+	renamedPrivateParams map[string]string
+	shadowingLoopVars    map[string]bool
+	// N-046 / N-047: source name -> binding name of a declaration that reused
+	// a name already bound in an enclosing scope (an outer local, a parameter,
+	// a loop variable, or, inside an inlined helper, a caller local). Copied by
+	// value into sub-contexts, so the rename ends with the declaring block.
+	scopeRenames map[string]string
+	// N-046: source names of the loop variables in scope.
+	loopVars map[string]bool
 	localByteVars     map[string]bool    // tracks local variables known to be byte-typed
 	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
 	// Param substitution stack used when inlining a private method's body
@@ -745,6 +759,14 @@ type lowerCtx struct {
 	// commitment constrains nothing about the transaction's real outputs, and
 	// the bond it claims to enforce can be satisfied with invented bytes.
 	didEmitHashOutputsCheck bool
+
+	// enclosingLoopCount — N-202. The product of the counts of every for-loop
+	// enclosing the block this context lowers (1 at method top level). Copied
+	// unchanged into if / ternary arms; a loop body gets enclosing * count.
+	// The per-loop ir.MaxLoopCount check bounds one loop; this bounds the
+	// unrolled work along a nesting path, the rule the --ir loader applies
+	// (F-283).
+	enclosingLoopCount int
 }
 
 // methodScopeT holds per-method bookkeeping shared by parent and
@@ -754,6 +776,15 @@ type lowerCtx struct {
 type methodScopeT struct {
 	autoInjectedParams []ir.ANFParam   // append-only, insertion order
 	autoInjectedSet    map[string]bool // dedup
+	// N-046 / N-047: the last `<name>@<n>` suffix handed out in this method,
+	// shared by every sub-context and inlined helper body.
+	shadowSeq int
+}
+
+// nextShadowName (N-046) returns a method-unique `<name>@<n>` binding name.
+func (ms *methodScopeT) nextShadowName(name string) string {
+	ms.shadowSeq++
+	return name + "@" + strconv.Itoa(ms.shadowSeq)
 }
 
 func newMethodScope() *methodScopeT {
@@ -785,6 +816,8 @@ func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *
 		paramAliasStack:  make(map[string][]string),
 		sideEffects:      summary,
 		methodScope:      newMethodScope(),
+		// N-202: no loop encloses a method's top level.
+		enclosingLoopCount: 1,
 	}
 }
 
@@ -841,7 +874,11 @@ func (ctx *lowerCtx) shouldInlinePrivate(name string) bool {
 	if !ok {
 		return false
 	}
-	return eff.HasStateOutput || eff.HasDataOutput
+	// N-070: a helper that calls requireOutputP2PKH is inlined too, so the
+	// _serialisedOutputs witness it auto-injects lands on the public method.
+	// N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
+	return eff.HasStateOutput || eff.HasDataOutput || eff.CallsRequireOutputP2PKH ||
+		eff.CallsExtractPrevOutputScript
 }
 
 // checkPrivateCallArity refuses a call to a private method whose argument
@@ -1006,6 +1043,241 @@ func (ctx *lowerCtx) isProperty(name string) bool {
 	return false
 }
 
+// shadowLocalSuffix (N-016) is appended to the binding name of a local that
+// shares a contract property's name. `@` appears in no surface's identifiers,
+// so the result cannot collide with a property, another local or a temp.
+const shadowLocalSuffix = "@local"
+
+// localName (N-016) returns the ANF binding name for a source-level local (or
+// loop variable, or private-helper parameter) called name. Binding names and
+// property names share one namespace downstream — stack lowering resolves
+// load_prop / update_prop / the state continuation / an if's results by name
+// — so a local bound as `x` next to a property `x` made `this.x` read the
+// local. Non-shadowing names are returned unchanged (byte-identical ANF).
+func (ctx *lowerCtx) localName(name string) string {
+	if renamed, ok := ctx.scopeRenames[name]; ok {
+		return renamed
+	}
+	if ctx.isProperty(name) {
+		return name + shadowLocalSuffix
+	}
+	return name
+}
+
+// localTarget (N-016) is the binding a write to the bare identifier name
+// rebinds: the local's (possibly renamed) binding when a local of that name is
+// in scope, otherwise the name itself, exactly as before.
+func (ctx *lowerCtx) localTarget(name string) string {
+	if local := ctx.localName(name); ctx.isLocal(local) {
+		return local
+	}
+	// N-360: a renamed parameter is read from its slot, so it is rebound there.
+	if ctx.isParam(name) {
+		return ctx.paramSlot(name)
+	}
+	return name
+}
+
+// isParamSlot (N-360) reports whether name is the load_param slot of one of
+// this method's parameters.
+func (ctx *lowerCtx) isParamSlot(name string) bool {
+	for p, registered := range ctx.paramNames {
+		if registered && ctx.paramSlot(p) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// statementsReassign (N-360) reports whether any statement writes the bare
+// identifier name — an assignment to it, or a ++ / -- of it — anywhere,
+// nested blocks included.
+func statementsReassign(stmts []Statement, name string) bool {
+	for _, s := range stmts {
+		if statementReassigns(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func statementReassigns(stmt Statement, name string) bool {
+	switch s := stmt.(type) {
+	case VariableDeclStmt:
+		return expressionReassigns(s.Init, name)
+	case AssignmentStmt:
+		if id, ok := s.Target.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(s.Target, name) || expressionReassigns(s.Value, name)
+	case IfStmt:
+		return expressionReassigns(s.Condition, name) ||
+			statementsReassign(s.Then, name) || statementsReassign(s.Else, name)
+	case ForStmt:
+		if expressionReassigns(s.Init.Init, name) || expressionReassigns(s.Condition, name) {
+			return true
+		}
+		if s.Update != nil && statementReassigns(s.Update, name) {
+			return true
+		}
+		return statementsReassign(s.Body, name)
+	case ReturnStmt:
+		return s.Value != nil && expressionReassigns(s.Value, name)
+	case ExpressionStmt:
+		return expressionReassigns(s.Expr, name)
+	}
+	return false
+}
+
+func expressionReassigns(expr Expression, name string) bool {
+	switch e := expr.(type) {
+	case BinaryExpr:
+		return expressionReassigns(e.Left, name) || expressionReassigns(e.Right, name)
+	case UnaryExpr:
+		return expressionReassigns(e.Operand, name)
+	case CallExpr:
+		if expressionReassigns(e.Callee, name) {
+			return true
+		}
+		for _, a := range e.Args {
+			if expressionReassigns(a, name) {
+				return true
+			}
+		}
+	case MemberExpr:
+		return expressionReassigns(e.Object, name)
+	case TernaryExpr:
+		return expressionReassigns(e.Condition, name) ||
+			expressionReassigns(e.Consequent, name) || expressionReassigns(e.Alternate, name)
+	case IndexAccessExpr:
+		return expressionReassigns(e.Object, name) || expressionReassigns(e.Index, name)
+	case IncrementExpr:
+		if id, ok := e.Operand.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(e.Operand, name)
+	case DecrementExpr:
+		if id, ok := e.Operand.(Identifier); ok && id.Name == name {
+			return true
+		}
+		return expressionReassigns(e.Operand, name)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if expressionReassigns(el, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (ctx *lowerCtx) renamePrivateParamTo(name, slot string) {
+	if ctx.renamedPrivateParams == nil {
+		ctx.renamedPrivateParams = make(map[string]string)
+	}
+	ctx.renamedPrivateParams[name] = slot
+}
+
+// paramSlot (N-016) is the load_param name a source parameter resolves to.
+func (ctx *lowerCtx) paramSlot(name string) string {
+	if slot, ok := ctx.renamedPrivateParams[name]; ok {
+		return slot
+	}
+	return name
+}
+
+func (ctx *lowerCtx) addShadowingLoopVar(name string) {
+	if ctx.shadowingLoopVars == nil {
+		ctx.shadowingLoopVars = make(map[string]bool)
+	}
+	ctx.shadowingLoopVars[name] = true
+}
+
+// sourceLocalName (N-016 / N-046) undoes localName and declareLocal: the
+// source spelling is everything before the first `@`.
+func sourceLocalName(bindingName string) string {
+	if at := strings.IndexByte(bindingName, '@'); at >= 0 {
+		return bindingName[:at]
+	}
+	return bindingName
+}
+
+// declareLocal (N-046 / N-047) returns the binding name of a block-scoped
+// declaration of name. A declaration that reuses a name already bound in an
+// enclosing scope (an outer local, a parameter, a loop variable, an inlined
+// helper's parameter) is bound under the fresh `<name>@<n>` and recorded in
+// this scope, so it can never be mistaken for a reassignment of the outer
+// binding (if-arm reconciliation matches arm bindings to outer locals BY
+// NAME). A declaration that collides with nothing keeps localName(name), which
+// keeps non-shadowing ANF byte-identical.
+func (ctx *lowerCtx) declareLocal(name string) string {
+	_, renamed := ctx.scopeRenames[name]
+	_, aliased := ctx.getParamAlias(name)
+	inScope := renamed || ctx.isLocal(ctx.localName(name)) || ctx.isParam(name) || aliased || ctx.loopVars[name]
+	if !inScope {
+		return ctx.localName(name)
+	}
+	fresh := ctx.methodScope.nextShadowName(name)
+	if ctx.scopeRenames == nil {
+		ctx.scopeRenames = make(map[string]string)
+	}
+	ctx.scopeRenames[name] = fresh
+	return fresh
+}
+
+// addLoopVar (N-046) registers a loop variable (source name) as in scope.
+func (ctx *lowerCtx) addLoopVar(name string) {
+	if ctx.loopVars == nil {
+		ctx.loopVars = make(map[string]bool)
+	}
+	ctx.loopVars[name] = true
+}
+
+// inlinedScopeState (N-047) is the caller scope saved around an inlined
+// helper body.
+type inlinedScopeState struct {
+	scopeRenames  map[string]string
+	localNames    map[string]bool
+	localByteVars map[string]bool
+	localAliases  map[string]string
+	loopVars      map[string]bool
+}
+
+func copyBoolMap(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// enterInlinedScope (N-047): an inlined private helper's body is its own
+// lexical scope. None of the caller's renames apply inside it, and none of its
+// locals outlive it.
+func (ctx *lowerCtx) enterInlinedScope() inlinedScopeState {
+	aliases := make(map[string]string, len(ctx.localAliases))
+	for k, v := range ctx.localAliases {
+		aliases[k] = v
+	}
+	saved := inlinedScopeState{
+		scopeRenames:  ctx.scopeRenames,
+		localNames:    copyBoolMap(ctx.localNames),
+		localByteVars: copyBoolMap(ctx.localByteVars),
+		localAliases:  aliases,
+		loopVars:      copyBoolMap(ctx.loopVars),
+	}
+	ctx.scopeRenames = nil
+	return saved
+}
+
+func (ctx *lowerCtx) leaveInlinedScope(saved inlinedScopeState) {
+	ctx.scopeRenames = saved.scopeRenames
+	ctx.localNames = saved.localNames
+	ctx.localByteVars = saved.localByteVars
+	ctx.localAliases = saved.localAliases
+	ctx.loopVars = saved.loopVars
+}
+
 func (ctx *lowerCtx) getParamType(name string) (string, bool) {
 	// Restricted to the CURRENT method's parameters (issue #34). A cross-method
 	// lookup poisoned the byte-type analysis when two methods shared a parameter
@@ -1044,6 +1316,7 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		// but one emitted inside it must not flow back out to a sibling arm.
 		didEmitHashOutputsCheck: ctx.didEmitHashOutputsCheck,
 		nested:                  true,
+		enclosingLoopCount:      ctx.enclosingLoopCount, // N-202
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -1065,6 +1338,24 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// Share local aliases
 	for k, v := range ctx.localAliases {
 		sub.localAliases[k] = v
+	}
+	// N-016: share the shadowing renames.
+	for k, v := range ctx.renamedPrivateParams {
+		sub.renamePrivateParamTo(k, v)
+	}
+	for k := range ctx.shadowingLoopVars {
+		sub.addShadowingLoopVar(k)
+	}
+	// N-046: the block inherits the enclosing renames and loop variables by
+	// value, so a rename made inside it ends with it.
+	if len(ctx.scopeRenames) > 0 {
+		sub.scopeRenames = make(map[string]string, len(ctx.scopeRenames))
+		for k, v := range ctx.scopeRenames {
+			sub.scopeRenames[k] = v
+		}
+	}
+	for k := range ctx.loopVars {
+		sub.addLoopVar(k)
 	}
 	// Deep-copy the inlined-param alias stack. inlinePrivateMethodCall pushes
 	// the caller's arg refs on the CURRENT context before lowering the private
@@ -1307,11 +1598,17 @@ func stmtSourceLoc(stmt Statement) *ir.SourceLocation {
 // a named binding that aliases the variable to the computed value via @ref.
 func (ctx *lowerCtx) lowerVariableDecl(stmt VariableDeclStmt) {
 	valueRef := ctx.lowerExprToRef(stmt.Init)
-	ctx.addLocal(stmt.Name)
-	if isByteTypedExpr(stmt.Init, ctx) {
-		ctx.localByteVars[stmt.Name] = true
+	// Byte-typedness of the initialiser is judged before the new name is in
+	// scope (the initialiser reads the OUTER binding of a shadowed name).
+	isBytes := isByteTypedExpr(stmt.Init, ctx)
+	// N-046 / N-047: a declaration reusing an enclosing binding's name is
+	// alpha-renamed (see declareLocal).
+	bindingName := ctx.declareLocal(stmt.Name)
+	ctx.addLocal(bindingName)
+	if isBytes {
+		ctx.localByteVars[bindingName] = true
 	}
-	ctx.emitNamed(stmt.Name, makeLoadConstString("@ref:"+valueRef))
+	ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+valueRef))
 }
 
 // lowerAssignment matches the TS reference:
@@ -1328,7 +1625,7 @@ func (ctx *lowerCtx) lowerAssignment(stmt AssignmentStmt) {
 
 	// local = expr -> re-bind (emit a new named binding with @ref)
 	if id, ok := stmt.Target.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+valueRef))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+valueRef))
 		return
 	}
 
@@ -1558,7 +1855,8 @@ func (ctx *lowerCtx) collectBranchMergedLocals(thenCtx, elseCtx *lowerCtx) []str
 		lastIndex := make(map[string]int)
 		var order []string
 		for i, b := range branch.bindings {
-			if !ctx.isLocal(b.Name) {
+			// N-360: a reassigned parameter merges like a local (by its slot name).
+			if !ctx.isLocal(b.Name) && !ctx.isParamSlot(b.Name) {
 				continue
 			}
 			if _, seen := lastIndex[b.Name]; !seen {
@@ -1714,7 +2012,7 @@ func branchOutputRejectionReason(
 	//    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
 	var liveMerged []string
 	for _, name := range mergedLocals {
-		if readsAfter[name] {
+		if readsAfter[sourceLocalName(name)] {
 			liveMerged = append(liveMerged, name)
 		}
 	}
@@ -1752,6 +2050,19 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	// statically determinable (issue #121).
 	start, step, count := extractLoopShape(stmt)
 
+	// N-202: bound the PRODUCT along the nesting path, not just this loop.
+	// extractLoopShape already capped count at ir.MaxLoopCount, and the
+	// enclosing product was capped the same way one level up, so this cannot
+	// overflow.
+	totalLoopCount := ctx.enclosingLoopCount * count
+	if totalLoopCount > ir.MaxLoopCount {
+		panic(fmt.Sprintf(
+			"For loop unrolls to %d iterations nested inside an enclosing loop of total count %d, "+
+				"producing %d total iterations, exceeding the maximum loop count of %d.",
+			count, ctx.enclosingLoopCount, totalLoopCount, ir.MaxLoopCount,
+		))
+	}
+
 	// Lower body into sub-context. The body repeats, so every read anywhere in
 	// it is a read that happens after any given statement inside it.
 	bodyReads := make(map[string]bool, len(readsAfter))
@@ -1763,18 +2074,63 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	}
 
 	bodyCtx := ctx.subContext()
+	bodyCtx.enclosingLoopCount = totalLoopCount
+	if ctx.isProperty(stmt.Init.Name) {
+		bodyCtx.addShadowingLoopVar(stmt.Init.Name)
+	}
+	// N-046: a loop variable reusing an enclosing binding's name is
+	// alpha-renamed in the body's scope (see declareLocal).
+	iterVar := bodyCtx.declareLocal(stmt.Init.Name)
+	bodyCtx.addLoopVar(stmt.Init.Name)
 	bodyCtx.lowerStatementsWithReads(stmt.Body, bodyReads)
 	ctx.syncCounter(bodyCtx)
+
+	// F-005 backstop for R-127. An output intrinsic in the body registered its
+	// ref on bodyCtx, which is dropped here, so the continuation hash would not
+	// commit to that output. Merging the refs cannot work (one body name denotes
+	// N unrolled slots), so refuse. The validator's syntactic search misses
+	// shapes such as `const xs = [this.addRawOutput(...)]`, and LowerToANF is
+	// exported, so this cannot rely on validation having run.
+	if len(bodyCtx.getAddOutputRefs()) > 0 || len(bodyCtx.getAddDataOutputRefs()) > 0 {
+		panic(loopOutputIntrinsicMsg(firstOutputIntrinsic(bodyCtx.bindings), ""))
+	}
 
 	ctx.emit(ir.ANFValue{
 		Kind:     "loop",
 		Count:    count,
 		Body:     bodyCtx.bindings,
-		IterVar:  stmt.Init.Name,
+		IterVar:  iterVar,
 		Start:    start,
 		StartRaw: bigIntStartRaw(start),
 		Step:     step,
 	})
+}
+
+// firstOutputIntrinsic names the source intrinsic of the first output node in
+// bindings (searching nested if/loop bodies), for the F-005 refusal.
+func firstOutputIntrinsic(bindings []ir.ANFBinding) string {
+	for _, b := range bindings {
+		switch b.Value.Kind {
+		case "add_output":
+			return "addOutput"
+		case "add_raw_output":
+			return "addRawOutput"
+		case "add_data_output":
+			return "addDataOutput"
+		case "if":
+			if name := firstOutputIntrinsic(b.Value.Then); name != "" {
+				return name
+			}
+			if name := firstOutputIntrinsic(b.Value.Else); name != "" {
+				return name
+			}
+		case "loop":
+			if name := firstOutputIntrinsic(b.Value.Body); name != "" {
+				return name
+			}
+		}
+	}
+	return "addOutput"
 }
 
 // extractLoopShape resolves a for-statement's compile-time loop shape (issue
@@ -2056,6 +2412,20 @@ func (ctx *lowerCtx) lowerIdentifier(id Identifier) string {
 		return ctx.emit(makeLoadConstString("@this"))
 	}
 
+	// N-046 / N-047: a declaration that shadowed an enclosing binding is the
+	// innermost binding of its name, ahead of params and param aliases. A
+	// renamed loop variable is not a local; it is read with load_param like
+	// every loop variable.
+	if renamed, ok := ctx.scopeRenames[name]; ok {
+		if ctx.isLocal(renamed) {
+			if alias := ctx.getLocalAlias(renamed); alias != "" {
+				return alias
+			}
+			return renamed
+		}
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: renamed})
+	}
+
 	// Param alias takes precedence over normal param lookup. Set when a
 	// private method's body is being inlined into this context — the
 	// private's param names map to the caller's arg refs.
@@ -2065,16 +2435,23 @@ func (ctx *lowerCtx) lowerIdentifier(id Identifier) string {
 
 	// Check if it's a registered parameter (e.g. txPreimage in StatefulSmartContract)
 	if ctx.isParam(name) {
-		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: name})
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: ctx.paramSlot(name)})
 	}
 
 	// Check if it's a local variable -- reference it directly
 	// (or use its alias if reassigned by an if-statement)
-	if ctx.isLocal(name) {
-		if alias := ctx.getLocalAlias(name); alias != "" {
+	local := ctx.localName(name)
+	if ctx.isLocal(local) {
+		if alias := ctx.getLocalAlias(local); alias != "" {
 			return alias
 		}
-		return name
+		return local
+	}
+
+	// N-016: a loop variable named like a property is the loop variable, not
+	// the property (it used to fall through to load_prop below).
+	if ctx.shadowingLoopVars[name] {
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: local})
 	}
 
 	// Check if it's a contract property
@@ -2304,6 +2681,18 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		return ctx.emit(makeAssert(outEqRef))
 	}
 
+	// continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+	// auto-injected `_newAmount` witness. It exists only in a public
+	// StatefulSmartContract method that continues through the default
+	// single-output continuation; anywhere else (private helpers, terminal
+	// methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+	if id, ok := callee.(Identifier); ok && id.Name == "continuationAmount" {
+		if !ctx.isParam("_newAmount") {
+			panic(ContinuationAmountUnavailable)
+		}
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
+	}
+
 	// currentBlockHeight() -> bigint. Pure source-level desugar to
 	// extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
 	// methods (typecheck enforces). No new ANF kind or stack codegen needed.
@@ -2518,6 +2907,16 @@ func (ctx *lowerCtx) lowerTernaryExpr(e TernaryExpr) string {
 	elseCtx.lowerTernaryArm(e.Alternate)
 	ctx.syncCounter(elseCtx)
 
+	// N-049 backstop: an output intrinsic in an arm registered its ref on the
+	// arm's sub-context, which is dropped here, so the continuation hash would
+	// not commit to that output. LowerToANF is exported, so this cannot rely
+	// on validation having run.
+	for _, armCtx := range []*lowerCtx{thenCtx, elseCtx} {
+		if len(armCtx.getAddOutputRefs()) > 0 || len(armCtx.getAddDataOutputRefs()) > 0 {
+			panic(ternaryOutputIntrinsicMsg(firstOutputIntrinsic(armCtx.bindings), ""))
+		}
+	}
+
 	elseBindings2 := elseCtx.bindings
 	if elseBindings2 == nil {
 		elseBindings2 = []ir.ANFBinding{}
@@ -2537,7 +2936,7 @@ func (ctx *lowerCtx) lowerIncrementExpr(e IncrementExpr) string {
 
 	// If the operand is a named variable, update it
 	if id, ok := e.Operand.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+result))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+result))
 	}
 	if pa, ok := e.Operand.(PropertyAccessExpr); ok {
 		ctx.emit(makeUpdateProp(pa.Property, result))
@@ -2556,7 +2955,7 @@ func (ctx *lowerCtx) lowerDecrementExpr(e DecrementExpr) string {
 
 	// If the operand is a named variable, update it
 	if id, ok := e.Operand.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+result))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+result))
 	}
 	if pa, ok := e.Operand.(PropertyAccessExpr); ok {
 		ctx.emit(makeUpdateProp(pa.Property, result))
@@ -2626,6 +3025,12 @@ func makeCall(funcName string, args []string) ir.ANFValue {
 	}
 }
 
+// ContinuationAmountUnavailable is the one diagnostic every tier emits for a
+// misplaced continuationAmount() (F-024 / R14).
+const ContinuationAmountUnavailable = "continuationAmount() is only available in a public StatefulSmartContract method whose state " +
+	"continues through the default single-output continuation (it mutates state or emits a data " +
+	"output, and does not call addOutput/addRawOutput)"
+
 func makeAssert(valueRef string) ir.ANFValue {
 	raw, _ := json.Marshal(valueRef)
 	return ir.ANFValue{
@@ -2686,16 +3091,39 @@ func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string
 		return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: methodName, Args: argRefs})
 	}
 
-	// Bind caller arg refs to the private's parameter names.
+	// Bind caller arg refs to the private's parameter names. N-362: a parameter
+	// the body reassigns is not aliased — a write cannot rebind an alias, so the
+	// helper read the caller's argument after it and the write landed on the
+	// caller's same-named variable. It is bound as a local of the helper below.
 	var aliasedParams []string
+	var reassignedParams []int
 	for i := 0; i < len(method.Params) && i < len(argRefs); i++ {
 		paramName := method.Params[i].Name
+		if statementsReassign(method.Body, paramName) {
+			reassignedParams = append(reassignedParams, i)
+			continue
+		}
 		ctx.pushParamAlias(paramName, argRefs[i])
 		aliasedParams = append(aliasedParams, paramName)
 	}
 
+	// N-047: the helper body is its own lexical scope. Its locals are declared
+	// against the caller's (a collision is alpha-renamed by declareLocal) and
+	// go out of scope when it returns.
+	callerScope := ctx.enterInlinedScope()
+	// N-362: `let <param> = <arg>` for each reassigned parameter (spec §6.3).
+	for _, i := range reassignedParams {
+		param := method.Params[i]
+		bindingName := ctx.declareLocal(param.Name)
+		ctx.addLocal(bindingName)
+		if isByteType(typeNodeToString(param.Type)) {
+			ctx.localByteVars[bindingName] = true
+		}
+		ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+argRefs[i]))
+	}
 	startIndex := len(ctx.bindings)
 	ctx.lowerStatements(method.Body)
+	ctx.leaveInlinedScope(callerScope)
 	endIndex := len(ctx.bindings)
 
 	// Pop aliases in reverse order so nested inlines compose correctly.
@@ -2774,6 +3202,9 @@ type updateBranch struct {
 	propName          string
 	valueBindings     []ir.ANFBinding
 	valueRef          string
+	// updateLoc is the location of the branch's original update_prop
+	// statement (N-350); nil when the source carried none.
+	updateLoc *ir.SourceLocation
 }
 
 // maxTempIndex finds the max temp index (e.g. t47 → 47) in a binding tree.
@@ -2865,21 +3296,21 @@ func allBindingsSideEffectFree(bindings []ir.ANFBinding) bool {
 }
 
 // extractBranchUpdate checks if a branch's bindings end with update_prop.
-// Returns (propName, valueBindings, valueRef, ok).
-func extractBranchUpdate(bindings []ir.ANFBinding) (string, []ir.ANFBinding, string, bool) {
+// Returns (propName, valueBindings, valueRef, updateLoc, ok).
+func extractBranchUpdate(bindings []ir.ANFBinding) (string, []ir.ANFBinding, string, *ir.SourceLocation, bool) {
 	if len(bindings) == 0 {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
 	last := &bindings[len(bindings)-1]
 	if last.Value.Kind != "update_prop" {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
 	valueBindings := make([]ir.ANFBinding, len(bindings)-1)
 	copy(valueBindings, bindings[:len(bindings)-1])
 	if !allBindingsSideEffectFree(valueBindings) {
-		return "", nil, "", false
+		return "", nil, "", nil, false
 	}
-	return last.Value.Name, valueBindings, last.Value.ValueRef, true
+	return last.Value.Name, valueBindings, last.Value.ValueRef, last.SourceLoc, true
 }
 
 // isAssertFalseElse checks if an else branch is just assert(false).
@@ -2925,7 +3356,7 @@ func stripDeclaredResults(bindings []ir.ANFBinding, results []string) []ir.ANFBi
 
 // collectUpdateBranches recursively collects update branches from a nested if-else chain.
 func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBinding) []updateBranch {
-	propName, valBindings, valRef, ok := extractBranchUpdate(thenBindings)
+	propName, valBindings, valRef, updateLoc, ok := extractBranchUpdate(thenBindings)
 	if !ok {
 		return nil
 	}
@@ -2935,6 +3366,7 @@ func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBin
 		propName:      propName,
 		valueBindings: valBindings,
 		valueRef:      valRef,
+		updateLoc:     updateLoc,
 	}}
 
 	if len(elseBindings) == 0 {
@@ -2970,12 +3402,13 @@ func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBin
 	}
 
 	// Otherwise, else branch should end with update_prop (final else)
-	if ePropName, eValBindings, eValRef, eOk := extractBranchUpdate(elseBindings); eOk {
+	if ePropName, eValBindings, eValRef, eLoc, eOk := extractBranchUpdate(elseBindings); eOk {
 		branches = append(branches, updateBranch{
 			condRef:       nil,
 			propName:      ePropName,
 			valueBindings: eValBindings,
 			valueRef:      eValRef,
+			updateLoc:     eLoc,
 		})
 		return branches
 	}
@@ -3081,6 +3514,59 @@ func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
 	}
 }
 
+// dropTerminalIfResults (N-261) mirrors the TS reference's
+// dropTerminalIfResults: a TERMINAL `if` (the last binding of a public method
+// body, or recursively of an arm of a terminal `if` -- the rule stack lowering
+// uses for terminalAssert) carries no results. Its arms' final asserts are the
+// script's verdict, so nothing reads a merged local afterwards, but the
+// appendBranchResults block sat AFTER the assert and every tier refused the
+// legal `let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }`.
+// Strips exactly that block (N `__merge$i` copies then N rebinds of LOCAL
+// results) and the Results list; any other shape is left alone. In place.
+func dropTerminalIfResults(bindings []ir.ANFBinding) {
+	if len(bindings) == 0 {
+		return
+	}
+	node := &bindings[len(bindings)-1].Value
+	if node.Kind != "if" {
+		return
+	}
+	n := len(node.Results)
+	if n > 0 {
+		constRef := func(v ir.ANFValue, want string) bool {
+			if v.Kind != "load_const" {
+				return false
+			}
+			var s string
+			if json.Unmarshal(v.RawValue, &s) != nil {
+				return false
+			}
+			return s == want
+		}
+		isBlock := func(arm []ir.ANFBinding) bool {
+			if len(arm) < 2*n {
+				return false
+			}
+			block := arm[len(arm)-2*n:]
+			for i, name := range node.Results {
+				temp := fmt.Sprintf("%s%d", ir.MergedLocalTempPrefix, i)
+				if block[i].Name != temp || !constRef(block[i].Value, "@ref:"+name) ||
+					block[n+i].Name != name || !constRef(block[n+i].Value, "@ref:"+temp) {
+					return false
+				}
+			}
+			return true
+		}
+		if isBlock(node.Then) && isBlock(node.Else) {
+			node.Then = node.Then[:len(node.Then)-2*n]
+			node.Else = node.Else[:len(node.Else)-2*n]
+			node.Results = nil
+		}
+	}
+	dropTerminalIfResults(node.Then)
+	dropTerminalIfResults(node.Else)
+}
+
 // liftBranchUpdateProps transforms if-bindings whose branches all end
 // with update_prop into flat conditional assignments.
 func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
@@ -3099,6 +3585,10 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			continue
 		}
 
+		// N-350: the rewrite replaces this located `if`; keep its location on
+		// the shared condition temporaries, and each branch's own update
+		// statement location on that branch's synthesized bindings (Java F-188).
+		ifLoc := binding.SourceLoc
 		branches := collectUpdateBranches(
 			binding.Value.Cond,
 			stripDeclaredResults(binding.Value.Then, binding.Value.Results),
@@ -3120,9 +3610,14 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			for _, csb := range branch.condSetupBindings {
 				newName := fresh()
 				nameMap[csb.Name] = newName
+				csbLoc := csb.SourceLoc
+				if csbLoc == nil {
+					csbLoc = ifLoc
+				}
 				result = append(result, ir.ANFBinding{
-					Name:  newName,
-					Value: remapValueRefs(csb.Value, nameMap),
+					Name:      newName,
+					Value:     remapValueRefs(csb.Value, nameMap),
+					SourceLoc: csbLoc,
 				})
 			}
 			if branch.condRef != nil {
@@ -3157,6 +3652,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Op:      "!",
 						Operand: *condRefs[j],
 					},
+					SourceLoc: ifLoc,
 				})
 				negatedConds = append(negatedConds, negName)
 			}
@@ -3177,6 +3673,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  andRef,
 						Right: negatedConds[j],
 					},
+					SourceLoc: ifLoc,
 				})
 				andRef = andName
 			}
@@ -3192,6 +3689,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  andRef,
 						Right: *condRefs[i],
 					},
+					SourceLoc: ifLoc,
 				})
 				effectiveConds = append(effectiveConds, finalName)
 			} else {
@@ -3236,6 +3734,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						Left:  orRef,
 						Right: *condRefs[i],
 					},
+					SourceLoc: ifLoc,
 				})
 				orRef = orName
 			}
@@ -3245,11 +3744,17 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Kind:     "assert",
 					ValueRef: orRef,
 				},
+				SourceLoc: ifLoc,
 			})
 		}
 
 		// 3. For each branch, emit: load_old, conditional if-expression, update_prop
 		for i, branch := range branches {
+			branchLoc := branch.updateLoc
+			if branchLoc == nil {
+				branchLoc = ifLoc
+			}
+
 			// Load old property value
 			oldPropRef := fresh()
 			result = append(result, ir.ANFBinding{
@@ -3258,6 +3763,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Kind: "load_prop",
 					Name: branch.propName,
 				},
+				SourceLoc: branchLoc,
 			})
 
 			// Remap value bindings for the then-branch
@@ -3269,9 +3775,14 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 			for _, vb := range branch.valueBindings {
 				newName := fresh()
 				branchMap[vb.Name] = newName
+				vbLoc := vb.SourceLoc
+				if vbLoc == nil {
+					vbLoc = branchLoc
+				}
 				thenBindings = append(thenBindings, ir.ANFBinding{
-					Name:  newName,
-					Value: remapValueRefs(vb.Value, branchMap),
+					Name:      newName,
+					Value:     remapValueRefs(vb.Value, branchMap),
+					SourceLoc: vbLoc,
 				})
 			}
 
@@ -3304,6 +3815,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						RawValue:    valueRaw,
 						ConstString: &valueRefStr,
 					},
+					SourceLoc: branchLoc,
 				})
 			}
 
@@ -3319,6 +3831,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 						RawValue:    raw,
 						ConstString: &refStr,
 					},
+					SourceLoc: branchLoc,
 				},
 			}
 
@@ -3332,6 +3845,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					Then: thenBindings,
 					Else: elseBindings,
 				},
+				SourceLoc: branchLoc,
 			})
 
 			// Emit update_prop
@@ -3345,6 +3859,7 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 					RawValue: valRefJSON,
 					ValueRef: condIfRef,
 				},
+				SourceLoc: branchLoc,
 			})
 		}
 	}

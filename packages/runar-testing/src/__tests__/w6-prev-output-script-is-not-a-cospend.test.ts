@@ -34,7 +34,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compile } from 'runar-compiler';
-import { LockingScript, UnlockingScript, Spend, Hash } from '@bsv/sdk';
+import { LockingScript, UnlockingScript, Hash } from '@bsv/sdk';
+import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 
 // ---------------------------------------------------------------------------
 // Contract under test
@@ -104,12 +105,13 @@ function pushHex(hex: string): string {
  * have read, and `Spend` is being told so explicitly.
  */
 function runSingleInput(lockingHex: string, unlockingHex: string): { success: boolean; error?: string } {
-  const spend = new Spend({
+  const spend = newConsensusSpend({
     sourceTXID: '11'.repeat(32),
     sourceOutputIndex: 0,
     sourceSatoshis: 100000,
     lockingScript: LockingScript.fromHex(lockingHex),
-    transactionVersion: 2,
+    // F-055: version 1, as every SDK-built tx; version 2 puts Spend in relaxed mode.
+    transactionVersion: CONSENSUS_TX_VERSION,
     otherInputs: [], // <-- a ONE-input transaction
     outputs: [],
     unlockingScript: UnlockingScript.fromHex(unlockingHex),

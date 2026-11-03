@@ -1,0 +1,102 @@
+{
+  "fixture": "blake3",
+  "kind": "stateless-signed",
+  "note": "blake3Compress / blake3Hash on a real @bsv/sdk Spend. No signature: the witness is the hash preimage. Honest digests are independent of the codegen: the 64-byte official BLAKE3 KAT (conformance/runtime-vectors/blake3-official-kat.json, input_len 64 = blake3Compress(IV, input) with block_len 64 and flags CHUNK_START|CHUNK_END|ROOT), and a BLAKE3 (spec §2) compress reference in packages/runar-testing/src/__tests__/f114-compress-operand-size-vm.test.ts that is itself pinned to that KAT. F-114: the compiled blake3Compress aborts unless the block is 64 bytes and the chaining value 32 bytes. Before F-114 a 65-byte block B || 0x01 (the 65th byte is the 2^32 bit of an addend, truncated by num2le) and a 60..63-byte block (short last word zero-extended) produced the committed digest of a DIFFERENT 64-byte block and Spend accepted them. The interpreter verdict is asserted equal to the Spend verdict on every row.",
+  "goldenHashes": {
+    "expected-script.hex": "48ebee8075d397defd3ea7f5c0fbb60c498f7e847530dfe7f362b5f034d51cae",
+    "expected-ir.json": "0f869d0e4dd17c516041b5a77719df37cc1bceed0b16a5467a2e4bae806e95d1"
+  },
+  "constructorArgs": {
+    "expected": "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98"
+  },
+  "spends": [
+    {
+      "method": "verifyCompress",
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+      ],
+      "expect": "accept",
+      "note": "Honest: 32-byte IV (LE) + the 64-byte KAT input; expected = official BLAKE3 KAT hash for input_len 64."
+    },
+    {
+      "method": "verifyCompress",
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f01"
+      ],
+      "expect": "reject",
+      "note": "F-114 forced near-miss: 65-byte block KAT || 0x01 with the honest digest. Accepted by Spend before F-114 (same digest); now refused by the block-size guard."
+    },
+    {
+      "method": "verifyCompress",
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e"
+      ],
+      "expect": "reject",
+      "note": "63-byte block (KAT input minus its last byte) with the KAT digest: refused by the block-size guard."
+    },
+    {
+      "method": "verifyCompress",
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b01",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+      ],
+      "expect": "reject",
+      "note": "33-byte chaining value IV || 0x01 with the honest digest: refused by the chaining-value size guard."
+    },
+    {
+      "method": "verifyCompress",
+      "constructorArgs": {
+        "expected": "885d567d0d1dbd0051fa657ed0c9f7e82e35e4ea705a8ad9effdaebbac532712"
+      },
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d9200000000"
+      ],
+      "expect": "accept",
+      "note": "Honest zero-tail block (the 64-byte block (i*37+11) mod 256 with its last four bytes zeroed); expected from the KAT-pinned reference compress."
+    },
+    {
+      "method": "verifyCompress",
+      "constructorArgs": {
+        "expected": "885d567d0d1dbd0051fa657ed0c9f7e82e35e4ea705a8ad9effdaebbac532712"
+      },
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92000000"
+      ],
+      "expect": "reject",
+      "note": "F-114 forced near-miss: the 63-byte prefix of the zero-tail block, whose short last word zero-extends to the honest word. Accepted by Spend before F-114 (same digest); now refused."
+    },
+    {
+      "method": "verifyCompress",
+      "constructorArgs": {
+        "expected": "885d567d0d1dbd0051fa657ed0c9f7e82e35e4ea705a8ad9effdaebbac532712"
+      },
+      "args": [
+        "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
+        "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92"
+      ],
+      "expect": "reject",
+      "note": "F-114 forced near-miss: the 60-byte prefix of the zero-tail block (empty last word reads as 0). Accepted by Spend before F-114; now refused."
+    },
+    {
+      "method": "verifyHash",
+      "args": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+      ],
+      "expect": "accept",
+      "note": "blake3Hash of the 64-byte KAT input equals the official KAT (blake3Hash is unguarded by F-114: it builds its own 64-byte block)."
+    },
+    {
+      "method": "verifyHash",
+      "args": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f01"
+      ],
+      "expect": "reject",
+      "note": "65-byte message is outside blake3Hash's single-block domain: refused (negative OP_NUM2BIN pad)."
+    }
+  ]
+}

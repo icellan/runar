@@ -13,17 +13,61 @@ tests:
 When both are available the tests assert that the subcommand parses its
 arguments and runs a trivial script (``OP_1 → final: pass``) without
 crashing — the per-tier "doesn't crash" smoke check required by the
-audit's G-6 gap.
+audit's G-6 gap. Both skip cleanly otherwise — EXCEPT in CI, where either
+missing dependency is treated as a hard failure (T-8 from
+audits/cross-language-completeness-20260514.md §5.2; N-209).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+
+def _spec_missing(module_name: str) -> bool:
+    """``importlib.util.find_spec`` for a dotted name imports its parent
+    packages first and raises ``ModuleNotFoundError`` if one is absent
+    (e.g. ``runar`` not on ``PYTHONPATH``), rather than returning ``None``
+    the way it does for a missing top-level module. Treat either outcome
+    as "missing"."""
+    try:
+        return importlib.util.find_spec(module_name) is None
+    except ModuleNotFoundError:
+        return True
+
+
+# N-209: in CI we want a missing `bsv-sdk`, or a `runar-py` not on
+# PYTHONPATH, to be loud, not a silent skip. The Python compiler CI job
+# (``.github/workflows/ci.yml`` → ``python-compiler``) explicitly installs
+# `bsv-sdk` and puts `packages/runar-py` on `PYTHONPATH` so this module runs
+# its real path. If a future CI change drops either, the silent
+# importorskips below would let this smoke test vanish from CI uncaught.
+# Mirrors test_script_vm.py's T-8 guard for both of this file's optional
+# dependencies.
+if os.environ.get("CI") and _spec_missing("bsv"):
+    pytest.fail(
+        "test_cli_debug.py: CI environment detected ($CI is set) but the "
+        "optional `bsv-sdk` package is not installed — this module's tests "
+        "would silently skip. Install the `script-vm` extra in CI "
+        "(`pip install runar[script-vm]` or `pip install bsv-sdk`). See "
+        "audits/cross-language-completeness-20260514.md T-8.",
+        pytrace=False,
+    )
+if os.environ.get("CI") and _spec_missing("runar.sdk.script_vm"):
+    pytest.fail(
+        "test_cli_debug.py: CI environment detected ($CI is set) but "
+        "`runar.sdk.script_vm` is not importable — `packages/runar-py` is "
+        "missing from PYTHONPATH and this module's tests would silently "
+        "skip. Set PYTHONPATH to include `packages/runar-py` in CI (see "
+        "`.github/workflows/ci.yml`'s `python-compiler` job). See "
+        "audits/cross-language-completeness-20260514.md T-8.",
+        pytrace=False,
+    )
 
 # Skip the whole module unless both bsv-sdk and runar-py are importable.
 # Without bsv-sdk the runar.sdk.script_vm wrapper raises ImportError on use;
@@ -72,11 +116,15 @@ def test_debug_missing_input_errors() -> None:
 
 
 def test_debug_falsy_script_reports_fail() -> None:
-    """OP_0 (hex 00) — pushes empty bytes; falsy. Wrapper must still exit 0."""
+    """OP_0 (hex 00) — pushes empty bytes; falsy. Must exit non-zero (F-221).
+
+    Proves the failing verdict is reported both on stdout and as the exit
+    status, so CI / scripts can rely on it. Does not prove anything about the
+    interpreter itself.
+    """
     proc = _run(["debug", "--script", "00"])
-    # A falsy script is not a wrapper error.
-    assert proc.returncode == 0, (
-        f"wrapper must exit 0 for falsy scripts; got: {proc.returncode}\n"
+    assert proc.returncode != 0, (
+        f"debug on a falsy script must exit non-zero; got: {proc.returncode}\n"
         f"stderr: {proc.stderr}"
     )
     assert "final: fail" in proc.stdout, f"expected 'final: fail' for OP_0, got:\n{proc.stdout}"

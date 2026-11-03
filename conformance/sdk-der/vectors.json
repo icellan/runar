@@ -1,0 +1,159 @@
+{
+  "fixture_version": 1,
+  "notes": "F-242 (CL-BUG-160). Cross-tier strict-DER (BIP66) ECDSA signature vectors for every SDK's checkSig / ANF-interpreter verify path. Each vector is a 32-byte digest, a signature hex and the verdict under the pubkey below (Alice, priv e3b0c442...b855). Every ok=false vector is a RE-ENCODING of canonical_sig: it carries the same (r, s) integers, so a verifier that decodes it leniently verifies it as valid. Rejecting it is the only correct verdict: strict DER is consensus (BIP66 / SCRIPT_VERIFY_DERSIG), so OP_CHECKSIG on a node fails these, and an SDK that accepts them lets distinct byte strings stand for one signature. The *-control vectors prove each malformed vector differs from a valid signature ONLY in its encoding. A single trailing byte after the SEQUENCE is the sighash type and is stripped (canonical-plus-sighash-byte); anything else outside the canonical TLV is refused.",
+  "pubkey": "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd",
+  "vectors": [
+    {
+      "id": "canonical",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": true,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "Strict-DER control: must verify."
+    },
+    {
+      "id": "canonical-plus-sighash-byte",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb6441741",
+      "ok": true,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "Control: one trailing byte is the Bitcoin sighash type and is stripped before DER parsing."
+    },
+    {
+      "id": "trailing-byte-inside-sequence",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3046022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb6441700",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "the SEQUENCE length counts one extra 0x00 byte after s."
+    },
+    {
+      "id": "extra-integer-inside-sequence",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3048022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417020101",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "a third INTEGER (02 01 01) inside the SEQUENCE after s."
+    },
+    {
+      "id": "trailing-bytes-after-sequence",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb644170000",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "two bytes (00 00) after the end of the SEQUENCE."
+    },
+    {
+      "id": "extra-zero-r",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "304602220000e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "r carries a superfluous leading 0x00."
+    },
+    {
+      "id": "extra-zero-s",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3046022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df0022100607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "s carries a superfluous leading 0x00."
+    },
+    {
+      "id": "long-form-sequence-length",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "308145022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "the SEQUENCE length is in BER long form (81 xx)."
+    },
+    {
+      "id": "long-form-integer-length",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "304602812100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "r's length is in BER long form (81 xx)."
+    },
+    {
+      "id": "trailing-byte-inside-sequence-plus-sighash-byte",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "3046022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb644170041",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "trailing-byte-inside-sequence followed by a sighash byte: stripping the sighash must not legitimise the inner trailing byte."
+    },
+    {
+      "id": "unprefixed-high-bit-r",
+      "digest": "ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa",
+      "sig": "30440220e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "ok": false,
+      "canonical_sig": "3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417",
+      "notes": "r's top bit is set but the 0x00 sign pad is missing (a negative INTEGER in DER)."
+    },
+    {
+      "id": "pad-r-control",
+      "digest": "7db90670f568ec3873e86798c64d9d9390e06cd05e19019196a98074b7d395ca",
+      "sig": "304402200087486a792e17047bedcc4da9abb9edb9e56b51964bb6a2f58963352ad63fbb022072bafeeff11a8c39ec6b3b33a18f58b4a972945b6757a4f7e12fa674c7f065a3",
+      "ok": true,
+      "canonical_sig": "304402200087486a792e17047bedcc4da9abb9edb9e56b51964bb6a2f58963352ad63fbb022072bafeeff11a8c39ec6b3b33a18f58b4a972945b6757a4f7e12fa674c7f065a3",
+      "notes": "Strict-DER control with a 0x00-padded 32-byte r: must verify."
+    },
+    {
+      "id": "unprefixed-high-bit-short-r",
+      "digest": "7db90670f568ec3873e86798c64d9d9390e06cd05e19019196a98074b7d395ca",
+      "sig": "3043021f87486a792e17047bedcc4da9abb9edb9e56b51964bb6a2f58963352ad63fbb022072bafeeff11a8c39ec6b3b33a18f58b4a972945b6757a4f7e12fa674c7f065a3",
+      "ok": false,
+      "canonical_sig": "304402200087486a792e17047bedcc4da9abb9edb9e56b51964bb6a2f58963352ad63fbb022072bafeeff11a8c39ec6b3b33a18f58b4a972945b6757a4f7e12fa674c7f065a3",
+      "notes": "r is 32 bytes with its top bit set but the 0x00 sign pad is missing. A parser that left-pads every INTEGER into a 32-byte buffer and checks the sign bit of that buffer misses this one."
+    },
+    {
+      "id": "pad-s-control",
+      "digest": "5b1f3cecc9b9ec8207af883f99ed3a6476ac60a4b92adb2e717485ab3d6421b2",
+      "sig": "3045022100b2af37ead7ca7f0b67e28e642fc379c91ce1bd5e6af3cdcdec4296442debede8022000e1b0c00dd57d309f37040c3838114e514cda44f6714bee169467bc63794582",
+      "ok": true,
+      "canonical_sig": "3045022100b2af37ead7ca7f0b67e28e642fc379c91ce1bd5e6af3cdcdec4296442debede8022000e1b0c00dd57d309f37040c3838114e514cda44f6714bee169467bc63794582",
+      "notes": "Strict-DER control with a 0x00-padded 32-byte s: must verify."
+    },
+    {
+      "id": "unprefixed-high-bit-short-s",
+      "digest": "5b1f3cecc9b9ec8207af883f99ed3a6476ac60a4b92adb2e717485ab3d6421b2",
+      "sig": "3044022100b2af37ead7ca7f0b67e28e642fc379c91ce1bd5e6af3cdcdec4296442debede8021fe1b0c00dd57d309f37040c3838114e514cda44f6714bee169467bc63794582",
+      "ok": false,
+      "canonical_sig": "3045022100b2af37ead7ca7f0b67e28e642fc379c91ce1bd5e6af3cdcdec4296442debede8022000e1b0c00dd57d309f37040c3838114e514cda44f6714bee169467bc63794582",
+      "notes": "s is 32 bytes with its top bit set but the 0x00 sign pad is missing. A parser that left-pads every INTEGER into a 32-byte buffer and checks the sign bit of that buffer misses this one."
+    },
+    {
+      "id": "short-r-control",
+      "digest": "dd065a99354f0941f04dfbd2b21361555c40f413ad893b1849e3eb649b9f4433",
+      "sig": "3043021f33bc3e119f928e076097556ac379d2e73810e7d0dac4a65d037ff96126ecb9022026f601b12d12f3cae3049b7606b13b156c3ff7c471420fde166d1668e8b382e9",
+      "ok": true,
+      "canonical_sig": "3043021f33bc3e119f928e076097556ac379d2e73810e7d0dac4a65d037ff96126ecb9022026f601b12d12f3cae3049b7606b13b156c3ff7c471420fde166d1668e8b382e9",
+      "notes": "Strict-DER control with a 31-byte r: must verify."
+    },
+    {
+      "id": "non-minimal-zero-short-r",
+      "digest": "dd065a99354f0941f04dfbd2b21361555c40f413ad893b1849e3eb649b9f4433",
+      "sig": "304402200033bc3e119f928e076097556ac379d2e73810e7d0dac4a65d037ff96126ecb9022026f601b12d12f3cae3049b7606b13b156c3ff7c471420fde166d1668e8b382e9",
+      "ok": false,
+      "canonical_sig": "3043021f33bc3e119f928e076097556ac379d2e73810e7d0dac4a65d037ff96126ecb9022026f601b12d12f3cae3049b7606b13b156c3ff7c471420fde166d1668e8b382e9",
+      "notes": "a 31-byte r carries a superfluous leading 0x00 (32 bytes on the wire). A parser that left-pads every INTEGER into a 32-byte buffer and checks the sign bit of that buffer misses this one."
+    },
+    {
+      "id": "short-s-control",
+      "digest": "e3802c7691c015192b1c6074d68e434f49c14b156c2703decdcbf8f279aa53fa",
+      "sig": "3044022100b2a2fc3f6883e04e1a5c321836c4f7db7c769d6abcc7e62f1f94e9509272e16d021f705466fae49aabb31d81bd23fad3c17947f83cb36edfd00f16e2a45c721259",
+      "ok": true,
+      "canonical_sig": "3044022100b2a2fc3f6883e04e1a5c321836c4f7db7c769d6abcc7e62f1f94e9509272e16d021f705466fae49aabb31d81bd23fad3c17947f83cb36edfd00f16e2a45c721259",
+      "notes": "Strict-DER control with a 31-byte s: must verify."
+    },
+    {
+      "id": "non-minimal-zero-short-s",
+      "digest": "e3802c7691c015192b1c6074d68e434f49c14b156c2703decdcbf8f279aa53fa",
+      "sig": "3045022100b2a2fc3f6883e04e1a5c321836c4f7db7c769d6abcc7e62f1f94e9509272e16d022000705466fae49aabb31d81bd23fad3c17947f83cb36edfd00f16e2a45c721259",
+      "ok": false,
+      "canonical_sig": "3044022100b2a2fc3f6883e04e1a5c321836c4f7db7c769d6abcc7e62f1f94e9509272e16d021f705466fae49aabb31d81bd23fad3c17947f83cb36edfd00f16e2a45c721259",
+      "notes": "a 31-byte s carries a superfluous leading 0x00 (32 bytes on the wire). A parser that left-pads every INTEGER into a 32-byte buffer and checks the sign bit of that buffer misses this one."
+    }
+  ]
+}

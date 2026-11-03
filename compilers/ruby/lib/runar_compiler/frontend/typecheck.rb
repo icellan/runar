@@ -41,6 +41,9 @@ module RunarCompiler
       "EC_G"    => "Point",
     }.freeze
 
+    # N-459: emitted by anf_lower itself; never callable from source.
+    COMPILER_INTERNAL_BUILTINS = %w[computeStateOutput].freeze
+
     # All built-in Runar function signatures.
     BUILTIN_FUNCTIONS = {
       "sha256"            => FuncSig.new(params: ["ByteString"], return_type: "Sha256"),
@@ -187,7 +190,16 @@ module RunarCompiler
       "extractPrevOutputScript" => FuncSig.new(params: ["bigint", "ByteString"], return_type: "ByteString"),
       "requireOutputP2PKH"      => FuncSig.new(params: ["bigint", "ByteString", "bigint"], return_type: "void"),
       "currentBlockHeight"      => FuncSig.new(params: [], return_type: "bigint"),
+      # F-024 (R14): read-only view of the auto-injected +_newAmount+ -- the
+      # satoshis of the default single-output state continuation.
+      "continuationAmount"      => FuncSig.new(params: [], return_type: "bigint"),
     }.freeze
+
+    # N-321: cap on a typecheck message; mirrored in every tier.
+    MAX_DIAGNOSTIC_CHARS = 1024
+
+    # F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+    CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned"
 
     # -------------------------------------------------------------------
     # Subtyping
@@ -263,6 +275,7 @@ module RunarCompiler
     def self.type_check(contract)
       checker = TypeChecker.new(contract)
 
+      checker.check_property_initializers
       checker.check_constructor
       contract.methods.each { |method| checker.check_method(method) }
 
@@ -298,6 +311,48 @@ module RunarCompiler
         end
         ["", false]
       end
+
+      # Index of the innermost scope binding +name+, or -1 if none does.
+      def scope_index_of(name)
+        (@scopes.length - 1).downto(0) do |i|
+          return i if @scopes[i].key?(name)
+        end
+        -1
+      end
+
+      # Index the next +push_scope+ will occupy.
+      def depth
+        @scopes.length
+      end
+    end
+
+    # F-110: whether a for-statement may execute its body two or more times.
+    # Mirrors the trip count the ANF lowerer unrolls; a shape it cannot resolve
+    # is refused elsewhere and is treated as repeating here.
+    # @api private
+    def self.loop_may_run_twice?(stmt)
+      literal = lambda do |e|
+        if e.is_a?(BigIntLiteral)
+          e.value
+        elsif e.is_a?(UnaryExpr) && e.op == "-"
+          inner = literal.call(e.operand)
+          inner.nil? ? nil : -inner
+        end
+      end
+      start = stmt.init.is_a?(VariableDeclStmt) ? literal.call(stmt.init.init) : nil
+      cond = stmt.condition
+      return true if start.nil? || !cond.is_a?(BinaryExpr)
+      bound = literal.call(cond.right)
+      return true if bound.nil?
+      count =
+        case cond.op
+        when "<" then bound - start
+        when "<=" then bound - start + 1
+        when ">" then start - bound
+        when ">=" then start - bound + 1
+        else return true
+        end
+      count >= 2
     end
 
     # -------------------------------------------------------------------
@@ -327,8 +382,20 @@ module RunarCompiler
         @method_sigs = {}
         @consumed_values = {}
         @affine_aliases = {}
+        # F-110: for every enclosing loop that may run two or more times, the
+        # env scope index its init/body bindings live at (innermost last). A
+        # bounded loop is unrolled `count` times, so consuming an affine value
+        # bound below the innermost index happens once per iteration.
+        @repeating_loop_scopes = []
         @current_method_loc = nil
         @current_stmt_loc = nil
+        # N-109: for every contract method, the indices of the parameters it
+        # consumes (directly or through further helper calls). Private helpers
+        # are inlined, so a call consumes the arguments at those positions.
+        # N-288: each entry is [indices, props]; props are the "prop:<name>"
+        # origins the method consumes, which a call consumes in the caller.
+        # Computed lazily by TypeChecker.consumed_param_summary.
+        @consumed_params = nil
 
         contract.properties.each do |prop|
           @prop_types[prop.name] = type_node_to_string(prop.type)
@@ -346,6 +413,33 @@ module RunarCompiler
             ret_type = TypeChecker.infer_method_return_type(method)
           end
           @method_sigs[method.name] = FuncSig.new(params: params, return_type: ret_type)
+        end
+      end
+
+      # N-234: a scalar property initializer whose literal type does not
+      # match the declared property type compiled without complaint on
+      # every tier (`readonly x: bigint = toByteString('ab')` emitted a
+      # locking script that pushes a byte string where the contract's own
+      # arithmetic expects a script NUMBER). The validator only checks that
+      # an initializer IS a literal of one of the three families, never
+      # that it is a literal OF THE DECLARED TYPE. FixedArray properties
+      # are skipped here: their element-type check already lives in
+      # expand_fixed_arrays.rb (N-133), which runs on the expanded array
+      # elements, not the whole-array initializer this pass sees. Mirrors
+      # the TS reference's method of the same name in 03-typecheck.ts.
+      def check_property_initializers
+        @contract.properties.each do |prop|
+          next if prop.initializer.nil?
+          next if prop.type.is_a?(FixedArrayType)
+
+          init_type = TypeChecker.infer_expr_type_static(prop.initializer)
+          next if init_type == "<unknown>"
+
+          declared_type = type_node_to_string(prop.type)
+          next if Frontend.subtype?(init_type, declared_type)
+
+          @current_method_loc = prop.source_location
+          add_error("type '#{init_type}' is not assignable to type '#{declared_type}'")
         end
       end
 
@@ -371,6 +465,9 @@ module RunarCompiler
       end
 
       def check_method(method)
+        # Lazy: anf_lower.rb requires this file, so a top-level require would be
+        # circular. Needed for the F-075 transitive effect predicates below.
+        require_relative "anf_lower"
         env = TypeEnv.new
 
         # Set current method location for diagnostics
@@ -392,8 +489,16 @@ module RunarCompiler
         # silently wrong when an OP_RETURN output (variable length) precedes
         # the indexed P2PKH output. v1 forbids the mix; v2 may relax with a
         # variable-stride decoder.
-        has_require_p2pkh = TypeChecker.body_calls_builtin?(method.body, "requireOutputP2PKH")
-        has_add_data_output = TypeChecker.body_calls_add_data_output?(method.body)
+        #
+        # F-075: all three guards here read the method's effects through
+        # anf_lower's transitive continuation predicates, which follow the
+        # private-helper call graph -- the same analysis ANF lowering injects
+        # the continuation from, and ANF lowering inlines private helpers. A
+        # body-local walk let a developer disable every guard by moving the
+        # triggering call into a helper.
+        frontend = RunarCompiler::Frontend
+        has_require_p2pkh = frontend.send(:_method_calls_require_output_p2pkh, method, @contract, false)
+        has_add_data_output = frontend.send(:_method_has_add_data_output, method, @contract)
         if has_require_p2pkh && has_add_data_output
           add_error(
             "method '#{method.name}' mixes requireOutputP2PKH() with addDataOutput() -- " \
@@ -423,12 +528,8 @@ module RunarCompiler
         # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         # Mirrors the TS reference guard in 03-typecheck.ts.
         if @contract.parent_class == "StatefulSmartContract"
-          mutable_props = {}
-          @contract.properties.each do |prop|
-            mutable_props[prop.name] = true unless prop.readonly
-          end
-          sig = TypeChecker.analyze_method_output_signals(method.body, mutable_props)
-          if has_require_p2pkh && sig[:has_state_output]
+          has_state_output = frontend.send(:_method_has_add_output, method, @contract)
+          if has_require_p2pkh && has_state_output
             add_error(
               "method '#{method.name}' mixes requireOutputP2PKH() with " \
               "this.addOutput()/addRawOutput() -- the intrinsic reads output i at byte " \
@@ -440,7 +541,9 @@ module RunarCompiler
               "output of its own"
             )
           end
-          if sig[:requires_output_p2pkh_zero] && sig[:mutates_state] && !sig[:has_state_output]
+          if frontend.send(:_method_calls_require_output_p2pkh, method, @contract, true) &&
+             frontend.send(:_method_mutates_state, method, @contract) &&
+             !has_state_output
             add_error(
               "method '#{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state " \
               "without this.addOutput()/addRawOutput() -- the auto-injected single-output state " \
@@ -450,207 +553,6 @@ module RunarCompiler
               "terminal (no state mutation)"
             )
           end
-        end
-      end
-
-      # -------------------------------------------------------------------
-      # Crit-3 body walkers -- recursive scan for builtin calls and
-      # addDataOutput calls inside a method body. Mirrors the Go
-      # bodyCallsBuiltin / bodyCallsAddDataOutput helpers in
-      # compilers/go/frontend/typecheck.go.
-      # -------------------------------------------------------------------
-
-      def self.body_calls_builtin?(body, name)
-        body.any? { |stmt| stmt_contains_call_to?(stmt, name) }
-      end
-
-      def self.body_calls_add_data_output?(body)
-        body.any? { |stmt| stmt_contains_add_data_output?(stmt) }
-      end
-
-      def self.stmt_contains_call_to?(stmt, name)
-        case stmt
-        when ExpressionStmt
-          expr_contains_call_to?(stmt.expr, name)
-        when VariableDeclStmt
-          expr_contains_call_to?(stmt.init, name)
-        when AssignmentStmt
-          expr_contains_call_to?(stmt.value, name) ||
-            expr_contains_call_to?(stmt.target, name)
-        when IfStmt
-          return true if expr_contains_call_to?(stmt.condition, name)
-          return true if stmt.then.any? { |t| stmt_contains_call_to?(t, name) }
-          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_call_to?(e, name) }
-          false
-        when ForStmt
-          stmt.body.any? { |t| stmt_contains_call_to?(t, name) }
-        when ReturnStmt
-          stmt.value.nil? ? false : expr_contains_call_to?(stmt.value, name)
-        else
-          false
-        end
-      end
-
-      def self.expr_contains_call_to?(expr, name)
-        return false if expr.nil?
-
-        case expr
-        when CallExpr
-          if expr.callee.is_a?(Identifier) && expr.callee.name == name
-            return true
-          end
-          expr.args.any? { |a| expr_contains_call_to?(a, name) }
-        when BinaryExpr
-          expr_contains_call_to?(expr.left, name) || expr_contains_call_to?(expr.right, name)
-        when UnaryExpr
-          expr_contains_call_to?(expr.operand, name)
-        when TernaryExpr
-          expr_contains_call_to?(expr.condition, name) ||
-            expr_contains_call_to?(expr.consequent, name) ||
-            expr_contains_call_to?(expr.alternate, name)
-        when IndexAccessExpr
-          expr_contains_call_to?(expr.object, name) || expr_contains_call_to?(expr.index, name)
-        when ArrayLiteralExpr
-          expr.elements.any? { |el| expr_contains_call_to?(el, name) }
-        else
-          false
-        end
-      end
-
-      def self.stmt_contains_add_data_output?(stmt)
-        case stmt
-        when ExpressionStmt
-          expr_contains_add_data_output?(stmt.expr)
-        when VariableDeclStmt
-          expr_contains_add_data_output?(stmt.init)
-        when AssignmentStmt
-          expr_contains_add_data_output?(stmt.value) ||
-            expr_contains_add_data_output?(stmt.target)
-        when IfStmt
-          return true if expr_contains_add_data_output?(stmt.condition)
-          return true if stmt.then.any? { |t| stmt_contains_add_data_output?(t) }
-          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_add_data_output?(e) }
-          false
-        when ForStmt
-          stmt.body.any? { |t| stmt_contains_add_data_output?(t) }
-        when ReturnStmt
-          stmt.value.nil? ? false : expr_contains_add_data_output?(stmt.value)
-        else
-          false
-        end
-      end
-
-      def self.expr_contains_add_data_output?(expr)
-        return false if expr.nil?
-
-        case expr
-        when CallExpr
-          if expr.callee.is_a?(PropertyAccessExpr) && expr.callee.property == "addDataOutput"
-            return true
-          end
-          if expr.callee.is_a?(MemberExpr) && expr.callee.property == "addDataOutput"
-            return true
-          end
-          expr.args.any? { |a| expr_contains_add_data_output?(a) }
-        when BinaryExpr
-          expr_contains_add_data_output?(expr.left) || expr_contains_add_data_output?(expr.right)
-        when UnaryExpr
-          expr_contains_add_data_output?(expr.operand)
-        when TernaryExpr
-          expr_contains_add_data_output?(expr.condition) ||
-            expr_contains_add_data_output?(expr.consequent) ||
-            expr_contains_add_data_output?(expr.alternate)
-        when IndexAccessExpr
-          expr_contains_add_data_output?(expr.object) || expr_contains_add_data_output?(expr.index)
-        when ArrayLiteralExpr
-          expr.elements.any? { |el| expr_contains_add_data_output?(el) }
-        else
-          false
-        end
-      end
-
-      # -------------------------------------------------------------------
-      # Single-output-continuation vs requireOutputP2PKH(0) collision walk.
-      # Detects the three signals in one pass over a method body:
-      #   * mutates_state           -- assigns to / ++/-- a non-readonly prop
-      #   * has_state_output        -- calls this.addOutput()/addRawOutput()
-      #   * requires_output_p2pkh_zero -- calls requireOutputP2PKH(0, ...)
-      # Mirrors analyzeMethodOutputSignals in TS 03-typecheck.ts.
-      # -------------------------------------------------------------------
-
-      STATE_OUTPUT_METHOD_NAMES = %w[addOutput addRawOutput].freeze
-
-      def self.analyze_method_output_signals(body, mutable_props)
-        sig = { mutates_state: false, has_state_output: false, requires_output_p2pkh_zero: false }
-        body.each { |stmt| walk_stmt_for_output_signals(stmt, mutable_props, sig) }
-        sig
-      end
-
-      def self.walk_stmt_for_output_signals(stmt, mutable_props, sig)
-        case stmt
-        when AssignmentStmt
-          if stmt.target.is_a?(PropertyAccessExpr) && mutable_props.key?(stmt.target.property)
-            sig[:mutates_state] = true
-          end
-          walk_expr_for_output_signals(stmt.target, mutable_props, sig)
-          walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        when ExpressionStmt
-          walk_expr_for_output_signals(stmt.expr, mutable_props, sig)
-        when VariableDeclStmt
-          walk_expr_for_output_signals(stmt.init, mutable_props, sig)
-        when IfStmt
-          walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-          stmt.then.each { |t| walk_stmt_for_output_signals(t, mutable_props, sig) }
-          stmt.else_.each { |e| walk_stmt_for_output_signals(e, mutable_props, sig) } unless stmt.else_.empty?
-        when ForStmt
-          walk_stmt_for_output_signals(stmt.init, mutable_props, sig) unless stmt.init.nil?
-          walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-          walk_stmt_for_output_signals(stmt.update, mutable_props, sig) unless stmt.update.nil?
-          stmt.body.each { |b| walk_stmt_for_output_signals(b, mutable_props, sig) }
-        when ReturnStmt
-          walk_expr_for_output_signals(stmt.value, mutable_props, sig) unless stmt.value.nil?
-        end
-      end
-
-      def self.walk_expr_for_output_signals(expr, mutable_props, sig)
-        return if expr.nil?
-
-        case expr
-        when IncrementExpr, DecrementExpr
-          if expr.operand.is_a?(PropertyAccessExpr) && mutable_props.key?(expr.operand.property)
-            sig[:mutates_state] = true
-          end
-          walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        when CallExpr
-          callee = expr.callee
-          if (callee.is_a?(PropertyAccessExpr) || callee.is_a?(MemberExpr)) &&
-             STATE_OUTPUT_METHOD_NAMES.include?(callee.property)
-            sig[:has_state_output] = true
-          end
-          if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
-            idx = expr.args[0]
-            if !idx.nil? && idx.is_a?(BigIntLiteral) && idx.value == 0
-              sig[:requires_output_p2pkh_zero] = true
-            end
-          end
-          expr.args.each { |arg| walk_expr_for_output_signals(arg, mutable_props, sig) }
-          walk_expr_for_output_signals(callee, mutable_props, sig) unless callee.is_a?(Identifier)
-        when BinaryExpr
-          walk_expr_for_output_signals(expr.left, mutable_props, sig)
-          walk_expr_for_output_signals(expr.right, mutable_props, sig)
-        when UnaryExpr
-          walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        when TernaryExpr
-          walk_expr_for_output_signals(expr.condition, mutable_props, sig)
-          walk_expr_for_output_signals(expr.consequent, mutable_props, sig)
-          walk_expr_for_output_signals(expr.alternate, mutable_props, sig)
-        when IndexAccessExpr
-          walk_expr_for_output_signals(expr.object, mutable_props, sig)
-          walk_expr_for_output_signals(expr.index, mutable_props, sig)
-        when MemberExpr
-          walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        when ArrayLiteralExpr
-          expr.elements.each { |el| walk_expr_for_output_signals(el, mutable_props, sig) }
         end
       end
 
@@ -735,6 +637,8 @@ module RunarCompiler
           infer_expr_type_static(expr.alternate)
         when IncrementExpr, DecrementExpr
           "bigint"
+        when ArrayLiteralExpr
+          "<unknown>[]"
         else
           "<unknown>"
         end
@@ -805,7 +709,7 @@ module RunarCompiler
         if args.length >= 1
           sat_type = infer_expr_type(args[0], env)
           unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
-            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'")
+            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'", args[0])
           end
         end
         if args.length >= 2
@@ -814,7 +718,8 @@ module RunarCompiler
           script_type = infer_expr_type(args[1], env)
           unless Frontend.subtype?(script_type, "ByteString") || script_type == "<unknown>"
             add_error(
-              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'"
+              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'",
+              args[1]
             )
           end
         end
@@ -860,7 +765,7 @@ module RunarCompiler
         if normalized.length >= 1
           sat_type = infer_expr_type(normalized[0], env)
           unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
-            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'")
+            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'", args[0])
           end
         end
         # Every state value is inferred, surplus ones included, so a type error
@@ -874,7 +779,8 @@ module RunarCompiler
           next if Frontend.subtype?(arg_type, prop_type)
 
           add_error(
-            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'"
+            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'",
+            arg
           )
         end
         "void"
@@ -905,9 +811,73 @@ module RunarCompiler
         slots
       end
 
-      def add_error(msg)
-        loc = @current_stmt_loc || @current_method_loc
+      # F-024 (R14): +continuationAmount()+ is a read-only view of the
+      # auto-injected +_newAmount+. Without this check an assignment to it
+      # would lower as a plain read and silently drop the write.
+      def refuse_continuation_amount_write(target)
+        return unless target.is_a?(CallExpr) && target.callee.is_a?(Identifier) &&
+                      target.callee.name == "continuationAmount"
+
+        add_error(CONTINUATION_AMOUNT_READ_ONLY)
+      end
+
+      def add_error(msg, at = nil)
+        # N-321: a message may echo user-written type text of any length; cap it.
+        if msg.length > MAX_DIAGNOSTIC_CHARS
+          msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+        end
+        # N-463: an error about an expression is anchored at that expression,
+        # as in TS, when its position is known (every surface parser records
+        # it); otherwise at the statement, then the method, as before.
+        loc = (at && expr_loc(at)) || @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
+      end
+
+      # N-472: an operand type error is anchored at the operand with no
+      # fallback, as TS does with `operand.sourceLocation`. A bigint or boolean
+      # literal carries no location in any TS parser, so the diagnostic prints
+      # none rather than the statement. Any other operand without a recorded
+      # position (a surface that does not record it) keeps add_error's
+      # statement anchor.
+      def add_operand_error(msg, operand)
+        if expr_loc(operand).nil? && (operand.is_a?(BigIntLiteral) || operand.is_a?(BoolLiteral))
+          if msg.length > MAX_DIAGNOSTIC_CHARS
+            msg = "#{msg[0, MAX_DIAGNOSTIC_CHARS]}...(#{msg.length - MAX_DIAGNOSTIC_CHARS} more bytes elided)"
+          end
+          @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: nil)
+          return
+        end
+        add_error(msg, operand)
+      end
+
+      # N-463: the position of +expr+'s first token, or nil when unknown.
+      # Only identifiers (`this` included), `this.x` and ByteString literals
+      # record a position, and only on .runar.ts. A composite expression
+      # starts where its leftmost child starts, which is the position TS
+      # reports for it (a parenthesised leftmost child is the exception: TS
+      # points at the `(`). A class method too, so the validator's N-464
+      # anchor uses the same rule.
+      def expr_loc(expr)
+        self.class.expr_loc(expr)
+      end
+
+      def self.expr_loc(expr)
+        loop do
+          case expr
+          when Identifier, PropertyAccessExpr, ByteStringLiteral then return expr.source_location
+          when BinaryExpr
+            # N-472: the parser records where the whole expression
+            # starts, which a leading `(` moves left of the leftmost leaf.
+            return expr.source_location if expr.source_location
+
+            expr = expr.left
+          when UnaryExpr then return expr.source_location # N-472: the operator token
+          when CallExpr then expr = expr.callee
+          when MemberExpr, IndexAccessExpr then expr = expr.object
+          when TernaryExpr then expr = expr.condition
+          else return nil
+          end
+        end
       end
 
       def type_node_to_string(node)
@@ -960,6 +930,7 @@ module RunarCompiler
           end
 
         when AssignmentStmt
+          refuse_continuation_amount_write(stmt.target)
           target_type = infer_expr_type(stmt.target, env)
           value_type = infer_expr_type(stmt.value, env)
           unless Frontend.subtype?(value_type, target_type)
@@ -971,16 +942,25 @@ module RunarCompiler
           if cond_type != "boolean"
             add_error("if condition must be boolean, got '#{cond_type}'")
           end
+          # F-222: the arms are mutually exclusive, so each is checked against
+          # the consumed set as it stood before the if; afterwards a value
+          # consumed in either arm counts as consumed.
+          consumed_before = @consumed_values.dup
           env.push_scope
           check_statements(stmt.then, env)
           env.pop_scope
+          consumed_after_then = @consumed_values
+          @consumed_values = consumed_before
           unless stmt.else_.empty?
             env.push_scope
             check_statements(stmt.else_, env)
             env.pop_scope
           end
+          @consumed_values.merge!(consumed_after_then)
 
         when ForStmt
+          loop_scope = env.depth
+          repeats = Frontend.loop_may_run_twice?(stmt)
           env.push_scope
           check_statement(stmt.init, env)
           cond_type = infer_expr_type(stmt.condition, env)
@@ -994,7 +974,10 @@ module RunarCompiler
           # separately restricts the clause to a unit-step advance; this is the
           # type-level half of the same guard.
           check_statement(stmt.update, env) unless stmt.update.nil?
+          # F-110: the body runs once per iteration; see @repeating_loop_scopes.
+          @repeating_loop_scopes.push(loop_scope) if repeats
           check_statements(stmt.body, env)
+          @repeating_loop_scopes.pop if repeats
           env.pop_scope
 
         when ExpressionStmt
@@ -1133,7 +1116,8 @@ module RunarCompiler
             # everything, exactly as in TS.
             add_error(
               "Ternary branches have incompatible types: " \
-              "'#{cons_type}' and '#{alt_type}'"
+              "'#{cons_type}' and '#{alt_type}'",
+              expr
             )
           end
           cons_type
@@ -1148,18 +1132,37 @@ module RunarCompiler
           "<unknown>"
 
         when IncrementExpr
+          refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
-            add_error("++ operator requires bigint, got '#{operand_type}'")
+            add_error("++ operator requires bigint, got '#{operand_type}'", expr)
           end
           "bigint"
 
         when DecrementExpr
+          refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
-            add_error("-- operator requires bigint, got '#{operand_type}'")
+            add_error("-- operator requires bigint, got '#{operand_type}'", expr)
           end
           "bigint"
+
+        when ArrayLiteralExpr
+          # F-063: without this arm every array literal typed as "<unknown>" --
+          # which subtype? accepts against anything, making checkMultiSig's
+          # argument check vacuous -- and its elements were never visited, so a
+          # call nested in one never reached the unknown-function rule. Ported
+          # from the TS reference, wording included.
+          return "<unknown>[]" if expr.elements.empty?
+
+          elem_type = infer_expr_type(expr.elements[0], env)
+          expr.elements[1..].each do |el|
+            et = infer_expr_type(el, env)
+            if !Frontend.subtype?(et, elem_type) && et != "<unknown>"
+              add_error("Array element type mismatch: expected '#{elem_type}', got '#{et}'")
+            end
+          end
+          "#{elem_type}[]"
 
         else
           "<unknown>"
@@ -1182,20 +1185,20 @@ module RunarCompiler
         # Arithmetic: bigint x bigint -> bigint
         if %w[+ - * / %].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
 
         if %w[< <= > >=].include?(expr.op)
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "boolean"
         end
@@ -1211,7 +1214,7 @@ module RunarCompiler
             Frontend.subtype?(right_type, left_type)
           unless compatible
             if left_type != "<unknown>" && right_type != "<unknown>"
-              add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'")
+              add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'", expr)
             end
           end
           return "boolean"
@@ -1219,20 +1222,20 @@ module RunarCompiler
 
         if expr.op == "&&" || expr.op == "||"
           if left_type != "boolean" && left_type != "<unknown>"
-            add_error("left operand of '#{expr.op}' must be boolean, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be boolean, got '#{left_type}'", expr.left)
           end
           if right_type != "boolean" && right_type != "<unknown>"
-            add_error("right operand of '#{expr.op}' must be boolean, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be boolean, got '#{right_type}'", expr.right)
           end
           return "boolean"
         end
 
         if expr.op == "<<" || expr.op == ">>"
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be bigint, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be bigint, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1243,10 +1246,10 @@ module RunarCompiler
             return "ByteString"
           end
           unless Frontend.bigint_family?(left_type)
-            add_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'")
+            add_operand_error("left operand of '#{expr.op}' must be bigint or ByteString, got '#{left_type}'", expr.left)
           end
           unless Frontend.bigint_family?(right_type)
-            add_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'")
+            add_operand_error("right operand of '#{expr.op}' must be bigint or ByteString, got '#{right_type}'", expr.right)
           end
           return "bigint"
         end
@@ -1264,20 +1267,20 @@ module RunarCompiler
         case expr.op
         when "!"
           if operand_type != "boolean" && operand_type != "<unknown>"
-            add_error("operand of '!' must be boolean, got '#{operand_type}'")
+            add_error("operand of '!' must be boolean, got '#{operand_type}'", expr)
           end
           "boolean"
 
         when "-"
           unless Frontend.bigint_family?(operand_type)
-            add_error("operand of unary '-' must be bigint, got '#{operand_type}'")
+            add_error("operand of unary '-' must be bigint, got '#{operand_type}'", expr)
           end
           "bigint"
 
         when "~"
           return "ByteString" if Frontend.byte_family?(operand_type)
           unless Frontend.bigint_family?(operand_type)
-            add_error("operand of '~' must be bigint or ByteString, got '#{operand_type}'")
+            add_error("operand of '~' must be bigint or ByteString, got '#{operand_type}'", expr)
           end
           "bigint"
 
@@ -1313,16 +1316,27 @@ module RunarCompiler
         # Direct builtin call
         if expr.callee.is_a?(Identifier)
           name = expr.callee.name
-          if BUILTIN_FUNCTIONS.key?(name)
+          # N-459: compiler-internal builtins sit in BUILTIN_FUNCTIONS for the IR
+          # loader and anf_lower, but a source call to one is not part of the
+          # language; refuse it here like the other six tiers.
+          if BUILTIN_FUNCTIONS.key?(name) && !COMPILER_INTERNAL_BUILTINS.include?(name)
             return check_call_args(name, BUILTIN_FUNCTIONS[name], expr.args, env)
           end
           # Check if it's a known contract method
           if @method_sigs.key?(name)
             return check_call_args(name, @method_sigs[name], expr.args, env)
           end
-          # Check if it's a local variable
+          # Check if it's a local variable -- F-208: Rúnar has no
+          # first-class functions, so a bound local can never be called.
+          # This used to return "<unknown>" with no diagnostic, silently
+          # accepting `const f: bigint = a; const r = f(a, a, a);`.
           _, found = env.lookup(name)
           if found
+            add_error(
+              "local variable '#{name}' is not callable -- Runar has no " \
+              "first-class functions; only built-in functions and contract " \
+              "methods can be called"
+            )
             expr.args.each { |arg| infer_expr_type(arg, env) }
             return "<unknown>"
           end
@@ -1505,9 +1519,10 @@ module RunarCompiler
           return sig.return_type
         end
 
-        # requireOutputP2PKH and currentBlockHeight need the auto-injected
-        # txPreimage -- only available in StatefulSmartContract methods.
-        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight"
+        # requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        # the auto-injected txPreimage / _newAmount -- only available in
+        # StatefulSmartContract methods.
+        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight" || func_name == "continuationAmount"
           if !@contract.nil? && @contract.parent_class != "StatefulSmartContract"
             add_error("#{func_name}() is only available in StatefulSmartContract methods")
           end
@@ -1541,6 +1556,29 @@ module RunarCompiler
             return sig.return_type
           end
           # Fall through to the standard subtype check below.
+        end
+
+        # F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        # argument. A literal negative start used to type-check as plain
+        # 'bigint' (the standard subtype loop below never inspects a
+        # literal's VALUE) and compile to a script that aborts at runtime
+        # -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        # the literal case (bare or unary-negated BigIntLiteral) at compile
+        # time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        # "must be >= 0" pattern above. A non-literal start (a variable or
+        # computed expression) has no static value to check and is
+        # unaffected.
+        if func_name == "substr" && args.length >= 2
+          start_lit = nil
+          if args[1].is_a?(BigIntLiteral)
+            start_lit = args[1]
+          elsif args[1].is_a?(UnaryExpr) && args[1].op == "-" &&
+                args[1].operand.is_a?(BigIntLiteral) && !args[1].operand.value.nil?
+            start_lit = BigIntLiteral.new(value: -args[1].operand.value)
+          end
+          if !start_lit.nil? && !start_lit.value.nil? && start_lit.value < 0
+            add_error("substr() argument 2 (start) must be >= 0; got #{start_lit.value}")
+          end
         end
 
         # Standard arg count check
@@ -1581,7 +1619,15 @@ module RunarCompiler
       # 2026-04-30 audit finding F6.
       def check_affine_consumption(func_name, args, env)
         consumed_indices = CONSUMING_FUNCTIONS[func_name]
-        return if consumed_indices.nil?
+        consumed_props = []
+        if consumed_indices.nil?
+          # N-109: a call to a contract method consumes the arguments at the
+          # parameter positions that method consumes.
+          return if BUILTIN_FUNCTIONS.key?(func_name) || !@method_sigs.key?(func_name)
+
+          @consumed_params ||= TypeChecker.consumed_param_summary(@contract)
+          consumed_indices, consumed_props = @consumed_params[func_name] || [[], []]
+        end
 
         consumed_indices.each do |param_index|
           next if param_index >= args.length
@@ -1602,12 +1648,75 @@ module RunarCompiler
               origin
             end
 
-          if @consumed_values[origin]
-            add_error("affine value '#{label}' has already been consumed")
+          if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
+            add_error("affine value '#{label}' has already been consumed", arg)
           else
             @consumed_values[origin] = true
           end
         end
+
+        # N-288: the call also consumes every property the method consumes.
+        consumed_props.each do |origin|
+          if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
+            add_error("affine value 'this.#{origin.delete_prefix('prop:')}' has already been consumed", args[0])
+          else
+            @consumed_values[origin] = true
+          end
+        end
+      end
+
+      # N-109: run the affine checker over each method body with throwaway
+      # diagnostics and record which parameters (and, N-288, which
+      # "prop:<name>" property origins) end up consumed. Reusing the
+      # checker inherits alias, if-arm and loop handling. Consumption only grows
+      # as summaries grow, so iterating until no entry changes terminates, also
+      # for recursive call graphs (refused separately by the validator).
+      # Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
+      def self.consumed_param_summary(contract)
+        summary = {}
+        contract.methods.each { |m| summary[m.name] = [[], []] }
+        changed = true
+        while changed
+          changed = false
+          contract.methods.each do |method|
+            consumed = TypeChecker.new(contract).send(:consumed_param_indices, method, summary)
+            prev = summary[method.name]
+            next if consumed[0].length == prev[0].length && consumed[1].length == prev[1].length
+
+            summary[method.name] = consumed
+            changed = true
+          end
+        end
+        summary
+      end
+
+      # N-109: the indices of +method+'s parameters its body consumes, and
+      # (N-288) the "prop:<name>" property origins it consumes, as
+      # [indices, props], with helper calls resolved through +summary+.
+      def consumed_param_indices(method, summary)
+        @consumed_params = summary
+        env = TypeEnv.new
+        @current_method_loc = method.source_location
+        @consumed_values = {}
+        @affine_aliases = {}
+        method.params.each do |param|
+          env.define(param.name, type_node_to_string(param.type))
+        end
+        check_statements(method.body, env)
+        indices = method.params.each_index.select { |i| @consumed_values[method.params[i].name] }
+        props = @consumed_values.select { |origin, used| used && origin.start_with?("prop:") }.keys.sort
+        [indices, props]
+      end
+
+      # F-110: true when +origin+ is bound outside the innermost enclosing loop
+      # that may run two or more times, so this one syntactic consumption is
+      # executed once per iteration -- a double use. A property, or a name the
+      # env does not bind (a bare-identifier property), is always outside.
+      def consumed_per_loop_iteration?(origin, env)
+        return false if @repeating_loop_scopes.empty?
+        return true if origin.start_with?("prop:")
+
+        env.scope_index_of(origin) < @repeating_loop_scopes.last
       end
 
       # Resolve the canonical affine origin for an expression.

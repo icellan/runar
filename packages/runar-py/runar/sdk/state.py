@@ -1,6 +1,8 @@
 """State serialization — encode/decode state values as raw bytes matching NUM2BIN format."""
 
 from __future__ import annotations
+import re
+from runar.sdk.errors import MalformedScriptError
 from runar.sdk.types import RunarArtifact, StateField
 
 
@@ -197,6 +199,14 @@ def deserialize_state(fields: list[StateField], script_hex: str) -> dict:
 
 def extract_state_from_script(artifact: RunarArtifact, script_hex: str) -> dict | None:
     """Extract state values from a full locking script hex."""
+    # N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+    # that is not whole bytes of hex before any reader sees it -- the N-317
+    # rule. Imported here: script_utils imports this module.
+    from runar.sdk.script_utils import is_hex_bytes
+    if not is_hex_bytes(script_hex):
+        raise MalformedScriptError(
+            "extract_state_from_script: script is not an even-length hex string"
+        )
     if not artifact.state_fields:
         return None
     op_return_pos = find_last_op_return(script_hex)
@@ -206,17 +216,42 @@ def extract_state_from_script(artifact: RunarArtifact, script_hex: str) -> dict 
     return deserialize_state(artifact.state_fields, state_hex)
 
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 def find_last_op_return(script_hex: str) -> int:
-    """Find the last OP_RETURN (0x6a) at a real opcode boundary.
+    """Find the first OP_RETURN (0x6a) at a real opcode boundary and stop.
+
+    The name is kept for parity with the other six SDKs (TS, Go, Rust, Zig,
+    Ruby, Java all expose the same name), but the walk returns immediately on
+    the first opcode-boundary 0x6a it finds — it does not keep scanning for a
+    later one. That is deliberate: the on-chain interpreter itself stops at
+    the first OP_RETURN it executes (post-Genesis, OP_RETURN terminates
+    script evaluation; success is decided by whatever is already on the
+    stack), so nothing placed after it is ever interpreted as opcodes. The
+    compiler emits the script as exactly `codePart + OP_RETURN + stateBytes`
+    — one separator, with the state data living in the bytes that
+    interpretation never reaches — so "first" and "last" coincide for every
+    script this SDK will ever be asked to read. All seven SDKs implement this
+    same "stop at the first real OP_RETURN" walk byte-for-byte.
 
     Returns the hex-char offset, or -1 if not found.
     """
-    last_pos = -1
+    def byte_at(i: int) -> int:
+        # N-320: a typed refusal, not the ValueError int(.., 16) raised on a
+        # non-hex pair (and int() also took '+a' or ' a' as a byte).
+        pair = script_hex[i:i + 2]
+        if len(pair) != 2 or not all(ch in _HEX_DIGITS for ch in pair):
+            raise MalformedScriptError(
+                f"find_last_op_return: non-hex byte at hex offset {i}"
+            )
+        return int(pair, 16)
+
     offset = 0
     length = len(script_hex)
 
     while offset + 2 <= length:
-        opcode = int(script_hex[offset:offset + 2], 16)
+        opcode = byte_at(offset)
 
         if opcode == 0x6A:
             # OP_RETURN at a real opcode boundary. Everything after is
@@ -227,25 +262,25 @@ def find_last_op_return(script_hex: str) -> int:
         elif opcode == 0x4C:
             if offset + 4 > length:
                 break
-            push_len = int(script_hex[offset + 2:offset + 4], 16)
+            push_len = byte_at(offset + 2)
             offset += 4 + push_len * 2
         elif opcode == 0x4D:
             if offset + 6 > length:
                 break
-            lo = int(script_hex[offset + 2:offset + 4], 16)
-            hi = int(script_hex[offset + 4:offset + 6], 16)
+            lo = byte_at(offset + 2)
+            hi = byte_at(offset + 4)
             push_len = lo | (hi << 8)
             offset += 6 + push_len * 2
         elif opcode == 0x4E:
             if offset + 10 > length:
                 break
-            b = bytes.fromhex(script_hex[offset + 2:offset + 10])
+            b = bytes(byte_at(offset + k) for k in (2, 4, 6, 8))
             push_len = int.from_bytes(b, 'little')
             offset += 10 + push_len * 2
         else:
             offset += 2
 
-    return last_pos
+    return -1
 
 
 # ---------------------------------------------------------------------------
@@ -472,15 +507,58 @@ _TYPE_WIDTHS = {
 }
 
 
+def check_fixed_width_value(value, field_type: str, what: str) -> None:
+    """N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+    Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+    that is not a hex string of exactly its declared width.
+
+    The on-chain reader slices each such field at its declared width, so a
+    wrong-width value in a state section (or an argument a covenant copies
+    into one) shifts every later field. The compiled covenant refuses such a
+    continuation on chain (``OP_SIZE <width> OP_NUMEQUALVERIFY``); this is the
+    off-chain refusal. No-op for every other type.
+    """
+    width = _TYPE_WIDTHS.get(field_type)
+    if width is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got {type(value).__name__}'
+        )
+    if len(value) % 2 != 0 or any(c not in '0123456789abcdefABCDEF' for c in value):
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got a non-hex string'
+        )
+    if len(value) != width * 2:
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got {len(value) // 2} bytes. '
+            f'A wrong-width {field_type} shifts every later state field when the '
+            f"contract's on-chain reader slices it at {width} bytes"
+        )
+
+
+# F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores them
+# as the same 8-byte OP_NUM2BIN word.
+_NUM2BIN8_TYPES = ('int', 'bigint', 'RabinSig', 'RabinPubKey')
+
+
 def _encode_state_value(value, field_type: str, label: str = '?') -> str:
-    if field_type in ('int', 'bigint'):
-        if value is None:
-            n = 0
-        elif isinstance(value, str) and value.endswith('n'):
-            # BigInt string from JSON without reviver (e.g. "0n", "1000n")
-            n = int(value[:-1])
+    if field_type in _NUM2BIN8_TYPES:
+        # N-084: only an int (not a bool) or a decimal integer string, with the
+        # optional JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value.
+        # None used to write 0, and int() coerced True -> 1 and 1.5 -> 1.
+        if isinstance(value, int) and not isinstance(value, bool):
+            n = value
+        elif isinstance(value, str) and re.fullmatch(r'-?[0-9]+n?', value):
+            n = int(value[:-1] if value.endswith('n') else value)
         else:
-            n = int(value)
+            got = ('a non-decimal string' if isinstance(value, str)
+                   else 'None' if value is None else type(value).__name__)
+            raise ValueError(
+                f'serialize_state: state field {label!r} ({field_type}) must be an integer '
+                f'or a decimal integer string, got {got}. Serializing anything else would '
+                'write a number the caller never supplied into the state section'
+            )
         return _encode_num2bin(n, 8, label)
     elif field_type in ('bool', 'boolean'):
         # 1 raw byte. The canonical Runar primitive name is `boolean` — that is
@@ -507,6 +585,8 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
                 "Writing a placeholder would deploy a state section the contract's own "
                 'on-chain reader cannot parse, leaving the output unspendable'
             )
+        # N-045: a wrong-width value shifts every later field for the reader.
+        check_fixed_width_value(value, field_type, f'serialize_state: state field {label!r}')
         return value
     else:
         # Variable-length types (ByteString, etc.): use push-data encoding
@@ -526,7 +606,7 @@ def _state_field_byte_width(field_type: str) -> int | None:
     """
     if field_type in ('bool', 'boolean'):
         return 1
-    if field_type in ('int', 'bigint'):
+    if field_type in _NUM2BIN8_TYPES:
         return 8
     return _TYPE_WIDTHS.get(field_type)
 
@@ -548,7 +628,7 @@ def _decode_state_value(hex_str: str, offset: int, field_type: str,
             # _encode_state_value — a reader that knows only 'bool' walks a real
             # boolean field as push data and desynchronises every field after it.
             return data != '00', hex_width
-        if field_type in ('int', 'bigint'):
+        if field_type in _NUM2BIN8_TYPES:
             # 8 raw bytes LE sign-magnitude
             return _decode_num2bin(data), hex_width
         # Raw fixed-size byte types

@@ -9,6 +9,10 @@ package frontend
 // call graph so effects buried inside private helpers surface to their
 // public callers.
 //
+// Also consumed by typecheck.go's requireOutputP2PKH output-layout guards
+// (Crit-3, R-300, index-0 continuation collision) — F-075: those guards must
+// see the same effects the continuation is injected from.
+//
 // Consumed by anf_lower.go for:
 //   - Auto-injecting continuation parameters (_changePKH, _changeAmount,
 //     _newAmount, txPreimage) on public stateful methods.
@@ -29,6 +33,12 @@ type MethodEffects struct {
 	HasStateOutput bool // calls this.addOutput(...) or this.addRawOutput(...)
 	HasDataOutput  bool // calls this.addDataOutput(...)
 	UsesPreimage   bool // calls checkPreimage(...) (manually, outside auto-injected one)
+	// CallsRequireOutputP2PKH: calls requireOutputP2PKH(...) with any index.
+	CallsRequireOutputP2PKH bool
+	// RequiresOutputP2PKHZero: calls requireOutputP2PKH(0, ...) (literal index 0).
+	RequiresOutputP2PKHZero bool
+	// CallsExtractPrevOutputScript: calls extractPrevOutputScript(...) (N-315).
+	CallsExtractPrevOutputScript bool
 }
 
 // SideEffectSummary maps method name -> that method's effects. Includes
@@ -101,6 +111,15 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 		}
 		if source.UsesPreimage {
 			target.UsesPreimage = true
+		}
+		if source.CallsRequireOutputP2PKH {
+			target.CallsRequireOutputP2PKH = true
+		}
+		if source.RequiresOutputP2PKHZero {
+			target.RequiresOutputP2PKHZero = true
+		}
+		if source.CallsExtractPrevOutputScript {
+			target.CallsExtractPrevOutputScript = true
 		}
 	}
 
@@ -182,6 +201,17 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 				if id.Name == "checkPreimage" {
 					into.UsesPreimage = true
 				}
+				if id.Name == "requireOutputP2PKH" {
+					into.CallsRequireOutputP2PKH = true
+					if len(e.Args) > 0 {
+						if lit, ok := e.Args[0].(BigIntLiteral); ok && lit.Value != nil && lit.Value.Sign() == 0 {
+							into.RequiresOutputP2PKHZero = true
+						}
+					}
+				}
+				if id.Name == "extractPrevOutputScript" {
+					into.CallsExtractPrevOutputScript = true
+				}
 				if target, ok := privateByName[id.Name]; ok {
 					unionInto(into, effectsFor(target.Name, target.Body))
 				}
@@ -228,18 +258,37 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 
 // ContinuationShape classifies a method's continuation requirements.
 //
-// NeedsChange controls injection of _changePKH and _changeAmount.
-// NeedsNewAmount controls injection of _newAmount. The pair maps
-// directly to ANF auto-param insertion; both sites must agree for a
+// NeedsChange is true when the method produces a continuation.
+// IncludesChange controls injection of _changePKH and _changeAmount and the
+// change segment of the continuation hash: it equals NeedsChange except under
+// a SIGHASH_SINGLE base, where BIP-143 commits hashOutputs to the same-index
+// output ONLY, so the change output is not committed and the method takes no
+// change params (N-038). NeedsNewAmount controls injection of _newAmount.
+// These map directly to ANF auto-param insertion; both sites must agree for a
 // deployed contract to be spendable.
 type ContinuationShape struct {
 	NeedsChange    bool
+	IncludesChange bool
 	NeedsNewAmount bool
 	IsTerminal     bool
 }
 
-// ContinuationShapeFor derives ContinuationShape from MethodEffects.
+// ContinuationShapeFor derives ContinuationShape from MethodEffects under the
+// default ALL|FORKID sighash mode.
 func ContinuationShapeFor(eff MethodEffects) ContinuationShape {
+	return ContinuationShapeForSighash(eff, SighashDefault)
+}
+
+// IncludesChangeOutput reports whether a method with a continuation under
+// sighash type `sighashType` commits (and takes params for) the change output:
+// false only under a SIGHASH_SINGLE base (N-038).
+func IncludesChangeOutput(needsChange bool, sighashType int) bool {
+	return needsChange && (sighashType&0x1f) != 0x03
+}
+
+// ContinuationShapeForSighash derives ContinuationShape from MethodEffects and
+// the method's declared sighash type (N-038).
+func ContinuationShapeForSighash(eff MethodEffects, sighashType int) ContinuationShape {
 	needsChange := eff.MutatesState || eff.HasStateOutput || eff.HasDataOutput
 	// addOutput / addRawOutput already specify per-output amounts, so
 	// when those are present the single-output _newAmount is redundant.
@@ -248,6 +297,7 @@ func ContinuationShapeFor(eff MethodEffects) ContinuationShape {
 	needsNewAmount := (eff.MutatesState || eff.HasDataOutput) && !eff.HasStateOutput
 	return ContinuationShape{
 		NeedsChange:    needsChange,
+		IncludesChange: IncludesChangeOutput(needsChange, sighashType),
 		NeedsNewAmount: needsNewAmount,
 		IsTerminal:     !needsChange,
 	}

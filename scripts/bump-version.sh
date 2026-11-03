@@ -75,6 +75,43 @@ sync_locks() {
 
 # --- check: verify all versions are consistent ---
 
+# check_exact FILE ERE...  (called from check_versions; reads $expected, sets $ok)
+# Each ERE has exactly one capture group around the version. Every value any of
+# them captures in FILE must equal $expected exactly, and at least one must be
+# captured. A missing FILE is skipped, as everywhere else in this check.
+check_exact() {
+  local f="$1"; shift
+  [ -f "$f" ] || return 0
+  local rel="${f#"$ROOT"/}" found=0 ere v matches
+  for ere in "$@"; do
+    # Here-string, not `< <(sed ...)`: bash 3.2 (macOS's /bin/bash) leaks the
+    # process-substitution pipe fd rather than closing it once the loop ends,
+    # so a function called this many times over the course of --check
+    # eventually exhausts open fds (see the N-172 note below, by the sdk_input
+    # loop). A here-string reads from a temp file instead of a FIFO, which
+    # sidesteps the bug. `|| true`: under `<(sed ...)`, the substitution's own
+    # exit status was never checked by `set -e`; `var=$(sed ...)` IS checked,
+    # so this keeps the same "a file simply not containing this shape is not
+    # fatal" behaviour (sed itself exits 0 here even on zero `-n ...p` matches
+    # — this guards a future sed/grep swap-in, not today's command).
+    # `|` delimits: the shapes contain `/` (`</version>`) but never `|`.
+    matches="$(sed -nE "s|.*${ere}.*|\1|p" "$f" || true)"
+    if [ -n "$matches" ]; then
+      while IFS= read -r v; do
+        found=1
+        if [ "$v" != "$expected" ]; then
+          echo "  ✗ $rel: $v"
+          ok=false
+        fi
+      done <<< "$matches"
+    fi
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "  ✗ $rel: no version string found"
+    ok=false
+  fi
+}
+
 check_versions() {
   local expected
   expected=$(get_current_version)
@@ -85,6 +122,11 @@ check_versions() {
 
   echo "Expected version: $expected"
   local ok=true
+  # Shared semver shape (one capture group around the whole thing where used
+  # bare): digits.digits.digits, optionally followed by a -/.  /+ prerelease
+  # or build identifier run. Declared here so it is available to the N-080
+  # checks below as well as the compiler-version-file sweep further down.
+  local semver='[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z]+)*'
 
   # TypeScript
   for f in "${TS_FILES[@]}"; do
@@ -149,44 +191,89 @@ check_versions() {
     fi
   done
 
-  # Java + sdk-output fixtures + ordinals tests + READMEs — generic stale-string sweep
-  # over the file set that bump_version touches. Any literal $expected mismatch surfaces here.
-  local java_files=(
-    "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java"
-    "$ROOT/compilers/java/build.gradle.kts"
-    "$ROOT/packages/runar-java/build.gradle.kts"
-    "$ROOT/examples/java/build.gradle.kts"
-    "$ROOT/examples/end2end-example/java/build.gradle.kts"
-    "$ROOT/integration/java/build.gradle.kts"
-    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts"
-    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"
-    "$ROOT/packages/runar-java/README.md"
-    "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json"
-    "$ROOT/conformance/sdk-output/runner/sdk-runner.ts"
-    "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts"
-    "$ROOT/packages/runar-py/tests/test_ordinals.py"
-    "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb"
-    "$ROOT/packages/runar-zig/README.md"
-  )
-  local sdk_inputs=()
-  while IFS= read -r line; do sdk_inputs+=("$line"); done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
-  # `"${sdk_inputs[@]}"` on an EMPTY array is an unbound-variable error under
-  # `set -u` in bash 3.2 (macOS), which aborted --check with a bash diagnostic
-  # instead of a version report. It never fired in this repo because the find
-  # always matches; it fires in any tree where conformance/sdk-output/tests has
-  # no input.json yet. R-211.
-  for f in "${java_files[@]}" ${sdk_inputs[@]+"${sdk_inputs[@]}"}; do
-    [ -f "$f" ] || continue
-    # Match version-shaped tokens that are NOT $expected. Skip historical refs in CHANGELOG-style content.
-    while IFS=: read -r ln content; do
-      [ -z "$ln" ] && continue
-      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"):$ln $content"
-      ok=false
-    done < <(grep -nE '(version|Version|compilerVersion|VALUE|java-sdk-driver|runar-zig-v|build\.runar:runar-java)' "$f" 2>/dev/null \
-      | grep -E '0\.[0-9]+\.[0-9]+' \
-      | grep -v "$expected" \
-      | grep -vE '0\.0\.0|0\.1\.|0\.2\.|0\.3\.' || true)
+  # Java + sdk-output fixtures + ordinals tests + READMEs. Each file is read
+  # with the exact line shapes bump_version rewrites in it, and every captured
+  # value must equal $expected. F-085: this used to be a substring sweep that
+  # only looked at lines containing `0.N.M` and dropped any line containing
+  # $expected as a substring, so in the 1.x family every drift (`1.0.1`,
+  # `2.0.0`, `1.0.0-rc.10`) passed. A file in which none of its shapes match
+  # also fails: a renamed field must not quietly leave the gate.
+  local gradle_shapes=('version = "([^"]*)"' 'build\.runar:runar-java[a-z-]*:([^"'"'"']*)')
+  local artifact_shapes=('"version": "runar-v([^"]*)"' '"compilerVersion": "([^"]*)"')
+  local g
+  for g in \
+    "$ROOT/compilers/java/build.gradle.kts" \
+    "$ROOT/packages/runar-java/build.gradle.kts" \
+    "$ROOT/examples/java/build.gradle.kts" \
+    "$ROOT/examples/end2end-example/java/build.gradle.kts" \
+    "$ROOT/integration/java/build.gradle.kts" \
+    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts" \
+    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"; do
+    check_exact "$g" "${gradle_shapes[@]}"
   done
+  check_exact "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java" 'VALUE = "([^"]*)"'
+  check_exact "$ROOT/packages/runar-java/README.md" \
+    'build\.runar:runar-java[a-z-]*:([^"'"'"']*)' '<version>([^<]*)</version>'
+  check_exact "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json" \
+    "${artifact_shapes[@]}"
+  check_exact "$ROOT/conformance/sdk-output/runner/sdk-runner.ts" 'java-sdk-driver-([^/"'"'"']*)-all\.jar'
+  # The ordinals fixtures also carry `version: 'runar-v0.1.0'`, a hand-written
+  # artifact field bump never rewrites; only compilerVersion is compared.
+  check_exact "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts" "compilerVersion: '([^']*)'"
+  check_exact "$ROOT/packages/runar-py/tests/test_ordinals.py" "compiler_version='([^']*)'"
+  check_exact "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb" "'compilerVersion'[[:space:]]*=> '([^']*)'"
+  # The README's `.version = "0.1.0"` is the consumer's example manifest, not ours.
+  check_exact "$ROOT/packages/runar-zig/README.md" \
+    'runar-zig-v([^/ )"]*)\.tar\.gz' 'SDK is at \*\*v([^*]*)\*\*'
+  local sdk_input sdk_input_list
+  sdk_input_list="$(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null || true)"
+  if [ -n "$sdk_input_list" ]; then
+    while IFS= read -r sdk_input; do
+      check_exact "$sdk_input" "${artifact_shapes[@]}"
+    done <<< "$sdk_input_list"
+  fi
+
+  # N-172 (R87 user decision 2026-10-12): the "frozen" version pins carried
+  # by the sdk-vertical conformance fixtures and the Go/Zig SDK pin-test
+  # fixtures. bump_version deliberately does NOT rewrite any of these — they
+  # are golden-like and move only through the golden-provenance gate, not a
+  # blind find-and-replace — but a gate that can't see them drift from a real
+  # release bump is no gate, so --check reads and flags them here.
+  # Read the file list via a here-string, not `< <(find ...)`: bash 3.2
+  # (macOS's /bin/bash) corrupts its process-substitution fd table once
+  # enough NESTED process substitutions accumulate (an outer `<(find ...)`
+  # while-loop whose body calls check_exact, itself opening more `<(sed ...)`
+  # substitutions per file) — reproduced as a deterministic SIGTRAP on this
+  # exact script once the sdk-output loop above plus ~40 more files pushed
+  # the count over the edge. A here-string reads from a temp file instead of
+  # a FIFO, which sidesteps the bug.
+  # `|| true`: under `set -e`, an assignment's status is find's status, and a
+  # missing directory makes find exit non-zero — which must not abort the
+  # whole check.
+  local sv_file sv_list
+  sv_list="$(find "$ROOT/conformance/sdk-vertical/cases" -mindepth 2 -maxdepth 2 -name 'input.json' 2>/dev/null || true)"
+  if [ -n "$sv_list" ]; then
+    while IFS= read -r sv_file; do
+      check_exact "$sv_file" "${artifact_shapes[@]}"
+    done <<< "$sv_list"
+  fi
+  sv_list="$(find "$ROOT/conformance/sdk-vertical/artifacts" -maxdepth 1 -name '*.json' 2>/dev/null || true)"
+  if [ -n "$sv_list" ]; then
+    while IFS= read -r sv_file; do
+      check_exact "$sv_file" "${artifact_shapes[@]}"
+    done <<< "$sv_list"
+  fi
+  check_exact "$ROOT/packages/runar-go/sdk_unsound_primitives_test.go" \
+    'Version:[[:space:]]*"runar-v([^"]*)"' 'CompilerVersion:[[:space:]]*"([^"]*)-go"'
+  check_exact "$ROOT/packages/runar-go/sdk_codepart_length_pin_test.go" "${artifact_shapes[@]}"
+  # sdk_contract.zig escapes its embedded JSON quotes (\"), unlike the plain
+  # Go/TS shapes above, and pins the PinFixture artifact TWICE (the function
+  # and the N-051 deploy-time constant) — both occurrences are read. The
+  # `runar-v<semver>` anchor also keeps this from ever matching the file's
+  # many UNRELATED dummy schema values ("version":"1", not escaped-quote,
+  # no "runar-v" prefix) used only to exercise the artifact-JSON parser.
+  check_exact "$ROOT/packages/runar-zig/src/sdk_contract.zig" \
+    '\\"version\\":\\"runar-v([^\\"]*)\\"' '\\"compilerVersion\\":\\"([^\\"]*)\\"'
 
   # Zig package manifest, Ruby gemspec, and the embedded compiler-version
   # strings (R-211). bump_version rewrites all eight of these files; until now
@@ -213,21 +300,110 @@ check_versions() {
     fi
   fi
 
+  # Ruby Gemfile.lock files (path gem version). N-080: `--check` read none of
+  # these, so a hand-edit or a bump that silently failed to rewrite one (see
+  # the matching note in bump_version below) could drift forever. RubyGems
+  # normalizes a hyphenated prerelease to dot-pre-dot form
+  # (Gem::Version.new("1.0.0-rc.1").to_s == "1.0.0.pre.rc.1"), so the
+  # committed lockfile spells it that way, not as the raw semver string
+  # everywhere else in this script compares against.
+  local rubygems_expected
+  rubygems_expected=$(printf '%s' "$expected" | sed -E 's/-/.pre./')
+  local lockfile
+  for lockfile in \
+    "$ROOT/packages/runar-rb/Gemfile.lock" \
+    "$ROOT/integration/ruby/Gemfile.lock" \
+    "$ROOT/examples/ruby/Gemfile.lock" \
+    "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
+    [ -f "$lockfile" ] || continue
+    local rel="${lockfile#"$ROOT"/}" found=0 v matches
+    # Here-string, not `< <(sed ...)`: see the N-172 note above the sv_list
+    # loop — a bash-3.2 leaked-fd issue, not specific to any one call site.
+    matches="$(sed -nE "s/.*runar-lang \(([^)]*)\).*/\1/p" "$lockfile" || true)"
+    if [ -n "$matches" ]; then
+      while IFS= read -r v; do
+        found=1
+        if [ "$v" != "$rubygems_expected" ]; then
+          echo "  ✗ $rel: $v"
+          ok=false
+        fi
+      done <<< "$matches"
+    fi
+    if [ "$found" -eq 0 ]; then
+      echo "  ✗ $rel: no version string found"
+      ok=false
+    fi
+  done
+
+  # N-080: the hard-coded version expectations in the per-tier compiler test
+  # suites. bump_version rewrites these with a blind `runar-v$OLD` -> `runar-v$NEW`
+  # substitution; --check never read them back.
+  # Note: $semver itself contains a parenthesized group, so each ERE below has
+  # two capture groups, not the "exactly one" check_exact's header describes.
+  # \1 still lands on the outer (first-opened) group, which is the one that
+  # spans the whole version — this is deliberate, not a bug to "simplify".
+  check_exact "$ROOT/compilers/go/compiler/compiler_test.go" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/go/compiler/integration_test.go" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/rust/tests/compiler_tests.rs" "runar-v(${semver})"
+  check_exact "$ROOT/compilers/python/tests/test_compiler.py" "runar-v(${semver})"
+
+  # assembler.test.ts: the `.version` assertion is unique in the file and safe
+  # for check_exact. The `.compilerVersion` DEFAULT assertion is NOT —
+  # `uses default compiler version` (track $expected) sits right next to
+  # `allows overriding compiler version` (a fixed '1.2.3' fixture that must
+  # never be compared against $expected), and both share the identical
+  # `expect(artifact.compilerVersion).toBe('...')` shape. A line-only regex
+  # cannot tell them apart, so this reads the DEFAULT block by name instead.
+  local assembler_test="$ROOT/packages/runar-compiler/src/__tests__/assembler.test.ts"
+  check_exact "$assembler_test" "artifact\.version\)\.toBe\('runar-v([^']*)'\)"
+  if [ -f "$assembler_test" ]; then
+    local dcv
+    dcv=$(awk '/uses default compiler version/{f=1} f && /\.toBe\(/{print; exit}' "$assembler_test" \
+      | sed -E "s/.*\.toBe\('([^']*)'\).*/\1/")
+    local rel="${assembler_test#"$ROOT"/}"
+    if [ -z "$dcv" ]; then
+      echo "  ✗ $rel: no default compiler version assertion found"
+      ok=false
+    elif [ "$dcv" != "$expected" ]; then
+      echo "  ✗ $rel: $dcv"
+      ok=false
+    fi
+  fi
+
   # Every `runar-v<semver>` and `<semver>-<tier>` token in the six files must be
   # $expected. Matching the tokens rather than each tier's syntax keeps this
-  # working when a tier renames its constant.
+  # working when a tier renames its constant. F-085: the token's prerelease part
+  # may itself contain `-` (`1.0.0-rc.1-go`), which the old token regex could
+  # not parse, so an rc-family compilerVersion drift went unread; and the TS
+  # tier stamps an unsuffixed DEFAULT_COMPILER_VERSION that no token matched.
+  # ($semver is declared once, near the top of this function.)
   for f in "${COMPILER_VERSION_FILES[@]}"; do
     [ -f "$f" ] || continue
+    local found=0 bad matches
+    # Here-string, not `< <(...)`: see the N-172 note above the sv_list loop
+    # — a bash-3.2 leaked-fd issue, not specific to any one call site. The
+    # `[ -z "$bad" ] && continue` below already tolerates the single empty
+    # line a `<<<` of a truly-empty capture feeds to `read`.
+    matches="$( { grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
+                  | grep -oE "runar-v${semver}|${semver}-(go|rust|zig|ruby|python|ts)" \
+                  | sed -E 's/^runar-v//; s/-(go|rust|zig|ruby|python|ts)$//'
+                sed -nE "s/.*DEFAULT_COMPILER_VERSION = '([^']*)'.*/\1/p" "$f"
+              } | sort -u || true)"
     while IFS= read -r bad; do
       [ -z "$bad" ] && continue
-      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $bad"
-      ok=false
+      found=1
+      if [ "$bad" != "$expected" ]; then
+        echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $bad"
+        ok=false
+      fi
     # Comment lines are excluded: assembler.ts documents the field with
     # `e.g. "runar-v0.1.0"`, which is an illustration and not a stamped version.
     # Flagging it would make the gate cry wolf at every release.
-    done < <(grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
-      | grep -oE '(runar-v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*|[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.]*-(go|rust|zig|ruby|python|ts))' \
-      | grep -vE "^(runar-v)?${expected}(-(go|rust|zig|ruby|python|ts))?$" | sort -u || true)
+    done <<< "$matches"
+    if [ "$found" -eq 0 ]; then
+      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): no version string found"
+      ok=false
+    fi
   done
 
   if $ok; then
@@ -305,13 +481,19 @@ bump_version() {
     echo "  ✓ packages/runar-rb/runar.gemspec"
   fi
 
-  # Ruby Gemfile.lock files (path gem version)
+  # Ruby Gemfile.lock files (path gem version). N-080: a literal `runar-lang
+  # ($OLD)` match misses a lockfile bundler already normalized to RubyGems'
+  # dot-pre-dot spelling (Gem::Version.new("1.0.0-rc.1").to_s ==
+  # "1.0.0.pre.rc.1"), silently leaving it at the old version. Match whatever
+  # spelling is on disk and always write the RubyGems-canonical one for $NEW.
+  local new_rubygems
+  new_rubygems=$(printf '%s' "$NEW" | sed -E 's/-/.pre./')
   for lockfile in "$ROOT/packages/runar-rb/Gemfile.lock" \
                   "$ROOT/integration/ruby/Gemfile.lock" \
                   "$ROOT/examples/ruby/Gemfile.lock" \
                   "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
     if [ -f "$lockfile" ]; then
-      sed -i '' "s/runar-lang ($OLD)/runar-lang ($NEW)/g" "$lockfile"
+      sed -i '' -E "s/runar-lang \([^)]*\)/runar-lang ($new_rubygems)/g" "$lockfile"
       echo "  ✓ $(echo "$lockfile" | sed "s|$ROOT/||")"
     fi
   done

@@ -195,18 +195,15 @@ fn test_double_not_kept_without_canonical_producer() {
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: NEGATE NEGATE -> removed
+// 2-op window: NEGATE NEGATE -> kept (F-001: OP_NEGATE validates and
+// normalises its CScriptNum operand, so the pair is not a stack no-op)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_double_negate_removed() {
+fn test_double_negate_kept() {
     let ops = vec![opcode("OP_NEGATE"), opcode("OP_NEGATE")];
     let result = optimize_stack_ops(&ops);
-    assert!(
-        result.is_empty(),
-        "OP_NEGATE OP_NEGATE should be removed entirely, got {:?}",
-        result
-    );
+    assert_eq!(format!("{:?}", result), format!("{:?}", ops), "OP_NEGATE OP_NEGATE must survive (F-001)");
 }
 
 // ---------------------------------------------------------------------------
@@ -242,33 +239,26 @@ fn test_push1_sub_becomes_1sub() {
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: PUSH(0) ADD -> removed (additive identity)
+// 2-op window: PUSH(0) ADD -> kept (F-001: OP_ADD validates and normalises
+// its CScriptNum operand, so x + 0 is not a stack no-op)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_push0_add_removed() {
+fn test_push0_add_kept() {
     let ops = vec![push_int(0), opcode("OP_ADD")];
     let result = optimize_stack_ops(&ops);
-    assert!(
-        result.is_empty(),
-        "PUSH(0) OP_ADD should be removed (additive identity), got {:?}",
-        result
-    );
+    assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) OP_ADD must survive (F-001)");
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: PUSH(0) SUB -> removed (subtractive identity)
+// 2-op window: PUSH(0) SUB -> kept (F-001, as for PUSH(0) ADD)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_push0_sub_removed() {
+fn test_push0_sub_kept() {
     let ops = vec![push_int(0), opcode("OP_SUB")];
     let result = optimize_stack_ops(&ops);
-    assert!(
-        result.is_empty(),
-        "PUSH(0) OP_SUB should be removed (subtractive identity), got {:?}",
-        result
-    );
+    assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) OP_SUB must survive (F-001)");
 }
 
 // ---------------------------------------------------------------------------
@@ -769,12 +759,13 @@ fn test_opcode_string_roll_passthrough_sequence() {
 
 #[test]
 fn test_multi_pass_optimization() {
-    // Pass 1: PUSH(0) ADD -> removed, leaving: SWAP SWAP OP_CHECKSIG
+    // Pass 1: PUSH(7) DROP -> removed, leaving: SWAP SWAP OP_CHECKSIG
     // Pass 2: SWAP SWAP -> removed, leaving: OP_CHECKSIG
+    // (Was PUSH(0) ADD, which F-001 no longer eliminates.)
     let ops = vec![
-        push_int(0),
-        opcode("OP_ADD"),
         StackOp::Swap,
+        push_int(7),
+        StackOp::Drop,
         StackOp::Swap,
         opcode("OP_CHECKSIG"),
     ];
@@ -803,20 +794,21 @@ fn test_swap_swap_in_middle_of_sequence() {
 }
 
 #[test]
-fn test_iterative_convergence_dup_push0_add_drop() {
-    // DUP PUSH(0) ADD DROP
-    // Pass 1: PUSH(0) ADD -> removed, leaving: DUP DROP
+fn test_iterative_convergence_dup_push_drop_drop() {
+    // DUP PUSH(7) DROP DROP
+    // Pass 1: PUSH(7) DROP -> removed, leaving: DUP DROP
     // Pass 2: DUP DROP -> removed, leaving: empty
+    // (Was DUP PUSH(0) ADD DROP; F-001 keeps PUSH(0) ADD.)
     let ops = vec![
         StackOp::Dup,
-        push_int(0),
-        opcode("OP_ADD"),
+        push_int(7),
+        StackOp::Drop,
         StackOp::Drop,
     ];
     let result = optimize_stack_ops(&ops);
     assert!(
         result.is_empty(),
-        "DUP PUSH(0) ADD DROP should converge to empty, got {:?}",
+        "DUP PUSH(7) DROP DROP should converge to empty, got {:?}",
         result
     );
 }
@@ -831,10 +823,12 @@ fn test_then_branch_optimized() {
     let ops = vec![StackOp::If {
         then_ops: vec![StackOp::Swap, StackOp::Swap],
         else_ops: vec![],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     }];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "if op should remain, got {:?}", result);
-    if let StackOp::If { then_ops, else_ops } = &result[0] {
+    if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
         assert!(
             then_ops.is_empty(),
             "then branch SWAP SWAP should be eliminated, got {:?}",
@@ -852,10 +846,12 @@ fn test_else_branch_optimized() {
     let ops = vec![StackOp::If {
         then_ops: vec![opcode("OP_ADD")],
         else_ops: vec![opcode("OP_CHECKSIG"), opcode("OP_VERIFY")],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     }];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1);
-    if let StackOp::If { then_ops, else_ops } = &result[0] {
+    if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
         assert_eq!(then_ops.len(), 1);
         assert!(matches!(&then_ops[0], StackOp::Opcode(c) if c == "OP_ADD"));
         assert_eq!(
@@ -880,10 +876,12 @@ fn test_both_branches_optimized() {
     let ops = vec![StackOp::If {
         then_ops: vec![StackOp::Dup, StackOp::Drop],
         else_ops: vec![opcode("OP_EQUAL"), opcode("OP_NOT"), opcode("OP_NOT")],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     }];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1);
-    if let StackOp::If { then_ops, else_ops } = &result[0] {
+    if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
         assert!(then_ops.is_empty(), "DUP DROP in then should be eliminated, got {:?}", then_ops);
         assert_eq!(
             else_ops.len(),
@@ -903,10 +901,12 @@ fn test_then_branch_with_constant_fold() {
     let ops = vec![StackOp::If {
         then_ops: vec![push_int(3), push_int(4), opcode("OP_ADD")],
         else_ops: vec![],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     }];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1);
-    if let StackOp::If { then_ops, else_ops } = &result[0] {
+    if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
         assert_eq!(then_ops.len(), 1, "PUSH(3) PUSH(4) ADD should fold to PUSH(7), got {:?}", then_ops);
         assert!(is_push_int_eq(&then_ops[0], 7));
         assert!(else_ops.is_empty());
@@ -925,13 +925,15 @@ fn test_nested_if_complex() {
         StackOp::If {
             then_ops: vec![opcode("OP_EQUAL"), opcode("OP_VERIFY")],
             else_ops: vec![opcode("OP_NUMEQUAL"), opcode("OP_NOT"), opcode("OP_NOT")],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         },
         StackOp::Swap,
         StackOp::Swap,
     ];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "trailing SWAP SWAP should be removed, got {:?}", result);
-    if let StackOp::If { then_ops, else_ops } = &result[0] {
+    if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
         assert_eq!(
             then_ops.len(),
             1,

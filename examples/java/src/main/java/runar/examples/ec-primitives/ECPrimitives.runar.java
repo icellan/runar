@@ -94,9 +94,9 @@ class ECPrimitives extends SmartContract {
     // Method 8: check make point roundtrip
     @Public
     void checkMakePoint(BigInteger x, BigInteger y, BigInteger expectedX, BigInteger expectedY) {
-        Point pt = ecMakePoint(x, y);
-        assertThat(ecPointX(pt).equals(expectedX));
-        assertThat(ecPointY(pt).equals(expectedY));
+        Point point = ecMakePoint(x, y);
+        assertThat(ecPointX(point).equals(expectedX));
+        assertThat(ecPointY(point).equals(expectedY));
     }
 
     // Method 9: check compressed encoding

@@ -434,8 +434,9 @@ func TestBN254G1OnCurve_Script(t *testing.T) {
 // The mask keys on the PRECISE predicate px == qx AND py != qy, not on a zero
 // denominator: BN254 has j-invariant 0 and p = 1 mod 3, so (w*px, -py) also
 // zeroes the denominator while being a perfectly ordinary summand — that case
-// keeps its fail-closed off-curve answer and is covered by
-// TestBN254G1AffineAdd_NegatedOperandStaysOffCurve.
+// is NOT masked; the builtin aborts on it instead (F-091), covered by
+// TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity and
+// TestBN254G1Add_OmegaCollisionAborts.
 func TestBN254G1Add_PointAtInfinity(t *testing.T) {
 	p := new(big.Int).Set(bn254FieldP)
 	gx := big.NewInt(1)

@@ -446,3 +446,279 @@ test "N-061 CONTROL: a countdown loop still compiles" {
     const down = try std.mem.replaceOwned(u8, alloc, src, "i < 3n", "i > 0n");
     _ = compileHex(alloc, down, "UpdateProbe.runar.ts") orelse return error.CountdownRegressed;
 }
+
+// ---------------------------------------------------------------------------
+// N-128: the .runar.java for-header update slot
+// ---------------------------------------------------------------------------
+//
+// `parse_java.zig`'s parseForStmt recognised only `ident = expr`, `ident++`
+// and `ident--` in the update slot. Anything else was skipped as raw tokens to
+// the closing `)`, leaving `update == null`, and the Java header never set
+// `header_requires_update` — so the validator read the C-style header as an
+// implied-step surface and let it through. `count += Bigint.ONE`,
+// `this.count += Bigint.ONE`, `this.count = this.count.plus(...)`, a bare
+// `i.plus(Bigint.ONE)` call, an empty slot and, worst, `i += Bigint.TWO` (a
+// non-unit step coerced to a unit step) all compiled in this tier alone.
+//
+// What these tests prove: each shape is refused with the shared cross-tier
+// diagnostic, and the unit-step spellings TS accepts (`i++`, `++i`,
+// `i += Bigint.ONE`, `i = i.plus(Bigint.ONE)`) still compile to the
+// bounded-loop bytes. What they do not prove: anything about the other
+// surfaces' headers, or that the refusal fires in the same pass as TS (TS
+// refuses the empty slot in its parser; this tier refuses it in validate).
+
+/// A stateful Java contract parameterised on the for-loop update clause.
+fn javaWithUpdate(alloc: Allocator, update: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc,
+        \\package runar.examples.updateprobe;
+        \\
+        \\import runar.lang.StatefulSmartContract;
+        \\import runar.lang.annotations.Public;
+        \\import runar.lang.types.Bigint;
+        \\
+        \\class UpdateProbe extends StatefulSmartContract {{
+        \\
+        \\    Bigint count;
+        \\
+        \\    UpdateProbe(Bigint count) {{
+        \\        super(count);
+        \\        this.count = count;
+        \\    }}
+        \\
+        \\    @Public
+        \\    void increment() {{
+        \\        for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); {s}) {{ this.count = this.count.plus(Bigint.ONE); }}
+        \\    }}
+        \\}}
+    , .{update});
+}
+
+test "N-128: unrepresentable .runar.java for-updates are rejected, not skipped" {
+    const updates = [_][]const u8{
+        "count += Bigint.ONE",
+        "this.count += Bigint.ONE",
+        "this.count = this.count.plus(Bigint.ONE)",
+        "i += Bigint.TWO",
+        "i.plus(Bigint.ONE)",
+        "",
+    };
+    for (updates) |u| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const src = try javaWithUpdate(alloc, u);
+        expectRejectedWithSharedDiagnostic(alloc, src, "UpdateProbe.runar.java") catch |e| {
+            std.debug.print("update `{s}`\n", .{u});
+            return e;
+        };
+    }
+}
+
+// The recovery loop after the update also swallowed trailing tokens, so
+// `i++, this.count++` compiled as `i++` with the state write dropped. TS
+// refuses it in the parser with `expected ')', got ','`.
+test "N-128: a comma-joined .runar.java for-update is rejected, not truncated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try javaWithUpdate(alloc, "i++, this.count++");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.java", "expected ')', got ','");
+}
+
+test "N-128 CONTROL: unit-step .runar.java for-updates keep the bounded-loop bytes" {
+    const updates = [_][]const u8{ "i++", "++i", "i += Bigint.ONE", "i = i.plus(Bigint.ONE)" };
+    for (updates) |u| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const src = try std.mem.replaceOwned(u8, alloc, src_java, "i = i.plus(Bigint.ONE)", u);
+        const hex = compileHex(alloc, src, "BoundedLoop.runar.java") orelse {
+            std.debug.print("update `{s}`: must still compile\n", .{u});
+            return error.ControlRegressed;
+        };
+        std.testing.expectEqualStrings(bounded_loop_hex, hex) catch |e| {
+            std.debug.print("update `{s}`: bytes moved\n", .{u});
+            return e;
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N-132: an EMPTY update slot on the C-style .runar.ts / .runar.sol headers
+// ---------------------------------------------------------------------------
+//
+// `for (let i = 0n; i < 3n; )` never advances `i` in the source, yet both
+// parsers left `update == null` without setting `header_requires_update`, so
+// validate.zig read the C-style header as an implied-step surface and the
+// unrolled loop advanced `i` anyway (byte-identical to `i++`). The TS reference
+// refuses both shapes in its parsers: `.runar.ts` with "For loop must have an
+// update expression", `.runar.sol` with "Unexpected token in expression: ')'"
+// (its Solidity parser always parses an update expression).
+//
+// What these tests prove: each parser refuses the empty slot with the
+// reference's text. What they do not prove: anything about the other surfaces
+// (pinned by the conformance negatives N180/N181 across all seven tiers).
+
+test "N-132: an empty .runar.ts for-update is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsWithUpdate(alloc, "");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have an update expression");
+}
+
+test "N-132: an empty .runar.sol for-update is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try std.mem.replaceOwned(u8, alloc, src_sol, "i < 5; i++)", "i < 5; )");
+    try expectRejectedWithDiagnostic(alloc, src, "BoundedLoop.runar.sol", "Unexpected token in expression: ')'");
+}
+
+// ---------------------------------------------------------------------------
+// N-116: an update that reads the iterator (or is a literal) without advancing it
+// ---------------------------------------------------------------------------
+//
+// The validator accepted a bare identifier / literal update as the "no-op
+// sentinel" the while-shaped parsers synthesize, and the step was then inferred
+// from the comparison direction -- so `var i = 3; while (i < 5) : (i)`, a source
+// loop that never terminates, unrolled to two laps over i = 3, 4 in six tiers.
+// This tier refused the `.runar.zig` spelling only by accident: its parser
+// dropped a bare continue expression, so nothing folded and the condition rule
+// fired instead of the update rule.
+//
+// What these tests prove: the `.runar.zig` continue expression and the
+// `.runar.ts` for-update are refused with the shared R-065 sentence. What they
+// do not prove: anything about while loops whose update lives in the body
+// (those keep a placeholder iterator and the condition rule refuses them).
+
+test "N-116: a .runar.zig continue expression that only reads the iterator is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var src = try std.mem.replaceOwned(u8, alloc, src_zig, "var i: i64 = 0;", "var i: i64 = 3;");
+    src = try std.mem.replaceOwned(u8, alloc, src, "while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+    try expectRejectedWithSharedDiagnostic(alloc, src, "BoundedLoop.runar.zig");
+}
+
+test "N-116: a .runar.ts for-update that only reads the iterator is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try expectRejectedWithSharedDiagnostic(alloc, try tsWithUpdate(alloc, "i"), "UpdateProbe.runar.ts");
+}
+
+test "N-116: a .runar.ts literal for-update is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try expectRejectedWithSharedDiagnostic(alloc, try tsWithUpdate(alloc, "0n"), "UpdateProbe.runar.ts");
+}
+
+// ---------------------------------------------------------------------------
+// N-135: an EMPTY condition slot on the C-style .runar.ts header
+// ---------------------------------------------------------------------------
+//
+// `for (let i = 0n; ; i++)` has no exit test in the source. The TS reference
+// refuses it in its parser with "For loop must have a condition". This parser
+// ran `skipSemicolons()` after the initializer, which ate BOTH `;`s: the bare
+// empty condition was refused only by accident (`i++` misparsed as the
+// condition, then "For loop must have an update expression"), and the shifted
+// header `for (let i = 0n;; i < 3n; i++)` - not valid TypeScript - compiled
+// exactly like `for (let i = 0n; i < 3n; i++)`.
+//
+// What these tests prove: the .runar.ts parser refuses both shapes with the
+// reference's condition diagnostic. What they do not prove: other surfaces or
+// tiers (pinned by the conformance negatives N274/N275).
+
+test "N-135: an empty .runar.ts for-condition is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const base = try tsWithUpdate(alloc, "i++");
+    const src = try std.mem.replaceOwned(u8, alloc, base, "0n; i < 3n; i++)", "0n; ; i++)");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have a condition");
+}
+
+test "N-135: a shifted .runar.ts for-header (;; cond; update) is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const base = try tsWithUpdate(alloc, "i++");
+    const src = try std.mem.replaceOwned(u8, alloc, base, "0n; i < 3n; i++)", "0n;; i < 3n; i++)");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have a condition");
+}
+
+// ---------------------------------------------------------------------------
+// N-306: a non-declaration for-initializer on the C-style .runar.ts header
+// ---------------------------------------------------------------------------
+//
+// `for (i = 0n; _i < 3n; _i++)` has no `let`/`const` in the initializer slot.
+// The TS reference refuses it in its parser with "For loop must have a
+// variable declaration initializer". This parser's non-`let`/`const` branch
+// (the `else` in `parseForStmt`) instead just skips tokens to the next `;`,
+// leaving `var_name` at its synthetic default `_i` with no diagnostic at
+// all. That substitution is invisible when the condition/update still
+// reference the original name `i`, because `cond_tests_iter` then compares
+// `i` against the default `_i`, mismatches, and the validator's "condition
+// must compare the loop variable" rule refuses the program anyway, for an
+// unrelated reason. Writing the condition/update against the substituted
+// name `_i` instead -- exactly what a developer who noticed the generated
+// variable would do -- makes `cond_tests_iter` true and the garbage
+// initializer compiles clean.
+//
+// What this test proves: the .runar.ts parser refuses a non-declaration
+// for-initializer with the reference's diagnostic, even when the rest of the
+// header is written against the substituted name. What it does not prove:
+// other surfaces or tiers (pinned by the conformance negatives N277-N279).
+
+/// A stateful contract parameterised on the for-loop HEADER, with a body
+/// that never references the loop variable by name -- unlike
+/// `tsWithUpdate`'s body (`acc = acc + i`), so a substituted `_i = 0`
+/// iterator can't be caught by an accidental "condition must compare the
+/// loop variable" validation error instead of the parser's own diagnostic.
+fn tsForInitializer(alloc: Allocator, init: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc,
+        \\import {{ StatefulSmartContract, assert }} from 'runar-lang';
+        \\
+        \\class InitProbe extends StatefulSmartContract {{
+        \\  count: bigint;
+        \\
+        \\  constructor(count: bigint) {{ super(count); this.count = count; }}
+        \\
+        \\  public unlock(expected: bigint): void {{
+        \\    let acc: bigint = 0n;
+        \\    for ({s}; _i < 3n; _i++) {{
+        \\      acc = acc + 1n;
+        \\    }}
+        \\    assert(acc === expected);
+        \\  }}
+        \\}}
+    , .{init});
+}
+
+test "N-306: a non-declaration .runar.ts for-initializer is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsForInitializer(alloc, "i = 0n");
+    try expectRejectedWithDiagnostic(
+        alloc,
+        src,
+        "InitProbe.runar.ts",
+        "For loop must have a variable declaration initializer",
+    );
+}
+
+// Control: a well-formed `let` initializer must keep compiling clean -- the
+// fix narrows only the non-declaration branch of the initializer dispatch.
+test "N-306: a let .runar.ts for-initializer still compiles clean" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsForInitializer(alloc, "let _i: bigint = 0n");
+    if (compileHex(alloc, src, "InitProbe.runar.ts") == null) {
+        std.debug.print("a `let` for-initializer must still compile\n", .{});
+        return error.LetInitializerRejected;
+    }
+}

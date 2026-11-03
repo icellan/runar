@@ -34,6 +34,12 @@ const emit = @import("../codegen/emit.zig");
 
 /// `check_preimage` lives ONLY inside the private helper `ck`; the public
 /// `check` reads the mutable var-length `tag` directly.
+///
+/// N-101: `parseANFProgram` now refuses this shape (a StatefulSmartContract
+/// public method must carry the checkPreimage prologue the frontend injects),
+/// so `check` is written private beside a scaffolded public `carrier`, and
+/// `loadC27` restores the original program in memory before stack lowering.
+/// The ANF fed to stack lowering is the same as before.
 const helper_ir =
     \\{
     \\  "contractName": "VarLenPrivateRead",
@@ -59,9 +65,10 @@ const helper_ir =
     \\        {"name": "t1", "value": {"kind": "check_preimage", "preimage": "t0"}}
     \\      ]
     \\    },
+    \\    {"name": "carrier", "isPublic": true, "params": [{"name": "txPreimage", "type": "SigHashPreimage"}], "body": [{"name": "p0", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p1", "value": {"kind": "check_preimage", "preimage": "p0"}}, {"name": "p2", "value": {"kind": "assert", "value": "p1"}}, {"name": "p3", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p4", "value": {"kind": "call", "func": "extractSigHashType", "args": ["p3"]}}, {"name": "p5", "value": {"kind": "load_const", "value": 65}}, {"name": "p6", "value": {"kind": "bin_op", "op": "===", "left": "p4", "right": "p5"}}, {"name": "p7", "value": {"kind": "assert", "value": "p6"}}, {"name": "p8", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p9", "value": {"kind": "deserialize_state", "preimage": "p8"}}, {"name": "_ok", "value": {"kind": "load_const", "value": true}}, {"name": "_ok_assert", "value": {"kind": "assert", "value": "_ok"}}]},
     \\    {
     \\      "name": "check",
-    \\      "isPublic": true,
+    \\      "isPublic": false,
     \\      "params": [{"name": "expected", "type": "bigint"}, {"name": "txPreimage", "type": "SigHashPreimage"}],
     \\      "body": [
     \\        {"name": "t0", "value": {"kind": "load_const", "value": "@this"}},
@@ -84,9 +91,12 @@ const helper_ir =
 /// Same program with NO `check_preimage` anywhere. The `_codePart` gate must
 /// stay gated — the recursion must not make `usesCodePart` unconditionally
 /// true just because a private helper is called.
+/// (N-087: labelled StatefulSmartContract, since the loader refuses a mutable
+/// property in IR with no parentClass and no stateful-only node.)
 const no_preimage_ir =
     \\{
     \\  "contractName": "VarLenPrivateRead",
+    \\  "parentClass": "StatefulSmartContract",
     \\  "properties": [{"name": "tag", "type": "ByteString", "readonly": false}],
     \\  "methods": [
     \\    {
@@ -97,9 +107,10 @@ const no_preimage_ir =
     \\        {"name": "t0", "value": {"kind": "load_param", "name": "p"}}
     \\      ]
     \\    },
+    \\    {"name": "carrier", "isPublic": true, "params": [{"name": "txPreimage", "type": "SigHashPreimage"}], "body": [{"name": "p0", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p1", "value": {"kind": "check_preimage", "preimage": "p0"}}, {"name": "p2", "value": {"kind": "assert", "value": "p1"}}, {"name": "p3", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p4", "value": {"kind": "call", "func": "extractSigHashType", "args": ["p3"]}}, {"name": "p5", "value": {"kind": "load_const", "value": 65}}, {"name": "p6", "value": {"kind": "bin_op", "op": "===", "left": "p4", "right": "p5"}}, {"name": "p7", "value": {"kind": "assert", "value": "p6"}}, {"name": "p8", "value": {"kind": "load_param", "name": "txPreimage"}}, {"name": "p9", "value": {"kind": "deserialize_state", "preimage": "p8"}}, {"name": "_ok", "value": {"kind": "load_const", "value": true}}, {"name": "_ok_assert", "value": {"kind": "assert", "value": "_ok"}}]},
     \\    {
     \\      "name": "check",
-    \\      "isPublic": true,
+    \\      "isPublic": false,
     \\      "params": [{"name": "expected", "type": "bigint"}, {"name": "txPreimage", "type": "SigHashPreimage"}],
     \\      "body": [
     \\        {"name": "t0", "value": {"kind": "load_const", "value": "@this"}},
@@ -116,10 +127,25 @@ const no_preimage_ir =
     \\}
 ;
 
+/// N-101: parse, then drop `carrier` and make `check` public again — the
+/// program C27 is about, which the loader no longer accepts as written.
+fn loadC27(allocator: std.mem.Allocator, json: []const u8) !types.ANFProgram {
+    var program = try json_parser.parseANFProgram(allocator, json);
+    var methods: std.ArrayListUnmanaged(types.ANFMethod) = .empty;
+    for (program.methods) |m| {
+        if (std.mem.eql(u8, m.name, "carrier")) continue;
+        var copy = m;
+        if (std.mem.eql(u8, m.name, "check")) copy.is_public = true;
+        try methods.append(allocator, copy);
+    }
+    program.methods = methods.items;
+    return program;
+}
+
 /// Mirror main.zig's compileFromIR pipeline: parse ANF JSON -> stack lower ->
 /// peephole -> emitArtifact.
 fn compileIrToArtifact(allocator: std.mem.Allocator, json: []const u8) ![]const u8 {
-    const program = try json_parser.parseANFProgram(allocator, json);
+    const program = try loadC27(allocator, json);
     const stack_program = try stack_lower.lower(allocator, program);
     const optimized_methods = try peephole.optimize(allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{
@@ -140,7 +166,7 @@ fn scriptHex(artifact: []const u8) ![]const u8 {
 }
 
 fn usesCodePartFor(allocator: std.mem.Allocator, json: []const u8, method_name: []const u8) !bool {
-    const program = try json_parser.parseANFProgram(allocator, json);
+    const program = try loadC27(allocator, json);
     for (program.methods) |method| {
         if (std.mem.eql(u8, method.name, method_name)) {
             return stack_lower.methodUsesCodePartFull(
@@ -172,9 +198,11 @@ test "C27: checkPreimage reachable only through a private helper still emits _co
     // `verify_code_part_len` pin adds 9 to the one authenticating method, this
     // contract's state being a variable-length ByteString). Zig under-emitted
     // while the private-method map was null. All seven tiers were re-measured
-    // at 625 on the same ANF input before this number was moved.
+    // at 625 on the same ANF input before this number was moved. N-044: +14
+    // for the unsigned PUSHDATA-length reader, header whitelist and exact
+    // state consumption -> 639.
     const hex = try scriptHex(artifact);
-    try std.testing.expectEqual(@as(usize, 625 * 2), hex.len);
+    try std.testing.expectEqual(@as(usize, 639 * 2), hex.len);
 }
 
 test "C27: the _codePart gate stays gated when no checkPreimage is reachable" {

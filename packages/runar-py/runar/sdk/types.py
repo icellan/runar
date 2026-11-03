@@ -110,6 +110,19 @@ class CodeSepIndexSlot:
 
 
 @dataclass
+class CodePartLenSlot:
+    """N-051 -- a ``verify_code_part_len`` length field whose value is only
+    known at deploy time (a readonly constructor arg of variable width is baked
+    into the code part).
+
+    ``byte_offset`` is the TEMPLATE offset of the first of the 4 little-endian
+    length bytes (the byte after the ``04`` push opcode). The SDK overwrites
+    those 4 bytes with the deployed code-part length.
+    """
+    byte_offset: int
+
+
+@dataclass
 class RunarArtifact:
     """Compiled output of a Runar compiler."""
     version: str = ''
@@ -126,6 +139,8 @@ class RunarArtifact:
     state_fields: list[StateField] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     code_sep_index_slots: list[CodeSepIndexSlot] = field(default_factory=list)
+    # N-051 -- deploy-time code-part length fields (see CodePartLenSlot).
+    code_part_len_slots: list[CodePartLenSlot] = field(default_factory=list)
     build_timestamp: str = ''
     code_separator_index: int | None = None
     code_separator_indices: list[int] | None = None
@@ -178,6 +193,10 @@ class RunarArtifact:
             CodeSepIndexSlot(byte_offset=s['byteOffset'], code_sep_index=s['codeSepIndex'])
             for s in d.get('codeSepIndexSlots', [])
         ]
+        code_part_len_slots = [
+            CodePartLenSlot(byte_offset=s['byteOffset'])
+            for s in d.get('codePartLenSlots') or []
+        ]
         return RunarArtifact(
             version=d.get('version', ''),
             compiler_version=d.get('compilerVersion', ''),
@@ -189,6 +208,7 @@ class RunarArtifact:
             state_fields=state_fields,
             constructor_slots=ctor_slots,
             code_sep_index_slots=code_sep_idx_slots,
+            code_part_len_slots=code_part_len_slots,
             build_timestamp=d.get('buildTimestamp', ''),
             code_separator_index=d.get('codeSeparatorIndex'),
             code_separator_indices=d.get('codeSeparatorIndices'),
@@ -283,13 +303,20 @@ class CallOptions:
 
 @dataclass
 class PreparedCall:
-    """Result of prepare_call() -- contains everything needed for external signing and finalize_call()."""
+    """Result of prepare_call() -- contains everything needed for external signing and finalize_call().
+
+    N-213: there is deliberately NO op_push_tx_sig field. Post-BUG-100 the
+    OP_PUSH_TX signature is derived ON-CHAIN from preimage --
+    _build_stateful_prefix's signature parameter is accepted for call-site
+    compatibility but ignored (see its "del op_sig_hex" discard), so there
+    was nothing for an external signer to produce or push here. Mirrors
+    F-369's TS fix.
+    """
     # Public -- callers use these to coordinate external signing
     # 64-char hex -- hash256(preimage) = sha256(sha256(preimage)), the BIP-143
     # digest external signers ECDSA-sign DIRECTLY (no further hashing).
     sighash: str = ''
     preimage: str = ''          # hex -- full BIP-143 preimage
-    op_push_tx_sig: str = ''    # hex -- OP_PUSH_TX DER sig (empty if not needed)
     tx_hex: str = ''            # hex -- built TX (P2PKH funding signed, primary input uses placeholder sigs)
     sig_indices: list[int] = field(default_factory=list)  # which user-visible arg positions need external Sig values
 

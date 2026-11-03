@@ -82,6 +82,17 @@ enum Val {
     Int(i64),
     Bool(bool),
     Bytes(String),
+    /// N-259: an `array_literal` binding's element values, in order.
+    /// N-275: also produced by `Val::from_sdk` when a caller passes a
+    /// pre-built list directly as a method arg (`SdkValue::Array`), without
+    /// going through an `array_literal` binding. Its only consumer is
+    /// `checkMultiSig`; it never reaches state or outputs.
+    Array(Vec<Val>),
+    /// N-163: a caller-supplied `SdkValue::BigInt` outside i64. Carried
+    /// unchanged (back to state as the same `BigInt`, into `verifyRabinSig`),
+    /// and refused wherever the interpreter would have to compute with it
+    /// (`refuses_wide` guards) — it used to be read as 0.
+    Wide(num_bigint::BigInt),
     Undefined,
 }
 
@@ -89,17 +100,28 @@ impl Val {
     fn from_sdk(v: &SdkValue) -> Self {
         match v {
             SdkValue::Int(n) => Val::Int(*n),
-            SdkValue::BigInt(n) => Val::Int(n.to_string().parse::<i64>().unwrap_or(0)),
+            // N-163: outside i64 -> `Wide`, never 0.
+            SdkValue::BigInt(n) => match i64::try_from(n) {
+                Ok(i) => Val::Int(i),
+                Err(_) => Val::Wide(n.clone()),
+            },
             SdkValue::Bool(b) => Val::Bool(*b),
             SdkValue::Bytes(s) => Val::Bytes(s.clone()),
             SdkValue::Auto => Val::Undefined,
             // EmptySig is a signature slot (issue #106); its value never feeds
             // state/data-output computation, so treat it as Undefined like Auto.
             SdkValue::EmptySig => Val::Undefined,
-            // Array values must be flattened into scalar slots by the
-            // caller before reaching the ANF interpreter. Treat any
-            // leaked Array as Undefined so downstream code fails loudly.
-            SdkValue::Array(_) => Val::Undefined,
+            // N-275: a caller may pass a pre-built sig/pk list directly as a
+            // method arg (not via an `array_literal` ANF binding) — e.g.
+            // `args["sigs"] = SdkValue::Array([..])` for `checkMultiSig`, as
+            // TS/Java accept. Map element-wise instead of discarding to
+            // Undefined, which made `verify_multi_sig_real` see non-Array
+            // operands and answer `false` for every such call (fail-closed
+            // on a VALID multisig). `FixedArray` state fields still flatten
+            // to scalar slots before reaching here (see `fixed_array`
+            // handling elsewhere); this arm only matters for values that
+            // reach `Val::from_sdk` as an actual `SdkValue::Array`.
+            SdkValue::Array(items) => Val::Array(items.iter().map(Val::from_sdk).collect()),
         }
     }
 
@@ -108,7 +130,9 @@ impl Val {
             Val::Int(n) => SdkValue::Int(*n),
             Val::Bool(b) => SdkValue::Bool(*b),
             Val::Bytes(s) => SdkValue::Bytes(s.clone()),
-            Val::Undefined => SdkValue::Int(0),
+            Val::Wide(n) => SdkValue::BigInt(n.clone()),
+            // An array never reaches state or outputs (N-259); like Undefined.
+            Val::Array(_) | Val::Undefined => SdkValue::Int(0),
         }
     }
 
@@ -117,7 +141,9 @@ impl Val {
             Val::Int(n) => *n,
             Val::Bool(b) => if *b { 1 } else { 0 },
             Val::Bytes(_) => 0,
-            Val::Undefined => 0,
+            // Unreached: every numeric consumer refuses a `Wide` first (N-163).
+            Val::Wide(_) => 0,
+            Val::Array(_) | Val::Undefined => 0,
         }
     }
 
@@ -126,19 +152,30 @@ impl Val {
             Val::Int(n) => *n != 0,
             Val::Bool(b) => *b,
             Val::Bytes(s) => !s.is_empty() && s != "0" && s != "false",
-            Val::Undefined => false,
+            // Outside i64, so never zero.
+            Val::Wide(_) => true,
+            Val::Array(_) | Val::Undefined => false,
         }
     }
 
     fn as_hex(&self) -> String {
         match self {
             Val::Bytes(s) => s.clone(),
-            Val::Int(_) | Val::Bool(_) | Val::Undefined => String::new(),
+            Val::Int(_) | Val::Bool(_) | Val::Array(_) | Val::Wide(_) | Val::Undefined => String::new(),
         }
     }
 
     fn is_bytes(&self) -> bool {
         matches!(self, Val::Bytes(_))
+    }
+
+    /// N-163: a `Wide` value, or an array holding one.
+    fn is_wide(&self) -> bool {
+        match self {
+            Val::Wide(_) => true,
+            Val::Array(items) => items.iter().any(Val::is_wide),
+            _ => false,
+        }
     }
 }
 
@@ -155,6 +192,13 @@ fn json_to_val(v: &serde_json::Value) -> Val {
             if let Some(stripped) = s.strip_suffix('n') {
                 if let Ok(n) = stripped.parse::<i64>() {
                     return Val::Int(n);
+                }
+                // N-282: outside i64 -> `Wide` (same value N-163 gives a
+                // caller-supplied `SdkValue::BigInt`), never 0. A literal that
+                // isn't valid decimal at all (shouldn't happen for a
+                // compiler-emitted ANF literal) falls through to `Bytes`.
+                if let Ok(n) = stripped.parse::<num_bigint::BigInt>() {
+                    return Val::Wide(n);
                 }
             }
             // Any other JSON string is a ByteString literal. (The
@@ -270,6 +314,104 @@ pub(crate) struct StrictCtx {
     /// AST-interpreter intent-intrinsic semantics into the Rust ANF
     /// interpreter.
     pub(crate) witness: Option<IntentWitnessContext>,
+    /// F-164 (round 2): identity set (by raw pointer address of the
+    /// binding's `serde_json::Value` — `Value` doesn't implement `Hash`/
+    /// `Eq` in a way that distinguishes structurally-identical-but-distinct
+    /// nodes, so this is the identity-equivalent of the TS reference's
+    /// `Set<ANFValue>` object-reference check) of the auto-injected
+    /// prologue's two assert VALUE nodes (checkPreimage's assert + the
+    /// sighash-type assert). Populated by `run_method` only in plain
+    /// strict mode (`real_crypto.is_none()`); left empty for
+    /// `execute_on_chain_authoritative`, which keeps enforcing both for
+    /// real. Safe only while the owning `ANFMethod.body` outlives the
+    /// walk and is never reallocated — true for every call site here.
+    pub(crate) mocked_prologue_asserts: std::collections::HashSet<usize>,
+}
+
+/// Rust port of the TS reference's `detectAutoInjectedPrologueAsserts`
+/// (packages/runar-sdk/src/anf-interpreter.ts) — see that function's doc
+/// comment for the full rationale. Structural (shape/position-based, NOT
+/// binding-name-based) detection of the fixed 8-binding sequence
+/// `compilers/rust/src/frontend/anf_lower.rs`'s stateful-prologue emitter
+/// injects at the START of every public StatefulSmartContract method:
+///
+/// ```text
+/// [0] load_param txPreimage
+/// [1] check_preimage(preimage: [0])
+/// [2] assert([1])                              <- mocked in strict mode
+/// [3] load_param txPreimage
+/// [4] call extractSigHashType([3])
+/// [5] load_const <declared sighash mode>
+/// [6] bin_op === ([4], [5])
+/// [7] assert([6])                              <- mocked in strict mode
+/// ```
+///
+/// This sequence can only appear at index 0 of a method body — the compiler
+/// emits it before a single line of developer code, so a user-written
+/// assert (even one that also calls `extractSigHashType`) is lowered AFTER
+/// it, at a later index, and is never matched here.
+///
+/// We don't mark these two ANF nodes with the existing
+/// `isAutoInjectedStateCheck` field the way the exit-time continuation-hash
+/// assert is marked: that field is part of the serialized ANF IR, and
+/// setting it on the prologue asserts would add a key to
+/// `conformance/tests/*/expected-ir.json` for every stateful fixture — a
+/// compiler-golden move this item must not cause.
+fn detect_auto_injected_prologue_asserts(body: &[ANFBinding]) -> std::collections::HashSet<usize> {
+    let mut result = std::collections::HashSet::new();
+    if body.len() < 8 {
+        return result;
+    }
+    let (b0, b1, b2, b3, b4, b5, b6, b7) = (
+        &body[0], &body[1], &body[2], &body[3], &body[4], &body[5], &body[6], &body[7],
+    );
+    fn str_field<'a>(v: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+        v.get(field).and_then(|x| x.as_str())
+    }
+    fn kind_of(v: &serde_json::Value) -> Option<&str> {
+        str_field(v, "kind")
+    }
+    fn is_load_tx_preimage(b: &ANFBinding) -> bool {
+        kind_of(&b.value) == Some("load_param") && str_field(&b.value, "name") == Some("txPreimage")
+    }
+    if !is_load_tx_preimage(b0) {
+        return result;
+    }
+    if kind_of(&b1.value) != Some("check_preimage") || str_field(&b1.value, "preimage") != Some(b0.name.as_str()) {
+        return result;
+    }
+    if kind_of(&b2.value) != Some("assert") || str_field(&b2.value, "value") != Some(b1.name.as_str()) {
+        return result;
+    }
+    if !is_load_tx_preimage(b3) {
+        return result;
+    }
+    let args4_ok = b4
+        .value
+        .get("args")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+        .and_then(|a| a.as_str())
+        == Some(b3.name.as_str());
+    if kind_of(&b4.value) != Some("call") || str_field(&b4.value, "func") != Some("extractSigHashType") || !args4_ok {
+        return result;
+    }
+    if kind_of(&b5.value) != Some("load_const") {
+        return result;
+    }
+    if kind_of(&b6.value) != Some("bin_op")
+        || str_field(&b6.value, "op") != Some("===")
+        || str_field(&b6.value, "left") != Some(b4.name.as_str())
+        || str_field(&b6.value, "right") != Some(b5.name.as_str())
+    {
+        return result;
+    }
+    if kind_of(&b7.value) != Some("assert") || str_field(&b7.value, "value") != Some(b6.name.as_str()) {
+        return result;
+    }
+    result.insert(&b2.value as *const serde_json::Value as usize);
+    result.insert(&b7.value as *const serde_json::Value as usize);
+    result
 }
 
 /// Per-method witness bytes + mock preimage fields consumed by the
@@ -384,8 +526,10 @@ impl std::error::Error for IntentInterpreterError {}
 ///    verification via `k256::ecdsa::VerifyingKey::verify_prehash`. Any
 ///    mismatch returns `false`, which then trips the enclosing `assert(...)`
 ///    and yields an [`AssertionFailureError`].
-///  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
-///    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
+///  - verifies `checkMultiSig(sigs, pks)` as `OP_CHECKMULTISIG` does: last
+///    signature against last key first, the same encoding gates on every
+///    examined pair, NULLFAIL on a failing check with a non-empty signature
+///    (N-259, see `verify_multi_sig_real`).
 ///  - verifies `checkPreimage(preimage)` by computing
 ///    `SHA256(SHA256(preimage))` and comparing it to `sighash` byte-for-byte
 ///    — the on-chain `OP_PUSH_TX` semantic.
@@ -450,10 +594,36 @@ pub fn compute_new_state_and_data_outputs(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
 ) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String> {
+    compute_new_state_and_data_outputs_with_script_code(
+        anf, method_name, current_state, args, constructor_args, None,
+    )
+}
+
+/// R67: like [`compute_new_state_and_data_outputs`], but additionally
+/// supplies the REAL off-chain `scriptCode` that `extractScriptCode(txPreimage)`
+/// returns on-chain -- the contract's own codePart, CompactSize-prefixed
+/// exactly as the BIP-143 preimage carries it. `contract.rs`'s `prepare_call`
+/// computes it from `get_code_part_hex()` trimmed at the OP_CODESEPARATOR
+/// offset and calls this function instead of the plain one above. A separate
+/// (additive) function rather than a new parameter on the existing one, so
+/// every other caller (tests, `compute_new_state`) keeps its exact arity.
+///
+/// Deliberately NOT threaded through `StrictCtx`/`witness`: that context is
+/// gated on `strict.is_some()`, which ALSO turns on full assert enforcement
+/// (see `run_method`'s "lenient mode skips asserts" invariant) -- `scriptCode`
+/// must reach `extractScriptCode` in LENIENT mode without flipping that.
+pub fn compute_new_state_and_data_outputs_with_script_code(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+    script_code: Option<&str>,
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String> {
     // Lenient mode: any assert() in the body is skipped — the on-chain
     // script handles enforcement, and `run_method` cannot return an
     // AssertionFailureError when `strict = None`.
-    match run_method(anf, method_name, current_state, args, constructor_args, None) {
+    match run_method(anf, method_name, current_state, args, constructor_args, None, script_code) {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(s)) => Err(s),
         // Unreachable: lenient mode never produces strict assertion failures.
@@ -485,6 +655,7 @@ pub fn execute_strict(
         method_name: method_name.to_string(),
         real_crypto: None,
         witness: None,
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         anf,
@@ -493,6 +664,7 @@ pub fn execute_strict(
         args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => panic!("execute_strict: interpreter error: {}", s),
@@ -524,6 +696,7 @@ pub fn execute_on_chain_authoritative(
         method_name: method_name.to_string(),
         real_crypto: Some(ctx.clone()),
         witness: None,
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         anf,
@@ -532,6 +705,7 @@ pub fn execute_on_chain_authoritative(
         args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => panic!("execute_on_chain_authoritative: interpreter error: {}", s),
@@ -668,6 +842,7 @@ pub fn execute_with_witness(
         method_name: method_name.to_string(),
         real_crypto: None,
         witness: Some(witness.clone()),
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         &anf_clone,
@@ -676,6 +851,7 @@ pub fn execute_with_witness(
         &merged_args,
         constructor_args,
         Some(&strict),
+        None,
     ) {
         Ok(Ok((state, data_outputs, raw_outputs, _ordered))) => Ok((state, data_outputs, raw_outputs)),
         Ok(Err(s)) => Err(IntentInterpreterError::Driver(s)),
@@ -695,6 +871,10 @@ fn run_method(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
     strict: Option<&StrictCtx>,
+    // R67: the real off-chain scriptCode for `extractScriptCode`, independent
+    // of `strict`/`witness` (see `compute_new_state_and_data_outputs_with_script_code`'s
+    // doc comment for why it can't be threaded through `StrictCtx`).
+    script_code: Option<&str>,
 ) -> Result<
     Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>, Vec<OrderedOutputEntry>), String>,
     AssertionFailureError,
@@ -745,10 +925,25 @@ fn run_method(
     // Load method params (skip implicit ones)
     let implicit: &[&str] = &["_changePKH", "_changeAmount", "_newAmount", "txPreimage"];
     for param in &method.params {
-        if implicit.contains(&param.name.as_str()) {
+        // F-024 (R14): a caller that knows the continuation's satoshis binds
+        // `_newAmount` (what `continuationAmount()` reads), and one that knows
+        // the spent UTXO's satoshis passes them as an INTEGER `txPreimage`
+        // (a real preimage is bytes), which `extractAmount` then returns.
+        let caller_bound = match param.name.as_str() {
+            "_newAmount" => args.contains_key("_newAmount"),
+            "txPreimage" => matches!(args.get("txPreimage"), Some(SdkValue::Int(_))),
+            _ => false,
+        };
+        if implicit.contains(&param.name.as_str()) && !caller_bound {
             continue;
         }
-        if let Some(sv) = args.get(&param.name) {
+        // N-360: a property-named public param the method reassigns is bound
+        // in the ANF under its `<name>@local` slot; the caller's args (and the
+        // ABI) use the source name.
+        let bound = args
+            .get(&param.name)
+            .or_else(|| param.name.strip_suffix("@local").and_then(|source| args.get(source)));
+        if let Some(sv) = bound {
             env.insert(param.name.clone(), Val::from_sdk(sv));
         }
     }
@@ -773,6 +968,22 @@ fn run_method(
     // is unaffected. Mirrors the TS SDK interpreter's `scriptBytes` map.
     let mut script_bytes: HashMap<String, Vec<u8>> = HashMap::new();
 
+    // F-164 (round 2): compute the mocked-prologue-assert identity set once
+    // per method, for plain strict mode only (on-chain mode keeps enforcing
+    // both prologue asserts for real, unchanged). Each `StrictCtx` is
+    // freshly constructed per top-level call (execute_strict et al.), so
+    // cloning + overwriting the field here is safe.
+    let strict_with_prologue: Option<StrictCtx> = strict.and_then(|s| {
+        if s.real_crypto.is_none() {
+            let mut c = s.clone();
+            c.mocked_prologue_asserts = detect_auto_injected_prologue_asserts(&method.body);
+            Some(c)
+        } else {
+            None
+        }
+    });
+    let effective_strict: Option<&StrictCtx> = strict_with_prologue.as_ref().or(strict);
+
     // Walk bindings — strict-mode assert failures bubble up through `?`.
     eval_bindings(
         &method.body,
@@ -782,8 +993,9 @@ fn run_method(
         &mut raw_outputs,
         &mut ordered_outputs,
         anf,
-        strict,
+        effective_strict,
         &mut script_bytes,
+        script_code,
     )?;
 
     // Merge delta into current_state
@@ -808,6 +1020,7 @@ fn eval_bindings(
     anf: &ANFProgram,
     strict: Option<&StrictCtx>,
     script_bytes: &mut HashMap<String, Vec<u8>>,
+    script_code: Option<&str>,
 ) -> Result<(), AssertionFailureError> {
     for binding in bindings {
         let val = eval_value(
@@ -821,6 +1034,7 @@ fn eval_bindings(
             strict,
             &binding.name,
             script_bytes,
+            script_code,
         )?;
         env.insert(binding.name.clone(), val);
     }
@@ -838,6 +1052,7 @@ fn eval_value(
     strict: Option<&StrictCtx>,
     binding_name: &str,
     script_bytes: &mut HashMap<String, Vec<u8>>,
+    script_code: Option<&str>,
 ) -> Result<Val, AssertionFailureError> {
     let kind = match value.get("kind").and_then(|k| k.as_str()) {
         Some(k) => k,
@@ -877,6 +1092,9 @@ fn eval_value(
             let result_type = value.get("resultType").and_then(|v| v.as_str()).unwrap_or("");
             let left = env.get(&left_name).cloned().unwrap_or(Val::Undefined);
             let right = env.get(&right_name).cloned().unwrap_or(Val::Undefined);
+            if left.is_wide() || right.is_wide() {
+                return Err(wide_refusal(strict, binding_name));
+            }
 
             // Numeric byte-array ops (& | ^ << >>) thread the operands' real
             // stack bytes so chained expressions match the deployed script: a
@@ -963,6 +1181,9 @@ fn eval_value(
             let operand_name = str_field(value, "operand");
             let result_type = value.get("resultType").and_then(|v| v.as_str()).unwrap_or("");
             let operand = env.get(&operand_name).cloned().unwrap_or(Val::Undefined);
+            if operand.is_wide() {
+                return Err(wide_refusal(strict, binding_name));
+            }
             // OP_INVERT threads the operand's real stack bytes so `~(2<<8)`
             // inverts the non-minimal [0x00] the shift left (-> -127), not the
             // minimal empty encoding of 0 (-> 0). Mirrors the bin_op threading.
@@ -987,6 +1208,16 @@ fn eval_value(
                         binding_name: binding_name.to_string(),
                     });
                 }
+                // N-281: `-i64::MIN` has no i64 representation; `eval_unary_op`'s
+                // native `-v` would panic (debug) or wrap (release) instead of
+                // returning the on-chain value. Same rejection channel as the
+                // N-163 `*` / math-builtin overflow refusals above.
+                if op == "-" && operand.to_i64() == i64::MIN {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
                 eval_unary_op(&op, &operand, result_type)
             }
         }
@@ -997,6 +1228,13 @@ fn eval_value(
             let args: Vec<Val> = arg_names.iter()
                 .map(|n| env.get(n).cloned().unwrap_or(Val::Undefined))
                 .collect();
+            // N-163: `verifyRabinSig` is the one builtin that legitimately
+            // takes values outside i64 (Rabin keys / signatures), and it does
+            // no integer math here. Every other builtin would compute with a
+            // `Wide` argument as 0.
+            if func != "verifyRabinSig" && args.iter().any(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             // The single funnel every numeric builtin (`abs`, `min`, `max`,
             // `within`, `safediv`, `clamp`, `sign`, `bool`, ...) reads its
             // operands through. Only a NUMERIC byte-op result ever carries
@@ -1026,9 +1264,77 @@ fn eval_value(
                     return Ok(Val::Undefined);
                 }
             }
+            // A math builtin whose compiled script ABORTS on these operands
+            // (zero divisor, the pow exponent guard, sqrt of a negative) fails
+            // the spend; surface it through the rejection channel instead of
+            // letting `eval_call` invent a value (F-134).
+            if math_builtin_aborts(&func, &args) || split_builtin_aborts(&func, &args) {
+                return Err(AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: binding_name.to_string(),
+                });
+            }
+            // N-163: not an on-chain abort — the script computes the value,
+            // but it lies outside the i64 this interpreter represents. Refuse
+            // through the same channel rather than return a wrapped value.
+            if math_builtin_overflows_i64(&func, &args) {
+                return Err(AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: binding_name.to_string(),
+                });
+            }
             let real_crypto = strict.and_then(|c| c.real_crypto.as_ref());
+            // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            // encoding; it does not push false. Answering false let
+            // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+            // spend the chain aborts on. Surfaced through the same rejection
+            // channel as the OP_SPLIT / math aborts above.
+            if real_crypto.is_some() && func == "checkSig" {
+                let sig = args.first().cloned().unwrap_or(Val::Undefined);
+                let pk = args.get(1).cloned().unwrap_or(Val::Undefined);
+                if check_sig_encoding_error(&sig, &pk).is_some() {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
+            }
             let witness = strict.and_then(|c| c.witness.as_ref());
-            eval_call(&func, &args, real_crypto, witness)
+            // N-259: on-chain checkMultiSig runs OP_CHECKMULTISIG as Spend does
+            // (`verify_multi_sig_real`); an abort (malformed encoding of an
+            // examined pair, NULLFAIL, N > M) takes the same rejection channel
+            // as the N-197 gate above.
+            let result = match real_crypto.filter(|_| func == "checkMultiSig") {
+                Some(rc) => {
+                    let sigs = args.first().cloned().unwrap_or(Val::Undefined);
+                    let pks = args.get(1).cloned().unwrap_or(Val::Undefined);
+                    match verify_multi_sig_real(&sigs, &pks, &rc.sighash) {
+                        Some(ok) => Val::Bool(ok),
+                        None => {
+                            return Err(AssertionFailureError {
+                                method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                                binding_name: binding_name.to_string(),
+                            });
+                        }
+                    }
+                }
+                None => eval_call(&func, &args, real_crypto, witness, script_code),
+            };
+            // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            // does not verify aborts the script; only an empty one pushes
+            // false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            // fail takes an empty signature (EMPTY_SIG, issue #106). `Spend`
+            // has no NULLFAIL. Same rejection channel as the N-197 gate above.
+            if real_crypto.is_some() && func == "checkSig" && matches!(result, Val::Bool(false)) {
+                let sig = args.first().cloned().unwrap_or(Val::Undefined);
+                if val_to_bytes(&sig).is_some_and(|b| !b.is_empty()) {
+                    return Err(AssertionFailureError {
+                        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
+            }
+            result
         }
 
         "method_call" => {
@@ -1056,7 +1362,7 @@ fn eval_value(
                 // byte-array-op results get a fresh side map (mirrors the TS
                 // reference, which calls evalBindings with a default `{}`).
                 let mut child_script_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, &mut child_script_bytes)?;
+                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, &mut child_script_bytes, script_code)?;
                 // Copy property updates back to caller env
                 for prop in &anf.properties {
                     if let Some(v) = child_env.get(&prop.name) {
@@ -1084,7 +1390,7 @@ fn eval_value(
                     .collect();
                 // Create child env for the branch
                 let mut child_env = env.clone();
-                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes)?;
+                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes, script_code)?;
                 // Copy new bindings back
                 for (k, v) in &child_env {
                     env.insert(k.clone(), v.clone());
@@ -1119,7 +1425,7 @@ fn eval_value(
                 for i in 0..count {
                     env.insert(iter_var.clone(), Val::Int(start + i * step));
                     let mut loop_env = env.clone();
-                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes)?;
+                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf, strict, script_bytes, script_code)?;
                     // Copy loop bindings back
                     for (k, v) in &loop_env {
                         env.insert(k.clone(), v.clone());
@@ -1139,6 +1445,42 @@ fn eval_value(
             // Strict mode: enforce — falsy predicate returns
             // AssertionFailureError, propagated up via `?`.
             if let Some(ctx) = strict {
+                // Marker-based skip: the auto-injected stateful-continuation
+                // `assert(hash256(_) === extractOutputHash(_))` carries
+                // `isAutoInjectedStateCheck: true` (set in
+                // `compilers/rust/src/frontend/anf_lower.rs`). The on-chain
+                // VM is authoritative for that check; off-chain we have no
+                // realistic continuation hash. Developer-written covenant
+                // asserts with the identical IR shape carry no marker and
+                // ARE enforced (see BUG-002). Pre-existing gap found while
+                // fixing F-164 (round 2): this plain-strict path never
+                // checked the marker at all (only `execute_with_witness`
+                // did, via a clone-and-pop-last-binding trick) — invisible
+                // until round 2 unblocked the entry prologue far enough to
+                // actually reach this exit assert. TS/Go/Python already
+                // check it here; this ports the same check to Rust.
+                if value
+                    .get("isAutoInjectedStateCheck")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return Ok(Val::Undefined);
+                }
+                // F-164 (round 2): the auto-injected prologue's
+                // checkPreimage assert and sighash-type assert (detected
+                // structurally — see detect_auto_injected_prologue_asserts)
+                // are mocked in plain strict mode, matching PROTOCOL.md's
+                // documented "crypto built-ins still mock-return true"
+                // contract. Never populated for
+                // execute_on_chain_authoritative (run_method only sets it
+                // when real_crypto is None), so on-chain mode keeps
+                // enforcing both for real.
+                let is_mocked_prologue_assert = ctx
+                    .mocked_prologue_asserts
+                    .contains(&(value as *const serde_json::Value as usize));
+                if is_mocked_prologue_assert {
+                    return Ok(Val::Undefined);
+                }
                 let pred_ref = str_field(value, "value");
                 let predicate = env.get(&pred_ref).cloned().unwrap_or(Val::Undefined);
                 if !predicate.is_truthy() {
@@ -1179,6 +1521,9 @@ fn eval_value(
             // a method may interleave raw outputs around it, and the on-chain
             // covenant folds them into hashOutputs in exactly this order.
             let sat_ref = str_field(value, "satoshis");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             ordered_outputs.push(OrderedOutputEntry {
                 kind: OrderedOutputKind::State,
@@ -1192,6 +1537,9 @@ fn eval_value(
             // Resolve the two arg refs from env and record the data output.
             let sat_ref = str_field(value, "satoshis");
             let script_ref = str_field(value, "scriptBytes");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
             data_outputs.push(DataOutputEntry { satoshis: sats, script: script_hex });
@@ -1206,6 +1554,9 @@ fn eval_value(
             // output at the correct index.
             let sat_ref = str_field(value, "satoshis");
             let script_ref = str_field(value, "scriptBytes");
+            if env.get(&sat_ref).is_some_and(Val::is_wide) {
+                return Err(wide_refusal(strict, binding_name));
+            }
             let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
             let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
             raw_outputs.push(RawOutputEntry { satoshis: sats, script: script_hex.clone() });
@@ -1219,20 +1570,32 @@ fn eval_value(
             Val::Undefined
         }
 
-        // On-chain-only operations — skip in simulation. When a witness
-        // context is active (i.e. `execute_with_witness`), `check_preimage`
-        // mocks success so the auto-injected `assert(check_preimage(...))`
-        // at every stateful-method entry doesn't trip a spurious assertion
-        // failure. Mirrors the TS reference, which mocks `checkPreimage`
-        // to `true` in the AST interpreter.
+        // F-164: mirrors the "checkPreimage" call-path case above (mock
+        // true unless a real-crypto context is active) — same mock/real
+        // split, regardless of whether a witness context is also present.
         "check_preimage" => {
-            if strict.and_then(|c| c.witness.as_ref()).is_some() {
-                Val::Bool(true)
-            } else {
-                Val::Undefined
+            match strict.and_then(|c| c.real_crypto.as_ref()) {
+                Some(rc) => {
+                    let pre_ref = str_field(value, "preimage");
+                    let pre = env.get(&pre_ref).cloned().unwrap_or(Val::Undefined);
+                    Val::Bool(verify_preimage_real(&pre, &rc.sighash))
+                }
+                None => Val::Bool(true),
             }
         }
         "deserialize_state" | "get_state_script" => Val::Undefined,
+
+        // N-259: the element values, in order. Its only consumer is
+        // `checkMultiSig`, which lenient mode mocks to true and on-chain mode
+        // verifies over these lists; `Undefined` here made on-chain
+        // `checkMultiSig` answer false for every input, a valid multisig
+        // included.
+        "array_literal" => Val::Array(
+            str_array_field(value, "elements")
+                .iter()
+                .map(|r| env.get(r).cloned().unwrap_or(Val::Undefined))
+                .collect(),
+        ),
 
         _ => Val::Undefined,
     };
@@ -1461,11 +1824,18 @@ fn eval_bin_op(op: &str, left: &Val, right: &Val, result_type: &str) -> Result<V
     let r = right.to_i64();
 
     Ok(match op {
-        "+" => Val::Int(l.wrapping_add(r)),
-        "-" => Val::Int(l.wrapping_sub(r)),
-        "*" => Val::Int(l.wrapping_mul(r)),
-        "/" => Val::Int(if r == 0 { 0 } else { l / r }),
-        "%" => Val::Int(if r == 0 { 0 } else { l % r }),
+        // N-281 (sibling of N-163): refuse a sum/difference outside i64
+        // rather than wrap it (`wrapping_add`/`wrapping_sub`).
+        "+" => return l.checked_add(r).map(Val::Int).ok_or(()),
+        "-" => return l.checked_sub(r).map(Val::Int).ok_or(()),
+        // N-163: refuse a product outside i64 rather than wrap it.
+        "*" => return l.checked_mul(r).map(Val::Int).ok_or(()),
+        // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there
+        // is no post-state to compute. `i64::MIN / -1` (2^63) is outside i64:
+        // refuse it too. `i64::MIN % -1` is 0 on chain (`wrapping_rem`).
+        "/" => return l.checked_div(r).map(Val::Int).ok_or(()),
+        "%" if r == 0 => return Err(()),
+        "%" => Val::Int(l.wrapping_rem(r)),
         "==" | "===" => Val::Bool(l == r),
         "!=" | "!==" => Val::Bool(l != r),
         "<" => Val::Bool(l < r),
@@ -1517,11 +1887,98 @@ fn eval_unary_op(op: &str, operand: &Val, result_type: &str) -> Val {
 // Built-in function calls
 // ---------------------------------------------------------------------------
 
+/// True when the compiled script for this math builtin ABORTS on these
+/// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, `sqrt`'s
+/// `n >= 0` guard and `log2`'s `n > 0` guard (N-103). (`sqrt`'s `n < 2^495`
+/// guard is out of i64 reach.)
+fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
+    let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
+    match func {
+        "safediv" | "safemod" | "divmod" => arg(1) == 0,
+        "mulDiv" => arg(2) == 0,
+        "pow" => !(0..=32).contains(&arg(1)),
+        "sqrt" => arg(0) < 0,
+        "log2" => arg(0) <= 0,
+        _ => false,
+    }
+}
+
+/// N-163: the refusal for a `Wide` value used where the interpreter would
+/// have to compute with it. Same channel as the math aborts; the binding name
+/// carries the reason, since `AssertionFailureError` has no other field.
+fn wide_refusal(strict: Option<&StrictCtx>, binding_name: &str) -> AssertionFailureError {
+    AssertionFailureError {
+        method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+        binding_name: format!("{} (integer outside the i64 range this interpreter supports)", binding_name),
+    }
+}
+
+/// N-163: true when this math builtin's (non-aborting) result lies outside
+/// i64, so `eval_call` could only return a wrapped/truncated value. Callers
+/// check `math_builtin_aborts` first, so divisors are non-zero and the `pow`
+/// exponent is in 0..=32 here.
+fn math_builtin_overflows_i64(func: &str, args: &[Val]) -> bool {
+    let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
+    match func {
+        // N-281: `abs(i64::MIN)` has no i64 representation (`-i64::MIN`
+        // overflows); `eval_call`'s `v.abs()` would panic (debug) or wrap
+        // (release) rather than return the on-chain value.
+        "abs" => arg(0) == i64::MIN,
+        "pow" => (0..arg(1)).try_fold(1i64, |acc, _| acc.checked_mul(arg(0))).is_none(),
+        "mulDiv" => {
+            let c = args.get(2).map(|v| v.to_i64()).unwrap_or(1) as i128;
+            c != 0 && i64::try_from((arg(0) as i128 * arg(1) as i128) / c).is_err()
+        }
+        "percentOf" => i64::try_from((arg(0) as i128 * arg(1) as i128) / 10000).is_err(),
+        _ => false,
+    }
+}
+
+/// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+/// whenever the computed split position is outside `[0, size(data)]` --
+/// `left` splits at `length` directly, `right` splits at
+/// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+/// lowerRight). A negative or past-the-end `length` must fail the spend, not
+/// return a clamped value.
+///
+/// N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the RIGHT
+/// half -- same bound, `index` in place of `length`.
+///
+/// R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+/// OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+/// REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+/// [0, size(data)] or `length` is outside [0, size(data) - start], which
+/// collapses to: start<0, length<0, or start+length>size(data). `substr`
+/// used to be excluded here because its one caller via `extractScriptCode`
+/// (`FungibleToken::merge`) got an empty dummy scriptCode, turning a
+/// realistic `substr(sc, ...)` into a POSITIVE overflow this check would
+/// have to reject. `extractScriptCode` now returns the contract's own REAL
+/// codePart (`contract.rs`'s `prepare_call`), so `substr` can be fully
+/// abort-faithful too.
+fn split_builtin_aborts(func: &str, args: &[Val]) -> bool {
+    match func {
+        "left" | "right" | "split" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            length < 0 || length * 2 > hex.len() as i64
+        }
+        "substr" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let start = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            let length = args.get(2).map(|v| v.to_i64()).unwrap_or(0);
+            start < 0 || length < 0 || (start + length) * 2 > hex.len() as i64
+        }
+        _ => false,
+    }
+}
+
 fn eval_call(
     func: &str,
     args: &[Val],
     real_crypto: Option<&OnChainCryptoContext>,
     witness: Option<&IntentWitnessContext>,
+    script_code: Option<&str>,
 ) -> Val {
     match func {
         // Crypto — mocked unless real-crypto context is present.
@@ -1538,7 +1995,10 @@ fn eval_call(
             if let Some(rc) = real_crypto {
                 let sigs = args.first().cloned().unwrap_or(Val::Undefined);
                 let pks  = args.get(1).cloned().unwrap_or(Val::Undefined);
-                Val::Bool(verify_multi_sig_real(&sigs, &pks, &rc.sighash))
+                // Not reached in real-crypto mode: the call-binding site runs
+                // `verify_multi_sig_real` itself and turns its abort (`None`)
+                // into an AssertionFailureError. Kept total for safety.
+                Val::Bool(verify_multi_sig_real(&sigs, &pks, &rc.sighash) == Some(true))
             } else {
                 Val::Bool(true)
             }
@@ -1576,15 +2036,12 @@ fn eval_call(
             let b = args.get(1).map(|v| v.as_hex()).unwrap_or_default();
             Val::Bytes(format!("{}{}", a, b))
         }
+        // R67: bounds already verified by `split_builtin_aborts` above.
         "substr" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
             let start = args.get(1).map(|v| v.to_i64()).unwrap_or(0) as usize;
             let len = args.get(2).map(|v| v.to_i64()).unwrap_or(0) as usize;
-            let from = start * 2;
-            let to = (start + len) * 2;
-            let to = to.min(hex.len());
-            let from = from.min(hex.len());
-            Val::Bytes(hex[from..to].to_string())
+            Val::Bytes(hex[start * 2..start * 2 + len * 2].to_string())
         }
         "reverseBytes" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
@@ -1600,6 +2057,26 @@ fn eval_call(
         "len" => {
             let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
             Val::Int((hex.len() / 2) as i64)
+        }
+        // F-274: bounds already verified by `split_builtin_aborts` above.
+        "left" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[..(length * 2) as usize].to_string())
+        }
+        "right" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let length = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[hex.len() - (length * 2) as usize..].to_string())
+        }
+        // N-171 (sibling of F-274): bounds already verified by
+        // `split_builtin_aborts` above. `split` binds the RIGHT half from
+        // `index` onwards -- a bare OP_SPLIT, unmodelled before this (fell
+        // through to the `default` arm's wrong value).
+        "split" => {
+            let hex = args.first().map(|v| v.as_hex()).unwrap_or_default();
+            let index = args.get(1).map(|v| v.to_i64()).unwrap_or(0);
+            Val::Bytes(hex[(index * 2) as usize..].to_string())
         }
 
         // Math builtins
@@ -1661,14 +2138,16 @@ fn eval_call(
             if v <= 0 {
                 Val::Int(0)
             } else {
-                // Integer square root via Newton's method
+                // Integer square root via Newton's method, in i128 so that
+                // v = i64::MAX does not overflow `x + 1` (N-030).
+                let v = v as i128;
                 let mut x = v;
                 let mut y = (x + 1) / 2;
                 while y < x {
                     x = y;
                     y = (x + v / x) / 2;
                 }
-                Val::Int(x)
+                Val::Int(x as i64)
             }
         }
         "gcd" => {
@@ -1726,12 +2205,21 @@ fn eval_call(
                 .and_then(|w| w.mock_preimage.get("locktime").copied())
                 .unwrap_or(0),
         ),
+        // F-024 (R14): an integer `txPreimage` is the caller-supplied input amount.
+        "extractAmount" if matches!(args.first(), Some(Val::Int(_))) => args[0].clone(),
         "extractAmount" => match witness {
             Some(w) => Val::Int(w.mock_preimage.get("amount").copied().unwrap_or(10000)),
             // Pre-witness simulation kept this as a 32-zero byte string;
             // preserve that to avoid breaking existing callers.
             None => Val::Bytes("00".repeat(32)),
         },
+        // R67: the contract's own real codePart when the caller supplied it
+        // (see `compute_new_state_and_data_outputs_with_script_code`'s doc
+        // comment) -- `contract.rs`'s `prepare_call` always supplies it now.
+        // Falls back to the historical empty dummy for a bare
+        // `compute_new_state` call with no script_code (e.g. a hand-built
+        // ANF probe in a test).
+        "extractScriptCode" => Val::Bytes(script_code.unwrap_or("").to_string()),
         "extractVersion" => Val::Int(
             witness
                 .and_then(|w| w.mock_preimage.get("version").copied())
@@ -1842,12 +2330,92 @@ fn strip_sighash_byte(sig_bytes: &[u8]) -> &[u8] {
     }
 }
 
+/// secp256k1 group order n, halved (n >> 1): the BIP-62 low-S bound.
+const SECP256K1_HALF_N: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+];
+
+/// Strict DER (BIP66) for a bare ECDSA signature: the SEQUENCE length covers
+/// exactly r and s, both INTEGERs are non-empty, non-negative and minimally
+/// encoded, and nothing follows s.
+fn is_strict_der_signature(der: &[u8]) -> bool {
+    let n = der.len();
+    if !(8..=72).contains(&n) || der[0] != 0x30 || der[1] as usize != n - 2 {
+        return false;
+    }
+    let r_len = der[3] as usize;
+    if der[2] != 0x02 || r_len == 0 || 5 + r_len >= n {
+        return false;
+    }
+    let s_len = der[5 + r_len] as usize;
+    if der[4 + r_len] != 0x02 || s_len == 0 || r_len + s_len + 6 != n {
+        return false;
+    }
+    let canonical = |b: &[u8]| b[0] & 0x80 == 0 && !(b.len() > 1 && b[0] == 0x00 && b[1] & 0x80 == 0);
+    canonical(&der[4..4 + r_len]) && canonical(&der[6 + r_len..])
+}
+
+/// N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+/// `None` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+/// `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules): a
+/// non-empty signature must be strict DER (BIP66) with a low S; the public key
+/// -- checked even when the signature is empty -- must be 33 bytes behind
+/// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+/// signature, or a well-formed one that does not verify, is not an encoding
+/// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
+/// applies NULLFAIL after verification (N-198). A non-empty signature is in
+/// checksig format, DER followed by exactly one sighash-type byte, as `Spend`
+/// requires: bare DER with no sighash byte aborts (N-255).
+/// Operands that are not bytes at all are left to `verify_ecdsa_real`.
+fn check_sig_encoding_error(sig_val: &Val, pk_val: &Val) -> Option<&'static str> {
+    let sig = val_to_bytes(sig_val)?;
+    let pk = val_to_bytes(pk_val)?;
+    if !sig.is_empty() {
+        if sig.len() < 2 || sig.len() != sig[1] as usize + 3 {
+            return Some("the signature is not strict DER");
+        }
+        let der = &sig[..sig.len() - 1];
+        if !is_strict_der_signature(der) {
+            return Some("the signature is not strict DER");
+        }
+        let r_len = der[3] as usize;
+        let s_bytes = &der[6 + r_len..];
+        let first_nz = s_bytes.iter().position(|&b| b != 0);
+        let low_s = match first_nz {
+            None => false,
+            Some(i) => {
+                let s = &s_bytes[i..];
+                s.len() < 32 || (s.len() == 32 && s <= &SECP256K1_HALF_N[..])
+            }
+        };
+        if !low_s {
+            return Some("the signature does not have a low S value");
+        }
+    }
+    let shape_ok = match pk.first() {
+        Some(0x02) | Some(0x03) => pk.len() == 33,
+        Some(0x04) => pk.len() == 65,
+        _ => false,
+    };
+    if !shape_ok {
+        return Some("the public key is not a 33-byte compressed or 65-byte uncompressed key");
+    }
+    if VerifyingKey::from_sec1_bytes(&pk).is_err() {
+        return Some("the public key is not a point on secp256k1");
+    }
+    None
+}
+
 /// Verify an ECDSA signature against a 32-byte sighash digest using `k256`
 /// secp256k1. Pubkey is SEC1 (compressed 33 bytes or uncompressed 65 bytes);
 /// signature is DER with an optional trailing sighash type byte stripped.
 /// Returns `false` on any decode error so the enclosing assert fires (and
 /// surfaces as `AssertionFailureError`, not a verify-error propagated to
-/// the caller).
+/// the caller). The `checkSig` call site first applies
+/// `check_sig_encoding_error` and aborts on a malformed encoding, as
+/// `OP_CHECKSIG` does (N-197); so does `checkMultiSig`, per examined pair
+/// (N-259).
 ///
 /// Note on the digest: ECDSA-verifies against the supplied `sighash`
 /// directly, with no extra SHA-256 layer. This mirrors the on-chain
@@ -1869,16 +2437,47 @@ fn verify_ecdsa_real(sig_val: &Val, pk_val: &Val, sighash: &[u8; 32]) -> bool {
     vk.verify_prehash(sighash.as_ref(), &sig).is_ok()
 }
 
-/// Verify a list of signatures against a list of pubkeys. Mirrors Bitcoin's
-/// `OP_CHECKMULTISIG`: iterate sigs left-to-right, consume pubkeys greedily.
+/// N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+/// layout `0 <sig1..sigN> N <pk1..pkM> M`. The LAST signature is examined
+/// against the LAST key first and both lists are walked toward the first. Each
+/// examined pair passes the N-197 encoding gates first and a malformed one
+/// aborts (a pair never reached is never checked); a signature that verifies
+/// consumes its key, a key is consumed either way, and the check fails once
+/// fewer keys remain than signatures. N > M aborts, as in `Spend`. NULLFAIL
+/// (BIP146, N-198): a failing check with ANY non-empty signature aborts on a
+/// node (`Spend` has no NULLFAIL); only an all-empty one yields `false`.
 ///
-/// The Rust interpreter's `Val` enum cannot represent arrays of bytes
-/// directly (lists leak through as `Val::Undefined` from `Val::from_sdk`),
-/// so this function returns `false` unless future ANF lowering wires a
-/// dedicated representation. The fail path matches the spec: "On any parse
-/// error → return false".
-fn verify_multi_sig_real(_sigs: &Val, _pks: &Val, _sighash: &[u8; 32]) -> bool {
-    false
+/// Returns `Some(result)`, or `None` where the script aborts. Operands that
+/// are not arrays yield `Some(false)`.
+fn verify_multi_sig_real(sigs: &Val, pks: &Val, sighash: &[u8; 32]) -> Option<bool> {
+    let (sigs, pks) = match (sigs, pks) {
+        (Val::Array(s), Val::Array(p)) => (s, p),
+        _ => return Some(false),
+    };
+    if sigs.len() > pks.len() {
+        return None;
+    }
+    let non_empty = |v: &Val| val_to_bytes(v).is_some_and(|b| !b.is_empty());
+    let mut nsigs = sigs.len();
+    let mut nkeys = pks.len();
+    let mut success = true;
+    while success && nsigs > 0 {
+        let (sig, pk) = (&sigs[nsigs - 1], &pks[nkeys - 1]);
+        if check_sig_encoding_error(sig, pk).is_some() {
+            return None;
+        }
+        if non_empty(sig) && verify_ecdsa_real(sig, pk, sighash) {
+            nsigs -= 1;
+        }
+        nkeys -= 1;
+        if nsigs > nkeys {
+            success = false; // fewer keys left than signatures
+        }
+    }
+    if !success && sigs.iter().any(non_empty) {
+        return None;
+    }
+    Some(success)
 }
 
 /// Verify that `SHA256(SHA256(preimage)) == sighash` — the on-chain
@@ -2809,5 +3408,179 @@ mod real_crypto_tests {
             let hex = num2bin_hex(n, 8);
             assert_eq!(bin2num_i64(&hex), n, "round trip of {} through {}", n, hex);
         }
+    }
+
+    // N-275 — `Val::from_sdk` mapped `SdkValue::Array(_)` to `Val::Undefined`,
+    // so a caller passing a PRE-BUILT sig/pk list as a method arg (as the TS
+    // reference's `anf-interpreter-real-crypto.spec.ts` "passes when both
+    // sigs verify against a 2-of-2 pubkey set" case does — `{ sigs: [sig1,
+    // sig2], pks: [pk1, pk2] }`, a plain array value, not an `array_literal`
+    // ANF binding) never reached `Val::Array` at all: the `sigs`/`pks`
+    // params landed in `env` as `Undefined`, `verify_multi_sig_real` saw
+    // non-Array operands and returned `Some(false)` (its documented
+    // "operands that are not arrays yield `Some(false)`" case), and a VALID
+    // multisig got rejected by the enclosing `assert` — fail-closed, but
+    // wrong: TS and Java accept exactly this call shape.
+    //
+    // This test drives `execute_on_chain_authoritative` directly with
+    // `args["sigs"]` / `args["pks"]` as `SdkValue::Array(..)` (mirroring how
+    // an SDK caller passes a pre-built list through `call()`), for a 2-of-3
+    // multisig: two real ECDSA signatures (over the method's sighash) by the
+    // first two of three keys, supplied in ascending key order — the same
+    // order `OP_CHECKMULTISIG` / `verify_multi_sig_real` require.
+    //
+    // What it proves: a method param whose arg value is `SdkValue::Array`
+    // (built outside the ANF body, never through an `array_literal`
+    // binding) reaches `checkMultiSig` as a real `Val::Array` and a valid
+    // 2-of-3 signature set is accepted, matching the TS reference — and
+    // (second assertion) that the elements are mapped THROUGH in order, not
+    // that any array makes `checkMultiSig` true: reversing `sigs` to
+    // `[sig2, sig1]` against the same `pks` makes the walk compare sig1
+    // against pk3 then pk2 (neither matches), so `nsigs(2) > nkeys(1)` and
+    // the call aborts (`None` from `verify_multi_sig_real`) exactly as it
+    // would for a genuinely wrong signature set.
+    // What it does not prove: `array_literal`-built lists (N-259, already
+    // covered elsewhere), NULLFAIL/abort behavior for malformed array
+    // elements, or `FixedArray` state-field flattening (a different, already
+    // -working path that never constructs `SdkValue::Array` at this layer —
+    // `contract.rs::encode_arg` panics on an unflattened `SdkValue::Array`,
+    // so one can never reach here from that path).
+    #[test]
+    fn execute_on_chain_authoritative_accepts_2_of_3_multisig_passed_as_array_args() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+
+        fn key_from_byte(last: u8) -> SigningKey {
+            let mut bytes = [0u8; 32];
+            bytes[31] = last;
+            SigningKey::from_bytes(&bytes.into()).unwrap()
+        }
+
+        // DER plus a 0x41 sighash-type byte: on-chain mode aborts on bare
+        // DER, as OP_CHECKSIG does (N-255).
+        fn sign_der_hex(key: &SigningKey, sighash: &[u8; 32]) -> String {
+            let (sig, _): (K256Signature, k256::ecdsa::RecoveryId) =
+                key.sign_prehash(sighash).unwrap();
+            format!("{}41", bytes_to_hex(sig.to_der().as_bytes()))
+        }
+
+        let digest = Sha256::digest(b"N-275-multisig-args-test");
+        let mut sighash = [0u8; 32];
+        sighash.copy_from_slice(&digest);
+
+        let key1 = key_from_byte(1);
+        let key2 = key_from_byte(2);
+        let key3 = key_from_byte(3);
+        let sig1 = sign_der_hex(&key1, &sighash);
+        let sig2 = sign_der_hex(&key2, &sighash);
+        let pk1 = bytes_to_hex(&key1.verifying_key().to_sec1_bytes());
+        let pk2 = bytes_to_hex(&key2.verifying_key().to_sec1_bytes());
+        let pk3 = bytes_to_hex(&key3.verifying_key().to_sec1_bytes());
+
+        // unlock(sigs, pks): assert(checkMultiSig(sigs, pks)); value = 1.
+        let anf = ANFProgram {
+            contract_name: "MultisigGuard".to_string(),
+            properties: vec![ANFProperty {
+                name: "value".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: false,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![
+                    ANFParam { name: "sigs".to_string(), param_type: "Sig[]".to_string() },
+                    ANFParam { name: "pks".to_string(), param_type: "PubKey[]".to_string() },
+                ],
+                is_public: true,
+                body: vec![
+                    ANFBinding {
+                        name: "sigsArg".to_string(),
+                        value: serde_json::json!({ "kind": "load_param", "name": "sigs" }),
+                    },
+                    ANFBinding {
+                        name: "pksArg".to_string(),
+                        value: serde_json::json!({ "kind": "load_param", "name": "pks" }),
+                    },
+                    ANFBinding {
+                        name: "msigOk".to_string(),
+                        value: serde_json::json!({
+                            "kind": "call",
+                            "func": "checkMultiSig",
+                            "args": ["sigsArg", "pksArg"],
+                        }),
+                    },
+                    ANFBinding {
+                        name: "assertMsig".to_string(),
+                        value: serde_json::json!({ "kind": "assert", "value": "msigOk" }),
+                    },
+                    ANFBinding {
+                        name: "one".to_string(),
+                        value: serde_json::json!({ "kind": "load_const", "value": 1 }),
+                    },
+                    ANFBinding {
+                        name: "upd".to_string(),
+                        value: serde_json::json!({
+                            "kind": "update_prop",
+                            "name": "value",
+                            "value": "one",
+                        }),
+                    },
+                ],
+            }],
+        };
+
+        let mut state = HashMap::new();
+        state.insert("value".to_string(), SdkValue::Int(0));
+
+        let mut args = HashMap::new();
+        args.insert(
+            "sigs".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(sig1.clone()),
+                SdkValue::Bytes(sig2.clone()),
+            ]),
+        );
+        args.insert(
+            "pks".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(pk1.clone()),
+                SdkValue::Bytes(pk2.clone()),
+                SdkValue::Bytes(pk3.clone()),
+            ]),
+        );
+
+        let ctx = OnChainCryptoContext { sighash };
+
+        let (new_state, _, _) =
+            execute_on_chain_authoritative(&anf, "unlock", &state, &args, &[], &ctx).expect(
+                "a valid 2-of-3 multisig passed via args (SdkValue::Array) must be accepted",
+            );
+        assert_eq!(new_state.get("value"), Some(&SdkValue::Int(1)));
+
+        // Non-vacuity: the elements are mapped THROUGH in order, not just
+        // "any array makes checkMultiSig true". Reversing `sigs` to
+        // `[sig2, sig1]` against the same `pks` breaks the ascending-order
+        // requirement `OP_CHECKMULTISIG` / `verify_multi_sig_real` enforce
+        // (sig1 is examined against pk3 then pk2, neither matches, so
+        // `nsigs(2) > nkeys(1)`), and must abort rather than succeed.
+        let mut reversed_args = HashMap::new();
+        reversed_args.insert(
+            "sigs".to_string(),
+            SdkValue::Array(vec![SdkValue::Bytes(sig2), SdkValue::Bytes(sig1)]),
+        );
+        reversed_args.insert(
+            "pks".to_string(),
+            SdkValue::Array(vec![
+                SdkValue::Bytes(pk1),
+                SdkValue::Bytes(pk2),
+                SdkValue::Bytes(pk3),
+            ]),
+        );
+        // Aborts at the `checkMultiSig` call binding itself (`msigOk`), not
+        // the enclosing `assert` — `verify_multi_sig_real` returning `None`
+        // short-circuits straight to `Err` (see the `"call"` dispatch arm).
+        let err = execute_on_chain_authoritative(&anf, "unlock", &state, &reversed_args, &[], &ctx)
+            .expect_err("reversed sig order must not satisfy checkMultiSig");
+        assert_eq!(err.binding_name, "msigOk");
     }
 }

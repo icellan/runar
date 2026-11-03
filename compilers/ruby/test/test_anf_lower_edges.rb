@@ -256,16 +256,20 @@ class TestAnfLowerEdges < Minitest::Test
 
     prog = anf_program_for(source, 'Lit.runar.ts')
     check = prog.methods.find { |m| m.name == 'check' }
-    # Find a binding whose value is a const_value with 42 somewhere
+    # Find a binding whose value is a load_const carrying the decoded bigint 42.
+    # (ANFValue's kind for a constant is "load_const", not "const_value", and
+    # the decoded-bigint field is `const_big_int`, not `big_int` -- see
+    # compilers/ruby/lib/runar_compiler/ir/types.rb FIELDS. A loose OR-fallback
+    # that greps `#inspect` of every binding for the substring "42" would pass
+    # on an unrelated binding name, line number, or byte offset containing
+    # "42", so this test asserts on the decoded value directly.)
     found_42 = check.body.any? do |b|
       v = b.value
-      v.kind == 'const_value' && v.respond_to?(:big_int) && v.big_int == 42
+      v.kind == 'load_const' && v.const_big_int == 42
     end
-    # ANF may flatten constants into binop directly, so don't require const_value.
-    # Just check the value is present in some form:
-    body_str = check.body.map { |b| b.value.inspect }.join(' ')
-    assert(body_str.include?('42') || found_42,
-           "expected literal 42 to be preserved in ANF, got: #{body_str[0, 200]}")
+    assert(found_42,
+           "expected a load_const binding carrying decoded bigint 42, got kinds: " \
+           "#{check.body.map { |b| b.value.kind }.inspect}")
   end
 
   # ---------------------------------------------------------------------------

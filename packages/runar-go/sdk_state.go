@@ -1,6 +1,7 @@
 package runar
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -321,6 +322,11 @@ func asInterfaceSlice(value interface{}) []interface{} {
 // hex, given the artifact. Returns nil if the artifact has no state fields
 // or the script doesn't contain a recognizable state section.
 func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error) {
+	// N-320: the script is untrusted (FromUtxo / FromTxId). Refuse anything
+	// that is not whole bytes of hex before any reader sees it — the N-317 rule.
+	if !isHexBytes(scriptHex) {
+		return nil, &MalformedScriptError{Message: "ExtractStateFromScript: script is not an even-length hex string"}
+	}
 	if len(artifact.StateFields) == 0 {
 		return nil, nil
 	}
@@ -335,12 +341,18 @@ func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[stri
 	return DeserializeState(artifact.StateFields, stateHex)
 }
 
-// FindLastOpReturn walks the script hex as Bitcoin Script opcodes to find the
-// last OP_RETURN (0x6a) at a real opcode boundary. Unlike strings.LastIndex,
-// this properly skips push data so it won't match 0x6a bytes inside data
-// payloads. Returns the hex-char offset of the last OP_RETURN, or -1.
+// FindLastOpReturn walks the script hex as Bitcoin Script opcodes and
+// returns the first OP_RETURN (0x6a) found at a real opcode boundary. Unlike
+// strings.LastIndex, this properly skips push data so it won't match 0x6a
+// bytes inside data payloads. The walk stops immediately on the first match
+// rather than continuing to look for a later one — that is correct here,
+// not a shortcut: the on-chain interpreter itself stops at the first
+// OP_RETURN it executes, and the compiler emits exactly one separator
+// (codePart + OP_RETURN + stateBytes), so "first" and "last" coincide for
+// every script this function will ever see. The name is kept for parity
+// with the other six SDKs, which all implement the same first-match walk.
+// Returns the hex-char offset of the OP_RETURN, or -1.
 func FindLastOpReturn(scriptHex string) int {
-	lastPos := -1
 	offset := 0
 	length := len(scriptHex)
 
@@ -387,7 +399,7 @@ func FindLastOpReturn(scriptHex string) int {
 		}
 	}
 
-	return lastPos
+	return -1
 }
 
 func hexByteValAt(hex string, pos int) uint64 {
@@ -407,8 +419,10 @@ func hexByteValAt(hex string, pos int) uint64 {
 // The result is raw hex bytes that are concatenated after OP_RETURN.
 func encodeStateValue(value interface{}, fieldType string, label string) string {
 	switch fieldType {
-	case "int", "bigint":
-		n := stateFieldInt64(value, label, 8)
+	// F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores
+	// them as the same 8-byte OP_NUM2BIN word.
+	case "int", "bigint", "RabinSig", "RabinPubKey":
+		n := stateFieldInt64(value, label, fieldType, 8)
 		return encodeNum2Bin(n, 8)
 	// 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
 	// what every compiler writes into `stateFields[].type`, alongside
@@ -442,6 +456,10 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 				"runar: SerializeState: state field %q (%s) has no value. Writing a placeholder "+
 					"would deploy a state section the contract's own on-chain reader cannot parse, "+
 					"leaving the output unspendable", label, fieldType))
+		}
+		// N-045: a wrong-width value shifts every later field for the reader.
+		if err := checkFixedWidthValue(value, fieldType, fmt.Sprintf("SerializeState: state field %q", label)); err != nil {
+			panic(err.Error())
 		}
 		return fmt.Sprintf("%v", value)
 	default:
@@ -611,7 +629,7 @@ func stateFieldByteWidth(fieldType string) (int, bool) {
 	switch fieldType {
 	case "bool", "boolean":
 		return 1, true
-	case "int", "bigint":
+	case "int", "bigint", "RabinSig", "RabinPubKey":
 		return 8, true
 	case "PubKey":
 		return 33, true
@@ -625,6 +643,37 @@ func stateFieldByteWidth(fieldType string) (int, bool) {
 		return 96, true
 	}
 	return 0, false
+}
+
+// checkFixedWidthValue (N-045, defence in depth) refuses a fixed-width byte
+// value — PubKey 33, Addr / Ripemd160 20, Sha256 32, Point / P256Point 64,
+// P384Point 96 bytes — that is not a hex string of exactly its declared width.
+// The on-chain reader slices each such field at its declared width, so a
+// wrong-width value in a state section (or an argument a covenant copies into
+// one) shifts every later field. The compiled covenant refuses such a
+// continuation on chain (OP_SIZE <width> OP_NUMEQUALVERIFY); this is the
+// off-chain refusal. Returns nil for every other type.
+func checkFixedWidthValue(value interface{}, fieldType string, what string) error {
+	switch fieldType {
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point":
+	default:
+		return nil
+	}
+	width, _ := stateFieldByteWidth(fieldType)
+	s, isStr := value.(string)
+	if !isStr {
+		return fmt.Errorf("runar: %s (%s) must be exactly %d bytes of hex, got %T", what, fieldType, width, value)
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return fmt.Errorf("runar: %s (%s) must be exactly %d bytes of hex, got a non-hex string", what, fieldType, width)
+	}
+	if len(s) != width*2 {
+		return fmt.Errorf(
+			"runar: %s (%s) must be exactly %d bytes of hex, got %d bytes. A wrong-width %s "+
+				"shifts every later state field when the contract's on-chain reader slices it at %d bytes",
+			what, fieldType, width, len(s)/2, fieldType, width)
+	}
+	return nil
 }
 
 // decodeStateValue reads one state field. Fixed-width types consume exactly
@@ -646,7 +695,7 @@ func decodeStateValue(hex string, offset int, fieldType string, label string) (i
 			// encodeStateValue — a reader that knows only "bool" walks a real
 			// boolean field as push data and desynchronises every field after it.
 			return data != "00", hexWidth, nil
-		case "int", "bigint":
+		case "int", "bigint", "RabinSig", "RabinPubKey":
 			// 8 raw bytes LE sign-magnitude (NUM2BIN 8)
 			return decodeNum2Bin(data), hexWidth, nil
 		default:
@@ -836,7 +885,7 @@ func hexToBytes(hex string) []byte {
 // keep their signatures; this is the same "the value cannot be represented, so
 // every result would be wrong" contract as checkedMul / checkedAdd in
 // overflow.go.
-func stateFieldInt64(value interface{}, label string, width int) int64 {
+func stateFieldInt64(value interface{}, label string, fieldType string, width int) int64 {
 	limit := new(big.Int).Lsh(big.NewInt(1), uint(8*width-1))
 	reject := func(n string) {
 		panic(fmt.Sprintf(
@@ -848,6 +897,37 @@ func stateFieldInt64(value interface{}, label string, width int) int64 {
 	}
 	tooWide := func(n *big.Int) bool {
 		return new(big.Int).Abs(n).Cmp(limit) >= 0
+	}
+
+	// N-084: refuse anything that is not an integer (or a decimal integer
+	// string, optionally with the JSON "n" suffix) BEFORE toInt64, which
+	// returns 0 for every other value and so used to serialize a hex string,
+	// bool, []byte, nil or unknown type as a valid 0 word.
+	notInteger := func(got string) {
+		panic(fmt.Sprintf(
+			"runar: SerializeState: state field %q (%s) must be an integer or a decimal integer string, got %s. "+
+				"Serializing anything else would write a number the caller never supplied into the state section",
+			label, fieldType, got))
+	}
+	switch v := value.(type) {
+	case int64, int, int32, uint64:
+	case *big.Int:
+		if v == nil {
+			notInteger("nil")
+		}
+	case float64:
+		// JSON numbers decode to float64; only an integral, finite one is an integer.
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+			notInteger("a non-integer number")
+		}
+	case string:
+		if _, ok := new(big.Int).SetString(strings.TrimSuffix(v, "n"), 10); !ok || strings.ContainsAny(v, "_+") {
+			notInteger("a non-decimal string")
+		}
+	case nil:
+		notInteger("nil")
+	default:
+		notInteger(fmt.Sprintf("%T", value))
 	}
 
 	// Range-check the WIDE value first, while it is still intact.

@@ -60,6 +60,8 @@ export interface RefArtifact {
   abi: { constructor: { params: Array<{ name: string; type: string }> } };
   constructorSlots?: RefConstructorSlot[];
   codeSepIndexSlots?: RefCodeSepIndexSlot[];
+  /** N-051: deploy-time `SIZE(_codePart)` length fields (4 bytes, LE). */
+  codePartLenSlots?: Array<{ byteOffset: number }>;
   codeSeparatorIndex?: number;
   codeSeparatorIndices?: number[];
   stateFields?: Array<Record<string, unknown>> | null;
@@ -235,6 +237,33 @@ export function checkTemplateClaims(artifact: RefArtifact): Violation[] {
     }
   }
 
+  // --- T9 (N-051): every `SIZE(_codePart)` pin is an equality, and every
+  //         codePartLenSlot points at a pin's 4-byte length field. A lower
+  //         bound (OP_GREATERTHANOREQUAL) lets a spender claim a truncated
+  //         code part that ends at a 0x6a inside a baked readonly value.
+  for (const o of ops) {
+    if (o.opcode !== 0x04) continue;
+    const tail = script.slice((o.offset + 5) * 2, (o.offset + 8) * 2);
+    if (tail === '81a269' && o.offset > 0 && byOffset.get(o.offset - 1)?.opcode === 0x76) {
+      v.push({
+        code: 'T9-codepart-pin-lower-bound',
+        message: `SIZE(_codePart) pin at byteOffset ${o.offset - 1} is OP_GREATERTHANOREQUAL — a lower bound, not the deployed length`,
+      });
+    }
+  }
+  for (const s of artifact.codePartLenSlots ?? []) {
+    const push = byOffset.get(s.byteOffset - 1);
+    const tail = script.slice((s.byteOffset + 4) * 2, (s.byteOffset + 7) * 2);
+    if (push === undefined || push.opcode !== 0x04 || tail !== '819c69') {
+      v.push({
+        code: 'T9-codepart-len-slot-target',
+        message:
+          `codePartLenSlot at byteOffset ${s.byteOffset} does not point at the 4-byte length ` +
+          `field of an OP_DUP <04 ..> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY pin`,
+      });
+    }
+  }
+
   // --- T8: slot descriptors agree with the ABI
   const params = artifact.abi?.constructor?.params ?? [];
   for (const s of artifact.constructorSlots ?? []) {
@@ -390,6 +419,18 @@ export function deriveVertical(artifact: RefArtifact, args: TypedArg[]): Vertica
   for (const s of [...subs].sort((a, b) => b.templateByteOffset - a.templateByteOffset)) {
     const at = s.templateByteOffset * 2;
     code = code.slice(0, at) + s.encodedHex + code.slice(at + 2);
+  }
+
+  // N-051: each deploy-time length field holds the deployed code-part length,
+  // 4 bytes little-endian, overwritten in place (fixed width: no offset moves).
+  for (const s of artifact.codePartLenSlots ?? []) {
+    const len = code.length / 2;
+    let le = '';
+    for (let i = 0; i < 4; i++) le += ((len >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+    let expand = 0;
+    for (const x of subs) if (x.templateByteOffset < s.byteOffset) expand += x.encodedHex.length / 2 - 1;
+    const at = (s.byteOffset + expand) * 2;
+    code = code.slice(0, at) + le + code.slice(at + 8);
   }
 
   // Resolve every substitution's deployed offset.

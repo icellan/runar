@@ -66,6 +66,26 @@ pub const Counter = struct {
 - Use `runar.Readonly(T)` to mark a stateful field readonly explicitly, with or without a default initializer.
 - Fields without defaults still become constructor parameters unless `init` assigns them explicitly.
 
+### ByteString literals
+
+A bare string literal used as a ByteString value is **refused**. Natively (`zig
+build test`) `"006a"` is four ASCII bytes, while the compiler used to read it as
+the two hex bytes `00 6a`, so one source meant two different programs. Spell the
+hex form with the comptime helper, which the native `runar` module also provides:
+
+```zig
+owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
+// not   owner: runar.PubKey = "0000...";
+runar.assert(runar.bytesEq(runar.hexToBytes("006a"), self.expected));
+```
+
+The refusal covers `ByteString` and every subtype (`PubKey`, `Sig`, `Addr`,
+`Ripemd160`, `Sha256`, `Point`, ...). Every tier prints the same diagnostic,
+`file:line:col: bare string literal "006a" is ambiguous in .runar.zig source:
+...`, at the literal's opening quote. Still legal: the empty string `""` (zero
+bytes either way) and the opcode body of `runar.asm("51", 0, 1)`, which is not a
+ByteString value.
+
 ### Constructor
 
 ```zig
@@ -117,7 +137,7 @@ Supported:
 
 - `if { ... } else { ... }`
 - bounded `for` loops in the supported compiler subset
-- local `const` and `var`
+- local `const` and `var` (a `const` local cannot be reassigned: the compiler refuses `Cannot assign to 'x' because it is a constant.`; use `var`)
 - assignments and compound assignments
 
 Unsupported or intentionally narrow:
@@ -129,12 +149,47 @@ Unsupported or intentionally narrow:
 
 ---
 
+## Compiler Directives
+
+Both directives are type functions from the `runar` package, so the contract
+still compiles as Zig:
+
+```zig
+pub const Directives = struct {
+    pub const Contract = runar.SmartContract;
+
+    pubKeyHash: runar.Addr,
+    deployTag: runar.EmbedAlways(runar.ByteString),          // @embedAlways
+
+    pub fn spendSingle(self: *const Directives, sig: runar.Sig, pubKey: runar.PubKey) runar.Sighash("SINGLE|FORKID") {   // @sighash
+        ...
+    }
+};
+```
+
+- `runar.EmbedAlways(T)` wraps a field type like `runar.Readonly(T)`, and the
+  two compose in either order. It evaluates to `T`.
+- `runar.Sighash("FLAGS")` replaces `void` as the return type of a `pub fn`. It
+  evaluates to `void`. The argument must be one string literal.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/zig/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mapping
 
 | Zig type | Rúnar type |
 |----------|-----------|
 | `i8`, `i16`, `i32`, `i64`, `i128` | `bigint` |
 | `u8`, `u16`, `u32`, `u64`, `u128` | `bigint` |
+| `runar.BigintBig` | `bigint` (native `u256`: the full 256-bit coordinate `ecPointX` / `ecPointY` return and `ecMakePoint` takes) |
 | `bool` | `boolean` |
 | `runar.ByteString` | `ByteString` |
 | `runar.PubKey` | `PubKey` |
@@ -161,6 +216,7 @@ Unsupported or intentionally narrow:
 | Private method | `fn name(self: *const Name, ...) Type { ... }` |
 | Readonly field | plain field in `SmartContract`, or `runar.Readonly(T)` in `StatefulSmartContract` |
 | Mutable/defaulted field | `field: i64 = 0,` in `StatefulSmartContract` |
+| Unused parameter | `_ = name;` is accepted and erased (it compiles to the same bytes as omitting it), so a native-Zig method can discard an unused `ctx` or other parameter |
 
 ---
 

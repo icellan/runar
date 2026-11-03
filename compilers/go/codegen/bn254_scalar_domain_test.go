@@ -147,15 +147,15 @@ func TestBN254G1ScalarMul_AllZeroPointIsNotOnCurve(t *testing.T) {
 // there: plausible and wrong, the exact failure mode 03f50d48 introduced on the
 // NIST curves and f16790a9 had to undo.
 //
-// SEPARATE, PRE-EXISTING DEFECT, deliberately NOT asserted here: this input
-// does not merely fail closed. Both the numerator and the denominator vanish
-// (w^2 + w + 1 == 0 makes px^2 + px*qx + qx^2 == 0), Fermat gives inv(0) = 0,
-// so s = 0 and the result is (-(px + qx), -py) -- which satisfies
-// y^2 = x^3 + 3, because (1 + w)^3 == -1. bn254G1Add answers the zero
-// denominator with a WRONG but ON-CURVE point, so assert(bn254G1OnCurve(r))
-// does not catch it. Fixing that means replacing the unified slope with the
-// chord/tangent selection secp256k1 and the NIST curves use, which also moves
-// the shared Groth16 MSM path; it is out of scope for the P == -Q mask.
+// The unified slope does not merely fail closed on this input. Both the
+// numerator and the denominator vanish (w^2 + w + 1 == 0 makes
+// px^2 + px*qx + qx^2 == 0), Fermat gives inv(0) = 0, so s = 0 and the raw
+// result is (-(px + qx), -py) -- which satisfies y^2 = x^3 + 3, because
+// (1 + w)^3 == -1: a WRONG but ON-CURVE point. F-091 made the builtin abort
+// here (bn254G1OmegaCollisionVerify; full matrix in
+// TestBN254G1Add_OmegaCollisionAborts). So the guard below is: the script must
+// abort -- a mask to the all-zero blob, or any other returned value, would let
+// `DROP 1` succeed.
 func TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity(t *testing.T) {
 	p := new(big.Int).Set(bn254FieldP)
 	gx := big.NewInt(1)
@@ -190,17 +190,14 @@ func TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity(t *testing.T) {
 		t.Fatal("py + qy is not zero: the input does not exercise the denominator")
 	}
 
-	zx, zy := bn254AllZeroPoint()
-
 	var ops []StackOp
 	ops = append(ops, pushPoint(gx, gy))
 	ops = append(ops, pushPoint(qx, negGy))
 	ops = append(ops, gatherOps(EmitBN254G1Add)...)
-	ops = append(ops, pushPoint(zx, zy))
-	ops = append(ops, opcode("OP_EQUAL"))
-	ops = append(ops, opcode("OP_NOT"))
+	ops = append(ops, opcode("OP_DROP"))
+	ops = append(ops, opcode("OP_1"))
 
-	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("bn254G1Add(G, (w*gx, -gy)) must NOT be masked to the all-zero point: %v", err)
+	if err := buildAndExecute(t, ops); err == nil {
+		t.Fatal("bn254G1Add(G, (w*gx, -gy)) must abort -- not be masked to the all-zero point, nor return any other value")
 	}
 }

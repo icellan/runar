@@ -1,0 +1,15 @@
+{
+  "_doc": "F-033: FunctionPatterns.runar.zig, one owner-signed stateful call per case from balance `init`. `expect` is the new `balance` in the continuation accepted by @bsv/sdk Spend.validate for the TS-compiled script (packages/runar-testing/src/__tests__/f033-zig-native-math-onchain.test.ts); FunctionPatterns_test.zig replays every case natively and must land on the same balance. `args` omit the leading Sig. `expect: \"abort\"`: the script rejects the spend and the native call must abort (replayed through assert_probe). `sdkRefuses`: the TS SDK cannot build that call (its interpreter throws on the zero divisor), so no spend reaches the engine; the script-level abort is pinned by the `mulDiv(1, 1, 0)` vector in packages/runar-zig/src/fixtures/f033-math-builtins-onchain.json.",
+  "cases": [
+    { "init": 1000, "method": "deposit", "args": [250], "expect": 1250 },
+    { "init": 1250, "method": "withdraw", "args": [400, 25], "expect": 849 },
+    { "init": 10000, "method": "withdraw", "args": [1000, 250], "expect": 8975 },
+    { "init": 137, "method": "scale", "args": [3, 2], "expect": 205 },
+    { "init": -7, "method": "scale", "args": [1, 2], "expect": -3 },
+    { "init": 205, "method": "normalize", "args": [0, 200, 16], "expect": 192 },
+    { "init": -40, "method": "normalize", "args": [-100, 100, 16], "expect": -32 },
+    { "init": 1000, "method": "withdraw", "args": [980, 500], "expect": "abort" },
+    { "init": 100, "method": "normalize", "args": [0, 200, 0], "expect": "abort" },
+    { "init": 100, "method": "scale", "args": [1, 0], "expect": "abort", "sdkRefuses": true }
+  ]
+}

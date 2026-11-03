@@ -306,6 +306,20 @@ class TestStringOps:
         r = fold_constants(p)
         _assert_load_const_bool(r.methods[0].body[2].value, True)
 
+    def test_fold_string_equality_ignores_hex_case(self):
+        # F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true
+        # on-chain and the fold must say so. Proves the Python folder's verdict
+        # on mixed-case hex; not the emitted script (conformance/negatives/
+        # f160-bytestring-case-fold-parity pins every tier's bytes).
+        for op, want in (("===", True), ("!==", False)):
+            p = _make_program([_make_method("m", [
+                _b("t0", _mk_str("aa")),
+                _b("t1", _mk_str("AA")),
+                _b("t2", _bin_op(op, "t0", "t1")),
+            ])])
+            r = fold_constants(p)
+            _assert_load_const_bool(r.methods[0].body[2].value, want)
+
 
 # ---------------------------------------------------------------------------
 # 6. Unary operations
@@ -677,7 +691,30 @@ class TestCrossTypeEquality:
 
 class TestRefAliases:
     def test_ref_alias_not_folded(self):
-        """@ref: prefixed strings in load_const should not be treated as constants."""
+        """@ref: prefixed strings in load_const should not be treated as constants.
+
+        N-397: the alias string itself is never a constant. An alias whose
+        target is not a constant (here a parameter) must leave its uses
+        unfolded; ``test_ref_alias_to_constant_folds`` covers the other case.
+        """
+        p = _make_program([_make_method("m", [
+            _b("t0", _load_param("a")),
+            _b("x", ANFValue(kind="load_const", raw_value='"@ref:t0"', const_string="@ref:t0")),
+            _b("t1", _mk_int(3)),
+            _b("t2", _bin_op("+", "x", "t1")),
+        ])])
+        r = fold_constants(p)
+        # x aliases a runtime value, so t2 should not be folded
+        _assert_not_folded(r.methods[0].body[3].value, "bin_op")
+        # and the alias binding itself is kept as the alias, not rewritten
+        assert r.methods[0].body[1].value.const_string == "@ref:t0"
+
+    def test_ref_alias_to_constant_folds(self):
+        """N-397: an alias of a constant holds that constant, so its uses fold.
+
+        ``const x = 5n`` lowers to ``t0 = 5; x = @ref:t0``; ``x + 3n`` must fold
+        to 8 (the target's value), and the alias binding stays an alias.
+        """
         p = _make_program([_make_method("m", [
             _b("t0", _mk_int(5)),
             _b("x", ANFValue(kind="load_const", raw_value='"@ref:t0"', const_string="@ref:t0")),
@@ -685,8 +722,8 @@ class TestRefAliases:
             _b("t2", _bin_op("+", "x", "t1")),
         ])])
         r = fold_constants(p)
-        # x is a @ref: alias, not a real constant, so t2 should not be folded
-        _assert_not_folded(r.methods[0].body[3].value, "bin_op")
+        _assert_load_const_int(r.methods[0].body[3].value, 8)
+        assert r.methods[0].body[1].value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -782,3 +819,52 @@ class TestLargeIntegerPrecision:
         ])])
         result = fold_constants(prog)
         _assert_load_const_int(result.methods[0].body[2].value, -1)
+
+
+# ---------------------------------------------------------------------------
+# N-029: folded values must be what the emitted script computes
+# ---------------------------------------------------------------------------
+# clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+# differs from max(lo, min(v, hi)) once lo > hi; gcd unrolls 256 Euclid steps,
+# so past those the script returns a partial value and the folder must decline.
+# log2 is exact for every n > 0 since N-103 and aborts for n <= 0, so the folder
+# folds every positive operand and declines the rest. Expected values were executed on @bsv/sdk
+# Spend.validate by
+# packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+# Proves the Python folder's value/decline decisions; not the script itself.
+
+def _n029_fib(n: int) -> int:
+    a, c = 0, 1
+    for _ in range(n):
+        a, c = c, a + c
+    return a
+
+
+def _n029_fold(args: list[int], func: str) -> ANFValue:
+    body = [_b(f"t{i}", _mk_int(a)) for i, a in enumerate(args)]
+    body.append(_b("r", _call_func(func, [f"t{i}" for i in range(len(args))])))
+    r = fold_constants(_make_program([_make_method("m", body)]))
+    return r.methods[0].body[-1].value
+
+
+class TestN029FoldMatchesScript:
+    def test_clamp_lo_above_hi_matches_script(self):
+        _assert_load_const_int(_n029_fold([5, 10, 0], "clamp"), 0)
+        _assert_load_const_int(_n029_fold([0, 3, -3], "clamp"), -3)
+        _assert_load_const_int(_n029_fold([-20, 10, 0], "clamp"), 0)
+
+    def test_log2_exact_and_declines_non_positive(self):
+        # N-103 (user decision R86): this used to pin the decline past 64
+        # halvings (2^65 and 2^70 not folded). The script is now exact with no
+        # cap, and n <= 0 (which it aborts on) is declined instead of folded to 0.
+        _assert_load_const_int(_n029_fold([1 << 64], "log2"), 64)
+        _assert_load_const_int(_n029_fold([(1 << 65) - 1], "log2"), 64)
+        _assert_load_const_int(_n029_fold([1 << 65], "log2"), 65)
+        _assert_load_const_int(_n029_fold([1 << 70], "log2"), 70)
+        _assert_not_folded(_n029_fold([0], "log2"), "call")
+        _assert_not_folded(_n029_fold([-1], "log2"), "call")
+
+    def test_gcd_declines_past_256_steps(self):
+        _assert_load_const_int(_n029_fold([_n029_fib(258), _n029_fib(257)], "gcd"), 1)
+        _assert_not_folded(_n029_fold([_n029_fib(259), _n029_fib(258)], "gcd"), "call")
+        _assert_not_folded(_n029_fold([_n029_fib(300), _n029_fib(299)], "gcd"), "call")

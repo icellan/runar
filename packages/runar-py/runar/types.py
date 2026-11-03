@@ -38,6 +38,13 @@ class Readonly(Generic[T]):
     pass
 
 
+class EmbedAlways(Generic[T]):
+    """Keeps a readonly property in the locking script even when no method
+    reads it (N-093: the Python spelling of the ``@embedAlways`` directive).
+    Composes with ``Readonly`` in either order."""
+    pass
+
+
 class _FixedArrayMeta(type):
     """Metaclass that makes ``FixedArray[T, N]`` subscriptable at runtime."""
 

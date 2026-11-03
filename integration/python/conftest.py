@@ -27,6 +27,7 @@ import sys
 from runar_compiler.compiler import compile_from_source, artifact_to_json
 from runar.sdk import RunarArtifact, RPCProvider, ExternalSigner
 from runar.sdk.local_signer import LocalSigner
+from runar._ripemd160 import ripemd160_digest
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +136,13 @@ def _regtest_address(pub_key_hash: str) -> str:
 
 
 def _hash160(data: bytes) -> str:
-    """RIPEMD160(SHA256(data)), returned as hex."""
+    """RIPEMD160(SHA256(data)), returned as hex.
+
+    Uses runar._ripemd160.ripemd160_digest to handle OpenSSL-3 hosts
+    where hashlib.new('ripemd160') is unavailable.
+    """
     sha = hashlib.sha256(data).digest()
-    ripe = hashlib.new("ripemd160", sha).digest()
+    ripe = ripemd160_digest(sha)
     return ripe.hex()
 
 

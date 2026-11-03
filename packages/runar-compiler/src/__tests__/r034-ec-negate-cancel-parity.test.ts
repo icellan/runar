@@ -13,13 +13,18 @@
  * REACHABILITY — the reason this sat undetected, and the reason the severity is
  * "cross-tier byte divergence" and not "wrong answer":
  *
- *  1. NOT reachable from source, in any tier. ANF lowering (pass 04) gives every
+ *  1. Reachable from source only through `@ref:` aliases (F-269, N-354); NOT
+ *     through repeated reads of a parameter or property, which is what this
+ *     paragraph describes. Since F-269 R8 follows `@ref:` chains, so
+ *     `const g = ecMulGen(1n); ecAdd(g, ecNegate(g))` folds from `.runar.ts` in
+ *     every tier (pinned by the N-354 block at the end of this file). The rest
+ *     of this note still holds for `p` read twice: ANF lowering (pass 04) gives every
  *     OCCURRENCE of a variable its own `load_param` / `load_prop` binding, so
  *     `ecAdd(ecNegate(p), p)` written in TypeScript lowers to
  *     `t0 = load_param p; t1 = ecNegate(t0); t2 = load_param p; t3 = ecAdd(t1, t2)`.
  *     `$x` therefore binds to two DIFFERENT names and no tier's matcher unifies
  *     them — not even the Go engine, whose `sameResolvedValue` only equates two
- *     `load_const` payloads. BOTH negate-cancel rules are inert from source.
+ *     `load_const` payloads. BOTH negate-cancel rules are inert for that spelling.
  *     Confirmed: TS and Go emit byte-identical hex for both spellings compiled
  *     from `.runar.ts`.
  *  2. Reachable through the `--ir` / `compileFromANF` path, which accepts
@@ -33,6 +38,12 @@
  *     UNFOLDED script yields x = 0 and y = 0 — exactly the constant the rule
  *     substitutes. So the rule is an optimisation, and the defect is that six
  *     tiers took the slow path while the seventh took the fast one.
+ *     EXCEPT for an off-curve p = (a, 0), a != 0: ecNegate(p) = p, the adder
+ *     doubles, and N-110 makes it abort. N-251 (user decision R96) keeps that
+ *     abort in the rewrite as a gate, `assert(ecPointX(p) === 0 ||
+ *     ecPointY(p) !== 0)`; its exact ANF is pinned below and its execution, in
+ *     both optimizer modes, by
+ *     packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
  *
  * The tests below pin all three claims.
  */
@@ -290,6 +301,41 @@ describe('ec-add-negate-cancel{,-reversed}: cross-tier parity via --ir', () => {
     }
   });
 
+  // N-251: the rewrite keeps the adder's y = 0 doubling abort as a gate, built
+  // from forms no rule matches, ahead of the INFINITY binding. Every native
+  // tier pins the same bindings in its own N-251 test; the per-tier hex tests
+  // below would catch a tier that dropped it.
+  it('N-251: the rewrite emits the y = 0 gate ahead of the INFINITY binding', () => {
+    for (const order of ['forward', 'reversed'] as const) {
+      const r = compileFromANF(aliasedProgram(order), { disableConstantFolding: true });
+      const spend = r.anf.methods.find((m) => m.name === 'spend')!;
+      const shape = spend.body.map((x) => {
+        const v = x.value;
+        switch (v.kind) {
+          case 'call': return `${x.name} = call ${v.func} ${v.args.join(' ')}`;
+          case 'bin_op': return `${x.name} = bin_op ${v.op} ${v.left} ${v.right}`;
+          case 'assert': return `${x.name} = assert ${v.value}`;
+          case 'load_const': return `${x.name} = const ${v.value === '0'.repeat(128) ? 'INFINITY' : String(v.value)}`;
+          default: return `${x.name} = ${v.kind}`;
+        }
+      });
+      expect(shape, order).toEqual([
+        't0 = load_param',
+        't1 = call ecNegate t0',
+        't2_px = call ecPointX t0',
+        't2_py = call ecPointY t0',
+        't2_zero = const 0',
+        't2_pxz = bin_op === t2_px t2_zero',
+        't2_pynz = bin_op !== t2_py t2_zero',
+        't2_ok = bin_op || t2_pxz t2_pynz',
+        't2_gate = assert t2_ok',
+        't2 = const INFINITY',
+        't3 = call ecOnCurve t2',
+        't4 = assert t3',
+      ]);
+    }
+  });
+
   // Control: expressions that must NOT fold. `ecAdd(x, ecNegate(y))` with x != y
   // is a real point addition; folding it would be a wrong answer, not a slow one.
   it('CONTROL: ecAdd over two different points does not fold', () => {
@@ -373,4 +419,85 @@ class NegCancelSrc extends SmartContract {
     expect(res.error).toBeUndefined();
     expect(res.success).toBe(true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// N-354 — REACHABILITY note 1, corrected after F-269
+// ---------------------------------------------------------------------------
+//
+// Note 1 above is true only of repeated reads of a PARAMETER (`p` twice): each
+// read gets its own `load_param` binding and no matcher unifies them. It is
+// stale for a local: pass 04 lowers `const g = <expr>` to `t = <expr>; g =
+// @ref:t`, and since F-269 (R77) R8 follows `@ref:` chains, so
+// `ecAdd(g, ecNegate(g))` over a constant point folds from SOURCE, in every
+// tier. That is why conformance/tests/ec-unit no longer executes the adder's
+// P + (-P) path at runtime (its `assert(!ecOnCurve(ecAdd(g, neg)))` is folded
+// to the gated INFINITY constant) — see conformance/README.md, "ec-unit and the
+// folded EC asserts".
+//
+// WHAT IT PROVES: a `.runar.ts` source with a constant point folds
+// `ecAdd(g, ecNegate(g))` — TS leaves no `ecAdd` call and a script a fraction of
+// the unfolded size — and every native tier compiling the same source emits TS's
+// exact hex. WHAT IT DOES NOT PROVE: the folded script's runtime value (executed
+// on @bsv/sdk by f269-ec-alias-rewrites-execution.test.ts and
+// n251-ec-negate-cancel-y0.test.ts), nor anything about the non-ts surfaces.
+describe('N-354: ecAdd(g, ecNegate(g)) over a constant point folds from source in every tier', () => {
+  const SRC = `
+class NegCancelConst extends SmartContract {
+  readonly tag: bigint;
+  constructor(tag: bigint) { super(tag); this.tag = tag; }
+  public spend() {
+    const g = ecMulGen(1n);
+    const neg = ecNegate(g);
+    const inf = ecAdd(g, neg);
+    assert(!ecOnCurve(inf));
+  }
+}
+`;
+  const calls = (r: ReturnType<typeof compile>): string[] =>
+    r.anf!.methods
+      .find((m) => m.name === 'spend')!
+      .body.filter((x) => x.value.kind === 'call')
+      .map((x) => (x.value as { func: string }).func);
+
+  let dir = '';
+  let srcPath = '';
+  let tsHex = '';
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'n354-'));
+    srcPath = join(dir, 'NegCancelConst.runar.ts');
+    writeFileSync(srcPath, SRC);
+    const r = compile(SRC, { disableConstantFolding: true, fileName: srcPath });
+    expect(r.success).toBe(true);
+    tsHex = (r.scriptHex as string).replace(/\s/g, '').toLowerCase();
+  });
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('TS: the ecAdd is gone from the ANF and the script is far smaller than the unfolded one', () => {
+    const folded = compile(SRC, { disableConstantFolding: true, fileName: srcPath });
+    const unfolded = compile(SRC, { disableConstantFolding: true, disableEcOptimizer: true, fileName: srcPath });
+    expect(folded.success).toBe(true);
+    expect(unfolded.success).toBe(true);
+    // CONTROL: with the EC optimizer off the adder is still there, so the
+    // absence below is the optimizer's doing and not a property of the source.
+    expect(calls(unfolded)).toContain('ecAdd');
+    expect(calls(folded)).not.toContain('ecAdd');
+    expect((folded.scriptHex as string).length).toBeLessThan((unfolded.scriptHex as string).length / 4);
+  });
+
+  for (const tier of TIERS) {
+    describe.skipIf(tier.binary === null)(`${tier.id}`, () => {
+      it('compiles the same source to TS\'s exact (folded) hex', () => {
+        const sourceTier: Tier = {
+          ...tier,
+          args: (p) => ['--source', p, '--hex', '--disable-constant-folding'],
+          firstLineOnly: false,
+        };
+        expectSameHex(`ts vs ${tier.id} source`, tsHex, runTier(sourceTier, srcPath));
+      });
+    });
+  }
 });

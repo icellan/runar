@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ScriptVM } from '../../packages/runar-testing/src/vm/script-vm.js';
 import { BrokenTier, IR_TIER_IDS, REPO, Tier, buildIrTiers, verdict } from './tier-harness.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * N-113 — the `--ir` no-public-methods guard counted the CONSTRUCTOR.
@@ -169,7 +170,7 @@ describe('N-113: a public constructor is not a spending entry point (--ir path)'
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(missing, `CI=true but these tiers have no toolchain: ${missing.join(', ')}`).toEqual(
         [],
       );

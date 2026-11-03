@@ -50,7 +50,7 @@ RSpec.describe 'Runar::SDK::State curve-point field widths' do
       'p256' => '11' * 64,
       'p384' => '22' * 96,
       'sig' => "3044#{'ee' * 66}",
-      'rab' => 'ff' * 8,
+      'rab' => (1 << 63) - 1, # F-035: RabinSig is a bigint alias
       'bs' => '0011',
     }
   end
@@ -66,12 +66,12 @@ RSpec.describe 'Runar::SDK::State curve-point field widths' do
       ('11' * 64) +                # P256Point 64 raw  <- was framed "40" + 64
       ('22' * 96) +                # P384Point 96 raw  <- was framed "4c60" + 96
       "443044#{'ee' * 66}" +       # Sig        framed <len><data>
-      "08#{'ff' * 8}" +            # RabinSig   framed <len><data>
+      'ffffffffffffff7f' +         # RabinSig   NUM2BIN 8 (F-035; was framed "08" + ff*8)
       '020011'                     # ByteString framed <len><data>
   end
 
   it 'serializes the cross-SDK golden record byte for byte' do
-    expect(cross_sdk_golden.length / 2).to eq(399)
+    expect(cross_sdk_golden.length / 2).to eq(398)
     expect(Runar::SDK::State.serialize_state(fields, values)).to eq(cross_sdk_golden)
   end
 
@@ -79,7 +79,8 @@ RSpec.describe 'Runar::SDK::State curve-point field widths' do
     back = Runar::SDK::State.deserialize_state(fields, cross_sdk_golden)
     expect(back['n']).to eq(1)
     expect(back['flag']).to be(true)
-    %w[pk h ad pt p256 p384 sig rab bs].each do |k|
+    expect(back['rab']).to eq((1 << 63) - 1)
+    %w[pk h ad pt p256 p384 sig bs].each do |k|
       expect(back[k]).to eq(values[k]), "field #{k}"
     end
   end
@@ -101,7 +102,10 @@ RSpec.describe 'Runar::SDK::State curve-point field widths' do
       got = Runar::SDK::State.serialize_state([field('v', type, 0)], { 'v' => v })
       expect(got).to eq(v), type
     end
-    %w[ByteString Sig RabinSig].each do |type|
+    # F-035: RabinSig left this list -- it is a bigint alias, NUM2BIN 8.
+    got = Runar::SDK::State.serialize_state([field('v', 'RabinSig', 0)], { 'v' => 1 })
+    expect(got).to eq('0100000000000000')
+    %w[ByteString Sig].each do |type|
       v = 'ab' * 64
       got = Runar::SDK::State.serialize_state([field('v', type, 0)], { 'v' => v })
       expect(got).to eq("40#{v}"), type

@@ -394,7 +394,7 @@ theorem reverse32_step_transport
                           :: .vBytes (value.extract 0 1) :: .vBytes acc :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte, Int.toNat_one]
       rw [if_neg (by omega : ¬ (1 : Nat) > value.size)] ]
   simp only [match_Except_ok_runOps]
@@ -492,7 +492,7 @@ theorem reverse32_step_transport_accV
                           :: .vBytes (value.extract 0 1) :: accV :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte, Int.toNat_one]
       rw [if_neg (by omega : ¬ (1 : Nat) > value.size)] ]
   simp only [match_Except_ok_runOps]
@@ -857,7 +857,7 @@ theorem ec_encode_op_transport
         = .ok { stack := .vBytes (p.extract 32 p.size) :: .vBytes (p.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > p.size)]
       rfl ]
@@ -896,7 +896,7 @@ theorem ec_encode_op_transport
                           :: .vBytes (p.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, reduceIte]
       rw [if_neg (show ¬ ((p.extract 32 p.size).size : Int) - 1 < 0 by omega)]
       have htn : (((p.extract 32 p.size).size : Int) - 1).toNat = (p.extract 32 p.size).size - 1 := by omega
@@ -1193,7 +1193,7 @@ theorem ec_pointX_op_transport
         = .ok { stack := .vBytes (p.extract 32 p.size) :: .vBytes (p.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > p.size)]
       rfl ]
@@ -1334,7 +1334,7 @@ theorem ec_pointY_op_transport
         = .ok { stack := .vBytes (p.extract 32 p.size) :: .vBytes (p.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > p.size)]
       rfl ]
@@ -1505,7 +1505,7 @@ theorem ec_makePoint_op_transport
                           :: .vBigint x :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > encY.size)]
       rfl ]
@@ -1556,7 +1556,7 @@ theorem ec_makePoint_op_transport
                           :: .vBytes (reverseAcc 32 (encY.extract 0 32) ByteArray.empty) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > encX.size)]
       rfl ]
@@ -3102,7 +3102,7 @@ theorem decomposePoint_op_transport (s : StackState) (p : ByteArray) (rest : Lis
         = .ok { stack := .vBytes (p.extract 32 p.size) :: .vBytes (p.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?, StackState.push,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?, StackState.push,
                  Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > p.size)]; rfl]
   simp only [match_Except_ok_runOps]
@@ -4372,7 +4372,7 @@ theorem coordEncode_transport (s : StackState) (v : Int) (enc : ByteArray) (rest
         = .ok { stack := .vBytes (enc.extract 32 enc.size) :: .vBytes (enc.extract 0 32) :: rest,
                 altstack := alt, outputs := out, props := props, preimage := pre } by
       unfold runOpcode
-      simp only [popN, StackState.pop?, asBytes?, asNonNegativeNat?, asInt?,
+      simp only [popN, StackState.pop?, asBytes?, asBytesNum?, asNonNegativeNat?, asInt?,
                  StackState.push, Int.reduceLT, reduceIte]
       rw [if_neg (by omega : ¬ (32 : Int).toNat > enc.size)]; rfl]
   simp only [match_Except_ok_runOps]

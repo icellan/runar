@@ -150,6 +150,16 @@ export interface CodeSepIndexSlot {
   codeSepIndex: number;
 }
 
+/**
+ * N-051 — a `verify_code_part_len` length field the SDK patches at deploy time
+ * with the deployed code-part length (4 bytes, little-endian, overwritten in
+ * place). Present only when the length is not known at compile time.
+ */
+export interface CodePartLenSlot {
+  /** Byte offset, in the TEMPLATE script, of the first of the 4 length bytes. */
+  byteOffset: number;
+}
+
 /** One piece of the slot-excised template identity. */
 export interface TemplateDigestPiece {
   kind: 'code' | 'slot';
@@ -233,6 +243,8 @@ export interface RunarArtifact {
 
   /** Byte offsets of codeSepIndex placeholders in the script */
   codeSepIndexSlots?: CodeSepIndexSlot[];
+  /** N-051 — deploy-time `verify_code_part_len` length fields (see CodePartLenSlot). */
+  codePartLenSlots?: CodePartLenSlot[];
 
   /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash).
    *  For multi-method contracts, use codeSeparatorIndices instead. */
@@ -279,6 +291,8 @@ export interface AssembleOptions {
   constructorSlots?: ConstructorSlot[];
   /** CodeSepIndex placeholder byte offsets from the emitter. */
   codeSepIndexSlots?: CodeSepIndexSlot[];
+  /** N-051 — deploy-time code-part length fields from the emitter. */
+  codePartLenSlots?: CodePartLenSlot[];
   /** Byte offset of OP_CODESEPARATOR in the locking script. */
   codeSeparatorIndex?: number;
   /** Per-method OP_CODESEPARATOR byte offsets. */
@@ -580,10 +594,13 @@ function extractABI(contract: ContractNode): ABI {
         hasStateOutput: false,
         hasDataOutput: false,
         usesPreimage: false,
+        callsRequireOutputP2PKH: false,
+        requiresOutputP2PKHZero: false,
+        callsExtractPrevOutputScript: false,
       };
-      const shape = continuationShape(effects);
+      const shape = continuationShape(effects, method.sighashType);
       needsChange = shape.needsChange;
-      if (needsChange) {
+      if (shape.includesChange) {
         params.push({ name: '_changePKH', type: 'Ripemd160' });
         params.push({ name: '_changeAmount', type: 'bigint' });
       }
@@ -880,8 +897,12 @@ export function assembleArtifact(
   // State fields (only if the contract has mutable state)
   if (stateFields.length > 0) {
     artifact.stateFields = stateFields;
-    // Always include ANF IR for stateful contracts — the SDK uses it
-    // to auto-compute state transitions without requiring manual newState.
+  }
+  // Always include ANF IR for stateful contracts — the SDK uses it
+  // to auto-compute state transitions without requiring manual newState.
+  // N-139: statefulness follows parentClass (as isTerminal does), so a
+  // StatefulSmartContract with zero mutable fields still carries its ANF.
+  if (contract.parentClass === 'StatefulSmartContract') {
     artifact.anf = anfProgram;
   }
 
@@ -895,6 +916,12 @@ export function assembleArtifact(
   // CodeSepIndex slots (only if there are placeholder byte offsets)
   if (options?.codeSepIndexSlots && options.codeSepIndexSlots.length > 0) {
     artifact.codeSepIndexSlots = options.codeSepIndexSlots;
+  }
+
+  // N-051 — deploy-time code-part length fields (only when some pin is not
+  // exact at compile time).
+  if (options?.codePartLenSlots && options.codePartLenSlots.length > 0) {
+    artifact.codePartLenSlots = options.codePartLenSlots;
   }
 
   // OP_CODESEPARATOR byte offsets (only for stateful contracts)

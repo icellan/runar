@@ -1,0 +1,10 @@
+{
+  "vector_version": 1,
+  "notes": "N-426 cross-SDK vector: the stateful change-address guard. A stateful covenant that takes _changePKH rebuilds its change output from hash160(changePubKey ?? signer pubkey), so a call whose changeAddress names a different key builds a spend the network rejects. Every SDK refuses that call BEFORE signing or broadcast with the shared message. Replay with the contract, UTXOs and signer key of stateful-merge-prepared.json (single contract input, no additionalContractInputs), method `increment`, null Sig. Cases: (1) changeAddress=otherAddress, no changePubKey -> refused with message (message template with {changeAddress} replaced by otherAddress), nothing broadcast; (2) changeAddress=otherAddress + changePubKey=otherPubKeyHex -> accepted and broadcast; (3) changeAddress=the signer's own address, no changePubKey -> accepted and broadcast. Stateless calls are unaffected. Validated against @bsv/sdk Spend by conformance/sdk-call/n426-change-address-guard.test.ts.",
+  "baseVector": "stateful-merge-prepared.json",
+  "message": "changeAddress {changeAddress} does not match the change key the covenant enforces (hash160 of changePubKey, or of the signer's key when changePubKey is unset); pass changePubKey for that address",
+  "otherPrivKeyHex": "0000000000000000000000000000000000000000000000000000000000000002",
+  "otherPubKeyHex": "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+  "otherAddress": "1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+  "ownAddress": "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
+}

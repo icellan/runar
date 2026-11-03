@@ -40,10 +40,19 @@
 //! Reachability: the type checker's `check_call_args` (`frontend/typecheck.rs`)
 //! DOES reject an over-supplied call on the source path, so a `.runar.*`
 //! contract cannot reach either mechanism. The `--ir` entry point
-//! (`compile_from_ir*` / `lower_to_stack`) runs no frontend validation in this
-//! tier — the same gap R-016 was reachable through — so these guards are the
-//! only thing standing between an over-supplied ANF IR input and a silently
-//! mis-paired crypto primitive.
+//! (`compile_from_ir*` / `lower_to_stack`) runs no FRONTEND validation — but
+//! `load_ir_from_str` (`ir/loader.rs`) is not a bare parse either: it runs its
+//! own loader-level gates before `lower_to_stack` ever sees the program,
+//! including the R-128/R-165 builtin-call-arity check (`builtin_allowed_arity`,
+//! "requires exactly N arguments") and N-205's `verifyRabinSig` key-provenance
+//! rule (`ir/rabin_key_provenance.rs` — the 4th argument must be a trusted
+//! `load_prop` or literal, which is why the fixtures below source it from a
+//! contract property rather than a `load_param`). Both of those run BEFORE
+//! the stack-lowering-level guards this file pins, so this file's guards are
+//! the LAST, not the only, thing standing between an over-supplied ANF IR
+//! input and a silently mis-paired crypto primitive — but they are still load
+//! bearing: `lower_to_stack` is a public entry point in its own right, callable
+//! without going through `load_ir_from_str`'s gates at all.
 //!
 //! The fix tightens every guard to an equality with the same "requires exactly
 //! N arguments, got M" wording the tier already uses for `verifyECDSA_*` and
@@ -57,6 +66,26 @@ use runar_compiler_rust::ir::loader::load_ir_from_str;
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// `verifyRabinSig`'s 4th call argument is its Rabin public key. N-205 (see
+/// `ir/rabin_key_provenance.rs`) refuses that argument unless it is trusted
+/// (a `load_prop` or an integer literal) — a plain `load_param` is a
+/// spender-supplied key and is refused regardless of arity. Every fixture
+/// below that exercises `verifyRabinSig` at (or above) its real 4-argument
+/// arity therefore sources call-position 3 (`t3`) from a contract property
+/// instead of a parameter, so the fixture is exercising the arity guard
+/// under test rather than tripping the unrelated key-provenance guard.
+///
+/// What this proves: with the key sourced from a trusted `load_prop`, the
+/// R-067 arity guards (equality checks tightened from `>=`) are exercised
+/// exactly as originally intended — an over- or under-supplied call is
+/// refused by the arity diagnostic, and a correct-arity call still lowers to
+/// the pinned byte-identical emission. What it does NOT prove: that N-205
+/// itself is correct, complete, or unweakened — this file does not touch
+/// `rabin_key_provenance.rs`, and N-205's own dedicated tests
+/// (`compilers/rust/src/ir/rabin_key_provenance.rs` `#[cfg(test)] mod tests`)
+/// are the ones that pin its refusal behaviour.
+const VERIFY_RABIN_SIG_KEY_BINDING_INDEX: usize = 3;
+
 /// A one-method contract whose body loads `n_params` parameters and then calls
 /// `func` with the bindings named by `args` (indices into the loaded params).
 fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
@@ -65,7 +94,11 @@ fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
         .collect();
     let mut body: Vec<String> = (0..n_params)
         .map(|i| {
-            format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_param", "name": "a{i}" }} }}"#)
+            if func == "verifyRabinSig" && i == VERIFY_RABIN_SIG_KEY_BINDING_INDEX {
+                format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_prop", "name": "key" }} }}"#)
+            } else {
+                format!(r#"{{ "name": "t{i}", "value": {{ "kind": "load_param", "name": "a{i}" }} }}"#)
+            }
         })
         .collect();
     let arg_list: Vec<String> = args.iter().map(|i| format!("\"t{i}\"")).collect();
@@ -74,8 +107,13 @@ fn call_anf(func: &str, n_params: usize, args: &[usize]) -> String {
         arg_list.join(", ")
     ));
     body.push(r#"{ "name": "tv", "value": { "kind": "assert", "value": "tc" } }"#.to_string());
+    let properties = if func == "verifyRabinSig" {
+        r#"{ "name": "key", "type": "RabinPubKey", "readonly": true }"#
+    } else {
+        ""
+    };
     format!(
-        r#"{{ "contractName": "R067", "properties": [], "methods": [ {{ "name": "unlock", "params": [{}], "body": [{}], "isPublic": true }} ] }}"#,
+        r#"{{ "contractName": "R067", "properties": [{properties}], "methods": [ {{ "name": "unlock", "params": [{}], "body": [{}], "isPublic": true }} ] }}"#,
         params.join(", "),
         body.join(", ")
     )
@@ -297,14 +335,29 @@ fn undersupplied_delegates_are_still_refused() {
 /// change cannot move these; a codegen change would.
 const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // (func, arity, op count, FNV-1a of the op vector)
-    ("verifyRabinSig", 4, 34, 0x32f3933061e6c9b4),
+    // F-047: 34 -> 36 top-level ops (OP_ROT OP_MOD reduce the digest mod pubKey;
+    // two in-place swaps become OP_OVER / OP_ROT).
+    // F-144: 36 -> 45 (<push 0x00> OP_CAT OP_BIN2NUM reads pubKey, padding and
+    // sig as unsigned LE integers).
+    // N-205: the key operand (call position 3) now comes from a `load_prop`
+    // instead of a `load_param` (see VERIFY_RABIN_SIG_KEY_BINDING_INDEX
+    // above), so it is read from a different stack depth than before; same
+    // op count (45), different fingerprint.
+    // F-368: 45 -> 50 top-level ops; the +5 is the sig < pubKey gate (OP_DUP,
+    // push 3, OP_PICK, OP_LESSTHAN, OP_VERIFY) after the F-144 sig normalization.
+    ("verifyRabinSig", 4, 50, 0x1324455e9a505b0e),
     // R-135: +3 top-level ops for the exact-signature-length gate (OP_SIZE,
     // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
     ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),
     ("verifySLHDSA_SHA2_128s", 3, 29583, 0xc1296427c5d591c0),
-    ("sha256Compress", 2, 21296, 0x73b8dfa330f7de6f),
-    ("sha256Finalize", 3, 63947, 0xfa3a224e6ba404f0),
-    ("blake3Compress", 2, 10377, 0xdc81c38b475c9e46),
+    // F-114: sha256Compress / blake3Compress +6 ops (OP_SIZE <64>
+    // OP_EQUALVERIFY on the block, OP_SIZE <32> OP_EQUALVERIFY on the state /
+    // chaining value); sha256Finalize +5 (OP_SWAP OP_SIZE <32> OP_EQUALVERIFY
+    // OP_SWAP on its state). A mis-sized operand used to be truncated or
+    // zero-extended into a second preimage of the committed digest.
+    ("sha256Compress", 2, 21302, 0x3e4a7f32cd8d603e),
+    ("sha256Finalize", 3, 63952, 0x47efde1184960a59),
+    ("blake3Compress", 2, 10383, 0x66c78065fba52101),
     ("blake3Hash", 1, 10387, 0x1b9842224c29f196),
     ("__array_access", 2, 10, 0x9fd1122314782f6a),
     ("substr", 3, 10, 0xa6268ef41498ed4a),
@@ -329,7 +382,10 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     ("reverseBytes", 1, 2083, 0xaa355cbc2102a10c),
     ("sign", 1, 2, 0x00a1c571bf6296bf),
     ("sqrt", 1, 10, 0xbfe239cb7a0312f2), // R-169: 2 -> 10 top-level ops (2 domain guards, 8 ops, ahead of the unchanged OP_DUP + OP_IF pair); the 256-round min-clamped Newton body lives inside the If and does not add top-level ops
-    ("log2", 1, 386, 0x391ad77ad05d6a00),
+    // N-103 (user decision R86, 2026-10-21): 386 -> 44 top-level ops; the
+    // 64-iteration halving loop (capped at 64) became the exact, branch-free
+    // read of the operand's minimal encoding.
+    ("log2", 1, 44, 0x5a9f644619073f3a),
 ];
 
 #[test]

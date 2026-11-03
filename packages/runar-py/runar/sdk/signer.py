@@ -86,4 +86,11 @@ class ExternalSigner(Signer):
         satoshis: int,
         sighash_type: int | None = None,
     ) -> str:
+        # N-041: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if not subscript:
+            raise ValueError(
+                f'ExternalSigner: refusing to sign input {input_index} with an empty subscript '
+                '(scriptCode); pass the locking script of the UTXO being spent'
+            )
         return self._sign_fn(tx_hex, input_index, subscript, satoshis, sighash_type)

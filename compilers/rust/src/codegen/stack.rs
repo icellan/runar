@@ -37,7 +37,7 @@ const POW_EXPONENT_LIMIT: u32 = 32;
 // ---------------------------------------------------------------------------
 
 /// A single stack-machine operation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum StackOp {
     Push(PushValue),
     Dup,
@@ -53,6 +53,13 @@ pub enum StackOp {
     If {
         then_ops: Vec<StackOp>,
         else_ops: Vec<StackOp>,
+        /// N-222: per-op source locations of each arm, parallel to `then_ops`
+        /// / `else_ops` (a method's `source_locs` covers its top-level ops
+        /// only). Empty, or any other length, means "no location" for every
+        /// op of that arm — what a codegen module's literal arms carry, as in
+        /// TS, where only ops lowered from a located ANF binding have one.
+        then_locs: Vec<Option<crate::ir::SourceLocation>>,
+        else_locs: Vec<Option<crate::ir::SourceLocation>>,
     },
     Placeholder {
         param_index: usize,
@@ -71,7 +78,7 @@ pub enum StackOp {
     /// FIXED-WIDTH 9-byte sequence
     ///
     /// ```text
-    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
     /// ```
     ///
     /// and back-patches `LL LL LL LL` (little-endian) once the whole script has
@@ -81,14 +88,16 @@ pub enum StackOp {
     ///
     /// `delta` is the deploy-time byte GROWTH of the template's OP_0
     /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`.
-    /// `exact` says whether every placeholder's growth is type-determined:
-    /// `true` → equality pin (OP_NUMEQUAL), `false` → lower-bound pin
-    /// (OP_GREATERTHANOREQUAL). Both are resolved by `pin_code_part_length`
-    /// once every method has been lowered.
+    /// `exact` says whether every placeholder's growth is type-determined.
+    /// The pin is ALWAYS an equality (OP_NUMEQUAL, N-051): when `exact` is
+    /// false the emitted value is only the compile-time lower bound and the
+    /// field is recorded as a `codePartLenSlots` entry that the SDK overwrites
+    /// with the real deployed length. Both are resolved by
+    /// `pin_code_part_length` once every method has been lowered.
     VerifyCodePartLen {
         /// Deploy-time byte growth of the template's OP_0 placeholders.
         delta: i64,
-        /// true → exact equality pin; false → lower-bound pin.
+        /// true → value is final at compile time; false → deploy-time slot.
         exact: bool,
     },
     /// An opaque opcode-byte span emitted verbatim by a `raw_script` ANF node.
@@ -100,6 +109,74 @@ pub enum StackOp {
         in_arity: usize,
         out_arity: usize,
     },
+}
+
+/// Hand-written to render exactly what `#[derive(Debug)]` rendered before
+/// N-222 added `then_locs` / `else_locs`: tests fingerprint lowered ops through
+/// their `{:?}` rendering, and source locations are neither opcodes nor
+/// operands, so they are left out.
+impl std::fmt::Debug for StackOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StackOp::Push(v) => f.debug_tuple("Push").field(v).finish(),
+            StackOp::Dup => f.write_str("Dup"),
+            StackOp::Swap => f.write_str("Swap"),
+            StackOp::Roll { depth } => f.debug_struct("Roll").field("depth", depth).finish(),
+            StackOp::Pick { depth } => f.debug_struct("Pick").field("depth", depth).finish(),
+            StackOp::Drop => f.write_str("Drop"),
+            StackOp::Nip => f.write_str("Nip"),
+            StackOp::Over => f.write_str("Over"),
+            StackOp::Rot => f.write_str("Rot"),
+            StackOp::Tuck => f.write_str("Tuck"),
+            StackOp::Opcode(code) => f.debug_tuple("Opcode").field(code).finish(),
+            StackOp::If { then_ops, else_ops, .. } => f
+                .debug_struct("If")
+                .field("then_ops", then_ops)
+                .field("else_ops", else_ops)
+                .finish(),
+            StackOp::Placeholder { param_index, param_name } => f
+                .debug_struct("Placeholder")
+                .field("param_index", param_index)
+                .field("param_name", param_name)
+                .finish(),
+            StackOp::PushCodeSepIndex => f.write_str("PushCodeSepIndex"),
+            StackOp::VerifyCodePartLen { delta, exact } => f
+                .debug_struct("VerifyCodePartLen")
+                .field("delta", delta)
+                .field("exact", exact)
+                .finish(),
+            StackOp::RawBytes { bytes, in_arity, out_arity } => f
+                .debug_struct("RawBytes")
+                .field("bytes", bytes)
+                .field("in_arity", in_arity)
+                .field("out_arity", out_arity)
+                .finish(),
+        }
+    }
+}
+
+/// N-264: an if-op's arms are dropped on an explicit work list. The derived
+/// drop glue recursed once per nested if-op, and private methods are inlined,
+/// so a chain of D helpers that each call the next under K nested ifs nests
+/// D*K if-ops: dropping the finished tree overflowed a thread stack on its
+/// own, after the iterative lowering had built it.
+impl Drop for StackOp {
+    fn drop(&mut self) {
+        let StackOp::If { then_ops, else_ops, .. } = self else { return };
+        if then_ops.is_empty() && else_ops.is_empty() {
+            return;
+        }
+        let mut work = vec![std::mem::take(then_ops), std::mem::take(else_ops)];
+        while let Some(mut list) = work.pop() {
+            for op in list.iter_mut() {
+                if let StackOp::If { then_ops, else_ops, .. } = op {
+                    work.push(std::mem::take(then_ops));
+                    work.push(std::mem::take(else_ops));
+                }
+            }
+            // `list` drops here; every if-op in it now has empty arms.
+        }
+    }
 }
 
 /// Typed value for push operations.
@@ -201,7 +278,9 @@ fn is_nist_ec_builtin(name: &str) -> bool {
 }
 
 fn is_merkle_builtin(name: &str) -> bool {
-    matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
+    // merkleRootPoseidon2KB is NOT here: it is variadic (8*depth + 10 args) and
+    // has its own lowering, `lower_merkle_root_poseidon2_kb` (N-237).
+    matches!(name, "merkleRootSha256" | "merkleRootHash256")
 }
 
 /// Fixed byte width a numeric state-field type occupies in the state section,
@@ -234,6 +313,20 @@ fn is_numeric_state_type(t: &str) -> bool {
 /// require `emit_push_data_decode` instead of a fixed OP_SPLIT.
 fn is_variable_length_state_type(t: &str) -> bool {
     matches!(t, "ByteString" | "Sig" | "SigHashPreimage")
+}
+
+/// N-045: the declared byte width of a fixed-width byte state type, or 0 for
+/// every other type. MUST match the reader's size table in
+/// `lower_deserialize_state` and the shared STATE_FIELD_WIDTHS table.
+fn fixed_width_state_bytes(t: &str) -> usize {
+    match t {
+        "PubKey" => 33,
+        "Addr" | "Ripemd160" => 20,
+        "Sha256" => 32,
+        "Point" | "P256Point" => 64,
+        "P384Point" => 96,
+        _ => 0,
+    }
 }
 
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
@@ -422,15 +515,43 @@ impl StackMap {
 // ---------------------------------------------------------------------------
 
 fn compute_last_uses(bindings: &[ANFBinding]) -> HashMap<String, usize> {
+    compute_last_uses_with_arrays(bindings, None)
+}
+
+/// `compute_last_uses` seeded with the array_literal metadata of an ENCLOSING
+/// scope (F-081): an if-arm or loop body can consume an array declared before
+/// it, and its own bindings do not contain that array_literal. Without the
+/// seed an element reached only through the outer array had no last-use here
+/// and was consumed at its first read.
+fn compute_last_uses_with_arrays(
+    bindings: &[ANFBinding],
+    inherited_arrays: Option<&HashMap<String, Vec<String>>>,
+) -> HashMap<String, usize> {
     let mut last_use = HashMap::new();
     // Pre-scan: map each array_literal binding to its element refs. Used to
     // propagate last-use across the array indirection (the array binding is
     // pure metadata in lower_array_literal — its elements must remain live
     // until the array's consumer, not until the array_literal binding itself).
-    let mut array_elems: HashMap<String, Vec<String>> = HashMap::new();
+    let mut array_elems: HashMap<String, Vec<String>> =
+        inherited_arrays.cloned().unwrap_or_default();
     for b in bindings {
         if let ANFValue::ArrayLiteral { elements } = &b.value {
             array_elems.insert(b.name.clone(), elements.clone());
+        } else if let Some(ConstValue::Str(ref s)) = b.value.const_value() {
+            // F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus
+            // the alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS.
+            // Without following it the elements got no last-use at all and
+            // were consumed at the first checkMultiSig, so a second read
+            // failed.
+            // F-268 / CL-BUG-049: `starts_with` compares bytes without ever
+            // constructing an invalid `str` slice, so it never panics on a
+            // non-ASCII string (unlike the old `s.len() > 5 && &s[..5] ==
+            // "@ref:"`, which could land its `..5` byte offset mid-character).
+            if let Some(ref_name) = s.strip_prefix("@ref:") {
+                if let Some(elems) = array_elems.get(ref_name).cloned() {
+                    array_elems.insert(b.name.clone(), elems);
+                }
+            }
         }
     }
     for (i, binding) in bindings.iter().enumerate() {
@@ -622,10 +743,12 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
         | ANFValue::GetStateScript { .. } => {}
 
         ANFValue::LoadConst { value: v } => {
-            // load_const with @ref: values reference another binding
+            // load_const with @ref: values reference another binding.
+            // F-268 / CL-BUG-049: `strip_prefix` never panics on a non-ASCII
+            // string (unlike the old `s.len() > 5 && &s[..5] == "@ref:"`).
             if let Some(s) = v.as_str() {
-                if s.len() > 5 && &s[..5] == "@ref:" {
-                    refs.push(s[5..].to_string());
+                if let Some(ref_name) = s.strip_prefix("@ref:") {
+                    refs.push(ref_name.to_string());
                 }
             }
         }
@@ -702,6 +825,419 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// N-264: iterative lowering
+// ---------------------------------------------------------------------------
+
+/// A suspended step of the lowering. `lower_bindings`, `lower_if`,
+/// `lower_loop` and `inline_method_call` are tasks: each place one used to
+/// CALL another (an if's two arms, a loop body, an inlined private method's
+/// body) now RETURNS the child as a [`LowerStep`], and [`run_lower_tasks`]
+/// keeps the suspended parents on an explicit heap stack.
+///
+/// Why: private methods are inlined at every call site, so F-213's per-method
+/// nesting bound (128) and N-180's call-depth bound (128) compose
+/// multiplicatively — a chain of D helpers that each call the next under K
+/// nested ifs is D*K nested ifs here, and the recursive lowering overflowed a
+/// 2 MiB thread stack at D=8 x 120 and the CLI's main thread at D=32 x 120
+/// (user decision R106: lower iteratively). Every statement runs in the same
+/// order, against the same state, as in the recursive version, so the
+/// emitted ops are unchanged. A panic abandons the whole lowering, as before.
+///
+/// Branch arms lower in their OWN context: a task that returns
+/// [`LowerStep::Arm`] hands that context to the driver, the arm's task runs
+/// against it, and the driver hands it back through `receive_arm` when the
+/// arm is done. Every other task runs against the context of the task below
+/// it (an inlined body or a loop body lowers in the caller's context).
+enum LowerTask<'a> {
+    Bindings(BindingsTask<'a>),
+    If(Box<IfTask<'a>>),
+    Inline(InlineTask<'a>),
+    Loop(Box<LoopTask<'a>>),
+}
+
+enum LowerStep<'a> {
+    /// The task is finished.
+    Done,
+    /// Run this child in the same context, then step the task again.
+    Child(LowerTask<'a>),
+    /// Run this child in the given branch-arm context, then hand the context
+    /// back (`receive_arm`) and step the task again.
+    Arm(LoweringContext, LowerTask<'a>),
+}
+
+impl<'a> LowerTask<'a> {
+    fn step(&mut self, ctx: &mut LoweringContext, arena: &'a HashMap<String, ANFMethod>) -> LowerStep<'a> {
+        match self {
+            LowerTask::Bindings(t) => t.step(ctx, arena),
+            LowerTask::If(t) => t.step(ctx),
+            LowerTask::Inline(t) => t.step(ctx),
+            LowerTask::Loop(t) => t.step(ctx, arena),
+        }
+    }
+
+    fn receive_arm(&mut self, arm: LoweringContext) {
+        match self {
+            LowerTask::If(t) => t.receive_arm(arm),
+            _ => unreachable!("only an if-task lowers a branch arm"),
+        }
+    }
+}
+
+/// Run `root` against `root_ctx`, and every child it returns, depth-first on
+/// an explicit stack. `arena` holds the private methods whose bodies inlined
+/// calls lower — content-equal to every context's `private_methods`.
+fn run_lower_tasks<'a>(
+    root_ctx: &mut LoweringContext,
+    arena: &'a HashMap<String, ANFMethod>,
+    root: LowerTask<'a>,
+) {
+    // Each task, and whether it runs in an arm context of its own.
+    let mut tasks: Vec<(LowerTask<'a>, bool)> = vec![(root, false)];
+    let mut arms: Vec<LoweringContext> = Vec::new();
+    while let Some((task, _)) = tasks.last_mut() {
+        let ctx = match arms.last_mut() {
+            Some(arm) => arm,
+            None => &mut *root_ctx,
+        };
+        match task.step(ctx, arena) {
+            LowerStep::Done => {
+                let (_, owns_arm) = tasks.pop().unwrap();
+                if owns_arm {
+                    let arm = arms.pop().unwrap();
+                    tasks.last_mut().unwrap().0.receive_arm(arm);
+                }
+            }
+            LowerStep::Child(child) => tasks.push((child, false)),
+            LowerStep::Arm(arm, child) => {
+                arms.push(arm);
+                tasks.push((child, true));
+            }
+        }
+    }
+}
+
+/// `lower_bindings` as a resumable task (N-264).
+struct BindingsTask<'a> {
+    bindings: &'a [ANFBinding],
+    last_uses: HashMap<String, usize>,
+    last_assert_idx: isize,
+    terminal_if_idx: isize,
+    i: usize,
+    awaiting_child: bool,
+}
+
+impl<'a> BindingsTask<'a> {
+    /// `lower_bindings`' setup, run against `ctx` when the task is built —
+    /// immediately before its first step. `inherited_arrays` is the enclosing
+    /// scope's array_literal metadata, which a branch arm's liveness must see
+    /// (F-081).
+    fn start(
+        ctx: &mut LoweringContext,
+        bindings: &'a [ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: Option<&HashMap<String, Vec<String>>>,
+    ) -> Self {
+        ctx.local_bindings = bindings.iter().map(|b| b.name.clone()).collect();
+        let mut last_uses = compute_last_uses_with_arrays(bindings, inherited_arrays);
+
+        // Protect parent-scope refs that are still needed after this scope
+        if let Some(ref protected) = ctx.outer_protected_refs {
+            for r in protected {
+                last_uses.insert(r.clone(), bindings.len());
+            }
+        }
+
+        // Find the terminal binding index (if terminal_assert is set).
+        // If the last binding is an 'if' whose branches end in asserts,
+        // that 'if' is the terminal point (not an earlier standalone assert).
+        // Only an assert that IS the last binding may leave its value as the
+        // result (N-005): any later binding (e.g. a terminal asm() raw_script
+        // with out_arity 1) pushes its own result, the cleanup NIPs the
+        // assert's value away, and the check is never enforced. Such an
+        // assert gets OP_VERIFY.
+        let mut last_assert_idx: isize = -1;
+        let mut terminal_if_idx: isize = -1;
+        if terminal_assert {
+            let last_binding = bindings.last();
+            if let Some(b) = last_binding {
+                if matches!(&b.value, ANFValue::If { .. }) {
+                    terminal_if_idx = (bindings.len() - 1) as isize;
+                } else if matches!(&b.value, ANFValue::Assert { .. }) {
+                    last_assert_idx = (bindings.len() - 1) as isize;
+                }
+            }
+        }
+        BindingsTask {
+            bindings,
+            last_uses,
+            last_assert_idx,
+            terminal_if_idx,
+            i: 0,
+            awaiting_child: false,
+        }
+    }
+
+    fn step(&mut self, ctx: &mut LoweringContext, arena: &'a HashMap<String, ANFMethod>) -> LowerStep<'a> {
+        if self.awaiting_child {
+            self.awaiting_child = false;
+            ctx.current_source_loc = None;
+            self.i += 1;
+        }
+        let last_assert_idx = self.last_assert_idx;
+        let terminal_if_idx = self.terminal_if_idx;
+        while self.i < self.bindings.len() {
+            let i = self.i;
+            let binding: &'a ANFBinding = &self.bindings[i];
+            let last_uses = &self.last_uses;
+            // Propagate source location from ANF binding to StackOps
+            ctx.current_source_loc = binding.source_loc.clone();
+
+            let child = if matches!(&binding.value, ANFValue::Assert { .. }) && i as isize == last_assert_idx {
+                // Terminal assert: leave value on stack instead of OP_VERIFY
+                if let ANFValue::Assert { value, .. } = &binding.value {
+                    ctx.lower_assert(value, i, last_uses, true);
+                }
+                None
+            } else if matches!(&binding.value, ANFValue::If { .. }) && i as isize == terminal_if_idx {
+                // Terminal if: propagate terminalAssert into both branches
+                if let ANFValue::If { cond, then, else_branch, results } = &binding.value {
+                    Some(ctx.lower_if_task(&binding.name, cond, then, else_branch, results, i, last_uses, true))
+                } else {
+                    None
+                }
+            } else {
+                ctx.lower_binding_task(binding, i, last_uses, arena)
+            };
+            if let Some(child) = child {
+                self.awaiting_child = true;
+                return LowerStep::Child(child);
+            }
+            // N-385: the TS reference clears the location after every binding,
+            // so the ops emitted after the last one (the method-tail cleanup,
+            // the dispatch OP_ELSE/OP_ENDIF) stay unmapped.
+            ctx.current_source_loc = None;
+            self.i += 1;
+        }
+        LowerStep::Done
+    }
+}
+
+/// `lower_if` as a resumable task (N-264): the head ran when the task was
+/// built; each arm is lowered as a child task in its own context; the tail
+/// reconciles the arms exactly as the recursive version did.
+struct IfTask<'a> {
+    binding_name: &'a str,
+    then_bindings: &'a [ANFBinding],
+    else_bindings: &'a [ANFBinding],
+    results: &'a [String],
+    terminal_assert: bool,
+    protected_refs: Option<HashSet<String>>,
+    pre_if_names: HashSet<String>,
+    then_ctx: Option<LoweringContext>,
+    else_ctx: Option<LoweringContext>,
+    phase: u8,
+}
+
+impl<'a> IfTask<'a> {
+    fn step(&mut self, ctx: &mut LoweringContext) -> LowerStep<'a> {
+        match self.phase {
+            0 => {
+                self.phase = 1;
+                let mut then_ctx = self.then_ctx.take().unwrap();
+                let task = BindingsTask::start(
+                    &mut then_ctx, self.then_bindings, self.terminal_assert, Some(&ctx.array_elements),
+                );
+                LowerStep::Arm(then_ctx, LowerTask::Bindings(task))
+            }
+            1 => {
+                self.phase = 2;
+                let then_ctx = self.then_ctx.as_mut().unwrap();
+                let mut else_ctx = ctx.lower_if_mid(
+                    then_ctx, &self.pre_if_names, self.protected_refs.take().unwrap(), self.terminal_assert,
+                );
+                let task = BindingsTask::start(
+                    &mut else_ctx, self.else_bindings, self.terminal_assert, Some(&ctx.array_elements),
+                );
+                LowerStep::Arm(else_ctx, LowerTask::Bindings(task))
+            }
+            _ => {
+                ctx.lower_if_tail(
+                    self.binding_name,
+                    self.then_bindings,
+                    self.else_bindings,
+                    self.results,
+                    &self.pre_if_names,
+                    self.terminal_assert,
+                    self.then_ctx.take().unwrap(),
+                    self.else_ctx.take().unwrap(),
+                );
+                LowerStep::Done
+            }
+        }
+    }
+
+    fn receive_arm(&mut self, arm: LoweringContext) {
+        if self.phase == 1 {
+            self.then_ctx = Some(arm);
+        } else {
+            self.else_ctx = Some(arm);
+        }
+    }
+}
+
+/// `inline_method_call` as a resumable task (N-264): the arguments were bound
+/// when the task was built; the body lowers in the caller's context as a
+/// child task; then shadowed names are restored and the result renamed.
+struct InlineTask<'a> {
+    binding_name: &'a str,
+    method: &'a ANFMethod,
+    shadowed: Vec<(String, String)>,
+    body_lowered: bool,
+}
+
+impl<'a> InlineTask<'a> {
+    fn step(&mut self, ctx: &mut LoweringContext) -> LowerStep<'a> {
+        if !self.body_lowered {
+            self.body_lowered = true;
+            // Lower the method body
+            let task = BindingsTask::start(ctx, &self.method.body, false, None);
+            return LowerStep::Child(LowerTask::Bindings(task));
+        }
+        ctx.inline_method_call_tail(self.binding_name, self.method, &self.shadowed);
+        LowerStep::Done
+    }
+}
+
+/// `lower_loop` as a resumable task (N-264).
+struct LoopTask<'a> {
+    count: usize,
+    body: &'a [ANFBinding],
+    iter_var: &'a str,
+    start_bigint: BigInt,
+    step_bigint: BigInt,
+    loop_binding_index: Option<usize>,
+    enclosing_last_uses: Option<HashMap<String, usize>>,
+    outer_refs: HashSet<String>,
+    outer_arrays: HashMap<String, Vec<String>>,
+    prev_local_bindings: Option<HashSet<String>>,
+    /// Current iteration, and body index within it (`None`: not begun).
+    i: usize,
+    j: Option<usize>,
+    last_uses: HashMap<String, usize>,
+    loop_loc: Option<crate::ir::SourceLocation>,
+    awaiting_child: bool,
+}
+
+impl<'a> LoopTask<'a> {
+    fn step(&mut self, ctx: &mut LoweringContext, arena: &'a HashMap<String, ANFMethod>) -> LowerStep<'a> {
+        if self.awaiting_child {
+            self.awaiting_child = false;
+            ctx.current_source_loc = self.loop_loc.clone();
+            self.j = self.j.map(|j| j + 1);
+        }
+        loop {
+            if self.j.is_none() {
+                if self.i >= self.count {
+                    break;
+                }
+                let i = self.i;
+                // Push the iteration variable value: start + i*step (issue #121).
+                let iter_val = &self.start_bigint + BigInt::from(i as i128) * &self.step_bigint;
+                ctx.emit_op(StackOp::Push(PushValue::Int(iter_val)));
+                ctx.sm.push(self.iter_var);
+
+                let mut last_uses = compute_last_uses_with_arrays(self.body, Some(&self.outer_arrays));
+
+                // Prevent outer-scope refs from being consumed by setting their
+                // last-use beyond any body binding index:
+                //  - in non-final iterations: always (the next iteration re-reads them);
+                //  - in the FINAL iteration: when the enclosing scope still references
+                //    them AFTER the loop. Previously the final iteration consumed
+                //    every outer ref at its last body use, so a method param (or
+                //    const) referenced after the loop was gone from the stack and was
+                //    silently lowered to an OP_0/empty push — compilation succeeded,
+                //    the env-based interpreter passed, but the emitted Script failed
+                //    at runtime (silent interpreter <-> Script divergence).
+                let is_final_iteration = i == self.count - 1;
+                for ref_name in &self.outer_refs {
+                    let used_after_loop = match (self.loop_binding_index, self.enclosing_last_uses.as_ref()) {
+                        (Some(idx), Some(elu)) => elu.get(ref_name).map_or(false, |&lu| lu > idx),
+                        _ => false,
+                    };
+                    if !is_final_iteration || used_after_loop {
+                        last_uses.insert(ref_name.clone(), self.body.len());
+                    }
+                }
+
+                self.last_uses = last_uses;
+                // F-259: each body binding's ops carry that binding's own location
+                // (a binding without one keeps the loop's). The iteration-variable
+                // push above and the cleanup below stay on the loop's location.
+                self.loop_loc = ctx.current_source_loc.clone();
+                self.j = Some(0);
+            }
+            let mut j = self.j.unwrap();
+            while j < self.body.len() {
+                let binding: &'a ANFBinding = &self.body[j];
+                if binding.source_loc.is_some() {
+                    ctx.current_source_loc = binding.source_loc.clone();
+                }
+                if let Some(child) = ctx.lower_binding_task(binding, j, &self.last_uses, arena) {
+                    self.j = Some(j);
+                    self.awaiting_child = true;
+                    return LowerStep::Child(child);
+                }
+                ctx.current_source_loc = self.loop_loc.clone();
+                j += 1;
+            }
+            // Clean up the iteration variable if it was not consumed by the body.
+            // The body may not reference iter_var at all, leaving it on the stack.
+            //
+            // R-186 / R-292: it is not always on TOP when that happens. A body
+            // whose last binding LEAVES a value — the accumulator
+            // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+            // — buries the iteration variable one slot down. Dropping only at
+            // depth 0 left one slot behind per iteration, until the leak alone
+            // crossed MAX_STACK_DEPTH and the compiler refused a contract with a
+            // working set of three. Removing it wherever it sits is the same
+            // operation `drain_branch_private_residue` performs, spelled the
+            // same way.
+            if ctx.sm.has(self.iter_var) {
+                match ctx.sm.find_depth(self.iter_var) {
+                    Some(0) => {
+                        ctx.emit_op(StackOp::Drop);
+                        ctx.sm.pop();
+                    }
+                    Some(1) => {
+                        ctx.emit_op(StackOp::Nip);
+                        ctx.sm.remove_at_depth(1);
+                    }
+                    Some(depth) => {
+                        ctx.emit_op(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
+                        ctx.sm.push("");
+                        ctx.emit_op(StackOp::Roll { depth });
+                        ctx.sm.pop();
+                        let rolled = ctx.sm.remove_at_depth(depth);
+                        ctx.sm.push(&rolled);
+                        ctx.emit_op(StackOp::Drop);
+                        ctx.sm.pop();
+                    }
+                    None => {}
+                }
+            }
+            self.i += 1;
+            self.j = None;
+        }
+        // Restore localBindings
+        ctx.local_bindings = self.prev_local_bindings.take().unwrap();
+        // Note: loops are statements, not expressions — they don't produce a
+        // physical stack value. Do NOT push a dummy stackMap entry, as it would
+        // desync the stackMap depth from the physical stack.
+        LowerStep::Done
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Lowering context
 // ---------------------------------------------------------------------------
 
@@ -712,7 +1248,10 @@ struct LoweringContext {
     source_locs: Vec<Option<crate::ir::SourceLocation>>,
     max_depth: usize,
     properties: Vec<ANFProperty>,
-    private_methods: HashMap<String, ANFMethod>,
+    /// Shared, not owned: every branch-arm context carries the same map, and
+    /// cloning it per arm deep-copied every private method's body once per
+    /// nested if — O(D^2 * K^2) for N-264's D-helper x K-if chain.
+    private_methods: std::rc::Rc<HashMap<String, ANFMethod>>,
     /// R-010: true when the emitter supplies the script-level
     /// OP_CODESEPARATOR, so `lower_check_preimage` must not emit its own.
     script_level_code_separator: bool,
@@ -748,7 +1287,7 @@ impl LoweringContext {
             source_locs: Vec::new(),
             max_depth: 0,
             properties: properties.to_vec(),
-            private_methods: HashMap::new(),
+            private_methods: std::rc::Rc::new(HashMap::new()),
             script_level_code_separator: false,
             local_bindings: HashSet::new(),
             outer_protected_refs: None,
@@ -1017,7 +1556,20 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
         self.sm = sm_after_inner_if;
 
-        // ELSE: >= 256 → 0x4d + 2-byte LE
+        // ELSE: >= 256
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(65536))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_pd4_if = self.sm.clone();
+
+        // THEN: 256-65535 → 0x4d + 2-byte LE
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
@@ -1040,6 +1592,35 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.push("");
 
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_pd4_if;
+
+        // ELSE: >= 65536 → 0x4e + 4-byte LE (N-044: this arm was missing, so
+        // the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+        // gives the unsigned 4-byte LE length.
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(5))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x4e])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.sm = sm_end_target;
@@ -1049,6 +1630,12 @@ impl LoweringContext {
     ///
     /// Expects stack: [..., state_bytes]
     /// Leaves stack:  [..., data, remaining_state]
+    ///
+    /// Accepts exactly the headers `emit_push_data_encode` writes: < 76 (the
+    /// header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+    /// (4-byte LE); any other header fails the script. The header and every
+    /// length are read UNSIGNED (`emit_unsigned_bin2num`) — bare OP_BIN2NUM
+    /// read 0x80 as 0 and 0x81..0xff as negative (N-044).
     fn emit_push_data_decode(&mut self) {
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
         self.sm.push("");
@@ -1056,7 +1643,7 @@ impl LoweringContext {
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_unsigned_bin2num(); // [..., rest, hb]
         self.emit_op(StackOp::Dup);
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(76))));
@@ -1069,7 +1656,7 @@ impl LoweringContext {
         self.sm.pop();
         let sm_after_outer_if = self.sm.clone();
 
-        // THEN: fb < 76 → direct length
+        // THEN: hb < 76 → direct length
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
@@ -1078,6 +1665,25 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
         self.sm = sm_after_outer_if.clone();
 
+        // ELSE: map the header to its length width (1, 2 or 4).
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(76))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_pd1_if = self.sm.clone();
+        // 0x4c → width 1
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        let sm_width = self.sm.clone();
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_pd1_if;
         self.emit_op(StackOp::Dup);
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(77))));
@@ -1085,43 +1691,72 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push("");
-
         self.emit_op(StackOp::Opcode("OP_IF".into()));
         self.sm.pop();
-        let sm_after_inner_if = self.sm.clone();
-
-        // THEN: fb == 77 → 2-byte LE
+        let sm_after_pd2_if = self.sm.clone();
+        // 0x4d → width 2
         self.emit_op(StackOp::Drop); self.sm.pop();
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop(); self.sm.pop();
-        self.sm.push(""); self.sm.push("");
-        self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop(); self.sm.pop();
-        self.sm.push(""); self.sm.push("");
 
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-        self.sm = sm_after_inner_if;
-
-        // ELSE: fb == 76 → 1-byte
-        self.emit_op(StackOp::Drop); self.sm.pop();
-        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm = sm_after_pd2_if;
+        // 0x4e → width 4; any other header fails the script
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(78))));
         self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.sm = sm_width;
+        // [..., rest, width]
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_unsigned_bin2num(); // [..., rest2, len]
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
 
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.sm = sm_end_target;
+    }
+
+    /// Fail the script unless the value on top (the rest of the state section
+    /// after the last field) is empty, and pop it: the last state field must
+    /// consume the state section exactly (N-044).
+    fn emit_assert_state_consumed(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+    }
+
+    /// N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+    /// Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
+    /// assert it has exactly its declared width:
+    ///
+    ///   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+    ///
+    /// The writer copies these values as they are and the next spend's reader
+    /// slices each at its declared width, so a wrong-width value shifts every
+    /// later field. No-op for every other type.
+    fn emit_fixed_width_state_check(&mut self, t: &str) {
+        let width = fixed_width_state_bytes(t);
+        if width == 0 {
+            return;
+        }
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(width))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+        self.sm.pop();
+        self.sm.pop();
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -1353,64 +1988,28 @@ impl LoweringContext {
     // Lower bindings
     // -----------------------------------------------------------------------
 
-    fn lower_bindings(&mut self, bindings: &[ANFBinding], terminal_assert: bool) {
-        self.local_bindings = bindings.iter().map(|b| b.name.clone()).collect();
-        let mut last_uses = compute_last_uses(bindings);
-
-        // Protect parent-scope refs that are still needed after this scope
-        if let Some(ref protected) = self.outer_protected_refs {
-            for r in protected {
-                last_uses.insert(r.clone(), bindings.len());
-            }
-        }
-
-        // Find the terminal binding index (if terminal_assert is set).
-        // If the last binding is an 'if' whose branches end in asserts,
-        // that 'if' is the terminal point (not an earlier standalone assert).
-        let mut last_assert_idx: isize = -1;
-        let mut terminal_if_idx: isize = -1;
-        if terminal_assert {
-            let last_binding = bindings.last();
-            if let Some(b) = last_binding {
-                if matches!(&b.value, ANFValue::If { .. }) {
-                    terminal_if_idx = (bindings.len() - 1) as isize;
-                } else {
-                    for i in (0..bindings.len()).rev() {
-                        if matches!(&bindings[i].value, ANFValue::Assert { .. }) {
-                            last_assert_idx = i as isize;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        for (i, binding) in bindings.iter().enumerate() {
-            // Propagate source location from ANF binding to StackOps
-            self.current_source_loc = binding.source_loc.clone();
-
-            if matches!(&binding.value, ANFValue::Assert { .. }) && i as isize == last_assert_idx {
-                // Terminal assert: leave value on stack instead of OP_VERIFY
-                if let ANFValue::Assert { value, .. } = &binding.value {
-                    self.lower_assert(value, i, &last_uses, true);
-                }
-            } else if matches!(&binding.value, ANFValue::If { .. }) && i as isize == terminal_if_idx {
-                // Terminal if: propagate terminalAssert into both branches
-                if let ANFValue::If { cond, then, else_branch, results } = &binding.value {
-                    self.lower_if(&binding.name, cond, then, else_branch, results, i, &last_uses, true);
-                }
-            } else {
-                self.lower_binding(binding, i, &last_uses);
-            }
-        }
+    /// Lower `bindings` in this context, with `arena` holding the private
+    /// methods inlined calls lower (N-264: iteratively; see [`LowerTask`]).
+    fn lower_bindings_in(
+        &mut self,
+        bindings: &[ANFBinding],
+        terminal_assert: bool,
+        arena: &HashMap<String, ANFMethod>,
+    ) {
+        let root = LowerTask::Bindings(BindingsTask::start(self, bindings, terminal_assert, None));
+        run_lower_tasks(self, arena, root);
     }
 
-    fn lower_binding(
+    /// Lowers `binding`; for a binding that lowers a nested body (an inlined
+    /// private call, an if, a loop) returns the task that does so instead,
+    /// for the caller to run (N-264). Otherwise returns `None`.
+    fn lower_binding_task<'a>(
         &mut self,
-        binding: &ANFBinding,
+        binding: &'a ANFBinding,
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
-    ) {
+        arena: &'a HashMap<String, ANFMethod>,
+    ) -> Option<LowerTask<'a>> {
         // R-138: publish where we are, so a refusal raised anywhere below —
         // there are 34 panic sites in this file — reports the contract line it
         // died on rather than nothing at all.
@@ -1458,7 +2057,7 @@ impl LoweringContext {
                 method,
                 args,
             } => {
-                self.lower_method_call(name, object, method, args, binding_index, last_uses);
+                return self.lower_method_call_task(name, object, method, args, binding_index, last_uses, arena);
             }
             ANFValue::If {
                 cond,
@@ -1466,7 +2065,7 @@ impl LoweringContext {
                 else_branch,
                 results,
             } => {
-                self.lower_if(name, cond, then, else_branch, results, binding_index, last_uses, false);
+                return Some(self.lower_if_task(name, cond, then, else_branch, results, binding_index, last_uses, false));
             }
             ANFValue::Loop {
                 count,
@@ -1475,7 +2074,7 @@ impl LoweringContext {
                 start,
                 step,
             } => {
-                self.lower_loop(name, *count, body, iter_var, start, *step, Some(binding_index), Some(last_uses));
+                return Some(self.lower_loop_task(name, *count, body, iter_var, start, *step, Some(binding_index), Some(last_uses)));
             }
             ANFValue::Assert { value, .. } => {
                 self.lower_assert(value, binding_index, last_uses, false);
@@ -1513,6 +2112,7 @@ impl LoweringContext {
                 self.lower_raw_script(name, bytes, *in_arity, *out_arity);
             }
         }
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -1559,7 +2159,13 @@ impl LoweringContext {
     fn lower_load_prop(&mut self, binding_name: &str, prop_name: &str) {
         let prop = self.properties.iter().find(|p| p.name == prop_name).cloned();
 
-        if self.sm.has(prop_name) {
+        // N-016: only a MUTABLE property ever lives on the stack
+        // (deserialize_state / update_prop). A readonly property is a
+        // deploy-time constant, so a slot that merely shares its name is a
+        // param, local or temp — reading it made `this.target` return whatever
+        // that slot held.
+        let may_be_on_stack = prop.as_ref().map_or(true, |p| !p.readonly);
+        if may_be_on_stack && self.sm.has(prop_name) {
             // Property has been updated (via update_prop) — use the stack value.
             // Must check this BEFORE initial_value — after update_prop, we need the
             // updated value, not the original constant.
@@ -1567,7 +2173,7 @@ impl LoweringContext {
             self.sm.pop();
         } else if let Some(ref p) = prop {
             if let Some(ref val) = p.initial_value {
-                self.push_json_value(val);
+                self.push_json_value(val, prop_name);
             } else {
                 // Property value will be provided at deployment time; emit a placeholder.
                 // The emitter records byte offsets so the SDK can splice in real values.
@@ -1613,7 +2219,7 @@ impl LoweringContext {
                 let loc = self
                     .current_source_loc
                     .as_ref()
-                    .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                    .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column.saturating_sub(1)))
                     .unwrap_or_default();
                 let ctor_props: Vec<&str> = self
                     .properties
@@ -1645,7 +2251,7 @@ impl LoweringContext {
     /// arbitrary-precision JSON number (what the Go tier writes) — never as
     /// hex. Only a plain string that is not a decimal-BigInt literal is hex
     /// `ByteString` bytes.
-    fn push_json_value(&mut self, val: &serde_json::Value) {
+    fn push_json_value(&mut self, val: &serde_json::Value, prop_name: &str) {
         match crate::ir::parse_const_value(val) {
             Some(ConstValue::Bool(b)) => {
                 self.emit_op(StackOp::Push(PushValue::Bool(b)));
@@ -1658,7 +2264,19 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
             None => {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+                // F-258 / CL-BUG-151: a property initializer is supposed to
+                // be a literal (bool/number/string) -- the language only
+                // allows BigIntLiteral / BoolLiteral / ByteStringLiteral
+                // initializers. `--ir` skips the frontend that enforces
+                // that, so a hand-written IR file can hand this an array or
+                // object. Silently pushing 0 compiled a working-looking
+                // script whose property always reads as 0 -- fail loudly
+                // instead.
+                panic!(
+                    "Stack lowering: property '{}' has a non-literal initializer \
+                     ({}). Refusing to emit a silent OP_0 placeholder.",
+                    prop_name, val
+                );
             }
         }
     }
@@ -1669,8 +2287,17 @@ impl LoweringContext {
         // to another binding. We bring that value to the top via PICK (non-consuming)
         // unless this is the last use, in which case we consume it via ROLL.
         if let Some(ConstValue::Str(ref s)) = value.const_value() {
-            if s.len() > 5 && &s[..5] == "@ref:" {
-                let ref_name = &s[5..];
+            // F-268 / CL-BUG-049: `s.len() > 5 && &s[..5] == "@ref:"` byte-
+            // sliced an arbitrary `load_const` string with no char-boundary
+            // check — a string whose 5th byte lands inside a multi-byte
+            // UTF-8 character (e.g. a hand-written `--ir` constant) panicked
+            // Rust's slicing instead of being refused as a diagnostic.
+            // `str::starts_with` compares bytes directly without ever
+            // constructing an invalid slice, so it is safe for any input;
+            // `strip_prefix` returning `Some` guarantees byte offset 5 is a
+            // valid char boundary (it is exactly after the 5 ASCII bytes of
+            // "@ref:"), so the remainder slice it hands back is always safe.
+            if let Some(ref_name) = s.strip_prefix("@ref:") {
                 // Special case: aliasing an array_literal (metadata-only
                 // binding, not present in the stack-map). Copy the array
                 // metadata under the new binding name and emit no stack moves.
@@ -1727,7 +2354,22 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
             None => {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+                // F-258 / CL-BUG-151: `load_const.value` must decode to a
+                // bool / number / string (see `parse_const_value`). Unlike
+                // Go/Python/Ruby, this tier's IR loader does not eagerly
+                // validate `load_const` values at load time, so a
+                // hand-written `--ir` file naming an array or object here
+                // reached this point and silently compiled to a bare OP_0 --
+                // fail loudly instead.
+                let raw = match value {
+                    ANFValue::LoadConst { value: raw } => raw.to_string(),
+                    _ => "<unknown>".to_string(),
+                };
+                panic!(
+                    "Stack lowering: binding '{}' has an undecodable load_const value \
+                     ({}). Refusing to emit a silent OP_0 placeholder.",
+                    binding_name, raw
+                );
             }
         }
         // Track constant values for compile-time extraction (e.g., Merkle depth)
@@ -1815,7 +2457,9 @@ impl LoweringContext {
                 self.bring_to_top(&args[0], is_last);
                 self.sm.pop();
                 self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
-                self.sm.push(binding_name);
+                // No result slot: OP_VERIFY leaves nothing behind, and a
+                // model-only slot puts every later PICK/ROLL one item too
+                // deep (F-072). Same model as lower_assert.
             }
             return;
         }
@@ -1827,7 +2471,9 @@ impl LoweringContext {
                 self.bring_to_top(&args[0], is_last);
                 self.sm.pop();
                 self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
-                self.sm.push(binding_name);
+                // No result slot: OP_VERIFY leaves nothing behind, and a
+                // model-only slot puts every later PICK/ROLL one item too
+                // deep (F-072). Same model as lower_assert.
             }
             return;
         }
@@ -1835,7 +2481,7 @@ impl LoweringContext {
         // super() in constructor -- no opcode emission needed.
         // Constructor args are already on the stack.
         if func_name == "super" {
-            self.sm.push(binding_name);
+            // No opcode, so no stack slot either (F-072).
             return;
         }
 
@@ -1928,6 +2574,11 @@ impl LoweringContext {
 
         if is_merkle_builtin(func_name) {
             self.lower_merkle_root(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "merkleRootPoseidon2KB" {
+            self.lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses);
             return;
         }
 
@@ -2065,7 +2716,7 @@ impl LoweringContext {
             let loc = self
                 .current_source_loc
                 .as_ref()
-                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column.saturating_sub(1)))
                 .unwrap_or_default();
             panic!(
                 "Stack lowering: unknown function '{}'{} — the name resolves to \
@@ -2106,15 +2757,17 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    fn lower_method_call(
+    /// Returns the inlining task for a private-method call (N-264), else `None`.
+    fn lower_method_call_task<'a>(
         &mut self,
-        binding_name: &str,
+        binding_name: &'a str,
         object: &str,
         method: &str,
         args: &[String],
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
-    ) {
+        arena: &'a HashMap<String, ANFMethod>,
+    ) -> Option<LowerTask<'a>> {
         // Consume the @this object reference — it's a compile-time concept,
         // not a runtime value. Without this, 0n stays on the stack.
         if self.sm.has(object) {
@@ -2125,29 +2778,37 @@ impl LoweringContext {
 
         if method == "getStateScript" {
             self.lower_get_state_script(binding_name);
-            return;
+            return None;
         }
 
-        // Check if this is a private method call that should be inlined
-        if let Some(private_method) = self.private_methods.get(method).cloned() {
-            self.inline_method_call(binding_name, &private_method, args, binding_index, last_uses);
-            return;
+        // Check if this is a private method call that should be inlined. The
+        // body is read from `arena`, which holds the same methods as
+        // `self.private_methods`.
+        if self.private_methods.contains_key(method) {
+            let private_method = arena.get(method).expect("private method in the lowering arena");
+            return Some(self.inline_method_call_task(binding_name, private_method, args, binding_index, last_uses));
         }
 
         // For other method calls, treat like a function call
         self.lower_call(binding_name, method, args, binding_index, last_uses);
+        None
     }
 
     /// Inline a private method by lowering its body in the current context.
     /// The method's parameters are bound to the call arguments.
-    fn inline_method_call(
+    fn inline_method_call_task<'a>(
         &mut self,
-        binding_name: &str,
-        method: &ANFMethod,
+        binding_name: &'a str,
+        method: &'a ANFMethod,
         args: &[String],
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
-    ) {
+    ) -> LowerTask<'a> {
+        // N-055: see IR_OUTPUT_DELEGATION_ERROR.
+        if contains_output_intrinsic(&method.body) {
+            panic!("{}", IR_OUTPUT_DELEGATION_ERROR);
+        }
+
         // Track shadowed names so we can restore them after the body runs.
         // When a param name already exists on the stack, temporarily rename
         // the existing entry to avoid duplicate names which break Set-based
@@ -2218,11 +2879,13 @@ impl LoweringContext {
             }
         }
 
-        // Lower the method body
-        self.lower_bindings(&method.body, false);
+        LowerTask::Inline(InlineTask { binding_name, method, shadowed, body_lowered: false })
+    }
 
+    /// The part of `inline_method_call` after the body is lowered (N-264).
+    fn inline_method_call_tail(&mut self, binding_name: &str, method: &ANFMethod, shadowed: &[(String, String)]) {
         // Restore shadowed names so the caller's scope sees its original entries.
-        for (param_name, shadowed_name) in &shadowed {
+        for (param_name, shadowed_name) in shadowed {
             if self.sm.has(shadowed_name) {
                 let depth = self.sm.find_depth(shadowed_name).unwrap();
                 self.sm.rename_at_depth(depth, param_name);
@@ -2244,21 +2907,21 @@ impl LoweringContext {
     }
 
 
-    fn lower_if(
+    fn lower_if_task<'a>(
         &mut self,
-        binding_name: &str,
+        binding_name: &'a str,
         cond: &str,
-        then_bindings: &[ANFBinding],
-        else_bindings: &[ANFBinding],
+        then_bindings: &'a [ANFBinding],
+        else_bindings: &'a [ANFBinding],
         // `results` is the `if` node's declared result slots, deepest first
         // (see `ANFValue::If::results`). Empty for an `if` that carries at most
         // one result, and then every path below behaves exactly as it did
         // before the multi-result contract existed.
-        results: &[String],
+        results: &'a [String],
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
         terminal_assert: bool,
-    ) {
+    ) -> LowerTask<'a> {
         // The ANF wire format has no version field, and `--ir` / `--ir-parity`
         // are documented surfaces that feed a checked-in ANF JSON straight into
         // this pass. An ANF produced BEFORE the multi-result node carries the
@@ -2414,10 +3077,49 @@ impl LoweringContext {
         // that guard, silently emitted a constant-0 placeholder instead. An arm
         // is not a different scope for inlining.
         then_ctx.private_methods = self.private_methods.clone();
+        // N-007 / issue #130: the arm's cloned stack carries the parent's
+        // reserved `__param_<name>` slot for a param that shadows a mutable
+        // property, so the arm must resolve `load_param` through the same map.
+        // `LoweringContext::new` starts with it EMPTY, and the arm then read
+        // the same-named deserialized PROPERTY slot — the stale on-chain state
+        // — in place of the caller's witness argument.
+        then_ctx.renamed_params = self.renamed_params.clone();
+        // F-081: the same holds for array_literal metadata. An array declared
+        // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+        // there needs its element refs; a fresh context has none and failed
+        // with "array_literal metadata missing". Cloned, so an arm-local array
+        // does not leak out.
+        then_ctx.array_elements = self.array_elements.clone();
+        then_ctx.array_lengths = self.array_lengths.clone();
         then_ctx.inside_branch = true;
-        then_ctx.lower_bindings(then_bindings, terminal_assert);
+        LowerTask::If(Box::new(IfTask {
+            binding_name,
+            then_bindings,
+            else_bindings,
+            results,
+            terminal_assert,
+            protected_refs: Some(protected_refs),
+            pre_if_names,
+            then_ctx: Some(then_ctx),
+            else_ctx: None,
+            phase: 0,
+        }))
+    }
 
-        then_ctx.drain_branch_private_residue(&pre_if_names);
+    /// `lower_if` between its arms (N-264): finishes the then-arm and builds
+    /// the else-arm's context.
+    fn lower_if_mid(
+        &mut self,
+        then_ctx: &mut LoweringContext,
+        pre_if_names: &HashSet<String>,
+        protected_refs: HashSet<String>,
+        terminal_assert: bool,
+    ) -> LoweringContext {
+        // N-222: the arm's statements are done; what follows is reconcile
+        // bookkeeping that belongs to none of them (TS clears the location
+        // after every binding).
+        then_ctx.current_source_loc = None;
+        then_ctx.drain_branch_private_residue(pre_if_names);
 
         if terminal_assert && then_ctx.sm.depth() > 1 {
             let excess = then_ctx.sm.depth() - 1;
@@ -2426,6 +3128,16 @@ impl LoweringContext {
                 then_ctx.sm.remove_at_depth(1);
             }
         }
+        // N-072: under a terminal assert the arm's one remaining slot is its
+        // VERDICT, which nothing reads by name. It must not keep the name of the
+        // parent local it asserted (`const x = a; if (c) { assert(x); } else
+        // { assert(b); }`): phase 1 below would then see "the else-arm consumed
+        // `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+        // the depth back with OP_0 -- an arm that always fails.
+        if terminal_assert && then_ctx.sm.depth() >= 1 {
+            then_ctx.sm.pop();
+            then_ctx.sm.push("");
+        }
 
         // Lower else-branch
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
@@ -2433,10 +3145,28 @@ impl LoweringContext {
         else_ctx.outer_protected_refs = Some(protected_refs);
         else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
+        else_ctx.renamed_params = self.renamed_params.clone(); // N-007, see then_ctx above
+        else_ctx.array_elements = self.array_elements.clone(); // F-081, see then_ctx above
+        else_ctx.array_lengths = self.array_lengths.clone();
         else_ctx.inside_branch = true;
-        else_ctx.lower_bindings(else_bindings, terminal_assert);
+        else_ctx
+    }
 
-        else_ctx.drain_branch_private_residue(&pre_if_names);
+    /// `lower_if` after its arms (N-264): the reconciliation.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_if_tail(
+        &mut self,
+        binding_name: &str,
+        then_bindings: &[ANFBinding],
+        else_bindings: &[ANFBinding],
+        results: &[String],
+        pre_if_names: &HashSet<String>,
+        terminal_assert: bool,
+        mut then_ctx: LoweringContext,
+        mut else_ctx: LoweringContext,
+    ) {
+        else_ctx.current_source_loc = None; // N-222, see lower_if_mid
+        else_ctx.drain_branch_private_residue(pre_if_names);
 
         if terminal_assert && else_ctx.sm.depth() > 1 {
             let excess = else_ctx.sm.depth() - 1;
@@ -2444,6 +3174,11 @@ impl LoweringContext {
                 else_ctx.emit_op(StackOp::Nip);
                 else_ctx.sm.remove_at_depth(1);
             }
+        }
+        // N-072, see then_ctx above
+        if terminal_assert && else_ctx.sm.depth() >= 1 {
+            else_ctx.sm.pop();
+            else_ctx.sm.push("");
         }
 
         // Balance stack between branches so both end at the same depth.
@@ -2651,11 +3386,33 @@ impl LoweringContext {
                 }
                 else_ctx.sm.push(&then_name);
             } else {
+                // N-262: padding an EMPTY else arm is the legitimate #99
+                // fallback; padding a NON-EMPTY one writes a placeholder the
+                // post-ENDIF code reads as a value. Same sentence as Go's R-161
+                // guard.
+                if !else_bindings.is_empty() {
+                    panic!(
+                        "internal codegen error: conditional needs {} placeholder push(es) to balance a NON-EMPTY else arm (then depth {} != else depth {}); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding={:?}",
+                        then_ctx.sm.depth() - else_ctx.sm.depth(),
+                        then_ctx.sm.depth(),
+                        else_ctx.sm.depth(),
+                        binding_name
+                    );
+                }
                 else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
                 else_ctx.sm.push("");
             }
         }
         while else_ctx.sm.depth() > then_ctx.sm.depth() {
+            if !then_bindings.is_empty() {
+                panic!(
+                    "internal codegen error: conditional needs {} placeholder push(es) to balance a NON-EMPTY then arm (else depth {} != then depth {}); binding={:?}",
+                    else_ctx.sm.depth() - then_ctx.sm.depth(),
+                    else_ctx.sm.depth(),
+                    then_ctx.sm.depth(),
+                    binding_name
+                );
+            }
             then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
             then_ctx.sm.push("");
         }
@@ -2682,6 +3439,8 @@ impl LoweringContext {
         let then_ops = then_ctx.ops;
         let else_ops = else_ctx.ops;
 
+        // N-222: the arms keep their own per-op locations, so each body op is
+        // attributed to its own statement rather than to the enclosing `if`.
         self.emit_op(StackOp::If {
             then_ops,
             else_ops: if else_ops.is_empty() {
@@ -2689,6 +3448,8 @@ impl LoweringContext {
             } else {
                 else_ops
             },
+            then_locs: then_ctx.source_locs,
+            else_locs: else_ctx.source_locs,
         });
 
         // Physical slots this function drops AFTER OP_ENDIF, while reconciling
@@ -2773,7 +3534,7 @@ impl LoweringContext {
                     if self.sm.peek_at_depth(d) == name.as_str() {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
@@ -2812,7 +3573,7 @@ impl LoweringContext {
                         (window_size - 1) as i128,
                     ))));
                     self.sm.push("");
-                    self.emit_op(StackOp::Roll { depth: window_size });
+                    self.emit_op(StackOp::Roll { depth: window_size - 1 });
                     self.sm.pop();
                     let lifted = self.sm.remove_at_depth(window_size - 1);
                     self.sm.push(&lifted);
@@ -2846,7 +3607,7 @@ impl LoweringContext {
                     if self.sm.peek_at_depth(d) == name.as_str() {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
@@ -2879,7 +3640,7 @@ impl LoweringContext {
                         } else {
                             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                             self.sm.push("");
-                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.emit_op(StackOp::Roll { depth: d });
                             self.sm.pop();
                             let rolled = self.sm.remove_at_depth(d);
                             self.sm.push(&rolled);
@@ -2905,7 +3666,7 @@ impl LoweringContext {
                         } else {
                             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                             self.sm.push("");
-                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.emit_op(StackOp::Roll { depth: d });
                             self.sm.pop();
                             let rolled = self.sm.remove_at_depth(d);
                             self.sm.push(&rolled);
@@ -2971,17 +3732,22 @@ impl LoweringContext {
         }
     }
 
-    fn lower_loop(
+    /// `lower_loop` as a resumable task (N-264): the loop is unrolled exactly
+    /// as before, but a body binding that lowers a nested body (if / inlined
+    /// call / inner loop) runs as a child task. The setup below runs when the
+    /// task is built, immediately before its first step.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_loop_task<'a>(
         &mut self,
         _binding_name: &str,
         count: usize,
-        body: &[ANFBinding],
-        iter_var: &str,
+        body: &'a [ANFBinding],
+        iter_var: &'a str,
         start: &serde_json::Value,
         step: i64,
         loop_binding_index: Option<usize>,
         enclosing_last_uses: Option<&HashMap<String, usize>>,
-    ) {
+    ) -> LowerTask<'a> {
         // Iteration `i` binds `iterVar = start + i*step` (issue #121).
         // Zero-start counting-up loops (start=0, step=1) reduce to `BigInt(i)`,
         // preserving the historical byte-for-byte lowering.
@@ -3024,85 +3790,42 @@ impl LoweringContext {
             }
         }
 
+        // F-081: an outer array_literal binding is metadata only — its
+        // ELEMENTS are the stack slots. Protecting the array name protects
+        // nothing, so the first iteration consumed the elements and the second
+        // failed with "value 't0' not found on stack". Protect the elements
+        // themselves.
+        let outer_arrays = self.array_elements.clone();
+        let array_refs: Vec<String> = outer_refs.iter().cloned().collect();
+        for r in array_refs {
+            if let Some(elems) = outer_arrays.get(&r) {
+                for e in elems {
+                    outer_refs.insert(e.clone());
+                }
+            }
+        }
+
         // Temporarily extend localBindings with body binding names so
         // @ref: to body-internal values can consume on last use.
         let prev_local_bindings = self.local_bindings.clone();
         self.local_bindings = self.local_bindings.union(&body_binding_names).cloned().collect();
-
-        for i in 0..count {
-            // Push the iteration variable value: start + i*step (issue #121).
-            let iter_val = &start_bigint + BigInt::from(i as i128) * &step_bigint;
-            self.emit_op(StackOp::Push(PushValue::Int(iter_val)));
-            self.sm.push(iter_var);
-
-            let mut last_uses = compute_last_uses(body);
-
-            // Prevent outer-scope refs from being consumed by setting their
-            // last-use beyond any body binding index:
-            //  - in non-final iterations: always (the next iteration re-reads them);
-            //  - in the FINAL iteration: when the enclosing scope still references
-            //    them AFTER the loop. Previously the final iteration consumed
-            //    every outer ref at its last body use, so a method param (or
-            //    const) referenced after the loop was gone from the stack and was
-            //    silently lowered to an OP_0/empty push — compilation succeeded,
-            //    the env-based interpreter passed, but the emitted Script failed
-            //    at runtime (silent interpreter <-> Script divergence).
-            let is_final_iteration = i == count - 1;
-            for ref_name in &outer_refs {
-                let used_after_loop = match (loop_binding_index, enclosing_last_uses) {
-                    (Some(idx), Some(elu)) => elu.get(ref_name).map_or(false, |&lu| lu > idx),
-                    _ => false,
-                };
-                if !is_final_iteration || used_after_loop {
-                    last_uses.insert(ref_name.clone(), body.len());
-                }
-            }
-
-            for (j, binding) in body.iter().enumerate() {
-                self.lower_binding(binding, j, &last_uses);
-            }
-
-            // Clean up the iteration variable if it was not consumed by the body.
-            // The body may not reference iter_var at all, leaving it on the stack.
-            //
-            // R-186 / R-292: it is not always on TOP when that happens. A body
-            // whose last binding LEAVES a value — the accumulator
-            // `sum = sum + x`, which rebinds `sum` in place and ends holding it
-            // — buries the iteration variable one slot down. Dropping only at
-            // depth 0 left one slot behind per iteration, until the leak alone
-            // crossed MAX_STACK_DEPTH and the compiler refused a contract with a
-            // working set of three. Removing it wherever it sits is the same
-            // operation `drain_branch_private_residue` performs, spelled the
-            // same way.
-            if self.sm.has(iter_var) {
-                match self.sm.find_depth(iter_var) {
-                    Some(0) => {
-                        self.emit_op(StackOp::Drop);
-                        self.sm.pop();
-                    }
-                    Some(1) => {
-                        self.emit_op(StackOp::Nip);
-                        self.sm.remove_at_depth(1);
-                    }
-                    Some(depth) => {
-                        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
-                        self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth });
-                        self.sm.pop();
-                        let rolled = self.sm.remove_at_depth(depth);
-                        self.sm.push(&rolled);
-                        self.emit_op(StackOp::Drop);
-                        self.sm.pop();
-                    }
-                    None => {}
-                }
-            }
-        }
-        // Restore localBindings
-        self.local_bindings = prev_local_bindings;
-        // Note: loops are statements, not expressions — they don't produce a
-        // physical stack value. Do NOT push a dummy stackMap entry, as it would
-        // desync the stackMap depth from the physical stack.
+        LowerTask::Loop(Box::new(LoopTask {
+            count,
+            body,
+            iter_var,
+            start_bigint,
+            step_bigint,
+            loop_binding_index,
+            enclosing_last_uses: enclosing_last_uses.cloned(),
+            outer_refs,
+            outer_arrays,
+            prev_local_bindings: Some(prev_local_bindings),
+            i: 0,
+            j: None,
+            last_uses: HashMap::new(),
+            loop_loc: None,
+            awaiting_child: false,
+        }))
     }
 
     fn lower_assert(
@@ -3151,7 +3874,7 @@ impl LoweringContext {
                     } else {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
@@ -3185,12 +3908,15 @@ impl LoweringContext {
             if self.sm.has(&prop.name) {
                 self.bring_to_top(&prop.name, true); // consume: raw value dead after serialization
             } else if let Some(ref val) = prop.initial_value {
-                self.push_json_value(val);
+                self.push_json_value(val, &prop.name);
                 self.sm.push("");
             } else {
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
                 self.sm.push("");
             }
+
+            // N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(&prop.prop_type);
 
             // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
             // The width MUST come from `numeric_state_type_width` — the same
@@ -3533,6 +4259,9 @@ impl LoweringContext {
 
             let consume = self.operand_consume(value_ref, &output_operands, binding_index, last_uses);
             self.bring_to_top(value_ref, consume);
+
+            // N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(&prop.prop_type);
 
             // Same table as the reader — see `numeric_state_type_width`.
             let numeric_width = numeric_state_type_width(&prop.prop_type);
@@ -4067,8 +4796,9 @@ impl LoweringContext {
         if self.has_state_section() && self.fixed_state_section_length().is_none() {
             // delta / exact are refined by `pin_code_part_length` once every
             // method has been lowered and the full placeholder set is known.
-            // The defaults here are the SOUND ones: a lower bound of
-            // `emittedLength + 0` holds for any deployment.
+            // The defaults here are the SOUND ones: `exact: false` makes the
+            // field a deploy-time `codePartLenSlots` entry (N-051) that the SDK
+            // patches with the real deployed length.
             self.emit_op(StackOp::VerifyCodePartLen { delta: 0, exact: false });
         }
 
@@ -4430,9 +5160,10 @@ impl LoweringContext {
         let num_props = prop_names.len();
         if num_props == 1 {
             if is_variable_length_state_type(&prop_types[0]) {
-                // Variable-length byte-string: decode push-data prefix, drop trailing empty
+                // Variable-length byte-string: decode push-data prefix; the
+                // remainder must be empty (N-044).
                 self.emit_push_data_decode(); // [..., data, remaining]
-                self.emit_op(StackOp::Drop); self.sm.pop();
+                self.emit_assert_state_consumed(); // [..., data]
             } else if is_numeric_state_type(&prop_types[0]) {
                 self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
             }
@@ -4463,12 +5194,20 @@ impl LoweringContext {
                         self.sm.push("");
                     }
                 } else {
+                    // Last field: it must consume the state section exactly (N-044).
                     if is_variable_length_state_type(&prop_types[i]) {
-                        // Last variable-length field: decode push-data prefix, drop trailing empty
                         self.emit_push_data_decode(); // [..., data, remaining]
-                        self.emit_op(StackOp::Drop); self.sm.pop();
-                    } else if is_numeric_state_type(&prop_types[i]) {
-                        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                        self.emit_assert_state_consumed(); // [..., data]
+                    } else {
+                        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(prop_sizes[i]))));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+                        self.sm.pop(); self.sm.pop();
+                        self.sm.push(""); self.sm.push("");
+                        self.emit_assert_state_consumed(); // [..., field]
+                        if is_numeric_state_type(&prop_types[i]) {
+                            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                        }
                     }
                     self.sm.pop();
                     self.sm.push(&prop_names[i]);
@@ -4926,6 +5665,8 @@ impl LoweringContext {
                     StackOp::Swap,
                 ],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
 
@@ -5051,6 +5792,8 @@ impl LoweringContext {
                 StackOp::Opcode("OP_DIV".to_string()),
             ],
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
 
         self.sm.push(binding_name);
@@ -5573,9 +6316,86 @@ impl LoweringContext {
         match func_name {
             "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),
             "merkleRootHash256" => super::merkle::emit_merkle_root_hash256(emit, depth),
-            "merkleRootPoseidon2KB" => super::poseidon2_merkle::emit_poseidon2_merkle_root(emit, depth),
             _ => panic!("unknown Merkle builtin: {}", func_name),
         }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// merkleRootPoseidon2KB(leaf_0..leaf_7, sib0_0..sib(D-1)_7, index, depth).
+    /// Mirrors Go's `lowerMerkleRootPoseidon2KB` step for step (Go-only-parity
+    /// policy: a non-Go port matches Go byte for byte or refuses). N-237: this
+    /// used to fall into `lower_merkle_root`, whose 4-argument assert made the
+    /// emitter unreachable from `--ir`.
+    fn lower_merkle_root_poseidon2_kb(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        use super::poseidon2_merkle::POSEIDON2_MERKLE_MAX_DEPTH;
+        let n_args = args.len();
+        assert!(
+            n_args >= 10,
+            "merkleRootPoseidon2KB requires at least 10 arguments, got {}",
+            n_args
+        );
+
+        // depth is the LAST argument and must be a compile-time constant.
+        let depth_arg = &args[n_args - 1];
+        let depth = match self.const_values.get(depth_arg).cloned() {
+            Some(ConstValue::Int(n)) => {
+                use num_traits::ToPrimitive;
+                n.to_usize().unwrap_or_else(|| panic!(
+                    "merkleRootPoseidon2KB: depth must be between 1 and {}, got {}",
+                    POSEIDON2_MERKLE_MAX_DEPTH, n
+                ))
+            }
+            _ => panic!(
+                "merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant \
+                 integer literal. Got a runtime value for '{}'.",
+                depth_arg
+            ),
+        };
+        // 32, not 64 (Go R-172): the emitter's own bound.
+        assert!(
+            depth >= 1 && depth <= POSEIDON2_MERKLE_MAX_DEPTH,
+            "merkleRootPoseidon2KB: depth must be between 1 and {}, got {}",
+            POSEIDON2_MERKLE_MAX_DEPTH, depth
+        );
+
+        // 8 leaf + depth*8 proof + index + depth
+        let expected_args = 8 + depth * 8 + 1 + 1;
+        assert!(
+            n_args == expected_args,
+            "merkleRootPoseidon2KB: expected {} arguments (8 leaf + {}*8 proof + index + depth), got {}",
+            expected_args, depth, n_args
+        );
+
+        // Remove depth from the real stack FIRST (compile-time constant, not runtime).
+        if self.sm.has(depth_arg) {
+            self.bring_to_top(depth_arg, true);
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
+        // Bring all runtime args (leaf*8 + proof*depth*8 + index) to the top in order.
+        let runtime_arg_count = n_args - 1;
+        for arg in &args[..runtime_arg_count] {
+            let consume = self.operand_consume(arg, args, binding_index, last_uses);
+            self.bring_to_top(arg, consume);
+        }
+        // The codegen consumes them and leaves root_0..root_7 ...
+        for _ in 0..runtime_arg_count {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
+        super::poseidon2_merkle::emit_poseidon2_merkle_root(emit, depth);
+        // ... which are packed into the single bigint the type system models.
+        super::poseidon2_merkle::emit_poseidon2_root_pack(emit);
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5742,6 +6562,8 @@ impl LoweringContext {
                     StackOp::Opcode("OP_MUL".to_string()),           // exp base (acc*base)
                 ],
                 else_ops: vec![],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
         // Stack: exp base result
@@ -5935,7 +6757,9 @@ impl LoweringContext {
 
         self.emit_op(StackOp::If {
             then_ops: newton_ops,
-            else_ops: vec![],  // n == 0, result is already 0 on stack
+            else_ops: vec![],  // n == 0, result is already 0 on stack,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
 
         self.sm.push(binding_name);
@@ -5991,6 +6815,8 @@ impl LoweringContext {
                 else_ops: vec![
                     // Stack: a b (b == 0), just keep as-is
                 ],
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
         }
 
@@ -6041,15 +6867,20 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// log2(n): exact floor(log2(n)) via bit-scanning.
+    /// log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+    /// user decision R86). No iteration cap: the bit length is read off the
+    /// minimal Script-number encoding.
     ///
-    /// Uses a bounded unrolled loop (64 iterations for bigint range):
-    ///   counter = 0
-    ///   while input > 1: input >>= 1, counter++
-    ///   result = counter
+    ///   OP_BIN2NUM                              n        (minimal re-encoding)
+    ///   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+    ///   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+    ///   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+    ///   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+    ///   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+    ///   OP_NIP                                  b + #{c : t >= c}
     ///
-    /// Stack layout during loop: <input> <counter>
-    /// Each iteration: OP_SWAP OP_DUP 1 OP_GREATERTHAN OP_IF 2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF OP_SWAP
+    /// t = 0 only as the sign-padding byte, where n's bit length is exactly
+    /// 8(s-1). Mirrors `05-stack-lower.ts#lowerLog2`.
     fn lower_log2(
         &mut self,
         binding_name: &str,
@@ -6068,35 +6899,29 @@ impl LoweringContext {
 
         self.sm.pop();
 
-        // Stack: <n>
-        // Push counter = 0
-        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0)))); // n 0
-
-        // 64 iterations (sufficient for Bitcoin Script bigint range)
-        const LOG2_ITERATIONS: usize = 64;
-        for _ in 0..LOG2_ITERATIONS {
-            // Stack: input counter
-            self.emit_op(StackOp::Swap);                                     // counter input
-            self.emit_op(StackOp::Opcode("OP_DUP".to_string()));            // counter input input
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));                  // counter input input 1
-            self.emit_op(StackOp::Opcode("OP_GREATERTHAN".to_string()));     // counter input (input>1)
-            self.emit_op(StackOp::If {
-                then_ops: vec![
-                    StackOp::Push(PushValue::Int(BigInt::from(2))),                        // counter input 2
-                    StackOp::Opcode("OP_DIV".to_string()),                   // counter (input/2)
-                    StackOp::Swap,                                           // (input/2) counter
-                    StackOp::Opcode("OP_1ADD".to_string()),                  // (input/2) (counter+1)
-                    StackOp::Swap,                                           // (counter+1) (input/2)
-                ],
-                else_ops: vec![],
-            });
-            // Stack: counter input (or input counter if swapped back)
-            // After the if: stack is counter input (swap at start, then if-branch swaps back)
-            self.emit_op(StackOp::Swap);                                     // input counter
+        let op = |s: &mut Self, code: &str| s.emit_op(StackOp::Opcode(code.to_string()));
+        op(self, "OP_BIN2NUM");
+        op(self, "OP_DUP");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        op(self, "OP_GREATERTHAN");
+        op(self, "OP_VERIFY");
+        op(self, "OP_SIZE");
+        op(self, "OP_1SUB");
+        op(self, "OP_TUCK");
+        op(self, "OP_SPLIT");
+        op(self, "OP_NIP");
+        op(self, "OP_BIN2NUM");
+        op(self, "OP_SWAP");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
+        op(self, "OP_MUL");
+        op(self, "OP_1SUB");
+        for c in [1i64, 2, 4, 8, 16, 32, 64] {
+            op(self, "OP_OVER");
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(c))));
+            op(self, "OP_GREATERTHANOREQUAL");
+            op(self, "OP_ADD");
         }
-        // Stack: input counter
-        // Drop input, keep counter
-        self.emit_op(StackOp::Nip); // counter
+        op(self, "OP_NIP");
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -6181,7 +7006,7 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
 
 /// Baked value width, in bytes, of every fixed-size constructor-arg type.
 /// Mirrors the `raw`-encoded entries of the shared `STATE_FIELD_WIDTHS` table.
-fn constructor_slot_value_bytes(prop_type: &str) -> Option<i64> {
+pub(crate) fn constructor_slot_value_bytes(prop_type: &str) -> Option<i64> {
     match prop_type {
         "PubKey" => Some(33),
         "Sha256" => Some(32),
@@ -6225,8 +7050,8 @@ fn push_header_len(value_bytes: i64) -> i64 {
 /// A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
 /// placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
 /// Script number) and `ByteString` (arbitrary-length data push) depend on the
-/// VALUE, which the compiler never sees — those return `None` and demote the
-/// pin to a lower bound.
+/// VALUE, which the compiler never sees — those return `None`, and the pin's
+/// length field becomes a deploy-time `codePartLenSlots` entry (N-051).
 fn constructor_slot_growth(prop_type: &str) -> Option<i64> {
     if prop_type == "boolean" {
         return Some(0);
@@ -6237,12 +7062,20 @@ fn constructor_slot_growth(prop_type: &str) -> Option<i64> {
 
 /// Collect every `Placeholder` param index and note whether any
 /// `VerifyCodePartLen` pin is present, recursing into if/else branches.
+///
+/// N-264: pre-order on an explicit stack — inlined private methods nest D*K
+/// if-ops here, too deep to recurse on.
 fn collect_code_part_len_inputs(ops: &[StackOp], placeholders: &mut Vec<usize>, has_pin: &mut bool) {
-    for op in ops {
+    let mut stack: Vec<std::slice::Iter<'_, StackOp>> = vec![ops.iter()];
+    while let Some(iter) = stack.last_mut() {
+        let Some(op) = iter.next() else {
+            stack.pop();
+            continue;
+        };
         match op {
-            StackOp::If { then_ops, else_ops } => {
-                collect_code_part_len_inputs(then_ops, placeholders, has_pin);
-                collect_code_part_len_inputs(else_ops, placeholders, has_pin);
+            StackOp::If { then_ops, else_ops, .. } => {
+                stack.push(else_ops.iter());
+                stack.push(then_ops.iter());
             }
             StackOp::Placeholder { param_index, .. } => placeholders.push(*param_index),
             StackOp::VerifyCodePartLen { .. } => *has_pin = true,
@@ -6252,18 +7085,23 @@ fn collect_code_part_len_inputs(ops: &[StackOp], placeholders: &mut Vec<usize>, 
 }
 
 /// Write the resolved `delta` / `exact` onto every `VerifyCodePartLen` op.
+/// N-264: on an explicit work list (every op gets the same values, so the
+/// visiting order is immaterial).
 fn assign_code_part_len(ops: &mut [StackOp], new_delta: i64, new_exact: bool) {
-    for op in ops.iter_mut() {
-        match op {
-            StackOp::If { then_ops, else_ops } => {
-                assign_code_part_len(then_ops, new_delta, new_exact);
-                assign_code_part_len(else_ops, new_delta, new_exact);
+    let mut work: Vec<&mut [StackOp]> = vec![ops];
+    while let Some(list) = work.pop() {
+        for op in list.iter_mut() {
+            match op {
+                StackOp::If { then_ops, else_ops, .. } => {
+                    work.push(else_ops);
+                    work.push(then_ops);
+                }
+                StackOp::VerifyCodePartLen { delta, exact } => {
+                    *delta = new_delta;
+                    *exact = new_exact;
+                }
+                _ => {}
             }
-            StackOp::VerifyCodePartLen { delta, exact } => {
-                *delta = new_delta;
-                *exact = new_exact;
-            }
-            _ => {}
         }
     }
 }
@@ -6309,7 +7147,8 @@ fn pin_code_part_length(methods: &mut [StackMethod], properties: &[ANFProperty])
             .unwrap_or("");
         match constructor_slot_growth(prop_type) {
             // No compile-time width. Growth is never negative, so the running
-            // sum stays a sound lower bound — just not an exact one.
+            // sum is a lower bound — not the deployed length, which the SDK
+            // patches into the pin's `codePartLenSlots` field (N-051).
             None => exact = false,
             Some(growth) => delta += growth,
         }
@@ -6332,47 +7171,63 @@ fn method_uses_check_preimage(
     bindings: &[ANFBinding],
     private_methods: Option<&HashMap<String, ANFMethod>>,
 ) -> bool {
-    let mut seen: HashSet<String> = HashSet::new();
-    method_uses_check_preimage_rec(bindings, private_methods, &mut seen)
+    some_reachable_binding(bindings, private_methods, |v| matches!(v, ANFValue::CheckPreimage { .. }))
 }
 
-fn method_uses_check_preimage_rec(
+/// True when `pred` holds for some binding reachable from `bindings` through
+/// if arms, loop bodies and (when `private_methods` is given) the bodies of
+/// called private methods, each visited once. N-264: an explicit work list,
+/// not recursion — a chain of D helpers each calling the next under K nested
+/// ifs is D*K levels deep through those edges. Same answer as the recursive
+/// walk, which shared one `seen` set across the whole search.
+fn some_reachable_binding(
     bindings: &[ANFBinding],
     private_methods: Option<&HashMap<String, ANFMethod>>,
-    seen: &mut HashSet<String>,
+    pred: impl Fn(&ANFValue) -> bool,
 ) -> bool {
-    for b in bindings {
-        match &b.value {
-            ANFValue::CheckPreimage { .. } => return true,
-            ANFValue::If { then, else_branch, .. } => {
-                if method_uses_check_preimage_rec(then, private_methods, seen) {
-                    return true;
-                }
-                if method_uses_check_preimage_rec(else_branch, private_methods, seen) {
-                    return true;
-                }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut work: Vec<&[ANFBinding]> = vec![bindings];
+    while let Some(list) = work.pop() {
+        for b in list {
+            if pred(&b.value) {
+                return true;
             }
-            ANFValue::Loop { body, .. } => {
-                if method_uses_check_preimage_rec(body, private_methods, seen) {
-                    return true;
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    work.push(else_branch);
+                    work.push(then);
                 }
-            }
-            ANFValue::MethodCall { method, .. } => {
-                if let Some(privs) = private_methods {
-                    if let Some(target) = privs.get(method) {
-                        if !seen.contains(&target.name) {
-                            seen.insert(target.name.clone());
-                            if method_uses_check_preimage_rec(&target.body, private_methods, seen) {
-                                return true;
-                            }
+                ANFValue::Loop { body, .. } => work.push(body),
+                ANFValue::MethodCall { method, .. } => {
+                    if let Some(target) = private_methods.and_then(|privs| privs.get(method)) {
+                        if seen.insert(target.name.clone()) {
+                            work.push(&target.body);
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     false
+}
+
+/// N-055: the one diagnostic all seven tiers give an `--ir` program whose
+/// `method_call` reaches a private method holding an output intrinsic. The
+/// source frontend inlines such helpers before ANF, so the intrinsic always
+/// sits in the public method; `--ir` has no delegation support.
+const IR_OUTPUT_DELEGATION_ERROR: &str = "output intrinsics must be called from the public method or an inlined helper; --ir method_call delegation is not supported";
+
+/// True if `bindings`, at any `if` / `loop` depth, hold an output intrinsic.
+fn contains_output_intrinsic(bindings: &[ANFBinding]) -> bool {
+    bindings.iter().any(|b| match &b.value {
+        ANFValue::AddOutput { .. } | ANFValue::AddRawOutput { .. } | ANFValue::AddDataOutput { .. } => true,
+        ANFValue::If { then, else_branch, .. } => {
+            contains_output_intrinsic(then) || contains_output_intrinsic(else_branch)
+        }
+        ANFValue::Loop { body, .. } => contains_output_intrinsic(body),
+        _ => false,
+    })
 }
 
 /// Check whether a method has add_output, add_raw_output, or computeStateOutput/
@@ -6412,58 +7267,9 @@ fn method_reads_var_len_state(
     var_len_props: &std::collections::HashSet<String>,
     private_methods: Option<&HashMap<String, ANFMethod>>,
 ) -> bool {
-    let mut seen: HashSet<String> = HashSet::new();
-    method_reads_var_len_state_rec(bindings, var_len_props, private_methods, &mut seen)
-}
-
-fn method_reads_var_len_state_rec(
-    bindings: &[ANFBinding],
-    var_len_props: &std::collections::HashSet<String>,
-    private_methods: Option<&HashMap<String, ANFMethod>>,
-    seen: &mut HashSet<String>,
-) -> bool {
-    for b in bindings {
-        match &b.value {
-            ANFValue::LoadProp { name, .. } => {
-                if var_len_props.contains(name) {
-                    return true;
-                }
-            }
-            ANFValue::If { then, else_branch, .. } => {
-                if method_reads_var_len_state_rec(then, var_len_props, private_methods, seen) {
-                    return true;
-                }
-                if method_reads_var_len_state_rec(else_branch, var_len_props, private_methods, seen)
-                {
-                    return true;
-                }
-            }
-            ANFValue::Loop { body, .. } => {
-                if method_reads_var_len_state_rec(body, var_len_props, private_methods, seen) {
-                    return true;
-                }
-            }
-            ANFValue::MethodCall { method, .. } => {
-                if let Some(privs) = private_methods {
-                    if let Some(target) = privs.get(method) {
-                        if !seen.contains(&target.name) {
-                            seen.insert(target.name.clone());
-                            if method_reads_var_len_state_rec(
-                                &target.body,
-                                var_len_props,
-                                private_methods,
-                                seen,
-                            ) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+    some_reachable_binding(bindings, private_methods, |v| {
+        matches!(v, ANFValue::LoadProp { name, .. } if var_len_props.contains(name))
+    })
 }
 
 /// Whether a method's unlocking script carries the `_codePart` implicit
@@ -6544,7 +7350,7 @@ fn lower_method_with_private_methods(
     }
 
     let mut ctx = LoweringContext::new(&param_names, properties);
-    ctx.private_methods = private_methods.clone();
+    ctx.private_methods = std::rc::Rc::new(private_methods.clone());
     // R-010: when `emit` places the script-level separator, `lower_check_preimage`
     // must NOT emit a per-method one — a later separator would win and re-narrow
     // `scriptCode`, undoing the `_codePart` authentication.
@@ -6566,7 +7372,7 @@ fn lower_method_with_private_methods(
 
     // Pass terminal_assert=true for public methods so the last assert leaves
     // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
-    ctx.lower_bindings(&method.body, method.is_public);
+    ctx.lower_bindings_in(&method.body, method.is_public, private_methods);
 
     // Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
     // Excess items can come from deserialize_state (stateful methods reading
@@ -6619,19 +7425,35 @@ fn lower_method_with_private_methods(
 /// in `catch_unwind`, so the refusal reaches the CLI as `Compilation error:
 /// stack lowering: …` and exit 1, exactly as the odd-length case already did.
 fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
-    if hex_str.is_empty() {
+    // F-268 / CL-BUG-049: this used to index with `&hex_str[i..i + 2]`, a
+    // byte-range slice into a `str`. `hex_str.len()` is already a BYTE
+    // count (same value as `hex_str.as_bytes().len()`), so the length check
+    // above was never the problem — but a non-ASCII byte in the input can
+    // still put `i` or `i + 2` in the middle of a multi-byte UTF-8 character,
+    // and slicing a `str` (unlike a `[u8]`) panics on an off-boundary index
+    // instead of just returning unexpected bytes. Working on `as_bytes()`
+    // directly removes the UTF-8 validity constraint entirely: every `u8` is
+    // a valid input, so indexing is always safe, and a non-hex-digit byte
+    // (which includes every UTF-8 continuation byte) is rejected by
+    // `to_digit(16)` exactly as it already was for ASCII non-hex bytes.
+    let bytes = hex_str.as_bytes();
+    if bytes.is_empty() {
         return Vec::new();
     }
     assert!(
-        hex_str.len() % 2 == 0,
+        bytes.len() % 2 == 0,
         "invalid hex string length: {}",
-        hex_str.len()
+        bytes.len()
     );
-    (0..hex_str.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex_str[i..i + 2], 16)
-                .unwrap_or_else(|_| panic!("invalid hex string: {hex_str}"))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = (pair[0] as char).to_digit(16);
+            let lo = (pair[1] as char).to_digit(16);
+            match (hi, lo) {
+                (Some(h), Some(l)) => ((h as u8) << 4) | (l as u8),
+                _ => panic!("invalid hex string: {hex_str}"),
+            }
         })
         .collect()
 }
@@ -6853,7 +7675,7 @@ mod tests {
         for op in ops {
             match op {
                 StackOp::Opcode(code) => result.push(code.clone()),
-                StackOp::If { then_ops, else_ops } => {
+                StackOp::If { then_ops, else_ops, .. } => {
                     result.push("OP_IF".to_string());
                     result.extend(collect_all_opcodes(then_ops));
                     result.push("OP_ELSE".to_string());
@@ -6877,7 +7699,7 @@ mod tests {
 
     fn collect_opcodes_in_if_branches(ops: &[StackOp]) -> (Vec<String>, Vec<String>) {
         for op in ops {
-            if let StackOp::If { then_ops, else_ops } = op {
+            if let StackOp::If { then_ops, else_ops, .. } = op {
                 return (collect_all_opcodes(then_ops), collect_all_opcodes(else_ops));
             }
         }
@@ -7443,11 +8265,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // log2 uses bit-scanning (OP_DIV + OP_GREATERTHAN), not byte approx
+    // log2 reads the minimal encoding exactly (N-103)
+    //
+    // N-103 (user decision R86, 2026-10-21): this used to pin the 64-iteration
+    // halving loop (OP_DIV / OP_1ADD present, no OP_SIZE / OP_MUL), which
+    // saturated at 64. The lowering is now an exact, branch-free read of the
+    // operand's minimal encoding; this pins that whole sequence. Execution is
+    // covered by conformance/negatives/n103-log2-exact-parity.test.ts.
     // -----------------------------------------------------------------------
 
+    fn n103_log2_window() -> Vec<String> {
+        let mut w: Vec<String> = [
+            "OP_BIN2NUM", "OP_DUP", "PUSH(0)", "OP_GREATERTHAN", "OP_VERIFY",
+            "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+            "OP_SWAP", "PUSH(8)", "OP_MUL", "OP_1SUB",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for c in [1, 2, 4, 8, 16, 32, 64] {
+            w.push("OP_OVER".to_string());
+            w.push(format!("PUSH({})", c));
+            w.push("OP_GREATERTHANOREQUAL".to_string());
+            w.push("OP_ADD".to_string());
+        }
+        w.push("OP_NIP".to_string());
+        w
+    }
+
     #[test]
-    fn test_log2_uses_bit_scanning_not_byte_approx() {
+    fn test_log2_reads_minimal_encoding_exactly() {
         let program = ANFProgram {
             contract_name: "TestLog2".to_string(),
             parent_class: String::new(),
@@ -7501,35 +8348,11 @@ mod tests {
 
         let methods = lower_to_stack(&program).expect("stack lowering should succeed");
         let opcodes = collect_all_opcodes(&methods[0].ops);
-
-        // The bit-scanning implementation must use OP_DIV and OP_GREATERTHAN
+        let want = n103_log2_window();
         assert!(
-            opcodes.contains(&"OP_DIV".to_string()),
-            "log2 should use OP_DIV (bit-scanning), got: {:?}",
-            opcodes
-        );
-        assert!(
-            opcodes.contains(&"OP_GREATERTHAN".to_string()),
-            "log2 should use OP_GREATERTHAN (bit-scanning), got: {:?}",
-            opcodes
-        );
-
-        // The old byte-approximation used OP_SIZE and OP_MUL — must NOT be present
-        assert!(
-            !opcodes.contains(&"OP_SIZE".to_string()),
-            "log2 should NOT use OP_SIZE (old byte approximation), got: {:?}",
-            opcodes
-        );
-        assert!(
-            !opcodes.contains(&"OP_MUL".to_string()),
-            "log2 should NOT use OP_MUL (old byte approximation), got: {:?}",
-            opcodes
-        );
-
-        // Should have OP_1ADD for counter increment
-        assert!(
-            opcodes.contains(&"OP_1ADD".to_string()),
-            "log2 should use OP_1ADD (counter increment), got: {:?}",
+            opcodes.windows(want.len()).any(|w| w == want.as_slice()),
+            "log2 should emit the N-103 sequence {:?}, got: {:?}",
+            want,
             opcodes
         );
     }
@@ -7918,7 +8741,7 @@ mod tests {
                             max_depth
                         );
                     }
-                    StackOp::If { then_ops, else_ops } => {
+                    StackOp::If { then_ops, else_ops, .. } => {
                         check_ops(then_ops, max_depth);
                         check_ops(else_ops, max_depth);
                     }
@@ -8011,12 +8834,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Row 201: log2 emits exactly 64 if-ops with OP_DIV+OP_1ADD
-    // (bit-scanning: 64 iterations, one per bit of a 64-bit integer)
+    // Row 201: log2 is branch-free (N-103). Before N-103 (user decision R86,
+    // 2026-10-21) this pinned exactly 64 if-ops — the halving loop that capped
+    // log2 at 64; the exact encoding read has none.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_log2_emits_64_if_ops() {
+    fn test_log2_emits_no_if_ops() {
         let program = ANFProgram {
             contract_name: "TestLog2Count".to_string(),
             parent_class: String::new(),
@@ -8070,12 +8894,12 @@ mod tests {
 
         let methods = lower_to_stack(&program).expect("stack lowering should succeed");
 
-        // Count OP_IF occurrences — there should be exactly 64 (one per bit)
+        // Count OP_IF occurrences — there should be none
         fn count_if_ops(ops: &[StackOp]) -> usize {
             let mut count = 0;
             for op in ops {
                 match op {
-                    StackOp::If { then_ops, else_ops } => {
+                    StackOp::If { then_ops, else_ops, .. } => {
                         count += 1;
                         count += count_if_ops(then_ops);
                         count += count_if_ops(else_ops);
@@ -8088,8 +8912,8 @@ mod tests {
 
         let if_count = count_if_ops(&methods[0].ops);
         assert_eq!(
-            if_count, 64,
-            "log2 should emit exactly 64 if-ops (one per bit); got {} if-ops",
+            if_count, 0,
+            "log2 should be branch-free; got {} if-ops",
             if_count
         );
     }

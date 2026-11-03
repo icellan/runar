@@ -3,18 +3,42 @@
 //! Truncated pushes are emitted with whatever data is available; no
 //! dedicated finding is produced (spec §6.1).
 
-use super::types::{ParsedOp, PushEncoding, RawScriptSpan};
+use super::types::{AnalyzerError, ParsedOp, PushEncoding, RawScriptSpan};
 
-/// Normalize a hex string: strip whitespace, lowercase.
+/// Normalize a hex string: strip whitespace, lowercase. "Whitespace" here
+/// is exactly what JS's `/\s/g` matches (what the TS reference strips) —
+/// a fixed 25-codepoint set per ECMA-262 (WhiteSpace + LineTerminator) —
+/// not `char::is_whitespace`, which additionally treats U+0085 (NEL) as
+/// whitespace (JS does not) and does not treat U+FEFF (the BOM) as
+/// whitespace (JS does).
 pub fn normalize_hex(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
-        if c.is_whitespace() {
+        if is_js_whitespace(c) {
             continue;
         }
         out.push(c.to_ascii_lowercase());
     }
     out
+}
+
+/// True iff `c` is matched by JS's regex `\s` class. Written with hex
+/// codepoint literals (`char::from_u32`) rather than `'\u{XXXX}'` escapes
+/// to keep this file plain ASCII; verified by enumerating every BMP
+/// codepoint against a live `node` `/\s/` regex.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 // TAB,LF,VT,FF,CR,SPACE
+        | 0xA0   // NBSP
+        | 0x1680 // OGHAM SPACE MARK
+        | 0x2000..=0x200A // EN QUAD..HAIR SPACE
+        | 0x2028 | 0x2029 // LINE/PARAGRAPH SEPARATOR
+        | 0x202F // NARROW NBSP
+        | 0x205F // MEDIUM MATHEMATICAL SPACE
+        | 0x3000 // IDEOGRAPHIC SPACE
+        | 0xFEFF // ZERO WIDTH NO-BREAK SPACE (BOM)
+    )
 }
 
 /// Decode a normalized lowercase hex string into bytes. Returns `None` on
@@ -108,6 +132,8 @@ pub fn opcode_name(byte: u8) -> String {
         0x88 => "OP_EQUALVERIFY".to_string(),
         0x8b => "OP_1ADD".to_string(),
         0x8c => "OP_1SUB".to_string(),
+        0x8d => "OP_2MUL".to_string(), // Chronicle
+        0x8e => "OP_2DIV".to_string(), // Chronicle
         0x8f => "OP_NEGATE".to_string(),
         0x90 => "OP_ABS".to_string(),
         0x91 => "OP_NOT".to_string(),
@@ -141,15 +167,48 @@ pub fn opcode_name(byte: u8) -> String {
         0xad => "OP_CHECKSIGVERIFY".to_string(),
         0xae => "OP_CHECKMULTISIG".to_string(),
         0xaf => "OP_CHECKMULTISIGVERIFY".to_string(),
+        // Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+        0xb3 => "OP_SUBSTR".to_string(),
+        0xb4 => "OP_LEFT".to_string(),
+        0xb5 => "OP_RIGHT".to_string(),
+        0xb6 => "OP_LSHIFTNUM".to_string(),
+        0xb7 => "OP_RSHIFTNUM".to_string(),
         b => format!("OP_UNKNOWN(0x{:02x})", b),
     }
 }
 
 /// Parse a normalized hex script into the opcode list. Returns the parsed
-/// operations. Truncation is silent.
-pub fn parse_script(hex: &str) -> Vec<ParsedOp> {
-    let bytes = decode_hex(hex).unwrap_or_default();
-    parse_bytes(&bytes)
+/// operations, or `AnalyzerError::InvalidHex` — with the TS reference's
+/// exact diagnostic text — if `hex` has odd length or contains a
+/// non-hex-digit character (N-176: this used to fall back to
+/// `decode_hex(..).unwrap_or_default()`, silently treating the invalid
+/// input as an empty byte stream). Truncation of a well-formed but
+/// incomplete push is still silent (spec §6.1); that is unrelated to hex
+/// decoding and is unaffected by this check.
+pub fn parse_script(hex: &str) -> Result<Vec<ParsedOp>, AnalyzerError> {
+    let bytes = decode_hex(hex).ok_or_else(|| invalid_hex_error(hex))?;
+    Ok(parse_bytes(&bytes))
+}
+
+/// Build the TS reference's exact diagnostic for why `decode_hex` rejected
+/// `hex`. Re-scans to distinguish the two cases `hexToBytes` throws on:
+/// odd length ("Invalid hex string: odd length (N)") or the first
+/// non-hex-digit character ("Invalid hex character: X").
+fn invalid_hex_error(hex: &str) -> AnalyzerError {
+    if !hex.len().is_multiple_of(2) {
+        return AnalyzerError::InvalidHex(format!(
+            "Invalid hex string: odd length ({})",
+            hex.len()
+        ));
+    }
+    for b in hex.bytes() {
+        if hex_digit(b).is_none() {
+            return AnalyzerError::InvalidHex(format!("Invalid hex character: {}", b as char));
+        }
+    }
+    // decode_hex only returns None for the two cases above, so this is
+    // unreachable in practice; kept total rather than panicking.
+    AnalyzerError::InvalidHex("invalid hex".to_string())
 }
 
 fn parse_bytes(bytes: &[u8]) -> Vec<ParsedOp> {

@@ -6,7 +6,7 @@ import "fmt"
 //
 // - NO_SIG_CHECK: one warning per reachable path with hasCheckSig=false.
 // - CHECKSIG_RESULT_DROPPED: one warning per OP_CHECKSIG or
-//   OP_CHECKMULTISIG immediately followed by OP_DROP.
+//   OP_CHECKMULTISIG immediately followed by OP_DROP or OP_2DROP.
 func analyzeSigHygiene(ops []Opcode, paths []ExecutionPath) []Finding {
 	var out []Finding
 	for _, p := range paths {
@@ -32,7 +32,7 @@ func analyzeSigHygiene(ops []Opcode, paths []ExecutionPath) []Finding {
 		if !isSigOp {
 			continue
 		}
-		if byte(nxt.Opcode) != opDrop {
+		if byte(nxt.Opcode) != opDrop && byte(nxt.Opcode) != op2Drop {
 			continue
 		}
 		out = append(out, Finding{

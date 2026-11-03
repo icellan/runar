@@ -14,7 +14,6 @@ import { ScriptExecutionContract } from '../script-execution.js';
 import {
   slhKeygen, slhSign, SLH_SHA2_128s,
 } from '../crypto/slh-dsa.js';
-import { runSlowTests } from '../test-env.js';
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
@@ -33,7 +32,7 @@ class W extends SmartContract {
 }
 `;
 
-describe.skipIf(!runSlowTests)('SLH-DSA-SHA2-128s dual-oracle', () => {
+describe('SLH-DSA-SHA2-128s dual-oracle', () => {
   const params = SLH_SHA2_128s;
   const seed = new Uint8Array(3 * params.n);
   seed[0] = 0x42;

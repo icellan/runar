@@ -21,8 +21,10 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/bsv-blockchain/go-sdk/chainhash"
 	bsvscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // VMResult is the outcome of a full script execution.
@@ -61,8 +63,9 @@ type StepResult struct {
 // VMOptions configures a ScriptVM. All fields are optional; the zero value
 // is a usable post-genesis VM.
 type VMOptions struct {
-	// ForkID enables BSV sighash fork-id semantics. Off by default — pure
-	// script execution (no transaction context) does not need it.
+	// ForkID sets the interpreter's EnableSighashForkID flag (which also
+	// turns on strict signature/pubkey encoding). Off by default; a FORKID
+	// signature is still verified against its BIP-143 preimage without it.
 	ForkID bool
 }
 
@@ -168,6 +171,12 @@ func (vm *ScriptVM) IsSuccess() bool {
 	return vm.result != nil && vm.result.Success
 }
 
+// Result returns the full-execution outcome of the last Load/Execute (nil if
+// nothing is loaded). Its Error field carries the interpreter error, which is
+// the only diagnostic when a script fails before its first opcode (e.g. a
+// malformed push), so the trace is empty.
+func (vm *ScriptVM) Result() *VMResult { return vm.result }
+
 // Stack returns the current main stack (after the last stepped opcode, or
 // the final stack if stepping is complete / one-shot Execute was used).
 func (vm *ScriptVM) Stack() [][]byte {
@@ -209,7 +218,10 @@ func (vm *ScriptVM) run(unlocking, locking []byte) ([]StepResult, *VMResult, err
 
 	rec := &recordingDebugger{}
 
+	tx, prevOut := syntheticSpendTx(lockingScript)
+
 	execOpts := []interpreter.ExecutionOptionFunc{
+		interpreter.WithTx(tx, 0, prevOut),
 		interpreter.WithScripts(lockingScript, unlockingScript),
 		interpreter.WithAfterGenesis(),
 		interpreter.WithDebugger(rec),
@@ -236,6 +248,30 @@ func (vm *ScriptVM) run(unlocking, locking []byte) ([]StepResult, *VMResult, err
 		result.Success = rec.success
 	}
 	return rec.trace, result, err
+}
+
+// syntheticSpendTx builds the transaction context signature-checking opcodes
+// need. The go-sdk parser rejects OP_CHECKSIG / OP_CHECKMULTISIG (and their
+// VERIFY forms) at parse time when no tx is supplied. The context mirrors the
+// TS ScriptVM's SYNTHETIC_SPEND_CONTEXT (packages/runar-testing/src/vm/
+// script-vm.ts) so a signature built for one validates on the other: a
+// version-1, single-input, zero-output spend of output 0 of the all-zero txid,
+// worth 100000 satoshis, sequence 0xffffffff, locktime 0. A fresh tx is built
+// per run because the interpreter writes the source output onto the input.
+func syntheticSpendTx(lockingScript *bsvscript.Script) (*transaction.Transaction, *transaction.TransactionOutput) {
+	prevOut := &transaction.TransactionOutput{
+		Satoshis:      100_000,
+		LockingScript: lockingScript,
+	}
+	tx := transaction.NewTransaction()
+	tx.Version = 1
+	tx.LockTime = 0
+	tx.Inputs = []*transaction.TransactionInput{{
+		SourceTXID:       &chainhash.Hash{},
+		SourceTxOutIndex: 0,
+		SequenceNumber:   0xffffffff,
+	}}
+	return tx, prevOut
 }
 
 // recordingDebugger implements interpreter.Debugger and snapshots VM state

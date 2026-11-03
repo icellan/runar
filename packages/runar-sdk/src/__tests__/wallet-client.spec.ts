@@ -70,11 +70,3 @@ describe.skipIf(!ENDPOINT)('BRC-100 WalletClient live endpoint', () => {
     }
   }, 60_000);
 });
-
-// Provide a sentinel test so the file is non-empty when the suite is skipped,
-// and shows up in vitest output as discovered-but-skipped rather than empty.
-describe.skipIf(ENDPOINT)('BRC-100 WalletClient live endpoint (skipped)', () => {
-  it.skip('RUNAR_WALLET_ENDPOINT not set — set it to a BRC-100 wallet URL to enable', () => {
-    /* placeholder */
-  });
-});

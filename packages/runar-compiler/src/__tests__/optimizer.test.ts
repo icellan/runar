@@ -1,7 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { foldConstants, eliminateDeadBindings } from '../optimizer/constant-fold.js';
 import { optimizeStackIR } from '../optimizer/peephole.js';
+import { compile, compileFromANF, loadANFFromJSON } from '../index.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ANFProgram, ANFBinding, ANFMethod, ANFValue, StackOp } from '../ir/index.js';
+import { emitMethod } from '../passes/06-emit.js';
+// @ts-expect-error vitest resolves this via alias (runar-testing is not a tsc dep of runar-compiler)
+import { ScriptVM, bytesToHex } from 'runar-testing';
+
+/** N-065: the ANF the (now refused) N-064 collision probes lowered to. */
+const N064_COLLISION_ANF = JSON.parse(
+  readFileSync(join(__dirname, '../../../../conformance/negatives/n064-collision-anf.json'), 'utf8'),
+) as { probes: Array<{ name: string; source: string; ir: unknown }> };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -297,6 +308,67 @@ describe('Optimizer: Constant Folding', () => {
       const folded = foldConstants(program);
       expect(folded.methods[0]!.body[2]!.value).toEqual({ kind: 'load_const', value: true });
     });
+
+    // F-160: ByteString equality is OP_EQUAL over the DECODED bytes, and hex
+    // decoding is case-insensitive, so 'aa' and 'AA' push the same byte. The
+    // folder compared the hex source text, folded `'aa' === 'AA'` to false and
+    // compiled the else arm under fold-ON while the fold-OFF script runs the
+    // then arm.
+    // What this proves: the folder answers `===` / `!==` on mixed-case hex the
+    // way OP_EQUAL does, and on the real @bsv/sdk interpreter (ScriptVM) the
+    // fold-ON and fold-OFF scripts of the same source accept exactly the same
+    // unlocking input (x = 1, the then arm) and reject the same one (x = 2).
+    // What it does NOT prove: the six peer tiers (each has its own unit case,
+    // and conformance/negatives/f160-bytestring-case-fold-parity.test.ts pins
+    // every tier's fold-ON bytes), or ByteString comparisons the folder does
+    // not reach (a local bound to a literal is an `@ref:` alias it does not
+    // follow).
+    it('folds ByteString equality over decoded bytes, ignoring hex case (F-160)', () => {
+      const fold = (op: '===' | '!==') => foldConstants(makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 'aa' }),
+          b('t1', { kind: 'load_const', value: 'AA' }),
+          b('t2', { kind: 'bin_op', op, left: 't0', right: 't1' }),
+        ]),
+      ])).methods[0]!.body[2]!.value;
+      expect(fold('===')).toEqual({ kind: 'load_const', value: true });
+      expect(fold('!==')).toEqual({ kind: 'load_const', value: false });
+    });
+
+    it("fold-ON and fold-OFF scripts of `'aa' === 'AA'` select the same arm on-chain (F-160)", () => {
+      const source = `import { SmartContract, assert } from 'runar-lang';
+
+class CaseFold extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock(x: bigint) {
+    if ('aa' === 'AA') {
+      assert(x === 1n);
+    } else {
+      assert(x === 2n);
+    }
+  }
+}
+`;
+      const bytes = (hex: string) => Uint8Array.from(hex.match(/../g)!.map((h) => Number.parseInt(h, 16)));
+      const hexFor = (disableConstantFolding: boolean): string => {
+        const r = compile(source, { fileName: 'CaseFold.runar.ts', disableConstantFolding });
+        expect(r.success).toBe(true);
+        return r.scriptHex!;
+      };
+      // Unlocking script: OP_1 (x = 1, the then arm) or OP_2 (x = 2, the else arm).
+      const accepts = (locking: string, unlocking: string) =>
+        new ScriptVM().execute(bytes(unlocking), bytes(locking)).success;
+      const off = hexFor(true);
+      const on = hexFor(false);
+      // The fold-OFF script is the on-chain truth: OP_EQUAL over 0xaa / 0xaa.
+      expect(accepts(off, '51')).toBe(true);
+      expect(accepts(off, '52')).toBe(false);
+      expect(accepts(on, '51')).toBe(true);
+      expect(accepts(on, '52')).toBe(false);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -382,6 +454,58 @@ describe('Optimizer: Constant Folding', () => {
       const folded = foldConstants(program);
       expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
     });
+
+    // N-064: a name can be bound more than once (a reassignment, or a user
+    // local that shares an earlier compiler temp's name). The env must track
+    // the LATEST binding, so a rebinding to a non-constant drops the old
+    // constant. Proves: after x = 1, rebinding x to a param or to an @ref
+    // alias leaves `x + 1` unfolded. Does not prove anything about if/loop
+    // arms (see the if-branch / loop tests) or the emitted script (the
+    // end-to-end Spend proof is runar-testing's n064 test).
+    it('drops a stale constant when the name is rebound to a load_param (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 1n }),
+          b('x', { kind: 'load_param', name: 'p' }),
+          b('t1', { kind: 'load_const', value: 1n }),
+          b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[3]!.value.kind).toBe('bin_op');
+    });
+
+    it('drops a stale constant when the name is rebound to an @ref alias (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 1n }),
+          b('p0', { kind: 'load_param', name: 'p' }),
+          b('x', { kind: 'load_const', value: '@ref:p0' }),
+          b('t1', { kind: 'load_const', value: 1n }),
+          b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[4]!.value.kind).toBe('bin_op');
+    });
+
+    it('a user local named like an earlier temp does not fold with the temp\'s constant (N-064)', () => {
+      // `assert(p > 0n); let t1: bigint = p; assert(t1 + 1n === 1n);` — the
+      // `0n` lowers to temp t1, then the user local rebinds t1. Folded with
+      // the stale t1 = 0 the guard became OP_TRUE and accepted any p > 0.
+      //
+      // N-065: that source is now refused (a local may not be spelled like an
+      // ANF temp), so the collision ANF it lowered to is replayed directly
+      // from the shared corpus. It is the exact binding list the source
+      // produced; before N-064 folding it gave `7600a0695151515177777777`.
+      const probe = N064_COLLISION_ANF.probes.find((p) => p.name === 'Rebind')!;
+      expect(compile(probe.source, { fileName: 'Rebind.runar.ts' }).success).toBe(false);
+      const load = () => loadANFFromJSON(JSON.stringify(probe.ir));
+      const off = compileFromANF(load()).scriptHex;
+      const on = compileFromANF(foldConstants(load())).scriptHex;
+      expect(off).toBe('76007c78a0697c8b519c77');
+      expect(on).toBe(off);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -461,6 +585,32 @@ describe('Optimizer: Constant Folding', () => {
       expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
     });
 
+    // N-064: an arm that rebinds a name the enclosing env holds as a constant
+    // changes that name's value after the if (it is how a branch reassigns a
+    // local), so the pre-if constant must not survive the if. Proves: the
+    // fold of `x + 1` after the if is not done with the stale x = 0.
+    it('drops a constant the if rebinds in an arm (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 0n }),
+          b('c', { kind: 'load_param', name: 'c' }),
+          b('t1', {
+            kind: 'if',
+            cond: 'c',
+            then: [
+              b('t2', { kind: 'load_param', name: 'p' }),
+              b('x', { kind: 'load_const', value: '@ref:t2' }),
+            ],
+            else: [],
+          }),
+          b('t3', { kind: 'load_const', value: 1n }),
+          b('t4', { kind: 'bin_op', op: '+', left: 'x', right: 't3' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[4]!.value.kind).toBe('bin_op');
+    });
+
     it('folds constants inside both branches when condition is unknown', () => {
       const program = makeProgram([
         makeMethod('m', [
@@ -509,6 +659,42 @@ describe('Optimizer: Constant Folding', () => {
       if (loopValue.kind === 'loop') {
         expect(loopValue.body[0]!.value).toEqual({ kind: 'load_const', value: 30n });
       }
+    });
+  });
+
+  describe('loop folding: names the body rebinds (N-064)', () => {
+    // The body is emitted once per iteration, so a read before the body's own
+    // rebinding sees the ENTRY value only in iteration 0. A name the body
+    // rebinds is not a constant inside the body, nor after the loop. Proves:
+    // neither the in-body nor the post-loop `x + 1` folds with x = 0.
+    it('does not fold a body-rebound name inside the body or after the loop', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 0n }),
+          b('t0', {
+            kind: 'loop',
+            count: 2,
+            iterVar: 'i',
+            start: 0n,
+            step: 1,
+            body: [
+              b('t1', { kind: 'load_const', value: 1n }),
+              b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+              b('t3', { kind: 'load_param', name: 'p' }),
+              b('x', { kind: 'load_const', value: '@ref:t3' }),
+            ],
+          }),
+          b('t4', { kind: 'load_const', value: 1n }),
+          b('t5', { kind: 'bin_op', op: '+', left: 'x', right: 't4' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      const loopValue = folded.methods[0]!.body[1]!.value;
+      expect(loopValue.kind).toBe('loop');
+      if (loopValue.kind === 'loop') {
+        expect(loopValue.body[1]!.value.kind).toBe('bin_op');
+      }
+      expect(folded.methods[0]!.body[3]!.value.kind).toBe('bin_op');
     });
   });
 
@@ -730,14 +916,17 @@ describe('Optimizer: Peephole (Stack IR)', () => {
       expect(result).toEqual([{ op: 'push', value: 1n }]);
     });
 
-    it('removes OP_NEGATE OP_NEGATE', () => {
+    it('keeps OP_NEGATE OP_NEGATE (F-001: OP_NEGATE validates/normalises its operand)', () => {
+      // Sound to drop only over a canonical producer like this constant; the
+      // rule has no producer guard (see peephole.ts), so it never fires — the
+      // ANF constant folder covers the constant case.
       const ops: StackOp[] = [
         { op: 'push', value: 42n },
         { op: 'opcode', code: 'OP_NEGATE' },
         { op: 'opcode', code: 'OP_NEGATE' },
       ];
       const result = optimizeStackIR(ops);
-      expect(result).toEqual([{ op: 'push', value: 42n }]);
+      expect(result).toEqual(ops);
     });
   });
 
@@ -1128,33 +1317,157 @@ describe('Optimizer: Peephole (Stack IR)', () => {
 
   // -----------------------------------------------------------------------
   // Opcode-string Roll/Pick forms
-  // SLH-DSA codegen emits Opcode("OP_ROLL") string form instead of typed
-  // Roll/Pick ops. The peephole optimizer currently does NOT reduce these
-  // (it only reduces the typed roll/pick forms above).
+  //
+  // F-353 (resolved 2026-10) established that opcode-string push+ROLL/PICK
+  // at the depths the typed rules cover (0/1/2 for ROLL, 0/1 for PICK) does
+  // not occur on any live TS codegen path, and is behaviourally identical to
+  // the typed form when it is constructed synthetically (see
+  // 'string-form Roll/Pick execution equivalence' below). F-353 left the
+  // peephole rules typed-only on that basis ("generalizing would be
+  // speculative code for zero benefit").
+  //
+  // F-392 revisits that call: the generalization is not speculative, it is
+  // a real cross-tier inconsistency. `compilers/python/.../optimizer.py` and
+  // `compilers/ruby/.../optimizer.rb` already match EITHER the typed node OR
+  // the opcode-string form for all five rules (explicitly commented "typed
+  // or string-form"); `compilers/go`, `compilers/rust`, and
+  // `compilers/java` match only the typed form, the same gap this file had.
+  // Since the pattern is proven byte-neutral (zero live occurrences in any
+  // tier's codegen, confirmed empirically via the full conformance corpus in
+  // both constant-folding modes, plus the whole `packages/runar-compiler`
+  // unit-test corpus), there is no reason for TS/Go/Rust/Java to special-case
+  // fewer representations of the same stack effect than Python/Ruby already
+  // do -- so this file, and the Go/Rust/Java peepholes, now match both forms
+  // too, using Python/Ruby's predicate.
+  //
+  // `compilers/zig` is excluded: its unified instruction stream cannot
+  // distinguish a typed depth-1/depth-2 roll from an untyped post-if
+  // reconciliation roll (`push d + roll(depth=d+1) + drop`), so folding
+  // PUSH(1)/PUSH(2) + ROLL there risks a miscompile, not just a missed
+  // optimization (see `compilers/zig/src/passes/peephole.zig` Rule 18/19
+  // comment). That is a pre-existing, independently-documented divergence,
+  // not something this item changes.
   // -----------------------------------------------------------------------
 
-  describe('opcode-string Roll/Pick forms', () => {
-    it('does NOT optimize PUSH(0) + opcode OP_ROLL (string form, typed form is optimized)', () => {
-      // Typed roll{0} is optimized away. Opcode-string OP_ROLL is not.
-      // POTENTIAL BUG: OP_ROLL string form and OP_PICK string form are not
-      // reduced by the same rules as typed Roll/Pick ops. Go/Rust/Python
-      // compilers may handle this differently.
+  describe('opcode-string Roll/Pick forms (F-392: now optimized, same as typed form)', () => {
+    it('optimizes PUSH(0) + opcode OP_ROLL the same as typed roll{0}', () => {
       const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
       expect(optimizeStackIR(typedOps)).toEqual([]);
 
       const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_ROLL' }];
-      // Currently passes through unchanged (not optimized)
-      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+      expect(optimizeStackIR(stringOps)).toEqual([]);
     });
 
-    it('does NOT optimize PUSH(0) + opcode OP_PICK (string form, typed form is optimized)', () => {
-      // Typed pick{0} → dup. Opcode-string OP_PICK is not reduced.
+    it('optimizes PUSH(1) + opcode OP_ROLL the same as typed roll{1} (-> swap)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'roll', depth: 1 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'swap' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'opcode', code: 'OP_ROLL' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'swap' }]);
+    });
+
+    it('optimizes PUSH(2) + opcode OP_ROLL the same as typed roll{2} (-> rot)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'roll', depth: 2 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'rot' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'opcode', code: 'OP_ROLL' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'rot' }]);
+    });
+
+    it('optimizes PUSH(0) + opcode OP_PICK the same as typed pick{0} (-> dup)', () => {
       const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'pick', depth: 0 }];
       expect(optimizeStackIR(typedOps)).toEqual([{ op: 'dup' }]);
 
       const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }];
-      // Currently passes through unchanged (not optimized)
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'dup' }]);
+    });
+
+    it('optimizes PUSH(1) + opcode OP_PICK the same as typed pick{1} (-> over)', () => {
+      const typedOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'pick', depth: 1 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'over' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 1n }, { op: 'opcode', code: 'OP_PICK' }];
+      expect(optimizeStackIR(stringOps)).toEqual([{ op: 'over' }]);
+    });
+
+    // Depths the typed rules do NOT cover (2 for PICK, 3 for ROLL -- the
+    // depths wots-codegen.ts and the pow() loop actually use) still pass
+    // through unreduced in both forms: this item only teaches the rules
+    // that already exist a second input representation, it does not add
+    // new depths.
+    it('does NOT optimize PUSH(2) + opcode OP_PICK (no typed rule at this depth either)', () => {
+      const stringOps: StackOp[] = [{ op: 'push', value: 2n }, { op: 'opcode', code: 'OP_PICK' }];
       expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+    });
+
+    it('does NOT optimize PUSH(3) + opcode OP_ROLL (no typed rule at this depth either)', () => {
+      const stringOps: StackOp[] = [{ op: 'push', value: 3n }, { op: 'opcode', code: 'OP_ROLL' }];
+      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // F-353: string-form Roll/Pick execution equivalence
+  //
+  // The comment above (before this fix) flagged the un-reduced opcode-string
+  // Roll/Pick sequences as a "POTENTIAL BUG". These tests settle the actual
+  // question -- is the un-reduced form a MISCOMPILE (different runtime
+  // behaviour) or merely a missed optimization (same behaviour, more bytes)?
+  // -- by running both the un-reduced sequence and its typed-rule equivalent
+  // through the real @bsv/sdk Spend engine (via ScriptVM, not the ANF
+  // interpreter or TestContract, which share the compiler's own model) and
+  // comparing the full final stack. They PASS at HEAD: that is the correct,
+  // expected result, and is the proof that closes this item.
+  //
+  // What this proves: the three un-reduced sequences below execute
+  // identically to their typed-rule replacements on the production script
+  // interpreter -- OP_0 OP_ROLL is a true no-op, OP_0 OP_PICK behaves like
+  // OP_DUP, and OP_2 OP_ROLL behaves like OP_ROT. There is no hidden runtime
+  // divergence.
+  //
+  // What this does NOT prove: that every string-form Roll/Pick depth is
+  // behaviourally safe (only the three depths tested are covered; the
+  // general claim follows from Bitcoin Script's OP_ROLL/OP_PICK semantics,
+  // not from exhaustive testing). The tests below feed the un-reduced ops
+  // straight to `emitMethod`, bypassing `optimizeStackIR`, so they are
+  // unaffected by F-392's peephole change (see the describe block above,
+  // which now DOES reduce these forms) -- they remain a direct check that
+  // the raw opcode-string bytes execute correctly regardless of whether the
+  // optimizer ever sees them.
+  // -----------------------------------------------------------------------
+
+  describe('string-form Roll/Pick execution equivalence (F-353)', () => {
+    function emitOps(ops: StackOp[]): string {
+      return emitMethod({ name: 'f353', ops, maxStackDepth: 0 }).scriptHex;
+    }
+    function runEffect(ops: StackOp[]): { success: boolean; stack: string[] } {
+      const r = new ScriptVM().executeHex(emitOps(ops));
+      return { success: r.success, stack: r.stack.map(bytesToHex) };
+    }
+
+    it('PUSH(0) + opcode OP_ROLL executes identically to a true no-op (typed roll{0})', () => {
+      const witness: StackOp[] = [{ op: 'push', value: 11n }, { op: 'push', value: 22n }];
+      const unreduced = runEffect([...witness, { op: 'push', value: 0n }, { op: 'opcode', code: 'OP_ROLL' }]);
+      const noop = runEffect(witness);
+      expect(unreduced).toEqual(noop);
+    });
+
+    it('PUSH(0) + opcode OP_PICK executes identically to OP_DUP (typed pick{0})', () => {
+      const witness: StackOp[] = [{ op: 'push', value: 11n }, { op: 'push', value: 22n }];
+      const unreduced = runEffect([...witness, { op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }]);
+      const dup = runEffect([...witness, { op: 'dup' }]);
+      expect(unreduced).toEqual(dup);
+    });
+
+    it('PUSH(2) + opcode OP_ROLL executes identically to OP_ROT (typed roll{2}) -- covers the dead emitCheckPreimageBindingLegacy shape, unreachable from compile() but still checked for safety', () => {
+      const witness: StackOp[] = [
+        { op: 'push', value: 11n },
+        { op: 'push', value: 22n },
+        { op: 'push', value: 33n },
+      ];
+      const unreduced = runEffect([...witness, { op: 'push', value: 2n }, { op: 'opcode', code: 'OP_ROLL' }]);
+      const rotated = runEffect([...witness, { op: 'rot' }]);
+      expect(unreduced).toEqual(rotated);
     });
   });
 

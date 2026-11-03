@@ -106,6 +106,46 @@ class TestParserZig < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
+  # runar.BigintBig (N-182 / R93)
+  # ---------------------------------------------------------------------------
+
+  # Proves: the 256-bit native spelling runar.BigintBig (u256 in
+  # packages/runar-zig, used for EC coordinates) lowers to the same AST bigint
+  # as runar.Bigint, for a property and a parameter. Does NOT prove the native
+  # u256 runtime or any codegen.
+  def test_bigint_big_maps_to_bigint
+    source = <<~ZIG
+      const runar = @import("runar");
+
+      pub const BigCoord = struct {
+          pub const Contract = runar.SmartContract;
+
+          x: runar.BigintBig,
+
+          pub fn init(x: runar.BigintBig) BigCoord {
+              return .{ .x = x };
+          }
+
+          pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+              runar.assert(self.x == y);
+          }
+      };
+    ZIG
+
+    result = parse(source, 'BigCoord.runar.zig')
+    assert_empty result.errors.map(&:format_message)
+
+    c = result.contract
+    refute_nil c
+    assert_instance_of PrimitiveType, c.properties[0].type
+    assert_equal 'bigint', c.properties[0].type.name
+    check = c.methods.find { |m| m.name == 'check' }
+    assert_equal 1, check.params.length
+    assert_instance_of PrimitiveType, check.params[0].type
+    assert_equal 'bigint', check.params[0].type.name
+  end
+
+  # ---------------------------------------------------------------------------
   # Public vs private visibility
   # ---------------------------------------------------------------------------
 
@@ -205,5 +245,63 @@ class TestParserZig < Minitest::Test
     assert_equal 2, ctor.params.length
     assert_equal 'a', ctor.params[0].name
     assert_equal 'b', ctor.params[1].name
+  end
+
+  # ---------------------------------------------------------------------------
+  # N-090: runar.hexToBytes("...") lowers to a ByteString literal
+  # ---------------------------------------------------------------------------
+  #
+  # Proves: the Ruby Zig-surface parser lowers `runar.hexToBytes("<hex>")` to a
+  # ByteStringLiteral carrying the hex verbatim (as 01-parse-zig.ts, the Zig
+  # tier and Python do), so it is accepted as a property initializer; a
+  # non-literal argument is refused with TS's diagnostic; the checked-in
+  # Zig-surface TicTacToe compiles to the same script as the TS-surface
+  # TicTacToe in this tier.
+  # Does NOT prove: identity with the TS compiler (pinned by the
+  # hex-to-bytes-initializer conformance fixture and the remediation sweep),
+  # or that the hex payload is well-formed (TS does not check it either).
+
+  HEX_TO_BYTES_SOURCE = <<~ZIG
+    const runar = @import("runar");
+
+    pub const H = struct {
+        pub const Contract = runar.SmartContract;
+
+        prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+        x: runar.ByteString,
+
+        pub fn init(x: runar.ByteString) H {
+            return .{ .x = x };
+        }
+
+        pub fn verify(self: *const H, b: runar.ByteString) void {
+            runar.assert(runar.bytesEq(runar.cat(self.prefix, self.x), b));
+        }
+    };
+  ZIG
+
+  def test_hex_to_bytes_initializer_is_bytestring_literal
+    result = parse(HEX_TO_BYTES_SOURCE, 'H.runar.zig')
+    assert_empty result.errors.map(&:format_message)
+    prefix = result.contract.properties.find { |p| p.name == 'prefix' }
+    refute_nil prefix
+    assert_instance_of ByteStringLiteral, prefix.initializer
+    assert_equal '1976a914', prefix.initializer.value
+  end
+
+  def test_hex_to_bytes_non_literal_argument_is_refused
+    source = HEX_TO_BYTES_SOURCE.sub('runar.hexToBytes("1976a914")', 'runar.hexToBytes(x)')
+    result = parse(source, 'H.runar.zig')
+    msgs = result.errors.map(&:format_message)
+    assert msgs.any? { |m| m.include?('runar.hexToBytes expects a string literal argument') },
+           "expected TS's diagnostic, got #{msgs.inspect}"
+  end
+
+  def test_tic_tac_toe_zig_example_compiles_like_the_ts_surface
+    examples = File.expand_path('../../../examples', __dir__)
+    zig = RunarCompiler.compile_from_source(File.join(examples, 'zig/tic-tac-toe/TicTacToe.runar.zig'))
+    ts = RunarCompiler.compile_from_source(File.join(examples, 'ts/tic-tac-toe/TicTacToe.runar.ts'))
+    refute_empty zig.script
+    assert_equal ts.script, zig.script
   end
 end

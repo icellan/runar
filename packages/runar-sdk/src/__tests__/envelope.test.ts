@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import {
 import type { SignedEnvelope, EnvelopeSigner } from '../envelope.js';
 import { MAX_ENVELOPE_PAYLOAD_DEPTH } from '../envelope.js';
 import type { RunarArtifact } from 'runar-ir-schema';
+import { InputLimits } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Test signer — signs precomputed digests directly via raw ECDSA, matching
@@ -279,9 +280,11 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
   });
 
   // R-115 / CL-BUG-066. The fixture's `v23-lone-surrogate-payload-bad-json`
-  // vector covers the six tiers whose verify takes an injectable clock; the TS
-  // verify reads `Date.now()` directly, so it gets the same envelope built
-  // around a live clock instead.
+  // vector covers the six tiers whose verify takes an injectable clock. TS's
+  // verifyEnvelope now also accepts an injectable `nowMs` (F-359 —
+  // f359-envelope-interop-fixture.test.ts replays the committed vector
+  // directly through it); this test predates that option and still builds
+  // the same envelope shape around a live clock instead.
   it('rejects a payload containing an unpaired surrogate with bad-json', () => {
     const now = Date.now();
     const payload = `{"expiresAt":${now + 60_000},"msg":"x\\ud800y","nonce":${now}}`;
@@ -340,10 +343,11 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
 //
 // Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT with
 // a NON-RECURSIVE bracket scan run before the stock parser, so the answer is
-// the same everywhere and the guard itself cannot overflow. TS's verify reads
-// `Date.now()` directly rather than taking an injectable clock, so — as with
-// the R-115 lone-surrogate vector — it replays the fixture's SHAPE around a
-// live clock instead of the fixture's frozen envelope.
+// the same everywhere and the guard itself cannot overflow. TS's verifyEnvelope
+// now also accepts an injectable `nowMs` (F-359), but — as with the R-115
+// lone-surrogate vector above — this file predates that option and still
+// replays the fixture's SHAPE around a live clock rather than the fixture's
+// frozen `depth_vectors` envelopes.
 // ---------------------------------------------------------------------------
 
 describe('verifyEnvelope payload depth bound (R-260)', () => {
@@ -464,6 +468,47 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// F-296 — the DoS size bound ('too-large') is pinned cross-tier.
+//
+// Every tier hard-codes the same two limits (16 MiB payload, 4 MiB sig/pubkey)
+// separately. conformance/sdk-envelope/fixtures.json carries them as
+// `size_limits` plus `size_vectors` (a generation spec -- a 16 MiB literal does
+// not belong in a checked-in fixture). Proves: this tier's limits equal the
+// fixture's and its verifyEnvelope returns 'too-large' for one byte over each
+// limit while NOT returning it at the limit. Does not prove the other six
+// tiers agree -- each replays the same fixture in its own interop test.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope size bound is pinned to the cross-tier fixture (F-296)', () => {
+  const fixturePath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../conformance/sdk-envelope/fixtures.json',
+  );
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+    valid_envelope: SignedEnvelope;
+    size_limits?: { max_payload_bytes: number; max_field_bytes: number };
+    size_vectors?: Array<{ _vector_id: string; field: 'payload' | 'sig' | 'pubkey'; length: number; expect_too_large: boolean }>;
+  };
+
+  it('pins the limits to the fixture', () => {
+    expect(fixture.size_limits).toBeDefined();
+    expect(fixture.size_limits!.max_payload_bytes).toBe(InputLimits.MAX_IR_BYTES);
+    expect(fixture.size_limits!.max_field_bytes).toBe(InputLimits.MAX_STRING_BYTES);
+  });
+
+  it('replays every size vector with the fixture reason', () => {
+    expect(fixture.size_vectors?.length ?? 0).toBeGreaterThanOrEqual(6);
+    for (const v of fixture.size_vectors!) {
+      const envelope = { ...fixture.valid_envelope, [v.field]: 'x'.repeat(v.length) };
+      const r = verifyEnvelope({ envelope, nowMs: 1700000000500 });
+      expect(r.ok, v._vector_id).toBe(false);
+      if (v.expect_too_large) expect(r.reason, v._vector_id).toBe('too-large');
+      else expect(r.reason, v._vector_id).not.toBe('too-large');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // R-261 — an explicit clockSkewMs of 0 must mean 0, not "not supplied".
 //
 // Six of the seven tiers distinguish the two: TS `?? 5_000` (this file's
@@ -474,10 +519,11 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
 // cross-tier valid envelope, 2000 ms past expiry with clockSkewMs explicitly
 // 0: go ok:true, rust/python/ruby/zig/java all expired.
 //
-// TS's verify reads Date.now() directly rather than taking an injectable
-// clock, so it cannot replay the fixture's frozen clock_skew_vectors the way
-// the six other tiers do; it covers the same shape against a live clock. TS
-// was already correct here, so these are REGRESSION guards, not a fix.
+// TS's verifyEnvelope now also accepts an injectable `nowMs` (F-359) —
+// f359-envelope-interop-fixture.test.ts replays the fixture's frozen
+// clock_skew_vectors directly through it. This file predates that option and
+// still covers the same shape against a live clock via `Date.now()` alone.
+// TS was already correct here, so these are REGRESSION guards, not a fix.
 // ---------------------------------------------------------------------------
 
 describe('verifyEnvelope clockSkewMs (R-261)', () => {
@@ -522,5 +568,114 @@ describe('verifyEnvelope clockSkewMs (R-261)', () => {
     const r = verifyEnvelope({ envelope: env, clockSkewMs: 10_000 });
     expect(r.reason).toBeUndefined();
     expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-138 — high-S signatures.
+//
+// ECDSA is malleable: if (r, s) verifies, so does (r, N - s). BIP-62's low-S
+// rule is transaction-script policy, not part of the envelope protocol, and
+// this tier (the reference) delegates to @bsv/sdk's raw ECDSA verify, which
+// has no low-S check — so a high-S envelope signature is ACCEPTED. Ruby used
+// to reject it as bad-sig. The fixture's malleability_vectors pin the verdict
+// for all seven tiers; TS replays them here with Date.now() pinned (via
+// `vi.spyOn`) to the fixture's verify_now_ms. TS's verifyEnvelope now also
+// accepts an injectable `nowMs` (F-359); this test keeps the `vi.spyOn`
+// mechanism rather than migrating to it.
+//
+// Proves: TS's verdict on the committed high-S vector is what the fixture
+// says, and the vector really is high-S. Does not prove anything about
+// signing — every signer still emits low-S.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope malleability vectors (F-138)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reaches the fixture verdict on every malleability vector', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      verify_now_ms: number;
+      malleability_vectors: Array<{
+        _vector_id: string;
+        expect_ok: boolean;
+        reason?: string;
+        envelope: SignedEnvelope;
+      }>;
+    };
+    expect(fixture.malleability_vectors.length).toBeGreaterThan(0);
+    vi.spyOn(Date, 'now').mockReturnValue(fixture.verify_now_ms);
+
+    const N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+    for (const v of fixture.malleability_vectors) {
+      // The vector must actually carry a high-S signature, or it pins nothing.
+      const der = Utils.toArray(v.envelope.sig, 'hex');
+      const rLen = der[3]!;
+      const sLen = der[4 + rLen + 1]!;
+      const s = BigInt('0x' + Utils.toHex(der.slice(4 + rLen + 2, 4 + rLen + 2 + sLen)));
+      expect(s > N / 2n, `${v._vector_id}: s must be high`).toBe(true);
+
+      const r = verifyEnvelope({ envelope: v.envelope });
+      expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(v.expect_ok);
+      if (!v.expect_ok) expect(r.reason).toBe(v.reason);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-242 (CL-BUG-160): strict-DER envelope signatures.
+//
+// The fixture's `der-*` rejection vectors each re-encode a validly signed
+// envelope's signature (`_canonical_sig`) without changing (r, s): a missing
+// 0x00 sign pad, a superfluous 0x00, bytes inside or after the SEQUENCE, BER
+// long-form lengths. TS delegated to @bsv/sdk `Signature.fromDER`, which
+// accepts an INTEGER whose top bit is set without the sign pad, so TS verified
+// three of them as ok; the six other tiers replay the same vectors through
+// their generic rejection_vectors loop. TS replays them here with Date.now()
+// pinned (via `vi.spyOn`). TS's verifyEnvelope now also accepts an injectable
+// `nowMs` (F-359); this test keeps the `vi.spyOn` mechanism rather than
+// migrating to it.
+//
+// Proves: every `der-*` vector's control envelope verifies, and the re-encoded
+// one is bad-sig. Does not prove anything about checkSig / the ANF interpreter
+// (der-strict.test.ts) or about high-S, which stays accepted (F-138).
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope strict-DER vectors (F-242)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('accepts each control signature and refuses its re-encoding as bad-sig', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      verify_now_ms: number;
+      rejection_vectors: Array<{
+        _vector_id?: string;
+        _canonical_sig?: string;
+        reason: string;
+        envelope: SignedEnvelope;
+      }>;
+    };
+    vi.spyOn(Date, 'now').mockReturnValue(fixture.verify_now_ms);
+
+    const derVectors = fixture.rejection_vectors.filter((v) => v._vector_id?.startsWith('der-'));
+    expect(derVectors.length).toBeGreaterThan(0);
+    for (const v of derVectors) {
+      const control = verifyEnvelope({ envelope: { ...v.envelope, sig: v._canonical_sig! } });
+      expect(control.ok, `${v._vector_id}: control reason=${control.reason}`).toBe(true);
+
+      const r = verifyEnvelope({ envelope: v.envelope });
+      expect(r.ok, `${v._vector_id}: re-encoded signature must not verify`).toBe(false);
+      expect(r.reason, v._vector_id).toBe(v.reason);
+    }
   });
 });

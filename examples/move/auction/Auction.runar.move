@@ -39,7 +39,7 @@
 //   locktime. v1 does not ship one.
 module Auction {
     use runar::types::{PubKey, Sig};
-    use runar::crypto::{check_sig, extract_locktime, extract_sequence};
+    use runar::crypto::{check_sig, extract_amount, extract_locktime, extract_sequence};
 
     resource struct Auction {
         auctioneer: PubKey,             // Auction creator's public key. Immutable — baked into script.
@@ -67,6 +67,13 @@ module Auction {
 
         // Reject bids that do not exceed the current highest
         assert!(bid_amount > contract.highest_bid, 0);
+
+        // The bid must be paid into the pot (N-027): the continuation carries the
+        // prior pot plus the new bid. This example never refunds an outbid bidder,
+        // so the pot is the deposit plus every bid, and close() hands all of it to
+        // the auctioneer. `>=` lets a bidder add more; the compiler's own
+        // `>= input` floor alone would let a bid pay nothing.
+        assert!(continuation_amount() >= extract_amount(contract.tx_preimage) + bid_amount, 0);
 
         // Persist new leader into on-chain state
         contract.highest_bidder = bidder;

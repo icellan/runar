@@ -43,7 +43,7 @@ const SLH_PARAMS: Record<string, SLHCodegenParams> = {
   'SHA2_192s': slhMk(24, 63, 7, 14, 17),
   'SHA2_192f': slhMk(24, 66, 22, 8, 33),
   'SHA2_256s': slhMk(32, 64, 8, 14, 22),
-  'SHA2_256f': slhMk(32, 68, 17, 8, 35),
+  'SHA2_256f': slhMk(32, 68, 17, 9, 35),
 };
 
 // ===========================================================================
@@ -1233,8 +1233,20 @@ function emitVerifySLHDSA(
   // treeAddr8 = treeIdx as 8-byte big-endian
   t.copyToTop('treeIdx', '_ti8');
   t.rawBlock(['_ti8'], 'treeAddr8', (e) => {
-    e({ op: 'push', value: 8n });
-    e({ op: 'opcode', code: 'OP_NUM2BIN' });
+    if (p.h - hp >= 64) {
+      // F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about half
+      // of all signatures it is >= 2^63 and its minimal script-number encoding
+      // needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in 9 bytes and
+      // drop the trailing (little-endian) 0x00 sign byte.
+      e({ op: 'push', value: 9n });
+      e({ op: 'opcode', code: 'OP_NUM2BIN' });
+      e({ op: 'push', value: 8n });
+      e({ op: 'opcode', code: 'OP_SPLIT' });
+      e({ op: 'drop' });
+    } else {
+      e({ op: 'push', value: 8n });
+      e({ op: 'opcode', code: 'OP_NUM2BIN' });
+    }
     for (const op of emitReverseN(8)) e(op);
   });
 

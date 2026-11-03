@@ -32,3 +32,30 @@ RSpec.describe 'R-178: code_separator_index range' do
     expect(Runar::SDK.get_subscript(script, -1)).to eq(script)
   end
 end
+
+# N-155: code_separator_index pointing at the LAST byte of the subscript
+# passes R-178's "past the end" check (trim_pos == length, not >), so
+# get_subscript still returns '' (asserted above, by design -- it is a
+# public, independently-tested low-level slicing helper). compute_op_push_tx
+# is the function that actually builds a preimage, and it must refuse that
+# empty scriptCode the same way it refuses a bare empty subscript. Proves:
+# compute_op_push_tx refuses this case. Does not prove anything about
+# ExternalSigner#sign (it already rejects any empty string it is handed) or
+# about callers upstream that compute the code_separator_index they pass in.
+RSpec.describe 'N-155: code_separator_index on the subscript\'s last byte' do
+  it 'is refused by compute_op_push_tx' do
+    tx_hex = '01000000' \
+             "01#{'11' * 32}00000000" \
+             '00' \
+             'ffffffff' \
+             '01' \
+             'e803000000000000' \
+             '0151' \
+             '00000000'
+    one_byte = '51' # OP_1 -- code_separator_index 0 is its last (and only) byte
+
+    expect do
+      Runar::SDK.compute_op_push_tx(tx_hex, 0, one_byte, 1000, 0)
+    end.to raise_error(ArgumentError, /empty subscript/)
+  end
+end

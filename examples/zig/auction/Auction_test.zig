@@ -33,6 +33,10 @@ test "auction accepts a higher bid through the real contract" {
     var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
 
+    // N-027: the continuation carries the prior pot (extractAmount is 10000
+    // off-chain) plus the bid.
+    const prev = runar.setMockContinuationAmount(10000 + 150);
+    defer _ = runar.setMockContinuationAmount(prev);
     auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 150);
     try std.testing.expectEqualSlices(u8, runar.BOB.pubKey, auction.highestBidder);
     try std.testing.expectEqual(@as(i64, 150), auction.highestBid);
@@ -57,6 +61,13 @@ test "auction closes at or after the deadline through the real contract" {
 // packages/runar-testing/src/__tests__/w7-auction-locktime-polarity.test.ts.
 test "auction rejects low bids" {
     try root.expectAssertFailure("auction-bid-too-low");
+}
+
+// N-027: carrying the pot forward unpaid passes F-024's `>= input` floor but not
+// bid's own rule.
+test "auction rejects a bid that is not paid into the pot" {
+    try root.expectAssertFailure("auction-bid-unpaid");
+    try root.expectAssertFailure("auction-bid-short");
 }
 
 test "auction rejects early close and wrong closing signature" {

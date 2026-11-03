@@ -1,7 +1,10 @@
 package compiler
 
 import (
+	"encoding/hex"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -33,30 +36,6 @@ type CompileOptions struct {
 
 	// ParseOnly stops compilation after the parse pass (pass 1).
 	ParseOnly bool
-
-	// AcknowledgeUnsoundSP1Fri authorises compiling a program that reaches the
-	// known-unsound SP1 FRI verifier when there is no source to carry the
-	// `@acknowledgeUnsoundSP1FriVerifier` comment directive — i.e. on the
-	// `--ir` / CompileFromProgram paths, which never run frontend.Validate.
-	//
-	// The acknowledgement deliberately lives here, on the INVOKER's options,
-	// and not in the ANF IR: IR fed to `--ir` is untrusted input, so a flag
-	// inside it would be written by the same party that wrote the verifier call
-	// and would authorise nothing. Surfaced on the CLI as
-	// `--acknowledge-unsound-sp1-fri`. See R-012 / CL-BUG-093 and
-	// compiler/sp1_fri_ir_guard.go.
-	AcknowledgeUnsoundSP1Fri bool
-
-	// sp1FriAdjudicatedByFrontend is set only by the in-package
-	// CompileFromSource path, after frontend.Validate has accepted the
-	// contract. It tells guardUnsoundSP1FriIR that the SP1 FRI refusal has
-	// already been decided against the real source — directive included — so
-	// the IR-path guard must not second-guess it.
-	//
-	// Unexported deliberately: a caller outside this package cannot set it, so
-	// every externally-constructed CompileOptions arrives with it false and the
-	// guard fails closed.
-	sp1FriAdjudicatedByFrontend bool
 
 	// ValidateOnly stops compilation after the validate pass (pass 2).
 	ValidateOnly bool
@@ -238,19 +217,115 @@ func applyConstructorArgs(program *ir.ANFProgram, args map[string]interface{}) [
 				key, program.ContractName, propertyNameList(program)))
 		}
 	}
+
+	// (d) Value kind / width check (F-101), in property declaration order.
+	// Integers are normalized to *big.Int here: pushPropertyValue has no arm
+	// for a plain Go int, which used to fall through to its default and bake
+	// OP_0.
+	baked := make(map[string]interface{}, len(args))
+	for i := range program.Properties {
+		p := &program.Properties[i]
+		v, ok := args[p.Name]
+		if !ok {
+			continue
+		}
+		norm, msg := checkConstructorArgValue(p.Name, p.Type, v)
+		if msg != "" {
+			errs = append(errs, msg)
+			continue
+		}
+		baked[p.Name] = norm
+	}
 	if len(errs) > 0 {
 		return errs
 	}
 
 	// Bake constructor args into ANF property initialValues.
 	for i := range program.Properties {
-		if v, ok := args[program.Properties[i].Name]; ok {
+		if v, ok := baked[program.Properties[i].Name]; ok {
 			program.Properties[i].InitialValue = v
 		}
 	}
 
 	// (c) Unbaked-referenced-readonly reject.
 	return findUnbakedReferencedReadonly(program)
+}
+
+// checkConstructorArgValue is the F-101 check: it returns the value to bake
+// (integers normalized to *big.Int) and "" when `v` matches the property's
+// declared type, or the diagnostic when it does not. Stack lowering pushes
+// whatever it is handed — `true` as OP_1, a 6-byte hex string as a 6-byte
+// push — so without this a wrong-typed value where a 20-byte hash belongs
+// compiles cleanly into an unspendable script. Message text is shared
+// verbatim with the TypeScript reference (`constructorArgTypeError` in
+// packages/runar-compiler/src/index.ts).
+func checkConstructorArgValue(name, typ string, v interface{}) (interface{}, string) {
+	var asInt *big.Int
+	switch n := v.(type) {
+	case *big.Int:
+		if n != nil {
+			asInt = n
+		}
+	case int:
+		asInt = big.NewInt(int64(n))
+	case int64:
+		asInt = big.NewInt(n)
+	case float64:
+		// encoding/json's default number type; integral values only.
+		if n == math.Trunc(n) && !math.IsInf(n, 0) {
+			asInt = big.NewInt(int64(n))
+		}
+	}
+	str, isStr := v.(string)
+	hexLen := -1
+	if isStr && len(str)%2 == 0 {
+		if _, err := hex.DecodeString(str); err == nil {
+			hexLen = len(str) / 2
+		}
+	}
+	_, isBool := v.(bool)
+
+	var expected string
+	var ok bool
+	switch {
+	case frontend.IsBigintFamilyType(typ):
+		expected, ok = "an integer", asInt != nil
+	case typ == "boolean":
+		expected, ok = "a boolean", isBool
+	case frontend.IsByteStringFamilyType(typ):
+		if w := codegen.FixedWidthValueBytes(typ); w > 0 {
+			expected, ok = fmt.Sprintf("exactly %d bytes of hex", w), hexLen == w
+		} else {
+			expected, ok = "a hex string", hexLen >= 0
+		}
+	default:
+		return nil, fmt.Sprintf(
+			"constructorArgs value for property '%s' (%s) cannot be baked: unsupported property type.",
+			name, typ)
+	}
+	if ok {
+		if asInt != nil {
+			return asInt, ""
+		}
+		return v, ""
+	}
+	var got string
+	switch {
+	case isBool:
+		got = "a boolean"
+	case asInt != nil:
+		got = "an integer"
+	case hexLen >= 0:
+		got = fmt.Sprintf("%d bytes of hex", hexLen)
+	case isStr:
+		got = "a non-hex string"
+	default:
+		got = "an unsupported value"
+	}
+	return nil, fmt.Sprintf(
+		"constructorArgs value for property '%s' (%s) must be %s, got %s. "+
+			"Baking it would silently put the wrong value in the locking script.",
+		name, typ, expected, got)
 }
 
 // propertyNameList renders the contract's property names as "a, b, c" for

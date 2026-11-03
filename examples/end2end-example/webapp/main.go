@@ -84,6 +84,10 @@ type GameState struct {
 	AliceUTXO *UTXO `json:"-"`
 	BobUTXO   *UTXO `json:"-"`
 
+	// Oracle is the Rabin key whose signature on the price settles a round
+	// (F-162). Its factors never leave this process.
+	Oracle *RabinKey `json:"-"`
+
 	Log []LogEntry `json:"log"`
 }
 
@@ -168,6 +172,18 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 	game.mu.Lock()
 	defer game.mu.Unlock()
 
+	// F-056: a deployed PriceBet commits to the current Alice/Bob pubkeys and
+	// only their private keys (held nowhere but here) can spend it. Replacing
+	// them mid-round strands the contract UTXO for good, so re-init is allowed
+	// only from the idle/settled phases. "funding" is reachable only after an
+	// init that failed part-way, before any contract exists.
+	switch game.Phase {
+	case "init", "funding", "ready", "complete":
+	default:
+		jsonError(w, "cannot re-initialize mid-round (phase: "+game.Phase+")", http.StatusConflict)
+		return
+	}
+
 	game.Lang = normalizeLang(req.Lang)
 
 	alice, err := newWallet()
@@ -182,8 +198,15 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oracle, err := newRabinKey()
+	if err != nil {
+		jsonError(w, fmt.Sprintf("create oracle key: %v", err), 500)
+		return
+	}
+
 	game.Alice = alice
 	game.Bob = bob
+	game.Oracle = oracle
 	game.AlicePubKey = alice.PubKeyHex
 	game.BobPubKey = bob.PubKeyHex
 	game.AliceAddr = alice.Address
@@ -364,10 +387,60 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, game)
 }
 
+// overUnder returns the wallets that bet "over" and "under".
+func overUnder(game *GameState) (over, under *Wallet) {
+	if game.AliceBet == "over" {
+		return game.Alice, game.Bob
+	}
+	return game.Bob, game.Alice
+}
+
+// gameLockingScript compiles this round's PriceBet. The contract pays its
+// alicePubKey slot when price > strikePrice, so that slot holds whoever bet
+// "over" — not necessarily Alice (F-162: with Alice on "under", settle would
+// otherwise pay the loser).
+func gameLockingScript(game *GameState) (string, error) {
+	over, under := overUnder(game)
+	scriptHex, _, err := compilePriceBet(game.Lang, over.PubKeyHex, under.PubKeyHex, game.Oracle.N, game.Threshold)
+	return scriptHex, err
+}
+
+// settleRound has the oracle sign price and builds the settle spend of the
+// round's contract, signed by the winner alone (F-162). It used to spend via
+// cancel, which needs both parties and never touched the oracle.
+func settleRound(game *GameState, price int64) (txHex, winner, winnerP2PKH string, err error) {
+	over, under := overUnder(game)
+	payee, slot := under, bobSigSlot
+	if price > int64(game.Threshold) {
+		payee, slot = over, aliceSigSlot
+	}
+	winner = "bob"
+	if payee == game.Alice {
+		winner = "alice"
+	}
+
+	rabinSig, padding, err := game.Oracle.sign(priceMessage(price))
+	if err != nil {
+		return "", "", "", fmt.Errorf("oracle sign: %w", err)
+	}
+
+	contractUTXO := &UTXO{
+		Txid:     game.ContractTxid,
+		Vout:     game.ContractVout,
+		Satoshis: contractSats,
+		Script:   game.LockingScript,
+	}
+	txHex, err = buildSettleTx(contractUTXO, payee.P2PKH, contractSats, price, rabinSig, padding, payee, slot)
+	if err != nil {
+		return "", "", "", err
+	}
+	return txHex, winner, payee.P2PKH, nil
+}
+
 // deployContract builds and broadcasts the contract funding tx for ONE
 // visitor's game (R-152: it used to reach for the package-level singleton).
 func deployContract(game *GameState) error {
-	scriptHex, _, err := compilePriceBet(game.Lang, game.Alice.PubKeyHex, game.Bob.PubKeyHex, game.Threshold)
+	scriptHex, err := gameLockingScript(game)
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
 	}
@@ -443,36 +516,9 @@ func handleReveal(w http.ResponseWriter, r *http.Request) {
 
 	oracle := rand.Intn(100) + 1
 
-	var winner string
-	var winnerP2PKH string
-	if oracle > game.Threshold {
-		if game.AliceBet == "over" {
-			winner = "alice"
-			winnerP2PKH = game.Alice.P2PKH
-		} else {
-			winner = "bob"
-			winnerP2PKH = game.Bob.P2PKH
-		}
-	} else {
-		if game.AliceBet == "under" {
-			winner = "alice"
-			winnerP2PKH = game.Alice.P2PKH
-		} else {
-			winner = "bob"
-			winnerP2PKH = game.Bob.P2PKH
-		}
-	}
-
-	contractUTXO := &UTXO{
-		Txid:     game.ContractTxid,
-		Vout:     game.ContractVout,
-		Satoshis: contractSats,
-		Script:   game.LockingScript,
-	}
-
-	txHex, err := buildSpendingTx(game.Alice, game.Bob, contractUTXO, winnerP2PKH, contractSats)
+	txHex, winner, winnerP2PKH, err := settleRound(game, int64(oracle))
 	if err != nil {
-		jsonError(w, fmt.Sprintf("build spending tx: %v", err), 500)
+		jsonError(w, fmt.Sprintf("build settle tx: %v", err), 500)
 		return
 	}
 

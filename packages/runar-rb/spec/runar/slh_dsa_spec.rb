@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'json'
+require 'pathname'
 require 'spec_helper'
 
 # These specs exercise the real SLH-DSA verifier exposed through
@@ -113,6 +115,68 @@ RSpec.describe Runar::SLHDSA do
       expect(kp[:pk].length).to eq(2 * params[:n] * 2) # hex chars
       # pk should be the last 2n bytes of sk
       expect(kp[:pk]).to eq(kp[:sk][2 * params[:n] * 2, 2 * params[:n] * 2])
+    end
+  end
+end
+
+# F-232 / F-240: SLHDSA.verify must accept ONLY a signature of the parameter
+# set's exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length the
+# on-chain verifier enforces with OP_SIZE <len> OP_EQUALVERIFY.
+#
+# Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector) and
+# SLH-DSA-SHA2-128f (self-signed), the honest signature verifies while the
+# same signature with one appended 0x00 byte, 32 appended bytes, or its last
+# byte removed is rejected. Before F-232 every length guard was a lower bound,
+# so the appended variants verified true.
+# Does not prove: anything about the 192/256 parameter sets beyond sharing the
+# same guard, nor anything about the on-chain script.
+RSpec.describe 'Runar::SLHDSA.verify exact signature length (F-232)' do
+  def self.acvp_128s_vector
+    here = Pathname.new(__FILE__).realpath
+    here.ascend do |dir|
+      candidate = dir.join('conformance', 'runtime-vectors', 'slh-dsa-acvp-kat.json')
+      next unless candidate.file?
+
+      vecs = JSON.parse(candidate.read)['slh_dsa_acvp']
+      return vecs.find { |v| v['param_set'] == 'SLH-DSA-SHA2-128s' }
+    end
+    raise "could not locate conformance/runtime-vectors/slh-dsa-acvp-kat.json walking up from #{__FILE__}"
+  end
+
+  tail32 = (0...32).map { |i| format('%02x', (0xA5 ^ (i * 37)) & 0xff) }.join
+
+  cases = {
+    '128s-acvp' => lambda {
+      v = acvp_128s_vector
+      [Runar::SLHDSA::PARAM_SETS[:sha2_128s], v['message'], v['signature'], v['pk']]
+    },
+    '128f-self' => lambda {
+      params = Runar::SLHDSA::PARAM_SETS[:sha2_128f]
+      kp = Runar::SLHDSA.keygen(params, '42' * (3 * params[:n]))
+      msg = '46323332' # "F232"
+      [params, msg, Runar::SLHDSA.sign(params, msg, kp[:sk]), kp[:pk]]
+    }
+  }
+
+  cases.each do |label, build|
+    context label do
+      before(:all) { @params, @msg, @sig, @pk = build.call }
+
+      it 'accepts the honest signature' do
+        expect(Runar::SLHDSA.verify(@params, @msg, @sig, @pk)).to be true
+      end
+
+      it 'rejects sig || 0x00' do
+        expect(Runar::SLHDSA.verify(@params, @msg, "#{@sig}00", @pk)).to be false
+      end
+
+      it 'rejects sig || 32 trailing bytes' do
+        expect(Runar::SLHDSA.verify(@params, @msg, @sig + tail32, @pk)).to be false
+      end
+
+      it 'rejects a signature truncated by one byte' do
+        expect(Runar::SLHDSA.verify(@params, @msg, @sig[0...-2], @pk)).to be false
+      end
     end
   end
 end

@@ -26,11 +26,11 @@
         }
       ]
     },
-    "script": "05ffffffff0005ffffffff000901000000feffffff0008ffffffffffffff7f51090000000000000080000500000000010500000000010900000000000000000108ffffffffffffff7f08ffffffffffffff7f100100000000000000ffffffffffffff3f597a577a93547a937c93597a93009c7777777777777777",
+    "script": "1002000000feffff7f01000000000000407c93009c",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 112,
+        "byteOffset": 19,
         "name": "target",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -44,7 +44,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 112,
+          "byteOffset": 19,
           "slot": "target"
         },
         {

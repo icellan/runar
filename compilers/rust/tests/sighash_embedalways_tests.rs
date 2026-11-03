@@ -378,7 +378,7 @@ fn embed_always_warns_for_stripped_field_and_not_for_annotated() {
         off.iter().any(|w|
             w.contains("readonly field 'metadataId' is not referenced")
                 && w.contains("eliminated by DCE")
-                && w.contains("@embedAlways")),
+                && w.contains("embedAlways directive")),
         "expected DCE warning for stripped un-annotated field, got: {:?}",
         off
     );
@@ -476,4 +476,135 @@ fn ec_armed_embed_always_changes_the_emitted_script() {
         on_hex.len(),
         off_hex.len()
     );
+}
+
+// ===========================================================================
+// F-039 — a present-but-malformed `@sighash` marker is a compile error
+// ===========================================================================
+//
+// Before F-039, `/** @sighash SINGLE|FORKID! */` (a one-character typo) made
+// `extract_sighash_directive` return `None`, which `parse_sighash_on_method`
+// read as "no directive": the method compiled, silently, under the default
+// ALL|FORKID. A second directive on one method was silently ignored.
+//
+// Proves: the Rust TS-surface parser refuses each malformed / duplicated shape
+// with the diagnostic shared by all seven tiers (N-039: including `@sighash`
+// glued to the next token), and still honours a well-formed multi-line JSDoc
+// directive.
+// Does not prove: cross-tier agreement (conformance/negatives rejection-parity)
+// or the on-chain consequence (conformance/closed-findings F-039 Spend test).
+
+const F039_MALFORMED: &str = "Method 'bump': @sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+const F039_MULTIPLE: &str =
+    "Method 'bump': @sighash: more than one @sighash directive on this method; declare exactly one";
+
+fn f039_errors(directive: &str) -> Vec<String> {
+    compile(&counter_out(directive), "Counter.runar.ts")
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn f039_malformed_directive_is_rejected_not_defaulted() {
+    for directive in [
+        "/** @sighash SINGLE|FORKID! */",
+        "/** @sighash:SINGLE|FORKID */",
+        "// @sighash=SINGLE|FORKID",
+        "/** @sighash SINGLE,FORKID */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MALFORMED.to_string()], "directive {directive:?}");
+    }
+}
+
+#[test]
+fn f039_bare_marker_line_comment_is_rejected() {
+    assert_eq!(
+        f039_errors("// @sighash"),
+        vec!["Method 'bump': @sighash directive requires at least one flag (e.g. `@sighash ALL|FORKID`)".to_string()]
+    );
+}
+
+#[test]
+fn f039_multiple_directives_are_rejected() {
+    for directive in [
+        "/** @sighash SINGLE|FORKID\n   * @sighash ALL|FORKID */",
+        "/** @sighash SINGLE|FORKID */\n    /** @sighash ALL|FORKID */",
+        "/** @sighash SINGLE|FORKID!\n   * @sighash NONE|FORKID */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MULTIPLE.to_string()], "directive {directive:?}");
+    }
+}
+
+// N-039 (user decision R85, "Refuse, all 7 tiers"): this used to pin the
+// word-boundary rule (`@sighashSINGLE` / `@sighashType` read as prose, so the
+// method silently got the default ALL|FORKID). A comment token that starts
+// with `@sighash` but is not exactly `@sighash <FLAGS>` is now refused with the
+// shared malformed diagnostic; the case list is unchanged plus `_` / digit.
+#[test]
+fn n039_glued_marker_is_rejected_not_defaulted() {
+    for directive in [
+        "/** @sighashSINGLE|FORKID */",
+        "/** see the @sighashType docs */",
+        "// @sighash_SINGLE|FORKID",
+        "/** @sighash2 */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MALFORMED.to_string()], "directive {directive:?}");
+    }
+}
+
+#[test]
+fn f039_well_formed_multiline_jsdoc_still_honoured() {
+    let r = compile(
+        &counter_out("/**\n   * Bump.\n   * @sighash SINGLE|FORKID\n   */"),
+        "Counter.runar.ts",
+    );
+    let bump = r.artifact.unwrap().abi.methods.into_iter().find(|m| m.name == "bump").unwrap();
+    assert_eq!(bump.sig_hash_type, Some(0x43));
+}
+
+// ===========================================================================
+// F-098 / R35 — @embedAlways on a FixedArray propagates to every expanded slot
+// ===========================================================================
+//
+// The expansion pass used to rebuild each slot with `embed_always: false`, so
+// the annotated array compiled to the same bytes as the un-annotated one ("91":
+// both slots DCE'd). The golden is the TS reference output, which equals the
+// same contract hand-written as two annotated scalars (7n, 9n) — an oracle that
+// never runs the expansion pass. Proves: both slots survive, byte-identical to
+// TS, in both fold modes; the un-annotated control still loses them. Does not
+// prove on-chain spending (a fixture with a real-crypto witness is N-093).
+
+fn embed_array_source(directive: &str) -> String {
+    format!(
+        "import {{ SmartContract, assert }} from 'runar-lang';\n\
+         class Arr extends SmartContract {{\n\
+         \x20 {directive}\n\
+         \x20 readonly tags: FixedArray<bigint, 2> = [7n, 9n];\n\
+         \x20 constructor() {{\n    super();\n  }}\n\
+         \x20 public unlock(x: bigint) {{\n    assert(x === 0n);\n  }}\n\
+         }}\n"
+    )
+}
+
+#[test]
+fn f098_embed_always_fixed_array_propagates_to_every_slot() {
+    for disable_constant_folding in [true, false] {
+        let opts = CompileOptions { disable_constant_folding, ..CompileOptions::default() };
+        let on = compile_from_source_str_with_result(
+            &embed_array_source("/** @embedAlways */"),
+            Some("Arr.runar.ts"),
+            &opts,
+        );
+        assert_eq!(
+            on.script_hex.as_deref(),
+            Some("57597b917777"),
+            "annotated FixedArray (disable_fold={disable_constant_folding}): {:?}",
+            on.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        let off = compile_from_source_str_with_result(&embed_array_source(""), Some("Arr.runar.ts"), &opts);
+        assert_eq!(off.script_hex.as_deref(), Some("91"), "un-annotated FixedArray (disable_fold={disable_constant_folding})");
+    }
 }

@@ -1,5 +1,23 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
+import { createHash } from 'node:crypto';
+// @ts-expect-error vitest resolves these via the root alias
+import { ScriptExecutionContract } from 'runar-testing';
+
+// ---------------------------------------------------------------------------
+// F-351: "generates ASM containing SHA-256 finalize operations" below only
+// asserts that certain opcode NAMES (including OP_IF/OP_ELSE/OP_ENDIF for the
+// 1-block/2-block branch) appear somewhere in the emitted ASM string — it
+// would still pass even if either branch computed the wrong value. This
+// block closes that gap: it EXECUTES the compiled script through
+// `ScriptExecutionContract` (the real Bitcoin Script hex via @bsv/sdk's
+// `Spend`) for one message on each branch and compares the result to
+// node:crypto's own SHA-256 of the same message — an independent reference,
+// never derived from this compiler's output.
+// ---------------------------------------------------------------------------
+
+/** The standard FIPS 180-4 SHA-256 initial hash value. */
+const SHA256_IV = '6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19';
 
 // ---------------------------------------------------------------------------
 // Test source — a contract that uses sha256Finalize
@@ -69,5 +87,44 @@ class Bad extends SmartContract {
     expect(asm).toContain('OP_IF');
     expect(asm).toContain('OP_ELSE');
     expect(asm).toContain('OP_ENDIF');
+  });
+
+  // F-351: value + execution check (see header comment). Two messages, one
+  // per branch of the OP_IF: a 3-byte message takes the 1-block path
+  // (remaining <= 55 bytes after the 0x80 pad byte), a 56-byte message takes
+  // the 2-block path (remaining in 56..119 bytes).
+  describe('executed script output matches node:crypto sha256(...)', () => {
+    const cases = [
+      { name: '"abc" (1-block path)', msgHex: '616263' },
+      { name: '56-byte message (2-block path)', msgHex: 'bb'.repeat(56) },
+    ];
+
+    for (const { name, msgHex } of cases) {
+      it(name, () => {
+        const bitLen = BigInt((msgHex.length / 2) * 8);
+        const expected = createHash('sha256').update(Buffer.from(msgHex, 'hex')).digest('hex');
+
+        const contract = ScriptExecutionContract.fromSource(
+          SHA256_FINALIZE_SOURCE,
+          { expected },
+          'Sha256FinalizeTest.runar.ts',
+        );
+        const result = contract.execute('verify', [SHA256_IV, msgHex, bitLen]);
+        expect(result.success, `Spend rejected the honest call: ${result.error}`).toBe(true);
+      });
+    }
+  });
+
+  it('rejects when the compiled script does not produce the node:crypto digest', () => {
+    const msgHex = '616263';
+    const wrongExpected = '00'.repeat(32);
+
+    const contract = ScriptExecutionContract.fromSource(
+      SHA256_FINALIZE_SOURCE,
+      { expected: wrongExpected },
+      'Sha256FinalizeTest.runar.ts',
+    );
+    const result = contract.execute('verify', [SHA256_IV, msgHex, 24n]);
+    expect(result.success).toBe(false);
   });
 });

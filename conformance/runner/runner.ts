@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawn } from 'child_process';
 import os from 'os';
 import { JavaDaemon } from './java-daemon.js';
+import { isCiEnv } from '../env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -465,6 +466,14 @@ export interface ConformanceResult {
   irMatch: boolean;
   scriptMatch: boolean;
   errors: string[];
+  /**
+   * Set when the row produced no errors but nothing was actually checked:
+   * fewer than two tiers were compared AND no golden file was compared (e.g. a
+   * single-tier `compilers` allowlist under fold-ON, where goldens are skipped,
+   * or the only allowlisted tier was unavailable). The report counts such a
+   * row as 'vacuous', never as 'pass' (F-049). The string says why.
+   */
+  vacuous?: string;
 }
 
 /**
@@ -484,6 +493,7 @@ export const INPUT_FORMATS = [
 
 export type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
 const EMPTY_COMPILERS: readonly CompilerId[] = [];
+const KNOWN_COMPILER_IDS: ReadonlySet<string> = new Set<string>(INPUT_FORMATS.flatMap((f) => f.compilers));
 
 export interface CompilerOutput {
   irJson: string;        // canonical JSON of ANF IR
@@ -1100,11 +1110,15 @@ function shouldUseJavaDaemon(): boolean {
   return true;
 }
 
-function getOrStartJavaDaemon(): JavaDaemon | null {
+export function getOrStartJavaDaemon(): JavaDaemon | null {
   if (!shouldUseJavaDaemon()) return null;
   if (javaDaemonInstance) return javaDaemonInstance;
   if (javaDaemonAttempted) return null;
   javaDaemonAttempted = true;
+  // The daemon spawns `java` itself, so the probe must cover `java` as well as
+  // the jar (findJavaBinary checks both). Probing the jar alone started a
+  // daemon whose spawn ENOENTed on every fixture (N-374).
+  if (findJavaBinary() === null) return null;
   const jar = findJavaJarPath();
   if (!jar) return null;
   try {
@@ -1340,7 +1354,7 @@ async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
       `import { compile } from '${pathToFileURL(resolve(REPO_ROOT, 'packages/runar-compiler/src/index.ts')).href}';` +
       `import { readFileSync } from 'fs';` +
       `const src = readFileSync(${JSON.stringify(tmpFile)}, 'utf-8');` +
-      `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, parseOnly: true });` +
+      `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, validateOnly: true });` +
       `if (!r.success) { for (const d of r.diagnostics) { if (d.severity === 'error') process.stderr.write('parse error: ' + (d.message||'') + '\\n'); } process.exit(1); }` +
       `process.stdout.write('parser ok\\n');`;
     driverFile = join(tmpDir, `driver-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
@@ -2003,6 +2017,165 @@ export function printIrParityReport(report: IrParityReport): void {
 }
 
 // ---------------------------------------------------------------------------
+// --ir-roundtrip: `--emit-ir` -> `--ir` reproduces the `--source` artifact
+// ---------------------------------------------------------------------------
+//
+// F-038 (+ F-065, F-066, F-070, F-088). `--ir-parity` above proves every tier
+// turns the SAME IR into the same script. It cannot see what the IR fails to
+// carry: `parentClass` and a method's `@sighash` mode used to be in-memory
+// only, so a tier's own `--emit-ir` -> `--ir` round trip produced the right
+// script and an artifact without them — and the SDK signs by those fields.
+// This mode compiles every fixture three ways per tier (`--source` artifact,
+// `--source --emit-ir`, `--ir` of that IR artifact) and requires the two
+// artifacts to agree on script, parentClass, abi and stateFields. TS is out:
+// its `--from-ir` CLI writes a minimal artifact (contractName/script/asm).
+// The per-fixture `compilers` allowlist scopes it, as it scopes --ir-parity.
+
+export interface IrRoundTripFixtureResult {
+  fixture: string;
+  status: 'ok' | 'skipped' | 'failed';
+  activeCompilers: CompilerId[];
+  unavailable: CompilerId[];
+  errors: string[];
+}
+
+export interface IrRoundTripReport {
+  results: IrRoundTripFixtureResult[];
+  allOk: boolean;
+  failures: Array<{ fixture: string; error: string }>;
+}
+
+/** The artifact fields the SDK reads to deploy and sign. */
+const ROUND_TRIP_FIELDS = ['script', 'parentClass', 'abi', 'stateFields'] as const;
+
+async function irRoundTripOneTier(
+  id: Exclude<CompilerId, 'ts'>,
+  sourceFile: string,
+  stem: string,
+): Promise<string[] | null> {
+  const spec = NATIVE_COMPILERS[id];
+  const binary = spec.find();
+  if (!binary) return null;
+  const { cmd, args: binArgs } = splitCmd(binary);
+  const opts = (phase: string): RunOptions => ({
+    timeoutMs: spec.timeoutMs,
+    cwd: spec.cwd,
+    env: spec.env?.(),
+    label: `${id} ${phase} on ${basename(sourceFile)}`,
+    // An artifact (script + asm + source map) of the SLH-DSA / EC fixtures
+    // runs past the default 10 MiB capture; the IR alone can too.
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  const irFile = `${stem}.ir.json`;
+
+  // Java prints IR on stdout by default; its artifact goes to --emit-artifact.
+  const artifactOf = async (inputArgs: string[], phase: string, out: string): Promise<Record<string, unknown>> => {
+    const res = id === 'java'
+      ? await runCmd(cmd, [...binArgs, ...inputArgs, '--emit-artifact', out], opts(phase))
+      : await runCmd(cmd, [...binArgs, ...inputArgs], opts(phase));
+    requireCleanExit(spec, res, phase);
+    if (res.code !== 0) throw new Error(`${phase} ${describeExit(res)}: ${res.stderr.split('\n').slice(0, 5).join(' | ')}`);
+    return JSON.parse(id === 'java' ? readFileSync(out, 'utf-8') : res.stdout) as Record<string, unknown>;
+  };
+
+  const errors: string[] = [];
+  try {
+    // N-445: this leg compares only script/parentClass/abi/stateFields, so it
+    // asks for the artifact without its sourceMap (--no-source-map). The
+    // default artifact carries one (N-152), and for the Go-only bn254-pairing
+    // fixture that is 566 MB of an 831 MB artifact: past the capture cap below
+    // and past V8's maximum string length.
+    const direct = await artifactOf(['--source', sourceFile, '--no-source-map', ...foldFlag()], '--source', `${stem}.direct.json`);
+    const emit = await runCmd(cmd, [...binArgs, '--source', sourceFile, '--emit-ir', ...foldFlag()], opts('--emit-ir'));
+    requireCleanExit(spec, emit, '--emit-ir');
+    if (emit.code !== 0) throw new Error(`--emit-ir ${describeExit(emit)}: ${emit.stderr.split('\n').slice(0, 5).join(' | ')}`);
+    writeFileSync(irFile, emit.stdout, 'utf-8');
+    const ir = JSON.parse(emit.stdout) as Record<string, unknown>;
+    const viaIr = await artifactOf(id === 'zig' ? ['compile-ir', irFile, '--no-source-map'] : ['--ir', irFile, '--no-source-map'], '--ir', `${stem}.via-ir.json`);
+
+    if (typeof direct.parentClass !== 'string') {
+      errors.push(`${id}: the --source artifact carries no parentClass (vacuous comparison)`);
+    } else if (ir.parentClass !== direct.parentClass) {
+      errors.push(`${id}: --emit-ir parentClass ${JSON.stringify(ir.parentClass)} != artifact ${JSON.stringify(direct.parentClass)}`);
+    }
+    for (const field of ROUND_TRIP_FIELDS) {
+      const a = JSON.stringify(sortKeys(direct[field]));
+      const b = JSON.stringify(sortKeys(viaIr[field]));
+      if (a !== b) {
+        errors.push(`${id}: ${field} differs after --emit-ir -> --ir\n    --source: ${(a ?? 'undefined').slice(0, 300)}\n    --ir:     ${(b ?? 'undefined').slice(0, 300)}`);
+      }
+    }
+  } catch (err) {
+    errors.push(`${id}: ${(err as Error).message}`);
+  }
+  return errors;
+}
+
+export async function runAllIrRoundTripChecks(
+  testsDir: string,
+  options?: { filter?: string },
+): Promise<IrRoundTripReport> {
+  assertAllCompilersAvailableInCi();
+  const testDirs = discoverFixtureDirs(testsDir, options);
+  const tmpDir = join(__dirname, '..', '.tmp');
+  if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+
+  const limit = makeLimiter(defaultConcurrency());
+  const results = await Promise.all(testDirs.map((testDir) => limit(async (): Promise<IrRoundTripFixtureResult> => {
+    const fixture = basename(testDir);
+    const allowlist = readFixtureCompilerAllowlist(testDir);
+    const inScope = IR_PARITY_COMPILERS.filter((c) => !allowlist || allowlist.has(c));
+    const sourceFile = resolveSourceFile(testDir, fixture);
+    const errors: string[] = [];
+    const active: CompilerId[] = [];
+    const unavailable: CompilerId[] = [];
+    const stems: string[] = [];
+    const runs = await Promise.all(inScope.map(async (id) => {
+      const stem = join(tmpDir, `roundtrip-${id}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      stems.push(stem);
+      return { id, errs: await irRoundTripOneTier(id, sourceFile, stem) };
+    }));
+    for (const stem of stems) {
+      for (const ext of ['.ir.json', '.direct.json', '.via-ir.json']) rmSync(`${stem}${ext}`, { force: true });
+    }
+    for (const { id, errs } of runs) {
+      if (errs === null) { unavailable.push(id); continue; }
+      active.push(id);
+      errors.push(...errs);
+    }
+    const status = errors.length > 0 ? 'failed' : active.length === 0 ? 'skipped' : 'ok';
+    return { fixture, status, activeCompilers: active, unavailable, errors };
+  })));
+
+  const failures = results.flatMap((r) => r.errors.map((error) => ({ fixture: r.fixture, error })));
+  return { results, allOk: failures.length === 0, failures };
+}
+
+/** Pretty-print an --ir-roundtrip report to stdout. */
+export function printIrRoundTripReport(report: IrRoundTripReport): void {
+  console.log('');
+  console.log('--emit-ir -> --ir round trip (artifact script/parentClass/abi/stateFields vs --source):');
+  console.log('');
+  for (const r of report.results) {
+    const activeCsv = r.activeCompilers.join(',');
+    if (r.status === 'skipped') {
+      console.log(`  === ${r.fixture} === SKIP (no in-scope compiler available)`);
+    } else if (r.status === 'ok') {
+      console.log(`  === ${r.fixture} === active=[${activeCsv}] OK`);
+    } else {
+      console.log(`  === ${r.fixture} === active=[${activeCsv}] FAIL`);
+      for (const e of r.errors) console.log(`    ${e}`);
+    }
+  }
+  console.log('');
+  const ok = report.results.filter((r) => r.status === 'ok').length;
+  const skipped = report.results.filter((r) => r.status === 'skipped').length;
+  const failed = report.results.filter((r) => r.status === 'failed').length;
+  console.log(`  ${ok} ok, ${failed} failed, ${skipped} skipped (${report.results.length} fixtures)`);
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
 // Strict-mode: fail loudly if any compiler binary is missing.
 // ---------------------------------------------------------------------------
 //
@@ -2026,7 +2199,7 @@ export function decideMissingCompilerAction(
   env: { CI?: string; RUNAR_CONFORMANCE_STRICT?: string },
 ): MissingCompilerAction {
   if (missing.length === 0) return 'ok';
-  if (env.CI === 'true') return 'fail';
+  if (isCiEnv(env)) return 'fail';
   const strict = env.RUNAR_CONFORMANCE_STRICT;
   if (strict === '1' || strict === 'true') return 'fail';
   return 'warn';
@@ -2084,7 +2257,7 @@ function assertAllCompilersAvailableInCi(): void {
 
   {
     const cwd = process.cwd();
-    const reason = process.env.CI === 'true' ? 'CI=true' : 'RUNAR_CONFORMANCE_STRICT set';
+    const reason = isCiEnv(process.env) ? 'CI set' : 'RUNAR_CONFORMANCE_STRICT set';
     const msg =
       `[conformance/runner] ${reason} but ${missing.length} compiler binary` +
       (missing.length === 1 ? '' : ' binaries') +
@@ -2209,6 +2382,33 @@ const PARITY_TIER_ORDER = ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'] 
 export interface ParityComparison {
   ok: boolean;
   detail?: string;
+  /**
+   * How many tiers' outputs were actually compared with each other. `ok` with
+   * `compared < 2` is a trivial match, not cross-validation (F-049).
+   */
+  compared: number;
+}
+
+/**
+ * F-049: decide whether a row verified anything. An artifact (IR or script) is
+ * verified when at least two tiers were compared with each other, or at least
+ * one tier's output was compared with the golden file. Returns the vacuity
+ * reason when either artifact went unverified, otherwise undefined.
+ */
+function vacuityReason(
+  ir: ParityComparison,
+  script: ParityComparison,
+  irGoldenChecked: number,
+  scriptGoldenChecked: number,
+): string | undefined {
+  const irOk = ir.compared >= 2 || irGoldenChecked > 0;
+  const scriptOk = script.compared >= 2 || scriptGoldenChecked > 0;
+  if (irOk && scriptOk) return undefined;
+  const golden = constantFoldingDisabled()
+    ? 'no tier output was compared with a golden file'
+    : 'golden comparison skipped under fold-ON';
+  return `nothing cross-validated: IR compared across ${ir.compared} tier(s), ` +
+    `script across ${script.compared} tier(s); ${golden}`;
 }
 
 function tierName(index: number): string {
@@ -2294,6 +2494,7 @@ export function compareIR(
     return {
       ok: false,
       detail: `reported success but produced empty IR: [${empty.join(', ')}]`,
+      compared: 0,
     };
   }
 
@@ -2304,18 +2505,19 @@ export function compareIR(
     .map(({ o, tier }) => ({ tier, value: o.irJson }));
 
   if (present.length < 2) {
-    if (present.length === 0) return { ok: true }; // No compilers produced IR — not a mismatch
-    if (expectedCount === 1) return { ok: true }; // Single-compiler fixture: trivial match
+    if (present.length === 0) return { ok: true, compared: 0 }; // No compilers produced IR — not a mismatch
+    if (expectedCount === 1) return { ok: true, compared: 1 }; // Single-compiler fixture: trivial match
     return {
       ok: false,
       detail: `only 1 of ${expectedCount ?? PARITY_TIER_ORDER.length} expected tier(s) produced IR ` +
         `— cannot cross-validate (present: [${present[0]!.tier}])`,
+      compared: 1,
     };
   }
 
   const groups = groupByValue(present);
-  if (groups.length === 1) return { ok: true };
-  return { ok: false, detail: describeDivergence(groups, 'char') };
+  if (groups.length === 1) return { ok: true, compared: present.length };
+  return { ok: false, detail: describeDivergence(groups, 'char'), compared: present.length };
 }
 
 /**
@@ -2339,6 +2541,7 @@ export function compareScript(
     return {
       ok: false,
       detail: `reported success but produced empty hex: [${empty.join(', ')}]`,
+      compared: 0,
     };
   }
 
@@ -2349,18 +2552,19 @@ export function compareScript(
     .map(({ o, tier }) => ({ tier, value: o.scriptHex.toLowerCase().replace(/\s/g, '') }));
 
   if (present.length < 2) {
-    if (present.length === 0) return { ok: true }; // No compilers produced hex — not a mismatch
-    if (expectedCount === 1) return { ok: true }; // Single-compiler fixture: trivial match
+    if (present.length === 0) return { ok: true, compared: 0 }; // No compilers produced hex — not a mismatch
+    if (expectedCount === 1) return { ok: true, compared: 1 }; // Single-compiler fixture: trivial match
     return {
       ok: false,
       detail: `only 1 of ${expectedCount ?? PARITY_TIER_ORDER.length} expected tier(s) produced hex ` +
         `— cannot cross-validate (present: [${present[0]!.tier}])`,
+      compared: 1,
     };
   }
 
   const groups = groupByValue(present);
-  if (groups.length === 1) return { ok: true };
-  return { ok: false, detail: describeDivergence(groups, 'byte') };
+  if (groups.length === 1) return { ok: true, compared: present.length };
+  return { ok: false, detail: describeDivergence(groups, 'byte'), compared: present.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -2560,9 +2764,15 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   // with the fold-off compiler flag. Cross-tier parity (above) is still
   // strictly enforced in fold-on mode — the goldens are merely a reference
   // for the fold-off run.
-  const skipGolden = !constantFoldingDisabled();
+  // N-473: a fixture flagged foldOnMatchesGolden is compared under fold-ON too.
+  const skipGolden = !constantFoldingDisabled() && !readFixtureFoldOnMatchesGolden(testDir);
   const goldenGateOk = tsIncluded ? tsResult.success : true;
+  // F-049: how many tier outputs each golden block below actually compares.
+  const nativeOutputs = [goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult];
+  let irGoldenChecked = 0;
+  let scriptGoldenChecked = 0;
   if (!skipGolden && existsSync(expectedIrFile) && goldenGateOk) {
+    irGoldenChecked = (tsIncluded ? 1 : 0) + nativeOutputs.filter((o) => o?.success && o.irJson).length;
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     if (tsIncluded && tsResult.irJson !== expectedIr) {
       errors.push(
@@ -2591,6 +2801,9 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   }
 
   if (!skipGolden && existsSync(expectedScriptFile) && goldenGateOk) {
+    scriptGoldenChecked =
+      (tsIncluded && tsResult.scriptHex.replace(/\s/g, '') ? 1 : 0) +
+      nativeOutputs.filter((o) => o?.success && o.scriptHex).length;
     const expectedScript = readFileSync(expectedScriptFile, 'utf-8').trim().toLowerCase();
     if (tsIncluded) {
       const tsScript = tsResult.scriptHex.toLowerCase().replace(/\s/g, '');
@@ -2648,6 +2861,7 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     irMatch: irMatch.ok,
     scriptMatch: scriptMatch.ok,
     errors,
+    vacuous: vacuityReason(irMatch, scriptMatch, irGoldenChecked, scriptGoldenChecked),
   };
 }
 
@@ -2768,9 +2982,22 @@ export async function runAllConformanceTests(
 /**
  * Update the golden files for a given test case from the TypeScript compiler
  * output. This is used to establish the initial baseline.
+ *
+ * F-051: a fixture whose source.json `compilers` allowlist excludes 'ts' is
+ * refused — the comparison modes never check TS output against its golden, so
+ * stamping it from TS would replace the verified tiers' bytes with ungated ones.
  */
 export async function updateGoldenFiles(testDir: string): Promise<void> {
   const testName = basename(testDir);
+  const allowlist = readFixtureCompilerAllowlist(testDir);
+  if (allowlist && !allowlist.has('ts')) {
+    throw new Error(
+      `conformance fixture '${testName}': source.json "compilers" allowlist ` +
+      `[${[...allowlist].join(', ')}] excludes ts, so its golden cannot be stamped ` +
+      `from TS output; regenerate it from an allowlisted tier and admit it through ` +
+      `the golden-provenance gate`,
+    );
+  }
   const sourceFile = resolveSourceFile(testDir, testName);
   const source = readFileSync(sourceFile, 'utf-8');
 
@@ -2925,18 +3152,80 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
  * Returns null when the field is absent (= "all compilers"), or a Set of
  * allowed compiler ids.
  */
-function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> | null {
+export function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> | null {
   const configFile = join(testDir, 'source.json');
   if (!existsSync(configFile)) return null;
+  let config: { compilers?: unknown };
   try {
-    const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
-      compilers?: string[];
-    };
-    if (!config.compilers || !Array.isArray(config.compilers)) return null;
-    return new Set(config.compilers as CompilerId[]);
-  } catch {
-    return null;
+    config = JSON.parse(readFileSync(configFile, 'utf-8')) as { compilers?: unknown };
+  } catch (err) {
+    // N-193: fail closed. A source.json that cannot be read or parsed must not
+    // read as "no allowlist" (= every tier), the same fail-open F-050 removed.
+    throw new Error(
+      `conformance fixture '${basename(testDir)}': source.json is unreadable or malformed: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+  if (!config.compilers || !Array.isArray(config.compilers)) return null;
+  // F-050: fail closed. An id that names no real tier (a typo such as "gp")
+  // would match nothing and silently drop every tier from the fixture's
+  // parity check; an empty list does the same.
+  const fixture = basename(testDir);
+  if (config.compilers.length === 0) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "compilers" allowlist is empty; ` +
+      `remove the field to run every tier, or list the tiers that run`,
+    );
+  }
+  for (const id of config.compilers) {
+    if (typeof id !== 'string' || !KNOWN_COMPILER_IDS.has(id)) {
+      throw new Error(
+        `conformance fixture '${fixture}': source.json "compilers" allowlist names unknown ` +
+        `compiler id ${JSON.stringify(id)} (known: ${[...KNOWN_COMPILER_IDS].join(', ')})`,
+      );
+    }
+  }
+  return new Set(config.compilers as CompilerId[]);
+}
+
+/**
+ * N-473: per-fixture opt-in `"foldOnMatchesGolden": true` in source.json.
+ *
+ * Goldens are stamped fold-OFF, so the golden comparison is normally skipped
+ * under fold-ON. For a single-tier (`"compilers"` allowlisted) fixture that
+ * left the fold-ON row comparing NOTHING (F-049 vacuous). A fixture whose
+ * fold-ON output is byte-identical to its fold-OFF golden declares so with
+ * this flag, and the runner then compares fold-ON output against the existing
+ * (provenance-gated) golden — every format against the same bytes, so the
+ * nine surface formats are also held to each other.
+ *
+ * Fail closed: the flag must be literally `true`, and it is refused on a
+ * fixture without a `compilers` allowlist (those are cross-validated
+ * tier-against-tier under fold-ON; the flag exists only for single-tier rows).
+ */
+export function readFixtureFoldOnMatchesGolden(testDir: string): boolean {
+  const configFile = join(testDir, 'source.json');
+  if (!existsSync(configFile)) return false;
+  const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
+    compilers?: unknown;
+    foldOnMatchesGolden?: unknown;
+  };
+  if (config.foldOnMatchesGolden === undefined) return false;
+  const fixture = basename(testDir);
+  if (config.foldOnMatchesGolden !== true) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "foldOnMatchesGolden" must be true ` +
+      `when present (got ${JSON.stringify(config.foldOnMatchesGolden)})`,
+    );
+  }
+  if (!Array.isArray(config.compilers)) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "foldOnMatchesGolden" is only allowed ` +
+      `on a fixture with a "compilers" allowlist (single-tier rows); every-tier fixtures ` +
+      `are cross-validated under fold-ON`,
+    );
+  }
+  return true;
 }
 
 /**
@@ -2970,6 +3259,7 @@ export async function runConformanceTestForFormat(
       irMatch: true,
       scriptMatch: true,
       errors: [],
+      vacuous: `fold-on allowlisted: ${foldSkip}`,
     };
   }
 
@@ -3086,7 +3376,11 @@ export async function runConformanceTestForFormat(
   // Golden file comparison (use any successful compiler output). Skipped
   // under fold-on (RUNAR_DISABLE_CONSTANT_FOLDING=0) — see runConformanceTest
   // above for the rationale.
-  const skipGoldenMf = !constantFoldingDisabled();
+  // N-473: a fixture flagged foldOnMatchesGolden is compared under fold-ON too.
+  const skipGoldenMf = !constantFoldingDisabled() && !readFixtureFoldOnMatchesGolden(testDir);
+  // F-049: how many tier outputs each golden block below actually compares.
+  let irGoldenChecked = 0;
+  let scriptGoldenChecked = 0;
   if (!skipGoldenMf && existsSync(expectedIrFile)) {
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     const allOutputs = [
@@ -3098,6 +3392,7 @@ export async function runConformanceTestForFormat(
       rubyResult,
       javaResult,
     ].filter((o): o is CompilerOutput => o !== undefined && o.success && o.irJson !== '');
+    irGoldenChecked = allOutputs.length;
 
     for (const output of allOutputs) {
       if (output.irJson !== expectedIr) {
@@ -3118,6 +3413,7 @@ export async function runConformanceTestForFormat(
       rubyResult,
       javaResult,
     ].filter((o): o is CompilerOutput => o !== undefined && o.success && o.scriptHex !== '');
+    scriptGoldenChecked = allOutputs.length;
 
     for (const output of allOutputs) {
       const normalized = output.scriptHex.toLowerCase().replace(/\s/g, '');
@@ -3141,6 +3437,7 @@ export async function runConformanceTestForFormat(
     irMatch: irMatch.ok,
     scriptMatch: scriptMatch.ok,
     errors,
+    vacuous: vacuityReason(irMatch, scriptMatch, irGoldenChecked, scriptGoldenChecked),
   };
 }
 

@@ -104,15 +104,18 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build attack tx: %v", err)
 		}
-		sigAttack, preAttack, err := runar.ComputeOpPushTxWithCodeSep(attackTx.Hex(), 0, utxo.Script, utxo.Satoshis, codesep)
+		// N-213: ComputeOpPushTxWithCodeSep also returns a DER signature, but
+		// PreparedCall has no field for it (post-BUG-100 the OP_PUSH_TX
+		// signature is derived on-chain from the preimage, not spender-supplied)
+		// — only the preimage below is wired into the hand-mutated PreparedCall.
+		_, preAttack, err := runar.ComputeOpPushTxWithCodeSep(attackTx.Hex(), 0, utxo.Script, utxo.Satoshis, codesep)
 		if err != nil {
 			t.Fatalf("attack OP_PUSH_TX: %v", err)
 		}
 
 		// Reuse the correct continuation-path unlock assembly (codePart + selector
-		// + change witness) via FinalizeCall, but point it at the attacker tx and
-		// the attacker signature. Swap the preimage per the flag.
-		pCont.OpPushTxSig = hex.EncodeToString(sigAttack)
+		// + change witness) via FinalizeCall, but point it at the attacker tx.
+		// Swap the preimage per the flag.
 		pCont.TxHex = attackTx.Hex()
 		if !useContinuationPreimage {
 			pCont.Preimage = hex.EncodeToString(preAttack) // naive: preimage matches the real (attacker) outputs
@@ -146,7 +149,7 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 			t.Fatalf("BUG-100 REGRESSION: decoupled-preimage spend was ACCEPTED (txid=%s) — the on-chain preimage binding is not enforced; attacker %s would receive the contract's funds", txid, attacker.Address)
 		}
 		// `err != nil` on its own does NOT prove consensus enforced anything.
-		// This leg hand-mutates a PreparedCall (TxHex, OpPushTxSig, a swapped
+		// This leg hand-mutates a PreparedCall (TxHex, a swapped
 		// preimage), and FinalizeCall returns "parsing tx: ..." before it ever
 		// reaches provider.Broadcast — so any future SDK change that makes a
 		// hand-modified PreparedCall fail assembly would turn this repo's only

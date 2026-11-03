@@ -140,8 +140,19 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     }
   });
 
-  it('RED: the byte-slicing gap (left / right / split / sha256Compress) is refused too', () => {
-    for (const name of ['left', 'right', 'split', 'sha256Compress', 'sha256Finalize']) {
+  it('RED: the byte-slicing gap (sha256Compress) is refused too', () => {
+    // F-274 modelled `left`/`right` (CL-BUG-163: they used to fail CLOSED
+    // here, but also fail OPEN with wrong values in several native runtimes
+    // and SDK ANF interpreters for an out-of-range length — see
+    // f274-split-builtins-onchain-vectors.test.ts), so they are no longer
+    // part of this gap. N-171 modelled `split` the same way (it is the same
+    // OP_SPLIT family) — see n171-split-substr-builtins-onchain-vectors.test.ts.
+    // `substr` is modelled here too, and (R67) is now fully abort-faithful:
+    // `extractScriptCode` supplies the contract's own real codePart instead
+    // of an empty dummy, so `substr(sc, ...)` in a method like
+    // `FungibleToken.merge` no longer needs a clamp to avoid a spurious
+    // abort during off-chain state derivation.
+    for (const name of ['sha256Compress', 'sha256Finalize']) {
       expect(probe(name), `${name} must be refused`).toMatchObject({ kind: 'refused' });
     }
   });

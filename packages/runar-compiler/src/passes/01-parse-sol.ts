@@ -18,9 +18,11 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -36,7 +38,7 @@ type TokenType =
   | '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||'
   | '<<' | '>>'
   | '&' | '|' | '^' | '~' | '!'
-  | '=' | '+=' | '-='
+  | '=' | '+=' | '-=' | '*=' | '/=' | '%='
   | '++' | '--'
   | 'eof';
 
@@ -60,11 +62,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
 
@@ -75,6 +77,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     tokens.push({ type, value, line: l, column: c });
   }
 
+  let closingQuoteAt = -1; // F-011, see the quoted-literal check below
   while (pos < source.length) {
     const ch = peek();
     const l = line;
@@ -115,6 +118,9 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     if (ch === '-' && peekN(1) === '-') { advance(); advance(); add('--', '--', l, c); continue; }
     if (ch === '+' && peekN(1) === '=') { advance(); advance(); add('+=', '+=', l, c); continue; }
     if (ch === '-' && peekN(1) === '=') { advance(); advance(); add('-=', '-=', l, c); continue; }
+    if (ch === '*' && peekN(1) === '=') { advance(); advance(); add('*=', '*=', l, c); continue; }
+    if (ch === '/' && peekN(1) === '=') { advance(); advance(); add('/=', '/=', l, c); continue; }
+    if (ch === '%' && peekN(1) === '=') { advance(); advance(); add('%=', '%=', l, c); continue; }
 
     // Single-char operators & punctuation
     const singles = '(){}[];,.:?+-*/%<>=&|^~!';
@@ -135,13 +141,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       continue;
     }
 
-    // Number
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9]/.test(peek())) {
-        val += advance();
-      }
-      add('number', val, l, c);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('sol', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('sol', text), 'error', { file, line: l, column: c }));
+      add('number', lit ? lit.value.toString() : '0', l, c);
       continue;
     }
 
@@ -154,6 +160,29 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       const kwType = KEYWORDS.get(val);
       add(kwType || 'ident', val, l, c);
       continue;
+    }
+
+    // F-011: this surface accepts no quoted literal (a terminated one is
+    // refused as an unexpected character below), but an unterminated one --
+    // reaching a line break or end of file -- gets the diagnostic every tier
+    // emits for it.
+    if ((ch === '"' || ch === "'") && pos !== closingQuoteAt) {
+      let k = pos + 1;
+      while (k < source.length && source[k] !== ch && source[k] !== '\n') {
+        if (source[k] === '\\') {
+          if (k + 1 >= source.length || source[k + 1] === '\n') break;
+          k++;
+        }
+        k++;
+      }
+      if (source[k] !== ch) {
+        errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
+        advance();
+        continue;
+      }
+      // Terminated: both quotes stay unexpected characters, as before; the
+      // closing one must not be re-read as an opening quote.
+      closingQuoteAt = k;
     }
 
     // Unrecognized character — reject it rather than dropping it silently.
@@ -193,6 +222,8 @@ class SolParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
@@ -202,6 +233,7 @@ class SolParser {
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
   private peek(): Token { return this.current(); }
+  private peekAt(n: number): Token { return this.tokens[this.pos + n] ?? this.tokens[this.tokens.length - 1]!; }
   private advance(): Token { const t = this.current(); this.pos++; return t; }
 
   private expect(type: TokenType): Token {
@@ -233,16 +265,25 @@ class SolParser {
     }
 
     // Parse contract
-    this.expect('contract');
+    const contractToken = this.expect('contract');
     const nameToken = this.expect('ident');
     const contractName = nameToken.value;
 
     // Optional: is SmartContract / StatefulSmartContract / UnsafeSmartContract
     let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     if (this.match('is')) {
-      const parent = this.expect('ident').value;
+      const parentToken = this.expect('ident');
+      const parent = parentToken.value;
       if (parent === 'StatefulSmartContract') parentClass = 'StatefulSmartContract';
       else if (parent === 'UnsafeSmartContract') parentClass = 'UnsafeSmartContract';
+      else if (parent !== 'SmartContract') {
+        // N-014: an unknown base is refused, never folded to SmartContract.
+        this.errors.push(makeDiagnostic(
+          `unknown parent class: '${parent}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
+          'error',
+          { file: this.file, line: parentToken.line, column: parentToken.column },
+        ));
+      }
     }
 
     this.expect('{');
@@ -265,7 +306,8 @@ class SolParser {
 
     // Build constructor if not explicitly defined
     if (!constructorNode) {
-      const loc = { file: this.file, line: 1, column: 1 };
+      // N-490: anchored at the `contract` keyword, not a fake 1:0.
+      const loc = { file: this.file, line: contractToken.line, column: contractToken.column };
       // Only non-initialized properties become constructor params
       const uninitProps = properties.filter(p => !p.initializer);
       constructorNode = {
@@ -320,10 +362,24 @@ class SolParser {
     const location = this.loc();
     // Type [immutable] name [= value];
     const typeName = this.parseType();
+    // Modifiers, any order: `immutable` (readonly) and N-093's `embedAlways`
+    // (the native spelling of the `@embedAlways` directive). An `embedAlways`
+    // directly followed by `;` or `=` is the property NAME, not a modifier.
     let readonly = false;
-    if (this.current().type === 'immutable') {
-      this.advance();
-      readonly = true;
+    let embedAlways = false;
+    for (;;) {
+      if (this.current().type === 'immutable') {
+        this.advance();
+        readonly = true;
+        continue;
+      }
+      if (this.current().type === 'ident' && this.current().value === 'embedAlways' &&
+          this.peekAt(1).type !== ';' && this.peekAt(1).type !== '=') {
+        this.advance();
+        embedAlways = true;
+        continue;
+      }
+      break;
     }
     const name = this.expect('ident').value;
 
@@ -341,6 +397,7 @@ class SolParser {
       type: typeName,
       readonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: location,
     };
   }
@@ -453,15 +510,28 @@ class SolParser {
     }
     this.expect(')');
 
-    // Visibility modifier
+    // Modifiers, any order: visibility and N-093's `sighash(FLAGS)` (the
+    // native spelling of the `@sighash` directive). FLAGS must be identifiers
+    // separated by `|`; any other token makes the spelling malformed.
     let visibility: 'public' | 'private' = 'private';
-    if (this.current().type === 'public') { this.advance(); visibility = 'public'; }
-    else if (this.current().type === 'private') { this.advance(); }
+    const sighashSpecs: Array<string | null> = [];
+    for (;;) {
+      if (this.current().type === 'public') { this.advance(); visibility = 'public'; continue; }
+      if (this.current().type === 'private') { this.advance(); continue; }
+      if (this.current().type === 'ident' && this.current().value === 'sighash' &&
+          this.peekAt(1).type === '(') {
+        this.advance();
+        sighashSpecs.push(this.parseSighashFlagTokens());
+        continue;
+      }
+      break;
+    }
 
-    // Return type (skip)
+    // Return type: the AST keeps none, but N-331 refuses an unknown name.
     if (this.current().type === 'ident' && this.current().value === 'returns') {
       this.advance();
       this.expect('(');
+      if (this.current().type === 'ident') checkReturnType(this.parseType(), name, location, this.errors, visibility === 'public');
       while (this.current().type !== ')' && this.current().type !== 'eof') this.advance();
       this.expect(')');
     }
@@ -473,10 +543,44 @@ class SolParser {
     }
     this.expect('}');
 
-    return { kind: 'method', name, params, body, visibility, sourceLocation: location };
+    const sighash = resolveNativeSighash(name, visibility === 'public', sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
+    return {
+      kind: 'method', name, params, body, visibility,
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+      sourceLocation: location,
+    };
+  }
+
+  /**
+   * N-093: `( IDENT ( '|' IDENT )* )` after `sighash` → the flag text, or
+   * `null` when anything else appears inside the parentheses. Always consumes
+   * through the matching `)` so a malformed spelling does not derail parsing.
+   */
+  private parseSighashFlagTokens(): string | null {
+    this.expect('(');
+    let text = '';
+    let ok = true;
+    let depth = 1;
+    while (this.current().type !== 'eof') {
+      const t = this.current();
+      if (t.type === '(') depth++;
+      if (t.type === ')' && --depth === 0) break;
+      if (t.type === 'ident' || t.type === '|') text += t.value;
+      else ok = false;
+      this.advance();
+    }
+    this.expect(')');
+    return ok ? text : null;
   }
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
 
     // require(expr); -> assert(expr)
@@ -582,26 +686,19 @@ class SolParser {
       };
     }
 
-    // Compound assignments
-    if (this.current().type === '+=') {
+    // Compound assignments: the closed set in spec/grammar.md (`+= -= *= /= %=`)
+    const compoundOps = new Map<TokenType, BinaryOp>([
+      ['+=', '+'], ['-=', '-'], ['*=', '*'], ['/=', '/'], ['%=', '%'],
+    ]);
+    const compoundOp = compoundOps.get(this.current().type);
+    if (compoundOp !== undefined) {
       this.advance();
       const rhs = this.parseExpression();
       this.expect(';');
       return {
         kind: 'assignment',
         target: expr,
-        value: { kind: 'binary_expr', op: '+', left: expr, right: rhs },
-        sourceLocation: location,
-      };
-    }
-    if (this.current().type === '-=') {
-      this.advance();
-      const rhs = this.parseExpression();
-      this.expect(';');
-      return {
-        kind: 'assignment',
-        target: expr,
-        value: { kind: 'binary_expr', op: '-', left: expr, right: rhs },
+        value: { kind: 'binary_expr', op: compoundOp, left: expr, right: rhs },
         sourceLocation: location,
       };
     }
@@ -700,7 +797,7 @@ class SolParser {
 
   // Expression parsing with precedence climbing
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   /**
@@ -723,107 +820,129 @@ class SolParser {
   }
 
   private parseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAnd();
     while (this.current().type === '||') {
       this.advance();
-      left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd() };
+      left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitOr();
     while (this.current().type === '&&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr() };
+      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitXor();
     while (this.current().type === '|' && this.tokens[this.pos + 1]?.type !== '|') {
       this.advance();
-      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor() };
+      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitAnd();
     while (this.current().type === '^') {
       this.advance();
-      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd() };
+      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.current().type === '&' && this.tokens[this.pos + 1]?.type !== '&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality() };
+      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality(), sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op = this.advance().type === '==' ? '===' : '!==';
-      left = { kind: 'binary_expr', op: op as BinaryOp, left, right: this.parseComparison() };
+      left = { kind: 'binary_expr', op: op as BinaryOp, left, right: this.parseComparison(), sourceLocation: start };
     }
     return left;
   }
 
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseShift() };
+      left = { kind: 'binary_expr', op, left, right: this.parseShift(), sourceLocation: start };
     }
     return left;
   }
 
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
+      left = { kind: 'binary_expr', op, left, right: this.parseAddSub(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (this.current().type === '+' || this.current().type === '-') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv() };
+      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv(), sourceLocation: start };
     }
     return left;
   }
 
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (this.current().type === '*' || this.current().type === '/' || this.current().type === '%') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseUnary() };
+      left = { kind: 'binary_expr', op, left, right: this.parseUnary(), sourceLocation: start };
     }
     return left;
   }
 
   private parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '++') {
       this.advance();
@@ -879,7 +998,7 @@ class SolParser {
     }
     if (t.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: t.value };
+      return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
     if (t.type === 'true') {
       this.advance();
@@ -907,7 +1026,7 @@ class SolParser {
     }
     if (t.type === 'ident') {
       this.advance();
-      return { kind: 'identifier', name: t.value };
+      return { kind: 'identifier', name: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Solidity-like surface syntax can start an expression with
@@ -1039,14 +1158,24 @@ function resolvePropertyAccess(stmt: Statement, propNames: Set<string>, paramNam
         then: stmt.then.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
         else: stmt.else?.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
       };
-    case 'for_statement':
+    case 'for_statement': {
+      // The init variable is scoped to the loop: it shadows a same-named
+      // property inside the init/condition/update/body only, never after it.
+      const forParams = new Set(paramNames);
+      const init = resolvePropertyAccess(stmt.init, propNames, forParams) as typeof stmt.init;
+      const condition = (resolvePropertyAccess(
+        { kind: 'expression_statement', expression: stmt.condition, sourceLocation: stmt.sourceLocation },
+        propNames,
+        forParams,
+      ) as { expression: Expression }).expression;
       return {
         ...stmt,
-        init: resolvePropertyAccess(stmt.init, propNames, paramNames) as typeof stmt.init,
-        condition: resolveExpr(stmt.condition),
-        update: resolvePropertyAccess(stmt.update, propNames, paramNames),
-        body: stmt.body.map(s => resolvePropertyAccess(s, propNames, new Set(paramNames))),
+        init,
+        condition,
+        update: resolvePropertyAccess(stmt.update, propNames, forParams),
+        body: stmt.body.map(s => resolvePropertyAccess(s, propNames, new Set(forParams))),
       };
+    }
     case 'return_statement':
       return stmt.value ? { ...stmt, value: resolveExpr(stmt.value) } : stmt;
     default:
@@ -1066,5 +1195,5 @@ export function parseSolSource(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new SolParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

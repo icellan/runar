@@ -132,6 +132,57 @@ class TestFindLastOpReturn:
         assert pos == -1
 
 
+class TestFindLastOpReturnNaming:
+    """F-367 (CL-DOC-016): `find_last_op_return` actually returns the FIRST
+    opcode-boundary OP_RETURN — it returns immediately on the first 0x6a it
+    walks into and never keeps scanning for a later one. That is a deliberate,
+    correct design: the on-chain interpreter itself stops at the first
+    OP_RETURN it executes (post-Genesis, OP_RETURN terminates script
+    evaluation rather than failing it), so nothing placed after it is ever
+    interpreted as opcodes, and the compiler only ever emits one separator
+    (`codePart + OP_RETURN + stateBytes`) — "first" and "last" coincide for
+    every script this walk will ever see. But the name, docstring, and a dead
+    `last_pos` accumulator all claim the function hunts for the LAST match.
+    TS, Go, Rust, Zig, Ruby, and Java implement the identical "stop at the
+    first real OP_RETURN" behaviour byte-for-byte, so this is a naming/doc bug
+    repeated across tiers, not a functional one — this item fixes only the
+    Python copy.
+    """
+
+    def test_docstring_does_not_claim_to_find_the_last_op_return(self):
+        """The docstring must describe the real behaviour (stops at the first
+        opcode-boundary OP_RETURN) rather than claiming to find the last one.
+
+        Proves: the public docstring for find_last_op_return no longer
+        contradicts its own control flow (an immediate `return offset` on the
+        first match, with no later-match tracking).
+        Does not prove: that every caller's mental model matches; callers
+        rely on there being exactly one real OP_RETURN in a well-formed
+        script, which this test does not exercise.
+        """
+        doc = find_last_op_return.__doc__ or ''
+        assert 'last OP_RETURN' not in doc, (
+            "docstring still claims to find the 'last' OP_RETURN, but the "
+            "function returns at the FIRST opcode-boundary 0x6a it walks into"
+        )
+
+    def test_no_dead_last_pos_accumulator(self):
+        """`last_pos` is initialised to -1 and never reassigned — the function
+        always returns directly (`return offset` on a match, or the bare `-1`
+        at the end), so the accumulator is dead code implying a "last match"
+        tracking that does not exist.
+
+        Proves: the dead accumulator has been removed from the function body.
+        Does not prove: anything about runtime behaviour — this is a static
+        source-text check.
+        """
+        import inspect
+        source = inspect.getsource(find_last_op_return)
+        assert 'last_pos' not in source, (
+            "dead `last_pos` accumulator is still present in find_last_op_return"
+        )
+
+
 # ---------------------------------------------------------------------------
 # extract_state_from_script
 # ---------------------------------------------------------------------------
@@ -475,3 +526,23 @@ class TestFixedArrayState:
         )
         result = deserialize_state(fields, hex_out)
         assert result == {'grid': [[5, 6], [7, 8]]}
+
+
+# N-044: the compiler's on-chain state reader and writer frame a ByteString
+# with an UNSIGNED length (<len> below 76, 4c <len8>, 4d <len16 LE>,
+# 4e <len32 LE>), and the covenant only accepts a continuation whose state
+# bytes equal the SDK's. Hand-written expected headers at every boundary where
+# a signed reading of the length used to differ (0x80, 0x81.., 0x8000, 0xffff)
+# and where PUSHDATA4 starts. The on-chain side is run against the same frames
+# by packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+@pytest.mark.parametrize('n,header', [
+    (75, '4b'), (76, '4c4c'), (127, '4c7f'), (128, '4c80'), (129, '4c81'),
+    (255, '4cff'), (256, '4d0001'), (32767, '4dff7f'), (32768, '4d0080'),
+    (65535, '4dffff'), (65536, '4e00000100'),
+])
+def test_bytestring_pushdata_length_boundaries_match_on_chain_frame(n, header):
+    fields = [StateField(name='b', type='ByteString', index=0)]
+    payload = 'ab' * n
+    encoded = serialize_state(fields, {'b': payload})
+    assert encoded == header + payload
+    assert deserialize_state(fields, encoded) == {'b': payload}

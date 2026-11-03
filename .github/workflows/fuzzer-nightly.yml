@@ -17,9 +17,10 @@ name: Fuzzer nightly
 #
 # PR merge gate (GAP-001 / GAP-101): on `pull_request` the job runs the
 # fuzzer with a FIXED seed (424242) and a modest program count (40), TWICE
-# — once fold-OFF (default, matches the checked-in goldens) and once
-# `--fold-on` (constant-folding enabled) — each hard-failing on any
-# cross-tier hex divergence. Determinism (fixed seed) keeps the gate
+# — once fold-OFF (default, every tier's `--ir` path, matches the checked-in
+# goldens) and once `--fold-on` (the same ANF corpus rendered to `.runar.ts`
+# and compiled from SOURCE with constant folding enabled) — each hard-failing
+# on any cross-tier hex divergence. Determinism (fixed seed) keeps the gate
 # reproducible and flake-free. The schedule/push path keeps the larger
 # run_id-seeded run for rotating coverage over time.
 #
@@ -34,7 +35,8 @@ name: Fuzzer nightly
 # per-finding directory tree (canonical IR JSON + per-tier diverging hex)
 # as an artifact, so the failing case can be replayed offline via
 #   `compilers/<tier>/<bin> --ir program.json --hex --disable-constant-folding`
-# against any tier.
+# (fold-OFF) or `compilers/<tier>/<bin> --source program.runar.ts --hex`
+# (fold-ON) against any tier.
 #
 # Security: all workflow_dispatch inputs are routed through `env:` blocks
 # (never interpolated directly into `run:` shell scripts) so the fuzzer
@@ -116,6 +118,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
 
       # ----- TypeScript workspace install + build (so the fuzzer can
@@ -144,13 +147,21 @@ jobs:
       - name: Build Zig compiler
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
       - name: Build Java compiler jar
-        run: cd compilers/java && gradle jar --no-daemon
+        run: cd compilers/java && ./gradlew jar --no-daemon
 
       # ----- PR merge gate (GAP-001): fixed-seed fold-OFF run hard-fails (the
       # ----- fuzzer's own exit(1)) on any cross-tier hex divergence. A FIXED
       # ----- seed (424242) + modest program count (40) keep it deterministic
       # ----- and fast. All argv values are literal constants — no untrusted PR
       # ----- input reaches the shell.
+      # ----- `--time-budget-ms` (N-228): without it, a MISMATCHING run's
+      # ----- delta-debugging shrink (F-173, `anf-differential.ts`'s `shrink`)
+      # ----- has `deadline === undefined` and runs with no wall-clock cap. 40
+      # ----- programs / 7 tiers measured at ~12s idle / ~35s under load; 2
+      # ----- minutes leaves headroom for that AND bounds the shrinker. A run
+      # ----- that still can't finish in budget hard-fails as an incomplete run
+      # ----- (the C5 rule in `fuzzer/index.ts`), so a too-tight budget is a
+      # ----- visible failure, not a silently truncated pass.
       - name: Fuzz (PR gate — fold-OFF, fixed seed)
         if: github.event_name == 'pull_request'
         working-directory: conformance
@@ -160,19 +171,19 @@ jobs:
             --anf \
             --num 40 \
             --seed 424242 \
+            --time-budget-ms 120000 \
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldoff.json
 
-      # ----- fold-ON is now a BLOCKING merge gate (GAP-101 closed). The earlier
-      # ----- cross-tier divergence was the ANF constant-fold being re-run on
-      # ----- the `--ir` path: it rewrote bin_ops to constants but left the
-      # ----- now-dead operand bindings, which the six non-Zig tiers emitted as
-      # ----- wasteful push+drop sequences (Zig's compileFromIR never folds IR
-      # ----- input). All seven IR entry points now skip the ANF fold on
-      # ----- pre-lowered IR (the peephole optimizer still folds), so fold-ON
-      # ----- `--ir` output is byte-identical to fold-OFF / the goldens across
-      # ----- all 7 tiers. Constant folding is still exercised on the source
-      # ----- path (the multi-format conformance gate).
+      # ----- fold-ON is a BLOCKING merge gate (GAP-101). All seven IR entry
+      # ----- points skip the ANF constant fold on pre-lowered IR (GAP-101's
+      # ----- fix), so this step can NOT go through `--ir`: that argv without
+      # ----- `--disable-constant-folding` re-ran fold-OFF byte for byte (N-003).
+      # ----- `--fold-on` therefore renders each generated ANF program to
+      # ----- `.runar.ts` and compiles it with `--source <file> --hex` in every
+      # ----- tier, folding ON — the only path on which folding runs. It fails
+      # ----- on any divergence, and also when folding changed no program's
+      # ----- bytes (a vacuous run).
       - name: Fuzz (PR gate — fold-ON, fixed seed)
         if: github.event_name == 'pull_request'
         working-directory: conformance
@@ -183,6 +194,7 @@ jobs:
             --fold-on \
             --num 40 \
             --seed 424242 \
+            --time-budget-ms 120000 \
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldon.json
 
@@ -975,17 +987,19 @@ jobs:
             echo "no current scorecard produced — scorer aborted; failing"
             exit 1
           fi
-          node -e '
-            const fs = require("fs");
-            const base = JSON.parse(fs.readFileSync("mutation/baseline.json", "utf8")).results;
-            const cur = JSON.parse(fs.readFileSync("/tmp/mutation-current.json", "utf8")).results;
-            const curById = new Map(cur.map((r) => [r.id, r]));
-            const regressions = [];
-            for (const b of base) {
-              const c = curById.get(b.id);
-              if (!c) { regressions.push(b.id + " (missing from current run)"); continue; }
-              if (b.caught && c.survived) regressions.push(b.id + " (was caught, now SURVIVES)");
-            }
+          # F-251: this used to be a bare `for (const b of base)` loop inlined
+          # here, which never visits a `cur` mutant absent from `base` — a
+          # mutant added to mutants.json without a `--write-baseline`
+          # re-stamp was structurally invisible to this gate. The comparison
+          # now lives in `findBaselineRegressions` (conformance/mutation/run-mutation.ts),
+          # unit-tested in `__tests__/baseline-regression-reverse-loop.test.ts`,
+          # and is only invoked here.
+          node_modules/.bin/tsx -e '
+            import { readFileSync } from "node:fs";
+            import { findBaselineRegressions } from "./mutation/run-mutation.ts";
+            const base = JSON.parse(readFileSync("mutation/baseline.json", "utf8")).results;
+            const cur = JSON.parse(readFileSync("/tmp/mutation-current.json", "utf8")).results;
+            const regressions = findBaselineRegressions(base, cur);
             if (regressions.length) {
               console.error("MUTATION REGRESSION — the net weakened:");
               for (const r of regressions) console.error("  • " + r);

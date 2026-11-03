@@ -1,0 +1,151 @@
+{
+  "contractName": "CheckSigOrProbe",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 16
+          },
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 20
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "sigA"
+          }
+        },
+        {
+          "name": "t1",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 20
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "pubA"
+          }
+        },
+        {
+          "name": "t2",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 20
+          },
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 20
+          },
+          "value": {
+            "cond": "t2",
+            "else": [
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sigB"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "load_param",
+                  "name": "pubB"
+                }
+              },
+              {
+                "name": "t6",
+                "value": {
+                  "args": [
+                    "t4",
+                    "t5"
+                  ],
+                  "func": "checkSig",
+                  "kind": "call"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t8",
+          "sourceLoc": {
+            "column": 4,
+            "file": "CheckSigOrProbe.runar.ts",
+            "line": 20
+          },
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": [
+        {
+          "name": "sigA",
+          "type": "Sig"
+        },
+        {
+          "name": "pubA",
+          "type": "PubKey"
+        },
+        {
+          "name": "sigB",
+          "type": "Sig"
+        },
+        {
+          "name": "pubB",
+          "type": "PubKey"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": []
+}

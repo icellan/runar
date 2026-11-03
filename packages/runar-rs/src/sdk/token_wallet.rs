@@ -4,8 +4,23 @@ use super::types::{RunarArtifact, Utxo, SdkValue, CallOptions};
 use super::provider::Provider;
 use super::signer::Signer;
 use super::contract::RunarContract;
-use super::script_utils::build_p2pkh_script;
-use super::calling::build_call_transaction;
+use super::script_utils::{build_p2pkh_script, is_hex_bytes, matches_artifact};
+use super::state::find_last_op_return;
+use std::sync::Once;
+
+// N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
+// be made sound, so they are deprecated rather than redesigned or removed.
+// Each warns once per process on first use.
+const MERGE_DEPRECATION: &str = "runar-sdk: warning: TokenWallet::merge is deprecated and unsafe. \
+    Its merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion input, \
+    so a holder can call merge on ONE input with a made-up otherSupply (supply inflation). \
+    Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).";
+const TRANSFER_DEPRECATION: &str = "runar-sdk: warning: TokenWallet::transfer is deprecated and unsafe. \
+    Its transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, \
+    so the token stays with the current holder instead of moving to the recipient. \
+    Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).";
+static MERGE_WARN_ONCE: Once = Once::new();
+static TRANSFER_WARN_ONCE: Once = Once::new();
 
 /// Manages token UTXOs for a fungible token contract.
 ///
@@ -62,7 +77,13 @@ impl TokenWallet {
     /// this wallet's signer and passed as the first argument.
     ///
     /// Returns the txid of the transfer transaction.
+    #[deprecated(
+        note = "unsafe (N-239): the transfer(sig, to: Addr) ABI cannot re-key a PubKey holder, \
+                so the token does not move to the recipient; use the token-ft example \
+                (FungibleTokenExample) instead"
+    )]
     pub fn transfer(&mut self, recipient_addr: &str, amount: i64) -> Result<String, String> {
+        TRANSFER_WARN_ONCE.call_once(|| eprintln!("{}", TRANSFER_DEPRECATION));
         let utxos = self.get_utxos()?;
         if utxos.is_empty() {
             return Err("TokenWallet.transfer: no token UTXOs found".to_string());
@@ -80,36 +101,19 @@ impl TokenWallet {
 
             if balance >= amount {
                 // FungibleToken.transfer(sig: Sig, to: Addr)
-                // Build a preliminary unlocking script with a placeholder sig
-                let placeholder_sig = "00".repeat(72);
-                let prelim_unlock = contract.build_unlocking_script(
-                    "transfer",
-                    &[SdkValue::Bytes(placeholder_sig), SdkValue::Bytes(recipient_addr.to_string())],
-                )?;
-
+                // F-045: pass Auto for the Sig so `call` auto-signs the
+                // transaction it actually builds and broadcasts. Signing a
+                // locally built preliminary tx covers a different tx and is
+                // rejected on-chain.
+                // An Addr is a 20-byte hash160: accept a Base58 address (as
+                // documented), a raw hash160, or a public key.
+                let to_pkh = build_p2pkh_script(recipient_addr)[6..46].to_string();
                 let change_address = self.signer.get_address()?;
-                let fee_rate = self.provider.get_fee_rate()?;
-                let additional_utxos = self.provider.get_utxos(&change_address)?;
-                let change_script = build_p2pkh_script(&change_address);
-
-                let (prelim_tx, _, _) = build_call_transaction(
-                    utxo,
-                    &prelim_unlock,
-                    None, // FungibleToken is stateless
-                    None,
-                    Some(&change_address),
-                    Some(&change_script),
-                    if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
-                    Some(fee_rate),
-                )?;
-
-                // Sign input 0 against the contract UTXO's locking script
-                let sig = self.signer.sign(&prelim_tx, 0, &utxo.script, utxo.satoshis, None)?;
 
                 let mut contract_mut = contract;
                 let (txid, _) = contract_mut.call(
                     "transfer",
-                    &[SdkValue::Bytes(sig), SdkValue::Bytes(recipient_addr.to_string())],
+                    &[SdkValue::Auto, SdkValue::Bytes(to_pkh)],
                     &mut *self.provider,
                     &*self.signer,
                     Some(&CallOptions {
@@ -134,7 +138,13 @@ impl TokenWallet {
     /// on-chain state and passed as arguments.
     ///
     /// Returns the txid of the merge transaction.
+    #[deprecated(
+        note = "unsafe (N-239): the merge(sig, otherSupply, otherHolder) ABI cannot authenticate \
+                its companion input, so a holder can inflate supply; use the token-ft example \
+                (FungibleTokenExample) instead"
+    )]
     pub fn merge(&mut self) -> Result<String, String> {
+        MERGE_WARN_ONCE.call_once(|| eprintln!("{}", MERGE_DEPRECATION));
         let utxos = self.get_utxos()?;
         if utxos.len() < 2 {
             return Err("TokenWallet.merge: need at least 2 UTXOs to merge".to_string());
@@ -166,40 +176,25 @@ impl TokenWallet {
             .unwrap_or_default();
 
         // FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-        let placeholder_sig = "00".repeat(72);
-        let prelim_unlock = contract.build_unlocking_script(
-            "merge",
-            &[
-                SdkValue::Bytes(placeholder_sig),
-                SdkValue::Int(other_supply),
-                SdkValue::Bytes(other_holder.clone()),
-            ],
-        )?;
+        // F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        // the OTHER input's supply/holder, and every Sig is Auto so `call`
+        // signs each input over the transaction it actually broadcasts.
+        let first_state = contract.state();
+        let first_supply = get_balance_from_state(first_state);
+        let first_holder = first_state.get("holder")
+            .map(|v| match v {
+                SdkValue::Bytes(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
 
         let change_address = self.signer.get_address()?;
-        let fee_rate = self.provider.get_fee_rate()?;
-        let additional_utxos = self.provider.get_utxos(&change_address)?;
-        let change_script = build_p2pkh_script(&change_address);
-
-        let (prelim_tx, _, _) = build_call_transaction(
-            first_utxo,
-            &prelim_unlock,
-            None,
-            None,
-            Some(&change_address),
-            Some(&change_script),
-            if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
-            Some(fee_rate),
-        )?;
-
-        // Sign input 0 against the first contract UTXO's locking script
-        let sig = self.signer.sign(&prelim_tx, 0, &first_utxo.script, first_utxo.satoshis, None)?;
 
         let mut contract_mut = contract;
         let (txid, _) = contract_mut.call(
             "merge",
             &[
-                SdkValue::Bytes(sig),
+                SdkValue::Auto,
                 SdkValue::Int(other_supply),
                 SdkValue::Bytes(other_holder),
             ],
@@ -207,6 +202,12 @@ impl TokenWallet {
             &*self.signer,
             Some(&CallOptions {
                 change_address: Some(change_address),
+                additional_contract_inputs: Some(vec![second_utxo.clone()]),
+                additional_contract_input_args: Some(vec![vec![
+                    SdkValue::Auto,
+                    SdkValue::Int(first_supply),
+                    SdkValue::Bytes(first_holder),
+                ]]),
                 ..Default::default()
             }),
         )?;
@@ -219,16 +220,50 @@ impl TokenWallet {
         let address = self.signer.get_address()?;
         let all_utxos = self.provider.get_utxos(&address)?;
 
-        let script_prefix = &self.artifact.script;
+        // N-076: the artifact script is the TEMPLATE; every slot (constructor
+        // arg, codeSepIndex, code-part length) is a placeholder that
+        // deployment replaces, so a raw prefix of it never matches a slotted
+        // deployment. With constructor slots, use the slot-aware
+        // `matches_artifact`; a template with none is deployed verbatim, so
+        // its literal prefix is exact.
+        let template = &self.artifact.script;
+        let slotted = self
+            .artifact
+            .constructor_slots
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
+        let declares_state = self
+            .artifact
+            .state_fields
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
 
         Ok(all_utxos
             .into_iter()
             .filter(|utxo| {
-                if !utxo.script.is_empty() && !script_prefix.is_empty() {
-                    utxo.script.starts_with(script_prefix)
-                } else {
-                    true
+                if utxo.script.is_empty() || template.is_empty() {
+                    return true;
                 }
+                if !slotted {
+                    return utxo.script.starts_with(template.as_str());
+                }
+                // N-317: any UTXO the provider lists is attacker-influenced; a
+                // script that is not whole ASCII hex bytes is not an instance of
+                // this contract (and slicing it below could panic).
+                if !is_hex_bytes(&utxo.script) {
+                    return false;
+                }
+                // `matches_artifact` strips the state section only for
+                // artifacts that declare state fields; cut it here for the rest.
+                let mut code_hex = utxo.script.as_str();
+                if !declares_state {
+                    if let Some(pos) = find_last_op_return(code_hex) {
+                        code_hex = &code_hex[..pos];
+                    }
+                }
+                // A script that is not well-formed at the artifact's slot
+                // offsets (F-238) is an Err and not an instance of this contract.
+                matches_artifact(&self.artifact, code_hex).unwrap_or(false)
             })
             .collect())
     }
@@ -293,6 +328,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -368,5 +404,88 @@ mod tests {
         let utxos = wallet.get_utxos().unwrap();
         assert_eq!(utxos.len(), 1);
         assert_eq!(utxos[0].txid, "aa".repeat(32));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-239: merge / transfer are deprecated and unsafe. The ABI they drive
+    // cannot be made sound: merge(sig, otherSupply, otherHolder) cannot
+    // authenticate its companion input (supply inflation) and
+    // transfer(sig, to: Addr) cannot re-key a PubKey holder. User decision
+    // R92: deprecate (marker + one-time runtime warning + docs), do not
+    // redesign or remove.
+    //
+    // Proves: each method carries `#[deprecated]`; calling it writes a
+    // warning to the process's real stderr naming its specific unsoundness
+    // and pointing to token-ft (FungibleTokenExample), once per process, not
+    // per call; the method's own behaviour (here, its error path) is
+    // unchanged. libtest captures eprintln!, so the parent re-runs this test
+    // binary on the child test below with --nocapture and reads its stderr.
+    // Does NOT prove: that anyone reads the warning, or anything on-chain —
+    // the happy paths stay covered by tests/f045_token_wallet.rs.
+    // -----------------------------------------------------------------------
+
+    const N239_CHILD_ENV: &str = "RUNAR_N239_CHILD";
+
+    /// Child half: only does anything when the parent re-executes it.
+    #[test]
+    #[allow(deprecated)]
+    fn n239_child_calls_deprecated_methods() {
+        if std::env::var(N239_CHILD_ENV).is_err() {
+            return;
+        }
+        use crate::sdk::provider::MockProvider;
+        use crate::sdk::signer::MockSigner;
+        let mut wallet = TokenWallet::new(
+            make_token_artifact(),
+            Box::new(MockProvider::testnet()),
+            Box::new(MockSigner::new()),
+        );
+        for _ in 0..2 {
+            let e = wallet.merge().unwrap_err();
+            assert!(e.contains("need at least 2 UTXOs"), "merge error path changed: {e}");
+            let e = wallet.transfer("recipient", 1).unwrap_err();
+            assert!(e.contains("no token UTXOs found"), "transfer error path changed: {e}");
+        }
+    }
+
+    #[test]
+    fn n239_merge_and_transfer_warn_once_on_stderr() {
+        let child = format!(
+            "{}::n239_child_calls_deprecated_methods",
+            module_path!().split_once("::").map(|(_, rest)| rest).unwrap()
+        );
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &child, "--nocapture", "--test-threads=1"])
+            .env(N239_CHILD_ENV, "1")
+            .output()
+            .expect("re-exec test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "child failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("1 passed"), "child test did not run: {stdout}");
+
+        let merge: Vec<&str> = stderr.lines().filter(|l| l.contains("TokenWallet::merge")).collect();
+        let transfer: Vec<&str> = stderr.lines().filter(|l| l.contains("TokenWallet::transfer")).collect();
+        assert_eq!(merge.len(), 1, "want one merge warning, stderr:\n{stderr}");
+        assert_eq!(transfer.len(), 1, "want one transfer warning, stderr:\n{stderr}");
+        for needle in ["deprecated", "supply inflation", "token-ft", "FungibleTokenExample"] {
+            assert!(merge[0].contains(needle), "merge warning lacks {needle:?}: {}", merge[0]);
+        }
+        for needle in ["deprecated", "re-key", "token-ft", "FungibleTokenExample"] {
+            assert!(transfer[0].contains(needle), "transfer warning lacks {needle:?}: {}", transfer[0]);
+        }
+    }
+
+    #[test]
+    fn n239_methods_carry_deprecated_attribute() {
+        let src = include_str!("token_wallet.rs");
+        for m in ["transfer", "merge"] {
+            let sig = format!("pub fn {m}(&mut self");
+            let at = src.find(&sig).unwrap_or_else(|| panic!("{m} not found"));
+            let before = &src[..at];
+            let attr = before.rfind("#[deprecated").unwrap_or_else(|| panic!("{m} lacks #[deprecated]"));
+            // The attribute must belong to THIS fn: no other `fn ` between it and the signature.
+            assert!(!before[attr..].contains("fn "), "{m} lacks #[deprecated]");
+        }
     }
 }

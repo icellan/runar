@@ -76,16 +76,27 @@ struct Args {
     #[arg(long)]
     parse_only: bool,
 
-    /// Disable the ANF constant folding pass
+    /// Disable the ANF constant folding pass (no-op when using --ir; constant folding is always disabled when reading pre-lowered ANF IR)
     #[arg(long)]
     disable_constant_folding: bool,
 
     /// After a successful compile, write artifact.sourceMap JSON to this path.
     #[arg(long)]
     emit_source_map: Option<PathBuf>,
+
+    /// Omit the sourceMap key from the artifact (mutually exclusive with
+    /// --emit-source-map). The artifact carries one by default.
+    #[arg(long)]
+    no_source_map: bool,
 }
 
 fn main() {
+    // N-285: install the catch_refusal panic-suppressing hook now, on this
+    // (the only) thread, before any subcommand or compile pass runs — the
+    // one install this process will ever do, done at a moment with no
+    // concurrency to race it. See runar_compiler_rust::refusal::init.
+    runar_compiler_rust::refusal::init();
+
     // Subcommand dispatch: if the first positional looks like a subcommand
     // (not a flag), route it to its handler. Mirrors the Go compiler's
     // approach so adding modes like `debug` does not require restructuring
@@ -93,11 +104,15 @@ fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.len() > 1 && !raw_args[1].starts_with('-') {
         if raw_args[1] == "debug" {
-            if let Err(e) = debug_subcommand::run(&raw_args[2..]) {
-                eprintln!("debug: {}", e);
-                process::exit(1);
+            match debug_subcommand::run(&raw_args[2..]) {
+                Ok(true) => return,
+                // Script failed: the verdict is already on stdout (F-221).
+                Ok(false) => process::exit(1),
+                Err(e) => {
+                    eprintln!("debug: {}", e);
+                    process::exit(1);
+                }
             }
-            return;
         }
         // Unknown positional: fall through to clap, which will emit a
         // standard usage error.
@@ -109,6 +124,12 @@ fn main() {
         disable_constant_folding: args.disable_constant_folding,
         ..Default::default()
     };
+
+    // N-445: refuse the contradictory pair rather than silently dropping one.
+    if args.no_source_map && args.emit_source_map.is_some() {
+        eprintln!("--no-source-map and --emit-source-map are mutually exclusive");
+        process::exit(1);
+    }
 
     if args.ir.is_none() && args.source.is_none() {
         eprintln!("Error: must provide --ir or --source flag.");
@@ -123,6 +144,14 @@ fn main() {
         eprintln!("  --asm            Output only script ASM");
         eprintln!("  --emit-ir        Output only ANF IR JSON (requires --source)");
         eprintln!("  --emit-ir-to <p> Write ANF IR JSON to <p> and keep compiling (requires --source)");
+        eprintln!("  --no-source-map  Omit the sourceMap key from the artifact");
+        process::exit(1);
+    }
+
+    // N-220: --source and --ir are mutually exclusive input modes (Go F-183,
+    // Ruby F-335). Previously --source was run and --ir silently ignored.
+    if args.ir.is_some() && args.source.is_some() {
+        eprintln!("Error: --source and --ir are mutually exclusive; pass exactly one");
         process::exit(1);
     }
 
@@ -159,7 +188,17 @@ fn main() {
         return;
     }
 
-    // Handle --emit-ir: dump ANF IR JSON and exit
+    // Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS --emit-source-map
+    // was also requested. The source map is only populated by the full
+    // compile (stack-lowering + emit), which this IR-only snapshot never
+    // runs, so an unconditional return here used to silently drop the
+    // --emit-source-map file with no diagnostic (F-255, same bug as Go's
+    // F-183). When --emit-source-map is also set we fall through — the same
+    // way --emit-ir-to already does — into the normal compile below so the
+    // source map gets populated and written; emit_ir_handled then stops us
+    // before the final hex/asm/artifact output, since --emit-ir's contract
+    // is "stdout carries only the IR".
+    let mut emit_ir_handled = false;
     if args.emit_ir {
         let source_path = match &args.source {
             Some(p) => p,
@@ -168,8 +207,8 @@ fn main() {
                 process::exit(1);
             }
         };
-        match runar_compiler_rust::compile_source_to_ir_with_options(source_path, &opts) {
-            Ok(program) => {
+        match runar_compiler_rust::compile_source_to_ir_collecting_warnings(source_path, &opts) {
+            Ok((program, warnings)) => {
                 match serde_json::to_string_pretty(&program) {
                     Ok(json) => println!("{}", json),
                     Err(e) => {
@@ -177,7 +216,18 @@ fn main() {
                         process::exit(1);
                     }
                 }
-                return;
+                if args.emit_source_map.is_none() {
+                    // F-220: this early return skips the full compile, which is
+                    // where warnings are otherwise printed, so print them here.
+                    // When --emit-source-map is set we fall through and the
+                    // full compile prints them; printing here too would print
+                    // each one twice.
+                    for w in &warnings {
+                        eprintln!("warning: {}", w);
+                    }
+                    return;
+                }
+                emit_ir_handled = true;
             }
             Err(e) => {
                 eprintln!("Compilation error: {}", e);
@@ -222,7 +272,7 @@ fn main() {
         }
     }
 
-    let artifact = if let Some(ref source_path) = args.source {
+    let mut artifact = if let Some(ref source_path) = args.source {
         // R-237: go through the result-bearing API so advisory diagnostics reach
         // the operator. `compile_from_source_with_options` returns
         // Result<RunarArtifact, String> — one value, with nowhere to put a
@@ -257,6 +307,11 @@ fn main() {
             }
         }
     };
+
+    // N-445: --no-source-map drops the sourceMap key from the artifact.
+    if args.no_source_map {
+        artifact.source_map = None;
+    }
 
     // --emit-source-map: write the artifact's sourceMap field as canonical
     // JSON ({"mappings":[...]}) to the requested path. Always emit the
@@ -302,6 +357,13 @@ fn main() {
                 process::exit(1);
             }
         }
+    }
+
+    // --emit-ir already printed the IR above; having fallen through only to
+    // populate and write the source map, stop here rather than also print
+    // the full hex/asm/artifact output.
+    if emit_ir_handled {
+        return;
     }
 
     // Determine output content

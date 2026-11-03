@@ -141,39 +141,79 @@
           "name": "t12",
           "value": {
             "kind": "load_param",
-            "name": "_changePKH"
+            "name": "txPreimage"
           }
         },
         {
           "name": "t13",
           "value": {
-            "kind": "load_param",
-            "name": "_changeAmount"
+            "args": [
+              "t12"
+            ],
+            "func": "extractAmount",
+            "kind": "call"
           }
         },
         {
           "name": "t14",
           "value": {
-            "kind": "load_const",
-            "value": 0
+            "kind": "load_param",
+            "name": "_newAmount"
           }
         },
         {
           "name": "t15",
           "value": {
             "kind": "bin_op",
-            "left": "t13",
-            "op": "!==",
-            "right": "t14"
+            "left": "t14",
+            "op": ">=",
+            "right": "t13"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "assert",
+            "value": "t15"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
           }
         },
         {
           "name": "t18",
           "value": {
-            "cond": "t15",
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t18",
+            "op": "!==",
+            "right": "t19"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "cond": "t20",
             "else": [
               {
-                "name": "t17",
+                "name": "t22",
                 "value": {
                   "kind": "load_const",
                   "value": ""
@@ -183,11 +223,11 @@
             "kind": "if",
             "then": [
               {
-                "name": "t16",
+                "name": "t21",
                 "value": {
                   "args": [
-                    "t12",
-                    "t13"
+                    "t17",
+                    "t18"
                   ],
                   "func": "buildChangeOutput",
                   "kind": "call"
@@ -197,56 +237,9 @@
           }
         },
         {
-          "name": "t19",
-          "value": {
-            "kind": "get_state_script"
-          }
-        },
-        {
-          "name": "t20",
-          "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t21",
-          "value": {
-            "kind": "load_param",
-            "name": "_newAmount"
-          }
-        },
-        {
-          "name": "t22",
-          "value": {
-            "args": [
-              "t20",
-              "t19",
-              "t21"
-            ],
-            "func": "computeStateOutput",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t23",
-          "value": {
-            "args": [
-              "t22",
-              "t18"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
           "name": "t24",
           "value": {
-            "args": [
-              "t23"
-            ],
-            "func": "hash256",
-            "kind": "call"
+            "kind": "get_state_script"
           }
         },
         {
@@ -259,29 +252,76 @@
         {
           "name": "t26",
           "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
             "args": [
-              "t25"
+              "t25",
+              "t24",
+              "t26"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "args": [
+              "t27",
+              "t23"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "args": [
+              "t28"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "args": [
+              "t30"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t27",
+          "name": "t32",
           "value": {
             "kind": "bin_op",
-            "left": "t24",
+            "left": "t29",
             "op": "===",
             "result_type": "bytes",
-            "right": "t26"
+            "right": "t31"
           }
         },
         {
-          "name": "t28",
+          "name": "t33",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t27"
+            "value": "t32"
           }
         }
       ],
@@ -442,6 +482,7 @@
       ]
     }
   ],
+  "parentClass": "StatefulSmartContract",
   "properties": [
     {
       "name": "message",

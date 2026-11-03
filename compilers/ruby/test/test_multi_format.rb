@@ -7,7 +7,7 @@ require_relative "test_helper"
 # Verifies that the same contract compiled from different source formats
 # produces identical hex output. The Ruby compiler supports .runar.ts,
 # .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb,
-# and .runar.zig.
+# .runar.zig, and .runar.java.
 
 class TestMultiFormat < Minitest::Test
   CONFORMANCE_DIR = File.expand_path("../../../conformance/tests", __dir__)
@@ -130,11 +130,20 @@ class TestMultiFormat < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
-  # 9. All non-Ruby formats produce identical output
+  # 9. Java format matches golden file
+  # ---------------------------------------------------------------------------
+
+  def test_java_matches_golden
+    hex = compile_conformance_ext(".runar.java")
+    assert_equal expected_hex, hex, ".runar.java should match expected hex"
+  end
+
+  # ---------------------------------------------------------------------------
+  # 10. All non-Ruby formats produce identical output
   # ---------------------------------------------------------------------------
 
   def test_all_non_rb_formats_identical
-    exts = %w[.runar.ts .runar.sol .runar.move .runar.go .runar.rs .runar.py]
+    exts = %w[.runar.ts .runar.sol .runar.move .runar.go .runar.rs .runar.py .runar.zig .runar.java]
 
     scripts = {}
     exts.each do |ext|
@@ -151,7 +160,7 @@ class TestMultiFormat < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
-  # 10. Unsupported extension raises error
+  # 11. Unsupported extension raises error
   # ---------------------------------------------------------------------------
 
   def test_unsupported_extension_raises

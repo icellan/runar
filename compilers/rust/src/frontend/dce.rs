@@ -16,8 +16,14 @@
 //! arms happened to be pure, and the merged locals kept their pre-branch
 //! values. See `conformance/dce/live-if.test.ts`.
 //!
-//! This module is the canonical, standalone DCE pass for the Rust compiler.
-//! It mirrors the Zig reference implementation in
+//! This module is the canonical DEFINITION of DCE for the Rust compiler, but
+//! it is not a standalone pipeline pass (F-219). Its only production caller is
+//! `anf_optimize::optimize_ec`, and only after that function's `any_changed`
+//! early exit, so a program in which no EC rewrite fires is never DCE'd. (The
+//! `lib.rs` issue-#109 probe runs `eliminate_dead_code` on a copy, for a
+//! warning only; it does not change what is compiled.) Running it on every
+//! program breaks conformance fixtures until N-140's liveness work lands
+//! (R-194). It mirrors the Zig reference implementation in
 //! `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in
 //! `anf_optimize.rs` has been surgically extracted here.
 //!
@@ -25,8 +31,9 @@
 //! previous inline DCE in `anf_optimize.rs`. Verified by the conformance suite
 //! (cross-tier hex parity) and the optimizer unit tests.
 //!
-//! N-140 is the one deliberate behaviour change since: liveness considers the
-//! names a binding DEFINES, not only its own `name`.
+//! N-140 is a deliberate behaviour change since: liveness considers the
+//! names a binding DEFINES, not only its own `name`. F-108 is the other: a
+//! private method's last binding (its return value) is a liveness root.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,6 +62,101 @@ pub fn eliminate_dead_code(program: ANFProgram) -> ANFProgram {
 
 /// Eliminate dead (unreferenced, side-effect-free) bindings, iterating to fixed point.
 pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
+    eliminate_dead_bindings_filtered(method, None)
+}
+
+/// `eliminate_dead_bindings_method` restricted to bindings whose name is in
+/// `candidates`: every other binding is kept as if live (N-138). The constant
+/// folder uses it to drop the operand bindings its own rewrites orphaned (the
+/// `1` under a folded `-1n`) without also deleting bindings that were already
+/// dead before folding, so fold-ON output does not move for a program the
+/// folder did not change.
+pub fn eliminate_dead_bindings_among(
+    method: &ANFMethod,
+    candidates: &HashSet<String>,
+) -> ANFMethod {
+    let mut out = eliminate_dead_bindings_filtered(method, Some(candidates));
+    // N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+    // (`-5n` in an else arm). Filtering only the top level left them there,
+    // stack lowering pushed them, and the arms ended at different depths.
+    // Prune the nested scopes too, then re-filter the top level, to a fixed
+    // point (a nested removal can orphan a top-level operand).
+    while prune_nested_orphans(&mut out.body, candidates) {
+        out = eliminate_dead_bindings_filtered(&out, Some(candidates));
+    }
+    out
+}
+
+/// N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+/// arms, `loop` bodies, recursively); returns whether anything was removed.
+///
+/// A nested binding is removed only if it is a candidate (referenced before
+/// folding), is referenced by NO binding anywhere in the method now (arm
+/// bindings can be read after the `if` by name, so an arm is never filtered
+/// against its own references alone), is not one of its `if`'s declared
+/// `results` (stack lowering requires those slots in both arms), is
+/// side-effect free, and is not itself an `if` / `loop` (those are recursed
+/// into instead). Only the candidate-restricted fold prune calls this; the
+/// EC-gated DCE stays top-level, so fold-OFF output cannot move.
+fn prune_nested_orphans(body: &mut Vec<ANFBinding>, candidates: &HashSet<String>) -> bool {
+    fn filter_scope(
+        scope: &mut Vec<ANFBinding>,
+        nested: bool,
+        protect: &HashSet<String>,
+        refs: &HashSet<String>,
+        candidates: &HashSet<String>,
+    ) -> bool {
+        let mut changed = false;
+        for b in scope.iter_mut() {
+            match &mut b.value {
+                ANFValue::If {
+                    then,
+                    else_branch,
+                    results,
+                    ..
+                } => {
+                    let res: HashSet<String> = results.iter().cloned().collect();
+                    changed |= filter_scope(then, true, &res, refs, candidates);
+                    changed |= filter_scope(else_branch, true, &res, refs, candidates);
+                }
+                ANFValue::Loop { body, .. } => {
+                    changed |= filter_scope(body, true, &HashSet::new(), refs, candidates);
+                }
+                _ => {}
+            }
+        }
+        if nested {
+            let before = scope.len();
+            scope.retain(|b| {
+                matches!(b.value, ANFValue::If { .. } | ANFValue::Loop { .. })
+                    || !candidates.contains(&b.name)
+                    || refs.contains(&b.name)
+                    || protect.contains(&b.name)
+                    || has_side_effect(&b.value)
+            });
+            changed |= scope.len() != before;
+        }
+        changed
+    }
+
+    let mut any = false;
+    loop {
+        let mut refs = HashSet::new();
+        for b in body.iter() {
+            collect_refs_from_value(&b.value, &mut refs);
+        }
+        if !filter_scope(body, false, &HashSet::new(), &refs, candidates) {
+            return any;
+        }
+        any = true;
+    }
+}
+
+fn eliminate_dead_bindings_filtered(
+    method: &ANFMethod,
+    candidates: Option<&HashSet<String>>,
+) -> ANFMethod {
+    let keep_last = returns_last_binding(method);
     let mut body = method.body.clone();
     loop {
         let own_refs: Vec<HashSet<String>> = body
@@ -75,7 +177,9 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
         let before_len = body.len();
         let mut index = 0usize;
         body.retain(|b| {
-            let keep = is_referenced_externally(b, &own_refs[index], &ref_count)
+            let keep = (keep_last && index + 1 == before_len)
+                || candidates.map_or(false, |c| !c.contains(&b.name))
+                || is_referenced_externally(b, &own_refs[index], &ref_count)
                 || has_side_effect(&b.value);
             index += 1;
             keep
@@ -93,6 +197,17 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
         is_public: method.is_public,
         sighash_type: method.sighash_type,
     }
+}
+
+/// F-108: whether `method`'s LAST binding is its return value. Stack lowering
+/// inlines a private method at each `method_call` and takes that binding as the
+/// call's result, so it is a liveness root even though nothing inside the
+/// method references it; without the root a pure return expression
+/// (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+/// one stack lowering uses to collect inlinable private methods. A public
+/// method's last binding is never a return value.
+fn returns_last_binding(method: &ANFMethod) -> bool {
+    method.name != "constructor" && !method.is_public
 }
 
 // ---------------------------------------------------------------------------
@@ -166,9 +281,11 @@ fn is_referenced_externally(
 /// Collect all referenced binding names from a value.
 pub fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
     match value {
-        ANFValue::LoadParam { .. } => {
-            // Do NOT track @ref: targets here — matches TS collectRefsFromValue
-            // which breaks on load_param without collecting refs.
+        ANFValue::LoadParam { name } => {
+            // N-356: a reassigned parameter is bound under its own name and
+            // read back as `load_param <name>`; count the read so DCE keeps
+            // the rebinding. Matches TS collectRefsFromValue.
+            refs.insert(name.clone());
         }
         ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
         // raw_script — opaque byte span, no SSA operand refs. Stack effect is

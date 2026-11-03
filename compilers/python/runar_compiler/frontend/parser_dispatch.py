@@ -10,50 +10,61 @@ if TYPE_CHECKING:
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
-# Author-facing comment directives honoured ONLY on the TypeScript (.runar.ts)
-# surface (parser_ts reads leading trivia): ``@sighash <FLAGS>`` (#123,
-# per-method sighash type) and ``@embedAlways`` (#109, readonly-field DCE
-# opt-out). The eight non-TS surface parsers ignore comments, so a directive in
-# one of those sources would be silently dropped and change signing / DCE
-# semantics. Fail closed on those formats rather than miscompile — this mirrors
-# the Go/Rust/Zig/Ruby/Java tiers. Word-boundary anchored to mirror the TS
-# ``/@sighash\b/`` / ``/@embedAlways\b/`` scans so an identifier like
-# ``sighashType`` does not trip the guard. No conformance fixture uses either
-# directive, so this has zero golden impact.
-_SIGHASH_DIRECTIVE_RE = re.compile(r"@sighash\b")
+# Author-facing comment directives ``@sighash <FLAGS>`` (#123, per-method
+# sighash type) and ``@embedAlways`` (#109, readonly-field DCE opt-out) are read
+# from COMMENTS only on the TypeScript (.runar.ts) surface (parser_ts reads
+# leading trivia). The eight non-TS surfaces spell both directives natively
+# instead (N-093, user decision R38: a modifier mirroring each surface's
+# readonly idiom -- see _NON_TS_SURFACES), and their parsers drop comments, so
+# a COMMENT directive in one of those sources would be silently ignored and
+# change signing / DCE semantics. Fail closed on those formats rather than
+# miscompile, and name the native spelling to use. None of the native
+# spellings contains either marker, so this guard never trips on them.
+# ``@embedAlways`` is word-boundary anchored so an identifier like
+# ``sighashType`` does not trip the guard; ``@sighash`` is not (N-244): N-039
+# made every occurrence of the marker a directive, so a glued
+# ``@sighashSINGLE|FORKID`` is refused here too. The message is identical in
+# all seven tiers.
+_SIGHASH_DIRECTIVE_RE = re.compile(r"@sighash")
 _EMBED_ALWAYS_DIRECTIVE_RE = re.compile(r"@embedAlways\b")
 
-# Non-TS extension -> human-readable surface name for the diagnostic.
-# ``.runar.ts`` is intentionally absent: parser_ts honours the directives.
-_NON_TS_SURFACES = {
-    ".runar.sol": "Solidity",
-    ".runar.move": "Move",
-    ".runar.py": "Python",
-    ".runar.go": "Go DSL",
-    ".runar.rs": "Rust",
-    ".runar.rb": "Ruby",
-    ".runar.zig": "Zig",
-    ".runar.java": "Java",
+# Non-TS extension -> (human-readable surface name, format doc, native
+# @sighash spelling, native @embedAlways spelling) (N-093). ``.runar.ts`` is
+# intentionally absent: parser_ts honours the comment directives.
+_NON_TS_SURFACES: dict[str, tuple[str, str, str, str]] = {
+    ".runar.sol": ("Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways"),
+    ".runar.move": ("Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"),
+    ".runar.py": ("Python", "python", '@public(sighash="<FLAGS>")', "the wrapper type EmbedAlways[T]"),
+    ".runar.go": ("Go DSL", "go", "the directive //runar:sighash <FLAGS>", 'the struct tag option runar:"readonly,embedAlways"'),
+    ".runar.rs": ("Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"),
+    ".runar.rb": ("Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true"),
+    ".runar.zig": ("Zig", "zig", 'the return type runar.Sighash("<FLAGS>")', "the type function runar.EmbedAlways(T)"),
+    ".runar.java": ("Java", "java", 'the annotation @Sighash("<FLAGS>")', "the annotation @EmbedAlways"),
 }
 
 
-def _unsupported_directive_error(source: str, surface_name: str) -> str | None:
+def _unsupported_directive_error(
+    source: str,
+    surface_name: str,
+    doc: str,
+    sighash_spelling: str,
+    embed_spelling: str,
+) -> str | None:
     """Return a fail-closed diagnostic message when ``source`` carries a
-    ``@sighash`` (#123) or ``@embedAlways`` (#109) directive on a non-TS surface
-    whose parser ignores comments (so the directive would be silently dropped),
-    else ``None``.
+    ``@sighash`` (#123) or ``@embedAlways`` (#109) COMMENT directive on a non-TS
+    surface whose parser ignores comments (so the directive would be silently
+    dropped), else ``None``. The message names the surface's native spelling
+    (N-093).
     """
     if _SIGHASH_DIRECTIVE_RE.search(source):
         return (
-            f"@sighash directive (issue #123) is not supported by the {surface_name} "
-            "surface parser; write the contract in TypeScript (.runar.ts) where "
-            "@sighash is honoured"
+            f"@sighash directive (issue #123) is not supported as a comment by the {surface_name} "
+            f"surface parser; write it as {sighash_spelling} (see docs/formats/{doc}.md)"
         )
     if _EMBED_ALWAYS_DIRECTIVE_RE.search(source):
         return (
-            f"@embedAlways directive (issue #109) is not supported by the {surface_name} "
-            "surface parser; write the contract in TypeScript (.runar.ts) where "
-            "@embedAlways is honoured"
+            f"@embedAlways directive (issue #109) is not supported as a comment by the {surface_name} "
+            f"surface parser; write it as {embed_spelling} (see docs/formats/{doc}.md)"
         )
     return None
 
@@ -72,6 +83,15 @@ class ParseResult:
 
 def parse_source(source: str, file_name: str) -> ParseResult:
     """Dispatch to the appropriate parser based on file extension."""
+    result = _parse_source_dispatch(source, file_name)
+    # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    if result.contract is not None:
+        from runar_compiler.frontend.loop_condition import normalize_loop_conditions
+        normalize_loop_conditions(result.contract)
+    return result
+
+
+def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
     # DoS-bound size guard. Reject oversized source BEFORE any
     # format-specific parser touches the input. Raises
     # :class:`SourceSizeExceededError` on rejection. BUG-008 follow-up.
@@ -83,9 +103,11 @@ def parse_source(source: str, file_name: str) -> ParseResult:
     # Fail-closed directive guard: reject ``@sighash`` / ``@embedAlways`` on any
     # non-TS surface (whose parser ignores comments) before dispatching. The
     # ``.runar.ts`` branch is exempt because parser_ts honours the directives.
-    for ext, surface_name in _NON_TS_SURFACES.items():
+    for ext, (surface_name, doc, sighash_spelling, embed_spelling) in _NON_TS_SURFACES.items():
         if lower.endswith(ext):
-            directive_error = _unsupported_directive_error(source, surface_name)
+            directive_error = _unsupported_directive_error(
+                source, surface_name, doc, sighash_spelling, embed_spelling,
+            )
             if directive_error is not None:
                 return ParseResult(errors=[Diagnostic(
                     message=directive_error,
@@ -98,7 +120,12 @@ def parse_source(source: str, file_name: str) -> ParseResult:
         return parse_python(source, file_name)
     elif lower.endswith(".runar.ts"):
         from runar_compiler.frontend.parser_ts import parse_ts
-        return parse_ts(source, file_name)
+        result = parse_ts(source, file_name)
+        # N-342: ``const`` locals cannot be reassigned (``.runar.ts`` only).
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.sol"):
         from runar_compiler.frontend.parser_sol import parse_sol
         return parse_sol(source, file_name)
@@ -110,13 +137,23 @@ def parse_source(source: str, file_name: str) -> ParseResult:
         return parse_go(source, file_name)
     elif lower.endswith(".runar.rs"):
         from runar_compiler.frontend.parser_rust import parse_rust
-        return parse_rust(source, file_name)
+        result = parse_rust(source, file_name)
+        # N-344: an immutable ``let`` (no ``mut``) cannot be reassigned.
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.rb"):
         from runar_compiler.frontend.parser_ruby import parse_ruby
         return parse_ruby(source, file_name)
     elif lower.endswith(".runar.zig"):
         from runar_compiler.frontend.parser_zig import parse_zig
-        return parse_zig(source, file_name)
+        result = parse_zig(source, file_name)
+        # N-344: a ``const`` local cannot be reassigned.
+        if result.contract is not None:
+            from runar_compiler.frontend.const_reassign import check_const_reassignment
+            result.errors.extend(check_const_reassignment(result.contract))
+        return result
     elif lower.endswith(".runar.java"):
         from runar_compiler.frontend.parser_java import parse_java
         return parse_java(source, file_name)

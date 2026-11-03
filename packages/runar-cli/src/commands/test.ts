@@ -2,7 +2,7 @@
 // runar-cli/commands/test.ts — Run contract tests
 // ---------------------------------------------------------------------------
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -64,7 +64,9 @@ function runWithVitest(
   cwd: string,
 ): void {
   try {
-    execSync(`"${vitestPath}" run "${pattern}"`, {
+    // argv array, no shell: `pattern` is user input and must never be
+    // interpreted by a shell (F-166).
+    execFileSync(vitestPath, ['run', pattern], {
       cwd,
       stdio: 'inherit',
       env: { ...process.env },
@@ -80,7 +82,7 @@ function runWithVitest(
  */
 function runWithNpxVitest(pattern: string, cwd: string): void {
   try {
-    execSync(`npx vitest run "${pattern}"`, {
+    execFileSync('npx', ['vitest', 'run', pattern], {
       cwd,
       stdio: 'inherit',
       env: { ...process.env },

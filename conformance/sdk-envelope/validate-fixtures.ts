@@ -195,7 +195,57 @@ function main(): void {
     fail(`depth_vectors must carry a bad-json vector at exactly max_depth ${depthLimit + 1}`);
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors validate against the TS reference.`);
+  // 5. F-138 malleability vectors. Each must (a) really carry a high-S
+  //    signature (s > N/2) — otherwise it pins nothing — and (b) verify under
+  //    the TS reference's raw ECDSA, so a tier that rejects it can only be
+  //    doing so on the low-S rule, not on a broken signature.
+  const N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+  const malleabilityVectors = fixture.malleability_vectors as Array<{
+    _vector_id?: string;
+    expect_ok: boolean;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>;
+  if (!Array.isArray(malleabilityVectors) || malleabilityVectors.length === 0) {
+    fail('malleability_vectors missing or empty');
+  }
+  for (const [i, v] of malleabilityVectors.entries()) {
+    const id = v._vector_id ? ` (${v._vector_id})` : '';
+    const sig = Signature.fromDER(Utils.toArray(v.envelope.sig, 'hex'));
+    if (BigInt('0x' + sig.s.toHex()) <= N / 2n) {
+      fail(`malleability_vectors[${i}]${id}: s is low — the vector does not exercise the high-S case`);
+    }
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    const ok = ecdsaVerifyRaw(new BigNumber(d), sig, PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')));
+    if (ok !== v.expect_ok) {
+      fail(`malleability_vectors[${i}]${id}: TS raw ECDSA verify returned ${ok}, fixture expects ok=${v.expect_ok}`);
+    }
+  }
+
+  // 6. F-242 strict-DER rejection vectors. Each `der-*` vector must re-encode
+  //    a signature (`_canonical_sig`) that really verifies for its payload, so
+  //    the encoding is the only thing a tier can reject it for.
+  const derVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    _canonical_sig?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => v._vector_id?.startsWith('der-'));
+  if (derVectors.length === 0) fail('rejection_vectors carries no der-* (F-242) vectors');
+  for (const v of derVectors) {
+    if (v.reason !== 'bad-sig') fail(`${v._vector_id}: reason must be bad-sig`);
+    if (!v._canonical_sig || v._canonical_sig === v.envelope.sig) {
+      fail(`${v._vector_id}: _canonical_sig missing or identical to the re-encoded sig`);
+    }
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    const ok = ecdsaVerifyRaw(
+      new BigNumber(d),
+      Signature.fromDER(Utils.toArray(v._canonical_sig, 'hex')),
+      PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')),
+    );
+    if (!ok) fail(`${v._vector_id}: _canonical_sig does not verify for the payload`);
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls validate against the TS reference.`);
 }
 
 main();

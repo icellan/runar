@@ -706,10 +706,12 @@ module RunarCompiler
       # collapses to 3*px^2/(2*py) when P == Q, which is the correct doubling
       # slope.
       #
-      # The remaining zero-denominator input (py + qy == 0) is handled by the
-      # caller: emit_bn254_g1_add masks P == -Q to the all-zero point at
-      # infinity (see bn254_g1_infinity_flag); the Groth16 MSM path shares
-      # this helper unmasked and stays fail-closed.
+      # Every zero-denominator input (py + qy == 0) still fails here: P == -Q,
+      # and the omega-partner pairs Q = (w*px, -py), (w^2*px, -py) with
+      # px != qx, where the slope is 0/0 and the result is a wrong but
+      # ON-CURVE point (F-091). emit_bn254_g1_add handles both in the builtin
+      # (infinity mask, omega abort); the Groth16 MSM path shares this helper
+      # unguarded and its bytes must not move.
       #
       # Compute `_notinf`, 0 exactly when P == -Q and 1 otherwise, reading
       # px/py/qx/qy WITHOUT consuming them. Call it before
@@ -765,6 +767,37 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
         }
         t.raw_block(%w[_xeq _cond], "_notinf", fn)
+      end
+
+      # F-091: abort when py + qy == 0 mod p while px != qx, reading
+      # px/py/qx/qy WITHOUT consuming them.
+      #
+      # That input is not P == -Q: it is the omega-partner pair
+      # Q = (w*px, -py) or (w^2*px, -py), w a primitive cube root of unity.
+      # The unified slope is 0/0, Fermat gives inv(0) = 0, and
+      # bn254_g1_affine_add returns (-(px+qx), -py) -- ON the curve and NOT
+      # P + Q, so assert(bn254G1OnCurve(r)) cannot catch it. Fail closed
+      # instead. The condition is (py + qy mod p != 0) OR (px == qx), so
+      # general addition, doubling, P == -Q and all-zero operands keep their
+      # answers. Builtin entry point only: the Groth16 MSM path keeps its bytes.
+      #
+      # Byte-identical to `bn254G1OmegaCollisionVerify` in
+      # compilers/go/codegen/bn254.go.
+      #
+      # @param t [BN254Tracker]
+      def self.bn254_g1_omega_collision_verify(t)
+        t.copy_to_top("px", "_om_px")
+        t.copy_to_top("qx", "_om_qx")
+        t.raw_block(%w[_om_px _om_qx], "_om_xeq",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL")) })
+        t.copy_to_top("py", "_om_py")
+        t.copy_to_top("qy", "_om_qy")
+        bn254_field_add(t, "_om_py", "_om_qy", "_om_den")
+        fn = lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLOR"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        }
+        t.raw_block(%w[_om_xeq _om_den], "", fn)
       end
 
       # Zero rx and ry when `_notinf` is 0, consuming it.
@@ -1134,6 +1167,25 @@ module RunarCompiler
       # Public emit functions -- entry points called from stack.rb
       # =================================================================
 
+      # F-196 -- every operand of the five public BN254 scalar-field entry
+      # points must BE a field element, aborting form. Port of Go's
+      # bn254EmitFieldCanonVerify (the R-119 gate for this field): before it,
+      # bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD reduction, and
+      # p was accepted as a second spelling of 0. Emitted before
+      # push_prime_cache.
+      def self.bn254_emit_field_canon_verify(t, *names)
+        within_verify = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_WITHIN"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        }
+        names.each do |n|
+          t.copy_to_top(n, "_bn_fcv")
+          t.push_int("_bn_fcv_lo", 0)
+          bn254_push_field_p(t, "_bn_fcv_p")
+          t.raw_block(%w[_bn_fcv _bn_fcv_lo _bn_fcv_p], "", within_verify)
+        end
+      end
+
       # BN254 field addition.
       # Stack in: [..., a, b] (b on top)
       # Stack out: [..., (a + b) mod p]
@@ -1141,6 +1193,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bn254_field_add(emit)
         t = BN254Tracker.new(%w[a b], emit)
+        bn254_emit_field_canon_verify(t, "a", "b")
         t.push_prime_cache
         bn254_field_add(t, "a", "b", "result")
         t.pop_prime_cache
@@ -1153,6 +1206,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bn254_field_sub(emit)
         t = BN254Tracker.new(%w[a b], emit)
+        bn254_emit_field_canon_verify(t, "a", "b")
         t.push_prime_cache
         bn254_field_sub(t, "a", "b", "result")
         t.pop_prime_cache
@@ -1165,6 +1219,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bn254_field_mul(emit)
         t = BN254Tracker.new(%w[a b], emit)
+        bn254_emit_field_canon_verify(t, "a", "b")
         t.push_prime_cache
         bn254_field_mul(t, "a", "b", "result")
         t.pop_prime_cache
@@ -1177,6 +1232,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bn254_field_inv(emit)
         t = BN254Tracker.new(["a"], emit)
+        bn254_emit_field_canon_verify(t, "a")
         t.push_prime_cache
         bn254_field_inv(t, "a", "result")
         t.pop_prime_cache
@@ -1189,6 +1245,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bn254_field_neg(emit)
         t = BN254Tracker.new(["a"], emit)
+        bn254_emit_field_canon_verify(t, "a")
         t.push_prime_cache
         bn254_field_neg(t, "a", "result")
         t.pop_prime_cache
@@ -1265,6 +1322,8 @@ module RunarCompiler
         # R-141: both points must be canonical before anything consumes them.
         bn254_emit_coord_canon_verify(t, "px", "py")
         bn254_emit_coord_canon_verify(t, "qx", "qy")
+        # F-091: the omega-partner 0/0 slope fails closed.
+        bn254_g1_omega_collision_verify(t)
         # The flag must be computed BEFORE the add: bn254_g1_affine_add
         # consumes px/py/qx/qy.
         bn254_g1_infinity_flag(t)

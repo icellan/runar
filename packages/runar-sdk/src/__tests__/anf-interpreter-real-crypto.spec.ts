@@ -102,6 +102,11 @@ function makeMultisigGuardANF(): ANFProgram {
   };
 }
 
+// N-198: a NON-EMPTY signature that does not verify aborts the script under
+// NULLFAIL (BIP146) on a node, so the interpreter throws a plain Error there,
+// not an AssertionFailureError from the enclosing assert.
+const NULLFAIL_ABORT = /non-empty and does not verify \(NULLFAIL\) — OP_CHECKSIG aborts/;
+
 describe('ANF interpreter — executeOnChainAuthoritative', () => {
   const sighash = deterministicSighash();
   const sighashHex = Utils.toHex(sighash);
@@ -114,7 +119,9 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
   // sha256 the supplied bytes on both sides — self-consistent for a
   // single-SDK round-trip but incompatible with cross-tier verifiers
   // (Go / Rust / Python / Ruby / Java / Zig) that ECDSA-verify the
-  // sighash directly.
+  // sighash directly. The signature carries a 0x41 (SIGHASH_ALL|FORKID)
+  // sighash-type byte: on-chain mode aborts on bare DER, as OP_CHECKSIG does
+  // (N-255).
   const priv = PrivateKey.fromHex(TEST_PRIV_HEX);
   const pubHex = priv.toPublicKey().toDER('hex') as string;
   const sigDerHex = (() => {
@@ -123,7 +130,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     const { BigNumber } = require('@bsv/sdk');
     const msgBN = new BigNumber(sighash);
     const sig = ecdsaSignRaw(msgBN, priv, true);
-    return sig.toDER('hex') as string;
+    return (sig.toDER('hex') as string) + '41';
   })();
 
   // ECDSA — checkSig
@@ -142,9 +149,10 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       expect(result.state.value).toBe(1n);
     });
 
-    it('throws AssertionFailureError when signature is corrupted', () => {
-      // Flip the last byte of r — invalidates the signature.
-      const broken = sigDerHex.slice(0, -2) + '00';
+    it('aborts under NULLFAIL (not an assert) when signature is corrupted', () => {
+      // Zero the last byte of s (before the sighash-type byte) — invalidates
+      // the signature.
+      const broken = sigDerHex.slice(0, -4) + '00' + sigDerHex.slice(-2);
       expect(() => executeOnChainAuthoritative(
         anf,
         'unlock',
@@ -152,10 +160,10 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: broken, pk: pubHex },
         [],
         { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
 
-    it('throws AssertionFailureError when pubkey does not match the signing key', () => {
+    it('aborts under NULLFAIL (not an assert) when pubkey does not match the signing key', () => {
       const otherPub = PrivateKey.fromHex(
         '11'.repeat(32),
       ).toPublicKey().toDER('hex') as string;
@@ -166,10 +174,10 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: sigDerHex, pk: otherPub },
         [],
         { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
 
-    it('throws AssertionFailureError when sighash differs from the one signed', () => {
+    it('aborts under NULLFAIL (not an assert) when sighash differs from the one signed', () => {
       const otherSighash = Hash.sha256(
         Utils.toArray('different-message', 'utf8'),
       );
@@ -180,7 +188,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
         { sig: sigDerHex, pk: pubHex },
         [],
         { sighash: otherSighash },
-      )).toThrow(AssertionFailureError);
+      )).toThrow(NULLFAIL_ABORT);
     });
   });
 
@@ -230,7 +238,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     });
   });
 
-  // checkMultiSig — accepts iff all sigs verify against some prefix of pks.
+  // checkMultiSig — OP_CHECKMULTISIG as Spend runs it, plus NULLFAIL (N-259).
   describe('checkMultiSig', () => {
     const anf = makeMultisigGuardANF();
     const priv2 = PrivateKey.fromHex('22'.repeat(32));
@@ -243,7 +251,7 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       const { sign: ecdsaSignRaw } = require('@bsv/sdk/primitives/ECDSA');
       const { BigNumber } = require('@bsv/sdk');
       const msgBN = new BigNumber(sighash);
-      return ecdsaSignRaw(msgBN, priv2, true).toDER('hex') as string;
+      return (ecdsaSignRaw(msgBN, priv2, true).toDER('hex') as string) + '41';
     })();
 
     it('passes when both sigs verify against a 2-of-2 pubkey set', () => {
@@ -258,16 +266,24 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
       expect(result.state.value).toBe(1n);
     });
 
-    it('throws AssertionFailureError when one signature is corrupted', () => {
-      const broken = sig2.slice(0, -2) + '00';
-      expect(() => executeOnChainAuthoritative(
-        anf,
-        'unlock',
-        { value: 0n },
-        { sigs: [sigDerHex, broken], pks: [pubHex, pub2] },
-        [],
-        { sighash: sighashHex },
-      )).toThrow(AssertionFailureError);
+    it('aborts under NULLFAIL (not an assert) when one signature is corrupted', () => {
+      // N-259: a failing OP_CHECKMULTISIG with a non-empty signature aborts on
+      // a node under NULLFAIL (BIP146), so the interpreter throws a plain Error.
+      const broken = sig2.slice(0, -4) + '00' + sig2.slice(-2);
+      let err: unknown;
+      try {
+        executeOnChainAuthoritative(
+          anf,
+          'unlock',
+          { value: 0n },
+          { sigs: [sigDerHex, broken], pks: [pubHex, pub2] },
+          [],
+          { sighash: sighashHex },
+        );
+      } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(AssertionFailureError);
+      expect((err as Error).message).toMatch(/check fails \(NULLFAIL\) — OP_CHECKMULTISIG aborts/);
     });
   });
 

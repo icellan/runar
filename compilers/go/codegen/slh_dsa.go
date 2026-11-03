@@ -51,7 +51,7 @@ var SLHParams = map[string]SLHCodegenParams{
 	"SHA2_192s": slhMk(24, 63, 7, 14, 17),
 	"SHA2_192f": slhMk(24, 66, 22, 8, 33),
 	"SHA2_256s": slhMk(32, 64, 8, 14, 22),
-	"SHA2_256f": slhMk(32, 68, 17, 8, 35),
+	"SHA2_256f": slhMk(32, 68, 17, 9, 35),
 }
 
 // ===========================================================================
@@ -1363,8 +1363,20 @@ func EmitVerifySLHDSA(emit func(StackOp), paramKey string) {
 	// treeAddr8 = treeIdx as 8-byte big-endian
 	t.copyToTop("treeIdx", "_ti8")
 	t.rawBlock([]string{"_ti8"}, "treeAddr8", func(e func(StackOp)) {
-		e(StackOp{Op: "push", Value: bigIntPush(8)})
-		e(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+		if p.H-hp >= 64 {
+			// F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about
+			// half of all signatures it is >= 2^63 and its minimal script-number
+			// encoding needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in
+			// 9 bytes and drop the trailing (little-endian) 0x00 sign byte.
+			e(StackOp{Op: "push", Value: bigIntPush(9)})
+			e(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+			e(StackOp{Op: "push", Value: bigIntPush(8)})
+			e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+			e(StackOp{Op: "drop"})
+		} else {
+			e(StackOp{Op: "push", Value: bigIntPush(8)})
+			e(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+		}
 		for _, op := range emitReverseN(8) {
 			e(op)
 		}

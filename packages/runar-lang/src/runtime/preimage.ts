@@ -46,20 +46,25 @@ export function extractSequence(_txPreimage: SigHashPreimage): bigint {
 }
 
 export function extractOutputHash(txPreimage: SigHashPreimage): Sha256 {
-  // Returns the first 32 bytes of the preimage in test mode.
-  // Tests set txPreimage = hash256(expectedOutputBytes) so the assertion
-  // hash256(outputs) == extractOutputHash(txPreimage) passes.
+  // hashOutputs is the 32 bytes immediately before the trailing nLocktime(4)
+  // + sighashType(4), i.e. end-relative: bytes[length-40 .. length-8). This
+  // mirrors the compiled opcode sequence exactly (OP_SIZE 40 OP_SUB OP_SPLIT
+  // OP_NIP 32 OP_SPLIT OP_DROP) and needs no knowledge of the variable-length
+  // scriptCode field that precedes it. N-245: this used to echo the leading
+  // 32 bytes (nVersion + most of hashPrevouts in a real preimage).
   const bytes = typeof txPreimage === 'string'
     ? Buffer.from(txPreimage as string, 'hex')
     : txPreimage as unknown as Buffer;
-  if (bytes && bytes.length >= 32) {
-    return bytes.slice(0, 32).toString('hex') as unknown as Sha256;
+  if (bytes && bytes.length >= 40) {
+    return bytes.slice(bytes.length - 40, bytes.length - 8).toString('hex') as unknown as Sha256;
   }
   return ZERO_32;
 }
 
-export function extractOutputs(_txPreimage: SigHashPreimage): Sha256 {
-  return ZERO_32;
+export function extractOutputs(txPreimage: SigHashPreimage): Sha256 {
+  // Alias for extractOutputHash — the compiler lowers both to the same
+  // 32-byte hashOutputs window (see 05-stack-lower.ts).
+  return extractOutputHash(txPreimage);
 }
 
 export function extractLocktime(_txPreimage: SigHashPreimage): bigint {

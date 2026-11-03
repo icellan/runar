@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use super::ast::*;
 use super::diagnostic::Diagnostic;
 use super::typecheck::{is_bigint_subtype, is_bytestring_subtype};
+use super::validator::is_to_byte_string_literal;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -135,7 +136,16 @@ fn family_of_element_type(t: &TypeNode) -> Option<&'static str> {
 
 /// The literal family of an initializer element, or `None` when the expression
 /// is not a literal this pass can judge. N-133.
+///
+/// N-234: `toByteString('<hex>')` IS the ByteStringLiteral production (see
+/// validator.rs's `is_to_byte_string_literal` and spec/grammar.md section
+/// 11). Checking only the bare `ByteStringLiteral` AST node let a
+/// call-wrapped ByteString element (`FixedArray<bigint, 2> =
+/// [toByteString('ab'), 0n]`) slip past this family check.
 fn family_of_literal(expr: &Expression) -> Option<&'static str> {
+    if is_to_byte_string_literal(expr) {
+        return Some("ByteString");
+    }
     match expr {
         Expression::BigIntLiteral { .. } => Some("bigint"),
         Expression::BoolLiteral { .. } => Some("boolean"),
@@ -185,6 +195,17 @@ struct ExpandContext<'a> {
     /// sibling check in this file passes `Some(loc)`. The enclosing STATEMENT
     /// always has one, and `rewrite_statement` sets it here before dispatching.
     current_stmt_loc: Option<SourceLocation>,
+    /// N-048: evaluation-order state for the statement being rewritten. A
+    /// computed index is hoisted to a `const __idx_K` in front of its whole
+    /// statement, which is only sound when nothing the statement evaluates
+    /// earlier can observe or be observed by the move. `order_effect`: a side
+    /// effect (`++`/`--`, a non-builtin call) was already evaluated;
+    /// `order_read`: a non-literal value was already read; `order_cond`:
+    /// inside an operand that is only conditionally evaluated (right of
+    /// `&&`/`||`, a ternary arm).
+    order_effect: bool,
+    order_read: bool,
+    order_cond: usize,
 }
 
 impl<'a> ExpandContext<'a> {
@@ -196,7 +217,16 @@ impl<'a> ExpandContext<'a> {
             synthetic_arrays: HashMap::new(),
             temp_counter: 0,
             current_stmt_loc: None,
+            order_effect: false,
+            order_read: false,
+            order_cond: 0,
         }
+    }
+
+    fn reset_order(&mut self) {
+        self.order_effect = false;
+        self.order_read = false;
+        self.order_cond = 0;
     }
 
     fn fresh_idx_name(&mut self) -> String {
@@ -306,8 +336,15 @@ impl<'a> ExpandContext<'a> {
                 ElementsResult::Some(elems) => Some(elems),
                 ElementsResult::None => None,
             };
-            let expanded =
-                self.expand_array_meta(&meta, prop.readonly, &prop.source_location, init_elems, Vec::new());
+            // F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
+            let expanded = self.expand_array_meta(
+                &meta,
+                prop.readonly,
+                &prop.source_location,
+                init_elems,
+                Vec::new(),
+                prop.embed_always,
+            );
             out.extend(expanded);
         }
         out
@@ -358,6 +395,7 @@ impl<'a> ExpandContext<'a> {
         loc: &SourceLocation,
         initializer: Option<Vec<Expression>>,
         parent_chain: Vec<SyntheticArrayLevel>,
+        embed_always: bool,
     ) -> Vec<PropertyNode> {
         let mut out: Vec<PropertyNode> = Vec::new();
         for i in 0..meta.length {
@@ -404,7 +442,7 @@ impl<'a> ExpandContext<'a> {
                     }
                 };
                 let nested_expanded =
-                    self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here);
+                    self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here, embed_always);
                 out.extend(nested_expanded);
             } else {
                 // N-133: the element-type check. typecheck's array-literal
@@ -438,8 +476,8 @@ impl<'a> ExpandContext<'a> {
                     prop_type: meta.element_type.clone(),
                     readonly,
                     initializer: slot_init,
-                    // Synthetic array leaves are not @embedAlways targets.
-                    embed_always: false,
+                    // Every slot inherits the root property's @embedAlways (R35).
+                    embed_always,
                     source_location: loc.clone(),
                     synthetic_array_chain: Some(chain_here),
                 });
@@ -481,6 +519,7 @@ impl<'a> ExpandContext<'a> {
         if let Some(loc) = statement_location(stmt) {
             self.current_stmt_loc = Some(loc);
         }
+        self.reset_order();
         match stmt {
             Statement::VariableDecl { .. } => self.rewrite_variable_decl(stmt),
             Statement::Assignment { .. } => self.rewrite_assignment(stmt),
@@ -510,7 +549,7 @@ impl<'a> ExpandContext<'a> {
         };
 
         // Statement-form dispatch for `const v = self.board[idx]`.
-        let target_expr = Expression::Identifier { name: name.clone() };
+        let target_expr = Expression::Identifier { name: name.clone(), source_location: None };
         if let Some(stmt_form) = self.try_rewrite_read_as_statements(&init, &target_expr, &loc) {
             let mut out: Vec<Statement> = Vec::new();
             out.extend(stmt_form.prelude);
@@ -564,7 +603,7 @@ impl<'a> ExpandContext<'a> {
                     let rewritten_value = self.rewrite_expression(&value, &mut prelude);
                     let mut out = prelude;
                     out.push(Statement::Assignment {
-                        target: Expression::PropertyAccess { property: name },
+                        target: Expression::PropertyAccess { property: name, source_location: None },
                         value: rewritten_value,
                         source_location: loc,
                     });
@@ -573,7 +612,7 @@ impl<'a> ExpandContext<'a> {
                 ChainResolve::None => {}
             }
 
-            if let Expression::PropertyAccess { property } = object.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = object.as_ref() {
                 if self.array_map.contains_key(property) {
                     return self.rewrite_array_write(
                         property.clone(),
@@ -587,6 +626,18 @@ impl<'a> ExpandContext<'a> {
             let new_index = self.rewrite_expression(index, &mut prelude);
             let new_obj = self.rewrite_expression(object, &mut prelude);
             let new_value = self.rewrite_expression(&value, &mut prelude);
+            // `self.grid[1][i] = v`: the literal outer hop has become the
+            // synthetic sub-array `grid__1`, and indexing it at runtime has no
+            // slot to address. Refuse here rather than in stack lowering (N-036).
+            if as_literal_index(&new_index).is_none()
+                && self.try_resolve_array_base(&new_obj).is_some()
+            {
+                self.errors.push(Diagnostic::error(
+                    "Runtime index assignment on a nested FixedArray is not supported",
+                    Some(loc.clone()),
+                ));
+                return prelude;
+            }
             let mut out = prelude;
             out.push(Statement::Assignment {
                 target: Expression::IndexAccess {
@@ -678,6 +729,7 @@ impl<'a> ExpandContext<'a> {
         let mut prelude: Vec<Statement> = Vec::new();
         let new_cond = self.rewrite_expression(&condition, &mut prelude);
 
+        self.reset_order();
         let mut init_prelude: Vec<Statement> = Vec::new();
         let new_init_stmt = match init.as_ref() {
             Statement::VariableDecl {
@@ -792,6 +844,7 @@ impl<'a> ExpandContext<'a> {
                         right: Box::new(Expression::BigIntLiteral {
                             value: BigInt::from(1),
                         }),
+                        source_location: None,
                     },
                     source_location: loc,
                 };
@@ -870,20 +923,30 @@ impl<'a> ExpandContext<'a> {
             Expression::IndexAccess { object, index } => {
                 self.rewrite_index_access(object, index, prelude)
             }
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 let l = self.rewrite_expression(left, prelude);
+                // spec §3.7: the right operand of && / || is conditional.
+                let short_circuit = matches!(op, BinaryOp::And | BinaryOp::Or);
+                if short_circuit {
+                    self.order_cond += 1;
+                }
                 let r = self.rewrite_expression(right, prelude);
+                if short_circuit {
+                    self.order_cond -= 1;
+                }
                 Expression::BinaryExpr {
                     op: op.clone(),
                     left: Box::new(l),
                     right: Box::new(r),
+                    source_location: None,
                 }
             }
-            Expression::UnaryExpr { op, operand } => {
+            Expression::UnaryExpr { op, operand, .. } => {
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::UnaryExpr {
                     op: op.clone(),
                     operand: Box::new(o),
+                    source_location: None,
                 }
             }
             Expression::CallExpr {
@@ -891,11 +954,17 @@ impl<'a> ExpandContext<'a> {
                 args,
                 asm_return_type,
             } => {
+                // The callee names a function; it is not a value read.
+                let read_before_callee = self.order_read;
                 let c = self.rewrite_expression(callee, prelude);
+                self.order_read = read_before_callee;
                 let new_args: Vec<Expression> = args
                     .iter()
                     .map(|a| self.rewrite_expression(a, prelude))
                     .collect();
+                if is_effectful_callee(callee) {
+                    self.order_effect = true;
+                }
                 Expression::CallExpr {
                     callee: Box::new(c),
                     args: new_args,
@@ -920,8 +989,10 @@ impl<'a> ExpandContext<'a> {
                 alternate,
             } => {
                 let c = self.rewrite_expression(condition, prelude);
+                self.order_cond += 1;
                 let t = self.rewrite_expression(consequent, prelude);
                 let e = self.rewrite_expression(alternate, prelude);
+                self.order_cond -= 1;
                 Expression::TernaryExpr {
                     condition: Box::new(c),
                     consequent: Box::new(t),
@@ -931,6 +1002,7 @@ impl<'a> ExpandContext<'a> {
             Expression::IncrementExpr { operand, prefix } => {
                 self.reject_array_element_mutation_in_expression(operand, "++");
                 let o = self.rewrite_expression(operand, prelude);
+                self.order_effect = true;
                 Expression::IncrementExpr {
                     operand: Box::new(o),
                     prefix: *prefix,
@@ -939,6 +1011,7 @@ impl<'a> ExpandContext<'a> {
             Expression::DecrementExpr { operand, prefix } => {
                 self.reject_array_element_mutation_in_expression(operand, "--");
                 let o = self.rewrite_expression(operand, prelude);
+                self.order_effect = true;
                 Expression::DecrementExpr {
                     operand: Box::new(o),
                     prefix: *prefix,
@@ -953,12 +1026,42 @@ impl<'a> ExpandContext<'a> {
                     elements: new_elements,
                 }
             }
-            Expression::Identifier { .. }
-            | Expression::BigIntLiteral { .. }
+            Expression::Identifier { .. } | Expression::PropertyAccess { .. } => {
+                self.order_read = true;
+                expr.clone()
+            }
+            Expression::BigIntLiteral { .. }
             | Expression::BoolLiteral { .. }
-            | Expression::ByteStringLiteral { .. }
-            | Expression::PropertyAccess { .. } => expr.clone(),
+            | Expression::ByteStringLiteral { .. } => expr.clone(),
         }
+    }
+
+    /// Rewrite a runtime FixedArray index and hoist it if impure, refusing
+    /// the hoist when it would change evaluation order (N-048). The binding
+    /// lands in front of the whole statement, so it is refused when the read
+    /// sits in a conditionally-evaluated operand, when an earlier part of the
+    /// statement already had a side effect, or when the index's own side
+    /// effect would move ahead of an earlier read. The AST has no
+    /// let-expression, so binding the index at the read's own position is not
+    /// expressible here.
+    fn rewrite_and_hoist_index(
+        &mut self,
+        index: &Expression,
+        prelude: &mut Vec<Statement>,
+    ) -> Expression {
+        let effect_before = self.order_effect;
+        let read_before = self.order_read;
+        let rewritten = self.rewrite_expression(index, prelude);
+        if !is_pure_reference(&rewritten) {
+            let effect_in_index = self.order_effect && !effect_before;
+            if self.order_cond > 0 || effect_before || (effect_in_index && read_before) {
+                self.errors.push(Diagnostic::error(
+                    HOIST_ORDER_DIAGNOSTIC,
+                    self.current_stmt_loc.clone(),
+                ));
+            }
+        }
+        self.hoist_if_impure(rewritten, prelude, HoistTag::Idx)
     }
 
     fn rewrite_index_access(
@@ -975,7 +1078,8 @@ impl<'a> ExpandContext<'a> {
         match self.try_resolve_literal_index_chain(&whole) {
             ChainResolve::Error => return Expression::BigIntLiteral { value: BigInt::from(0) },
             ChainResolve::Leaf(name) => {
-                return Expression::PropertyAccess { property: name };
+                self.order_read = true;
+                return Expression::PropertyAccess { property: name, source_location: None };
             }
             ChainResolve::None => {}
         }
@@ -1033,6 +1137,7 @@ impl<'a> ExpandContext<'a> {
 
         // Literal index?
         if let Some(literal) = as_literal_index(index) {
+            self.order_read = true;
             if literal < 0 || literal >= meta.length as i128 {
                 self.errors.push(Diagnostic::error(
                     format!(
@@ -1044,13 +1149,13 @@ impl<'a> ExpandContext<'a> {
                 return Expression::BigIntLiteral { value: BigInt::from(0) };
             }
             let slot = meta.slot_names[literal as usize].clone();
-            return Expression::PropertyAccess { property: slot };
+            return Expression::PropertyAccess { property: slot, source_location: None };
         }
 
         // Runtime index — rewrite sub-expressions, hoist if impure, build
         // nested ternary chain.
-        let rewritten_index = self.rewrite_expression(index, prelude);
-        let index_ref = self.hoist_if_impure(rewritten_index, prelude, HoistTag::Idx);
+        let index_ref = self.rewrite_and_hoist_index(index, prelude);
+        self.order_read = true;
 
         if meta.slot_is_array {
             self.errors.push(Diagnostic::error(
@@ -1067,7 +1172,7 @@ impl<'a> ExpandContext<'a> {
         &mut self,
         init_expr: &Expression,
         target: &Expression,
-        _loc: &SourceLocation,
+        loc: &SourceLocation,
     ) -> Option<StmtForm> {
         let (object, index) = match init_expr {
             Expression::IndexAccess { object, index } => (object.as_ref(), index.as_ref()),
@@ -1088,13 +1193,13 @@ impl<'a> ExpandContext<'a> {
         }
 
         let mut prelude: Vec<Statement> = Vec::new();
-        let rewritten_index = self.rewrite_expression(index, &mut prelude);
-        let index_ref = self.hoist_if_impure(rewritten_index, &mut prelude, HoistTag::Idx);
+        let index_ref = self.rewrite_and_hoist_index(index, &mut prelude);
 
         let n = meta.length;
         if n < 2 {
             let fallback_init = Expression::PropertyAccess {
                 property: meta.slot_names[0].clone(),
+                source_location: None,
             };
             return Some(StmtForm {
                 prelude,
@@ -1105,10 +1210,10 @@ impl<'a> ExpandContext<'a> {
 
         let fallback_init = Expression::PropertyAccess {
             property: meta.slot_names[n - 1].clone(),
+            source_location: None,
         };
 
         let mut tail_else: Option<Vec<Statement>> = None;
-        let loc = default_loc();
         let mut i = (n - 1) as isize - 1;
         while i >= 0 {
             let slot = &meta.slot_names[i as usize];
@@ -1116,11 +1221,13 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let assign = Statement::Assignment {
                 target: target.clone(),
                 value: Expression::PropertyAccess {
                     property: slot.clone(),
+                    source_location: None,
                 },
                 source_location: loc.clone(),
             };
@@ -1148,6 +1255,7 @@ impl<'a> ExpandContext<'a> {
     ) -> Expression {
         let mut chain = Expression::PropertyAccess {
             property: meta.slot_names[meta.length - 1].clone(),
+            source_location: None,
         };
         let mut i = (meta.length - 1) as isize - 1;
         while i >= 0 {
@@ -1156,9 +1264,11 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let branch = Expression::PropertyAccess {
                 property: slot.clone(),
+                source_location: None,
             };
             let ternary = Expression::TernaryExpr {
                 condition: Box::new(cond),
@@ -1184,7 +1294,14 @@ impl<'a> ExpandContext<'a> {
             None => return Vec::new(),
         };
 
+        // Source order is index THEN value, but the value is rewritten first
+        // so hoisted names are allocated as before; for the N-048 order checks
+        // the value's nested reads are judged as if the target index had
+        // already been evaluated. The target index itself is evaluated first.
+        self.order_effect = expr_has_effect(&index);
+        self.order_read = expr_has_read(&index);
         let rewritten_value = self.rewrite_expression(&value, &mut prelude);
+        self.reset_order();
         let rewritten_index = self.rewrite_expression(&index, &mut prelude);
 
         if let Some(literal) = as_literal_index(&rewritten_index) {
@@ -1208,7 +1325,7 @@ impl<'a> ExpandContext<'a> {
             let slot = meta.slot_names[literal as usize].clone();
             let mut out = prelude;
             out.push(Statement::Assignment {
-                target: Expression::PropertyAccess { property: slot },
+                target: Expression::PropertyAccess { property: slot, source_location: None },
                 value: rewritten_value,
                 source_location: loc,
             });
@@ -1221,6 +1338,13 @@ impl<'a> ExpandContext<'a> {
                 Some(loc),
             ));
             return prelude;
+        }
+
+        // A side-effecting value is hoisted to `__val_K` in front of the
+        // dispatch, which reads a pure (unhoisted) index only afterwards: that
+        // would move the value's effect ahead of the index read (N-048).
+        if is_pure_reference(&rewritten_index) && expr_has_effect(&value) {
+            self.errors.push(Diagnostic::error(HOIST_ORDER_DIAGNOSTIC, Some(loc.clone())));
         }
 
         let index_ref = self.hoist_if_impure(rewritten_index, &mut prelude, HoistTag::Idx);
@@ -1242,6 +1366,7 @@ impl<'a> ExpandContext<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![Expression::BoolLiteral { value: false }],
                 asm_return_type: None,
@@ -1256,10 +1381,12 @@ impl<'a> ExpandContext<'a> {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
                 right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
+                source_location: None,
             };
             let branch_assign = Statement::Assignment {
                 target: Expression::PropertyAccess {
                     property: slot.clone(),
+                    source_location: None,
                 },
                 value: value_ref.clone(),
                 source_location: loc.clone(),
@@ -1299,7 +1426,7 @@ impl<'a> ExpandContext<'a> {
             }
         }
         let root_name = match cursor {
-            Expression::PropertyAccess { property } => property.clone(),
+            Expression::PropertyAccess { property, .. } => property.clone(),
             _ => return ChainResolve::None,
         };
         let root_meta = match self.array_map.get(&root_name).cloned() {
@@ -1343,7 +1470,7 @@ impl<'a> ExpandContext<'a> {
     /// or synthetic-intermediate array property, return the base name.
     fn try_resolve_array_base(&self, obj: &Expression) -> Option<String> {
         match obj {
-            Expression::PropertyAccess { property }
+            Expression::PropertyAccess { property, .. }
                 if self.array_map.contains_key(property)
                     || self.synthetic_arrays.contains_key(property) =>
             {
@@ -1366,7 +1493,9 @@ impl<'a> ExpandContext<'a> {
             HoistTag::Idx => self.fresh_idx_name(),
             HoistTag::Val => self.fresh_val_name(),
         };
-        let loc = default_loc();
+        // N-393: the synthetic `__idx_K` / `__val_K` decl carries the original
+        // statement's location, as TS pass 03b does, not a line-0 anchor.
+        let loc = self.current_stmt_loc.clone().unwrap_or_else(default_loc);
         let decl = Statement::VariableDecl {
             name: name.clone(),
             var_type: None,
@@ -1375,7 +1504,7 @@ impl<'a> ExpandContext<'a> {
             source_location: loc,
         };
         prelude.push(decl);
-        Expression::Identifier { name }
+        Expression::Identifier { name, source_location: None }
     }
 }
 
@@ -1413,6 +1542,7 @@ fn as_literal_index(expr: &Expression) -> Option<i128> {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
                 (-value).to_i128()
@@ -1421,6 +1551,68 @@ fn as_literal_index(expr: &Expression) -> Option<i128> {
             }
         }
         _ => None,
+    }
+}
+
+/// N-048: the one diagnostic every tier emits when hoisting a computed
+/// FixedArray index would reorder evaluation. Shared verbatim with the TS
+/// reference.
+const HOIST_ORDER_DIAGNOSTIC: &str = "FixedArray index would be evaluated out of source order: hoisting it \
+would move it past an earlier side effect in the same statement, move \
+its own side effect past an earlier read, or lift it out of a \
+conditionally-evaluated operand of &&, || or ?:. Compute the index into \
+a local variable in a separate statement first";
+
+/// A call is treated as side-effecting unless its callee is a bare
+/// identifier (a built-in function). Method calls — output intrinsics and
+/// inlined private methods, which may write state — count as effects.
+fn is_effectful_callee(callee: &Expression) -> bool {
+    !matches!(callee, Expression::Identifier { .. })
+}
+
+/// Syntactic: does evaluating `expr` perform a side effect?
+fn expr_has_effect(expr: &Expression) -> bool {
+    match expr {
+        Expression::IncrementExpr { .. } | Expression::DecrementExpr { .. } => true,
+        Expression::CallExpr { callee, args, .. } => {
+            is_effectful_callee(callee) || args.iter().any(expr_has_effect)
+        }
+        Expression::BinaryExpr { left, right, .. } => {
+            expr_has_effect(left) || expr_has_effect(right)
+        }
+        Expression::UnaryExpr { operand, .. } => expr_has_effect(operand),
+        Expression::MemberExpr { object, .. } => expr_has_effect(object),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => expr_has_effect(condition) || expr_has_effect(consequent) || expr_has_effect(alternate),
+        Expression::IndexAccess { object, index } => {
+            expr_has_effect(object) || expr_has_effect(index)
+        }
+        Expression::ArrayLiteral { elements } => elements.iter().any(expr_has_effect),
+        _ => false,
+    }
+}
+
+/// Syntactic: does evaluating `expr` read a non-literal value?
+fn expr_has_read(expr: &Expression) -> bool {
+    match expr {
+        Expression::Identifier { .. } | Expression::PropertyAccess { .. } => true,
+        Expression::CallExpr { args, .. } => args.iter().any(expr_has_read),
+        Expression::BinaryExpr { left, right, .. } => expr_has_read(left) || expr_has_read(right),
+        Expression::UnaryExpr { operand, .. }
+        | Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } => expr_has_read(operand),
+        Expression::MemberExpr { object, .. } => expr_has_read(object),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => expr_has_read(condition) || expr_has_read(consequent) || expr_has_read(alternate),
+        Expression::IndexAccess { object, index } => expr_has_read(object) || expr_has_read(index),
+        Expression::ArrayLiteral { elements } => elements.iter().any(expr_has_read),
+        _ => false,
     }
 }
 
@@ -1434,6 +1626,7 @@ fn is_pure_reference(expr: &Expression) -> bool {
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
+            ..
         } => matches!(operand.as_ref(), Expression::BigIntLiteral { .. }),
         _ => false,
     }
@@ -1634,7 +1827,7 @@ class Init extends StatefulSmartContract {
         });
         let target = assign.expect("assignment");
         match target {
-            Expression::PropertyAccess { property } => assert_eq!(property, "board__0"),
+            Expression::PropertyAccess { property, .. } => assert_eq!(property, "board__0"),
             _ => panic!("expected property_access"),
         }
     }
@@ -1701,7 +1894,7 @@ class R extends StatefulSmartContract {
             Statement::VariableDecl { name, init, .. } => {
                 assert_eq!(name, "v");
                 match init {
-                    Expression::PropertyAccess { property } => assert_eq!(property, "board__2"),
+                    Expression::PropertyAccess { property, .. } => assert_eq!(property, "board__2"),
                     _ => panic!("expected fallback property access"),
                 }
             }

@@ -1,6 +1,6 @@
 //! Peephole optimizer for Stack IR.
 //!
-//! Runs after stack lowering but before emission. Applies 30 rewrite rules
+//! Runs after stack lowering but before emission. Applies 22 rewrite rules
 //! iteratively (fixed-point, max 100 iterations) in a single left-to-right pass.
 //! Larger windows are tried first (greedy). If-block bodies are recursively
 //! optimized before the main pass.
@@ -14,15 +14,28 @@ const Allocator = std.mem.Allocator;
 
 const max_iterations = 100;
 
+/// N-343: instructions read by `runOnePassWithLocs`, summed over every pass of
+/// every call. A work counter for tests (src/tests/n343_composite_nesting_work.zig)
+/// that bound the optimizer's total work by the size of the program; nothing
+/// in the compiler reads it.
+pub var ops_visited: usize = 0;
+
 // ============================================================================
 // Matching helpers
 // ============================================================================
 
-/// Returns true if the instruction is any push variant (push_int, push_data,
-/// push_bool, push_big_int_decimal).
+/// Returns true if the instruction is a literal push (push_int, push_data,
+/// push_bool, push_big_int_decimal) -- the TS reference's `op === 'push'`.
+///
+/// N-123: a constructor-slot `placeholder` and the emitter-filled
+/// `push_codesep_index` are deliberately NOT literal pushes here. TS, Go,
+/// Rust, Python, Ruby and Java all leave `placeholder; drop` in place
+/// (`OP_0 OP_DROP`); treating them as pushes made rule 1 delete the pair in
+/// this tier only.
 fn isPush(inst: Inst) bool {
     return switch (inst) {
-        .push_int, .push_data, .push_bool, .push_big_int_decimal, .push_codesep_index, .placeholder => true,
+        .push_int, .push_data, .push_bool, .push_big_int_decimal => true,
+        .push_codesep_index, .placeholder => false,
         // R-095: verify_code_part_len is a self-contained, stack-neutral
         // verify sequence, not a push — no rewrite window may treat it as one.
         .op, .raw_bytes, .verify_code_part_len => false,
@@ -179,6 +192,10 @@ pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]typ
 pub const OptOut = struct {
     insts: []Inst,
     locs: []?types.SourceLocation,
+    /// N-343: the last pass changed nothing, so the result is a fixed point —
+    /// one more run would return it unchanged. False when `max_iterations`
+    /// stopped the loop instead.
+    converged: bool = true,
 };
 
 /// Run the iterative peephole pass while keeping a parallel
@@ -190,6 +207,20 @@ pub const OptOut = struct {
 /// mis-attributed every opcode after the first conditional.
 pub fn optimizeOpsAndLocs(
     allocator: Allocator,
+    ops: []const Inst,
+    src_locs: []const ?types.SourceLocation,
+) !OptOut {
+    return optimizeOpsAndLocsSplit(allocator, allocator, ops, src_locs);
+}
+
+/// `optimizeOpsAndLocs` with the working buffers and the returned slices on
+/// `allocator`, and the payloads of folded pushes -- which the returned
+/// instructions reference -- on `value_allocator` (N-280: stack lowering
+/// frees an arm's buffers once spliced, but the folded values must live as
+/// long as the compile).
+pub fn optimizeOpsAndLocsSplit(
+    allocator: Allocator,
+    value_allocator: Allocator,
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,
 ) !OptOut {
@@ -213,10 +244,14 @@ pub fn optimizeOpsAndLocs(
         buf_a_locs.appendAssumeCapacity(loc);
     }
 
+    var converged = false;
     var iteration: usize = 0;
     while (iteration < max_iterations) : (iteration += 1) {
-        const changed = try runOnePassWithLocs(allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
-        if (!changed) break;
+        const changed = try runOnePassWithLocs(allocator, value_allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
+        if (!changed) {
+            converged = true;
+            break;
+        }
         const tmp_i = buf_a_insts;
         buf_a_insts = buf_b_insts;
         buf_b_insts = tmp_i;
@@ -229,11 +264,12 @@ pub fn optimizeOpsAndLocs(
     @memcpy(insts, buf_a_insts.items);
     const locs = try allocator.alloc(?types.SourceLocation, buf_a_locs.items.len);
     @memcpy(locs, buf_a_locs.items);
-    return .{ .insts = insts, .locs = locs };
+    return .{ .insts = insts, .locs = locs, .converged = converged };
 }
 
 fn runOnePassWithLocs(
     allocator: Allocator,
+    value_allocator: Allocator,
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,
     out_insts: *std.ArrayListUnmanaged(Inst),
@@ -241,6 +277,7 @@ fn runOnePassWithLocs(
 ) !bool {
     out_insts.clearRetainingCapacity();
     out_locs.clearRetainingCapacity();
+    ops_visited += ops.len;
     var changed = false;
 
     var i: usize = 0;
@@ -248,7 +285,7 @@ fn runOnePassWithLocs(
         const head_loc = if (i < src_locs.len) src_locs[i] else null;
         // Window 4
         if (i + 4 <= ops.len) {
-            if (try tryWindow4(allocator, ops[i..][0..4])) |replacement| {
+            if (try tryWindow4(value_allocator, ops[i..][0..4])) |replacement| {
                 for (replacement) |inst| {
                     if (inst) |r| {
                         try out_insts.append(allocator, r);
@@ -262,7 +299,7 @@ fn runOnePassWithLocs(
         }
         // Window 3
         if (i + 3 <= ops.len) {
-            if (try tryWindow3(allocator, ops[i..][0..3])) |replacement| {
+            if (try tryWindow3(value_allocator, ops[i..][0..3])) |replacement| {
                 for (replacement) |inst| {
                     if (inst) |r| {
                         try out_insts.append(allocator, r);
@@ -378,7 +415,7 @@ fn runOnePass(allocator: Allocator, ops: []const Inst, out: *std.ArrayListUnmana
 }
 
 // ============================================================================
-// Window-2 rules (23 rules)
+// Window-2 rules (16 rules)
 // ============================================================================
 
 /// Optional replacement: up to 2 instructions (null = no output for that slot).
@@ -406,18 +443,16 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     // Rule 5: PUSH(1) + OP_SUB -> OP_1SUB
     if (isPushInt(a, 1) and isOp(b, .op_sub)) return .{ Inst{ .op = .op_1sub }, null };
 
-    // Rule 6: PUSH(0) + OP_ADD -> (removed)
-    if (isPushInt(a, 0) and isOp(b, .op_add)) return .{ null, null };
-
-    // Rule 7: PUSH(0) + OP_SUB -> (removed)
-    if (isPushInt(a, 0) and isOp(b, .op_sub)) return .{ null, null };
+    // Rules 6, 7, 9 removed (F-001): PUSH(0) + OP_ADD, PUSH(0) + OP_SUB and
+    // OP_NEGATE + OP_NEGATE are identities over integers, not over stack
+    // elements: the opcode decodes its operand as a CScriptNum (rejecting a
+    // non-minimal encoding under strict rules) and pushes back the minimal
+    // re-encoding. Deleting it changes accept/reject and the value for a
+    // witness-supplied operand.
 
     // Rule 8 moved to tryWindow3: `OP_NOT + OP_NOT -> (removed)` was an
     // UNGUARDED 2-op rule and is unsound (C17). The 3-op form takes the
     // PRODUCER of the negated value into the window.
-
-    // Rule 9: OP_NEGATE + OP_NEGATE -> (removed)
-    if (isOp(a, .op_negate) and isOp(b, .op_negate)) return .{ null, null };
 
     // Rule 10: OP_EQUAL + OP_VERIFY -> OP_EQUALVERIFY
     if (isOp(a, .op_equal) and isOp(b, .op_verify))
@@ -445,13 +480,13 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     if (isPushInt(a, 0) and isOp(b, .op_roll)) return .{ null, null };
 
     // NOTE: PUSH(1) + ROLL -> SWAP and PUSH(2) + ROLL -> ROT are intentionally
-    // NOT folded as 2-window peephole rules. The TS reference compiler
-    // distinguishes typed `RollOp` (which carries a depth field and IS folded
-    // by peephole) from untyped post-if reconciliation rolls (`push d +
-    // roll(depth=d+1) + drop`, which are NOT folded). The Zig instruction
-    // stream collapses both into `op_roll`, so we cannot tell them apart at
-    // the peephole level. To preserve byte-equivalence with the canonical TS
-    // output, we leave these rolls unfolded.
+    // NOT folded as 2-window peephole rules. The TS reference compiler folds
+    // only a typed `RollOp` whose depth field equals the pushed value, and some
+    // of its rolls still carry a different depth (so they stay unfolded). The
+    // Zig instruction stream collapses both into `op_roll`, so we cannot tell
+    // them apart at the peephole level; each lowering site that TS folds
+    // writes the folded form out itself (the post-if reconcile rolls since
+    // N-216, which used to be `roll(depth=d+1)` in TS and never folded).
 
     // Rule 20: PUSH(0) + PICK -> DUP
     if (isPushInt(a, 0) and isOp(b, .op_pick)) return .{ Inst{ .op = .op_dup }, null };
@@ -516,6 +551,16 @@ fn tryWindow3(allocator: Allocator, w: *const [3]Inst) !?Replacement3 {
     // raw_bytes is a hard peephole barrier — never rewrite across it.
     if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2])) return null;
 
+    // N-376: ROT + ROT + ROT -> (removed). OP_ROT is a 3-cycle on the top three
+    // items, so three in a row are the identity; the fixed-point loop leaves a
+    // run of n as n mod 3. Every Zig rot is the typed `op_rot` (string-form
+    // "OP_ROT" emits resolve to it too), matching the other tiers, which accept
+    // both their typed and string forms. Must sit before the constant-fold
+    // early return below.
+    if (isOp(w[0], .op_rot) and isOp(w[1], .op_rot) and isOp(w[2], .op_rot)) {
+        return .{ null, null, null };
+    }
+
     // Rule 8: <canonical-bool producer> + OP_NOT + OP_NOT -> <producer>
     //
     // `OP_NOT OP_NOT` is boolean NORMALISATION, not numeric identity: for any
@@ -573,14 +618,16 @@ fn tryWindow4(allocator: Allocator, w: *const [4]Inst) !?Replacement4 {
     // raw_bytes is a hard peephole barrier — never rewrite across it.
     if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2]) or isRawBytes(w[3])) return null;
 
-    // Rules 27-30 reassociate two constant operands across a pair of
-    // OP_ADD / OP_SUB. Like rules 24-26 they read at full precision and in
-    // either push representation (issue #162).
+    // Rules 27-28 reassociate two constant operands across a pair of
+    // OP_ADD / OP_SUB of the SAME kind. Like rules 24-26 they read at full
+    // precision and in either push representation (issue #162).
+    //
+    // Rules 29/30 (mixed OP_ADD / OP_SUB) were removed (N-001): no other tier,
+    // the TS reference included, implements them, so `x + 5n - 3n` emitted
+    // different bytes here than in the other six tiers.
     const add_add = isOp(w[1], .op_add) and isOp(w[3], .op_add);
     const sub_sub = isOp(w[1], .op_sub) and isOp(w[3], .op_sub);
-    const add_sub = isOp(w[1], .op_add) and isOp(w[3], .op_sub);
-    const sub_add = isOp(w[1], .op_sub) and isOp(w[3], .op_add);
-    if (!add_add and !sub_sub and !add_sub and !sub_add) return null;
+    if (!add_add and !sub_sub) return null;
 
     var a = (try pushOperand(allocator, w[0])) orelse return null;
     defer a.deinit();
@@ -589,29 +636,12 @@ fn tryWindow4(allocator: Allocator, w: *const [4]Inst) !?Replacement4 {
 
     var r = try const_arith.Big.init(allocator);
     defer r.deinit();
+    try r.add(&a, &b);
 
     // Rule 27: PUSH(a) + OP_ADD + PUSH(b) + OP_ADD -> PUSH(a+b) + OP_ADD
-    if (add_add) {
-        try r.add(&a, &b);
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_add }, null, null };
-    }
-
     // Rule 28: PUSH(a) + OP_SUB + PUSH(b) + OP_SUB -> PUSH(a+b) + OP_SUB
-    if (sub_sub) {
-        try r.add(&a, &b);
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_sub }, null, null };
-    }
-
-    // Rule 29: PUSH(a) + OP_ADD + PUSH(b) + OP_SUB -> PUSH(a-b) + OP_ADD (if a >= b)
-    //          or PUSH(b-a) + OP_SUB (if b > a)
-    // Rule 30: PUSH(a) + OP_SUB + PUSH(b) + OP_ADD -> PUSH(b-a) + OP_ADD (if b >= a)
-    //          or PUSH(a-b) + OP_SUB (if a > b)
-    if (add_sub) try r.sub(&a, &b) else try r.sub(&b, &a);
-    if (!const_arith.isNegative(r)) {
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_add }, null, null };
-    }
-    r.abs();
-    return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_sub }, null, null };
+    const op: Opcode = if (add_add) .op_add else .op_sub;
+    return .{ try foldedPushBig(allocator, r), Inst{ .op = op }, null, null };
 }
 
 // ============================================================================
@@ -637,6 +667,34 @@ test "rule 1: push + drop eliminated" {
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
     try testing.expectEqual(@as(usize, 0), result.len);
+}
+
+// N-123: rule 1 matches only literal pushes, as in the TS reference (`isPush`
+// is `op === 'push'` there) and the Go/Rust/Python/Ruby/Java peepholes.
+// A constructor-slot `placeholder` and the emitter-filled
+// `push_codesep_index` are NOT pushes for this rule: TS keeps
+// `placeholder; drop` as `OP_0 OP_DROP`. Crafted ANF (a `load_prop` of a
+// ctor param used as a method_call object) compiles to `0075767c93009c` in
+// those six tiers; Zig deleted the pair and emitted `767c93009c`.
+// Proves: the Zig window leaves both pairs in place. Does not prove the
+// end-to-end hex matches -- that is the --ir probe in the N-123 log.
+test "N-123 rule 1: placeholder + drop is NOT eliminated (TS parity)" {
+    const alloc = testing.allocator;
+    const input = [_]Inst{
+        .{ .placeholder = .{ .param_index = 0, .param_name = "a" } },
+        .{ .op = .op_drop },
+    };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
+}
+
+test "N-123 rule 1: push_codesep_index + drop is NOT eliminated (TS parity)" {
+    const alloc = testing.allocator;
+    const input = [_]Inst{ .{ .push_codesep_index = {} }, .{ .op = .op_drop } };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
 }
 
 // --- Rule 2: DUP + DROP -> removed ---
@@ -675,22 +733,27 @@ test "rule 5: push 1 + sub -> 1sub" {
     try expectOps(&.{.{ .op = .op_1sub }}, result);
 }
 
-// --- Rule 6: PUSH(0) + OP_ADD -> removed ---
-test "rule 6: push 0 + add eliminated" {
+// --- Rule 6 (removed, F-001): PUSH(0) + OP_ADD is kept ---
+// x + 0 = x over integers, but OP_ADD decodes its operand as a CScriptNum
+// (rejecting a non-minimal encoding under strict rules) and re-encodes it
+// minimally; a witness operand gets no other normalisation, so deleting the
+// pair changes accept/reject and value. Proves the Zig peephole keeps the
+// pair; does not execute a script.
+test "rule 6 (F-001): push 0 + add kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .push_int = 0 }, .{ .op = .op_add } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
-// --- Rule 7: PUSH(0) + OP_SUB -> removed ---
-test "rule 7: push 0 + sub eliminated" {
+// --- Rule 7 (removed, F-001): PUSH(0) + OP_SUB is kept ---
+test "rule 7 (F-001): push 0 + sub kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .push_int = 0 }, .{ .op = .op_sub } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
 // --- Rule 8: <canonical-bool producer> + OP_NOT + OP_NOT -> <producer> ---
@@ -781,13 +844,13 @@ test "C17: x !== 0n keeps its OP_NOT pair" {
     }, result);
 }
 
-// --- Rule 9: OP_NEGATE + OP_NEGATE -> removed ---
-test "rule 9: negate + negate eliminated" {
+// --- Rule 9 (removed, F-001): OP_NEGATE + OP_NEGATE is kept ---
+test "rule 9 (F-001): negate + negate kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .op = .op_negate }, .{ .op = .op_negate } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
 // --- Rule 10: OP_EQUAL + OP_VERIFY -> OP_EQUALVERIFY ---
@@ -935,10 +998,17 @@ test "rule 28: reassociate sub + sub" {
     try expectOps(&.{ .{ .push_int = 10 }, .{ .op = .op_sub } }, result);
 }
 
-// --- Rule 29: PUSH(a) + OP_ADD + PUSH(b) + OP_SUB ---
-test "rule 29: reassociate add + sub" {
+// --- Rules 29/30 (removed, N-001): PUSH(a) + OP_ADD + PUSH(b) + OP_SUB and
+// PUSH(a) + OP_SUB + PUSH(b) + OP_ADD are kept ---
+// Zig alone carried these reassociations; the TS reference and the other five
+// tiers have no such rule, so `x + 5n - 3n` compiled to 5293009c here and to
+// 55935394009c everywhere else (cross-tier hex parity break). These tests prove
+// the peephole leaves both mixed windows untouched. They do not prove the
+// emitted script for the whole contract matches the other tiers; that is pinned
+// by the 7-tier probe in packages/runar-compiler/src/__tests__/cross-compiler.test.ts.
+test "rule 29 (N-001): push + add + push + sub kept" {
     const alloc = testing.allocator;
-    // x + 5 - 3 => x + (5-3) = x + 2
+    // x + 5 - 3 stays as written: no tier but the old Zig folded it to x + 2.
     const input = [_]Inst{
         .{ .push_int = 5 },
         .{ .op = .op_add },
@@ -947,13 +1017,12 @@ test "rule 29: reassociate add + sub" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{ .{ .push_int = 2 }, .{ .op = .op_add } }, result);
+    try expectOps(&input, result);
 }
 
-// --- Rule 30: PUSH(a) + OP_SUB + PUSH(b) + OP_ADD ---
-test "rule 30: reassociate sub + add" {
+test "rule 30 (N-001): push + sub + push + add kept" {
     const alloc = testing.allocator;
-    // x - 3 + 7 => x + (7-3) = x + 4
+    // x - 3 + 7 stays as written: no tier but the old Zig folded it to x + 4.
     const input = [_]Inst{
         .{ .push_int = 3 },
         .{ .op = .op_sub },
@@ -962,7 +1031,21 @@ test "rule 30: reassociate sub + add" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{ .{ .push_int = 4 }, .{ .op = .op_add } }, result);
+    try expectOps(&input, result);
+}
+
+test "rule 30 (N-001): push + sub + push + add kept when a > b" {
+    const alloc = testing.allocator;
+    // The old b < a arm rewrote this to PUSH(4) OP_SUB.
+    const input = [_]Inst{
+        .{ .push_int = 7 },
+        .{ .op = .op_sub },
+        .{ .push_int = 3 },
+        .{ .op = .op_add },
+    };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
 }
 
 // --- Fixed-point iteration ---
@@ -982,11 +1065,11 @@ test "fixed-point: cascading optimizations" {
     try testing.expectEqual(@as(usize, 0), result.len);
 }
 
-test "fixed-point: reassociation then identity" {
+test "fixed-point (N-001): equal add/sub constants are not cancelled" {
     const alloc = testing.allocator;
-    // PUSH(5) OP_ADD PUSH(5) OP_SUB
-    // Rule 29: diff = 5-5 = 0 -> PUSH(0) OP_ADD
-    // Rule 6: PUSH(0) OP_ADD -> removed
+    // PUSH(5) OP_ADD PUSH(5) OP_SUB used to become PUSH(0) OP_ADD via the
+    // removed rule 29. With no mixed-window reassociation (matching TS) the
+    // sequence is left exactly as written.
     const input = [_]Inst{
         .{ .push_int = 5 },
         .{ .op = .op_add },
@@ -995,7 +1078,7 @@ test "fixed-point: reassociation then identity" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
 // --- No-op on already optimal code ---
@@ -1064,12 +1147,11 @@ test "greedy: window 4 takes priority" {
     try expectOps(&.{ .{ .push_int = 5 }, .{ .op = .op_add } }, result);
 }
 
-// --- Reassociation resulting in push(1) triggers further optimization ---
-test "fixed-point: reassociation yields push(1) then 1add" {
+// --- A mixed add/sub window whose difference is 1 is NOT turned into OP_1ADD ---
+test "fixed-point (N-001): mixed add/sub with difference 1 stays unfolded" {
     const alloc = testing.allocator;
-    // PUSH(3) OP_ADD PUSH(2) OP_SUB
-    // Rule 29: 3-2=1 -> PUSH(1) OP_ADD
-    // Rule 4: PUSH(1) OP_ADD -> OP_1ADD
+    // PUSH(3) OP_ADD PUSH(2) OP_SUB used to cascade through the removed
+    // rule 29 (-> PUSH(1) OP_ADD) into rule 4 (-> OP_1ADD). TS keeps it as is.
     const input = [_]Inst{
         .{ .push_int = 3 },
         .{ .op = .op_add },
@@ -1078,7 +1160,7 @@ test "fixed-point: reassociation yields push(1) then 1add" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{.{ .op = .op_1add }}, result);
+    try expectOps(&input, result);
 }
 
 // --- Empty input ---

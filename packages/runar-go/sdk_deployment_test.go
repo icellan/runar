@@ -1,6 +1,8 @@
 package runar
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -133,5 +135,53 @@ func TestEstimateCallFee_MockProviderRoundTrip(t *testing.T) {
 	// 1000 sats.
 	if fee > 1000 {
 		t.Errorf("EstimateCallFee unexpectedly high for small tx: %d", fee)
+	}
+}
+
+// TestBuildP2PKHScript_F043 pins the input contract every SDK shares, using a
+// real key: the secp256k1 generator G.
+//
+// PROVES: a 40-char hash, a 66-char compressed and a 130-char uncompressed
+// pubkey (hashed with HASH160), and the mainnet/testnet addresses of G all map
+// to the expected P2PKH script; the Genesis address with its last character
+// flipped (still 25 decoded bytes, bad SHA256d checksum) panics, as do a P2SH
+// address, a short address and a non-Base58 character.
+// DOES NOT PROVE: that a pubkey is a valid curve point (no SDK checks it).
+func TestBuildP2PKHScript_F043(t *testing.T) {
+	const gPKH = "751e76e8199196d454941c45d1b3a323f1433bd6"
+	ok := map[string]string{
+		gPKH: "76a914" + gPKH + "88ac",
+		"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798": "76a914" + gPKH + "88ac",
+		"0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" +
+			"483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8": "76a91491b24bf9f5288532960ac687abb035127b1d28a588ac",
+		"1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH": "76a914" + gPKH + "88ac",
+		"mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r": "76a914" + gPKH + "88ac",
+		"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa": "76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac",
+	}
+	for in, want := range ok {
+		if got := BuildP2PKHScript(in); got != want {
+			t.Errorf("BuildP2PKHScript(%q) = %s, want %s", in, got, want)
+		}
+	}
+	bad := map[string]string{
+		"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb": "checksum",
+		"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy": "not supported",
+		"1Badx":                              "length",
+		"1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf0a": "bad char",
+	}
+	for in, want := range bad {
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Errorf("BuildP2PKHScript(%q) did not panic", in)
+					return
+				}
+				if msg := fmt.Sprint(r); !strings.Contains(msg, want) {
+					t.Errorf("BuildP2PKHScript(%q) panic %q, want it to mention %q", in, msg, want)
+				}
+			}()
+			BuildP2PKHScript(in)
+		}()
 	}
 }

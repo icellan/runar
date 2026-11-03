@@ -38,7 +38,7 @@ func TestExtractConstructorArgs_RepeatedSlotReferences_Issue143(t *testing.T) {
 
 	t.Run("reads slots AFTER a repeated wide value at the correct offsets", func(t *testing.T) {
 		resolved := "ab" + "02f401" + "7c" + "02f401" + "7c" + "57" + "ac"
-		args := ExtractConstructorArgs(artifact, resolved)
+		args := mustExtractConstructorArgs(t, artifact, resolved)
 		if got := args["alpha"]; got != int64(500) {
 			t.Errorf("alpha = %v (%T), want int64(500)", got, got)
 		}
@@ -53,7 +53,7 @@ func TestExtractConstructorArgs_RepeatedSlotReferences_Issue143(t *testing.T) {
 	t.Run("still extracts correctly when the repeated value fits its placeholder width", func(t *testing.T) {
 		// alpha = 5 → OP_5 (1 byte, same width as the placeholder: zero shift).
 		resolved := "ab" + "55" + "7c" + "55" + "7c" + "57" + "ac"
-		args := ExtractConstructorArgs(artifact, resolved)
+		args := mustExtractConstructorArgs(t, artifact, resolved)
 		if got := args["alpha"]; got != int64(5) {
 			t.Errorf("alpha = %v (%T), want int64(5)", got, got)
 		}

@@ -185,6 +185,12 @@ module RubyLsp
           'unlocking paths.',
         'params'       => '`params param: Type, ...` — Annotate parameter types for the ' \
           'immediately following method without changing its visibility.',
+        'runar_sighash' => '`runar_sighash \'SINGLE|FORKID\'` — Declare the BIP-143 sighash mode ' \
+          'of the next public method (the native spelling of the compiler\'s `@sighash` ' \
+          'directive). A no-op at runtime; the compiler reads it from the source.',
+        'embed_always' => '`prop :name, Type, embed_always: true` — Keep a readonly property ' \
+          'in the locking script even when no method reads it (the native spelling of the ' \
+          'compiler\'s `@embedAlways` directive). Recorded in the property metadata only.',
       }.freeze
 
       # @param response_builder [Object] LSP response builder (responds to #push)

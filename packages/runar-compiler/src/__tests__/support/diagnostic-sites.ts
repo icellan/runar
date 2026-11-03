@@ -1,4 +1,4 @@
-import { Project, SyntaxKind, type Node } from 'ts-morph';
+import { Project, SyntaxKind, VariableDeclarationKind, type Node, type SourceFile } from 'ts-morph';
 import { resolve } from 'node:path';
 
 /**
@@ -43,12 +43,22 @@ export const DIAGNOSTIC_PASS_FILES = [
 /**
  * Flatten a message argument into literal chunks and holes.
  *
- * Three shapes appear in the passes, and all three must be handled or the
+ * Five shapes appear in the passes, and all must be handled or the
  * inventory silently under-counts (the failure mode this whole gate exists to
- * prevent): a plain string, a template literal, and — for the long messages —
- * a `+` chain of either.
+ * prevent): a plain string, a template literal, a `+` chain of either, an
+ * identifier naming a top-level const initialized to one of the above, and a
+ * call to a top-level function whose body is a single `return <...>;` of one
+ * of the above (e.g. `rabinKeyWriteMessage(w.prop)` — N-205's message is a
+ * shared helper because it is also thrown from IR validation, not just
+ * pushed as a diagnostic). Template spans are already holes regardless of
+ * what expression they interpolate (see the TemplateExpression case below),
+ * so the call's argument value never needs to be resolved — only the
+ * function's own template shape does. This does NOT handle a helper whose
+ * body builds the string with a `+` chain over a parameter identifier
+ * (there is no such helper today); that shape would still be reported as
+ * unextractable.
  */
-function flatten(node: Node): string | null {
+export function flatten(node: Node, sourceFile?: SourceFile): string | null {
   switch (node.getKind()) {
     case SyntaxKind.StringLiteral:
     case SyntaxKind.NoSubstitutionTemplateLiteral:
@@ -66,14 +76,48 @@ function flatten(node: Node): string | null {
     case SyntaxKind.BinaryExpression: {
       const be = node.asKindOrThrow(SyntaxKind.BinaryExpression);
       if (be.getOperatorToken().getKind() !== SyntaxKind.PlusToken) return null;
-      const left = flatten(be.getLeft());
-      const right = flatten(be.getRight());
+      const left = flatten(be.getLeft(), sourceFile);
+      const right = flatten(be.getRight(), sourceFile);
       if (left === null || right === null) return null;
       return left + right;
     }
 
     case SyntaxKind.ParenthesizedExpression:
-      return flatten(node.asKindOrThrow(SyntaxKind.ParenthesizedExpression).getExpression());
+      return flatten(node.asKindOrThrow(SyntaxKind.ParenthesizedExpression).getExpression(), sourceFile);
+
+    case SyntaxKind.CallExpression: {
+      if (!sourceFile) return null;
+      const call = node.asKindOrThrow(SyntaxKind.CallExpression);
+      const callee = call.getExpression();
+      if (callee.getKind() !== SyntaxKind.Identifier) return null;
+      const fn = sourceFile.getFunction(callee.getText());
+      if (!fn) return null;
+      const statements = fn.getStatements();
+      if (statements.length !== 1 || statements[0]!.getKind() !== SyntaxKind.ReturnStatement) return null;
+      const ret = statements[0]!.asKindOrThrow(SyntaxKind.ReturnStatement);
+      const expr = ret.getExpression();
+      if (!expr) return null;
+      return flatten(expr, sourceFile);
+    }
+
+    case SyntaxKind.Identifier: {
+      if (!sourceFile) return null;
+      const id = node.asKindOrThrow(SyntaxKind.Identifier).getText();
+      // Look for a top-level const declaration with this name
+      for (const stmt of sourceFile.getVariableStatements()) {
+        // Only consider const declarations, not let/var
+        if (stmt.getDeclarationKind() !== VariableDeclarationKind.Const) continue;
+        for (const decl of stmt.getDeclarations()) {
+          if (decl.getName() === id) {
+            const init = decl.getInitializer();
+            if (init) {
+              return flatten(init, sourceFile);
+            }
+          }
+        }
+      }
+      return null;
+    }
 
     default:
       return null;
@@ -110,7 +154,7 @@ export function collectDiagnosticSites(repoRoot: string): DiagnosticSite[] {
         unextractable.push(`${file}:${line} (no message argument)`);
         continue;
       }
-      const template = flatten(arg);
+      const template = flatten(arg, sf);
       if (template === null) {
         unextractable.push(`${file}:${line} ${arg.getText().slice(0, 80).replace(/\s+/g, ' ')}`);
         continue;

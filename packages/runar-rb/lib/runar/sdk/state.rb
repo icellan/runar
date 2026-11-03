@@ -10,6 +10,8 @@
 # The public helpers encode_push_data and encode_script_int are also provided
 # for callers that need to hand-craft push operations outside of state encoding.
 
+require_relative 'errors'
+
 module Runar
   module SDK
     module State
@@ -124,17 +126,21 @@ module Runar
         encode_push_data(data_hex)
       end
 
-      # Find the hex-char offset of the last OP_RETURN (0x6a) at a real opcode
-      # boundary.
+      # Find the hex-char offset of the first OP_RETURN (0x6a) at a real
+      # opcode boundary, and stop.
       #
       # Walks opcodes correctly so that 0x6a bytes embedded inside push data are
-      # not mistaken for OP_RETURN.  In practice a Runar stateful contract has
-      # exactly one OP_RETURN; the walk stops immediately when it finds it.
+      # not mistaken for OP_RETURN. The name is kept for parity with the other
+      # six SDKs, which all implement this same first-match walk: stopping at
+      # the first opcode-boundary 0x6a is correct, not a shortcut, because the
+      # on-chain interpreter itself stops at the first OP_RETURN it executes,
+      # and the compiler emits exactly one separator (codePart + OP_RETURN +
+      # stateBytes), so "first" and "last" coincide for every script this
+      # method will ever see.
       #
       # @param script_hex [String] full locking script as a hex string
       # @return [Integer] hex-char offset of OP_RETURN, or -1 if not found
       def find_last_op_return(script_hex)
-        last_pos = -1
         offset   = 0
         length   = script_hex.length
 
@@ -169,7 +175,7 @@ module Runar
           end
         end
 
-        last_pos
+        -1
       end
 
       # Encode a list of state field values into a raw hex string.
@@ -372,6 +378,13 @@ module Runar
       # @param full_locking_script_hex [String] complete locking script as hex
       # @return [Hash, nil] decoded state hash, or nil if no OP_RETURN / no state fields
       def extract_state_from_script(artifact, full_locking_script_hex)
+        # N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+        # that is not whole bytes of hex before any reader sees it — the N-317
+        # rule (ScriptUtils.hex_bytes?; script_utils requires this file).
+        unless full_locking_script_hex.length.even? && full_locking_script_hex.match?(/\A\h*\z/)
+          raise Runar::SDK::MalformedScriptError,
+                'extract_state_from_script: script is not an even-length hex string'
+        end
         return nil if artifact.state_fields.nil? || artifact.state_fields.empty?
 
         op_return_pos = find_last_op_return(full_locking_script_hex)
@@ -423,12 +436,44 @@ module Runar
       end
       private_class_method :encode_push_data_state
 
+      # N-045 (defence in depth): refuse a fixed-width byte value -- PubKey 33,
+      # Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96
+      # bytes -- that is not a hex string of exactly its declared width. The
+      # on-chain reader slices each such field at its declared width, so a
+      # wrong-width value in a state section (or an argument a covenant copies
+      # into one) shifts every later field. The compiled covenant refuses such
+      # a continuation on chain (OP_SIZE <width> OP_NUMEQUALVERIFY); this is the
+      # off-chain refusal. No-op for every other type.
+      #
+      # @raise [ArgumentError]
+      def check_fixed_width_value(value, field_type, what)
+        width = TYPE_WIDTHS[field_type]
+        return if width.nil?
+
+        unless value.is_a?(String)
+          raise ArgumentError,
+                "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got #{value.class}"
+        end
+        if value.length.odd? || value !~ /\A[0-9a-fA-F]*\z/
+          raise ArgumentError,
+                "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got a non-hex string"
+        end
+        return if value.length == width * 2
+
+        raise ArgumentError,
+              "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got #{value.length / 2} bytes. " \
+              "A wrong-width #{field_type} shifts every later state field when the " \
+              "contract's on-chain reader slices it at #{width} bytes"
+      end
+
       # @param field_type [String] Runar type name
       # @return [String] hex-encoded bytes
       def encode_state_value(value, field_type, label = '?')
         case field_type
-        when 'int', 'bigint'
-          n = coerce_to_integer(value)
+        # F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+        # stores them as the same 8-byte OP_NUM2BIN word.
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey'
+          n = coerce_to_integer(value, label, field_type)
           encode_num2bin(n, 8, label)
         when 'bool', 'boolean'
           value ? '01' : '00'
@@ -448,6 +493,8 @@ module Runar
                     "Writing a placeholder would deploy a state section the contract's own " \
                     'on-chain reader cannot parse, leaving the output unspendable'
             end
+            # N-045: a wrong-width value shifts every later field for the reader.
+            check_fixed_width_value(value, field_type, "serialize_state: state field '#{label}'")
             value
           else
             hex = value.is_a?(String) ? value : ''
@@ -483,7 +530,7 @@ module Runar
           # encode_state_value — a reader that knows only 'bool' walks a real
           # boolean field as push data and desynchronises every field after it.
           [data != '00', hex_width]
-        when 'int', 'bigint'
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey'
           # 8 raw bytes LE sign-magnitude (NUM2BIN 8)
           [decode_num2bin(data), hex_width]
         else
@@ -500,7 +547,7 @@ module Runar
       def state_field_byte_width(field_type)
         case field_type
         when 'bool', 'boolean' then 1
-        when 'int', 'bigint' then 8
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey' then 8
         else TYPE_WIDTHS[field_type]
         end
       end
@@ -655,11 +702,21 @@ module Runar
       #   "42n"       → 42  (BigInt string from JSON without reviver)
       #   Integer     → as-is
       #   other       → Integer() conversion
-      def coerce_to_integer(value)
-        return 0 if value.nil?
-        return value.to_s.chomp('n').to_i if value.is_a?(String) && value.end_with?('n')
+      # N-084: only an Integer, or a decimal integer string with the optional
+      # JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value. nil used to
+      # write 0, "abcn" chomped to 0, and Integer() accepted 1.5, "0x10", "1_0".
+      def coerce_to_integer(value, label = '?', field_type = '?')
+        return value if value.is_a?(Integer)
+        return value.chomp('n').to_i if value.is_a?(String) && value.match?(/\A-?[0-9]+n?\z/)
 
-        Integer(value)
+        got = if value.is_a?(String) then 'a non-decimal string'
+              elsif value.nil? then 'nil'
+              else value.class.to_s
+              end
+        raise ArgumentError,
+              "serialize_state: state field '#{label}' (#{field_type}) must be an integer or a " \
+              "decimal integer string, got #{got}. Serializing anything else would write a " \
+              'number the caller never supplied into the state section'
       end
       private_class_method :coerce_to_integer
     end

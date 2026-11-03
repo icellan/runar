@@ -26,7 +26,48 @@ import (
 // The on-chain verifier now simply on-curve-checks this point and uses it
 // as the G1 input for the second pairing — matching how SP1's Solidity
 // verifier computes the MSM via the BN254 EC precompile.
+//
+// Per user decision R86a (N-035), the on-chain witness-assisted MSM binding
+// asserts 0 <= pub_i < r for each public input before folding it into the
+// accumulator — a non-canonical representative (pub_i + k*r, pub_i - r, ...)
+// would bind the SAME accumulator as its canonical residue while the
+// contract body and the txid see the raw, unreduced value. This helper
+// refuses such inputs instead of silently reducing them mod r (N-232), so
+// callers learn about the mismatch at build time instead of a rejected
+// on-chain spend.
 func computePreparedInputs(ic []*[2]*big.Int, publicInputs []*big.Int) ([2]*big.Int, error) {
+	if err := validatePublicInputsCanonical(publicInputs); err != nil {
+		return [2]*big.Int{}, err
+	}
+	return computePreparedInputsUnchecked(ic, publicInputs)
+}
+
+// validatePublicInputsCanonical returns an error if any scalar in
+// publicInputs is outside the canonical range [0, r) for the BN254 scalar
+// field (r = fr.Modulus()). Negative values and values >= r are both
+// rejected.
+func validatePublicInputsCanonical(publicInputs []*big.Int) error {
+	r := fr.Modulus()
+	for i, pub := range publicInputs {
+		if pub.Sign() < 0 || pub.Cmp(r) >= 0 {
+			return fmt.Errorf(
+				"public input %d is not a canonical BN254 Fr element: %s is outside [0, %s)",
+				i, pub.String(), r.String(),
+			)
+		}
+	}
+	return nil
+}
+
+// computePreparedInputsUnchecked is computePreparedInputs without the
+// canonicity check on publicInputs. It exists ONLY so that
+// BuildFromProofWithInputsUnchecked (test-only, see its doc comment) can
+// construct the adversarial witness that the on-chain MSM-binding preamble
+// (N-035, R86a) must reject — proving the SCRIPT rejects it, not the SDK.
+// Do not call this outside tests; production code must go through
+// computePreparedInputs / BuildFromProofWithInputs, which refuse
+// non-canonical inputs.
+func computePreparedInputsUnchecked(ic []*[2]*big.Int, publicInputs []*big.Int) ([2]*big.Int, error) {
 	if len(ic) != len(publicInputs)+1 {
 		return [2]*big.Int{}, fmt.Errorf(
 			"computePreparedInputs: ic length %d != publicInputs length %d + 1",

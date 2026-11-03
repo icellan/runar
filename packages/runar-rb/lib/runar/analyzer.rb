@@ -71,7 +71,13 @@ module Runar
 
     # Public entry. Returns a Hash (raw analysis result; not serialized JSON).
     def analyze_script(hex_script, options = {})
-      normalized = hex_script.gsub(/\s/, '').downcase
+      # Strip exactly what JS's /\s/g matches (what the TS reference
+      # strips): a fixed 25-codepoint set per ECMA-262 (WhiteSpace +
+      # LineTerminator). Ruby's bare /\s/ (no Unicode option) only
+      # matches ASCII whitespace, so it misses NBSP, the BOM, and other
+      # Unicode space separators that JS strips.
+      js_whitespace = /[\t\n\v\f\r\x20\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]/
+      normalized = hex_script.gsub(js_whitespace, '').downcase
       script_size = normalized.length / 2
 
       if script_size == 0

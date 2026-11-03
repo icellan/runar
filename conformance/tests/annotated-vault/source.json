@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/annotated-vault/AnnotatedVault.runar.ts",
+    ".runar.sol": "../../../examples/sol/annotated-vault/AnnotatedVault.runar.sol",
+    ".runar.move": "../../../examples/move/annotated-vault/AnnotatedVault.runar.move",
+    ".runar.go": "../../../examples/go/annotated-vault/AnnotatedVault.runar.go",
+    ".runar.rs": "../../../examples/rust/annotated-vault/AnnotatedVault.runar.rs",
+    ".runar.py": "../../../examples/python/annotated-vault/AnnotatedVault.runar.py",
+    ".runar.zig": "../../../examples/zig/annotated-vault/AnnotatedVault.runar.zig",
+    ".runar.rb": "../../../examples/ruby/annotated-vault/AnnotatedVault.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/annotated-vault/AnnotatedVault.runar.java"
+  }
+}

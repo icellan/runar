@@ -18,8 +18,15 @@ name: Differential test
 # in shell run: blocks. All inputs are derived from the checked-in
 # repository tree.
 
+# push + merge_group as well as pull_request: most commits reach main by
+# direct push, so a pull_request-only trigger left the repo's only external-
+# reference oracle dark on most of main (F-053). No cancel-in-progress, for the
+# same reason: a cancelled push run is an unchecked commit.
 on:
+  push:
+    branches: [main, 'release/v*']
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:

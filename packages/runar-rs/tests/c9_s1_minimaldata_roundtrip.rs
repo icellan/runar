@@ -128,6 +128,7 @@ fn ctor_bytestring_artifact() -> RunarArtifact {
             byte_offset: 1,
         }]),
         code_sep_index_slots: None,
+        code_part_len_slots: None,
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,

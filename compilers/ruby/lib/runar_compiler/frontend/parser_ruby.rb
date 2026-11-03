@@ -22,6 +22,9 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
+require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -98,6 +101,14 @@ module RunarCompiler
       TOK_REQUIRE = 67
       TOK_ASSERT  = 68
       TOK_DO      = 69
+
+      # N-053: the tokens that can begin an expression and are not already a
+      # statement form of their own (mirrors the TS reference's
+      # RB_EXPRESSION_START).
+      RB_EXPR_START_KINDS = [
+        TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_TRUE, TOK_FALSE, TOK_NIL,
+        TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG, TOK_NOT
+      ].freeze
 
       KEYWORDS = {
         "class"   => TOK_CLASS,
@@ -190,6 +201,7 @@ module RunarCompiler
       "extract_prev_output_script" => "extractPrevOutputScript",
       "require_output_p2pkh"       => "requireOutputP2PKH",
       "current_block_height"       => "currentBlockHeight",
+      "continuation_amount"        => "continuationAmount",
       "mul_div"                    => "mulDiv",
       "percent_of"                 => "percentOf",
       "reverse_bytes"              => "reverseBytes",
@@ -340,16 +352,35 @@ module RunarCompiler
       # The tokenizer processes one line at a time, tracking parenthesis depth
       # to suppress NEWLINE tokens inside multi-line expressions. This matches
       # the behavior of the TypeScript reference implementation.
-      def self.tokenize(source)
+      #
+      # +errors+, when given, receives tokenizer diagnostics (currently only an
+      # unterminated +=begin+ embedded document).
+      def self.tokenize(source, errors = nil, lex = [], file_name = "")
       tokens = []
       lines = source.split("\n", -1)
       paren_depth = 0
+      # Line number of an open +=begin+ embedded document, or nil.
+      block_comment_start = nil
 
       lines.each_with_index do |raw_line, line_idx|
         line_num = line_idx + 1
 
         # Strip trailing carriage return
         line = raw_line.chomp("\r")
+
+        # F-018: Ruby embedded documents. +=begin+ / +=end+ open and close a
+        # block comment only at column 0 and only as a whole word (followed by
+        # whitespace or end of line) -- exactly Ruby's own rule. Everything
+        # from the +=begin+ line through the +=end+ line is a comment. Before
+        # this, a method "commented out" this way compiled as a live spend path.
+        if block_comment_start
+          block_comment_start = nil if line.match?(/\A=end(?:\s|\z)/)
+          next
+        end
+        if line.match?(/\A=begin(?:\s|\z)/)
+          block_comment_start = line_num
+          next
+        end
 
         # Skip blank lines and comment-only lines
         stripped = line.lstrip
@@ -385,7 +416,14 @@ module RunarCompiler
               pos += 1
             end
             name = line[name_start...pos]
-            tokens << Token.new(kind: TOK_IVAR, value: name, line: line_num, col: col) if name && !name.empty?
+            if name && !name.empty?
+              tokens << Token.new(kind: TOK_IVAR, value: name, line: line_num, col: col)
+            else
+              # N-214: a bare `@` was dropped, so `a + @ b` compiled as
+              # `a + b`. The TS reference lexes it as its own token and
+              # refuses it in the expression; refuse it with TS's diagnostic.
+              lex << Frontend.lex_error("Unexpected token in expression: '@'", file_name, line_num, col)
+            end
             next
           end
 
@@ -529,7 +567,13 @@ module RunarCompiler
                 pos += 1
               end
             end
-            pos += 1 if pos < line.length # skip closing quote
+            if pos < line.length
+              pos += 1 # skip closing quote
+            else
+              # F-011: line-based, so reaching the line break means the
+              # literal is unterminated; refuse it, never end it silently.
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
             tokens << Token.new(kind: TOK_HEXSTRING, value: val_chars, line: line_num, col: col)
             next
           end
@@ -548,27 +592,20 @@ module RunarCompiler
                 pos += 1
               end
             end
-            pos += 1 if pos < line.length # skip closing quote
+            if pos < line.length
+              pos += 1 # skip closing quote
+            else
+              # F-011: line-based, so reaching the line break means the
+              # literal is unterminated; refuse it, never end it silently.
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
             tokens << Token.new(kind: TOK_STRING, value: val_chars, line: line_num, col: col)
             next
           end
 
-          # Numbers (decimal and hex)
+          # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
           if ch.match?(/[0-9]/)
-            num_chars = +""
-            if ch == "0" && pos + 1 < line.length && (line[pos + 1] == "x" || line[pos + 1] == "X")
-              num_chars << "0x"
-              pos += 2
-              while pos < line.length && line[pos].match?(/[0-9a-fA-F_]/)
-                num_chars << line[pos] unless line[pos] == "_"
-                pos += 1
-              end
-            else
-              while pos < line.length && (line[pos].match?(/[0-9]/) || line[pos] == "_")
-                num_chars << line[pos] unless line[pos] == "_"
-                pos += 1
-              end
-            end
+            pos, num_chars, = IntLiteral.lex_number("rb", line, pos, lex, file_name, line_num, col)
             tokens << Token.new(kind: TOK_NUMBER, value: num_chars, line: line_num, col: col)
             next
           end
@@ -593,7 +630,9 @@ module RunarCompiler
             next
           end
 
-          # Skip unrecognized characters
+          # N-214: an unrecognised character is refused, as the TS reference
+          # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line_num, col)
           pos += 1
         end
 
@@ -601,6 +640,10 @@ module RunarCompiler
         if paren_depth == 0
           tokens << Token.new(kind: TOK_NEWLINE, value: "", line: line_num, col: line.length + 1)
         end
+      end
+
+      if block_comment_start && errors
+        errors << "unterminated '=begin' block comment starting at line #{block_comment_start}: missing '=end'"
       end
 
       tokens << Token.new(kind: TOK_EOF, value: "", line: lines.length + 1, col: 1)
@@ -675,6 +718,8 @@ module RunarCompiler
 
     # Recursive descent parser for Ruby-format Runar contracts.
     class RbParser
+      include InputLimits::NestingCounter
+
       include RubyTokens
 
       def initialize(tokens, file_name)
@@ -684,6 +729,8 @@ module RunarCompiler
         @errors = []
         # Track locally declared variables per method scope
         @declared_locals = Set.new
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        @declared = []
       end
 
       # -------------------------------------------------------------------
@@ -755,15 +802,32 @@ module RunarCompiler
         end
 
         contract = parse_class
+        unless contract.nil?
+          # N-004: nothing may follow the class's +end+.
+          skip_newlines
+          trailing = peek
+          unless trailing.kind == TOK_EOF
+            @errors << "#{@file}:#{trailing.line}:#{trailing.col}: #{Frontend.unexpected_token_after_class_message(trailing.value)}"
+          end
+        end
         diagnostics = @errors.map { |e| Diagnostic.new(message: e, severity: Severity::ERROR) }
         if contract.nil?
           return ParseResult.new(errors: diagnostics)
         end
 
+        diagnostics.concat(IdentifierCollision.diagnostics(@declared))
         ParseResult.new(contract: contract, errors: diagnostics)
       end
 
       private
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.snake_to_camel(raw)
+        @declared << [raw, name]
+        name
+      end
 
       def parse_require_line
         advance # 'require'
@@ -800,7 +864,7 @@ module RunarCompiler
         skip_newlines
 
         unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          @errors << "#{@file}:#{first_part.line}: unknown parent class: #{parent_class}"
+          @errors << "#{@file}:#{first_part.line}: unknown parent class: '#{parent_class}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
           return nil
         end
 
@@ -812,6 +876,9 @@ module RunarCompiler
         # Pending visibility/param types for the next method
         pending_visibility = nil
         pending_param_types = nil
+        # N-093: pending +runar_sighash+ macros for the next +def+, each
+        # {spec: String or nil (malformed), loc: SourceLocation}.
+        pending_sighash = []
 
         while peek.kind != TOK_END && peek.kind != TOK_EOF
           skip_newlines
@@ -821,6 +888,23 @@ module RunarCompiler
           if check_ident("prop")
             prop = parse_prop(parent_class)
             properties << prop unless prop.nil?
+            skip_newlines
+            next
+          end
+
+          # N-093: +runar_sighash 'FLAGS'+ is the native spelling of the
+          # +@sighash+ directive; it applies to the next +def+.
+          if check_ident("runar_sighash")
+            sighash_loc = loc
+            advance # 'runar_sighash'
+            arg = peek
+            count = 0
+            while peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
+              advance
+              count += 1
+            end
+            is_str = arg.kind == TOK_STRING || arg.kind == TOK_HEXSTRING
+            pending_sighash << { spec: count == 1 && is_str ? arg.value : nil, loc: sighash_loc }
             skip_newlines
             next
           end
@@ -846,21 +930,51 @@ module RunarCompiler
           if peek.kind == TOK_DEF
             method = parse_method(pending_visibility, pending_param_types)
             if method.name == "constructor"
+              # N-093: the constructor is not a spending entry point.
+              pending_sighash.each do |p|
+                @errors << located_message(p[:loc], SighashDirective.lost_directive_message("@sighash"))
+              end
               constructor = method
             else
+              sighash = SighashDirective.resolve_native_sighash(
+                method.name, method.visibility == "public", pending_sighash.map { |p| p[:spec] }
+              )
+              if sighash && sighash[:error]
+                @errors << located_message(method.source_location, sighash[:error])
+              elsif sighash
+                method.sighash_type = sighash[:value]
+              end
               methods << method
             end
             pending_visibility = nil
             pending_param_types = nil
+            pending_sighash = []
             skip_newlines
             next
           end
 
-          # Skip unknown tokens
-          advance
+          # Ruby's bare visibility markers are no-ops here (visibility comes
+          # from +runar_public+); examples/ruby uses them.
+          if check_ident("private") || check_ident("public")
+            advance
+            next
+          end
+
+          # N-004: refuse anything else (an indented +=begin+ lexes as +=+).
+          stray = advance
+          @errors << "#{@file}:#{stray.line}:#{stray.col}: #{Frontend.unexpected_class_body_token_message(stray.value)}"
         end
 
-        match_tok(TOK_END) # end of class
+        # N-093: a +runar_sighash+ with no +def+ after it annotates nothing.
+        pending_sighash.each do |p|
+          @errors << located_message(p[:loc], SighashDirective.lost_directive_message("@sighash"))
+        end
+
+        # N-319: the class +end+ is required; EOF here means it is missing.
+        unless match_tok(TOK_END)
+          eof_tok = peek
+          @errors << "#{@file}:#{eof_tok.line}:#{eof_tok.col}: unterminated class: missing closing 'end'"
+        end
 
         # Auto-generate constructor if not provided
         constructor = auto_generate_constructor(properties) if constructor.nil?
@@ -882,6 +996,10 @@ module RunarCompiler
         # +self.add_output(...)+ / +this.addOutput(...)+.
         intrinsic_methods = Set.new(%w[addOutput addRawOutput addDataOutput getStateScript])
         method_names = methods.map(&:name).to_set | intrinsic_methods
+        # F-213 measure (B) before the recursive rewrite below walks the AST.
+        InputLimits.assert_ast_nesting!(
+          ContractNode.new(properties: properties, constructor: constructor, methods: methods)
+        )
         methods.each do |m|
           Frontend.rewrite_bare_method_calls(m.body, method_names)
         end
@@ -957,13 +1075,31 @@ module RunarCompiler
         type_node = parse_type
 
         is_readonly = false
+        embed_always = false
         initializer = nil
 
-        # Check for optional trailing +readonly: true+ or +default: value+
+        # Check for optional trailing +readonly: true+, +embed_always: true+
+        # or +default: value+
+        option_error = false
         while peek.kind == TOK_COMMA
           advance # ','
 
-          if check_ident("readonly")
+          if check_ident("embed_always")
+            # N-093: the native spelling of the +@embedAlways+ directive.
+            advance # 'embed_always'
+            expect(TOK_COLON, ":")
+            if peek.kind == TOK_TRUE
+              advance
+              embed_always = true
+            elsif peek.kind == TOK_FALSE
+              advance
+              embed_always = false
+            else
+              bad_boolean_prop_option("embed_always")
+              option_error = true
+              break
+            end
+          elsif check_ident("readonly")
             advance # 'readonly'
             expect(TOK_COLON, ":")
             if peek.kind == TOK_TRUE
@@ -972,12 +1108,36 @@ module RunarCompiler
             elsif peek.kind == TOK_FALSE
               advance
               is_readonly = false
+            else
+              bad_boolean_prop_option("readonly")
+              option_error = true
+              break
             end
           elsif check_ident("default")
             advance # 'default'
             expect(TOK_COLON, ":")
-            initializer = parse_primary
+            if peek.kind == TOK_NIL
+              # N-414: +nil+ is not a Rúnar literal; refused, never read as 0.
+              @errors << "#{@file}:#{peek.line}:#{peek.col}: prop default 'nil' is not a literal (expected a number, true, false or a hex string)"
+              advance # 'nil'
+            else
+              initializer = parse_unary
+            end
+          else
+            # N-301: an unknown option (e.g. a typo of +embed_always+) is
+            # refused, never silently dropped. Same text in all seven tiers.
+            @errors << "#{@file}:#{peek.line}:#{peek.col}: unknown prop option '#{peek.value}' (expected readonly, embed_always or default)"
+            option_error = true
+            break
           end
+        end
+
+        # N-413: nothing may follow the type or an option value except +,+
+        # (the next option) or end of line, so +default: 1 + 2+ is refused
+        # rather than silently truncated to its first operand. Same text in
+        # all seven tiers.
+        if !option_error && peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
+          @errors << "#{@file}:#{peek.line}:#{peek.col}: unexpected '#{peek.value}' in prop declaration (expected ',' or end of line)"
         end
 
         # In stateless contracts (SmartContract and UnsafeSmartContract), all
@@ -988,12 +1148,27 @@ module RunarCompiler
         advance while peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
 
         PropertyNode.new(
-          name: Frontend.snake_to_camel(raw_name),
+          name: declare(raw_name),
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
+          embed_always: embed_always,
           source_location: current_loc
         )
+      end
+
+      # This parser's error-string convention: +file:line:col: message+.
+      def located_message(location, message)
+        "#{@file}:#{location.line}:#{location.column}: #{message}"
+      end
+
+      # N-313: +readonly:+ and +embed_always:+ take a literal +true+ or +false+.
+      # Any other value is refused, never silently dropped. Same text in all
+      # seven tiers.
+      def bad_boolean_prop_option(option)
+        tok = peek
+        got = [TOK_NEWLINE, TOK_EOF].include?(tok.kind) ? "<end of line>" : tok.value
+        @errors << "#{@file}:#{tok.line}:#{tok.col}: invalid value '#{got}' for prop option '#{option}' (expected true or false)"
       end
 
       def parse_type
@@ -1004,7 +1179,7 @@ module RunarCompiler
         # FixedArray[T, N] style generic
         if raw_name == "FixedArray" && peek.kind == TOK_LBRACKET
           advance # '['
-          elem_type = parse_type
+          elem_type = nested { parse_type }
           expect(TOK_COMMA, ",")
           size_tok = expect(TOK_NUMBER, "number")
           size = size_tok.value.to_i
@@ -1021,6 +1196,13 @@ module RunarCompiler
         expect(TOK_DEF, "def")
 
         name_tok = advance
+        # N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        # method, not a contract method.
+        if peek.kind == TOK_DOT
+          advance # '.'
+          name_tok = advance
+          @errors << "#{@file}:#{name_tok.line}:#{name_tok.col}: #{Frontend.static_method_message(name_tok.value)}"
+        end
         raw_name = name_tok.value
 
         # Reset local variable tracking for this method scope
@@ -1052,7 +1234,7 @@ module RunarCompiler
         end
 
         is_public = pending_visibility == "public"
-        method_name = Frontend.snake_to_camel(raw_name)
+        method_name = declare(raw_name)
 
         MethodNode.new(
           name: method_name,
@@ -1070,7 +1252,7 @@ module RunarCompiler
         while peek.kind != TOK_RPAREN && peek.kind != TOK_EOF
           name_tok = advance
           raw_name = name_tok.value
-          camel_name = Frontend.snake_to_camel(raw_name)
+          camel_name = declare(raw_name)
 
           type_node = nil
           type_node = param_types[raw_name] if param_types
@@ -1156,6 +1338,10 @@ module RunarCompiler
       end
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         current_loc = loc
         kind = peek.kind
 
@@ -1168,8 +1354,15 @@ module RunarCompiler
         return parse_ivar_statement(current_loc)    if kind == TOK_IVAR
         return parse_ident_statement(current_loc)   if kind == TOK_IDENT
 
-        # Skip unrecognized token
-        advance
+        # N-053: a token that can begin an expression begins an expression
+        # statement (a private helper's last one is its implicit return
+        # value); any other token is refused. Skipping it dropped `!` / `(` /
+        # literals.
+        if RB_EXPR_START_KINDS.include?(kind)
+          return ExpressionStmt.new(expr: parse_expression, source_location: current_loc)
+        end
+        tok = advance
+        @errors << "#{@file}:#{tok.line}:#{tok.col}: #{Frontend.unsupported_statement_message(tok.value)}"
         nil
       end
 
@@ -1206,7 +1399,7 @@ module RunarCompiler
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
-          else_stmts = [parse_elsif_statement(elif_loc)]
+          else_stmts = [nested { parse_elsif_statement(elif_loc) }]
           @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
@@ -1240,7 +1433,7 @@ module RunarCompiler
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
-          else_stmts = [parse_elsif_statement(elif_loc)]
+          else_stmts = [nested { parse_elsif_statement(elif_loc) }]
           @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
@@ -1298,7 +1491,7 @@ module RunarCompiler
         advance # 'for'
 
         iter_tok = advance # loop variable name
-        var_name = Frontend.snake_to_camel(iter_tok.value)
+        var_name = declare(iter_tok.value)
 
         expect(TOK_IN, "in")
 
@@ -1423,6 +1616,7 @@ module RunarCompiler
       def parse_ivar_statement(current_loc)
         # Parse +@var = expr+, +@var[i] = expr+, +@var += expr+, or
         # +@var+ as expression.
+        start = @pos
         ivar_tok = advance # ivar token
         raw_name = ivar_tok.value
         prop_name = Frontend.snake_to_camel(raw_name)
@@ -1456,9 +1650,12 @@ module RunarCompiler
           return AssignmentStmt.new(target: target, value: value, source_location: current_loc)
         end
 
-        # Expression statement: bare +@var+ (e.g. followed by +.method(...)+)
-        expr = parse_postfix_from(target)
-        ExpressionStmt.new(expr: expr, source_location: current_loc)
+        # Expression statement: bare +@var+, +@var.method(...)+, or a private
+        # helper's implicit return such as +@x + 1+. N-053: re-parse from the
+        # ivar as a whole expression; continuing only the postfix chain left
+        # +' + 1'+ behind, and the statement dispatcher skipped it.
+        @pos = start
+        ExpressionStmt.new(expr: parse_expression, source_location: current_loc)
       end
 
       def parse_ident_statement(current_loc)
@@ -1471,7 +1668,7 @@ module RunarCompiler
           advance # consume ident
           advance # consume '='
           value = parse_expression
-          camel_name = Frontend.snake_to_camel(raw_name)
+          camel_name = declare(raw_name)
 
           if @declared_locals.include?(camel_name)
             return AssignmentStmt.new(
@@ -1515,7 +1712,7 @@ module RunarCompiler
       # -------------------------------------------------------------------
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1531,76 +1728,83 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while peek.kind == TOK_OR || peek.kind == TOK_PIPEPIPE
           advance
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_not
         while peek.kind == TOK_AND || peek.kind == TOK_AMPAMP
           advance
           right = parse_not
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_not
+        op_loc = loc
         if peek.kind == TOK_NOT || peek.kind == TOK_BANG
           advance
-          operand = parse_not
-          return UnaryExpr.new(op: "!", operand: operand)
+          operand = nested { parse_not }
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
         parse_bitwise_or
       end
 
       def parse_bitwise_or
+        start = loc
         left = parse_bitwise_xor
         while peek.kind == TOK_PIPE
           advance
           right = parse_bitwise_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_xor
+        start = loc
         left = parse_bitwise_and
         while peek.kind == TOK_CARET
           advance
           right = parse_bitwise_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_and
+        start = loc
         left = parse_equality
         while peek.kind == TOK_AMP
           advance
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           kind = peek.kind
           if kind == TOK_EQEQ
             advance
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif kind == TOK_NOTEQ
             advance
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1609,25 +1813,26 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           kind = peek.kind
           if kind == TOK_LT
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: "<", left: left, right: right)
+            left = BinaryExpr.new(op: "<", left: left, right: right, source_location: start)
           elsif kind == TOK_LTEQ
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: "<=", left: left, right: right)
+            left = BinaryExpr.new(op: "<=", left: left, right: right, source_location: start)
           elsif kind == TOK_GT
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: ">", left: left, right: right)
+            left = BinaryExpr.new(op: ">", left: left, right: right, source_location: start)
           elsif kind == TOK_GTEQ
             advance
             right = parse_shift
-            left = BinaryExpr.new(op: ">=", left: left, right: right)
+            left = BinaryExpr.new(op: ">=", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1636,17 +1841,18 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_add_sub
         loop do
           kind = peek.kind
           if kind == TOK_LSHIFT
             advance
             right = parse_add_sub
-            left = BinaryExpr.new(op: "<<", left: left, right: right)
+            left = BinaryExpr.new(op: "<<", left: left, right: right, source_location: start)
           elsif kind == TOK_RSHIFT
             advance
             right = parse_add_sub
-            left = BinaryExpr.new(op: ">>", left: left, right: right)
+            left = BinaryExpr.new(op: ">>", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1655,17 +1861,18 @@ module RunarCompiler
       end
 
       def parse_add_sub
+        start = loc
         left = parse_mul_div
         loop do
           kind = peek.kind
           if kind == TOK_PLUS
             advance
             right = parse_mul_div
-            left = BinaryExpr.new(op: "+", left: left, right: right)
+            left = BinaryExpr.new(op: "+", left: left, right: right, source_location: start)
           elsif kind == TOK_MINUS
             advance
             right = parse_mul_div
-            left = BinaryExpr.new(op: "-", left: left, right: right)
+            left = BinaryExpr.new(op: "-", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1674,21 +1881,22 @@ module RunarCompiler
       end
 
       def parse_mul_div
+        start = loc
         left = parse_unary
         loop do
           kind = peek.kind
           if kind == TOK_STAR
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "*", left: left, right: right)
+            left = BinaryExpr.new(op: "*", left: left, right: right, source_location: start)
           elsif kind == TOK_SLASH
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif kind == TOK_PERCENT
             advance
             right = parse_unary
-            left = BinaryExpr.new(op: "%", left: left, right: right)
+            left = BinaryExpr.new(op: "%", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1697,18 +1905,19 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         kind = peek.kind
         if kind == TOK_MINUS
           advance
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if kind == TOK_TILDE
           advance
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         if kind == TOK_BANG
           advance
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         parse_power
       end
@@ -1718,7 +1927,7 @@ module RunarCompiler
         # +**+ is right-associative and maps to +pow(base, exp)+
         if peek.kind == TOK_STARSTAR
           advance
-          exp = parse_power # right-recursive for right-associativity
+          exp = nested { parse_power } # right-recursive for right-associativity
           return CallExpr.new(
             callee: Identifier.new(name: "pow"),
             args: [base, exp]
@@ -1815,17 +2024,18 @@ module RunarCompiler
         # Hex string literal (single-quoted)
         if kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
         # Double-quoted string literal
         if kind == TOK_STRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
-        # +nil+ -> 0
+        # N-416: +nil+ is not a Rúnar value; refused, never read as 0.
         if kind == TOK_NIL
+          @errors << "#{@file}:#{tok.line}:#{tok.col}: 'nil' is not a Rúnar value (use a number, true, false or a hex string)"
           advance
           return BigIntLiteral.new(value: 0)
         end
@@ -1862,7 +2072,7 @@ module RunarCompiler
           advance
           raw_name = tok.value
           name = Frontend.map_builtin_name(raw_name)
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: SourceLocation.new(file: @file, line: tok.line, column: tok.col))
         end
 
         # +super+ as expression
@@ -1899,7 +2109,24 @@ module RunarCompiler
     # @param file_name [String] the source file name
     # @return [ParseResult]
     def self.parse_ruby(source, file_name = "contract.runar.rb")
-      tokens = RubyTokens.tokenize(source)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_ruby_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_ruby_tokens(source, file_name, lex)
+      lex_errors = []
+      tokens = RubyTokens.tokenize(source, lex_errors, lex, file_name)
+      unless lex_errors.empty?
+        return ParseResult.new(errors: lex_errors.map { |e|
+          Diagnostic.new(message: "#{file_name}: #{e}", severity: Severity::ERROR)
+        })
+      end
       parser = RbParser.new(tokens, file_name)
       parser.parse
     end

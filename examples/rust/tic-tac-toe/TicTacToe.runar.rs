@@ -71,6 +71,11 @@ impl TicTacToe {
     pub fn join(&mut self, opponent_pk: PubKey, sig: &Sig) {
         assert!(self.status == 0);
         assert!(check_sig(sig, &opponent_pk));
+        // Player O must pay exactly the bet (N-027): the continuation holds the
+        // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        // payout methods pay out. The compiler's own `>= input` floor alone would
+        // let O join for free.
+        assert!(continuation_amount() == extract_amount(&self.tx_preimage) + self.bet_amount);
         self.player_o = opponent_pk;
         self.status = 1;
         self.turn = 1;

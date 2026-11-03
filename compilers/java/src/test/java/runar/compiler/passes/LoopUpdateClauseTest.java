@@ -228,4 +228,180 @@ class LoopUpdateClauseTest {
             }""";
         PipelineTestSupport.hex(src, "Countdown.runar.ts");
     }
+
+    // -----------------------------------------------------------------------
+    // N-132: an EMPTY update slot on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-132: {@code for (let i = 0n; i < 3n; )} never advances {@code i} in the source, yet this
+     * tier filled the empty slot with a {@code 0n} placeholder and the unrolled loop advanced it
+     * anyway (938 hex chars, byte-identical to {@code i++}). The TS reference refuses it in its
+     * parser with the text asserted below.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses an empty update slot with the
+     * reference's text. Does not prove: anything about other surfaces (their empty-update shapes
+     * are pinned by the conformance negatives N180/N181).
+     */
+    @Test
+    void n132EmptyTsUpdateIsRejected() {
+        String err = compileError(tsWithUpdate(""), "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("an empty for-update must not compile");
+        }
+        assertTrue(err.contains("For loop must have an update expression"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    // -----------------------------------------------------------------------
+    // N-116: an update that reads the iterator (or is a literal) without advancing it
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-116: the validator accepted a bare identifier / literal update as the "no-op sentinel" the
+     * while-shaped parsers synthesize, and the step was then inferred as +1 from the comparison
+     * direction -- so {@code var i = 3; while (i < 5) : (i)}, a source loop that never terminates,
+     * unrolled to two laps over i = 3, 4.
+     *
+     * <p>Proves: the refusal, with the shared R-065 sentence, on the Zig continue expression and
+     * the TS for-update surface. Does not prove: anything about while loops whose update lives in
+     * the body (those keep a placeholder iterator and the condition rule refuses them).
+     */
+    @Test
+    void n116ZigContinueThatOnlyReadsTheIteratorIsRejected() throws Exception {
+        String src = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+            .replace("var i: i64 = 0;", "var i: i64 = 3;")
+            .replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)");
+        assertRejectedWithSharedDiagnostic(src, "BoundedLoop.runar.zig",
+            "`: (i)` never advances i; the source loop never terminates");
+    }
+
+    @Test
+    void n116TsUpdateThatOnlyReadsTheIteratorIsRejected() {
+        assertRejectedWithSharedDiagnostic(tsWithUpdate("i"), "UpdateProbe.runar.ts",
+            "`for (...; i)` does not advance i");
+    }
+
+    @Test
+    void n116TsLiteralUpdateIsRejected() {
+        assertRejectedWithSharedDiagnostic(tsWithUpdate("0n"), "UpdateProbe.runar.ts",
+            "`for (...; 0n)` does not advance i");
+    }
+
+    // -----------------------------------------------------------------------
+    // N-135: an EMPTY condition slot on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-135: {@code for (let i = 0n; ; i++)} has no exit test in the source. The TS reference
+     * refuses it in its parser with the text asserted below; this tier refused it only by accident
+     * (the {@code let} declaration consumed its own {@code ;}, a second {@code match(;)} swallowed
+     * the empty slot's {@code ;}, and {@code i++} was misparsed as the condition).
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses an empty condition slot with the
+     * reference's text. Does not prove: other surfaces or tiers (pinned by the conformance
+     * negatives N274/N275).
+     */
+    @Test
+    void n135EmptyTsConditionIsRejected() {
+        String src = tsWithUpdate("i++").replace("0n; i < 3n; i++)", "0n; ; i++)");
+        String err = compileError(src, "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("an empty for-condition must not compile");
+        }
+        assertTrue(err.contains("For loop must have a condition"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    /**
+     * N-135: {@code for (let i = 0n;; i < 3n; i++)} is not valid TypeScript (empty condition slot,
+     * last two clauses shifted left). The second {@code match(;)} after the initializer swallowed
+     * the empty slot's {@code ;} and this tier compiled it exactly like
+     * {@code for (let i = 0n; i < 3n; i++)}.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses the shifted header with the
+     * reference's condition diagnostic. Does not prove: other surfaces or tiers (pinned by the
+     * conformance negative N275).
+     */
+    @Test
+    void n135ShiftedTsHeaderIsRejected() {
+        String src = tsWithUpdate("i++").replace("0n; i < 3n; i++)", "0n;; i < 3n; i++)");
+        String err = compileError(src, "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("a shifted for-header must not compile");
+        }
+        assertTrue(err.contains("For loop must have a condition"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    // -----------------------------------------------------------------------
+    // N-306: a non-declaration for-initializer on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    private static final String NON_DECLARATION_INITIALIZER_DIAGNOSTIC =
+        "For loop must have a variable declaration initializer";
+
+    /**
+     * A stateful contract parameterised on the for-loop HEADER, with a body that never
+     * references the loop variable by name -- unlike {@link #tsWithUpdate}'s body ({@code acc =
+     * acc + i}), so a substituted {@code _i = 0} iterator can't be caught by an accidental
+     * "undefined variable 'i'" typecheck error instead of the parser's own diagnostic.
+     */
+    private static String tsForInitializer(String init) {
+        return """
+            import { StatefulSmartContract, assert } from 'runar-lang';
+
+            class InitProbe extends StatefulSmartContract {
+              count: bigint;
+
+              constructor(count: bigint) { super(count); this.count = count; }
+
+              public unlock(expected: bigint): void {
+                let acc: bigint = 0n;
+                for (INIT; _i < 3n; _i++) {
+                  acc = acc + 1n;
+                }
+                assert(acc === expected);
+              }
+            }"""
+            .replace("INIT", init);
+    }
+
+    /**
+     * N-306: {@code for (i = 0n; _i < 3n; _i++)} has no {@code let}/{@code const} in the
+     * initializer slot. The TS reference refuses it in its parser with the text asserted below.
+     * This tier's {@code parseFor} instead silently substituted the synthetic {@code _i = 0}
+     * iterator for the whole initializer, discarding {@code i = 0n} with no diagnostic at all --
+     * invisible as long as the condition/update still reference the original name {@code i},
+     * because an unrelated validator check (the unrolled loop's "condition must compare the loop
+     * variable" rule) then catches the name mismatch by accident and refuses the program anyway.
+     * Writing the condition/update against the substituted name {@code _i} instead -- exactly
+     * what a developer who noticed the generated variable would do -- defeats that accidental
+     * catch and the garbage initializer compiled clean.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses a non-declaration
+     * for-initializer with the reference's text, even when the rest of the header is written
+     * against the substituted name. Does not prove: other surfaces or tiers (pinned by the
+     * conformance negatives N277-N279).
+     */
+    @Test
+    void n306NonDeclarationInitializerIsRejected() {
+        String src = tsForInitializer("i = 0n");
+        String err = compileError(src, "InitProbe.runar.ts");
+        if (err == null) {
+            fail("a non-declaration for-initializer must not compile");
+        }
+        assertTrue(err.contains(NON_DECLARATION_INITIALIZER_DIAGNOSTIC),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
+
+    /**
+     * Control: a well-formed {@code let} initializer must keep compiling clean -- the fix
+     * narrows only the non-declaration branch of the initializer dispatch.
+     */
+    @Test
+    void n306LetInitializerStillCompiles() throws Exception {
+        String src = tsForInitializer("let _i: bigint = 0n");
+        PipelineTestSupport.hex(src, "InitProbe.runar.ts");
+    }
 }

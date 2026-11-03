@@ -2,6 +2,7 @@ package runar
 
 import (
 	"crypto/sha256"
+	"math/big"
 	"testing"
 )
 
@@ -33,5 +34,33 @@ func TestRabinPaddingBound_AcceptsHonestSig(t *testing.T) {
 
 	if !rabinVerifyImpl(msg, sigBytes, padBytes, []byte(RabinTestKeyN)) {
 		t.Fatalf("honest signature rejected: sig=%s padding=%s", sigInt, padInt)
+	}
+}
+
+// TestRabinSigRange_RejectsNonCanonicalSig (N-380, F-368 follow-up): the
+// on-chain script asserts sig < n before squaring, so sig + k*n aborts there.
+// The off-chain verifier must reject the same encodings.
+//
+// Proves: the canonical sig and the second root n - sig are accepted; sig + n
+// and sig + 2n (same padding) are rejected. Does not prove the verdict equals
+// the consensus interpreter's (conformance/negatives/f368 does that).
+func TestRabinSigRange_RejectsNonCanonicalSig(t *testing.T) {
+	msg := []byte("attack at dawn")
+	n := leBytesToBigInt([]byte(RabinTestKeyN))
+	sigInt, padInt := RabinSign(msg, RabinTestP(), RabinTestQ())
+	padBytes := bigIntToLEBytes(padInt)
+	pk := []byte(RabinTestKeyN)
+
+	canonical := []*big.Int{sigInt, new(big.Int).Sub(n, sigInt)}
+	for _, s := range canonical {
+		if !rabinVerifyImpl(msg, bigIntToLEBytes(s), padBytes, pk) {
+			t.Fatalf("canonical sig %s rejected", s)
+		}
+	}
+	for k := int64(1); k <= 2; k++ {
+		s := new(big.Int).Add(sigInt, new(big.Int).Mul(n, big.NewInt(k)))
+		if rabinVerifyImpl(msg, bigIntToLEBytes(s), padBytes, pk) {
+			t.Fatalf("non-canonical sig + %d*n accepted", k)
+		}
 	}
 }

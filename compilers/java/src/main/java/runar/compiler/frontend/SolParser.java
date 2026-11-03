@@ -41,6 +41,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.sol} (Solidity-like) source into a Rúnar
@@ -75,10 +76,21 @@ public final class SolParser {
 
     /** Parse Solidity-syntax source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         Parser p = new Parser(filename);
-        p.tokens = tokenize(source);
+        List<String> lex = new ArrayList<>();
+        p.tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         p.pos = 0;
-        ContractNode contract = p.parseContract();
+        // F-213: measures (A) and (B) — before the recursive prop rewrite.
+        ContractNode contract = SourceNesting.guard(p::parseContract, ParseException::new);
         rewriteContractProps(contract);
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("; ", p.errors));
@@ -208,14 +220,16 @@ public final class SolParser {
     }
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_' || ch == '$';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_' || ch == '$';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_' || ch == '$';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
     }
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -286,20 +300,26 @@ public final class SolParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
-                    if (i < n) {
-                        i++;
-                        col++;
-                    }
-                }
-                String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
                     i++;
                     col++;
+                }
+                String val = source.substring(start, Math.min(i, n));
+                if (i < n && source.charAt(i) == quote) {
+                    i++;
+                    col++;
+                    // N-019: this surface has no quoted literal; a terminated one
+                    // is refused as an unexpected character (as the TS reference).
+                    lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + quote + "'"));
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;
@@ -307,7 +327,8 @@ public final class SolParser {
 
             // Numbers (and hex byte string literals: 0x... -> ByteString)
             if (ch >= '0' && ch <= '9') {
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
+                // (lowercase x only, as the TS reference: `0X` is an invalid integer)
+                if (ch == '0' && i + 1 < n && source.charAt(i + 1) == 'x') {
                     i += 2;
                     col += 2;
                     int hexStart = i;
@@ -318,17 +339,11 @@ public final class SolParser {
                     tokens.add(new Token(TOK_HEXSTRING, source.substring(hexStart, i), line, startCol));
                     continue;
                 }
-                int start = i;
-                while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                    i++;
-                    col++;
-                }
-                // Skip trailing 'n' for bigint literals (TS-style)
-                if (i < n && source.charAt(i) == 'n') {
-                    i++;
-                    col++;
-                }
-                tokens.add(new Token(TOK_NUMBER, source.substring(start, i), line, startCol));
+                // F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+                IntLiteral.Scan sc = IntLiteral.lex("sol", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(TOK_NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -364,7 +379,9 @@ public final class SolParser {
                 continue;
             }
 
-            // Skip unknown characters
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -433,6 +450,8 @@ public final class SolParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
 
         Parser(String fileName) {
             this.fileName = fileName;
@@ -445,6 +464,13 @@ public final class SolParser {
         Token peek() {
             if (pos < tokens.size()) {
                 return tokens.get(pos);
+            }
+            return new Token(TOK_EOF, "", 0, 0);
+        }
+
+        Token peekAt(int n) {
+            if (pos + n < tokens.size()) {
+                return tokens.get(pos + n);
             }
             return new Token(TOK_EOF, "", 0, 0);
         }
@@ -523,6 +549,8 @@ public final class SolParser {
                 match(TOK_SEMICOLON);
             }
 
+            // N-490: a synthesized constructor is anchored at the `contract` keyword.
+            SourceLocation contractLoc = loc();
             if (!matchIdent("contract")) {
                 throw new ParseException("expected 'contract' keyword");
             }
@@ -548,7 +576,8 @@ public final class SolParser {
                     parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                     break;
                 default:
-                    throw new ParseException("unknown parent class: " + parentClassName);
+                    throw new ParseException("unknown parent class: '" + parentClassName
+                        + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
             }
 
             expect(TOK_LBRACE);
@@ -581,7 +610,7 @@ public final class SolParser {
                 // `.runar.sol` with no constructor compiled in ts/go/zig/ruby
                 // and failed here and in python, while rust refused it at parse
                 // time. Mirrors compilers/go/frontend/parser_sol.go:495-530.
-                SourceLocation synthLoc = new SourceLocation(fileName, 1, 0);
+                SourceLocation synthLoc = contractLoc;
                 List<PropertyNode> uninit = new ArrayList<>();
                 for (PropertyNode pn : properties) {
                     if (pn.initializer() == null) {
@@ -638,10 +667,25 @@ public final class SolParser {
             String typeName = typeTok.value;
             TypeNode propType = parseSolFixedArraySuffix(parseSolType(typeName));
 
+            // Modifiers, any order: `immutable` (readonly) and N-093's
+            // `embedAlways` (the native spelling of the `@embedAlways`
+            // directive). An `embedAlways` directly followed by `;` or `=` is
+            // the property NAME, not a modifier.
             boolean isReadonly = false;
-            if (checkIdent("immutable")) {
-                advance();
-                isReadonly = true;
+            boolean embedAlways = false;
+            for (;;) {
+                if (checkIdent("immutable")) {
+                    advance();
+                    isReadonly = true;
+                    continue;
+                }
+                if (checkIdent("embedAlways")
+                    && peekAt(1).kind != TOK_SEMICOLON && peekAt(1).kind != TOK_ASSIGN) {
+                    advance();
+                    embedAlways = true;
+                    continue;
+                }
+                break;
             }
 
             Token nameTok = expect(TOK_IDENT);
@@ -660,7 +704,8 @@ public final class SolParser {
                 isReadonly,
                 initializer,
                 location,
-                null
+                null,
+                embedAlways
             );
         }
 
@@ -695,7 +740,7 @@ public final class SolParser {
         MethodNode parseSolConstructor(List<PropertyNode> properties) {
             SourceLocation location = loc();
             expectIdent("constructor");
-            List<ParamNode> params = parseSolParams();
+            List<ParamNode> params = parseSolParams(true);
             List<Statement> body = parseSolBlock();
 
             List<Statement> constructorBody = new ArrayList<>();
@@ -759,20 +804,36 @@ public final class SolParser {
             Token nameTok = expect(TOK_IDENT);
             String name = nameTok.value;
 
-            List<ParamNode> params = parseSolParams();
+            List<ParamNode> params = parseSolParams(false);
 
+            // Modifiers. N-093: `sighash(FLAGS)` among them is the native
+            // spelling of the `@sighash` directive; FLAGS must be identifiers
+            // separated by `|`, any other token makes the spelling malformed.
             Visibility visibility = Visibility.PRIVATE;
+            List<String> sighashSpecs = new ArrayList<>();
+            TypeNode pendingRet = null;
             while (checkIdent("public") || checkIdent("private")
                 || checkIdent("external") || checkIdent("internal")
                 || checkIdent("view") || checkIdent("pure")
-                || checkIdent("returns") || checkIdent("payable")) {
+                || checkIdent("returns") || checkIdent("payable")
+                || (checkIdent("sighash") && peekAt(1).kind == TOK_LPAREN)) {
                 Token tok = advance();
+                if (tok.value.equals("sighash")) {
+                    sighashSpecs.add(parseSighashFlagTokens());
+                    continue;
+                }
                 if (tok.value.equals("public") || tok.value.equals("external")) {
                     visibility = Visibility.PUBLIC;
                 }
                 if (tok.value.equals("returns")) {
                     if (check(TOK_LPAREN)) {
                         advance();
+                        // N-331: the AST keeps no return type; an unknown name is refused.
+                        // N-332: checked after the modifier loop, because
+                        // `public` may follow `returns (...)`.
+                        if (check(TOK_IDENT)) {
+                            pendingRet = parseSolType(peek().value);
+                        }
                         int depth = 1;
                         while (depth > 0 && !check(TOK_EOF)) {
                             if (check(TOK_LPAREN)) depth++;
@@ -783,14 +844,50 @@ public final class SolParser {
                 }
             }
 
+            if (pendingRet != null) {
+                String unknownReturn = LexDiag.unknownReturnType(pendingRet, name, visibility == Visibility.PUBLIC);
+                if (unknownReturn != null) addError(unknownReturn);
+            }
+
             List<Statement> body = parseSolBlock();
 
-            return new MethodNode(name, params, body, visibility, location);
+            SighashDirective.Result sighash =
+                SighashDirective.resolveNativeSighash(name, visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                addError(sighash.error());
+            }
+            return new MethodNode(name, params, body, visibility, location,
+                sighash == null || sighash.isError() ? null : sighash.value());
+        }
+
+        /**
+         * N-093: {@code ( IDENT ( '|' IDENT )* )} after {@code sighash} -> the
+         * flag text, or {@code null} when anything else appears inside the
+         * parentheses. Always consumes through the matching {@code )} so a
+         * malformed spelling does not derail parsing. Mirrors the TS reference
+         * parseSighashFlagTokens.
+         */
+        String parseSighashFlagTokens() {
+            expect(TOK_LPAREN);
+            StringBuilder text = new StringBuilder();
+            boolean ok = true;
+            int depth = 1;
+            while (!check(TOK_EOF)) {
+                Token t = peek();
+                if (t.kind == TOK_LPAREN) depth++;
+                if (t.kind == TOK_RPAREN && --depth == 0) break;
+                if (t.kind == TOK_IDENT) text.append(t.value);
+                else if (t.kind == TOK_PIPE) text.append('|');
+                else ok = false;
+                advance();
+            }
+            expect(TOK_RPAREN);
+            return ok ? text.toString() : null;
         }
 
         // ---- Parameter list -------------------------------------------
 
-        List<ParamNode> parseSolParams() {
+        List<ParamNode> parseSolParams(boolean stripUnderscore) {
             expect(TOK_LPAREN);
             List<ParamNode> params = new ArrayList<>();
 
@@ -805,7 +902,11 @@ public final class SolParser {
 
                 Token nameTok = expect(TOK_IDENT);
                 String paramName = nameTok.value;
-                if (paramName.startsWith("_")) {
+                // Strip leading underscore (Solidity convention) for
+                // CONSTRUCTOR params only, whose body parseSolConstructor
+                // renames. Method params keep their name verbatim, as in TS
+                // 01-parse-sol.ts (N-142).
+                if (stripUnderscore && paramName.startsWith("_")) {
                     paramName = paramName.substring(1);
                 }
 
@@ -838,6 +939,10 @@ public final class SolParser {
         // ---- Statements -----------------------------------------------
 
         Statement parseSolStatement() {
+            return nest.nested(this::parseSolStatementInner);
+        }
+
+        Statement parseSolStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("require")) {
@@ -919,7 +1024,8 @@ public final class SolParser {
             List<Statement> elseBlock = null;
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
-                    Statement elseStmt = parseIf(loc());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elseStmt = nest.nested(() -> parseIf(loc()));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elseStmt);
                 } else {
@@ -1049,7 +1155,7 @@ public final class SolParser {
         // ---- Expression parsing (precedence climbing) -----------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1064,59 +1170,65 @@ public final class SolParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TOK_PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (match(TOK_AMPAMP)) {
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TOK_PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TOK_CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TOK_AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TOK_EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TOK_NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1125,20 +1237,21 @@ public final class SolParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TOK_LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TOK_LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TOK_GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TOK_GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1147,14 +1260,15 @@ public final class SolParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TOK_LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TOK_RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1163,14 +1277,15 @@ public final class SolParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TOK_PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TOK_MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1179,17 +1294,18 @@ public final class SolParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TOK_STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TOK_SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TOK_PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1198,24 +1314,25 @@ public final class SolParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(TOK_BANG)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             if (match(TOK_MINUS)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TOK_TILDE)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TOK_PLUSPLUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new IncrementExpr(operand, true);
             }
             if (match(TOK_MINUSMINUS)) {
-                Expression operand = parseUnary();
+                Expression operand = nest.nested(this::parseUnary);
                 return new DecrementExpr(operand, true);
             }
             return parsePostfix();
@@ -1270,12 +1387,12 @@ public final class SolParser {
 
             if (tok.kind == TOK_HEXSTRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_IDENT) {
@@ -1292,9 +1409,9 @@ public final class SolParser {
                 }
                 if (check(TOK_LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(name), args);
+                    return new CallExpr(new Identifier(name, new SourceLocation(fileName, tok.line, tok.col)), args);
                 }
-                return new Identifier(name);
+                return new Identifier(name, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TOK_LPAREN) {
@@ -1380,10 +1497,10 @@ public final class SolParser {
         if (expr instanceof BinaryExpr be) {
             return new BinaryExpr(be.op(),
                 renameInExpr(be.left(), renameMap),
-                renameInExpr(be.right(), renameMap));
+                renameInExpr(be.right(), renameMap), be.sourceLocation());
         }
         if (expr instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), renameInExpr(ue.operand(), renameMap));
+            return new UnaryExpr(ue.op(), renameInExpr(ue.operand(), renameMap), ue.sourceLocation());
         }
         if (expr instanceof CallExpr ce) {
             List<Expression> newArgs = new ArrayList<>(ce.args().size());
@@ -1495,11 +1612,12 @@ public final class SolParser {
             return new BinaryExpr(
                 be.op(),
                 rewriteBareProps(be.left(), propNames, paramNames, methodNames),
-                rewriteBareProps(be.right(), propNames, paramNames, methodNames)
+                rewriteBareProps(be.right(), propNames, paramNames, methodNames),
+                be.sourceLocation()
             );
         }
         if (expr instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), rewriteBareProps(ue.operand(), propNames, paramNames, methodNames));
+            return new UnaryExpr(ue.op(), rewriteBareProps(ue.operand(), propNames, paramNames, methodNames), ue.sourceLocation());
         }
         if (expr instanceof CallExpr ce) {
             // Bare method call: foo(args) -> this.foo(args)
@@ -1533,7 +1651,19 @@ public final class SolParser {
                 rewriteBareProps(ia.index(), propNames, paramNames, methodNames)
             );
         }
-        // MemberExpr, PropertyAccessExpr, literals, increment/decrement: leave alone
+        // N-137: mirror TS resolvePropertyAccess — recurse into a member's
+        // object and an increment/decrement operand, or `count++` keeps a bare
+        // Identifier and a stateful contract drops the state write.
+        if (expr instanceof MemberExpr me) {
+            return new MemberExpr(rewriteBareProps(me.object(), propNames, paramNames, methodNames), me.property());
+        }
+        if (expr instanceof IncrementExpr ie) {
+            return new IncrementExpr(rewriteBareProps(ie.operand(), propNames, paramNames, methodNames), ie.prefix());
+        }
+        if (expr instanceof DecrementExpr de) {
+            return new DecrementExpr(rewriteBareProps(de.operand(), propNames, paramNames, methodNames), de.prefix());
+        }
+        // PropertyAccessExpr, literals: leave alone
         return expr;
     }
 

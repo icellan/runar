@@ -9,6 +9,10 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
+require_relative "input_limits"
+require_relative "loop_condition"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -58,6 +62,8 @@ module RunarCompiler
       TOK_ASSERTEQ_BANG = 38 # assert_eq!
       TOK_SHL          = 39  # <<
       TOK_SHR          = 40  # >>
+      # N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+      TOK_HASH         = 41
     end
 
     # A single token produced by the Move tokenizer.
@@ -251,8 +257,9 @@ module RunarCompiler
       move_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_move(source)
+    def self.tokenize_move(source, lex = [], file_name = "")
       tokens = []
+      closing_quote_at = -1 # F-011, see the quoted-literal check below
       line = 1
       col = 0
       i = 0
@@ -316,8 +323,18 @@ module RunarCompiler
 
         start_col = col
 
+        # N-093: `#[` opens an attribute. A `#` not followed by `[` stays an
+        # unknown character below.
+        if ch == "#" && i + 1 < n && source[i + 1] == "["
+          tokens << MoveToken.new(kind: MoveTokens::TOK_HASH, value: "#", line: line, col: start_col)
+          i += 1
+          col += 1
+          next
+        end
+
         # Hex literal: 0x...
-        if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
+        # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+        if ch == "0" && i + 1 < n && source[i + 1] == "x"
           i += 2
           col += 2
           hex_start = i
@@ -329,14 +346,12 @@ module RunarCompiler
           next
         end
 
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-            i += 1
-            col += 1
-          end
-          tokens << MoveToken.new(kind: MoveTokens::TOK_NUMBER, value: source[num_start...i].delete("_"), line: line, col: start_col)
+          stop, value, = IntLiteral.lex_number("move", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
+          tokens << MoveToken.new(kind: MoveTokens::TOK_NUMBER, value: value, line: line, col: start_col)
           next
         end
 
@@ -387,7 +402,33 @@ module RunarCompiler
           next
         end
 
-        # Skip unknown characters
+        # F-011: this surface scans no quoted literal (the quote is skipped
+        # below), but an unterminated one -- reaching a line break or end of
+        # file -- gets the diagnostic every tier emits for it.
+        if (ch == '"' || ch == "'") && i != closing_quote_at
+          k = i + 1
+          while k < n && source[k] != ch && source[k] != "\n" && source[k] != "\r"
+            break if source[k] == "\\" && (k + 1 >= n || source[k + 1] == "\n" || source[k + 1] == "\r")
+
+            k += 1 if source[k] == "\\"
+            k += 1
+          end
+          if k < n && source[k] == ch
+            closing_quote_at = k
+            # N-019: this surface has no quoted literal; a terminated one is
+            # refused as an unexpected character (as the TS reference).
+            lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
+          end
+        end
+
+        # N-214: any other unrecognised character is refused, as the TS
+        # reference does, rather than skipped: skipping compiled `a + § b` as
+        # `a + b`. A quote was reported just above.
+        unless ch == '"' || ch == "'"
+          lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
+        end
         i += 1
         col += 1
       end
@@ -401,6 +442,8 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     class MoveParser
+      include InputLimits::NestingCounter
+
       include MoveTokens
 
       def initialize(file_name)
@@ -411,6 +454,17 @@ module RunarCompiler
       end
 
       attr_accessor :tokens, :pos, :errors
+
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.move_snake_to_camel(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
 
       # -- Token helpers --------------------------------------------------
 
@@ -469,6 +523,11 @@ module RunarCompiler
         advance if is_unsafe
 
         # module ContractName { ... }
+        # N-490: the synthesized constructor is anchored at the first struct's
+        # `struct` keyword (the `resource` token when it stands alone), or at
+        # `module` when the contract declares no struct.
+        ctor_loc = loc
+        saw_struct = false
         expect_ident("module")
         name_tok = expect(TOK_IDENT)
         contract_name = name_tok.value
@@ -488,12 +547,25 @@ module RunarCompiler
         methods = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          # N-093: attributes before a function (`#[sighash(...)]`). Anything
+          # else they precede reads neither directive, so each one is refused.
+          attrs = parse_attributes
+          if !attrs.empty? && !(check_ident("public") || check_ident("fun"))
+            report_lost_attributes(attrs)
+          end
+
           if check_ident("resource") || check_ident("struct")
             is_resource = peek.value == "resource"
+            kind_loc = loc
             advance
             # "resource struct"
             if check_ident("struct")
+              kind_loc = loc
               advance
+            end
+            unless saw_struct
+              saw_struct = true
+              ctor_loc = kind_loc
             end
 
             # Struct name (skip, should match module name)
@@ -514,8 +586,18 @@ module RunarCompiler
 
             while !check(TOK_RBRACE) && !check(TOK_EOF)
               prop_loc = loc
+              # N-093: `#[embed_always]` before a field is the native spelling
+              # of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+              embed_always = false
+              parse_attributes.each do |attr|
+                if attr[:kind] == :embed_always
+                  embed_always = true
+                else
+                  report_lost_attributes([attr])
+                end
+              end
               prop_name_raw = expect(TOK_IDENT).value
-              prop_name = Frontend.move_snake_to_camel(prop_name_raw)
+              prop_name = declare(prop_name_raw)
               expect(TOK_COLON)
 
               # Check for &mut (mutable reference)
@@ -543,6 +625,7 @@ module RunarCompiler
                 type: type_node,
                 readonly: readonly,
                 initializer: initializer,
+                embed_always: embed_always,
                 source_location: prop_loc
               )
 
@@ -552,7 +635,7 @@ module RunarCompiler
 
             parent_class = "StatefulSmartContract" if (is_resource || has_mutable) && !is_unsafe
           elsif check_ident("public") || check_ident("fun")
-            method, has_mut_recv = parse_function_with_mut
+            method, has_mut_recv = parse_function_with_mut(attrs)
             parent_class = "StatefulSmartContract" if has_mut_recv && !is_unsafe
             methods << method
           else
@@ -567,7 +650,7 @@ module RunarCompiler
         parent_class = "StatefulSmartContract" if has_mutable && !is_unsafe
 
         # Build constructor -- only non-initialized properties become params
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+        default_loc = ctor_loc
         uninit_props = properties.reject { |p| p.initializer }
 
         super_call = ExpressionStmt.new(
@@ -625,7 +708,7 @@ module RunarCompiler
         # `FixedArray<FixedArray<bigint, 2>, 2>` closes cleanly.
         if name == "FixedArray" && check(TOK_LT)
           advance # <
-          inner = parse_move_type
+          inner = nested { parse_move_type }
           expect(TOK_COMMA)
           size_tok = expect(TOK_NUMBER)
           size = begin
@@ -641,7 +724,7 @@ module RunarCompiler
         # vector<T> => treat as ByteString
         if name == "vector" && check(TOK_LT)
           advance # <
-          _inner = parse_move_type
+          _inner = nested { parse_move_type }
           consume_generic_close
           return PrimitiveType.new(name: "ByteString")
         end
@@ -668,8 +751,72 @@ module RunarCompiler
 
       # -- Function parsing -------------------------------------------------
 
+      # N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+      # `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+      # otherwise be ignored). For `sighash`, +:flags+ is the `|`-joined
+      # identifier list, or nil when the parentheses hold anything else or are
+      # missing.
+      def parse_attributes
+        attrs = []
+        while check(TOK_HASH)
+          attr_loc = loc
+          advance
+          expect(TOK_LBRACKET)
+          name = check(TOK_IDENT) ? advance.value : ""
+          flags = nil
+          has_args = false
+          if check(TOK_LPAREN)
+            has_args = true
+            advance
+            text = +""
+            ok = true
+            depth = 1
+            until check(TOK_EOF)
+              t = peek
+              depth += 1 if t.kind == TOK_LPAREN
+              if t.kind == TOK_RPAREN
+                depth -= 1
+                break if depth.zero?
+              end
+              if t.kind == TOK_IDENT || t.kind == TOK_PIPE
+                text << t.value
+              else
+                ok = false
+              end
+              advance
+            end
+            expect(TOK_RPAREN)
+            flags = ok ? text : nil
+          end
+          advance while !check(TOK_RBRACKET) && !check(TOK_EOF)
+          expect(TOK_RBRACKET)
+          if name == "embed_always" && !has_args
+            attrs << { kind: :embed_always, flags: nil, loc: attr_loc }
+          elsif name == "sighash"
+            attrs << { kind: :sighash, flags: flags, loc: attr_loc }
+          else
+            @errors << Diagnostic.new(
+              message: SighashDirective.unknown_move_attribute_message(name + (has_args ? "(...)" : "")),
+              severity: Severity::ERROR,
+              loc: attr_loc
+            )
+          end
+        end
+        attrs
+      end
+
+      def report_lost_attributes(attrs)
+        attrs.each do |attr|
+          @errors << Diagnostic.new(
+            message: SighashDirective.lost_directive_message(attr[:kind] == :sighash ? "@sighash" : "@embedAlways"),
+            severity: Severity::ERROR,
+            loc: attr[:loc]
+          )
+        end
+      end
+
       # Returns [MethodNode, has_mut_receiver]
-      def parse_function_with_mut
+      def parse_function_with_mut(attrs = [])
         location = loc
         visibility = "private"
         has_mut_receiver = false
@@ -686,7 +833,7 @@ module RunarCompiler
 
         expect_ident("fun")
         raw_name = expect(TOK_IDENT).value
-        name = Frontend.move_snake_to_camel(raw_name)
+        name = declare(raw_name)
 
         expect(TOK_LPAREN)
         params = []
@@ -733,7 +880,7 @@ module RunarCompiler
             end
 
             params << ParamNode.new(
-              name: Frontend.move_snake_to_camel(p_name_raw),
+              name: declare(p_name_raw),
               type: p_type
             )
           end
@@ -746,7 +893,8 @@ module RunarCompiler
         has_return_type = false
         if check(TOK_COLON)
           advance
-          parse_move_type
+          # The AST keeps no return type; N-331 refuses an unknown name.
+          Frontend.reject_unknown_return_type(@errors, parse_move_type, name, location, visibility == "public")
           has_return_type = true
         end
 
@@ -780,12 +928,25 @@ module RunarCompiler
           )
         end
 
+        # N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        # annotates nothing.
+        report_lost_attributes(attrs.reject { |a| a[:kind] == :sighash })
+        sighash = SighashDirective.resolve_native_sighash(
+          name,
+          visibility == "public",
+          attrs.select { |a| a[:kind] == :sighash }.map { |a| a[:flags] }
+        )
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
         method = MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
         [method, has_mut_receiver]
       end
@@ -793,6 +954,10 @@ module RunarCompiler
       # -- Statement parsing -------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
 
         # assert!(expr, code) -> assert(expr)
@@ -841,7 +1006,7 @@ module RunarCompiler
             advance
             mutable = true
           end
-          var_name = Frontend.move_snake_to_camel(expect(TOK_IDENT).value)
+          var_name = declare(expect(TOK_IDENT).value)
           var_type = nil
           if match_tok(TOK_COLON)
             var_type = parse_move_type
@@ -1070,7 +1235,8 @@ module RunarCompiler
       # nil when the pair is not a representable counting loop.
       def fold_counting_while(decl, stub)
         iter_name = decl.name
-        cond = stub.condition
+        # N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+        cond = LoopCondition.normalize(stub.condition, iter_name)
         return nil unless cond.is_a?(BinaryExpr)
         return nil unless cond.left.is_a?(Identifier) && cond.left.name == iter_name
 
@@ -1177,58 +1343,64 @@ module RunarCompiler
       # -- Expression parsing (precedence climbing) -------------------------
 
       def parse_expression
-        parse_or
+        nested { parse_or }
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match_tok(TOK_PIPEPIPE)
-          left = BinaryExpr.new(op: "||", left: left, right: parse_and)
+          left = BinaryExpr.new(op: "||", left: left, right: parse_and, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bit_or
         while match_tok(TOK_AMPAMP)
-          left = BinaryExpr.new(op: "&&", left: left, right: parse_bit_or)
+          left = BinaryExpr.new(op: "&&", left: left, right: parse_bit_or, source_location: start)
         end
         left
       end
 
       def parse_bit_or
+        start = loc
         left = parse_bit_xor
         while check(TOK_PIPE) && !(@pos + 1 < @tokens.length && @tokens[@pos + 1].kind == TOK_PIPE)
           advance
-          left = BinaryExpr.new(op: "|", left: left, right: parse_bit_xor)
+          left = BinaryExpr.new(op: "|", left: left, right: parse_bit_xor, source_location: start)
         end
         left
       end
 
       def parse_bit_xor
+        start = loc
         left = parse_bit_and
         while match_tok(TOK_CARET)
-          left = BinaryExpr.new(op: "^", left: left, right: parse_bit_and)
+          left = BinaryExpr.new(op: "^", left: left, right: parse_bit_and, source_location: start)
         end
         left
       end
 
       def parse_bit_and
+        start = loc
         left = parse_equality
         while check(TOK_AMP) && !(@pos + 1 < @tokens.length && @tokens[@pos + 1].kind == TOK_AMP)
           advance
-          left = BinaryExpr.new(op: "&", left: left, right: parse_equality)
+          left = BinaryExpr.new(op: "&", left: left, right: parse_equality, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
-            left = BinaryExpr.new(op: "===", left: left, right: parse_comparison)
+            left = BinaryExpr.new(op: "===", left: left, right: parse_comparison, source_location: start)
           elsif match_tok(TOK_NOTEQ)
-            left = BinaryExpr.new(op: "!==", left: left, right: parse_comparison)
+            left = BinaryExpr.new(op: "!==", left: left, right: parse_comparison, source_location: start)
           else
             break
           end
@@ -1237,16 +1409,17 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = BinaryExpr.new(op: "<", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: "<", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_LTEQ)
-            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_GT)
-            left = BinaryExpr.new(op: ">", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: ">", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_GTEQ)
-            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift, source_location: start)
           else
             break
           end
@@ -1255,12 +1428,13 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match_tok(TOK_SHL)
-            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive, source_location: start)
           elsif match_tok(TOK_SHR)
-            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive, source_location: start)
           else
             break
           end
@@ -1269,12 +1443,13 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match_tok(TOK_PLUS)
-            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative, source_location: start)
           elsif match_tok(TOK_MINUS)
-            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative, source_location: start)
           else
             break
           end
@@ -1283,14 +1458,15 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match_tok(TOK_STAR)
-            left = BinaryExpr.new(op: "*", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "*", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_SLASH)
-            left = BinaryExpr.new(op: "/", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "/", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_PERCENT)
-            left = BinaryExpr.new(op: "%", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "%", left: left, right: parse_unary, source_location: start)
           else
             break
           end
@@ -1299,14 +1475,15 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_MINUS)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         # Dereference & -- skip
         if check(TOK_AMP)
@@ -1378,7 +1555,7 @@ module RunarCompiler
         # Hex string literal
         if tok.kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Boolean literals
@@ -1424,11 +1601,11 @@ module RunarCompiler
           # normalisation matches the other six tiers, they have to be
           # anchored explicitly.
           anchored = MOVE_ANCHORED_NAMES[tok.value]
-          return Identifier.new(name: anchored) if anchored
+          return Identifier.new(name: anchored, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col)) if anchored
 
           name = Frontend.move_snake_to_camel(tok.value)
           mapped = Frontend.move_map_builtin(name)
-          return Identifier.new(name: mapped)
+          return Identifier.new(name: mapped, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback
@@ -1447,18 +1624,32 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_move(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_move_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_move_tokens(source, file_name, lex)
       p = MoveParser.new(file_name)
-      p.tokens = tokenize_move(source)
+      p.tokens = tokenize_move(source, lex, file_name)
       p.pos = 0
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

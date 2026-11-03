@@ -619,6 +619,27 @@ def _ec_affine_add(t: ECTracker) -> None:
 
     t.raw_block(["_xeq", "_cond_c"], "_notinf", _sub_not)
 
+    # N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+    # _ec_field_inv is Fermat, so inv(0) = 0 would silently return
+    # (p - 2px, 0)). No secp256k1 point has y == 0, so only an off-curve
+    # operand gets here. ABORT — the one failure channel this adder has
+    # besides the operand gates:
+    #   ok = NOT(cond AND px != 0 AND py == 0)
+    # px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    t.copy_to_top("px", "_px_g")
+    t.copy_to_top("py", "_py_g")
+    t.copy_to_top("_cond", "_cond_g")
+
+    def _tangent_y0_verify(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_SWAP"))
+        e(_make_stack_op(op="opcode", code="OP_NOT"))
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+        e(_make_stack_op(op="opcode", code="OP_NOT"))
+        e(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+    t.raw_block(["_px_g", "_py_g", "_cond_g"], "", _tangent_y0_verify)
+
     # chord numerator / denominator
     t.copy_to_top("qy", "_qy1")
     t.copy_to_top("py", "_py1")

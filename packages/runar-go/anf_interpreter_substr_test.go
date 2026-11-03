@@ -5,29 +5,38 @@ import (
 	"testing"
 )
 
-// TestAnfEvalCall_SubstrNegativeLength_NoPanic pins the W8 merge walk:
-// extractScriptCode is empty in the Go SDK mock, so
-// substr(sc, 0, len(sc)-49) has length -49. Go's h[lo:hi] panics on a
-// negative hi (`slice bounds out of range [:-98]`); Bitcoin Script and
-// the TS interpreter's String.slice yield empty instead.
-func TestAnfEvalCall_SubstrNegativeLength_NoPanic(t *testing.T) {
-	got := anfEvalCall("substr", []interface{}{"", big.NewInt(0), big.NewInt(-49)}, nil, nil, "merge")
-	s, ok := got.(string)
-	if !ok {
-		t.Fatalf("substr: got %T, want string", got)
-	}
-	if s != "" {
-		t.Fatalf("substr empty/-49 = %q, want empty", s)
-	}
+// R67: these two used to pin the W8 merge walk's historical clamp —
+// extractScriptCode was empty in the Go SDK mock, so substr(sc, 0,
+// len(sc)-49) had a negative length, and the OLD substr clamped that to ""
+// instead of aborting. That was ITSELF the bug (N-171): OP_SPLIT aborts on a
+// negative or past-the-end position, it does not clamp. extractScriptCode
+// now returns the contract's own REAL codePart (sdk_contract.go's
+// PrepareCall), so `merge`'s own scriptCode reads no longer go negative in
+// practice -- but substr(data, start, length) with a literal negative
+// start/length, as pinned directly here, must still abort on its own terms
+// regardless of where the data came from.
+func TestAnfEvalCall_SubstrNegativeLength_Panics(t *testing.T) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("substr with negative length must panic, not return a value")
+		}
+		if _, ok := rec.(*ScriptOpcodeError); !ok {
+			t.Fatalf("expected *ScriptOpcodeError, got %T (%v)", rec, rec)
+		}
+	}()
+	anfEvalCall("substr", []interface{}{"", big.NewInt(0), big.NewInt(-49)}, nil, nil, "merge")
 }
 
-func TestAnfEvalCall_SubstrNegativeStart_NoPanic(t *testing.T) {
-	got := anfEvalCall("substr", []interface{}{"aabb", big.NewInt(-1), big.NewInt(1)}, nil, nil, "merge")
-	s, ok := got.(string)
-	if !ok {
-		t.Fatalf("substr: got %T, want string", got)
-	}
-	if s != "" {
-		t.Fatalf("substr start=-1 = %q, want empty", s)
-	}
+func TestAnfEvalCall_SubstrNegativeStart_Panics(t *testing.T) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("substr with negative start must panic, not return a value")
+		}
+		if _, ok := rec.(*ScriptOpcodeError); !ok {
+			t.Fatalf("expected *ScriptOpcodeError, got %T (%v)", rec, rec)
+		}
+	}()
+	anfEvalCall("substr", []interface{}{"aabb", big.NewInt(-1), big.NewInt(1)}, nil, nil, "merge")
 }

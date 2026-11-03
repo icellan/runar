@@ -92,7 +92,7 @@ func TestOrdinalNFT_CompilesToValidArtifact(t *testing.T) {
 
 func TestOrdinalNFT_AttachesImageInscription(t *testing.T) {
 	a := compileContract(t)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 
 	// Small PNG header as inscription data
 	pngData := "89504e470d0a1a0a"
@@ -126,7 +126,7 @@ func TestOrdinalNFT_AttachesImageInscription(t *testing.T) {
 
 func TestOrdinalNFT_AttachesTextInscription(t *testing.T) {
 	a := compileContract(t)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 
 	textData := hex.EncodeToString([]byte("Hello, Ordinals!"))
 	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textData}); err != nil {
@@ -157,7 +157,7 @@ func TestOrdinalNFT_AttachesTextInscription(t *testing.T) {
 
 func TestOrdinalNFT_InscriptionRoundTripFromUtxo(t *testing.T) {
 	a := compileContract(t)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 
 	pngData := "89504e470d0a1a0a"
 	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: pngData}); err != nil {
@@ -193,7 +193,7 @@ func TestOrdinalNFT_InscriptionRoundTripFromUtxo(t *testing.T) {
 
 func TestOrdinalNFT_LockingScriptWithoutInscription(t *testing.T) {
 	a := compileContract(t)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 
 	lockingScript := contract.GetLockingScript()
 	if parsed := runar.ParseInscriptionEnvelope(lockingScript); parsed != nil {
@@ -207,7 +207,7 @@ func TestOrdinalNFT_LockingScriptWithoutInscription(t *testing.T) {
 
 func TestOrdinalNFT_WithInscriptionChaining(t *testing.T) {
 	a := compileContract(t)
-	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
+	contract := runar.NewRunarContract(a, []interface{}{hex.EncodeToString([]byte(runar.Alice.PubKeyHash))})
 	result, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: ""})
 	if err != nil {
 		t.Fatalf("WithInscription: %v", err)

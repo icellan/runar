@@ -55,7 +55,7 @@ func (c *CovenantVault) Spend(sig runar.Sig, txPreimage runar.SigHashPreimage) {
 	runar.Assert(runar.CheckPreimage(txPreimage))
 
 	// Construct expected P2PKH output and verify against hashOutputs
-	p2pkhScript := runar.Cat(runar.Cat("1976a914", c.Recipient), "88ac")
+	p2pkhScript := runar.Cat(runar.Cat(runar.HexToBytes("1976a914"), c.Recipient), runar.HexToBytes("88ac"))
 	expectedOutput := runar.Cat(runar.Num2Bin(c.MinAmount, 8), p2pkhScript)
 	runar.Assert(runar.Hash256(expectedOutput) == runar.ExtractOutputHash(txPreimage))
 }

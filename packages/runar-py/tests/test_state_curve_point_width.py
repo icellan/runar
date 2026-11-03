@@ -39,7 +39,7 @@ VALUES = {
     'p256': '11' * 64,
     'p384': '22' * 96,
     'sig': '3044' + 'ee' * 66,
-    'rab': 'ff' * 8,
+    'rab': (1 << 63) - 1,  # F-035: RabinSig is a bigint alias
     'bs': '0011',
 }
 
@@ -54,21 +54,22 @@ CROSS_SDK_GOLDEN = (
     + '11' * 64             # P256Point 64 raw   <- was framed "40" + 64
     + '22' * 96             # P384Point 96 raw   <- was framed "4c60" + 96
     + '44' + '3044' + 'ee' * 66   # Sig        framed <len><data>
-    + '08' + 'ff' * 8             # RabinSig   framed <len><data>
+    + 'ffffffffffffff7f'          # RabinSig   NUM2BIN 8 (F-035; was framed '08' + ff*8)
     + '02' + '0011'               # ByteString framed <len><data>
 )
 
 
 class TestCurvePointStateWidth:
     def test_cross_sdk_golden_serialize(self):
-        assert len(CROSS_SDK_GOLDEN) // 2 == 399
+        assert len(CROSS_SDK_GOLDEN) // 2 == 398
         assert serialize_state(FIELDS, VALUES) == CROSS_SDK_GOLDEN
 
     def test_cross_sdk_golden_deserialize(self):
         back = deserialize_state(FIELDS, CROSS_SDK_GOLDEN)
         assert back['n'] == 1
         assert back['flag'] is True
-        for k in ('pk', 'h', 'ad', 'pt', 'p256', 'p384', 'sig', 'rab', 'bs'):
+        assert back['rab'] == (1 << 63) - 1
+        for k in ('pk', 'h', 'ad', 'pt', 'p256', 'p384', 'sig', 'bs'):
             assert back[k] == VALUES[k], k
 
     def test_lone_curve_point_round_trip(self):
@@ -85,7 +86,10 @@ class TestCurvePointStateWidth:
             v = 'ab' * size
             got = serialize_state([StateField(name='v', type=field_type, index=0)], {'v': v})
             assert got == v, field_type
-        for field_type in ('ByteString', 'Sig', 'RabinSig'):
+        # F-035: RabinSig left this list -- it is a bigint alias, NUM2BIN 8.
+        got = serialize_state([StateField(name='v', type='RabinSig', index=0)], {'v': 1})
+        assert got == '0100000000000000'
+        for field_type in ('ByteString', 'Sig'):
             v = 'ab' * 64
             got = serialize_state([StateField(name='v', type=field_type, index=0)], {'v': v})
             assert got == '40' + v, field_type

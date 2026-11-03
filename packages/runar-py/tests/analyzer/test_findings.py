@@ -65,6 +65,27 @@ def test_checksig_result_dropped():
     assert f.opcode == "OP_CHECKSIG"
 
 
+# F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+# `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+# OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+# removes the item BELOW the result) is not. Does not prove that longer
+# discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+# only looks at the next opcode.
+def test_checksig_result_dropped_by_2drop():
+    for hex_, want, offset in [
+        ("0000ac6d51", "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect", 2),
+        ("000000ae6d51", "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect", 3),
+    ]:
+        report = analyze_script(hex_)
+        got = [f for f in report.findings if f.code == "CHECKSIG_RESULT_DROPPED"]
+        assert len(got) == 1, (hex_, _codes(report))
+        assert got[0].message == want
+        assert got[0].severity == "warning"
+        assert got[0].offset == offset
+    # OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+    assert "CHECKSIG_RESULT_DROPPED" not in _codes(analyze_script("0000ac77"))
+
+
 def test_codeseparator_present():
     # OP_CODESEPARATOR + OP_CHECKSIG so we don't flag NO_SIG_CHECK as well.
     report = analyze_script("abac")
@@ -159,3 +180,26 @@ def test_large_script_kb_round_half_to_even():
     assert _format_kb(872248) == "851.8"    # schnorr-zkp
     assert _format_kb(1024) == "1.0"
     assert _format_kb(1500) == "1.5"
+
+
+def test_format_kb_breaks_ties_like_js_not_half_to_even():
+    # 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+    # division has no floating-point error). Scaled by 10 that is 4892.5
+    # - an exact tie at the tenths digit. JS Number.prototype.toFixed(1)
+    # does NOT use round-half-to-even: per spec it picks the integer n for
+    # which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+    # Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+    # "489.3". Round-half-to-even rounds 4892.5 down to 4892 (already
+    # even), producing the wrong "489.2".
+    from runar.analyzer.opcode_concerns import _format_kb
+    assert _format_kb(500992) == "489.3"
+
+
+def test_format_kb_does_not_move_existing_analyzer_goldens():
+    # Pins the two LARGE_SCRIPT conformance goldens
+    # (conformance/analyzer/{ec-demo,schnorr-zkp}/expected-analyzer-report.json)
+    # so the tie-rounding fix above is proven not to move them - neither
+    # size lands on an exact .5 tie at the tenths digit.
+    from runar.analyzer.opcode_concerns import _format_kb
+    assert _format_kb(1337343) == "1306.0"
+    assert _format_kb(877253) == "856.7"

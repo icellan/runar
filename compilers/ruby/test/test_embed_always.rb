@@ -212,4 +212,52 @@ class TestEmbedAlways < Minitest::Test
     assert on.script.length > off.script.length,
            "annotated hex (#{on.script.length}) should exceed un-annotated (#{off.script.length})"
   end
+
+  # -------------------------------------------------------------------------
+  # F-098 / R35 -- @embedAlways on a FixedArray propagates to every slot
+  # -------------------------------------------------------------------------
+  #
+  # The expansion pass used to rebuild each slot without +embed_always+, so the
+  # annotated array compiled to the same bytes as the un-annotated one ("91":
+  # both slots DCE'd). The golden is the TS reference output, which equals the
+  # same contract hand-written as two annotated scalars (7n, 9n) -- an oracle
+  # that never runs the expansion pass. Proves: both slots survive,
+  # byte-identical to TS, in both fold modes; the un-annotated control still
+  # loses them. Does not prove on-chain spending (a conformance
+  # fixture with a real-crypto witness is tracked as N-093).
+
+  def array_source(directive)
+    <<~TS
+      import { SmartContract, assert } from 'runar-lang';
+
+      class Arr extends SmartContract {
+        #{directive}
+        readonly tags: FixedArray<bigint, 2> = [7n, 9n];
+
+        constructor() {
+          super();
+        }
+
+        public unlock(x: bigint) {
+          assert(x === 0n);
+        }
+      }
+    TS
+  end
+
+  def compile_array(directive, fold:)
+    tf = Tempfile.new(['Arr', '.runar.ts'])
+    tf.write(array_source(directive))
+    tf.close
+    RunarCompiler.compile_from_source(tf.path, disable_constant_folding: !fold)
+  ensure
+    tf.unlink
+  end
+
+  def test_f098_embed_always_fixed_array_propagates_to_every_slot
+    [false, true].each do |fold|
+      assert_equal '57597b917777', compile_array('/** @embedAlways */', fold: fold).script, "fold=#{fold}"
+      assert_equal '91', compile_array('', fold: fold).script, "fold=#{fold}"
+    end
+  end
 end

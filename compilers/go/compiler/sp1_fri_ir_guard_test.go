@@ -15,27 +15,14 @@ import (
 // `CompileFromSource*` path. `CompileFromIR`, `CompileFromIRBytes` and
 // `CompileFromProgram` never call it, so ANF IR that reaches the known-unsound
 // SP1 FRI verifier compiled clean — no error, no warning, exit 0 — producing
-// byte-for-byte the same 248,560-byte locking script the source path refuses to
-// emit without an explicit acknowledgement.
+// byte-for-byte the same locking script the source path refuses to emit.
 //
-// The acknowledgement CANNOT be carried in the IR. Two independent reasons:
+// The guard consults the OBSERVABLE: a `call` binding naming `verifySP1FRI` is
+// exactly what `codegen/stack.go` dispatches on to emit the verifier body.
 //
-//  1. `ir.ANFProgram` has exactly three JSON fields (contractName, properties,
-//     methods) and the emitted ANF IR JSON is compared BYTE-FOR-BYTE across all
-//     seven tiers by the conformance suite. The tier-local metadata that does
-//     exist (`ParentClass`, `ANFMethod.SigHashType`) is deliberately tagged
-//     `json:"-"` precisely so it never reaches that JSON — an in-memory carrier
-//     cannot survive the `--ir` round trip by construction.
-//  2. More fundamentally: IR handed to `--ir` is UNTRUSTED INPUT. A flag inside
-//     it would be written by whoever wrote the IR, so it would authorise
-//     nothing. The acknowledgement has to come from the invoker
-//     (`CompileOptions.AcknowledgeUnsoundSP1Fri`, surfaced as the CLI's
-//     `--acknowledge-unsound-sp1-fri`), not from the artifact under inspection.
-//
-// So the guard consults the OBSERVABLE instead: a `call` binding naming
-// `verifySP1FRI` is exactly what `codegen/stack.go` dispatches on to emit the
-// unsound verifier, and it is present in the IR whether or not the source that
-// produced it carried the directive.
+// F-007: the verifier is not implemented for v1, so the refusal is
+// unconditional. The invoker-side override (`CompileOptions.
+// AcknowledgeUnsoundSP1Fri` / `--acknowledge-unsound-sp1-fri`) was removed.
 
 const sp1FriIRCall = `{
 	"contractName": "Sp1Guard",
@@ -149,26 +136,31 @@ func TestCompileFromIRBytes_RefusesUnsoundSP1FriVerifier(t *testing.T) {
 			if !strings.Contains(err.Error(), "verifySP1FRI") {
 				t.Errorf("error must name the builtin; got: %v", err)
 			}
-			// The IR path has no source to put a comment directive in, so the
-			// message must point at the invoker-side acknowledgement instead.
-			if !strings.Contains(err.Error(), "--acknowledge-unsound-sp1-fri") {
-				t.Errorf("error must name the IR-path acknowledgement flag; got: %v", err)
+			// F-007: rewritten — the message used to name the IR-path acknowledgement flag; that flag was removed,
+			// so the message must say the verifier is not implemented and must advertise no override.
+			if !strings.Contains(err.Error(), "not implemented for v1") {
+				t.Errorf("error must say the verifier is not implemented for v1; got: %v", err)
+			}
+			if strings.Contains(err.Error(), "acknowledge") {
+				t.Errorf("error must not advertise an acknowledgement override; got: %v", err)
 			}
 		})
 	}
 }
 
-// TestCompileFromIR_AcknowledgedByInvokerStillCompiles pins the escape hatch:
-// the acknowledgement comes from the caller, never from the IR.
+// TestCompileFromIR_AcknowledgedByInvokerStillCompiles pinned the invoker-side
+// escape hatch. F-007: rewritten to expect refusal — the override was removed, so
+// no combination of the remaining options compiles the verifier either.
 func TestCompileFromIR_AcknowledgedByInvokerStillCompiles(t *testing.T) {
-	artifact, err := CompileFromIRBytes([]byte(sp1FriIRCall), CompileOptions{
-		AcknowledgeUnsoundSP1Fri: true,
-	})
-	if err != nil {
-		t.Fatalf("acknowledged --ir compile must succeed: %v", err)
-	}
-	if len(artifact.Script) == 0 {
-		t.Fatal("acknowledged --ir compile produced an empty script")
+	for _, o := range []CompileOptions{
+		{},
+		{DisableConstantFolding: true, DisableEcOptimizer: true, DisablePeephole: true},
+		{SP1FriParams: SP1FriPresetMust("evm-guest")},
+	} {
+		if artifact, err := CompileFromIRBytes([]byte(sp1FriIRCall), o); err == nil {
+			t.Fatalf("F-007: --ir compile of verifySP1FRI succeeded with options %+v (script %d hex chars); "+
+				"v1 must always refuse", o, len(artifact.Script))
+		}
 	}
 }
 

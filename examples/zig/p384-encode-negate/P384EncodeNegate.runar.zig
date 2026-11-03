@@ -16,7 +16,7 @@ pub const P384EncodeNegate = struct {
     pub fn checkNegate(self: *const P384EncodeNegate, p: runar.P384Point, expected: runar.P384Point) void {
         _ = self;
         const n = runar.p384Negate(p);
-        runar.assert(n == expected);
+        runar.assert(runar.bytesEq(n, expected));
     }
 
     /// Point -> 49-byte 02/03||x. Guards the width; parity read at a fixed offset.

@@ -852,3 +852,46 @@ class C extends SmartContract {
 		t.Errorf("expected bigint element, got %+v", fa.Element)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-205: annotation names — a qualified `@pkg.Public` must be read, and an
+// unrecognized annotation must be a loud diagnostic (never a silent
+// visibility downgrade), matching the TS reference
+// (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+// ---------------------------------------------------------------------------
+
+func TestParseJava_QualifiedPublicAnnotation_Recognized(t *testing.T) {
+	source := `
+class C extends SmartContract {
+    C() { super(); }
+    @runar.lang.annotations.Public
+    void check() { assertThat(true); }
+}
+`
+	result := ParseSource([]byte(source), "C.runar.java")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if len(c.Methods) != 1 || c.Methods[0].Visibility != "public" {
+		t.Fatalf("expected one public method, got %+v", c.Methods)
+	}
+}
+
+func TestParseJava_MisspelledAnnotation_LoudError(t *testing.T) {
+	// Claim (2): a misspelled annotation (@Publlic) must be refused with a
+	// diagnostic, exactly as the TS reference refuses it ("unsupported
+	// annotation @Publlic"). Before the fix this parsed with zero errors
+	// and the method silently stayed private.
+	source := `
+class C extends SmartContract {
+    C() { super(); }
+    @Publlic
+    void check() { assertThat(true); }
+}
+`
+	result := ParseSource([]byte(source), "C.runar.java")
+	if len(result.Errors) != 1 || result.Errors[0].Message != "unsupported annotation @Publlic" {
+		t.Fatalf("expected exactly one 'unsupported annotation @Publlic' error, got %v", result.ErrorStrings())
+	}
+}

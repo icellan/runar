@@ -42,14 +42,14 @@ class Sha256Test {
         List<StackOp> ops = new ArrayList<>();
         Sha256.emitSha256Compress(ops::add);
         // Matches Python reference count: 21,292 ops.
-        assertEquals(21292, ops.size(), "sha256Compress op count drift");
+        assertEquals(21298, ops.size(), "sha256Compress op count drift");
     }
 
     @Test
     void finalizeOpCount() {
         List<StackOp> ops = new ArrayList<>();
         Sha256.emitSha256Finalize(ops::add);
-        assertEquals(63941, ops.size(), "sha256Finalize op count drift");
+        assertEquals(63946, ops.size(), "sha256Finalize op count drift");
     }
 
     @Test
@@ -57,18 +57,32 @@ class Sha256Test {
         List<StackOp> ops = new ArrayList<>();
         Sha256.emitSha256Compress(ops::add);
 
-        // First ops from Python: SWAP, DUP, OP_TOALTSTACK, OP_TOALTSTACK,
-        // then 15 × (push 4, OP_SPLIT) to unpack the 64-byte block into 16 words.
-        assertTrue(ops.get(0) instanceof SwapOp, "op[0] must be SWAP");
-        assertTrue(ops.get(1) instanceof DupOp, "op[1] must be DUP");
+        // F-114: OP_SIZE, push 64, OP_EQUALVERIFY (block guard), SWAP,
+        // OP_SIZE, push 32, OP_EQUALVERIFY (state guard), then DUP,
+        // OP_TOALTSTACK, OP_TOALTSTACK, then 15 × (push 4, OP_SPLIT) to unpack
+        // the 64-byte block into 16 words.
+        assertTrue(ops.get(0) instanceof OpcodeOp
+            && "OP_SIZE".equals(((OpcodeOp) ops.get(0)).code()), "op[0] must be OP_SIZE");
+        assertEquals(BigInteger.valueOf(64),
+            ((BigIntPushValue) ((PushOp) ops.get(1)).value()).value(), "op[1] must push 64");
         assertTrue(ops.get(2) instanceof OpcodeOp
-            && "OP_TOALTSTACK".equals(((OpcodeOp) ops.get(2)).code()),
-            "op[2] must be OP_TOALTSTACK");
-        assertTrue(ops.get(3) instanceof OpcodeOp
-            && "OP_TOALTSTACK".equals(((OpcodeOp) ops.get(3)).code()),
-            "op[3] must be OP_TOALTSTACK");
+            && "OP_EQUALVERIFY".equals(((OpcodeOp) ops.get(2)).code()), "op[2] must be OP_EQUALVERIFY");
+        assertTrue(ops.get(3) instanceof SwapOp, "op[3] must be SWAP");
+        assertTrue(ops.get(4) instanceof OpcodeOp
+            && "OP_SIZE".equals(((OpcodeOp) ops.get(4)).code()), "op[4] must be OP_SIZE");
+        assertEquals(BigInteger.valueOf(32),
+            ((BigIntPushValue) ((PushOp) ops.get(5)).value()).value(), "op[5] must push 32");
+        assertTrue(ops.get(6) instanceof OpcodeOp
+            && "OP_EQUALVERIFY".equals(((OpcodeOp) ops.get(6)).code()), "op[6] must be OP_EQUALVERIFY");
+        assertTrue(ops.get(7) instanceof DupOp, "op[7] must be DUP");
+        assertTrue(ops.get(8) instanceof OpcodeOp
+            && "OP_TOALTSTACK".equals(((OpcodeOp) ops.get(8)).code()),
+            "op[8] must be OP_TOALTSTACK");
+        assertTrue(ops.get(9) instanceof OpcodeOp
+            && "OP_TOALTSTACK".equals(((OpcodeOp) ops.get(9)).code()),
+            "op[9] must be OP_TOALTSTACK");
 
-        for (int i = 4; i < 34; i += 2) {
+        for (int i = 10; i < 40; i += 2) {
             StackOp push = ops.get(i);
             StackOp split = ops.get(i + 1);
             assertTrue(push instanceof PushOp, "op[" + i + "] must be push");
@@ -96,8 +110,9 @@ class Sha256Test {
 
         String hex = Emit.run(prog);
         assertFalse(hex.isEmpty(), "hex must not be empty");
-        // First 4 bytes (SWAP, DUP, OP_TOALTSTACK, OP_TOALTSTACK) = 7c 76 6b 6b
-        assertEquals("7c766b6b", hex.substring(0, 8));
+        // F-114 guards then SWAP-DUP-TOALT-TOALT:
+        // 82 0140 88 7c 82 0120 88 76 6b 6b
+        assertEquals("820140887c82012088766b6b", hex.substring(0, 24));
     }
 
     @Test

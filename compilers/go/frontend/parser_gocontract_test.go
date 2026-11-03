@@ -760,3 +760,312 @@ func TestR254_GoFieldToCamelLowercasesTheFirstLetter(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-003 / CL-BUG-167: compound assignment in the Go DSL.
+//
+// convertStatement special-cased only `:=`; every other AssignStmt token
+// (`=`, `+=`, `*=`, `<<=`, ...) fell through to a plain AssignmentStmt whose
+// value was the bare RHS, so `x *= 2` compiled as `x = 2` with no diagnostic.
+//
+// Proves: exactly the compound operators the TS reference Go-surface parser
+// accepts (`+= -= *= /= %=`, 01-parse-go.ts) lower to `x = x <op> rhs`, plain
+// `=` still lowers to the bare RHS, and every other Go compound operator
+// (`&= |= ^= <<= >>= &^=`, which the reference rejects) is a parse error
+// rather than a silent rewrite or a new frontend-parity divergence.
+// Does not prove: anything about the emitted script (the ANF/stack passes
+// are shared with every other surface and covered elsewhere), nor anything
+// about the Rust tier's `.runar.go` parser (a separate item).
+// ---------------------------------------------------------------------------
+
+func parseGoCompoundAssign(t *testing.T, stmt string) *ParseResult {
+	t.Helper()
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Compound struct {
+	runar.SmartContract
+	Target runar.Bigint ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Compound) Unlock(a runar.Bigint) {
+	x := a
+	` + stmt + `
+	runar.Assert(x == c.Target)
+}
+`
+	return ParseSource([]byte(source), "Compound.runar.go")
+}
+
+func TestParseGoContract_CompoundAssignmentDesugars(t *testing.T) {
+	cases := []struct{ stmt, op string }{
+		{"x += 3", "+"},
+		{"x -= 3", "-"},
+		{"x *= 3", "*"},
+		{"x /= 3", "/"},
+		{"x %= 3", "%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.stmt, func(t *testing.T) {
+			result := parseGoCompoundAssign(t, tc.stmt)
+			if len(result.Errors) > 0 {
+				t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+			}
+			if result.Contract == nil || len(result.Contract.Methods) == 0 {
+				t.Fatal("expected a contract with at least one method")
+			}
+			body := result.Contract.Methods[0].Body
+			if len(body) != 3 {
+				t.Fatalf("expected 3 statements, got %d", len(body))
+			}
+			assign, ok := body[1].(AssignmentStmt)
+			if !ok {
+				t.Fatalf("expected AssignmentStmt, got %T", body[1])
+			}
+			if id, ok := assign.Target.(Identifier); !ok || id.Name != "x" {
+				t.Fatalf("expected target x, got %#v", assign.Target)
+			}
+			bin, ok := assign.Value.(BinaryExpr)
+			if !ok {
+				t.Fatalf("%s: value is %#v, want BinaryExpr x %s 3 (operator was discarded)", tc.stmt, assign.Value, tc.op)
+			}
+			if bin.Op != tc.op {
+				t.Errorf("%s: op = %q, want %q", tc.stmt, bin.Op, tc.op)
+			}
+			if id, ok := bin.Left.(Identifier); !ok || id.Name != "x" {
+				t.Errorf("%s: left = %#v, want identifier x", tc.stmt, bin.Left)
+			}
+			if lit, ok := bin.Right.(BigIntLiteral); !ok || lit.Value.Int64() != 3 {
+				t.Errorf("%s: right = %#v, want literal 3", tc.stmt, bin.Right)
+			}
+		})
+	}
+}
+
+func TestParseGoContract_PlainAssignmentUnchanged(t *testing.T) {
+	result := parseGoCompoundAssign(t, "x = 3")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	assign, ok := result.Contract.Methods[0].Body[1].(AssignmentStmt)
+	if !ok {
+		t.Fatalf("expected AssignmentStmt, got %T", result.Contract.Methods[0].Body[1])
+	}
+	if lit, ok := assign.Value.(BigIntLiteral); !ok || lit.Value.Int64() != 3 {
+		t.Errorf("x = 3: value = %#v, want literal 3", assign.Value)
+	}
+}
+
+// The TS reference (01-parse-go.ts) lexes only `+= -= *= /= %=` as compound
+// assignments; accepting any other Go compound operator here would parse
+// programs the reference rejects (frontend-parity divergence).
+func TestParseGoContract_NonReferenceCompoundAssignmentRejected(t *testing.T) {
+	for _, stmt := range []string{"x &= 3", "x |= 3", "x ^= 3", "x <<= 3", "x >>= 3", "x &^= 3"} {
+		t.Run(stmt, func(t *testing.T) {
+			result := parseGoCompoundAssign(t, stmt)
+			if len(result.Errors) == 0 {
+				t.Fatalf("expected a parse error for %q (not accepted by the TS reference), got none", stmt)
+			}
+			if msg := strings.Join(result.ErrorStrings(), "; "); !strings.Contains(msg, "unsupported compound assignment operator") {
+				t.Errorf("%q: error %q does not name the unsupported compound assignment", stmt, msg)
+			}
+		})
+	}
+}
+
+// F-010: a method is a contract method only if its receiver IS the contract.
+// The `ident.Name != contractName` guard sat inside the `*ast.StarExpr` branch,
+// so a VALUE receiver on a helper type skipped it and
+// `func (u Unrelated) Drain(...) { runar.Assert(true) }` became a public
+// spending entry point anyone can satisfy with no key.
+//
+// The rule (user decision R9) is shared verbatim with the TS reference
+// (01-parse-go.test.ts "F-010") and the other five tiers:
+//   - the contract is THE struct embedding a runar base; other structs are ignored;
+//   - zero or several such structs refuse the file;
+//   - a method whose receiver (value or pointer) is another type refuses it;
+//   - a free function, exported or not, is a private helper.
+//
+// Proves: this tier's .runar.go diagnostics and method set for each shape.
+// Does NOT prove: the other tiers, nor the on-chain behaviour (see
+// remediation-logs/F-010 for the Spend.validate evidence).
+const f010Prelude = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+`
+
+const f010Guarded = `
+type Guarded struct {
+	runar.SmartContract
+	PubKey runar.PubKey ` + "`" + `runar:"readonly"` + "`" + `
+}
+
+func (c *Guarded) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckSig(sig, c.PubKey))
+}
+`
+
+func f010Unrelated(recv string) string {
+	return `
+type Unrelated struct{}
+
+func (` + recv + `) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`
+}
+
+const f010ReceiverError = "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; " +
+	"methods on other types are not allowed"
+
+func f010Errors(src string) []string {
+	var msgs []string
+	for _, d := range ParseSource([]byte(src), "Guarded.runar.go").Errors {
+		if d.Severity == SeverityError {
+			msgs = append(msgs, d.Message)
+		}
+	}
+	return msgs
+}
+
+func f010Methods(t *testing.T, src string) []string {
+	t.Helper()
+	result := ParseSource([]byte(src), "Guarded.runar.go")
+	if result.Contract == nil {
+		t.Fatalf("no contract: %v", result.ErrorStrings())
+	}
+	var names []string
+	for _, m := range result.Contract.Methods {
+		names = append(names, m.Name+"("+m.Visibility+")")
+	}
+	return names
+}
+
+func TestParseGoContract_F010_ForeignReceiverRefused(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"value receiver, helper after the contract", f010Prelude + f010Guarded + f010Unrelated("u Unrelated")},
+		{"pointer receiver, helper after the contract", f010Prelude + f010Guarded + f010Unrelated("u *Unrelated")},
+		{"value receiver, helper before the contract", f010Prelude + f010Unrelated("u Unrelated") + f010Guarded},
+		{"pointer receiver, helper before the contract", f010Prelude + f010Unrelated("u *Unrelated") + f010Guarded},
+		{"undeclared receiver type", f010Prelude + f010Guarded + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := f010Errors(tc.src)
+			if len(got) != 1 || got[0] != f010ReceiverError {
+				t.Fatalf("errors = %q, want exactly [%q]", got, f010ReceiverError)
+			}
+		})
+	}
+}
+
+func TestParseGoContract_F010_ContractReceiversKept(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public),drain(public)" {
+		t.Fatalf("methods = %s, want unlock(public),drain(public)", got)
+	}
+}
+
+func TestParseGoContract_F010_ExportedFreeFunctionIsPrivateHelper(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public),drain(private)" {
+		t.Fatalf("methods = %s, want unlock(public),drain(private)", got)
+	}
+}
+
+func TestParseGoContract_F010_HelperStructIgnored(t *testing.T) {
+	helper := "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+	for _, src := range []string{f010Prelude + f010Guarded + helper, f010Prelude + helper + f010Guarded} {
+		result := ParseSource([]byte(src), "Guarded.runar.go")
+		if len(result.Errors) != 0 {
+			t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+		}
+		var props []string
+		for _, p := range result.Contract.Properties {
+			props = append(props, p.Name)
+		}
+		if result.Contract.Name != "Guarded" || strings.Join(props, ",") != "pubKey" {
+			t.Fatalf("contract %s props %v, want Guarded [pubKey]", result.Contract.Name, props)
+		}
+	}
+}
+
+func TestParseGoContract_F010_NoContractStruct(t *testing.T) {
+	got := f010Errors(f010Prelude + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n")
+	want := "no Rúnar contract struct found in Go source"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("errors = %q, want exactly [%q]", got, want)
+	}
+}
+
+func TestParseGoContract_F010_TwoContractStructs(t *testing.T) {
+	got := f010Errors(f010Prelude + f010Guarded + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n")
+	want := "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; " +
+		"exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("errors = %q, want exactly [%q]", got, want)
+	}
+}
+
+// N-018: the unnamed receiver `(T)` must leave the receiver unreferenceable.
+// Real Go forbids referencing an unnamed receiver in the method body at all
+// -- there is no name bound to it. This tier instead defaulted the unnamed
+// receiver's name to "c" AND (independently) hardcoded "c"/"self" as always
+// meaning "the receiver" regardless of the actual declared name, so a
+// parameter literally named `c` was silently read as the contract's own
+// `PubKey` -- `this.pubKey`, not the parameter. The TS/Ruby reference
+// already gets this right (receiver name "", no hardcoded alias); Rust,
+// Zig, Python and Java carried the identical hardcoded-alias bug and are
+// fixed alongside this one (see their own suites).
+//
+// This tier's SelectorExpr grammar only understands a dotted expression
+// whose base is `runar` or the receiver -- unlike the lenient tiers, it has
+// no general `ident.field` fallback, so the correct, fail-closed answer for
+// an unrelated identifier is a parse error, not a silently-accepted
+// PropertyAccessExpr.
+//
+// Proves: this tier's .runar.go parser never treats a same-spelled
+// non-receiver identifier as the contract's self, for an unnamed receiver.
+// Does NOT prove: the other six tiers.
+func TestParseGoContract_N018_UnnamedReceiverParamNamedCIsNotSelf(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc (Guarded) CheckC(c runar.PubKey) {\n\trunar.Assert(c.PubKey)\n}\n"
+	result := ParseSource([]byte(src), "Guarded.runar.go")
+	errs := result.ErrorStrings()
+	if len(errs) == 0 {
+		t.Fatalf("c.PubKey was silently accepted (c is not the receiver -- it is "+
+			"unnamed); want a parse error, got none; contract = %+v", result.Contract)
+	}
+	for _, e := range errs {
+		if strings.Contains(e, "unsupported expression 'c.PubKey'") {
+			return
+		}
+	}
+	t.Fatalf("errors = %q, want one naming 'c.PubKey' as unsupported", errs)
+}
+
+// N-018: a free `init`/`main` is not an ordinary private helper. This tier
+// already skips it (the fix for TS/Ruby/Zig matches this tier's existing
+// behaviour; see their own suites). This locks the behaviour in.
+//
+// A 0-param free `init()` is not a case this test reaches: the existing
+// init-extraction pass below (`m.Name == "init" && len(m.Params) == 0`)
+// already absorbs it regardless of receiver. A free `init` WITH a parameter
+// does reach the skip added by F-010's standalone-function loop.
+func TestParseGoContract_N018_FreeInitParamAndMainAreDropped(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc main() {\n\trunar.Assert(true)\n}\n" +
+		"\nfunc init(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public)" {
+		t.Fatalf("methods = %s, want unlock(public)", got)
+	}
+}

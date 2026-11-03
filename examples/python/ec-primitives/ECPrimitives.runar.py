@@ -52,9 +52,9 @@ class ECPrimitives(SmartContract):
 
     @public
     def check_make_point(self, x: Bigint, y: Bigint, expected_x: Bigint, expected_y: Bigint):
-        pt = ec_make_point(x, y)
-        assert_(ec_point_x(pt) == expected_x)
-        assert_(ec_point_y(pt) == expected_y)
+        point = ec_make_point(x, y)
+        assert_(ec_point_x(point) == expected_x)
+        assert_(ec_point_y(point) == expected_y)
 
     @public
     def check_encode_compressed(self, expected: ByteString):

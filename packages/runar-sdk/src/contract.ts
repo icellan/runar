@@ -4,17 +4,17 @@
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
-import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
+import { assertScriptHexUnderLimit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
-import { txToTransactionData, warnNonFatal } from './providers/provider.js';
+import { txToTransactionData } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
 import type { Inscription } from './ordinals/types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
-import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
-import { computeOpPushTx } from './oppushtx.js';
-import { buildP2PKHScript, extractConstructorArgs } from './script-utils.js';
+import { serializeState, extractStateFromScript, findLastOpReturn, assertFixedWidthValue } from './state.js';
+import { computeOpPushTx, computeOpPushTxPreimage } from './oppushtx.js';
+import { assertChangeAddressMatchesCovenantKey, buildP2PKHScript, extractConstructorArgs, isHexBytes } from './script-utils.js';
 import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
 import type { OrderedOutputEntry } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
@@ -22,6 +22,7 @@ import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScr
 import { WalletProvider } from './providers/wallet-provider.js';
 import { detachUnlockingScript } from './spend-safety.js';
 import { assertUnsoundPrimitivesAcknowledged } from './unsound-primitives.js';
+import { isSdkSuppliedParam } from './sdk-params.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -43,24 +44,41 @@ declare module './types.js' {
      * broadcasting when the input would be rejected on-chain.
      *
      * **Default: OFF (opt-in).** C8 asked for this to default ON, and that is
-     * still the goal — but it is not yet safe to. The local harness currently
-     * produces at least one FALSE REJECTION: it rejects `Auction.bid()`
-     * (`codeseparator-signing.test.ts`, a real contract signed by a real
-     * `LocalSigner`) with "OP_CHECKSIGVERIFY requires that a valid signature
-     * is provided", while the independent real-crypto oracle
-     * (`conformance/witnesses/real-crypto/auction.json`, which drives the same
-     * method deploy->call->Spend through `runStatefulSpend`) ACCEPTS it — so
-     * the transaction is valid and the dry-run's tx modelling is wrong, not
-     * the signature. Nine other pre-existing tests fail the same way on
-     * synthetic stub artifacts whose scripts do not consume their pushed args
-     * (clean-stack violations).
+     * still the goal — but it is not yet safe to. Flipping the internal
+     * default to ON (F-360 investigation, 2026-10) shows 11 pre-existing tests
+     * across 5 files (`sdk-fixes.test.ts`, `intent-witness-values.test.ts`,
+     * `c19-multisig-sighash-digest.test.ts`, `c20-c27-branch-semantics.test.ts`,
+     * `f045-token-wallet-signs-broadcast-tx.test.ts`) start failing their
+     * broadcast with "The clean stack rule requires exactly one item to be on
+     * the stack after script execution" — synthetic/stub artifacts whose
+     * scripts were never written to consume every item they push, because
+     * those tests assert something else about the broadcast tx and have
+     * nothing to do with on-chain validity. The dry-run's verdict on them is
+     * CORRECT (the production `Spend` engine would reject the same bytes on a
+     * real network) — turning it on by default would just break those tests,
+     * not uncover a modelling bug, so it stays opt-in until those 11 fixtures
+     * are made clean-stack-valid (or explicitly opted out) and
+     * `dryRunContractInput` agrees with `runStatefulSpend` on every
+     * `witnesses/real-crypto/*.json` accept case.
+     *
+     * `Auction.bid()` was previously (through 2026-10) cited here as a case
+     * where this dry-run FALSELY rejects a legitimate call that the
+     * independent real-crypto oracle (`conformance/witnesses/real-crypto/
+     * auction.json`, driven via `runStatefulSpend`) ACCEPTS. That claim was
+     * wrong on two counts (F-360): `runStatefulSpend` itself calls
+     * `contract.call(..., { dryRun: true })` (`real-crypto-execution.ts`), so
+     * it is structurally incapable of reporting "accept" for anything THIS
+     * dry-run rejects — the oracle is not independent of it, and can never be
+     * used to prove a disagreement exists. And empirically, `Auction.bid()`
+     * signed by a real `LocalSigner` does not get rejected by the dry-run
+     * today (`codeseparator-signing.test.ts`, "F-360" describe block) — there
+     * never was a disagreement to point to, on top of the oracle being unable
+     * to show one either way.
      *
      * For a FAIL-CLOSED pre-broadcast gate a false rejection is worse than the
      * hole it closes: it would block legitimate calls and strand funds. So the
-     * capability ships opt-in until its fidelity is proven against the
-     * real-crypto oracle across the fixture corpus. Flip the default to ON
-     * once `dryRunContractInput` agrees with `runStatefulSpend` on every
-     * `witnesses/real-crypto/*.json` accept case.
+     * capability stays opt-in until the 11 fixtures above are resolved and the
+     * real-crypto accept corpus agrees, as described above.
      *
      * Set `true` to opt in. Do not enable it for setups the local harness
      * cannot model — e.g. a covenant whose correctness depends on OTHER
@@ -194,6 +212,79 @@ const AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts';
  * template holds OP_0 placeholders where constructor args go, so no
  * caller-supplied byte string can be mistaken for a pin.
  */
+/**
+ * N-051 — write the deployed code-part length into every `codePartLenSlots`
+ * field of a spliced code script.
+ *
+ * The compiler cannot know the deployed length of a code part that bakes a
+ * variable-width readonly constructor arg (a ByteString, a bigint), so the
+ * `SIZE(_codePart)` equality pin carries a 4-byte little-endian field the SDK
+ * fills in. The field is fixed-width, so writing it changes no length and no
+ * offset. A wrong or missing value is fail-safe on chain (honest spends fail
+ * OP_NUMEQUAL); it is never a lower bound.
+ *
+ * @param spliced     the template with every OP_0 placeholder substituted
+ * @param subs        those substitutions, by TEMPLATE byte offset (each
+ *                    replaced one placeholder byte with `encoded`)
+ * @param codePartLen the deployed code-part length in bytes, including any
+ *                    inscription envelope (it is part of `_codePart`)
+ */
+export function patchCodePartLenSlots(
+  artifact: RunarArtifact,
+  spliced: string,
+  subs: ReadonlyArray<{ byteOffset: number; encoded: string }>,
+  codePartLen: number,
+): string {
+  const slots = artifact.codePartLenSlots;
+  if (!slots || slots.length === 0) return spliced;
+  if (!Number.isInteger(codePartLen) || codePartLen < 0 || codePartLen > 0x7fffffff) {
+    throw new Error(`patchCodePartLenSlots: code part length ${codePartLen} does not fit the 4-byte pin field`);
+  }
+  let le = '';
+  for (let i = 0; i < 4; i++) le += ((codePartLen >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  let out = spliced;
+  for (const slot of slots) {
+    const off = slot.byteOffset;
+    // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY`
+    // here; anything else means the descriptor does not describe this script.
+    if (
+      artifact.script.slice((off - 1) * 2, off * 2) !== '04' ||
+      artifact.script.slice((off + 4) * 2, (off + 7) * 2) !== '819c69'
+    ) {
+      throw new Error(
+        `patchCodePartLenSlots: ${artifact.contractName} codePartLenSlots entry at byteOffset ${off} ` +
+          `does not point at a verify_code_part_len length field (corrupted or mismatched artifact)`,
+      );
+    }
+    let shift = 0;
+    for (const s of subs) {
+      if (s.byteOffset < off) shift += s.encoded.length / 2 - 1;
+    }
+    const at = (off + shift) * 2;
+    out = out.slice(0, at) + le + out.slice(at + 8);
+  }
+  return out;
+}
+
+/**
+ * R67: BIP-143's `scriptCode` preimage field is a Bitcoin CompactSize-prefixed
+ * script (same encoding as a transaction's `scriptSig`/`scriptPubKey` length),
+ * which is exactly what `extractScriptCode` extracts on-chain
+ * (`05-stack-lower.ts`'s `preimage[104 .. len-52]` spans the varint AND the
+ * script bytes together — there is no separate trim step). Used to build the
+ * REAL off-chain `scriptCode` mock passed to the ANF interpreter, below.
+ */
+function compactSizeHex(byteLen: number): string {
+  const le = (n: number, width: number): string => {
+    let out = '';
+    for (let i = 0; i < width; i++) out += ((n >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+    return out;
+  };
+  if (byteLen < 0xfd) return byteLen.toString(16).padStart(2, '0');
+  if (byteLen <= 0xffff) return 'fd' + le(byteLen, 2);
+  return 'fe' + le(byteLen, 4);
+}
+
 function decodeExactCodePartLenPins(scriptHex: string): number[] {
   const values: number[] = [];
   for (let i = 0; i + 18 <= scriptHex.length; i += 2) {
@@ -391,12 +482,29 @@ export class RunarContract {
     this.artifact = artifact;
     this.constructorArgs = constructorArgs;
 
+    // Fail closed on a malformed artifact rather than crash a few lines down
+    // with a generic "Cannot read properties of null" TypeError. A conforming
+    // producer always emits an array here (possibly empty); a non-array
+    // (e.g. a pre-fix Go artifact that serialized a zero-parameter
+    // constructor as `null` — see N-067) means the wire data itself is not
+    // trustworthy, so this refuses rather than silently normalizing to [].
+    if (!Array.isArray(artifact.abi.constructor.params)) {
+      throw new Error(
+        `RunarContract: malformed artifact for ${artifact.contractName}: abi.constructor.params must be an array, got ${JSON.stringify(artifact.abi.constructor.params)}`,
+      );
+    }
+
     // Validate constructor args match ABI
     const expected = artifact.abi.constructor.params.length;
     if (constructorArgs.length !== expected) {
       throw new Error(
         `RunarContract: expected ${expected} constructor args for ${artifact.contractName}, got ${constructorArgs.length}`,
       );
+    }
+
+    if (!restoringFromUtxo) {
+      constructorArgs = checkByteStringCtorArgs(artifact, constructorArgs);
+      this.constructorArgs = constructorArgs;
     }
 
     // Initialize state from constructor args for stateful contracts.
@@ -511,7 +619,9 @@ export class RunarContract {
    * a longer code part — and rejects only the shape that would lock funds.
    */
   private assertCodePartLengthPinHonoured(): void {
-    const pinned = decodeExactCodePartLenPins(this.artifact.script);
+    // Decode from the code this contract really deploys: a deploy-time pin
+    // (N-051 `codePartLenSlots`) is patched to the inscribed length there.
+    const pinned = decodeExactCodePartLenPins(this.buildCodeScript());
     if (pinned.length === 0) return;
     const actual = this.getCodePartHex().length / 2;
     for (const value of pinned) {
@@ -737,27 +847,47 @@ export class RunarContract {
     let outputIndex = 0;
     let actualSatoshis = satoshis;
     if (result.tx) {
+      // N-168: this used to swallow both a BEEF parse failure and a deploy
+      // broadcast failure (routing each through warnNonFatal — a
+      // console.warn — while still resolving normally), the same shape
+      // F-248 fixed in WalletProvider.ensureFunding. deployWithWallet's
+      // entire job is to hand back a real { txid, outputIndex } for a
+      // contract UTXO that exists on chain; it must not report success when
+      // the wallet handed back a BEEF it could not parse, or when this
+      // extra ARC push was explicitly rejected. The caller would otherwise
+      // try to spend a UTXO that was never actually broadcast.
+      let tx: BsvTransaction;
       try {
-        const tx = BsvTransaction.fromAtomicBEEF(result.tx);
-        for (let i = 0; i < tx.outputs.length; i++) {
-          const out = tx.outputs[i]!;
-          if (out.lockingScript?.toHex() === lockingScript) {
-            outputIndex = i;
-            actualSatoshis = out.satoshis != null ? out.satoshis : satoshis;
-            break;
-          }
-        }
-        // Cache raw hex for EF child tx builds
-        const txid = result.txid || '';
-        if (txid) {
-          walletProvider.cacheTx(txid, tx.toHex());
-        }
-        // Broadcast to ARC (may already be known — non-fatal)
-        await walletProvider.broadcast(tx).catch((e) =>
-          warnNonFatal('deploy-tx broadcast', e),
-        );
+        tx = BsvTransaction.fromAtomicBEEF(result.tx);
       } catch (e) {
-        warnNonFatal('deploy-tx BEEF parse', e);
+        throw new Error(
+          `${this.artifact.contractName}.deployWithWallet: deploy tx BEEF returned by ` +
+            `the wallet did not parse: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      for (let i = 0; i < tx.outputs.length; i++) {
+        const out = tx.outputs[i]!;
+        if (out.lockingScript?.toHex() === lockingScript) {
+          outputIndex = i;
+          actualSatoshis = out.satoshis != null ? out.satoshis : satoshis;
+          break;
+        }
+      }
+      // Cache raw hex for EF child tx builds
+      const cacheTxid = result.txid || '';
+      if (cacheTxid) {
+        walletProvider.cacheTx(cacheTxid, tx.toHex());
+      }
+      // Broadcast to ARC (may already be known — that is a success path,
+      // not a failure one; see checkArcAccepted).
+      try {
+        await walletProvider.broadcast(tx);
+      } catch (e) {
+        throw new Error(
+          `${this.artifact.contractName}.deployWithWallet: deploy tx broadcast failed, ` +
+            `the contract UTXO may not exist on-chain: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     }
 
@@ -923,6 +1053,13 @@ export class RunarContract {
         : isStateful;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
+    // N-038: a SIGHASH_SINGLE stateful method continues the contract but takes
+    // no `_changePKH` (BIP-143 SINGLE does not commit the change output), so
+    // "has a continuation" is read from the ABI's sighash base + isTerminal,
+    // not from the change param alone.
+    const methodHasContinuation =
+      methodNeedsChange ||
+      (((method.sigHashType ?? 0x41) & 0x1f) === 0x03 && method.isTerminal !== true);
     // Whether the unlocking script is prefixed with `_codePart`. New artifacts
     // carry the authoritative `usesCodePart` flag (true for continuation
     // builders AND terminal var-length-state readers — issue #100). Older
@@ -932,18 +1069,8 @@ export class RunarContract {
     // params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
     // user-facing arg count check. Witness values come from
     // setPrevOutScript / setSerialisedOutputs, not from the args array.
-    const isAutoInjectedWitnessParam = (name: string): boolean =>
-      name.startsWith('_prevOutScript_') || name === '_serialisedOutputs';
-    const userParams = isStateful
-      ? method.params.filter(
-          (p) =>
-            p.type !== 'SigHashPreimage' &&
-            p.name !== '_changePKH' &&
-            p.name !== '_changeAmount' &&
-            p.name !== '_newAmount' &&
-            !isAutoInjectedWitnessParam(p.name),
-        )
-      : method.params.filter((p) => !isAutoInjectedWitnessParam(p.name));
+    // Shared with the typed-wrapper codegen (F-245).
+    const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
 
     if (userParams.length !== args.length) {
       throw new Error(
@@ -1016,6 +1143,15 @@ export class RunarContract {
       // in `resolvedArgs` and `encodeArg` emits OP_0 (empty sig) for it.
     }
 
+    // N-045 (defence in depth): a fixed-width method arg must have its
+    // declared width — a covenant may copy it straight into its state.
+    for (let i = 0; i < userParams.length; i++) {
+      assertFixedWidthValue(
+        resolvedArgs[i], userParams[i]!.type,
+        `RunarContract.prepareCall: method '${methodName}' arg '${userParams[i]!.name}' (index ${i})`,
+      );
+    }
+
     // Soft heuristic (issue #106): more than one auto-signed Sig slot on an
     // OR-CHECKSIG method (`checkSig || checkSig` → OP_BOOLOR) usually means
     // the non-matching branch should use EMPTY_SIG — otherwise every branch
@@ -1036,15 +1172,27 @@ export class RunarContract {
     const needsOpPushTx = preimageIndex >= 0 || isStateful;
 
     // Compute method selector and method index (needed for both terminal and non-terminal)
+    //
+    // N-270: `methodIndex` must be the REAL index among public methods
+    // whenever `computeOpPushTxWithCodeSep` is going to use it to look up
+    // `codeSeparatorIndices` / a method's `sigHashType` — not just when
+    // `isStateful` (stateFields.length > 0). A zero-mutable-field
+    // StatefulSmartContract has empty `stateFields` (`isStateful` false) but
+    // still auto-injects checkPreimage per method, each with its OWN
+    // OP_CODESEPARATOR offset, so a call to any method but the first used to
+    // sign against method 0's offset. `methodSelectorHex` stays gated on
+    // `isStateful`: it is appended only by the isStateful unlock-building
+    // branch below — the stateless branch pushes its own selector via
+    // `buildUnlockingScript()`, independent of this variable.
     let methodSelectorHex = '';
     let methodIndex = 0;
-    if (isStateful) {
-      const publicMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
-      if (publicMethods.length > 1) {
-        const idx = publicMethods.findIndex((m) => m.name === methodName);
-        if (idx >= 0) {
+    const publicMethodsForIndex = this.artifact.abi.methods.filter((m) => m.isPublic);
+    if (publicMethodsForIndex.length > 1) {
+      const idx = publicMethodsForIndex.findIndex((m) => m.name === methodName);
+      if (idx >= 0) {
+        methodIndex = idx;
+        if (isStateful) {
           methodSelectorHex = encodeScriptNumber(BigInt(idx));
-          methodIndex = idx;
         }
       }
     }
@@ -1056,6 +1204,11 @@ export class RunarContract {
       const pubKeyBytes = Utils.toArray(changePubKeyHex, 'hex');
       const hash160Bytes = Hash.hash160(pubKeyBytes);
       changePKHHex = Utils.toHex(hash160Bytes);
+      // N-426: refuse before any signing/broadcast when the explicit change
+      // address is not the key the covenant's _changePKH enforces.
+      if (options?.changeAddress) {
+        assertChangeAddressMatchesCovenantKey(options.changeAddress, changePKHHex);
+      }
     }
 
     // Pre-resolve intent-intrinsic witness hex (throws WitnessValueMissingError
@@ -1070,18 +1223,30 @@ export class RunarContract {
     if (options?.terminalOutputs) {
       const terminalOutputs = options.terminalOutputs;
 
+      // N-271: the terminal builder below lays out exactly one contract
+      // input (plus an optional fee/funding input) and never reads
+      // additionalContractInputs — accepting it here would silently spend
+      // less than the caller asked for while reporting success. Fail
+      // closed instead of dropping the extra UTXOs.
+      if (options.additionalContractInputs && options.additionalContractInputs.length > 0) {
+        throw new Error(
+          `RunarContract.call(${methodName}): additionalContractInputs is only supported ` +
+            'on the OP_PUSH_TX call path. Terminal calls spend the contract into a ' +
+            'caller-supplied output set and take a single contract input.',
+        );
+      }
+
       let termUnlockScript: string;
+      // Witness values are part of the size-estimation script too so the
+      // BIP-143 preimage sees the same input weight that the final unlock
+      // will produce; buildUnlockingScript puts them in their ABI slot
+      // (before the method selector, N-412).
       if (needsOpPushTx) {
         termUnlockScript = encodePushData('00'.repeat(72)) +
-          this.buildUnlockingScript(methodName, resolvedArgs);
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
       } else {
-        termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs);
+        termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
       }
-      // Witness values are appended to the size-estimation script too so
-      // the BIP-143 preimage sees the same input weight that the final
-      // stateful unlock will produce (the real final unlock is built by
-      // `buildUnlock` below which inserts witnessHex in the correct ABI slot).
-      termUnlockScript += witnessHex;
 
       // Sequence (issue #131): all-final inputs make nLockTime a consensus
       // no-op — when a non-zero locktime is set, default to 0xfffffffe so the
@@ -1123,13 +1288,13 @@ export class RunarContract {
       };
 
       let termTx = buildTerminalTx(termUnlockScript);
-      let finalOpPushTxSig = '';
       let finalPreimage = '';
 
       if (isStateful) {
         // Build stateful terminal unlock with PLACEHOLDER user sigs
-        const buildUnlock = (tx: BsvTransaction): { unlock: string; opSig: string; preimage: string } => {
-          const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
+        const buildUnlock = (tx: BsvTransaction): { unlock: string; preimage: string } => {
+          // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+          const { preimageHex: preimage } = this.computeOpPushTxPreimageWithCodeSep(
             tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
           let argsHex = '';
@@ -1142,8 +1307,8 @@ export class RunarContract {
           if (methodNeedsNewAmount) {
             newAmountHex = encodeArg(BigInt(contractUtxo.satoshis));
           }
-          const unlock = this.buildStatefulPrefix(opSig, methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
-          return { unlock, opSig, preimage };
+          const unlock = this.buildStatefulPrefix('', methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
+          return { unlock, preimage };
         };
 
         // First pass
@@ -1154,31 +1319,29 @@ export class RunarContract {
         const second = buildUnlock(termTx);
         termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(second.unlock);
         invalidateTxCache(termTx);
-        finalOpPushTxSig = second.opSig;
         finalPreimage = second.preimage;
       } else if (needsOpPushTx || sigIndices.length > 0) {
         // Stateless terminal — keep placeholder sigs
+        // N-433: preimage only -- buildStatefulPrefix ignores the signature.
         if (needsOpPushTx) {
-          const { sigHex, preimageHex } = this.computeOpPushTxWithCodeSep(
+          const { preimageHex } = this.computeOpPushTxPreimageWithCodeSep(
             termTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
-          finalOpPushTxSig = sigHex;
           resolvedArgs[preimageIndex] = preimageHex;
         }
         // Don't sign Sig params — keep 72-byte placeholders
-        let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs);
-        if (needsOpPushTx && finalOpPushTxSig) {
-          realUnlock = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlock;
+        let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
+        if (needsOpPushTx) {
+          realUnlock = this.buildStatefulPrefix('') + realUnlock;
           termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
           invalidateTxCache(termTx);
-          const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
+          const { preimageHex: finalPre } = this.computeOpPushTxPreimageWithCodeSep(
             termTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
           resolvedArgs[preimageIndex] = finalPre;
-          finalOpPushTxSig = finalSig;
           finalPreimage = finalPre;
-          realUnlock = this.buildStatefulPrefix(finalSig) +
-            this.buildUnlockingScript(methodName, resolvedArgs);
+          realUnlock = this.buildStatefulPrefix('') +
+            this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
         }
         termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
         invalidateTxCache(termTx);
@@ -1243,7 +1406,6 @@ export class RunarContract {
       return {
         sighash,
         preimage: finalPreimage,
-        opPushTxSig: finalOpPushTxSig,
         tx: termTx,
         sigIndices,
         _methodName: methodName,
@@ -1275,22 +1437,43 @@ export class RunarContract {
     // -------------------------------------------------------------------
 
     // Build the initial unlocking script (with placeholders). Intent-witness
-    // hex is suffixed so size estimation (and any downstream
+    // hex is included (before the selector, N-412) so size estimation (and any downstream
     // assertScriptHexUnderLimit / fee math) accounts for the witness pushes.
     // The real ABI-correct unlock is rebuilt by buildStatefulUnlock below for
     // stateful methods.
     let unlockingScript: string;
     if (needsOpPushTx) {
       unlockingScript = encodePushData('00'.repeat(72)) +
-        this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
+        this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
     } else {
-      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
+      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
     }
 
     let newLockingScript: string | undefined;
     let newSatoshis: number | undefined;
     let contractOutputs: Array<{ script: string; satoshis: number }> | undefined;
     const extraContractUtxos = options?.additionalContractInputs ?? [];
+
+    // N-227 Part 2 / N-258: the isStateful branch below builds a REAL
+    // per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for
+    // every extra contract input via buildStatefulUnlock. The non-stateful
+    // branch does the same (N-258) only for a zero-mutable-field
+    // StatefulSmartContract whose preimage the SDK derives (parentStateful
+    // and needsOpPushTx); there each extra input gets its own preimage and
+    // Sig. Any other non-stateful call (a plain SmartContract, or a
+    // caller-supplied preimage) has no per-input unlock builder, and
+    // shipping the SIZING placeholder as the FINAL unlocking script would
+    // broadcast an invalid spend for every input after the primary. Fail
+    // closed there.
+    if (extraContractUtxos.length > 0 && !isStateful && !(parentStateful && needsOpPushTx)) {
+      throw new Error(
+        `RunarContract.call(${methodName}): additionalContractInputs is not supported for this ` +
+          'call — only a StatefulSmartContract (with an SDK-derived preimage) builds a real ' +
+          'unlock for each extra contract input; any other path would ship a placeholder ' +
+          'unlock and the resulting tx would be invalid',
+      );
+    }
+
     const hasMultiOutput = options?.outputs && options.outputs.length > 0;
 
     // Data outputs declared via this.addDataOutput(...). Explicit
@@ -1317,9 +1500,32 @@ export class RunarContract {
       const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
       const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
       try {
+        // F-024 (R14): a default single-output continuation reads its own
+        // satoshis (`continuationAmount()` = `_newAmount`) and the spent
+        // UTXO's (`extractAmount(txPreimage)`); both are known before the tx
+        // is built, and the state the script re-derives must match.
+        const interpArgs = methodNeedsNewAmount
+          ? { ...namedArgs, _newAmount: BigInt(options?.satoshis ?? this.currentUtxo!.satoshis) }
+          : namedArgs;
+        // R67: give extractScriptCode(txPreimage) the contract's OWN real
+        // codePart (post-OP_CODESEPARATOR, CompactSize-prefixed exactly as
+        // the BIP-143 preimage carries it) instead of the historical empty
+        // dummy, so a method like FungibleToken.merge that inspects its own
+        // scriptCode during off-chain state derivation sees realistic bytes
+        // rather than aborting substr on an empty value.
+        // getSubscriptForSigning is the SAME call every other signing path
+        // uses to trim the codePart to the post-separator subscript.
+        // N-189: trim the SPENT UTXO's locking script (the subscript the
+        // primary input's preimage signs), not the bare codePart — BIP-143's
+        // scriptCode carries the `OP_RETURN <state>` tail too.
+        const scriptCodeHex = this.getSubscriptForSigning(contractUtxo.script, methodIndex);
         const { state: computed, dataOutputs: anfDataOutputs, outputs: anfOutputs } = computeNewStateAndDataOutputs(
-          this.artifact.anf, methodName, flatState, namedArgs,
+          this.artifact.anf, methodName, flatState, interpArgs,
           flatCtorArgs,
+          {
+            ...(this.currentUtxo ? { inputAmount: BigInt(this.currentUtxo.satoshis) } : {}),
+            scriptCode: compactSizeHex(scriptCodeHex.length / 2) + scriptCodeHex,
+          },
         );
         autoComputedState = computed;
         autoFlatState = flatState;
@@ -1350,7 +1556,9 @@ export class RunarContract {
     }
 
     if (isStateful && hasMultiOutput) {
-      const codeScript = this._codeScript ?? this.buildCodeScript();
+      // N-075: getCodePartHex() carries the inscription envelope (as the
+      // single-output path's getLockingScript() does); buildCodeScript() alone dropped it.
+      const codeScript = this.getCodePartHex();
       contractOutputs = options!.outputs!.map((out) => {
         const stateHex = serializeState(this.artifact.stateFields!, out.state);
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
@@ -1375,7 +1583,7 @@ export class RunarContract {
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)
         this._state = { ...this._state, ...options.newState };
-      } else if (methodNeedsChange && autoComputedState && autoFlatState) {
+      } else if (methodHasContinuation && autoComputedState && autoFlatState) {
         const merged = { ...autoFlatState, ...autoComputedState };
         const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
         this._state = { ...this._state, ...regrouped };
@@ -1425,8 +1633,13 @@ export class RunarContract {
     const feeRate = await provider.getFeeRate();
     const changeScript = buildP2PKHScript(changeAddress);
     const allFundingUtxos = await provider.getUtxos(address);
+    // Never fund with an outpoint this tx already spends as a contract input
+    // (the primary, or any additionalContractInputs — F-045: a merge's second
+    // token UTXO listed at the same address was picked as a P2PKH funding
+    // input too, spending one outpoint twice).
     const candidateFundingUtxos = allFundingUtxos.filter(
-      (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex),
+      (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex)
+        && !extraContractUtxos.some((c) => c.txid === u.txid && c.outputIndex === u.outputIndex),
     );
 
     // Resolve per-input args for additional contract inputs. Hoisted ABOVE the
@@ -1597,7 +1810,6 @@ export class RunarContract {
       }
     }
 
-    let finalOpPushTxSig = '';
     let finalPreimage = '';
 
     if (isStateful) {
@@ -1608,8 +1820,9 @@ export class RunarContract {
       const buildStatefulUnlock = async (
         currentTx: BsvTransaction, inputIdx: number, subscript: string, sats: number,
         argsOverride?: unknown[], txChangeAmount?: number,
-      ): Promise<{ unlock: string; opSig: string; preimage: string }> => {
-        const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
+      ): Promise<{ unlock: string; preimage: string }> => {
+        // N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+        const { preimageHex: preimage } = this.computeOpPushTxPreimageWithCodeSep(
           currentTx, inputIdx, subscript, sats, methodIndex,
         );
         const baseArgs = argsOverride ?? resolvedArgs;
@@ -1645,8 +1858,8 @@ export class RunarContract {
         if (methodNeedsNewAmount) {
           newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
         }
-        const unlock = this.buildStatefulPrefix(opSig, methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
-        return { unlock, opSig, preimage };
+        const unlock = this.buildStatefulPrefix('', methodUsesCodePart) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
+        return { unlock, preimage };
       };
 
       // First pass
@@ -1705,11 +1918,10 @@ export class RunarContract {
       ));
 
       // Second pass: recompute with final tx
-      const { unlock: finalInput0Unlock, opSig, preimage } = await buildStatefulUnlock(
+      const { unlock: finalInput0Unlock, preimage } = await buildStatefulUnlock(
         tx, 0, contractUtxo.script, contractUtxo.satoshis,
         undefined, changeAmount,
       );
-      finalOpPushTxSig = opSig;
       finalPreimage = preimage;
       tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(finalInput0Unlock);
       invalidateTxCache(tx);
@@ -1752,27 +1964,129 @@ export class RunarContract {
       }
     } else if (needsOpPushTx || sigIndices.length > 0) {
       // Stateless: keep placeholder sigs, compute OP_PUSH_TX
+      // N-433: preimage only -- buildStatefulPrefix ignores the signature.
       if (needsOpPushTx) {
-        const { sigHex, preimageHex } = this.computeOpPushTxWithCodeSep(
+        const { preimageHex } = this.computeOpPushTxPreimageWithCodeSep(
           tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
-        finalOpPushTxSig = sigHex;
         resolvedArgs[preimageIndex] = preimageHex;
       }
       // Don't sign Sig params — keep placeholders
-      let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs);
-      if (needsOpPushTx && finalOpPushTxSig) {
-        realUnlockingScript = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlockingScript;
+      let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
+      if (needsOpPushTx) {
+        realUnlockingScript = this.buildStatefulPrefix('') + realUnlockingScript;
         tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
         invalidateTxCache(tx);
-        const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
+        const { preimageHex: finalPre } = this.computeOpPushTxPreimageWithCodeSep(
           tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
         resolvedArgs[preimageIndex] = finalPre;
-        finalOpPushTxSig = finalSig;
         finalPreimage = finalPre;
-        realUnlockingScript = this.buildStatefulPrefix(finalSig) +
-          this.buildUnlockingScript(methodName, resolvedArgs);
+        realUnlockingScript = this.buildStatefulPrefix('') +
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
+
+        // N-258: a zero-mutable-field StatefulSmartContract merge. Each
+        // extra contract input gets a REAL unlock of the same layout as the
+        // primary's: its own OP_PUSH_TX preimage (its own outpoint,
+        // scriptCode and amount) and its Sig params signed at its own input
+        // index over the post-OP_CODESEPARATOR subscript (the contract is
+        // parentStateful, issue #44). Built here once so the rebuild below
+        // sizes fee/change against real bytes, and again after it because
+        // the rebuild can move the change output that the sighash commits.
+        // Same subscript index call() uses to sign the primary's Sig params.
+        const sigMethodIndex = Math.max(
+          0, this.artifact.abi.methods.filter((m) => m.isPublic).findIndex((m) => m.name === methodName),
+        );
+        const buildExtraUnlock = async (currentTx: BsvTransaction, i: number): Promise<string> => {
+          const mu = extraContractUtxos[i]!;
+          const inputArgs = [...(resolvedPerInputArgs?.[i] ?? resolvedArgs)];
+          const { preimageHex: extraPre } = this.computeOpPushTxPreimageWithCodeSep(
+            currentTx, i + 1, mu.script, mu.satoshis, methodIndex,
+          );
+          const currentHex = currentTx.toHex();
+          const sigSubscript = this.getSubscriptForSigning(mu.script, sigMethodIndex);
+          for (const idx of sigIndices) {
+            inputArgs[idx] = await signer.sign(currentHex, i + 1, sigSubscript, mu.satoshis);
+          }
+          inputArgs[preimageIndex] = extraPre;
+          return this.buildStatefulPrefix('') + this.buildUnlockingScript(methodName, inputArgs, witnessHex);
+        };
+        const extraRealUnlocks: string[] = [];
+        for (let i = 0; i < extraContractUtxos.length; i++) {
+          extraRealUnlocks.push(await buildExtraUnlock(tx, i));
+        }
+
+        // N-085: the BIP-143 scriptCode is everything AFTER the
+        // checkPreimage-injected OP_CODESEPARATOR, which can sit right at
+        // method entry — for a zero-mutable-field StatefulSmartContract
+        // (empty `stateFields` makes `isStateful` false here even though it
+        // IS `parentStateful` and still auto-injects checkPreimage) that
+        // leaves almost the ENTIRE locking script as scriptCode. The real
+        // preimage — and therefore `realUnlockingScript` — can end up far
+        // bigger than the sizing pass above assumed (which stubbed a short
+        // placeholder preimage). The `isStateful` branch above already
+        // re-derives fee/change from the REAL unlock via a second
+        // `buildCallTransaction` call; do the same here so `changeAmount`
+        // isn't pinned to the undersized estimate — otherwise the broadcast
+        // tx pays less than the fee floor even though its real byte size is
+        // larger than what fee/change were computed for.
+        ({ tx, inputCount, changeAmount } = buildCallTransaction(
+          this.currentUtxo,
+          realUnlockingScript,
+          newLockingScript,
+          newSatoshis,
+          changeAddress,
+          changeScript,
+          additionalUtxos.length > 0 ? additionalUtxos : undefined,
+          feeRate,
+          {
+            contractOutputs,
+            additionalContractInputs: extraContractUtxos.length > 0
+              ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraRealUnlocks[i]! }))
+              : undefined,
+            dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
+            locktime: options?.locktime,
+            sequence: options?.sequence,
+          },
+        ));
+        // buildCallTransaction above returned a FRESH Transaction whose P2PKH
+        // funding inputs (already signed once, before this stateless branch
+        // ran) are blank again — re-sign them against the rebuilt tx (issue
+        // #134's fundingSigner), mirroring the isStateful branch's re-sign
+        // step below.
+        txHex = tx.toHex();
+        for (let i = p2pkhStartIdx; i < inputCount; i++) {
+          const utxo = additionalUtxos[i - p2pkhStartIdx];
+          if (utxo) {
+            const sig = await fundingSigner.sign(txHex, i, utxo.script, utxo.satoshis);
+            const pubKey = await fundingSigner.getPublicKey();
+            const unlockScript = encodePushData(sig) + encodePushData(pubKey);
+            tx.inputs[i]!.unlockingScript = UnlockingScript.fromHex(unlockScript);
+            invalidateTxCache(tx);
+            txHex = tx.toHex();
+          }
+        }
+        // The rebuild may have changed the change output's satoshis, which
+        // hashOutputs (and therefore the preimage above) commits to — the
+        // preimage is now stale. Recompute it against the REBUILT tx before
+        // embedding it in the final unlock (same scriptCode => same preimage
+        // byte length, so this does not reopen the sizing question above).
+        tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
+        invalidateTxCache(tx);
+        const { preimageHex: rebuiltPre } = this.computeOpPushTxPreimageWithCodeSep(
+          tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
+        );
+        resolvedArgs[preimageIndex] = rebuiltPre;
+        finalPreimage = rebuiltPre;
+        realUnlockingScript = this.buildStatefulPrefix('') +
+          this.buildUnlockingScript(methodName, resolvedArgs, witnessHex);
+
+        // N-258: re-derive every extra input's preimage and Sig against the
+        // rebuilt tx (its change output is final now).
+        for (let i = 0; i < extraContractUtxos.length; i++) {
+          tx.inputs[i + 1]!.unlockingScript = UnlockingScript.fromHex(await buildExtraUnlock(tx, i));
+          invalidateTxCache(tx);
+        }
       }
       tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
       invalidateTxCache(tx);
@@ -1788,7 +2102,6 @@ export class RunarContract {
     return {
       sighash,
       preimage: finalPreimage,
-      opPushTxSig: finalOpPushTxSig,
       tx,
       sigIndices,
       _methodName: methodName,
@@ -1841,6 +2154,22 @@ export class RunarContract {
 
     const { provider } = this.resolveProviderSigner();
 
+    // F-247: every declared sigIndices slot MUST be covered by `signatures`.
+    // A missing entry would otherwise leave `resolvedArgs[idx]` at the
+    // `'00'.repeat(72)` placeholder stubbed in by `prepareCall` — a
+    // well-formed but all-zero signature push that silently reaches
+    // `provider.broadcast()` below instead of being refused up front.
+    const missingSigIndices = prepared.sigIndices.filter((idx) => signatures[idx] === undefined);
+    if (missingSigIndices.length > 0) {
+      throw new Error(
+        `RunarContract.finalizeCall: missing signature(s) for method ` +
+          `'${prepared._methodName}' at sigIndices [${missingSigIndices.join(', ')}] (F-247). ` +
+          `Every index in \`prepared.sigIndices\` must have a corresponding entry in the ` +
+          `\`signatures\` map, or finalizeCall would broadcast a 72-byte all-zero placeholder ` +
+          `signature in its place.`,
+      );
+    }
+
     // Replace placeholder sigs with real signatures
     const resolvedArgs = [...prepared._resolvedArgs];
     for (const idx of prepared.sigIndices) {
@@ -1864,7 +2193,10 @@ export class RunarContract {
         newAmountHex = encodeArg(BigInt(prepared._newAmount));
       }
       primaryUnlock =
-        this.buildStatefulPrefix(prepared.opPushTxSig, prepared._methodUsesCodePart ?? prepared._methodNeedsChange) +
+        // F-369: buildStatefulPrefix's first param is accepted for call-site
+        // compatibility but ignored (post-BUG-100 no signature is pushed) —
+        // pass '' rather than a now-nonexistent `prepared.opPushTxSig`.
+        this.buildStatefulPrefix('', prepared._methodUsesCodePart ?? prepared._methodNeedsChange) +
         argsHex +
         changeHex +
         newAmountHex +
@@ -1876,10 +2208,10 @@ export class RunarContract {
       if (prepared._preimageIndex >= 0) {
         resolvedArgs[prepared._preimageIndex] = prepared.preimage;
       }
-      primaryUnlock = this.buildStatefulPrefix(prepared.opPushTxSig) +
-        this.buildUnlockingScript(prepared._methodName, resolvedArgs);
+      primaryUnlock = this.buildStatefulPrefix('') +
+        this.buildUnlockingScript(prepared._methodName, resolvedArgs, prepared._intentWitnessHex);
     } else {
-      primaryUnlock = this.buildUnlockingScript(prepared._methodName, resolvedArgs);
+      primaryUnlock = this.buildUnlockingScript(prepared._methodName, resolvedArgs, prepared._intentWitnessHex);
     }
 
     // Insert primary unlock into the transaction
@@ -2092,12 +2424,22 @@ export class RunarContract {
       type Substitution = { byteOffset: number; encoded: string };
       const subs: Substitution[] = [];
 
-      // Constructor arg slots: replace OP_0 placeholder with encoded arg
+      // Constructor arg slots: replace OP_0 placeholder with encoded arg.
+      // N-081: the constructor only checks `constructorArgs.length` against
+      // `abi.constructor.params.length` (see the constructor above) — it never
+      // cross-checks that every slot's paramIndex actually falls within that
+      // range. A malformed or hostile artifact can declare a slot whose
+      // paramIndex is out of bounds; without this check,
+      // `this.constructorArgs[slot.paramIndex]` reads `undefined`, which
+      // `encodeArg`'s fallback silently turns into the literal bytes of the
+      // string "undefined" spliced into the deployed script. Fail closed
+      // with a named error instead (see `resolveConstructorArg`, shared with
+      // `adjustCodeSepOffset` and `_resolvedCodeSepSlotValues` — N-223).
       if (hasConstructorSlots) {
         for (const slot of this.artifact.constructorSlots!) {
           subs.push({
             byteOffset: slot.byteOffset,
-            encoded: encodeArg(this.constructorArgs[slot.paramIndex]),
+            encoded: encodeArg(this.resolveConstructorArg(slot.paramIndex)),
           });
         }
       }
@@ -2123,14 +2465,23 @@ export class RunarContract {
         // Replace the 1-byte OP_0 placeholder (2 hex chars) with the encoded value
         script = script.slice(0, hexOffset) + sub.encoded + script.slice(hexOffset + 2);
       }
-    } else if (!this.artifact.stateFields || this.artifact.stateFields.length === 0) {
-      // Backward compatibility: old stateless artifacts without constructorSlots.
-      // For stateful contracts, constructor args initialize the state section
-      // (after OP_RETURN), not the code portion.
-      for (const arg of this.constructorArgs) {
-        script += encodeArg(arg);
-      }
+
+      // N-051: the deploy-time code-part length pins. The inscription envelope,
+      // when present, is part of `_codePart` (see getCodePartHex).
+      const envelopeLen = this._inscription
+        ? buildInscriptionEnvelope(this._inscription.contentType, this._inscription.data).length / 2
+        : 0;
+      script = patchCodePartLenSlots(this.artifact, script, subs, script.length / 2 + envelopeLen);
     }
+    // R84: no fallback append for args without a constructor slot. A ctor arg
+    // with no corresponding `constructorSlots` entry means the property it
+    // initializes was eliminated by DCE (never read by any surviving method),
+    // so there is no placeholder in the compiled template for it to fill —
+    // appending it would deploy a script that is not the one the compiler
+    // produced (and fails the consensus clean-stack rule on spend; see
+    // n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK, which
+    // never had this fallback. If there are no slots at all, the script is
+    // already the compiled template and needs no further changes.
 
     return script;
   }
@@ -2139,16 +2490,24 @@ export class RunarContract {
    * Build the unlocking script for a method call.
    *
    * The unlocking script pushes the method arguments onto the stack in
-   * order, followed by a method selector (the method index as a Script
-   * number) if the contract has multiple public methods.
+   * order, then `witnessHex` (the pre-encoded intent-witness pushes from
+   * buildIntentWitnessHex — the method's trailing auto-injected params),
+   * followed by a method selector (the method index as a Script number) if
+   * the contract has multiple public methods.
    */
-  buildUnlockingScript(methodName: string, args: unknown[]): string {
+  buildUnlockingScript(methodName: string, args: unknown[], witnessHex = ''): string {
     let script = '';
 
     // Push each argument
     for (const arg of args) {
       script += encodeArg(arg);
     }
+
+    // N-412: the auto-injected intent-witness params (`_prevOutScript_<i>`,
+    // `_serialisedOutputs`) are the LAST ABI params, so the script reads them
+    // directly beneath the selector — the same slot the stateful unlock
+    // gives them (after the preimage, before the selector).
+    script += witnessHex;
 
     // If there are multiple public methods, push the method selector
     const publicMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
@@ -2187,6 +2546,24 @@ export class RunarContract {
   }
 
   /**
+   * N-223: shared out-of-range guard for every `constructorArgs[paramIndex]`
+   * read in this file. N-081 added this check only to `buildCodeScript`'s
+   * constructor-slot loop; `adjustCodeSepOffset` (reached via
+   * `getSubscriptForSigning` / `computeOpPushTxWithCodeSep` without going
+   * through `buildCodeScript` first) and `_resolvedCodeSepSlotValues` read
+   * the same array unguarded, so a malformed artifact could still splice
+   * `encodeArg(undefined)`'s "undefined" bytes through either of those paths.
+   */
+  private resolveConstructorArg(paramIndex: number): unknown {
+    if (paramIndex < 0 || paramIndex >= this.constructorArgs.length) {
+      throw new Error(
+        `RunarContract: constructorSlots entry for ${this.artifact.contractName} has out-of-range paramIndex ${paramIndex} (constructorArgs has ${this.constructorArgs.length} entries)`,
+      );
+    }
+    return this.constructorArgs[paramIndex];
+  }
+
+  /**
    * Adjust a code separator byte offset from the base (template) script to
    * the fully-substituted script. Both constructor arg slots and codeSepIndex
    * slots replace OP_0 (1 byte) with encoded push data, shifting subsequent
@@ -2197,7 +2574,7 @@ export class RunarContract {
     if (this.artifact.constructorSlots) {
       for (const slot of this.artifact.constructorSlots) {
         if (slot.byteOffset < baseOffset) {
-          const encoded = encodeArg(this.constructorArgs[slot.paramIndex]);
+          const encoded = encodeArg(this.resolveConstructorArg(slot.paramIndex));
           shift += encoded.length / 2 - 1; // encoded bytes minus the 1-byte OP_0 placeholder
         }
       }
@@ -2235,7 +2612,7 @@ export class RunarContract {
       if (this.artifact.constructorSlots) {
         for (const cs of this.artifact.constructorSlots) {
           if (cs.byteOffset < slot.codeSepIndex) {
-            const encoded = encodeArg(this.constructorArgs[cs.paramIndex]);
+            const encoded = encodeArg(this.resolveConstructorArg(cs.paramIndex));
             shift += encoded.length / 2 - 1;
           }
         }
@@ -2330,6 +2707,36 @@ export class RunarContract {
     satoshis: number,
     methodIndex?: number,
   ): { sigHex: string; preimageHex: string } {
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    return computeOpPushTx(
+      tx, inputIndex, subscript, satoshis,
+      codeSepIdx,
+      sigHashType,
+    );
+  }
+
+  /**
+   * N-253: `computeOpPushTxWithCodeSep` without the k=1 ECDSA signature -- the
+   * same code-separator offset, sighash mode and preimage bytes. Post-BUG-100
+   * the stateful unlock carries no OP_PUSH_TX signature, so the stateful
+   * prepareCall path uses this instead of signing and discarding one.
+   */
+  computeOpPushTxPreimageWithCodeSep(
+    tx: BsvTransaction,
+    inputIndex: number,
+    subscript: string,
+    satoshis: number,
+    methodIndex?: number,
+  ): { preimageHex: string } {
+    const { codeSepIdx, sigHashType } = this.resolveOpPushTxParams(methodIndex);
+    return computeOpPushTxPreimage(
+      tx, inputIndex, subscript, satoshis,
+      codeSepIdx,
+      sigHashType,
+    );
+  }
+
+  private resolveOpPushTxParams(methodIndex?: number): { codeSepIdx: number | undefined; sigHashType: number } {
     let codeSepIdx: number | undefined;
 
     if (this._codeScript !== null) {
@@ -2365,11 +2772,7 @@ export class RunarContract {
     const sigHashType =
       (methodIndex !== undefined ? publicMethods[methodIndex]?.sigHashType : undefined) ?? 0x41;
 
-    return computeOpPushTx(
-      tx, inputIndex, subscript, satoshis,
-      codeSepIdx,
-      sigHashType,
-    );
+    return { codeSepIdx, sigHashType };
   }
 
   /**
@@ -2411,10 +2814,24 @@ export class RunarContract {
     artifact: RunarArtifact,
     utxo: { txid: string; outputIndex: number; satoshis: number; script: string },
   ): RunarContract {
-    const contract = new RunarContract(
-      artifact,
-      restoreConstructorArgs(artifact, utxo.script),
-    );
+    // N-320: the script is untrusted. Refuse anything that is not whole bytes
+    // of hex before any reader sees it — the N-317 rule.
+    if (!isHexBytes(utxo.script)) {
+      throw new MalformedScriptError('RunarContract.fromUtxo: script is not an even-length hex string');
+    }
+    // N-330: restoreConstructorArgs fills unslotted params with a `0n`
+    // placeholder, which the ByteString-family arg check would refuse. Those
+    // are internal values, not user input, so the check is skipped here.
+    let contract: RunarContract;
+    restoringFromUtxo = true;
+    try {
+      contract = new RunarContract(
+        artifact,
+        restoreConstructorArgs(artifact, utxo.script),
+      );
+    } finally {
+      restoringFromUtxo = false;
+    }
 
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       const lastOpReturn = findLastOpReturn(utxo.script);
@@ -2453,7 +2870,8 @@ export class RunarContract {
       // deploy-time defaults as if they were live on-chain state. Fail
       // loudly instead of fabricating plausible-looking state.
       if (state === null) {
-        throw new Error(
+        // N-320: typed, so every tier classifies this script the same way.
+        throw new MalformedScriptError(
           `RunarContract.fromUtxo: could not extract state for ${artifact.contractName} — ` +
             `no state section (OP_RETURN) found in the UTXO script, but the artifact declares ` +
             `${artifact.stateFields.length} state field(s). Refusing to silently present ` +
@@ -2483,7 +2901,7 @@ export class RunarContract {
   ): Promise<RunarContract> {
     const tx = await provider.getTransaction(txid);
 
-    if (outputIndex >= tx.outputs.length) {
+    if (outputIndex < 0 || outputIndex >= tx.outputs.length) {
       throw new Error(
         `RunarContract.fromTxId: output index ${outputIndex} out of range (tx has ${tx.outputs.length} outputs)`,
       );
@@ -2716,6 +3134,71 @@ function regroupFixedArrayState(
     }
     const rebuilt = regroupNested(flat, dims);
     out[field.name] = rebuilt.value;
+  }
+  return out;
+}
+
+/** N-330: set only around the internal construction in `fromUtxo`. */
+let restoringFromUtxo = false;
+
+/**
+ * Constructor param types whose arg is spliced into the locking script as a
+ * push of hex-decoded bytes.
+ */
+const BYTE_STRING_CTOR_TYPES = new Set([
+  'ByteString', 'PubKey', 'Sig', 'Addr', 'Ripemd160', 'Sha256',
+  'Point', 'P256Point', 'P384Point', 'SigHashPreimage',
+]);
+
+/**
+ * N-329 / N-330: a ByteString-family constructor arg must be an even-length hex
+ * string or raw bytes (Uint8Array / Buffer). `encodeArg` treats every string as
+ * hex, so raw text (e.g. 20 raw Addr bytes) was emitted as a push header
+ * followed by non-hex text, and its `String(v)` fallback turned a Uint8Array
+ * into "1,2,3" and null/undefined into "null"/"undefined": corrupt locking
+ * scripts with no error. Raw bytes are converted to their hex string (so the
+ * script and any state built from the arg agree); every other kind is refused.
+ * Returns the (possibly rewritten) args; the caller's array is not mutated.
+ * Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an error tag.
+ */
+function checkByteStringCtorArgs(
+  artifact: RunarArtifact,
+  args: unknown[],
+): unknown[] {
+  const params = artifact.abi.constructor.params as ReadonlyArray<{ name: string; type: string; fixedArray?: unknown }>;
+  const out = args.slice();
+  for (let i = 0; i < params.length && i < args.length; i++) {
+    const param = params[i]!;
+    let leafType = param.type;
+    while (leafType.startsWith('FixedArray<') && leafType.endsWith('>')) {
+      const inner = leafType.slice('FixedArray<'.length, -1);
+      const comma = inner.lastIndexOf(',');
+      if (comma < 0) break;
+      leafType = inner.slice(0, comma).trim();
+    }
+    if (!BYTE_STRING_CTOR_TYPES.has(leafType)) continue;
+    const refuse = (): never => {
+      throw new InvalidConstructorArgError(
+        `RunarContract: constructor arg '${param.name}' (${param.type}) of ${artifact.contractName} must be an even-length hex string`,
+      );
+    };
+    // N-073: a fixed-width type must have its declared width (N-045's check
+    // and message, re-thrown as the constructor-arg error type).
+    const width = (hex: string): string => {
+      try {
+        assertFixedWidthValue(hex, leafType, `RunarContract: constructor arg '${param.name}'`);
+      } catch (e) {
+        throw new InvalidConstructorArgError((e as Error).message);
+      }
+      return hex;
+    };
+    const norm = (v: unknown): unknown => {
+      if (typeof v === 'string') return isHexBytes(v) ? width(v) : refuse();
+      if (v instanceof Uint8Array) return width(Array.from(v, (b) => b.toString(16).padStart(2, '0')).join(''));
+      if (param.fixedArray && Array.isArray(v)) return v.map(norm);
+      return refuse();
+    };
+    out[i] = norm(args[i]);
   }
   return out;
 }

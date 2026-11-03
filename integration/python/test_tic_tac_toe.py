@@ -85,6 +85,7 @@ class TestTicTacToe:
             "join",
             [player_o_wallet["pubKeyHex"], None],
             provider, player_o_wallet["signer"],
+            CallOptions(satoshis=10000),  # N-027: the join pays the 5000 bet
         )
         assert call_txid
         assert len(call_txid) == 64
@@ -112,6 +113,7 @@ class TestTicTacToe:
             "join",
             [player_o_wallet["pubKeyHex"], None],
             provider, player_o_wallet["signer"],
+            CallOptions(satoshis=10000),  # N-027: the join pays the 5000 bet
         )
 
         # Player X moves to center (position 4)
@@ -215,6 +217,7 @@ class TestTicTacToe:
             "join",
             [player_o_wallet["pubKeyHex"], None],
             provider, player_o_wallet["signer"],
+            CallOptions(satoshis=10000),  # N-027: the join pays the 5000 bet
         )
 
         # It's Player X's turn (turn=1), but Player O tries to move
@@ -260,6 +263,7 @@ class TestTicTacToe:
             "join",
             [player_o_wallet["pubKeyHex"], None],
             provider, player_o_wallet["signer"],
+            CallOptions(satoshis=10000),  # N-027: the join pays the 5000 bet
         )
 
         # Another player tries to join again -- status is now 1, assert(status==0) fails
@@ -273,6 +277,7 @@ class TestTicTacToe:
                 "join",
                 [intruder_wallet["pubKeyHex"], None],
                 provider, intruder_wallet["signer"],
+                CallOptions(satoshis=15000),  # paid (N-027): only the status guard can reject it
             )
 
         assert provider.broadcast_attempts > broadcasts_before_1, (

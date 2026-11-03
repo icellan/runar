@@ -84,6 +84,11 @@ module Runar
     # Slot recording a push_codesep_index placeholder in the template script.
     CodeSepIndexSlot = Struct.new(:byte_offset, :code_sep_index, keyword_init: true)
 
+    # N-051 -- a verify_code_part_len length field the SDK fills at deploy time.
+    # +byte_offset+ is the TEMPLATE offset of the first of the 4 little-endian
+    # length bytes (the byte after the 04 push opcode).
+    CodePartLenSlot = Struct.new(:byte_offset, keyword_init: true)
+
     # Compiled output of a Runar compiler.
     #
     # Use RunarArtifact.from_hash to load from a JSON-parsed Hash, or
@@ -91,7 +96,7 @@ module Runar
     class RunarArtifact
       attr_reader :version, :compiler_version, :contract_name, :parent_class, :abi,
                   :script, :asm, :state_fields, :constructor_slots,
-                  :code_sep_index_slots,
+                  :code_sep_index_slots, :code_part_len_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
                   :anf, :unsound_primitives
 
@@ -110,6 +115,7 @@ module Runar
         state_fields: [],
         constructor_slots: [],
         code_sep_index_slots: [],
+        code_part_len_slots: [],
         build_timestamp: '',
         code_separator_index: nil,
         code_separator_indices: nil,
@@ -128,6 +134,7 @@ module Runar
         @state_fields           = state_fields
         @constructor_slots      = constructor_slots
         @code_sep_index_slots   = code_sep_index_slots
+        @code_part_len_slots    = Array(code_part_len_slots)
         @build_timestamp        = build_timestamp
         @code_separator_index   = code_separator_index
         @code_separator_indices = code_separator_indices
@@ -198,6 +205,10 @@ module Runar
           CodeSepIndexSlot.new(byte_offset: cs['byteOffset'], code_sep_index: cs['codeSepIndex'])
         end
 
+        code_part_len_slots = Array(hash['codePartLenSlots']).map do |cs|
+          CodePartLenSlot.new(byte_offset: cs['byteOffset'])
+        end
+
         new(
           version:                hash.fetch('version', ''),
           compiler_version:       hash.fetch('compilerVersion', ''),
@@ -209,6 +220,7 @@ module Runar
           state_fields:           state_fields,
           constructor_slots:      constructor_slots,
           code_sep_index_slots:   code_sep_index_slots,
+          code_part_len_slots:    code_part_len_slots,
           build_timestamp:        hash.fetch('buildTimestamp', ''),
           code_separator_index:   hash['codeSeparatorIndex'],
           code_separator_indices: hash['codeSeparatorIndices'],
@@ -319,14 +331,20 @@ module Runar
     # Result of +prepare_call+ — contains everything needed for external signing
     # and subsequent +finalize_call+.
     #
-    # Public fields (+sighash+, +preimage+, +op_push_tx_sig+, +tx_hex+,
-    # +sig_indices+) are for external signer coordination.  All other fields
-    # are internal state consumed by +finalize_call+.
+    # Public fields (+sighash+, +preimage+, +tx_hex+, +sig_indices+) are for
+    # external signer coordination.  All other fields are internal state
+    # consumed by +finalize_call+.
+    #
+    # N-213: there is deliberately NO +op_push_tx_sig+ field. Post-BUG-100 the
+    # OP_PUSH_TX signature is derived ON-CHAIN from +preimage+ —
+    # +build_stateful_prefix+'s signature parameter is accepted for call-site
+    # compatibility but ignored (see its leading <tt>_ = op_sig_hex</tt>
+    # discard), so there was nothing for an external signer to produce or push
+    # here. Mirrors F-369's TS fix.
     PreparedCall = Struct.new(
       # Public — callers use these to coordinate external signing.
       :sighash,             # 64-char hex — BIP-143 hash external signers sign
       :preimage,            # hex — full BIP-143 preimage
-      :op_push_tx_sig,      # hex — OP_PUSH_TX DER sig (empty if not needed)
       :tx_hex,              # hex — built TX (P2PKH funding signed, primary input uses placeholder sigs)
       :sig_indices,         # Array<Integer> — user-visible arg positions needing external Sig values
 
@@ -364,7 +382,6 @@ module Runar
       def initialize(
         sighash: '',
         preimage: '',
-        op_push_tx_sig: '',
         tx_hex: '',
         sig_indices: [],
         method_name: '',

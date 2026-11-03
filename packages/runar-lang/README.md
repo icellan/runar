@@ -199,7 +199,7 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | `sqrt` | `(n: bigint) => bigint` | Integer square root |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | Greatest common divisor |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | Division returning quotient |
-| `log2` | `(n: bigint) => bigint` | Approximate floor(log2(n)) |
+| `log2` | `(n: bigint) => bigint` | Exact floor(log2(n)) for every n > 0; n <= 0 fails the script |
 | `bool` | `(n: bigint) => boolean` | Convert integer to boolean (0 is false, non-zero is true) |
 
 ### Control
@@ -313,7 +313,7 @@ Stateless hash-based signatures supporting multiple signings per keypair. Six pa
 | `verifySLHDSA_SHA2_192s` | 192-bit | small | 16,224 bytes |
 | `verifySLHDSA_SHA2_192f` | 192-bit | fast | 35,664 bytes |
 | `verifySLHDSA_SHA2_256s` | 256-bit | small | 29,792 bytes |
-| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 48,736 bytes |
+| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
 
 All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
 

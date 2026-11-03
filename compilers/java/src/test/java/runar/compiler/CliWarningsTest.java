@@ -121,6 +121,72 @@ class CliWarningsTest {
         assertTrue(a.stdout.trim().matches("[0-9a-f]+"), "stdout must be pure hex: " + a.stdout);
     }
 
+    /**
+     * F-187 (CX-BUG-048): the CLI path above already surfaces warnings
+     * (CL-BUG-104), but {@code --daemon}'s {@code serveRequest} called
+     * {@code Validate.run(contract)} for its exception side-effect only and
+     * discarded the returned warning list, so a daemon client (the
+     * conformance runner's {@code JavaDaemon}) had no way to see the same
+     * {@code warnStrippedReadonlyFields} / locktime-guard / "no mutable
+     * properties" advisories the CLI prints to stderr.
+     *
+     * <p>Fix returns them as a {@code "warnings"} JSON array of raw message
+     * strings (no "warning: " prefix — that prefix is a stderr-line
+     * convention from the CLI path; a structured JSON field doesn't need
+     * it), omitted entirely when there are none, so existing daemon
+     * consumers that don't look for the field are unaffected.
+     */
+    @Test
+    void daemonServeRequestIncludesWarnings(@TempDir Path tmp) throws Exception {
+        Path src = write(tmp, "WarnStateful.runar.ts", WARNING_SOURCE);
+        Cli.DaemonRequest req = new Cli.DaemonRequest();
+        req.id = 1;
+        req.source = src.toString();
+        req.hex = true;
+
+        String response = new Cli(devNull(), devNull()).serveRequest(req);
+
+        assertTrue(response.contains("\"ok\":true"), "response: " + response);
+        assertTrue(response.contains("\"warnings\":["),
+            "daemon response dropped the validator warning; response=" + response);
+        assertTrue(response.contains("StatefulSmartContract has no mutable properties"),
+            "response: " + response);
+    }
+
+    @Test
+    void daemonServeRequestParseOnlyAlsoIncludesWarnings(@TempDir Path tmp) throws Exception {
+        Path src = write(tmp, "WarnStateful.runar.ts", WARNING_SOURCE);
+        Cli.DaemonRequest req = new Cli.DaemonRequest();
+        req.id = 2;
+        req.source = src.toString();
+        req.parseOnly = true;
+
+        String response = new Cli(devNull(), devNull()).serveRequest(req);
+
+        assertTrue(response.contains("\"parsed\":true"), "response: " + response);
+        assertTrue(response.contains("\"warnings\":["),
+            "daemon --parse-only response dropped the validator warning; response=" + response);
+    }
+
+    @Test
+    void daemonServeRequestCleanCompileHasNoWarningsField(@TempDir Path tmp) throws Exception {
+        Path src = write(tmp, "CleanStateless.runar.ts", CLEAN_SOURCE);
+        Cli.DaemonRequest req = new Cli.DaemonRequest();
+        req.id = 3;
+        req.source = src.toString();
+        req.hex = true;
+
+        String response = new Cli(devNull(), devNull()).serveRequest(req);
+
+        assertTrue(response.contains("\"ok\":true"), "response: " + response);
+        assertFalse(response.contains("\"warnings\""),
+            "clean compile must not carry an empty warnings field; response=" + response);
+    }
+
+    private static PrintStream devNull() {
+        return new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8);
+    }
+
     private static Path write(Path dir, String name, String body) throws Exception {
         Path p = dir.resolve(name);
         Files.writeString(p, body);

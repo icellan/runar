@@ -967,7 +967,12 @@ end
       const assertStmt = bar.body[0] as ExpressionStatement;
       const call = assertStmt.expression as CallExpr;
       const eq = call.args[0] as BinaryExpr;
-      expect(eq.right).toEqual({ kind: 'bytestring_literal', value: 'deadbeef' });
+      // N-449: the literal carries its opening quote's position.
+      expect(eq.right).toEqual({
+        kind: 'bytestring_literal',
+        value: 'deadbeef',
+        sourceLocation: { file: 'Foo.runar.rb', line: 10, column: 17 },
+      });
     });
   });
 
@@ -1207,10 +1212,11 @@ end
       expect(result.contract).toBeNull();
     });
 
-    it('does not throw when class end keyword is missing', () => {
-      // The parser loops until 'end' or 'eof' — on eof it exits and
-      // match('end') silently returns false.  The contract is still
-      // returned rather than null, so the main guarantee is no exception.
+    it('reports a diagnostic when class end keyword is missing', () => {
+      // N-319: the class `end` is required. On eof the body loop exits and the
+      // parser must report the shared "missing closing 'end'" diagnostic
+      // rather than silently returning a partial contract. Proves the
+      // diagnostic is emitted and nothing throws; does not prove its location.
       const rb = `
 class Foo < Runar::SmartContract
   prop :x, Bigint
@@ -1219,18 +1225,9 @@ class Foo < Runar::SmartContract
     @x = x
   end
 `;
-      // Must not throw.
-      let threw = false;
-      let result: ReturnType<typeof parseRubySource> | null = null;
-      try {
-        result = parseRubySource(rb, 'Test.runar.rb');
-      } catch {
-        threw = true;
-      }
-      expect(threw).toBe(false);
-      // Either a contract is returned (partial parse) or errors are present.
-      // Both are acceptable — the requirement is that no exception is raised.
-      expect(result).not.toBeNull();
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.some(e => e.message.includes("missing closing 'end'"))).toBe(true);
     });
 
     it('produces an error for unknown parent class', () => {
@@ -1265,10 +1262,15 @@ end
       expect(errors.length).toBeGreaterThan(0);
     });
 
-    it('does not throw on block syntax (each { |x| ... })', () => {
-      // The tokenizer skips '{' and '}' as unknown characters.
-      // '|' is tokenized as a bitwise OR operator, causing malformed
-      // expression parsing.  The parser must not throw.
+    it('reports a diagnostic naming the unsupported char for block syntax (each { |x| ... })', () => {
+      // Block syntax isn't part of the Rúnar Ruby surface. '{' and '}' are
+      // rejected by the tokenizer (see 01-parse-ruby.ts: "Unrecognized
+      // character — reject it rather than dropping it silently"), and '|'
+      // is tokenized as the bitwise-OR operator, so the braces' contents
+      // get folded into a malformed `each | n | assert` expression chain.
+      // The requirement this proves: that malformed re-parse must not pass
+      // silently — there must be a diagnostic naming the unsupported
+      // character, not merely "did not throw".
       const rb = `
 class Foo < Runar::SmartContract
   prop :x, Bigint
@@ -1282,8 +1284,18 @@ class Foo < Runar::SmartContract
   end
 end
 `;
-      // Must not throw — that's the only guarantee for unsupported syntax.
-      expect(() => parseRubySource(rb, 'Test.runar.rb')).not.toThrow();
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.message.includes("'{'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'}'"))).toBe(true);
+      // Does NOT prove: that the resulting AST for `bar` is sane — it is
+      // not (the brace contents are folded into a bogus `|`-chain
+      // expression). It proves only that the parser flags the unsupported
+      // construct rather than silently accepting it; `compile()` in
+      // index.ts gates on `hasErrors()` right after parsing, so this
+      // diagnostic is what stops a malformed-but-non-throwing parse from
+      // reaching later passes.
     });
 
     it('does not throw on lambda syntax (-> { ... })', () => {
@@ -1313,6 +1325,15 @@ end
       expect(threw).toBe(false);
       // The lambda syntax should not panic.  Errors in the result are expected.
       expect(result).not.toBeNull();
+      // N-242: and the errors must actually be there. Proves: the tokenizer
+      // names the unsupported '{' and '}' and the parser flags the dangling
+      // '>' left over from '->', so a lambda cannot be silently accepted.
+      // Does NOT prove: anything about the shape of the AST for `bar`, nor
+      // that lambdas will ever be supported.
+      const errors = result!.errors.filter(e => e.severity === 'error');
+      expect(errors.some(e => e.message.includes("'{'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'}'"))).toBe(true);
+      expect(errors.some(e => e.message.includes("'>'"))).toBe(true);
     });
 
     it('does not throw on duplicate method names', () => {
@@ -1383,13 +1404,6 @@ end
       expect(bar).toBeDefined();
       expect(bar!.params).toHaveLength(0);
     });
-  });
-
-  // ---------------------------------------------------------------------------
-  // Integration: full parse via dispatcher
-  // ---------------------------------------------------------------------------
-
-  describe('error handling', () => {
     it('rejects an unknown parent class', () => {
       const source = `
 class Foo < Runar::UnknownBase

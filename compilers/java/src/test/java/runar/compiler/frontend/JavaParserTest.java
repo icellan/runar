@@ -442,4 +442,44 @@ class JavaParserTest {
         assertEquals(2, loc.column());
         assertEquals('a', src.split("\n", -1)[loc.line() - 1].charAt(loc.column()));
     }
+
+    // -----------------------------------------------------------------
+    // F-205: annotation names — a qualified `@pkg.Public` must be read, and
+    // an unrecognized annotation must be a loud diagnostic (never a silent
+    // visibility downgrade), matching the TS reference
+    // (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+    // -----------------------------------------------------------------
+
+    @Test
+    void qualifiedPublicAnnotationIsRecognized() {
+        String src = """
+            class C extends SmartContract {
+                C() { super(); }
+                @runar.lang.annotations.Public
+                void check() { assertThat(true); }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        assertEquals(1, c.methods().size());
+        assertEquals(Visibility.PUBLIC, c.methods().get(0).visibility());
+    }
+
+    @Test
+    void misspelledAnnotationIsALoudErrorNotASilentDowngrade() {
+        // Claim (2): a misspelled annotation (@Publlic) must be refused
+        // with a diagnostic, exactly as the TS reference refuses it
+        // ("unsupported annotation @Publlic"). Before the fix this parsed
+        // with no exception and the method silently stayed private.
+        String src = """
+            class C extends SmartContract {
+                C() { super(); }
+                @Publlic
+                void check() { assertThat(true); }
+            }
+            """;
+        JavaParser.ParseException e = assertThrows(JavaParser.ParseException.class,
+            () -> JavaParser.parse(src, "C.runar.java")
+        );
+        assertTrue(e.getMessage().contains("unsupported annotation @Publlic"));
+    }
 }

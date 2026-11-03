@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -358,6 +359,27 @@ func TestFoldConstants_StringEquality(t *testing.T) {
 	assertLoadConstBool(t, result.Methods[0].Body[2], true)
 }
 
+// F-160: 'aa' and 'AA' decode to the same byte, so OP_EQUAL is true on-chain
+// and the fold must say so. Proves the Go folder's verdict on mixed-case hex;
+// not the emitted script (conformance/negatives/f160-bytestring-case-fold-parity
+// pins every tier's bytes, and the TS optimizer test executes them).
+func TestFoldConstants_StringEqualityIgnoresHexCase(t *testing.T) {
+	for _, tc := range []struct {
+		op   string
+		want bool
+	}{{"===", true}, {"!==", false}} {
+		p := makeTestANFProgram([]ir.ANFMethod{
+			makeTestMethod("m", []ir.ANFBinding{
+				b("t0", mkStr("aa")),
+				b("t1", mkStr("AA")),
+				b("t2", binOp(tc.op, "t0", "t1")),
+			}),
+		})
+		result := foldConstantsOnly(p)
+		assertLoadConstBool(t, result.Methods[0].Body[2], tc.want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Unary operations
 // ---------------------------------------------------------------------------
@@ -437,6 +459,24 @@ func TestFoldConstants_DoesNotFoldWithParam(t *testing.T) {
 	})
 	result := foldConstantsOnly(p)
 	assertNotFolded(t, result.Methods[0].Body[2], "bin_op")
+}
+
+// F-078 / N-064: a name bound to a constant and then rebound to an @ref alias
+// of a runtime value must lose its constant. The alias is still a load_const
+// node, but anfValueToConst rejects "@ref:" strings, so foldBinding must drop
+// the old entry instead of leaving x=5 in the env (which folded y to 6).
+// Proves: foldBindings does not fold through a stale entry after an @ref
+// rebinding. Does not prove: if-arm / loop-body invalidation or on-chain
+// behaviour (see compilers/go/compiler/n064_rebind_fold_test.go).
+func TestFoldConstants_RebindToRefAliasDropsStaleConstant(t *testing.T) {
+	folded := foldBindings([]ir.ANFBinding{
+		b("t", loadParam("p")),
+		b("x", mkInt(5)),
+		b("x", mkStr("@ref:t")),
+		b("one", mkInt(1)),
+		b("y", binOp("+", "x", "one")),
+	}, newConstEnv())
+	assertNotFolded(t, folded[4], "bin_op")
 }
 
 // ---------------------------------------------------------------------------
@@ -725,6 +765,64 @@ func TestFoldConstants_Clamp(t *testing.T) {
 	assertLoadConstBigInt(t, result.Methods[0].Body[3], 10)
 }
 
+// N-029: every folded value must be what the emitted script computes.
+// clamp lowers to `<v> <lo> OP_MAX <hi> OP_MIN` = min(max(v, lo), hi), which
+// differs from `v < lo ? lo : ...` once lo > hi; gcd unrolls 256 Euclid
+// steps, so past those the script returns a partial value and the folder must
+// decline. log2 is exact for every n > 0 since N-103 and aborts for n <= 0, so
+// the folder folds every positive operand and declines the rest. Expected values were executed on
+// @bsv/sdk Spend.validate by
+// packages/runar-testing/src/__tests__/n029-fold-builtin-script-parity.test.ts.
+// Proves the Go folder's value/decline decisions; not the script itself.
+func n029Fib(n int) *big.Int {
+	a, c := big.NewInt(0), big.NewInt(1)
+	for i := 0; i < n; i++ {
+		a, c = c, new(big.Int).Add(a, c)
+	}
+	return a
+}
+
+func n029Fold(args []*big.Int, fn string) ir.ANFBinding {
+	body := make([]ir.ANFBinding, 0, len(args)+1)
+	names := make([]string, 0, len(args))
+	for i, a := range args {
+		n := fmt.Sprintf("t%d", i)
+		body = append(body, b(n, makeLoadConstInt(a)))
+		names = append(names, n)
+	}
+	body = append(body, b("r", callFunc(fn, names)))
+	p := makeTestANFProgram([]ir.ANFMethod{makeTestMethod("m", body)})
+	out := foldConstantsOnly(p).Methods[0].Body
+	return out[len(out)-1]
+}
+
+func TestFoldConstants_N029_ClampLoAboveHiMatchesScript(t *testing.T) {
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(5), big.NewInt(10), big.NewInt(0)}, "clamp"), 0)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(0), big.NewInt(3), big.NewInt(-3)}, "clamp"), -3)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{big.NewInt(-20), big.NewInt(10), big.NewInt(0)}, "clamp"), 0)
+}
+
+// N-103 (user decision R86): this used to pin the decline past 64 halvings
+// (2^65 and 2^70 not folded). The script is now exact with no cap, so those
+// fold to their exact value, and n <= 0 — which the script aborts on — is
+// declined instead of folded to 0.
+func TestFoldConstants_N103_Log2ExactAndDeclinesNonPositive(t *testing.T) {
+	two := big.NewInt(2)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(64), nil)}, "log2"), 64)
+	max64 := new(big.Int).Sub(new(big.Int).Exp(two, big.NewInt(65), nil), big.NewInt(1))
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{max64}, "log2"), 64)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(65), nil)}, "log2"), 65)
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{new(big.Int).Exp(two, big.NewInt(70), nil)}, "log2"), 70)
+	assertNotFolded(t, n029Fold([]*big.Int{big.NewInt(0)}, "log2"), "call")
+	assertNotFolded(t, n029Fold([]*big.Int{big.NewInt(-1)}, "log2"), "call")
+}
+
+func TestFoldConstants_N029_GcdDeclinesPast256Steps(t *testing.T) {
+	assertLoadConstBigInt(t, n029Fold([]*big.Int{n029Fib(258), n029Fib(257)}, "gcd"), 1)
+	assertNotFolded(t, n029Fold([]*big.Int{n029Fib(259), n029Fib(258)}, "gcd"), "call")
+	assertNotFolded(t, n029Fold([]*big.Int{n029Fib(300), n029Fib(299)}, "gcd"), "call")
+}
+
 func TestFoldConstants_Sign(t *testing.T) {
 	p := makeTestANFProgram([]ir.ANFMethod{
 		makeTestMethod("m", []ir.ANFBinding{
@@ -822,8 +920,14 @@ func TestFoldConstants_Bool(t *testing.T) {
 // Dead binding elimination (tested via eliminateDeadBindings after fold)
 // ---------------------------------------------------------------------------
 
-// foldAndEliminate is a test helper that folds constants then eliminates dead bindings,
-// mirroring the full pipeline behavior (FoldConstants + EC optimizer's DCE).
+// foldAndEliminate is a test helper that folds constants then eliminates dead
+// bindings UNCONDITIONALLY. It does NOT mirror the production pipeline
+// (F-303): CompileFromProgram only runs EliminateDeadBindings conditionally,
+// via OptimizeEC's `anyChanged` gate (anf_optimize.go) — a program that
+// triggers no EC rewrite gets no DCE at all through any public compile
+// entrypoint. This helper exists to exercise DCE's behavior on folded ANF in
+// isolation; see f303_dce_invocation_test.go for the pinned production
+// behavior.
 func foldAndEliminate(p *ir.ANFProgram) *ir.ANFProgram {
 	result := FoldConstants(p)
 	for i := range result.Methods {

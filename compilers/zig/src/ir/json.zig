@@ -7,6 +7,13 @@ const std = @import("std");
 const types = @import("types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
+const reserved_names = @import("../passes/reserved_names.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
+const stateful_scaffold = @import("stateful_scaffold.zig");
+const synthetic_array_chain = @import("synthetic_array_chain.zig");
+const rabin_key_provenance = @import("rabin_key_provenance.zig");
+const call_depth = @import("call_depth.zig");
+pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
     MissingField,
@@ -57,6 +64,39 @@ const ParseError = error{
     // because Zig's IR loader carries no message payload, so the name is the
     // whole diagnostic.
     InvalidLoopStart,
+    // N-071: a public method whose body does not END with an assert (or an if
+    // whose arms both do, or a terminal raw_script with out_arity 1). The
+    // shared message is in required_fields.lastDiagnostic().
+    PublicMethodMissingTerminalAssert,
+    // N-060 / N-065: a name the compiler mints (stack lowering's slots in any
+    // position; an ANF temp spelling as a parameter / property / method / loop
+    // variable). Message in required_fields.lastDiagnostic().
+    ReservedName,
+    // N-087: the source validator's parentClass rules (a mutable property
+    // outside StatefulSmartContract, a stateful-only node outside it, a
+    // raw_script outside UnsafeSmartContract). Message in
+    // required_fields.lastDiagnostic().
+    ParentClassRuleViolation,
+    // N-087 (port of Go F-004): an update_prop outside the constructor on a
+    // readonly or undeclared property. Message in lastDiagnostic().
+    IllegalPropertyWrite,
+    // N-101: a StatefulSmartContract public method whose auto-injected
+    // parameters, prologue or state continuation differ from what the
+    // frontend injects. Message in required_fields.lastDiagnostic().
+    StatefulScaffoldMismatch,
+    // N-096: a syntheticArrayChain expand-fixed-arrays could not have written
+    // (too deep, an index out of range, names that do not derive, or sibling
+    // leaves that are not one expansion). Message in lastDiagnostic().
+    SyntheticArrayChainMalformed,
+    RabinKeyProvenance,
+    // N-265: a cycle in the method_call graph. `compile-ir` skips the
+    // frontend entirely, so frontend/validate.zig's recursion check never
+    // ran; stack lowering inlines every method_call with no cycle guard,
+    // recursing until a stack overflow. Message in lastDiagnostic().
+    IRRecursionDetected,
+    // N-265: an ACYCLIC method_call chain past N-180's MAX_CALL_DEPTH (128).
+    // Message in lastDiagnostic().
+    IRCallDepthExceeded,
 };
 
 const max_parse_depth: u32 = 256;
@@ -228,6 +268,9 @@ pub fn parseANFProgram(allocator: std.mem.Allocator, json_source: []const u8) !t
     // N-131: refuse float syntax at the door, before any field-specific
     // decoding. See assertNoJSONFloats.
     try assertNoJSONFloats(root);
+    // N-069: required fields present and correctly typed before any `.array`
+    // / `.object` access below; the message is in required_fields.lastDiagnostic().
+    try required_fields.assertRequiredIrFields(allocator, root);
     return try parseProgram(allocator, root);
 }
 
@@ -260,6 +303,98 @@ pub fn serializeArtifact(allocator: std.mem.Allocator, artifact: types.Artifact)
 // JSON Parsing — ANFProgram from dynamic JSON values
 // ============================================================================
 
+/// N-071: ANF form of the source validator's ends-with-assert rule — the last
+/// binding is an `assert`, or an `if` whose then AND else arms both end that
+/// way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+/// `asm()` terminal) is also accepted, because ANF carries no parentClass.
+fn endsWithTerminalAssert(bindings: []const types.ANFBinding) bool {
+    if (bindings.len == 0) return false;
+    return switch (bindings[bindings.len - 1].value) {
+        .assert => true,
+        .@"if" => |v| endsWithTerminalAssert(v.then) and endsWithTerminalAssert(v.@"else"),
+        .raw_script => |v| v.out_arity == 1,
+        else => false,
+    };
+}
+
+/// N-060 / N-065 — `--ir` names that alias a name the compiler mints. Port of
+/// `assertNoReservedIrNames` (packages/runar-compiler/src/index.ts): stack
+/// lowering keeps its own slots (`_codePart`, `__param_*`, `__shadowed_*`,
+/// `_pub_<n>`) in the same name map as the program's parameters and bindings,
+/// so declaring or referencing one aliases a compiler slot; a parameter,
+/// property, method or loop variable spelled like an ANF temp (`t<digits>`,
+/// `__merge$<digits>`) aliases the bindings that ARE spelled that way. Binding
+/// names in those ANF families stay legal. See passes/reserved_names.zig.
+fn checkReservedIrName(name: []const u8, declaration: bool) ParseError!void {
+    if (!reserved_names.isReservedIrName(name, declaration)) return;
+    required_fields.setDiag("'{s}' is reserved for compiler-generated names and cannot be used as an identifier", .{name});
+    return ParseError.ReservedName;
+}
+
+fn checkReservedIrBindings(bindings: []const types.ANFBinding) ParseError!void {
+    for (bindings) |b| {
+        try checkReservedIrName(b.name, false);
+        switch (b.value) {
+            .load_param => |v| try checkReservedIrName(v.name, true),
+            .load_prop => |v| try checkReservedIrName(v.name, true),
+            .update_prop => |v| {
+                try checkReservedIrName(v.name, true);
+                try checkReservedIrName(v.value, false);
+            },
+            .load_const => |v| switch (v.value) {
+                .string => |s| if (std.mem.startsWith(u8, s, "@ref:")) try checkReservedIrName(s[5..], false),
+                else => {},
+            },
+            .bin_op => |v| {
+                try checkReservedIrName(v.left, false);
+                try checkReservedIrName(v.right, false);
+            },
+            .unary_op => |v| try checkReservedIrName(v.operand, false),
+            .call => |v| for (v.args) |r| try checkReservedIrName(r, false),
+            .method_call => |v| {
+                try checkReservedIrName(v.object, false);
+                for (v.args) |r| try checkReservedIrName(r, false);
+            },
+            .@"if" => |v| {
+                try checkReservedIrName(v.cond, false);
+                try checkReservedIrBindings(v.then);
+                try checkReservedIrBindings(v.@"else");
+            },
+            .loop => |v| {
+                try checkReservedIrName(v.iter_var, true);
+                try checkReservedIrBindings(v.body);
+            },
+            .assert => |v| try checkReservedIrName(v.value, false),
+            .check_preimage => |v| try checkReservedIrName(v.preimage, false),
+            .deserialize_state => |v| try checkReservedIrName(v.preimage, false),
+            .add_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                for (v.state_values) |r| try checkReservedIrName(r, false);
+                try checkReservedIrName(v.preimage, false);
+            },
+            .add_raw_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                try checkReservedIrName(v.script_bytes, false);
+            },
+            .add_data_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                try checkReservedIrName(v.script_bytes, false);
+            },
+            .array_literal => |v| for (v.elements) |r| try checkReservedIrName(r, false),
+            .get_state_script, .raw_script => {},
+        }
+    }
+}
+
+fn checkReservedIrNames(properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+    for (properties) |p| try checkReservedIrName(p.name, true);
+    for (methods) |m| {
+        try checkReservedIrName(m.name, true);
+        for (m.params) |p| try checkReservedIrName(p.name, true);
+        try checkReservedIrBindings(m.body);
+    }
+}
+
 fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFProgram {
     const obj = root.object;
 
@@ -274,6 +409,24 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     for (methods_arr.items) |method_val| {
         const method = try parseMethod(allocator, method_val.object);
         try method_list.append(allocator, method);
+    }
+
+    // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+    try checkReservedIrNames(properties, method_list.items);
+
+    // N-071: --ir skips passes/validate.zig, whose ends-with-assert rule is
+    // what makes a public method's script a covenant. Stack lowering leaves
+    // the method's last binding as the script result, so `"body": []`
+    // compiled to a bare OP_1 (anyone-can-spend). Same rule and words as Go's
+    // F-004 check; see endsWithTerminalAssert.
+    for (method_list.items) |m| {
+        if (m.is_public and !std.mem.eql(u8, m.name, "constructor") and !endsWithTerminalAssert(m.body)) {
+            required_fields.setDiag(
+                "IR validation: public method '{s}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                .{m.name},
+            );
+            return ParseError.PublicMethodMissingTerminalAssert;
+        }
     }
 
     // N-113 / R-081: a contract with no public method has no spending entry
@@ -334,11 +487,176 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
     }
 
+    // N-265: a cycle or an acyclic chain past MAX_CALL_DEPTH in the
+    // method_call graph. Checked first, same order as Go's F-004
+    // checkIRFrontendRules (recursion before parentClass).
+    call_depth.check(allocator, method_list.items) catch |err| switch (err) {
+        error.IRRecursionDetected => return ParseError.IRRecursionDetected,
+        error.IRCallDepthExceeded => return ParseError.IRCallDepthExceeded,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+
+    // F-038: optional on input (required_fields.zig validated the value).
+    const parent_class: ?types.ParentClass = if (obj.get("parentClass")) |v| switch (v) {
+        .string => |s| types.ParentClass.fromTsString(s),
+        else => null,
+    } else null;
+
+    const effective_class = try checkParentClassRules(parent_class, properties, method_list.items);
+    try checkNoIllegalPropertyWrites(properties, method_list.items);
+    // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+    // the scaffolding the frontend injects. See stateful_scaffold.zig.
+    if (effective_class == .stateful_smart_contract) {
+        stateful_scaffold.check(allocator, properties, method_list.items) catch |err| switch (err) {
+            error.StatefulScaffoldMismatch => return ParseError.StatefulScaffoldMismatch,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
+    // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+    // written (shared rule and diagnostic, 7 tiers).
+    synthetic_array_chain.check(allocator, properties) catch |err| switch (err) {
+        error.SyntheticArrayChainMalformed => return ParseError.SyntheticArrayChainMalformed,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    // N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+    // mutable key property (shared rule and diagnostics, 7 tiers).
+    rabin_key_provenance.check(allocator, properties, method_list.items) catch |err| switch (err) {
+        error.RabinKeyProvenance => return ParseError.RabinKeyProvenance,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
+        .parent_class = parent_class,
         .properties = properties,
         .methods = try method_list.toOwnedSlice(allocator),
     };
+}
+
+/// N-087: the ANF kind name of a node only StatefulSmartContract lowering
+/// produces, or null.
+fn statefulOnlyKind(v: types.ANFValue) ?[]const u8 {
+    return switch (v) {
+        .add_output => "add_output",
+        .add_raw_output => "add_raw_output",
+        .add_data_output => "add_data_output",
+        .get_state_script => "get_state_script",
+        .deserialize_state => "deserialize_state",
+        else => null,
+    };
+}
+
+/// First stateful-only kind (or, with `raw`, the first raw_script) in a
+/// binding list, nested `if` arms and `loop` bodies included.
+fn findKind(bindings: []const types.ANFBinding, raw: bool) ?[]const u8 {
+    for (bindings) |b| {
+        if (raw) {
+            if (b.value == .raw_script) return "raw_script";
+        } else if (statefulOnlyKind(b.value)) |k| return k;
+        switch (b.value) {
+            .@"if" => |v| {
+                if (findKind(v.then, raw)) |k| return k;
+                if (findKind(v.@"else", raw)) |k| return k;
+            },
+            .loop => |v| if (findKind(v.body, raw)) |k| return k,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// N-087: the source validator's parentClass rules, which --ir never ran. A
+/// SmartContract property declared readonly:false got no constructor slot, so
+/// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which
+/// any key spends. Checked in this order, with the diagnostics all seven tiers
+/// share (conformance/negatives/ir-parent-class-cases.json): (1) SmartContract
+/// / UnsafeSmartContract properties must be readonly; (2) stateful-only nodes
+/// require StatefulSmartContract; (3) raw_script (asm) requires
+/// UnsafeSmartContract. An absent parentClass (IR older than F-038) is
+/// inferred fail-closed: StatefulSmartContract only from a stateful-only node,
+/// else UnsafeSmartContract from a raw_script, else SmartContract. Returns the
+/// (declared or inferred) parentClass.
+fn checkParentClassRules(declared: ?types.ParentClass, properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!types.ParentClass {
+    var has_stateful = false;
+    var has_raw = false;
+    for (methods) |m| {
+        if (findKind(m.body, false) != null) has_stateful = true;
+        if (findKind(m.body, true) != null) has_raw = true;
+    }
+    const pc: types.ParentClass = declared orelse
+        if (has_stateful) .stateful_smart_contract else if (has_raw) .unsafe_smart_contract else .smart_contract;
+    const pc_name = pc.toTsString();
+    if (pc != .stateful_smart_contract) {
+        for (properties) |p| {
+            if (!p.readonly) {
+                required_fields.setDiag(
+                    "IR validation: Property '{s}' in {s} must be readonly. Use StatefulSmartContract for mutable state.",
+                    .{ p.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+        for (methods) |m| {
+            if (findKind(m.body, false)) |k| {
+                required_fields.setDiag(
+                    "IR validation: '{s}' in method '{s}' is only available in StatefulSmartContract; got {s}",
+                    .{ k, m.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+    }
+    if (pc != .unsafe_smart_contract) {
+        for (methods) |m| {
+            if (findKind(m.body, true) != null) {
+                required_fields.setDiag(
+                    "IR validation: 'raw_script' in method '{s}' is only available in contracts extending UnsafeSmartContract; got {s}",
+                    .{ m.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+    }
+    return pc;
+}
+
+/// N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
+/// only be written in the constructor, and an update_prop must name a declared
+/// property; otherwise a later load_prop reads the written value instead of
+/// the one baked into the locking script. Go's sentences.
+fn checkNoIllegalPropertyWrites(properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+    for (methods) |m| {
+        if (std.mem.eql(u8, m.name, "constructor")) continue;
+        try checkWrites(m.body, m.name, properties);
+    }
+}
+
+fn checkWrites(bindings: []const types.ANFBinding, method: []const u8, properties: []const types.ANFProperty) ParseError!void {
+    for (bindings) |b| {
+        switch (b.value) {
+            .update_prop => |v| {
+                const prop = for (properties) |p| {
+                    if (std.mem.eql(u8, p.name, v.name)) break p;
+                } else {
+                    required_fields.setDiag("IR validation: method '{s}' assigns to undeclared property '{s}'", .{ method, v.name });
+                    return ParseError.IllegalPropertyWrite;
+                };
+                if (prop.readonly) {
+                    required_fields.setDiag(
+                        "IR validation: cannot assign to readonly property '{s}' in method '{s}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script",
+                        .{ v.name, method },
+                    );
+                    return ParseError.IllegalPropertyWrite;
+                }
+            },
+            .@"if" => |v| {
+                try checkWrites(v.then, method, properties);
+                try checkWrites(v.@"else", method, properties);
+            },
+            .loop => |v| try checkWrites(v.body, method, properties),
+            else => {},
+        }
+    }
 }
 
 /// Walk a binding list — nested `if` arms and `loop` bodies included — and
@@ -451,20 +769,27 @@ fn parseMethod(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) !ty
     const name = try getString(method_obj, "name");
     const is_public = try getBool(method_obj, "isPublic");
     const params = try parseParams(allocator, method_obj);
+    // F-065 / F-088: optional on input (required_fields.zig validated the value).
+    const sighash_type: ?i32 = if (method_obj.get("sigHashType")) |v| switch (v) {
+        .integer => |n| @intCast(n),
+        else => null,
+    } else null;
 
     const body_val = method_obj.get("body") orelse return .{
         .name = try allocator.dupe(u8, name),
         .is_public = is_public,
         .params = params,
         .body = &.{},
+        .sighash_type = sighash_type,
     };
-    const bindings = try parseBindings(allocator, body_val.array, 0);
+    const bindings = try parseBindings(allocator, body_val.array, 0, 1);
 
     return .{
         .name = try allocator.dupe(u8, name),
         .is_public = is_public,
         .params = params,
         .body = bindings,
+        .sighash_type = sighash_type,
     };
 }
 
@@ -485,18 +810,24 @@ fn parseParams(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) ![]
 
 const BindingError = ParseError || std.mem.Allocator.Error || unknown_anf_kind.UnknownAnfKindError;
 
-fn parseBindings(allocator: std.mem.Allocator, arr: std.json.Array, depth: u32) BindingError![]types.ANFBinding {
+// `enclosing_loop_count` is the product of every loop count already entered
+// on the path from the method body down to `arr` (1 at the top). F-283 /
+// CL-GAP-164: the per-binding MAX_LOOP_COUNT check in parseLoop bounds a
+// single loop's own count but never the PRODUCT across nesting -- two loops
+// of 10,000 each, one inside the other, each pass that check independently
+// while the real unrolled work is 10,000 x 10,000 = 100,000,000.
+fn parseBindings(allocator: std.mem.Allocator, arr: std.json.Array, depth: u32, enclosing_loop_count: i64) BindingError![]types.ANFBinding {
     var result = try allocator.alloc(types.ANFBinding, arr.items.len);
     for (arr.items, 0..) |binding_val, i| {
-        result[i] = try parseBinding(allocator, binding_val.object, depth);
+        result[i] = try parseBinding(allocator, binding_val.object, depth, enclosing_loop_count);
     }
     return result;
 }
 
-fn parseBinding(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFBinding {
+fn parseBinding(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFBinding {
     const name = try getString(obj, "name");
     const value_json = obj.get("value") orelse return ParseError.MissingField;
-    const value = try parseANFValue(allocator, value_json.object, depth);
+    const value = try parseANFValue(allocator, value_json.object, depth, enclosing_loop_count);
 
     return .{
         .name = try allocator.dupe(u8, name),
@@ -533,7 +864,7 @@ const kind_map = std.StaticStringMap(KindTag).initComptime(.{
     .{ "raw_script", .raw_script },
 });
 
-fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     if (depth >= max_parse_depth) return ParseError.MaxRecursionDepthExceeded;
 
     const kind = try getString(obj, "kind");
@@ -555,8 +886,8 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
         .unary_op => try parseUnaryOp(allocator, obj),
         .call => try parseCall(allocator, obj),
         .method_call => try parseMethodCall(allocator, obj),
-        .@"if" => try parseIf(allocator, obj, depth),
-        .loop => try parseLoop(allocator, obj, depth),
+        .@"if" => try parseIf(allocator, obj, depth, enclosing_loop_count),
+        .loop => try parseLoop(allocator, obj, depth, enclosing_loop_count),
         .assert => try parseAssert(allocator, obj),
         .update_prop => try parseUpdateProp(allocator, obj),
         .get_state_script => .{ .get_state_script = {} },
@@ -718,11 +1049,20 @@ fn parseBinOp(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFV
     const left = try getString(obj, "left");
     const right = try getString(obj, "right");
 
-    // Optional result_type field
+    // Optional result_type field.
+    //
+    // F-357: a non-string, non-null value (e.g. `"result_type": 1`) used to
+    // fall into the same `else => null` arm as a genuinely absent field,
+    // silently discarding the "bytes" hint a byte-equality comparison
+    // depends on and lowering it as a numeric comparison instead -- a
+    // different script with no diagnostic. `null` still means "absent" (Go's
+    // encoding/json leaves a non-pointer string field at its zero value for
+    // a JSON null, which this loader treats as "no hint" the same way).
     const result_type: ?[]const u8 = if (obj.get("result_type")) |rt|
         switch (rt) {
             .string => |s| try allocator.dupe(u8, s),
-            else => null,
+            .null => null,
+            else => return ParseError.UnexpectedValueType,
         }
     else
         null;
@@ -767,13 +1107,13 @@ fn parseMethodCall(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types
     } };
 }
 
-fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     const cond = try getString(obj, "cond");
     const then_val = obj.get("then") orelse return ParseError.MissingField;
-    const then_bindings = try parseBindings(allocator, then_val.array, depth + 1);
+    const then_bindings = try parseBindings(allocator, then_val.array, depth + 1, enclosing_loop_count);
 
     const else_bindings: []types.ANFBinding = if (obj.get("else")) |else_val|
-        try parseBindings(allocator, else_val.array, depth + 1)
+        try parseBindings(allocator, else_val.array, depth + 1, enclosing_loop_count)
     else
         try allocator.alloc(types.ANFBinding, 0);
 
@@ -798,7 +1138,7 @@ fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) Bi
     return .{ .@"if" = if_expr };
 }
 
-fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
+fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32, enclosing_loop_count: i64) BindingError!types.ANFValue {
     const count_val = obj.get("count") orelse return ParseError.MissingField;
 
     // N-115: the unroll ceiling, checked BEFORE the narrowing cast.
@@ -837,9 +1177,19 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
         return ParseError.LoopCountExceedsMaximum;
     }
     const count: u32 = @intCast(raw_count);
+
+    // F-283 / CL-GAP-164: the product check. Reached only once the
+    // binding's own count is within [0, MAX_LOOP_COUNT] (the guard above
+    // already returned otherwise), so both operands are <= MAX_LOOP_COUNT
+    // (10_000) and the multiplication cannot overflow i64.
+    const total_loop_count: i64 = enclosing_loop_count * raw_count;
+    if (total_loop_count > types.MAX_LOOP_COUNT) {
+        return ParseError.LoopCountExceedsMaximum;
+    }
+
     const iter_var = try getString(obj, "iterVar");
     const body_val = obj.get("body") orelse return ParseError.MissingField;
-    const body_bindings = try parseBindings(allocator, body_val.array, depth + 1);
+    const body_bindings = try parseBindings(allocator, body_val.array, depth + 1, total_loop_count);
 
     // Issue #121: decode the iterator start value (a bare number, or a decimal
     // `Nn` string for oversize starts) and step direction. Older ANF payloads
@@ -888,10 +1238,20 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
         // that is the `else 0` on the `if (obj.get(...))` below, not here.
         else => return ParseError.InvalidLoopStart,
     } else 0;
+    // F-357: a wrong-typed `step` (a string, bool, object, array) used to
+    // fall into the same `else => 1` arm as a genuinely absent field,
+    // silently substituting the commonest step value with no diagnostic --
+    // `.float` is unreachable here in practice (floats are refused at the
+    // JSON-parse boundary, see `FloatNotAllowedInIR`), but is left as a
+    // direction-only read since it predates this fix and is not the defect.
+    // `null` still means "absent", matching Go (a JSON null into a
+    // non-pointer `int` field leaves it at the zero value, which this
+    // tier's own post-unmarshal default then turns into 1).
     const step: i8 = if (obj.get("step")) |v| switch (v) {
         .integer => |i| if (i < 0) @as(i8, -1) else 1,
         .float => |f| if (f < 0) @as(i8, -1) else 1,
-        else => 1,
+        .null => 1,
+        else => return ParseError.UnexpectedValueType,
     } else 1;
 
     const loop_node = try allocator.create(types.ANFLoop);
@@ -908,8 +1268,18 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
 
 fn parseAssert(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
     const val_ref = try getString(obj, "value");
+    // F-357: a wrong-typed `isAutoInjectedStateCheck` (e.g. the string
+    // `"true"`) used to satisfy neither arm of `v == .bool`, so the
+    // expression fell through to `false` -- the same silent-default shape as
+    // the other five fields this item closes. `null` still means "absent"
+    // (Go's encoding/json leaves a non-pointer `bool` field at its zero
+    // value, `false`, for a JSON null).
     const marker = if (obj.get("isAutoInjectedStateCheck")) |v|
-        v == .bool and v.bool
+        switch (v) {
+            .bool => |b| b,
+            .null => false,
+            else => return ParseError.UnexpectedValueType,
+        }
     else
         false;
 
@@ -933,11 +1303,22 @@ fn parseAddOutput(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const satoshis = try getString(obj, "satoshis");
     const state_values = try parseStringArray(allocator, obj, "stateValues");
 
-    // preimage field is present in JSON but may be empty string
+    // preimage field is present in JSON but may be empty string.
+    //
+    // F-357: a non-string, non-null value used to fall into the same
+    // `else => ""` arm as a genuinely absent/empty field. No lowerer in any
+    // tier currently emits a non-empty `add_output.preimage` (it is always
+    // written as `""`), but `--ir` accepts IR from outside the compiler, and
+    // the field's type (a reference to the binding holding the verified
+    // preimage, per types.zig) is still a `string | null`, never a number,
+    // bool, object or array. `null` still means "absent" (Go's
+    // encoding/json leaves a non-pointer string field at its zero value for
+    // a JSON null).
     const preimage: []const u8 = if (obj.get("preimage")) |p|
         switch (p) {
             .string => |s| try allocator.dupe(u8, s),
-            else => try allocator.dupe(u8, ""),
+            .null => try allocator.dupe(u8, ""),
+            else => return ParseError.UnexpectedValueType,
         }
     else
         try allocator.dupe(u8, "");
@@ -1031,7 +1412,7 @@ fn parseStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: 
 fn writeCanonicalProgram(writer: anytype, program: types.ANFProgram, depth: usize) !void {
     try writer.writeAll("{\n");
 
-    // Keys in alphabetical order: contractName, methods, properties
+    // Keys in alphabetical order: contractName, methods, parentClass, properties
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "contractName");
     try writer.writeAll(": ");
@@ -1043,6 +1424,17 @@ fn writeCanonicalProgram(writer: anytype, program: types.ANFProgram, depth: usiz
     try writer.writeAll(": ");
     try writeMethodsArray(writer, program.methods, depth + 1);
     try writer.writeAll(",\n");
+
+    // F-038: wire data, so `--emit-ir` -> `compile-ir` keeps the artifact's
+    // parentClass. Always known on the source path; absent only when an IR
+    // input lacked it.
+    if (program.parent_class) |pc| {
+        try writeIndent(writer, depth + 1);
+        try writeJsonString(writer, "parentClass");
+        try writer.writeAll(": ");
+        try writeJsonString(writer, pc.toTsString());
+        try writer.writeAll(",\n");
+    }
 
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "properties");
@@ -1074,7 +1466,7 @@ fn writeMethodsArray(writer: anytype, methods: []const types.ANFMethod, depth: u
 fn writeMethodObject(writer: anytype, method: types.ANFMethod, depth: usize) !void {
     try writer.writeAll("{\n");
 
-    // Sorted keys: body, isPublic, name, params
+    // Sorted keys: body, isPublic, name, params, sigHashType
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "body");
     try writer.writeAll(": ");
@@ -1101,6 +1493,17 @@ fn writeMethodObject(writer: anytype, method: types.ANFMethod, depth: usize) !vo
     try writeJsonString(writer, "params");
     try writer.writeAll(": ");
     try writeParamsArray(writer, method.params, depth + 1);
+
+    // F-065 / F-088: a non-default @sighash mode is wire data, so the ABI's
+    // sigHashType survives `--emit-ir` -> `compile-ir`. Omitted for the default.
+    if (method.sighash_type) |st| {
+        if (st != sighash_directive.SIGHASH_DEFAULT) {
+            try writer.writeAll(",\n");
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "sigHashType");
+            try writer.print(": {d}", .{st});
+        }
+    }
     try writer.writeByte('\n');
 
     try writeIndent(writer, depth);
@@ -2387,6 +2790,7 @@ test "parse if-else ANF IR" {
         \\            ]
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "check",
@@ -2404,7 +2808,7 @@ test "parse if-else ANF IR" {
     try std.testing.expectEqual(@as(usize, 1), program.methods.len);
 
     const method = program.methods[0];
-    try std.testing.expectEqual(@as(usize, 2), method.body.len);
+    try std.testing.expectEqual(@as(usize, 2 + 2), method.body.len); // + N-071 `_ok = true; assert(_ok)`
 
     // First binding: load_const 0
     switch (method.body[0].value) {
@@ -2472,6 +2876,7 @@ test "parse loop ANF IR" {
         \\            "kind": "loop"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "run",
@@ -2487,7 +2892,7 @@ test "parse loop ANF IR" {
 
     try std.testing.expectEqualStrings("Loop", program.contract_name);
     const method = program.methods[0];
-    try std.testing.expectEqual(@as(usize, 1), method.body.len);
+    try std.testing.expectEqual(@as(usize, 1 + 2), method.body.len); // + N-071 `_ok = true; assert(_ok)`
 
     switch (method.body[0].value) {
         .loop => |lp| {
@@ -2518,6 +2923,7 @@ test "parse unary_op ANF IR" {
         \\            "operand": "flag"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "test",
@@ -2592,6 +2998,7 @@ test "parse load_const variants" {
         \\            "value": "@this"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "test",
@@ -2658,6 +3065,9 @@ test "parse stateful contract with check_preimage and get_state_script" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "Counter",
@@ -2684,8 +3094,9 @@ test "parse stateful contract with check_preimage and get_state_script" {
         \\            "kind": "get_state_script"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "increment",
         \\      "params": [
         \\        {
@@ -2694,6 +3105,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
         \\        }
         \\      ]
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
         \\  "properties": [
         \\    {
@@ -2709,7 +3121,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
     defer program.deinit(allocator);
 
     const bindings = program.methods[0].body;
-    try std.testing.expectEqual(@as(usize, 3), bindings.len);
+    try std.testing.expectEqual(@as(usize, 3 + 2), bindings.len); // + N-071 `_ok = true; assert(_ok)`
 
     // check_preimage
     switch (bindings[0].value) {
@@ -2739,6 +3151,9 @@ test "parse add_output ANF IR" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "OutputTest",
@@ -2754,11 +3169,13 @@ test "parse add_output ANF IR" {
         \\            "stateValues": ["v1", "v2"]
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "spend",
         \\      "params": []
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
         \\  "properties": [
         \\    { "name": "a", "readonly": false, "type": "bigint" },
@@ -2780,6 +3197,170 @@ test "parse add_output ANF IR" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+// F-357: a wrong-typed `bin_op.result_type` used to be swallowed by the same
+// `else => null` arm as a genuinely absent field, silently discarding the
+// "bytes" hint and lowering the comparison as a numeric one instead of a
+// byte-equality one -- a different script, with no diagnostic. Proven
+// against a `byte-builtins`-shaped comparison rather than a stateful
+// scaffold's continuation check, because the latter's own `===` structural
+// check happens to reject the mutated program for an UNRELATED reason
+// (missing scaffolding) and would mask this defect.
+test "bin_op.result_type must be a string or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "ResultTypeTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {"name": "t0", "value": {"kind": "load_const", "value": 1}},
+        \\        {"name": "t1", "value": {"kind": "load_const", "value": 1}},
+        \\        {
+        \\          "name": "t2",
+        \\          "value": {
+        \\            "kind": "bin_op",
+        \\            "left": "t0",
+        \\            "op": "===",
+        \\            "result_type": 1,
+        \\            "right": "t1"
+        \\          }
+        \\        },
+        \\        {"name": "_ok_assert", "value": {"kind": "assert", "value": "t2"}}
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `assert.isAutoInjectedStateCheck` (e.g. the string
+// `"true"` instead of a JSON boolean) used to satisfy neither arm of the old
+// `v == .bool and v.bool` expression and silently fall through to `false`.
+test "assert.isAutoInjectedStateCheck must be a bool or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "AutoInjectedTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {"name": "t0", "value": {"kind": "load_const", "value": true}},
+        \\        {
+        \\          "name": "t1",
+        \\          "value": {
+        \\            "kind": "assert",
+        \\            "value": "t0",
+        \\            "isAutoInjectedStateCheck": "true"
+        \\          }
+        \\        }
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `loop.step` used to be swallowed by the same
+// `else => 1` arm as a genuinely absent field, silently substituting the
+// commonest step value with no diagnostic.
+test "loop.step must be an integer or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "LoopStepTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {
+        \\          "name": "t0",
+        \\          "value": {
+        \\            "kind": "loop",
+        \\            "count": 2,
+        \\            "iterVar": "i",
+        \\            "step": "abc",
+        \\            "body": [
+        \\              {"name": "t1", "value": {"kind": "load_const", "value": 0}}
+        \\            ]
+        \\          }
+        \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
+        \\      ],
+        \\      "isPublic": true,
+        \\      "name": "run",
+        \\      "params": []
+        \\    }
+        \\  ],
+        \\  "properties": []
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
+}
+
+// F-357: a wrong-typed `add_output.preimage` used to be swallowed by the
+// same `else => ""` arm as a genuinely absent/empty field. No lowerer in any
+// tier emits a non-empty value for this field today, but `--ir` takes IR
+// from outside the compiler and the field is typed `string | null`, never a
+// number.
+test "add_output.preimage must be a string or absent (F-357)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const json_source =
+        \\{
+        \\  "contractName": "OutputTest",
+        \\  "methods": [
+        \\    {
+        \\      "body": [
+        \\        {
+        \\          "name": "t0",
+        \\          "value": {
+        \\            "kind": "add_output",
+        \\            "preimage": 12345,
+        \\            "satoshis": "sat_ref",
+        \\            "stateValues": ["v1", "v2"]
+        \\          }
+        \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
+        \\      ],
+        \\      "isPublic": false,
+        \\      "name": "spend",
+        \\      "params": []
+        \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
+        \\  ],
+        \\  "properties": [
+        \\    { "name": "a", "readonly": false, "type": "bigint" },
+        \\    { "name": "b", "readonly": false, "type": "bigint" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.UnexpectedValueType, parseANFProgram(allocator, json_source));
 }
 
 test "parse method_call ANF IR" {
@@ -2809,6 +3390,7 @@ test "parse method_call ANF IR" {
         \\            "object": "t0"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "run",
@@ -2839,6 +3421,9 @@ test "parse update_prop ANF IR" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "PropTest",
@@ -2853,13 +3438,16 @@ test "parse update_prop ANF IR" {
         \\            "value": "t7"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "inc",
         \\      "params": []
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
-        \\  "properties": []
+        \\  "parentClass": "StatefulSmartContract",
+        \\  "properties": [{"name": "count", "type": "bigint", "readonly": false}]
         \\}
     ;
 

@@ -99,7 +99,7 @@ fn slh_params(key: &str) -> SLHCodegenParams {
         "SHA2_192s" => slh_mk(24, 63, 7, 14, 17),
         "SHA2_192f" => slh_mk(24, 66, 22, 8, 33),
         "SHA2_256s" => slh_mk(32, 64, 8, 14, 22),
-        "SHA2_256f" => slh_mk(32, 68, 17, 8, 35),
+        "SHA2_256f" => slh_mk(32, 68, 17, 9, 35),
         _ => panic!("Unknown SLH-DSA params: {}", key),
     }
 }
@@ -677,6 +677,8 @@ fn emit_slh_one_chain(
         emit(StackOp::If {
             then_ops: then_ops.clone(),
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -951,6 +953,8 @@ fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: u
         emit(StackOp::If {
             then_ops: then_branch,
             else_ops: else_branch,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         // psp(3) ta8(2) kp4(1) authPathRest(1) result(0) | alt: leafIdx
     }
@@ -1162,6 +1166,8 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
             emit(StackOp::If {
                 then_ops: then_branch,
                 else_ops: else_branch,
+                then_locs: Vec::new(),
+                else_locs: Vec::new(),
             });
             // psp(4) ta8(3) kp4(2) sigRest(1) result(0)
         }
@@ -1412,8 +1418,20 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     // treeAddr8 = treeIdx as 8-byte big-endian
     t.copy_to_top("treeIdx", "_ti8");
     t.raw_block(&["_ti8"], "treeAddr8", |e| {
-        e(StackOp::Push(PushValue::Int(BigInt::from(8))));
-        e(StackOp::Opcode("OP_NUM2BIN".into()));
+        if p.h - hp >= 64 {
+            // F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about
+            // half of all signatures it is >= 2^63 and its minimal script-number
+            // encoding needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in
+            // 9 bytes and drop the trailing (little-endian) 0x00 sign byte.
+            e(StackOp::Push(PushValue::Int(BigInt::from(9))));
+            e(StackOp::Opcode("OP_NUM2BIN".into()));
+            e(StackOp::Push(PushValue::Int(BigInt::from(8))));
+            e(StackOp::Opcode("OP_SPLIT".into()));
+            e(StackOp::Drop);
+        } else {
+            e(StackOp::Push(PushValue::Int(BigInt::from(8))));
+            e(StackOp::Opcode("OP_NUM2BIN".into()));
+        }
         for op in emit_reverse_n(8) {
             e(op);
         }
@@ -1596,6 +1614,40 @@ mod tests {
             assert!(p.n > 0);
             assert!(p.len > 0);
             assert_eq!(p.hp, p.h / p.d);
+        }
+    }
+
+    /// F-034: every parameter set must match FIPS 205 Table 2. SHA2_256f
+    /// shipped FORS height a=8 (48,736-byte signature) in all 7 tiers; FIPS 205
+    /// says a=9 (49,856 bytes), so the compiled verifier rejected every honest
+    /// 256f signature at its OP_SIZE gate. Proves the table and the emitted
+    /// exact-length gate; does NOT prove a real signature verifies (that is the
+    /// real-crypto witness conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+    #[test]
+    fn test_slh_params_match_fips205_table2() {
+        let fips205 = [
+            ("SHA2_128s", [16, 63, 7, 9, 12, 14], 7856i128),
+            ("SHA2_128f", [16, 66, 22, 3, 6, 33], 17088),
+            ("SHA2_192s", [24, 63, 7, 9, 14, 17], 16224),
+            ("SHA2_192f", [24, 66, 22, 3, 8, 33], 35664),
+            ("SHA2_256s", [32, 64, 8, 8, 14, 22], 29792),
+            ("SHA2_256f", [32, 68, 17, 4, 9, 35], 49856),
+        ];
+        for (key, dims, sig_len) in fips205 {
+            let p = slh_params(key);
+            assert_eq!([p.n, p.h, p.d, p.hp, p.a, p.k], dims, "{key} (n,h,d,h',a,k) vs FIPS 205 Table 2");
+            let mut ops = Vec::new();
+            emit_verify_slh_dsa(&mut |op| ops.push(op), key);
+            let i = ops
+                .iter()
+                .position(|o| matches!(o, StackOp::Opcode(c) if c == "OP_SIZE"))
+                .expect("OP_SIZE gate");
+            match &ops[i + 1] {
+                StackOp::Push(PushValue::Int(v)) => {
+                    assert_eq!(*v, BigInt::from(sig_len), "{key}: OP_SIZE gate vs FIPS signature size")
+                }
+                other => panic!("{key}: OP_SIZE gate followed by {other:?}"),
+            }
         }
     }
 

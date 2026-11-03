@@ -18,6 +18,7 @@ import runar.compiler.ir.stack.PushValue;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackOp;
+import runar.compiler.ir.stack.StackSourceLoc;
 import runar.compiler.ir.stack.SwapOp;
 
 class PeepholeTest {
@@ -56,16 +57,21 @@ class PeepholeTest {
         assertTrue(r.get(0) instanceof OpcodeOp o && "OP_1SUB".equals(o.code()));
     }
 
+    // F-001: x + 0 = x over integers, but OP_ADD / OP_SUB decode their operand
+    // as a CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // re-encode it minimally; a witness operand gets no other normalisation, so
+    // deleting the pair changes accept/reject and value. Proves the Java
+    // peephole keeps the pair; does not execute a script.
     @Test
-    void pushZeroAddIsIdentity() {
-        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ADD")));
-        assertEquals(0, r.size());
+    void pushZeroAddIsKept() {
+        List<StackOp> in = List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ADD"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
-    void pushZeroSubIsIdentity() {
-        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_SUB")));
-        assertEquals(0, r.size());
+    void pushZeroSubIsKept() {
+        List<StackOp> in = List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_SUB"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
@@ -82,10 +88,11 @@ class PeepholeTest {
         assertEquals(2, unknownProducer.size());
     }
 
+    // F-001: OP_NEGATE validates/normalises its operand too — the pair stays.
     @Test
-    void doubleOpNegateCancels() {
-        List<StackOp> r = Peephole.optimize(List.of(new OpcodeOp("OP_NEGATE"), new OpcodeOp("OP_NEGATE")));
-        assertEquals(0, r.size());
+    void doubleOpNegateIsKept() {
+        List<StackOp> in = List.of(new OpcodeOp("OP_NEGATE"), new OpcodeOp("OP_NEGATE"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
@@ -168,6 +175,55 @@ class PeepholeTest {
         List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(1)), new PickOp(1)));
         assertEquals(1, r.size());
         assertTrue(r.get(0) instanceof OverOp);
+    }
+
+    // F-392: the opcode-string form (OpcodeOp("OP_ROLL")/("OP_PICK")) folds
+    // the same as the typed RollOp/PickOp, at the three depths the typed
+    // rules cover. The depth comes from the preceding PushOp either way.
+    // Matches compilers/python/.../optimizer.py and compilers/ruby/.../
+    // optimizer.rb, which already accept both forms.
+
+    @Test
+    void push0OpcodeStringRollRemoved() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ROLL")));
+        assertEquals(0, r.size());
+    }
+
+    @Test
+    void push1OpcodeStringRollBecomesSwap() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(1)), new OpcodeOp("OP_ROLL")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof SwapOp);
+    }
+
+    @Test
+    void push2OpcodeStringRollBecomesRot() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(2)), new OpcodeOp("OP_ROLL")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof RotOp);
+    }
+
+    @Test
+    void push0OpcodeStringPickBecomesDup() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_PICK")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof DupOp);
+    }
+
+    @Test
+    void push1OpcodeStringPickBecomesOver() {
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(1)), new OpcodeOp("OP_PICK")));
+        assertEquals(1, r.size());
+        assertTrue(r.get(0) instanceof OverOp);
+    }
+
+    @Test
+    void push2OpcodeStringPickUntouched() {
+        // No typed rule exists at depth 2 for Pick either -- this item only
+        // teaches existing rules a second input representation, it does not
+        // add new depths.
+        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(2)), new OpcodeOp("OP_PICK")));
+        assertEquals(2, r.size());
     }
 
     @Test
@@ -274,6 +330,33 @@ class PeepholeTest {
         // Peephole should have killed the SWAP/SWAP and merged CHECKSIG+VERIFY.
         assertEquals(1, out.thenBranch().size(), "then-branch should reduce to a single op");
         assertTrue(out.thenBranch().get(0) instanceof OpcodeOp o && "OP_CHECKSIGVERIFY".equals(o.code()));
+    }
+
+    /**
+     * N-158. optimizeNestedIf rebuilt every IfOp with the two-argument
+     * constructor, which drops the op's sourceLoc. Emit reads that loc to map
+     * the OP_IF opcode, so every if/else lost its OP_IF mapping (if-else:
+     * opcode 11). The TS peephole keeps it (F-224), and so does Go (F-179).
+     *
+     * Proves: the rebuilt IfOp carries the original sourceLoc, with and
+     * without an else branch, and the branches are still optimised.
+     * Does not prove: anything about where the loc came from upstream
+     * (StackLower stamps it); the end-to-end map is pinned by
+     * N158IfElseSourceMapTest.
+     */
+    @Test
+    void nestedIfRebuildKeepsSourceLoc() {
+        StackSourceLoc loc = new StackSourceLoc("C.runar.java", 27, 8);
+
+        List<StackOp> thenB = List.of(new SwapOp(), new SwapOp(), new OpcodeOp("OP_ADD"));
+        List<StackOp> elseB = List.of(new OpcodeOp("OP_SUB"));
+        IfOp withElse = (IfOp) Peephole.optimize(List.of(new IfOp(thenB, elseB, loc))).get(0);
+        assertEquals(loc, withElse.sourceLoc(), "if/else rebuild must keep the IfOp sourceLoc");
+        assertEquals(1, withElse.thenBranch().size(), "then-branch is still optimised");
+
+        IfOp thenOnly = (IfOp) Peephole.optimize(List.of(new IfOp(thenB, null, loc))).get(0);
+        assertEquals(loc, thenOnly.sourceLoc(), "then-only rebuild must keep the IfOp sourceLoc");
+        assertEquals(null, thenOnly.elseBranch());
     }
 
     // ---- End-to-end: P2PKH reduces to SWAP-less form ----

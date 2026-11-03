@@ -54,11 +54,12 @@ describe('TicTacToe', () => {
     const playerO = await createFundedWallet(provider);
 
     const contract = new RunarContract(artifact, [playerX.pubKeyHex, 5000n]);
-    await contract.deploy(provider, playerX.signer, {});
+    await contract.deploy(provider, playerX.signer, { satoshis: 5000 });
 
     // join(opponentPK, sig) — playerO signs, passing their pubkey
+    // N-027: the join must add exactly the 5000 bet to the pot.
     const { txid: joinTxid } = await contract.call(
-      'join', [playerO.pubKeyHex, null], provider, playerO.signer,
+      'join', [playerO.pubKeyHex, null], provider, playerO.signer, { satoshis: 10000 },
     );
     expect(joinTxid).toBeTruthy();
     expect(joinTxid.length).toBe(64);
@@ -76,10 +77,10 @@ describe('TicTacToe', () => {
     const playerO = await createFundedWallet(provider);
 
     const contract = new RunarContract(artifact, [playerX.pubKeyHex, 5000n]);
-    await contract.deploy(provider, playerX.signer, {});
+    await contract.deploy(provider, playerX.signer, { satoshis: 5000 });
 
     // Player O joins
-    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer);
+    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer, { satoshis: 10000 }); // N-027: pays the bet
 
     // Player X moves to position 4 (center) — turn=1 means it's X's turn
     // DEBUG: try manual newState to isolate the issue
@@ -149,10 +150,10 @@ describe('TicTacToe', () => {
     const playerO = await createFundedWallet(provider);
 
     const contract = new RunarContract(artifact, [playerX.pubKeyHex, 5000n]);
-    await contract.deploy(provider, playerX.signer, {});
+    await contract.deploy(provider, playerX.signer, { satoshis: 5000 });
 
     // Player O joins — turn=1 (X's turn)
-    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer);
+    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer, { satoshis: 10000 }); // N-027: pays the bet
     expect(contract.state.turn).toBe(1n);
 
     // Player O tries to move when it's X's turn
@@ -171,16 +172,17 @@ describe('TicTacToe', () => {
     const playerO = await createFundedWallet(provider);
 
     const contract = new RunarContract(artifact, [playerX.pubKeyHex, 5000n]);
-    await contract.deploy(provider, playerX.signer, {});
+    await contract.deploy(provider, playerX.signer, { satoshis: 5000 });
 
     // Player O joins — status becomes 1
-    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer);
+    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer, { satoshis: 10000 }); // N-027: pays the bet
     expect(contract.state.status).toBe(1n);
 
     // Second join attempt — assert(status == 0) fails on-chain
     const anotherPlayer = await createFundedWallet(provider);
     await expect(
-      contract.call('join', [anotherPlayer.pubKeyHex, null], provider, anotherPlayer.signer),
+      // Paid (N-027), so only the status guard can reject it.
+      contract.call('join', [anotherPlayer.pubKeyHex, null], provider, anotherPlayer.signer, { satoshis: 15000 }),
     ).rejects.toThrow();
   });
 });

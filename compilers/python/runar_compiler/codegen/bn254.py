@@ -604,6 +604,38 @@ def _bn254_g1_infinity_flag(t: BN254Tracker) -> None:
     t.raw_block(["_xeq", "_cond"], "_notinf", _notinf_fn)
 
 
+def _bn254_g1_omega_collision_verify(t: BN254Tracker) -> None:
+    """F-091: abort when py + qy == 0 mod p while px != qx.
+
+    Reads px/py/qx/qy WITHOUT consuming them. That input is not P == -Q: it is
+    the omega-partner pair Q = (w*px, -py) or (w^2*px, -py), w a primitive cube
+    root of unity. The unified slope is 0/0, Fermat gives inv(0) = 0, and
+    _bn254_g1_affine_add returns (-(px+qx), -py) -- ON the curve and NOT
+    P + Q, so assert(bn254G1OnCurve(r)) cannot catch it. Fail closed instead.
+
+    The condition is (py + qy mod p != 0) OR (px == qx), so general addition,
+    doubling, P == -Q (masked to O afterwards) and all-zero operands keep their
+    answers. Builtin entry point only: the Groth16 MSM path shares
+    _bn254_g1_affine_add and keeps its bytes.
+
+    Byte-identical to `bn254G1OmegaCollisionVerify` in
+    compilers/go/codegen/bn254.go.
+    """
+    t.copy_to_top("px", "_om_px")
+    t.copy_to_top("qx", "_om_qx")
+    t.raw_block(["_om_px", "_om_qx"], "_om_xeq",
+                lambda e: e(_make_stack_op(op="opcode", code="OP_NUMEQUAL")))
+    t.copy_to_top("py", "_om_py")
+    t.copy_to_top("qy", "_om_qy")
+    _bn254_field_add(t, "_om_py", "_om_qy", "_om_den")
+
+    def _or_verify(e: Callable) -> None:
+        e(_make_stack_op(op="opcode", code="OP_BOOLOR"))
+        e(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+    t.raw_block(["_om_xeq", "_om_den"], "", _or_verify)
+
+
 def _bn254_g1_mask_infinity(t: BN254Tracker) -> None:
     """Zero rx and ry when `_notinf` is 0, consuming it.
 
@@ -630,10 +662,12 @@ def _bn254_g1_affine_add(t: BN254Tracker) -> None:
     Uses the unified slope formula
         s = (px^2 + px*qx + qx^2) / (py + qy)
     which handles both P != Q and the doubling case P == Q on y^2 = x^3 + b.
-    The remaining zero-denominator input (py + qy == 0) is handled by the
-    caller: emit_bn254_g1_add masks P == -Q to the all-zero point at infinity
-    (see _bn254_g1_infinity_flag); the Groth16 MSM path shares this helper
-    unmasked and stays fail-closed.
+    Every zero-denominator input (py + qy == 0) still fails here: P == -Q, and
+    the omega-partner pairs Q = (w*px, -py), (w^2*px, -py) with px != qx, where
+    the slope is 0/0 and the result is a wrong but ON-CURVE point (F-091).
+    emit_bn254_g1_add handles both in the builtin (infinity mask, omega abort);
+    the Groth16 MSM path shares this helper unguarded and its bytes must not
+    move.
 
     Expects px, py, qx, qy on tracker. Produces rx, ry. Consumes all four
     inputs.
@@ -964,6 +998,29 @@ def _bn254_g1_negate(t: BN254Tracker, point_name: str, result_name: str) -> None
 # Public emit functions -- entry points called from stack.py
 # ===========================================================================
 
+def _bn254_emit_field_canon_verify(t: BN254Tracker, *names: str) -> None:
+    """F-196 -- every operand of the five public BN254 scalar-field entry points
+    must BE a field element, aborting form.
+
+    Port of Go's bn254EmitFieldCanonVerify (the R-119 gate for this field):
+    before it, bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD
+    _bn254_field_mod_positive, and p was accepted as a second spelling of 0.
+    Emitted before push_prime_cache.
+    """
+    for n in names:
+        t.copy_to_top(n, "_bn_fcv")
+        t.push_int("_bn_fcv_lo", 0)
+        _bn254_push_field_p(t, "_bn_fcv_p")
+        t.raw_block(
+            ["_bn_fcv", "_bn_fcv_lo", "_bn_fcv_p"],
+            "",
+            lambda e: (
+                e(_make_stack_op(op="opcode", code="OP_WITHIN")),
+                e(_make_stack_op(op="opcode", code="OP_VERIFY")),
+            ),
+        )
+
+
 def emit_bn254_field_add(emit: Callable[["StackOp"], None]) -> None:
     """BN254 field addition.
 
@@ -971,6 +1028,7 @@ def emit_bn254_field_add(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a + b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_add(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -983,6 +1041,7 @@ def emit_bn254_field_sub(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a - b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_sub(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -995,6 +1054,7 @@ def emit_bn254_field_mul(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a * b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_mul(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -1007,6 +1067,7 @@ def emit_bn254_field_inv(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., a^(p-2) mod p]
     """
     t = BN254Tracker(["a"], emit)
+    _bn254_emit_field_canon_verify(t, "a")
     t.push_prime_cache()
     _bn254_field_inv(t, "a", "result")
     t.pop_prime_cache()
@@ -1019,6 +1080,7 @@ def emit_bn254_field_neg(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (p - a) mod p]
     """
     t = BN254Tracker(["a"], emit)
+    _bn254_emit_field_canon_verify(t, "a")
     t.push_prime_cache()
     _bn254_field_neg(t, "a", "result")
     t.pop_prime_cache()
@@ -1098,6 +1160,8 @@ def emit_bn254_g1_add(emit: Callable[["StackOp"], None]) -> None:
     # R-141: both points must be canonical before anything consumes them.
     _bn254_emit_coord_canon_verify(t, "px", "py")
     _bn254_emit_coord_canon_verify(t, "qx", "qy")
+    # F-091: the omega-partner 0/0 slope fails closed.
+    _bn254_g1_omega_collision_verify(t)
     # The flag must be computed BEFORE the add: _bn254_g1_affine_add consumes
     # px/py/qx/qy.
     _bn254_g1_infinity_flag(t)

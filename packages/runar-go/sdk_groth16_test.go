@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	sdkscript "github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
+
 	"github.com/icellan/runar/packages/runar-go/bn254witness"
 )
 
@@ -281,5 +284,184 @@ func TestGroth16WASDK_CallWithWitness_EndToEndMock(t *testing.T) {
 	}
 	if g.CurrentUTXO() != nil {
 		t.Errorf("CurrentUTXO should be nil after successful spend")
+	}
+}
+
+// TestGroth16WASDK_CallWithWitness_OwnerSignedSpendCannotBeReplayed is the
+// SDK half of F-233.
+//
+// The UTXO is locked by `<ownerPubKey> OP_CHECKSIGVERIFY` — exactly the owner
+// binding CompileGroth16WA now prepends to the verifier (here with no proof
+// check behind it, so the test isolates the signature half). The spend is
+// broadcast through a VALIDATING MockProvider, which runs every known input
+// through the go-sdk interpreter with full transaction context, so
+// OP_CHECKSIG verifies a real BIP-143 signature.
+//
+// Proves: CallWithWitness signs the spend with the supplied signer (the
+// owner's spend is ACCEPTED), and an observer who copies that broadcast
+// transaction's unlocking script into a transaction paying themselves is
+// REJECTED by the same interpreter.
+//
+// Does not prove: that the real ~700 KB verifier accepts the proof (see
+// compilers/go/compiler/groth16_wa_replay_test.go, which runs the compiled
+// artifact), or anything about regtest acceptance.
+func TestGroth16WASDK_CallWithWitness_OwnerSignedSpendCannotBeReplayed(t *testing.T) {
+	owner, err := NewLocalSigner("0000000000000000000000000000000000000000000000000000000000000003")
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	ownerPub, err := owner.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	lock := "21" + ownerPub + "ad" // <ownerPubKey> OP_CHECKSIGVERIFY
+	newUtxo := func() *UTXO {
+		return &UTXO{Txid: strings.Repeat("cc", 32), OutputIndex: 0, Satoshis: 50_000, Script: lock}
+	}
+
+	provider := NewMockProvider("testnet")
+	provider.AddContractUtxo("groth16-owner-bound", newUtxo())
+
+	g := NewGroth16WAContract(buildFakeGroth16WAArtifact())
+	g.SetCurrentUTXO(newUtxo())
+
+	ownerDest := "76a914" + strings.Repeat("11", 20) + "88ac"
+	if _, _, err := g.CallWithWitness(provider, owner, buildFakeWitness(), "", ownerDest); err != nil {
+		t.Fatalf("the owner's own spend was refused by the validating MockProvider: %v", err)
+	}
+	broadcast := provider.GetBroadcastedTxs()
+	if len(broadcast) != 1 {
+		t.Fatalf("expected exactly 1 broadcast, got %d", len(broadcast))
+	}
+
+	// The observer's replay: same input, same unlocking bytes, new payee.
+	replay, err := transaction.NewTransactionFromHex(broadcast[0])
+	if err != nil {
+		t.Fatalf("parse broadcast tx: %v", err)
+	}
+	attackerScript, err := sdkscript.NewFromHex("76a914" + strings.Repeat("ee", 20) + "88ac")
+	if err != nil {
+		t.Fatalf("attacker script: %v", err)
+	}
+	replay.Outputs[0].LockingScript = attackerScript
+
+	// A fresh provider that knows the same (still-unspent from its point of
+	// view) outpoint, so the only thing that can reject the replay is the
+	// script itself — not double-spend bookkeeping.
+	observerView := NewMockProvider("testnet")
+	observerView.AddContractUtxo("groth16-owner-bound", newUtxo())
+	_, err = observerView.Broadcast(replay)
+	if err == nil {
+		t.Fatal("REPLAY ACCEPTED: the observed unlocking script, re-attached to a transaction paying the attacker, passed the interpreter")
+	}
+	if !strings.Contains(err.Error(), "REJECTED by the go-sdk interpreter") {
+		t.Fatalf("replay refused for an unexpected reason (want a script rejection): %v", err)
+	}
+}
+
+// buildOwnerBoundGroth16WAArtifact mirrors the shape CompileGroth16WA emits
+// since F-233 — one PubKey constructor slot at byte 0 followed by
+// OP_CHECKSIGVERIFY — with the ~700 KB verifier body left out.
+func buildOwnerBoundGroth16WAArtifact() *RunarArtifact {
+	art := buildFakeGroth16WAArtifact()
+	art.Script = "00ad" // <ownerPubKey placeholder> OP_CHECKSIGVERIFY
+	art.ABI.Constructor.Params = []ABIParam{{Name: "ownerPubKey", Type: "PubKey"}}
+	art.ConstructorSlots = []ConstructorSlot{{ParamIndex: 0, ByteOffset: 0}}
+	return art
+}
+
+// TestGroth16WASDK_Deploy_RefusesWithoutAValidOwner proves Deploy fails
+// closed — before touching the provider — when the owner key is missing or
+// malformed, or when the artifact predates F-233 and has no owner slot (its
+// output would be spendable by any observer of a valid witness). It does not
+// prove anything about the spend path.
+func TestGroth16WASDK_Deploy_RefusesWithoutAValidOwner(t *testing.T) {
+	signer := NewMockSigner("", "")
+	provider := NewAlwaysAckMockProvider("mocknet")
+	pub, _ := signer.GetPublicKey()
+
+	cases := []struct {
+		name     string
+		artifact *RunarArtifact
+		owner    string
+		wantErr  string
+	}{
+		{"missing owner", buildOwnerBoundGroth16WAArtifact(), "", "owner public key is required"},
+		{"not hex", buildOwnerBoundGroth16WAArtifact(), "zz" + strings.Repeat("00", 32), "not hex"},
+		{"uncompressed length", buildOwnerBoundGroth16WAArtifact(), "04" + strings.Repeat("11", 64), "33-byte compressed"},
+		{"off-curve x (x = 0: 7 is not a square mod p)", buildOwnerBoundGroth16WAArtifact(), "02" + strings.Repeat("00", 32), "not a valid secp256k1 point"},
+		{"non-canonical x >= p", buildOwnerBoundGroth16WAArtifact(), "02" + strings.Repeat("ff", 32), "canonical"},
+		{"owner param without a constructor slot", func() *RunarArtifact {
+			a := buildOwnerBoundGroth16WAArtifact()
+			a.ConstructorSlots = nil // would deploy OP_0 OP_CHECKSIGVERIFY: unspendable
+			return a
+		}(), pub, "no owner-pubkey constructor slot"},
+		{"legacy unbound artifact", buildFakeGroth16WAArtifact(), pub, "no owner-pubkey constructor slot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGroth16WAContract(tc.artifact)
+			_, _, err := g.Deploy(provider, signer, tc.owner, DeployOptions{Satoshis: 10_000})
+			if err == nil {
+				t.Fatalf("Deploy accepted owner %q", tc.owner)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Deploy error = %v, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+	if n := len(provider.GetBroadcastedTxs()); n != 0 {
+		t.Fatalf("a refused Deploy broadcast %d transaction(s)", n)
+	}
+}
+
+// TestGroth16WASDK_DeployThenCall_BindsTheDeployTimeOwner drives the real
+// Deploy → CallWithWitness lifecycle through a validating MockProvider.
+//
+// Proves: Deploy splices the owner key into the artifact's slot (the deployed
+// output is `<ownerPub> OP_CHECKSIGVERIFY`), and the spend CallWithWitness
+// builds is accepted by the go-sdk interpreter only because it carries that
+// owner's signature — a spend signed by a different key is refused.
+// Does not prove: proof verification (no verifier body in this artifact).
+func TestGroth16WASDK_DeployThenCall_BindsTheDeployTimeOwner(t *testing.T) {
+	owner, err := NewLocalSigner("0000000000000000000000000000000000000000000000000000000000000003")
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	stranger, err := NewLocalSigner("0000000000000000000000000000000000000000000000000000000000000005")
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	ownerPub, _ := owner.GetPublicKey()
+	ownerAddr, _ := owner.GetAddress()
+
+	deployAndSpend := func(spender Signer) error {
+		provider := NewMockProvider("testnet")
+		provider.AddUtxo(ownerAddr, UTXO{
+			Txid:        strings.Repeat("aa", 32),
+			OutputIndex: 0,
+			Satoshis:    500_000,
+			Script:      BuildP2PKHScript(ownerAddr),
+		})
+		g := NewGroth16WAContract(buildOwnerBoundGroth16WAArtifact())
+		if _, _, err := g.Deploy(provider, owner, ownerPub, DeployOptions{Satoshis: 50_000}); err != nil {
+			t.Fatalf("Deploy: %v", err)
+		}
+		if got, want := g.CurrentUTXO().Script, "21"+ownerPub+"ad"; got != want {
+			t.Fatalf("deployed locking script = %s, want %s", got, want)
+		}
+		_, _, err := g.CallWithWitness(provider, spender, buildFakeWitness(), ownerAddr, "")
+		return err
+	}
+
+	if err := deployAndSpend(owner); err != nil {
+		t.Fatalf("owner-signed spend refused: %v", err)
+	}
+	err = deployAndSpend(stranger)
+	if err == nil {
+		t.Fatal("a spend signed by a key other than the deploy-time owner was accepted")
+	}
+	if !strings.Contains(err.Error(), "REJECTED by the go-sdk interpreter") {
+		t.Fatalf("stranger's spend refused for an unexpected reason (want a script rejection): %v", err)
 	}
 }

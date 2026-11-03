@@ -33,7 +33,7 @@ function trackedMarkdown(): string[] {
     .split('\n')
     .filter(Boolean)
     // This remediation's own working notes quote the finding; they are not docs.
-    .filter((f) => !/^RECONCILED-|^REMEDIATION-/.test(f));
+    .filter((f) => !/^RECONCILED-|^REMEDIATION-|^COMBINED-findings/.test(f));
 }
 
 /** Lines mentioning a hosted host, with their file and line number. */

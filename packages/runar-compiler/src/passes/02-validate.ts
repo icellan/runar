@@ -16,6 +16,8 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { validateSighashUsage } from './sighash-validate.js';
+import { isReservedSourceName } from './reserved-names.js';
+import { InputLimits } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -43,7 +45,13 @@ export function validate(contract: ContractNode): ValidationResult {
   validateProperties(ctx);
   validateConstructor(ctx);
   validateMethods(ctx);
-  checkNoRecursion(ctx);
+  const callDepthExceeded = checkNoRecursion(ctx);
+  checkReservedNames(ctx);
+  // N-180: the Rabin-provenance and sighash passes walk the private-method
+  // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+  // refuses, so stop here.
+  if (callDepthExceeded) return { errors, warnings };
+  checkRabinPubKeyProvenance(ctx);
 
   // Issue #123: reject preimage-field reads / output bindings that are unsound
   // under a method's declared @sighash mode (security core). This pass emits
@@ -55,6 +63,49 @@ export function validate(contract: ContractNode): ValidationResult {
   }
 
   return { errors, warnings };
+}
+
+/**
+ * N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+ * pass mints (see `reserved-names.ts` for the families). Checks properties,
+ * method names, constructor and method parameters, locals and loop variables.
+ * A stateful `txPreimage` PROPERTY keeps its older, dedicated diagnostic.
+ */
+function checkReservedNames(ctx: ValidationContext): void {
+  const stateful = ctx.contract.parentClass === 'StatefulSmartContract';
+  const check = (name: string, loc: SourceLocation): void => {
+    if (isReservedSourceName(name, stateful)) {
+      // Same sentence as `reservedNameMessage` (the --ir loader's), spelled out
+      // here so the diagnostic-coverage extractor can read the template.
+      ctx.errors.push(makeDiagnostic(
+        `'${name}' is reserved for compiler-generated names and cannot be used as an identifier`,
+        'error',
+        loc,
+      ));
+    }
+  };
+  const walk = (stmts: readonly Statement[]): void => {
+    for (const s of stmts) {
+      if (s.kind === 'variable_decl') check(s.name, s.sourceLocation);
+      else if (s.kind === 'if_statement') {
+        walk(s.then);
+        if (s.else) walk(s.else);
+      } else if (s.kind === 'for_statement') {
+        check(s.init.name, s.init.sourceLocation);
+        walk(s.body);
+      }
+    }
+  };
+
+  for (const prop of ctx.contract.properties) {
+    if (stateful && prop.name === 'txPreimage') continue;
+    check(prop.name, prop.sourceLocation);
+  }
+  for (const method of [ctx.contract.constructor, ...ctx.contract.methods]) {
+    if (method.name !== 'constructor') check(method.name, method.sourceLocation);
+    for (const p of method.params) check(p.name, method.sourceLocation);
+    walk(method.body);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +161,19 @@ function validateProperties(ctx: ValidationContext): void {
           prop.sourceLocation,
         ));
       }
+
+      // F-265: the shape checks above only ask "is this a literal node at
+      // all?" -- they never validate a ByteStringLiteral's HEX FORMAT. That
+      // check lives in `validateExpression`'s `bytestring_literal` arm,
+      // which a method body reaches via the statement walk but a property
+      // INITIALIZER never did: it is read directly off `prop.initializer`
+      // and is not part of that walk. A malformed hex literal here (e.g.
+      // `"zzz" as ByteString`, or `toByteString('zzz')`) used to sail
+      // through this pass and only surface two passes later as an opaque
+      // stack-lowering error with no source location -- `validateExpression`
+      // recurses into array elements and `toByteString(...)` args, so this
+      // also covers FixedArray initializer elements.
+      validateExpression(prop.initializer, ctx);
     }
   }
 
@@ -178,7 +242,7 @@ function isLiteralExpression(expr: Expression): boolean {
  * production; it stays an ordinary identity-cast call and remains a
  * non-literal initializer.
  */
-function isToByteStringLiteral(expr: Expression): boolean {
+export function isToByteStringLiteral(expr: Expression): boolean {
   return expr.kind === 'call_expr'
     && expr.callee.kind === 'identifier'
     && expr.callee.name === 'toByteString'
@@ -312,6 +376,17 @@ function validateConstructor(ctx: ValidationContext): void {
     if (param.type.kind === 'custom_type' && param.type.name === 'unknown') {
       ctx.errors.push(makeDiagnostic(
         `Constructor parameter '${param.name}' must have a type annotation`,
+        'error',
+        ctor.sourceLocation,
+      ));
+    }
+    // N-325: a named type that is not a Rúnar type is refused, not carried
+    // through as an opaque name nothing downstream compares. `unknown` is the
+    // missing-annotation case above; `StatefulContext` is the explicit context
+    // parameter of the Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+    if (param.type.kind === 'custom_type' && param.type.name !== 'unknown' && param.type.name !== 'StatefulContext') {
+      ctx.errors.push(makeDiagnostic(
+        `Type '${param.type.name}' of parameter '${param.name}' in constructor is not a Rúnar type`,
         'error',
         ctor.sourceLocation,
       ));
@@ -526,6 +601,14 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
     if (param.type.kind === 'custom_type' && param.type.name === 'unknown') {
       ctx.errors.push(makeDiagnostic(
         `Parameter '${param.name}' in method '${method.name}' must have a type annotation`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
+    // N-325: see the constructor check above.
+    if (param.type.kind === 'custom_type' && param.type.name !== 'unknown' && param.type.name !== 'StatefulContext') {
+      ctx.errors.push(makeDiagnostic(
+        `Type '${param.type.name}' of parameter '${param.name}' in method '${method.name}' is not a Rúnar type`,
         'error',
         method.sourceLocation,
       ));
@@ -850,6 +933,7 @@ function validateStatement(stmt: Statement, ctx: ValidationContext): void {
       break;
 
     case 'assignment':
+      validateIndexAssignmentTarget(stmt, ctx);
       validateExpression(stmt.target, ctx);
       validateExpression(stmt.value, ctx);
       break;
@@ -875,6 +959,35 @@ function validateStatement(stmt: Statement, ctx: ValidationContext): void {
         validateExpression(stmt.value, ctx);
       }
       break;
+  }
+}
+
+/**
+ * N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+ * property is index-writable. Any other index target (a ByteString property,
+ * a local, a parameter, a member-chained root) is left alone by
+ * 03b-expand-fixed-arrays and ANF lowering lowers it as a READ, dropping the
+ * write -- a deployable script whose state never changes. Reject it here with
+ * a location instead.
+ */
+function validateIndexAssignmentTarget(
+  stmt: Extract<Statement, { kind: 'assignment' }>,
+  ctx: ValidationContext,
+): void {
+  if (stmt.target.kind !== 'index_access') return;
+  let root: Expression = stmt.target;
+  while (root.kind === 'index_access') root = root.object;
+  const rootProp = root.kind === 'property_access' ? root.property : undefined;
+  const isFixedArrayProp = ctx.contract.properties.some(
+    (p) => p.name === rootProp && p.type.kind === 'fixed_array_type',
+  );
+  if (!isFixedArrayProp) {
+    ctx.errors.push(makeDiagnostic(
+      'index assignment is only supported on FixedArray contract properties; ' +
+        'the target here is not a FixedArray property',
+      'error',
+      stmt.sourceLocation,
+    ));
   }
 }
 
@@ -1083,33 +1196,45 @@ function findOutputIntrinsic(
   return undefined;
 }
 
+/**
+ * First output intrinsic reachable from `expr`, following calls to private
+ * methods; the site is reported at `location`.
+ */
+function findOutputIntrinsicInExpr(
+  expr: Expression,
+  ctx: ValidationContext,
+  seen: Set<string>,
+  location: SourceLocation | undefined,
+): OutputIntrinsicSite | undefined {
+  const intrinsic = outputIntrinsicCallName(expr);
+  if (intrinsic !== undefined) {
+    return { intrinsic, location };
+  }
+  const helper = privateMethodCallName(expr, ctx);
+  if (helper !== undefined && !seen.has(helper)) {
+    seen.add(helper);
+    const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
+    const nested = findOutputIntrinsic(body, ctx, seen);
+    if (nested) {
+      return { intrinsic: nested.intrinsic, via: helper, location };
+    }
+  }
+  // Recurse into sub-expressions: an intrinsic can sit inside an argument
+  // list or an operand, not only as a bare expression statement.
+  for (const child of subExpressions(expr)) {
+    const found = findOutputIntrinsicInExpr(child, ctx, seen, location);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 function findOutputIntrinsicInStatement(
   stmt: Statement,
   ctx: ValidationContext,
   seen: Set<string>,
 ): OutputIntrinsicSite | undefined {
-  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined => {
-    const intrinsic = outputIntrinsicCallName(expr);
-    if (intrinsic !== undefined) {
-      return { intrinsic, location: stmt.sourceLocation };
-    }
-    const helper = privateMethodCallName(expr, ctx);
-    if (helper !== undefined && !seen.has(helper)) {
-      seen.add(helper);
-      const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
-      const nested = findOutputIntrinsic(body, ctx, seen);
-      if (nested) {
-        return { intrinsic: nested.intrinsic, via: helper, location: stmt.sourceLocation };
-      }
-    }
-    // Recurse into sub-expressions: an intrinsic can sit inside an argument
-    // list or an operand, not only as a bare expression statement.
-    for (const child of subExpressions(expr)) {
-      const found = fromExpr(child);
-      if (found) return found;
-    }
-    return undefined;
-  };
+  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined =>
+    findOutputIntrinsicInExpr(expr, ctx, seen, stmt.sourceLocation);
 
   switch (stmt.kind) {
     case 'expression_statement':
@@ -1125,8 +1250,14 @@ function findOutputIntrinsicInStatement(
       if (inCond) return inCond;
       return findOutputIntrinsic([...stmt.then, ...(stmt.else ?? [])], ctx, seen);
     }
-    case 'for_statement':
+    case 'for_statement': {
+      const inHeader =
+        findOutputIntrinsicInStatement(stmt.init, ctx, seen) ??
+        fromExpr(stmt.condition) ??
+        findOutputIntrinsicInStatement(stmt.update, ctx, seen);
+      if (inHeader) return inHeader;
       return findOutputIntrinsic(stmt.body, ctx, seen);
+    }
     default:
       return undefined;
   }
@@ -1145,6 +1276,8 @@ function subExpressions(expr: Expression): Expression[] {
       return [expr.condition, expr.consequent, expr.alternate];
     case 'index_access':
       return [expr.object, expr.index];
+    case 'array_literal':
+      return [...expr.elements];
     default:
       return [];
   }
@@ -1156,16 +1289,97 @@ function validateNoOutputIntrinsicInLoop(
 ): void {
   const site = findOutputIntrinsic(stmt.body, ctx, new Set<string>());
   if (site === undefined) return;
-  const via = site.via !== undefined ? ` (reached through private method '${site.via}')` : '';
-  ctx.errors.push(makeDiagnostic(
-    `Output intrinsic '${site.intrinsic}'${via} cannot be called inside a loop body. `
+  ctx.errors.push(loopOutputIntrinsicDiagnostic(
+    site.intrinsic,
+    site.via,
+    site.location ?? stmt.sourceLocation,
+  ));
+}
+
+/**
+ * The R-127 diagnostic, shared verbatim with the other six tiers and with the
+ * pass-4 backstop in `04-anf-lower.ts` (N-006). The message stays an inline
+ * template at this `makeDiagnostic` call so the diagnostic-coverage extractor
+ * (`__tests__/support/diagnostic-sites.ts`) can reduce it to a template.
+ */
+function loopOutputIntrinsicDiagnostic(
+  intrinsic: string,
+  via: string | undefined,
+  loc?: SourceLocation,
+): CompilerDiagnostic {
+  const viaClause = via !== undefined ? ` (reached through private method '${via}')` : '';
+  return makeDiagnostic(
+    `Output intrinsic '${intrinsic}'${viaClause} cannot be called inside a loop body. `
     + `A loop body lowers into its own scope whose declared outputs never reach the method's `
     + `output list, so the continuation hash would commit to fewer outputs than the transaction `
     + `actually creates: the spend is rejected by every shipped SDK and any successor it produces `
     + `is unspendable. Move the call out of the loop.`,
     'error',
-    site.location ?? stmt.sourceLocation,
-  ));
+    loc,
+  );
+}
+
+/** The R-127 message text, for the pass-4 backstop. */
+export function loopOutputIntrinsicMessage(intrinsic: string, via?: string): string {
+  return loopOutputIntrinsicDiagnostic(intrinsic, via).message;
+}
+
+/**
+ * Reject any output intrinsic in either arm of a ternary expression (N-049).
+ *
+ * `lowerTernaryExpr` lowers each arm into `ctx.subContext()`, whose fresh
+ * `_addOutputRefs` is dropped when the arm is folded into the `if` binding --
+ * unlike `lowerIfStatement`, which merges each arm's outputs into one ref so
+ * the parent sees them. Measured on every tier before this check existed
+ * (EXT-2 TernaryToll): `c ? this.addRawOutput(p, payee) : this.addRawOutput(p,
+ * refund)` beside one top-level `addOutput` compiled to a continuation over the
+ * state output and the change only, so a spend that DROPS the payout was
+ * accepted and the honest spend rejected; without the top-level call the
+ * method died on the internal "_newAmount is not on the stack" error.
+ *
+ * Refusal rather than lowering (fail-closed, same shape as R-127): the
+ * if/else statement form already expresses a conditional output correctly,
+ * and no fixture or example wraps an output intrinsic in a ternary. Private
+ * helpers are followed because they are inlined into the arm at ANF time. A
+ * ternary that only selects VALUES (`addRawOutput(p, c ? a : b)`) is untouched.
+ */
+function validateNoOutputIntrinsicInTernaryArm(
+  expr: Extract<Expression, { kind: 'ternary_expr' }>,
+  ctx: ValidationContext,
+): void {
+  for (const arm of [expr.consequent, expr.alternate]) {
+    const site = findOutputIntrinsicInExpr(arm, ctx, new Set<string>(), expr.sourceLocation);
+    if (site === undefined) continue;
+    ctx.errors.push(ternaryOutputIntrinsicDiagnostic(site.intrinsic, site.via, site.location));
+    return;
+  }
+}
+
+/**
+ * The N-049 diagnostic, shared verbatim with the other six tiers and with the
+ * pass-4 backstop in `04-anf-lower.ts`. Inline template at the `makeDiagnostic`
+ * call for the diagnostic-coverage extractor, as R-127's.
+ */
+function ternaryOutputIntrinsicDiagnostic(
+  intrinsic: string,
+  via: string | undefined,
+  loc?: SourceLocation,
+): CompilerDiagnostic {
+  const viaClause = via !== undefined ? ` (reached through private method '${via}')` : '';
+  return makeDiagnostic(
+    `Output intrinsic '${intrinsic}'${viaClause} cannot be called inside a conditional (ternary) expression arm. `
+    + `A ternary arm lowers into its own scope whose declared outputs never reach the method's `
+    + `output list, so the continuation hash would commit to fewer outputs than the transaction `
+    + `actually creates: a spender can drop the output and the honest spend is rejected. `
+    + `Use an if/else statement instead.`,
+    'error',
+    loc,
+  );
+}
+
+/** The N-049 message text, for the pass-4 backstop. */
+export function ternaryOutputIntrinsicMessage(intrinsic: string, via?: string): string {
+  return ternaryOutputIntrinsicDiagnostic(intrinsic, via).message;
 }
 
 /**
@@ -1197,7 +1411,13 @@ function validateNoOutputIntrinsicInLoop(
  * `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
  * the effect-free no-op sentinel (a literal or a bare identifier) that the
  * while-shaped parsers synthesize when the source has no continue expression
- * at all.
+ * at all -- but only on a loop whose condition does not test its declared
+ * iterator. Such a loop carries a placeholder iterator and is already refused
+ * by the condition rule, so tolerating its sentinel just avoids a second
+ * diagnostic. On a loop whose condition DOES test the iterator a no-op update
+ * leaves it unchanged forever, yet the unrolled loop would still step it by
+ * one: `var i = 3; while (i < 5) : (i)` (Zig), `for (...; i)` and
+ * `for (...; 0n)` compiled two laps over i = 3, 4 (N-116).
  *
  * The advanced variable must be the declared iterator or the identifier the
  * condition tests. Both are needed: the Zig parser only folds
@@ -1219,7 +1439,12 @@ function validateForUpdate(
     allowed.push(stmt.condition.left.name);
   }
 
-  if (isRepresentableForUpdate(allowed, stmt.update)) return;
+  const conditionTestsIterator =
+    stmt.condition.kind === 'binary_expr' &&
+    stmt.condition.left.kind === 'identifier' &&
+    stmt.condition.left.name === stmt.init.name;
+
+  if (isRepresentableForUpdate(allowed, stmt.update, !conditionTestsIterator)) return;
 
   ctx.errors.push(makeDiagnostic(
     'For loop update must advance the loop variable by one (`i++`, `i--`, ' +
@@ -1244,7 +1469,11 @@ function isLiteralOne(expr: Expression): boolean {
   return expr.kind === 'bigint_literal' && expr.value === 1n;
 }
 
-function isRepresentableForUpdate(allowed: string[], update: Statement): boolean {
+function isRepresentableForUpdate(
+  allowed: string[],
+  update: Statement,
+  acceptNoOpSentinel: boolean,
+): boolean {
   if (update.kind === 'expression_statement') {
     const e = update.expression;
     if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
@@ -1253,8 +1482,10 @@ function isRepresentableForUpdate(allowed: string[], update: Statement): boolean
     // The no-op sentinel a while-shaped frontend synthesizes when the source
     // carries no continue expression: zig's `while (c) {}`, move's
     // `while (c) {}`, go's `for c {}`. Reading a literal or a bare identifier
-    // has no effect, so discarding it loses nothing.
-    return e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier';
+    // has no effect, so discarding it loses nothing -- on a loop the condition
+    // rule already refuses. On a real iterator it does not advance (N-116).
+    return acceptNoOpSentinel &&
+      (e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier');
   }
 
   // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
@@ -1413,6 +1644,7 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
       break;
 
     case 'ternary_expr':
+      validateNoOutputIntrinsicInTernaryArm(expr, ctx);
       validateExpression(expr.condition, ctx);
       validateExpression(expr.consequent, ctx);
       validateExpression(expr.alternate, ctx);
@@ -1426,6 +1658,10 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
     case 'increment_expr':
     case 'decrement_expr':
       validateExpression(expr.operand, ctx);
+      break;
+
+    case 'array_literal':
+      for (const el of expr.elements) validateExpression(el, ctx);
       break;
 
     // Leaf nodes -- nothing to validate
@@ -1461,7 +1697,8 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-function checkNoRecursion(ctx: ValidationContext): void {
+/** Reports recursion and N-180 call depth; true iff MAX_CALL_DEPTH was exceeded. */
+function checkNoRecursion(ctx: ValidationContext): boolean {
   // Build call graph: method name -> set of methods it calls
   const callGraph = new Map<string, Set<string>>();
   const methodNames = new Set<string>();
@@ -1469,23 +1706,25 @@ function checkNoRecursion(ctx: ValidationContext): void {
   for (const method of ctx.contract.methods) {
     methodNames.add(method.name);
     const calls = new Set<string>();
-    collectMethodCalls(method.body, calls);
+    collectMethodCalls(method.body, calls, true);
     callGraph.set(method.name, calls);
   }
 
   // Also add constructor
   {
     const calls = new Set<string>();
-    collectMethodCalls(ctx.contract.constructor.body, calls);
+    collectMethodCalls(ctx.contract.constructor.body, calls, true);
     callGraph.set('constructor', calls);
   }
 
-  // Check for cycles using DFS
-  for (const method of ctx.contract.methods) {
-    const visited = new Set<string>();
-    const stack = new Set<string>();
+  // N-180: one iterative pass over the call graph answers both questions for
+  // every method — does it reach a cycle, and how deep is its call chain — in
+  // O(methods + calls). The old per-method DFS restarted from scratch for each
+  // method (quadratic on a chain) and recursed once per link.
+  const { reachesCycle, depth } = analyzeCallGraph(callGraph, methodNames);
 
-    if (hasCycle(method.name, callGraph, methodNames, visited, stack)) {
+  for (const method of ctx.contract.methods) {
+    if (reachesCycle.get(method.name)) {
       ctx.errors.push(makeDiagnostic(
         `Recursion detected: method '${method.name}' calls itself directly or indirectly. Recursion is not allowed in Rúnar contracts.`,
         'error',
@@ -1493,43 +1732,113 @@ function checkNoRecursion(ctx: ValidationContext): void {
       ));
     }
   }
+
+  // N-180: private methods are inlined at every call site, so the call depth is
+  // the inlining depth. Report the first method (declaration order) past it.
+  for (const method of ctx.contract.methods) {
+    if (!reachesCycle.get(method.name) && (depth.get(method.name) ?? 0) > InputLimits.MAX_CALL_DEPTH) {
+      ctx.errors.push(makeDiagnostic(
+        `call depth of method '${method.name}' exceeds MAX_CALL_DEPTH (limit=${InputLimits.MAX_CALL_DEPTH})`,
+        'error',
+        method.sourceLocation,
+      ));
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * N-180: for every method in `methodNames`, whether it reaches a call cycle,
+ * and (when it does not) its call depth: 0 if it calls no contract method, else
+ * 1 + the largest call depth among the contract methods it calls. Iterative
+ * three-colour DFS with memoisation, so O(methods + calls) and no host
+ * recursion. `reachesCycle` matches what a fresh DFS from each method reports.
+ */
+function analyzeCallGraph(
+  callGraph: Map<string, Set<string>>,
+  methodNames: Set<string>,
+): { reachesCycle: Map<string, boolean>; depth: Map<string, number> } {
+  const reachesCycle = new Map<string, boolean>();
+  const depth = new Map<string, number>();
+  const onStack = new Set<string>();
+
+  for (const root of methodNames) {
+    if (reachesCycle.has(root)) continue;
+    const stack: Array<{ name: string; callees: string[]; next: number; cyc: boolean; depth: number }> = [];
+    const push = (name: string) => {
+      onStack.add(name);
+      stack.push({ name, callees: [...(callGraph.get(name) ?? [])], next: 0, cyc: false, depth: 0 });
+    };
+    push(root);
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]!;
+      if (top.next < top.callees.length) {
+        const callee = top.callees[top.next++]!;
+        if (!methodNames.has(callee)) continue;
+        if (onStack.has(callee)) {
+          top.cyc = true;
+        } else if (reachesCycle.has(callee)) {
+          if (reachesCycle.get(callee)) top.cyc = true;
+          else top.depth = Math.max(top.depth, 1 + depth.get(callee)!);
+        } else {
+          push(callee);
+        }
+        continue;
+      }
+      stack.pop();
+      onStack.delete(top.name);
+      reachesCycle.set(top.name, top.cyc);
+      depth.set(top.name, top.depth);
+      const parent = stack[stack.length - 1];
+      if (parent) {
+        if (top.cyc) parent.cyc = true;
+        else parent.depth = Math.max(parent.depth, 1 + top.depth);
+      }
+    }
+  }
+  return { reachesCycle, depth };
 }
 
 function collectMethodCalls(
   stmts: Statement[],
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   for (const stmt of stmts) {
-    collectMethodCallsInStatement(stmt, calls);
+    collectMethodCallsInStatement(stmt, calls, bareCalls);
   }
 }
 
 function collectMethodCallsInStatement(
   stmt: Statement,
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   switch (stmt.kind) {
     case 'expression_statement':
-      collectMethodCallsInExpr(stmt.expression, calls);
+      collectMethodCallsInExpr(stmt.expression, calls, bareCalls);
       break;
     case 'variable_decl':
-      collectMethodCallsInExpr(stmt.init, calls);
+      collectMethodCallsInExpr(stmt.init, calls, bareCalls);
       break;
     case 'assignment':
-      collectMethodCallsInExpr(stmt.target, calls);
-      collectMethodCallsInExpr(stmt.value, calls);
+      collectMethodCallsInExpr(stmt.target, calls, bareCalls);
+      collectMethodCallsInExpr(stmt.value, calls, bareCalls);
       break;
     case 'if_statement':
-      collectMethodCallsInExpr(stmt.condition, calls);
-      collectMethodCalls(stmt.then, calls);
-      if (stmt.else) collectMethodCalls(stmt.else, calls);
+      collectMethodCallsInExpr(stmt.condition, calls, bareCalls);
+      collectMethodCalls(stmt.then, calls, bareCalls);
+      if (stmt.else) collectMethodCalls(stmt.else, calls, bareCalls);
       break;
     case 'for_statement':
-      collectMethodCallsInExpr(stmt.condition, calls);
-      collectMethodCalls(stmt.body, calls);
+      collectMethodCallsInStatement(stmt.init, calls, bareCalls);
+      collectMethodCallsInExpr(stmt.condition, calls, bareCalls);
+      collectMethodCallsInStatement(stmt.update, calls, bareCalls);
+      collectMethodCalls(stmt.body, calls, bareCalls);
       break;
     case 'return_statement':
-      if (stmt.value) collectMethodCallsInExpr(stmt.value, calls);
+      if (stmt.value) collectMethodCallsInExpr(stmt.value, calls, bareCalls);
       break;
   }
 }
@@ -1537,6 +1846,7 @@ function collectMethodCallsInStatement(
 function collectMethodCallsInExpr(
   expr: Expression,
   calls: Set<string>,
+  bareCalls = false,
 ): void {
   switch (expr.kind) {
     case 'call_expr':
@@ -1550,33 +1860,43 @@ function collectMethodCallsInExpr(
           expr.callee.object.name === 'this') {
         calls.add(expr.callee.property);
       }
-      collectMethodCallsInExpr(expr.callee, calls);
+      // N-180: the Solidity, Move and Java surfaces call a helper as a bare
+      // `m(...)`. Counted only for the recursion / call-depth graph
+      // (`bareCalls`), and only names of contract methods count there
+      // (analyzeCallGraph filters by methodNames), so builtins are unaffected.
+      if (bareCalls && expr.callee.kind === 'identifier') {
+        calls.add(expr.callee.name);
+      }
+      collectMethodCallsInExpr(expr.callee, calls, bareCalls);
       for (const arg of expr.args) {
-        collectMethodCallsInExpr(arg, calls);
+        collectMethodCallsInExpr(arg, calls, bareCalls);
       }
       break;
     case 'binary_expr':
-      collectMethodCallsInExpr(expr.left, calls);
-      collectMethodCallsInExpr(expr.right, calls);
+      collectMethodCallsInExpr(expr.left, calls, bareCalls);
+      collectMethodCallsInExpr(expr.right, calls, bareCalls);
       break;
     case 'unary_expr':
-      collectMethodCallsInExpr(expr.operand, calls);
+      collectMethodCallsInExpr(expr.operand, calls, bareCalls);
       break;
     case 'member_expr':
-      collectMethodCallsInExpr(expr.object, calls);
+      collectMethodCallsInExpr(expr.object, calls, bareCalls);
       break;
     case 'ternary_expr':
-      collectMethodCallsInExpr(expr.condition, calls);
-      collectMethodCallsInExpr(expr.consequent, calls);
-      collectMethodCallsInExpr(expr.alternate, calls);
+      collectMethodCallsInExpr(expr.condition, calls, bareCalls);
+      collectMethodCallsInExpr(expr.consequent, calls, bareCalls);
+      collectMethodCallsInExpr(expr.alternate, calls, bareCalls);
       break;
     case 'index_access':
-      collectMethodCallsInExpr(expr.object, calls);
-      collectMethodCallsInExpr(expr.index, calls);
+      collectMethodCallsInExpr(expr.object, calls, bareCalls);
+      collectMethodCallsInExpr(expr.index, calls, bareCalls);
       break;
     case 'increment_expr':
     case 'decrement_expr':
-      collectMethodCallsInExpr(expr.operand, calls);
+      collectMethodCallsInExpr(expr.operand, calls, bareCalls);
+      break;
+    case 'array_literal':
+      for (const el of expr.elements) collectMethodCallsInExpr(el, calls, bareCalls);
       break;
     default:
       // Leaf nodes
@@ -1584,32 +1904,369 @@ function collectMethodCallsInExpr(
   }
 }
 
-function hasCycle(
-  methodName: string,
-  callGraph: Map<string, Set<string>>,
-  methodNames: Set<string>,
-  visited: Set<string>,
-  stack: Set<string>,
-): boolean {
-  if (stack.has(methodName)) return true;
-  if (visited.has(methodName)) return false;
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
 
-  visited.add(methodName);
-  stack.add(methodName);
+/**
+ * The one diagnostic every tier emits for F-286 (user decision R78).
+ */
+export const RABIN_PUBKEY_PROVENANCE_MESSAGE =
+  'verifyRabinSig public key (4th argument) must be a contract property or a literal; ' +
+  'a spender-supplied Rabin modulus lets anyone forge a signature';
 
-  const calls = callGraph.get(methodName);
-  if (calls) {
-    for (const callee of calls) {
-      if (methodNames.has(callee)) {
-        if (hasCycle(callee, callGraph, methodNames, visited, stack)) {
-          return true;
+/**
+ * N-205 (a): the diagnostic every tier emits when a mutable key property is
+ * written, outside the constructor, with a value the F-286 rule does not trust.
+ */
+export function rabinKeyWriteMessage(prop: string): string {
+  return (
+    `verifyRabinSig public key property '${prop}' may only be assigned a contract property or a literal ` +
+    'outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature'
+  );
+}
+
+/**
+ * `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod n ==
+ * SHA256(msg) mod n`. A spender who chooses `n` forges any message (`n = 1`,
+ * `sig = 0` passes on chain), so the modulus must be fixed by the deployer.
+ *
+ * Trusted values for the 4th argument:
+ *   - a property read: `this.x` (`property_access`, or `member_expr` on
+ *     `this`), or a bare identifier naming a property that no parameter or
+ *     local of the method shadows (the Java surface's bare field);
+ *   - a bigint literal;
+ *   - a local whose initialiser AND every assignment to it are trusted;
+ *   - a parameter of a PRIVATE method that every call site (at least one)
+ *     binds to a trusted value in the caller (least fixed point, so chains of
+ *     helpers work and an uncalled or cyclic helper stays untrusted).
+ * Everything else — public and constructor parameters, arithmetic, ternaries,
+ * calls — is refused.
+ */
+function checkRabinPubKeyProvenance(ctx: ValidationContext): void {
+  const contract = ctx.contract;
+  const propertyNames = new Set(contract.properties.map((p) => p.name));
+  const privateMethods = new Map<string, MethodNode>();
+  for (const m of contract.methods) {
+    if (m.visibility === 'private') privateMethods.set(m.name, m);
+  }
+
+  // Per method: local name -> every value bound to it (inits + assignments),
+  // and names that are ever ++/-- (never trusted).
+  interface Scope {
+    method: MethodNode;
+    params: Set<string>;
+    bindings: Map<string, Expression[]>;
+    mutated: Set<string>;
+    /** N-205: names declared as locals (a bare property write also lands in `bindings`). */
+    declared: Set<string>;
+  }
+  const scopeOf = (method: MethodNode): Scope => {
+    const scope: Scope = {
+      method,
+      params: new Set(method.params.map((p) => p.name)),
+      bindings: new Map(),
+      mutated: new Set(),
+      declared: new Set(),
+    };
+    const bind = (name: string, value: Expression) => {
+      const list = scope.bindings.get(name) ?? [];
+      list.push(value);
+      scope.bindings.set(name, list);
+    };
+    const visitExpr = (expr: Expression) => {
+      walkExpr(expr, (e) => {
+        if ((e.kind === 'increment_expr' || e.kind === 'decrement_expr') && e.operand.kind === 'identifier') {
+          scope.mutated.add(e.operand.name);
+        }
+      });
+    };
+    const visit = (stmts: Statement[]) => {
+      for (const stmt of stmts) {
+        switch (stmt.kind) {
+          case 'variable_decl':
+            scope.declared.add(stmt.name);
+            bind(stmt.name, stmt.init);
+            visitExpr(stmt.init);
+            break;
+          case 'assignment':
+            if (stmt.target.kind === 'identifier') bind(stmt.target.name, stmt.value);
+            visitExpr(stmt.target);
+            visitExpr(stmt.value);
+            break;
+          case 'expression_statement':
+            visitExpr(stmt.expression);
+            break;
+          case 'if_statement':
+            visitExpr(stmt.condition);
+            visit(stmt.then);
+            if (stmt.else) visit(stmt.else);
+            break;
+          case 'for_statement':
+            visit([stmt.init]);
+            visitExpr(stmt.condition);
+            visit([stmt.update]);
+            visit(stmt.body);
+            break;
+          case 'return_statement':
+            if (stmt.value) visitExpr(stmt.value);
+            break;
+        }
+      }
+    };
+    visit(method.body);
+    return scope;
+  };
+
+  const allMethods = [contract.constructor, ...contract.methods];
+  const scopes = new Map<MethodNode, Scope>(allMethods.map((m) => [m, scopeOf(m)]));
+
+  // Private method name -> indices of parameters proven trusted so far.
+  const trustedParams = new Map<string, Set<number>>();
+  for (const name of privateMethods.keys()) trustedParams.set(name, new Set());
+
+  const isTrusted = (expr: Expression, scope: Scope, visiting: Set<string>): boolean => {
+    switch (expr.kind) {
+      case 'property_access':
+        return true;
+      case 'member_expr':
+        return expr.object.kind === 'identifier' && expr.object.name === 'this';
+      case 'bigint_literal':
+        return true;
+      case 'identifier': {
+        const name = expr.name;
+        const isParam = scope.params.has(name);
+        const locals = scope.bindings.get(name);
+        if (!isParam && !locals) return propertyNames.has(name);
+        if (scope.mutated.has(name)) return false;
+        if (isParam) {
+          const method = scope.method;
+          if (method.visibility !== 'private' || method === contract.constructor) return false;
+          const idx = method.params.findIndex((p) => p.name === name);
+          if (!trustedParams.get(method.name)?.has(idx)) return false;
+        }
+        if (locals) {
+          if (visiting.has(name)) return false;
+          visiting.add(name);
+          const ok = locals.every((v) => isTrusted(v, scope, visiting));
+          visiting.delete(name);
+          if (!ok) return false;
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
+  };
+
+  const privateCallee = (expr: Expression): string | undefined => {
+    if (expr.kind !== 'call_expr') return undefined;
+    const c = expr.callee;
+    let name: string | undefined;
+    if (c.kind === 'property_access') name = c.property;
+    else if (c.kind === 'member_expr' && c.object.kind === 'identifier' && c.object.name === 'this') name = c.property;
+    return name !== undefined && privateMethods.has(name) ? name : undefined;
+  };
+
+  // Every call site of every private method, with the caller's scope.
+  const callSites = new Map<string, { args: Expression[]; scope: Scope }[]>();
+  for (const name of privateMethods.keys()) callSites.set(name, []);
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      const callee = privateCallee(e);
+      if (callee !== undefined && e.kind === 'call_expr') callSites.get(callee)!.push({ args: e.args, scope });
+    });
+  }
+
+  // Least fixed point: a parameter becomes trusted once every call site binds
+  // it to a trusted value. Monotone, so it terminates.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, method] of privateMethods) {
+      const sites = callSites.get(name)!;
+      if (sites.length === 0) continue;
+      const trusted = trustedParams.get(name)!;
+      for (let i = 0; i < method.params.length; i++) {
+        if (trusted.has(i)) continue;
+        if (sites.every((s) => s.args[i] !== undefined && isTrusted(s.args[i]!, s.scope, new Set()))) {
+          trusted.add(i);
+          changed = true;
         }
       }
     }
   }
 
-  stack.delete(methodName);
-  return false;
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      if (
+        e.kind === 'call_expr' &&
+        e.callee.kind === 'identifier' &&
+        e.callee.name === 'verifyRabinSig' &&
+        e.args.length >= 4 &&
+        !isTrusted(e.args[3]!, scope, new Set())
+      ) {
+        // N-464 (user decision R186): anchored at the 4th argument itself.
+        ctx.errors.push(makeDiagnostic(
+          RABIN_PUBKEY_PROVENANCE_MESSAGE,
+          'error',
+          e.args[3]!.sourceLocation ?? e.sourceLocation ?? scope.method.sourceLocation,
+        ));
+      }
+    });
+  }
+
+  // N-205 (a): a MUTABLE property used as the key is state the previous spend
+  // chose, so outside the constructor it may only be written with a value
+  // `isTrusted` accepts. KEY properties: those whose value reaches a 4th
+  // argument, closed under "is written into a key property" (so a trusted
+  // property read on the right-hand side is itself held to the rule).
+  const sourcesOf = (expr: Expression, scope: Scope, out: Set<string>, visiting: Set<string>): void => {
+    switch (expr.kind) {
+      case 'property_access':
+        out.add(expr.property);
+        return;
+      case 'member_expr':
+        if (expr.object.kind === 'identifier' && expr.object.name === 'this') out.add(expr.property);
+        return;
+      case 'identifier': {
+        const name = expr.name;
+        const isParam = scope.params.has(name);
+        const locals = scope.bindings.get(name);
+        if (!isParam && !locals) {
+          if (propertyNames.has(name)) out.add(name);
+          return;
+        }
+        const key = `${scope.method.name}\u0000${name}`;
+        if (visiting.has(key)) return;
+        visiting.add(key);
+        for (const v of locals ?? []) sourcesOf(v, scope, out, visiting);
+        const method = scope.method;
+        if (isParam && method.visibility === 'private' && method !== contract.constructor) {
+          const idx = method.params.findIndex((p) => p.name === name);
+          for (const site of callSites.get(method.name) ?? []) {
+            const arg = site.args[idx];
+            if (arg !== undefined) sourcesOf(arg, site.scope, out, visiting);
+          }
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  const keyProps = new Set<string>();
+  for (const scope of scopes.values()) {
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      if (e.kind === 'call_expr' && e.callee.kind === 'identifier' && e.callee.name === 'verifyRabinSig' && e.args.length >= 4) {
+        sourcesOf(e.args[3]!, scope, keyProps, new Set());
+      }
+    });
+  }
+
+  // Every write to a property outside the constructor. `value` is undefined
+  // for ++/--, which no value makes trusted.
+  interface PropWrite { prop: string; value: Expression | undefined; scope: Scope; loc: SourceLocation }
+  const writes: PropWrite[] = [];
+  const mutableProps = contract.properties.filter((p) => !p.readonly).map((p) => p.name);
+  const writtenProp = (target: Expression, scope: Scope): string | undefined => {
+    if (target.kind === 'property_access') return target.property;
+    if (target.kind === 'member_expr' && target.object.kind === 'identifier' && target.object.name === 'this') {
+      return target.property;
+    }
+    if (
+      target.kind === 'identifier' &&
+      propertyNames.has(target.name) &&
+      !scope.params.has(target.name) &&
+      !scope.declared.has(target.name)
+    ) {
+      return target.name;
+    }
+    return undefined;
+  };
+  const collectAssignments = (stmts: Statement[], scope: Scope): void => {
+    for (const stmt of stmts) {
+      switch (stmt.kind) {
+        case 'assignment': {
+          const prop = writtenProp(stmt.target, scope);
+          if (prop !== undefined) writes.push({ prop, value: stmt.value, scope, loc: stmt.sourceLocation });
+          break;
+        }
+        case 'if_statement':
+          collectAssignments(stmt.then, scope);
+          if (stmt.else) collectAssignments(stmt.else, scope);
+          break;
+        case 'for_statement':
+          collectAssignments([stmt.init, stmt.update], scope);
+          collectAssignments(stmt.body, scope);
+          break;
+      }
+    }
+  };
+  for (const scope of scopes.values()) {
+    if (scope.method === contract.constructor) continue;
+    collectAssignments(scope.method.body, scope);
+    walkExpressionsInBodyDeep(scope.method.body, (e) => {
+      const loc = e.sourceLocation ?? scope.method.sourceLocation;
+      if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
+        const prop = writtenProp(e.operand, scope);
+        if (prop !== undefined) writes.push({ prop, value: undefined, scope, loc });
+      } else if (outputIntrinsicCallName(e) === 'addOutput' && e.kind === 'call_expr') {
+        // addOutput(satoshis, ...values): values are positional over the
+        // mutable properties in declaration order. A single array-literal
+        // value list (`addOutput(sats, [a, b])`, the Zig tuple form) is
+        // unpacked, as ANF lowering's flattenAddOutputArgs does.
+        const values = e.args.length === 2 && e.args[1]!.kind === 'array_literal' ? e.args[1].elements : e.args.slice(1);
+        values.forEach((value, i) => {
+          const prop = mutableProps[i];
+          if (prop !== undefined) writes.push({ prop, value, scope, loc });
+        });
+      }
+    });
+  }
+
+  let grew = true;
+  while (grew) {
+    const before = keyProps.size;
+    for (const w of writes) {
+      if (keyProps.has(w.prop) && w.value !== undefined && isTrusted(w.value, w.scope, new Set())) {
+        sourcesOf(w.value, w.scope, keyProps, new Set());
+      }
+    }
+    grew = keyProps.size !== before;
+  }
+
+  const mutable = new Set(mutableProps);
+  for (const w of writes) {
+    if (!keyProps.has(w.prop) || !mutable.has(w.prop)) continue;
+    if (w.value !== undefined && isTrusted(w.value, w.scope, new Set())) continue;
+    ctx.errors.push(makeDiagnostic(rabinKeyWriteMessage(w.prop), 'error', w.loc));
+  }
+}
+
+/**
+ * Like `walkExpressionsInBody`, but also visits every `for` loop's init and
+ * update, at any nesting depth.
+ */
+function walkExpressionsInBodyDeep(stmts: Statement[], visitor: (expr: Expression) => void): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case 'if_statement':
+        walkExpr(stmt.condition, visitor);
+        walkExpressionsInBodyDeep(stmt.then, visitor);
+        if (stmt.else) walkExpressionsInBodyDeep(stmt.else, visitor);
+        break;
+      case 'for_statement':
+        walkExpressionsInBodyDeep([stmt.init], visitor);
+        walkExpr(stmt.condition, visitor);
+        walkExpressionsInBodyDeep([stmt.update], visitor);
+        walkExpressionsInBodyDeep(stmt.body, visitor);
+        break;
+      default:
+        walkExpressionsInStatement(stmt, visitor);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,7 +2475,9 @@ function walkExpressionsInStatement(
       if (stmt.else) walkExpressionsInBody(stmt.else, visitor);
       break;
     case 'for_statement':
+      walkExpressionsInStatement(stmt.init, visitor);
       walkExpr(stmt.condition, visitor);
+      walkExpressionsInStatement(stmt.update, visitor);
       walkExpressionsInBody(stmt.body, visitor);
       break;
     case 'return_statement':
@@ -1856,6 +2515,9 @@ function walkExpr(expr: Expression, visitor: (expr: Expression) => void): void {
     case 'increment_expr':
     case 'decrement_expr':
       walkExpr(expr.operand, visitor);
+      break;
+    case 'array_literal':
+      for (const el of expr.elements) walkExpr(el, visitor);
       break;
   }
 }

@@ -98,6 +98,90 @@ class MockCryptoTest {
         assertFalse(MockCrypto.checkMultiSig(sigs, pks));
     }
 
+    /**
+     * N-175: {@link MockCrypto}'s class javadoc said "Signature verification
+     * is mocked (always returns success)" with no qualification, and never
+     * named Rabin at all -- even though {@code verifyRabinSig} (below),
+     * {@code verifyWOTS}, the six {@code verifySLHDSA_SHA2_*} methods, and
+     * {@code verifyECDSA_P256}/{@code verifyECDSA_P384} all perform real
+     * cryptography and reject a forged signature (see
+     * {@code RabinPaddingBoundTest}, {@code wotsVerifyFailsOnTamperedMessage},
+     * {@code SlhDsaTest}, {@code p256VerifyAcceptsBouncyCastleSignature}).
+     *
+     * <p>First, by execution: feed {@code verifyRabinSig} the universal-forgery
+     * shape ({@code sig = 0}, {@code padding = SHA256(msg)}) that a verifier
+     * which "always returns success" would accept, and confirm it is
+     * rejected. Then read the class javadoc straight from the source file and
+     * check it no longer makes the disproven blanket claim, does name Rabin
+     * as real, and says what {@code checkSig} actually does (a null check,
+     * not ECDSA math).
+     *
+     * <p>What this proves: the class-level javadoc text is consistent with
+     * the executable behaviour of the methods it describes. What it does not
+     * prove: the cryptographic correctness of any individual verifier (that
+     * is {@code RabinPaddingBoundTest}'s, {@code SlhDsaTest}'s, etc. job) or
+     * anything about the on-chain Script -- this is an off-chain simulator
+     * doc, not a consensus claim.
+     */
+    @Test
+    void classJavadocMatchesRealSignatureVerificationBehavior() throws java.io.IOException {
+        // Real Rabin test primes (both ≡ 3 mod 4), mirroring RabinPaddingBoundTest.
+        BigInteger p = new BigInteger("1361129467683753853853498429727072846227");
+        BigInteger q = new BigInteger("1361129467683753853853498429727082846007");
+        BigInteger n = p.multiply(q);
+        byte[] msg = "N-175 javadoc fidelity check".getBytes();
+        byte[] forgedPadding;
+        try {
+            forgedPadding = java.security.MessageDigest.getInstance("SHA-256").digest(msg);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+
+        boolean accepted = MockCrypto.verifyRabinSig(
+            new ByteString(msg), BigInteger.ZERO, new ByteString(forgedPadding), n);
+        assertFalse(accepted,
+            "verifyRabinSig accepted a forged signature -- if signature verification on "
+            + "this class always returned success, this assertion would be backwards");
+
+        String doc = classJavadoc();
+        assertFalse(
+            doc.contains("Signature verification is mocked (always returns success)"),
+            "class javadoc still claims ALL signature verification always returns success, "
+            + "which the forged-signature rejection above (and the existing WOTS+/SLH-DSA/"
+            + "P-256/P-384 tests) disprove by execution");
+        assertTrue(
+            doc.toLowerCase(java.util.Locale.ROOT).contains("rabin"),
+            "class javadoc never mentions Rabin, but verifyRabinSig performs real "
+            + "verification -- the doc's list of real verifiers is incomplete");
+        assertTrue(
+            doc.contains("checkSig") && doc.toLowerCase(java.util.Locale.ROOT).contains("null"),
+            "class javadoc does not say what checkSig actually does (a null check, not "
+            + "ECDSA verification)");
+    }
+
+    /** Locates {@code MockCrypto.java}'s source whether tests run from the
+     * {@code packages/runar-java} module root (Gradle's default) or the repo root. */
+    private static java.nio.file.Path mockCryptoSourceFile() {
+        java.nio.file.Path rel =
+            java.nio.file.Path.of("src/main/java/runar/lang/runtime/MockCrypto.java");
+        java.nio.file.Path here = java.nio.file.Path.of("").toAbsolutePath();
+        if (java.nio.file.Files.exists(here.resolve(rel))) return here.resolve(rel);
+        java.nio.file.Path nested = here.resolve("packages/runar-java").resolve(rel);
+        if (java.nio.file.Files.exists(nested)) return nested;
+        throw new IllegalStateException("cannot locate MockCrypto.java from " + here);
+    }
+
+    /** The class-level javadoc block immediately preceding {@code public final class MockCrypto}. */
+    private static String classJavadoc() throws java.io.IOException {
+        String src = java.nio.file.Files.readString(mockCryptoSourceFile());
+        int classIdx = src.indexOf("public final class MockCrypto");
+        assertTrue(classIdx > 0, "MockCrypto class declaration not found");
+        int docEnd = src.lastIndexOf("*/", classIdx);
+        int docStart = src.lastIndexOf("/**", docEnd);
+        assertTrue(docStart >= 0 && docEnd > docStart, "class javadoc block not found");
+        return src.substring(docStart, docEnd + 2);
+    }
+
     // --- Math -----------------------------------------------------------
 
     @Test
@@ -191,6 +275,45 @@ class MockCryptoTest {
     @Test
     void ecOnCurveHoldsForG() {
         assertTrue(MockCrypto.ecOnCurve(MockCrypto.EC_G));
+    }
+
+    @Test
+    void ecOnCurveRejectsNonCanonicalX() {
+        // CL-BUG-161 / F-243: coordinate canonicity. x0 = 1 is a genuine
+        // secp256k1 curve point (y0 below). Point.fromRaw64 parses each half
+        // as an unsigned BigInteger with no range check, so a coordinate
+        // written as x0 + EC_P (still exactly 32 bytes) reaches the field
+        // arithmetic in ecOnCurve, which reduces it mod EC_P and accepts it
+        // as if it were x0. The compiled script range-checks x < p AND y < p
+        // BEFORE the curve-equation check (GAP-301), so this mock must
+        // reject what the script rejects. Verified against the real
+        // compiled script via @bsv/sdk's Spend in
+        // packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+        // ("the predicate stays TOTAL: onCurve(alias) is false").
+        BigInteger y0 = new BigInteger("4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee", 16);
+        BigInteger ecP = new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16);
+        BigInteger noncanonicalX = ecP.add(BigInteger.ONE);
+        MockCrypto.Point aliasPoint = new MockCrypto.Point(noncanonicalX, y0);
+        assertFalse(MockCrypto.ecOnCurve(aliasPoint));
+    }
+
+    @Test
+    void ecOnCurveRejectsWrongWidthBytes() {
+        // N-184: the compiled ecOnCurve is a PREDICATE over untrusted bytes --
+        // for a 63- or 65-byte blob the script answers false, it does not
+        // abort (emitPointLengthGate ANDs a width flag into the result; see
+        // packages/runar-testing/src/__tests__/r052-point-length-gate.test.ts
+        // "onCurve(G <plus> surplus) is FALSE, not true", executed on @bsv/sdk
+        // Spend). MockCrypto.Point#fromRaw64 is the only bytes-to-Point path
+        // and throws on the wrong width -- correct for ecAdd/ecMul/ecNegate,
+        // which abort on the wrong width too -- so ecOnCurve needs a
+        // byte-level overload that answers false instead of routing through
+        // fromRaw64.
+        byte[] g = HEX.parseHex(MockCrypto.EC_G.toHex());
+        byte[] short63 = java.util.Arrays.copyOf(g, 63);
+        byte[] long65 = java.util.Arrays.copyOf(g, 65);
+        assertFalse(MockCrypto.ecOnCurve(short63));
+        assertFalse(MockCrypto.ecOnCurve(long65));
     }
 
     @Test
@@ -337,6 +460,21 @@ class MockCryptoTest {
             new ByteString(MockCrypto.BLAKE3_IV_BYTES),
             new ByteString(msg));
         assertEquals(viaCompress.toHex(), viaHash.toHex());
+    }
+
+    @Test
+    void blake3HashRejectsMessagesLongerThan64BytesWithSharedDiagnostic() {
+        // N-107: the on-chain blake3Hash script only ever handles a single 64-byte
+        // block, so every off-chain tier must refuse >64 bytes with the SAME
+        // diagnostic the TS reference interpreter throws (packages/runar-testing/
+        // src/interpreter/interpreter.ts:1610) — matched verbatim (not just
+        // "contains") across Go/Rust/Python/Ruby/TS so a caller parsing the message
+        // doesn't see a tier-specific string. This proves the Java off-chain mock's
+        // refusal text; it does not prove the on-chain script's behavior, Zig's
+        // (untestable in-process) panic text, or any other tier.
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.blake3Hash(new ByteString(new byte[65])));
+        assertEquals("blake3Hash: message must be <= 64 bytes, got 65", ex.getMessage());
     }
 
     @Test

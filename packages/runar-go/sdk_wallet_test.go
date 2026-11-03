@@ -259,6 +259,34 @@ func TestWalletProvider_GetUtxos_NoSigner(t *testing.T) {
 	}
 }
 
+// N-043: an output the wallet reports without a usable (empty) locking script
+// is dropped, matching the TypeScript reference (fail-closed), with or without
+// a signer to filter on.
+// PROVES: GetUtxos returns only the output carrying a script.
+// DOES NOT PROVE: behaviour against a real BRC-100 wallet.
+func TestWalletProvider_GetUtxos_DropsEmptyLockingScript(t *testing.T) {
+	for _, withSigner := range []bool{true, false} {
+		mockWallet := newMockWalletClient("")
+		pubKeyBytes, _ := hex.DecodeString(mockWallet.pubKey)
+		expectedScript := "76a914" + walletHash160Hex(pubKeyBytes) + "88ac"
+		mockWallet.listedOutputs = []WalletOutput{
+			{Satoshis: 10000, LockingScript: expectedScript, Spendable: true, Outpoint: strings.Repeat("aa", 32) + ".0"},
+			{Satoshis: 5000, LockingScript: "", Spendable: true, Outpoint: strings.Repeat("bb", 32) + ".1"},
+		}
+		opts := WalletProviderOptions{Wallet: mockWallet}
+		if withSigner {
+			opts.Signer = NewMockSigner(mockWallet.pubKey, "")
+		}
+		utxos, err := NewWalletProvider(opts).GetUtxos("")
+		if err != nil {
+			t.Fatalf("withSigner=%v: unexpected error: %v", withSigner, err)
+		}
+		if len(utxos) != 1 || utxos[0].Satoshis != 10000 {
+			t.Fatalf("withSigner=%v: expected only the 10000-sat output, got %+v", withSigner, utxos)
+		}
+	}
+}
+
 func TestWalletProvider_EnsureFunding_AlreadyFunded(t *testing.T) {
 	mockWallet := newMockWalletClient("")
 	pubKeyBytes, _ := hex.DecodeString(mockWallet.pubKey)

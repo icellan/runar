@@ -7,6 +7,7 @@
  *   <code part> OP_RETURN <field0> <field1> ... <fieldN>
  *
  *   - bigint / int : 8 raw bytes, little-endian sign-magnitude (OP_NUM2BIN 8)
+ *   - RabinSig / RabinPubKey : bigint aliases, the same 8-byte NUM2BIN word
  *   - bool         : 1 raw byte (0x00 / 0x01)
  *   - PubKey       : 33 raw bytes          - Addr / Ripemd160 : 20 raw bytes
  *   - Sha256       : 32 raw bytes          - Point            : 64 raw bytes
@@ -42,6 +43,11 @@ export const STATE_FIELD_WIDTHS: Readonly<
 > = {
   int: { size: 8, encoding: 'num2bin-le8' },
   bigint: { size: 8, encoding: 'num2bin-le8' },
+  // F-035: bigint aliases. Every compiler writes and reads them exactly like
+  // bigint (OP_NUM2BIN 8); without these rows the SDKs push-data framed them
+  // and deployed a state section the script's own reader cannot parse.
+  RabinSig: { size: 8, encoding: 'num2bin-le8' },
+  RabinPubKey: { size: 8, encoding: 'num2bin-le8' },
   bool: { size: 1, encoding: 'bool1' },
   boolean: { size: 1, encoding: 'bool1' },
   PubKey: { size: 33, encoding: 'raw' },

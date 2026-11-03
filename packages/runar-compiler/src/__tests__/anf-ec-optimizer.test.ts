@@ -426,4 +426,128 @@ describe('ANF EC Optimizer', () => {
       expect(t4).toBeUndefined();
     });
   });
+
+  // N-201: the optimizer used to sweep only the method's top-level bindings,
+  // so every rule below was skipped inside an `if` arm or a loop body.
+  // PROVES: nested calls are rewritten against a scope that sees the bindings
+  // visible at the `if`/`loop` and the arm's own earlier bindings, and nothing
+  // else (no then->else or arm->after-if leakage, no resolution of a loop's
+  // iteration variable); gate helpers land inside the arm, before the
+  // rewritten binding; the scalar the rewrite orphans in the arm is pruned.
+  // DOES NOT PROVE: script bytes, execution, or cross-tier parity — those are
+  // conformance/ec-optimizer/ec-nested-rewrite.test.ts.
+  describe('N-201: rewrites inside if arms and loop bodies', () => {
+    function arm(result: ANFProgram, ifName: string, which: 'then' | 'else'): ANFBinding[] {
+      const v = findBinding(result, ifName)!.value;
+      if (v.kind !== 'if') throw new Error(`${ifName} is not an if`);
+      return v[which];
+    }
+
+    it('rewrites ecMulGen(0) in a then arm and prunes the orphaned scalar there', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('c', { kind: 'load_param', name: 'c' }),
+          b('t9', {
+            kind: 'if', cond: 'c',
+            then: [
+              b('t0', { kind: 'load_const', value: 0n }),
+              b('t1', { kind: 'call', func: 'ecMulGen', args: ['t0'] }),
+              b('t2', { kind: 'assert', value: 't1' }),
+            ],
+            else: [],
+          }),
+        ]),
+      ]);
+      const then = arm(optimizeEC(program), 't9', 'then');
+      expect(then.map((x) => x.name)).toEqual(['t1', 't2']);
+      expect(then[0]!.value).toEqual({ kind: 'load_const', value: INFINITY_HEX });
+    });
+
+    it('rewrites in a loop body, against an outer scalar', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('k', { kind: 'load_const', value: 1n }),
+          b('t9', {
+            kind: 'loop', count: 2, iterVar: 'i', start: 0n, step: 1,
+            body: [
+              b('t1', { kind: 'call', func: 'ecMulGen', args: ['k'] }),
+              b('t2', { kind: 'assert', value: 't1' }),
+            ],
+          }),
+        ]),
+      ]);
+      const v = findBinding(optimizeEC(program), 't9')!.value;
+      if (v.kind !== 'loop') throw new Error('not a loop');
+      expect(v.body[0]!.value).toEqual({ kind: 'load_const', value: G_HEX });
+    });
+
+    it('does not resolve a loop iteration variable through an outer binding of the same name', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('i', { kind: 'load_const', value: 0n }),
+          b('t9', {
+            kind: 'loop', count: 2, iterVar: 'i', start: 0n, step: 1,
+            body: [
+              b('t1', { kind: 'call', func: 'ecMulGen', args: ['i'] }),
+              b('t2', { kind: 'assert', value: 't1' }),
+            ],
+          }),
+        ]),
+      ]);
+      const v = findBinding(optimizeEC(program), 't9')!.value;
+      if (v.kind !== 'loop') throw new Error('not a loop');
+      expect(v.body[0]!.value.kind).toBe('call');
+    });
+
+    it('a then-arm binding is visible neither in the else arm nor after the if', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('c', { kind: 'load_param', name: 'c' }),
+          b('t9', {
+            kind: 'if', cond: 'c',
+            then: [
+              b('z', { kind: 'load_const', value: 0n }),
+              b('t2', { kind: 'assert', value: 'z' }),
+            ],
+            else: [
+              b('t3', { kind: 'call', func: 'ecMulGen', args: ['z'] }),
+              b('t4', { kind: 'assert', value: 't3' }),
+            ],
+          }),
+          b('t5', { kind: 'call', func: 'ecMulGen', args: ['z'] }),
+          b('t6', { kind: 'assert', value: 't5' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      expect(result).toBe(program); // nothing fired anywhere
+      expect(arm(result, 't9', 'else')[0]!.value.kind).toBe('call');
+      expect(findBinding(result, 't5')!.value.kind).toBe('call');
+    });
+
+    it('emits a gate inside the arm, ahead of the rewritten binding', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('p', { kind: 'load_param', name: 'p' }),
+          b('c', { kind: 'load_param', name: 'c' }),
+          b('t9', {
+            kind: 'if', cond: 'c',
+            then: [b('t1', { kind: 'load_const', value: 7n }), b('t2', { kind: 'assert', value: 't1' })],
+            else: [
+              b('t3', { kind: 'load_const', value: 1n }),
+              b('t4', { kind: 'call', func: 'ecMul', args: ['p', 't3'] }),
+              b('t5', { kind: 'assert', value: 't4' }),
+            ],
+          }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      const els = arm(result, 't9', 'else');
+      expect(els.map((x) => x.name)).toEqual(
+        ['t4_inf', 't4_isinf', 't4_oncurve', 't4_ok', 't4_gate', 't4', 't5'],
+      );
+      expect(els[5]!.value).toEqual({ kind: 'load_const', value: '@ref:p' });
+      // The then arm had nothing to rewrite and is untouched.
+      expect(arm(result, 't9', 'then').map((x) => x.name)).toEqual(['t1', 't2']);
+    });
+  });
 });

@@ -175,6 +175,8 @@ func TestSP1FriRefusal_NegativeControl_NoFalseRefusal(t *testing.T) {
 	// Deliberately exercises every expression and statement form the positive
 	// cases use — ternary, index, array literal, member, ++/--, for-init,
 	// for-update, assignment target — with no verifySP1FRI anywhere.
+	// (N-133: the for-update is `i++`; an assignment there is refused by the
+	// .runar.ts parser, as in the TS reference.)
 	src := `
 import { SmartContract, ByteString, FixedArray, assert } from 'runar-lang';
 
@@ -190,7 +192,7 @@ export class Clean extends SmartContract {
     let n: bigint = xs[0n];
     n++;
     n--;
-    for (let i: bigint = this.helper(a); i < 2n; i = i + 1n) {
+    for (let i: bigint = this.helper(a); i < 2n; i++) {
       n = n + i;
     }
     assert(n >= 0n);

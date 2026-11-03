@@ -117,17 +117,22 @@ func TestOptimizer_Push1Sub_Becomes1SUB(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: PUSH(0) OP_ADD -> removed (identity)
+// F-001: PUSH(0) OP_ADD must survive. x + 0 = x over integers, but OP_ADD
+// also decodes its operand as a CScriptNum (rejecting a non-minimal encoding
+// under strict rules) and re-encodes it minimally; a witness operand gets no
+// other normalisation, so deleting the pair changes accept/reject and value.
+// Proves the Go peephole keeps the pair; does not execute a script (the TS
+// peephole-exhaustive sweep does that against @bsv/sdk).
 // ---------------------------------------------------------------------------
 
-func TestOptimizer_Push0Add_Removed(t *testing.T) {
+func TestOptimizer_Push0Add_Survives(t *testing.T) {
 	ops := []StackOp{
 		pushBigIntOp(0),
 		opcodeOp("OP_ADD"),
 	}
 	result := OptimizeStackOps(ops)
-	if len(result) != 0 {
-		t.Errorf("PUSH(0) OP_ADD should be removed, got %d ops", len(result))
+	if len(result) != 2 || !isPushBigInt(result[0], 0) || result[1].Code != "OP_ADD" {
+		t.Errorf("PUSH(0) OP_ADD must survive (F-001: OP_ADD validates/normalises its operand), got %+v", result)
 	}
 }
 
@@ -163,17 +168,17 @@ func TestOptimizer_DoubleNot_BarePair_Survives(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: OP_NEGATE OP_NEGATE -> removed
+// F-001: OP_NEGATE OP_NEGATE must survive — same reason as PUSH(0) OP_ADD.
 // ---------------------------------------------------------------------------
 
-func TestOptimizer_DoubleNegate_Removed(t *testing.T) {
+func TestOptimizer_DoubleNegate_Survives(t *testing.T) {
 	ops := []StackOp{
 		opcodeOp("OP_NEGATE"),
 		opcodeOp("OP_NEGATE"),
 	}
 	result := OptimizeStackOps(ops)
-	if len(result) != 0 {
-		t.Errorf("OP_NEGATE OP_NEGATE should be removed, got %d ops", len(result))
+	if len(result) != 2 || result[0].Code != "OP_NEGATE" || result[1].Code != "OP_NEGATE" {
+		t.Errorf("OP_NEGATE OP_NEGATE must survive (F-001: OP_NEGATE validates/normalises its operand), got %+v", result)
 	}
 }
 
@@ -351,6 +356,82 @@ func TestOptimizer_Push1Pick_BecomesOver(t *testing.T) {
 	}
 	if result[0].Op != "over" {
 		t.Errorf("expected over, got %s", result[0].Op)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-392: PUSH(depth) + opcode-string OP_ROLL/OP_PICK fold the same as the
+// typed roll/pick form, at the three depths the typed rules cover. Matches
+// compilers/python/runar_compiler/codegen/optimizer.py and
+// compilers/ruby/.../optimizer.rb, which already accept both forms.
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push0OpcodeStringRoll_Removed(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(0) opcode-string OP_ROLL should be removed, got %d ops", len(result))
+	}
+}
+
+func TestOptimizer_Push1OpcodeStringRoll_BecomesSwap(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "swap" {
+		t.Fatalf("expected [swap], got %v", result)
+	}
+}
+
+func TestOptimizer_Push2OpcodeStringRoll_BecomesRot(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(2),
+		opcodeOp("OP_ROLL"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "rot" {
+		t.Fatalf("expected [rot], got %v", result)
+	}
+}
+
+func TestOptimizer_Push0OpcodeStringPick_BecomesDup(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "dup" {
+		t.Fatalf("expected [dup], got %v", result)
+	}
+}
+
+func TestOptimizer_Push1OpcodeStringPick_BecomesOver(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 || result[0].Op != "over" {
+		t.Fatalf("expected [over], got %v", result)
+	}
+}
+
+// Depths the typed rules do NOT cover still pass through unreduced in
+// opcode-string form too -- this item only teaches existing rules a second
+// input representation, it does not add new depths.
+func TestOptimizer_Push2OpcodeStringPick_Untouched(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(2),
+		opcodeOp("OP_PICK"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 2 {
+		t.Fatalf("expected passthrough (2 ops), got %v", result)
 	}
 }
 
@@ -587,17 +668,17 @@ func TestOptimizer_NestedIf_Optimized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2-op window: PUSH(0) OP_SUB -> removed (subtractive identity)
+// F-001: PUSH(0) OP_SUB must survive — same reason as PUSH(0) OP_ADD.
 // ---------------------------------------------------------------------------
 
-func TestOptimizer_Push0Sub_Removed(t *testing.T) {
+func TestOptimizer_Push0Sub_Survives(t *testing.T) {
 	ops := []StackOp{
 		pushBigIntOp(0),
 		opcodeOp("OP_SUB"),
 	}
 	result := OptimizeStackOps(ops)
-	if len(result) != 0 {
-		t.Errorf("PUSH(0) OP_SUB should be removed (x - 0 = x), got %d ops", len(result))
+	if len(result) != 2 || !isPushBigInt(result[0], 0) || result[1].Code != "OP_SUB" {
+		t.Errorf("PUSH(0) OP_SUB must survive (F-001: OP_SUB validates/normalises its operand), got %+v", result)
 	}
 }
 
@@ -729,12 +810,13 @@ func TestOptimizer_ConstFoldAdd_LargeValues(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOptimizer_MultiPass_Convergence(t *testing.T) {
-	// PUSH(0) OP_ADD produces nothing in pass 1.
-	// Then SWAP SWAP from the remaining ops is removed in pass 2.
+	// PUSH(7) DROP produces nothing in pass 1, leaving SWAP SWAP adjacent.
+	// Then SWAP SWAP is removed in pass 2. (Was PUSH(0) OP_ADD, which F-001
+	// no longer eliminates.)
 	ops := []StackOp{
-		pushBigIntOp(0),
-		opcodeOp("OP_ADD"),
 		{Op: "swap"},
+		pushBigIntOp(7),
+		{Op: "drop"},
 		{Op: "swap"},
 		opcodeOp("OP_CHECKSIG"),
 	}

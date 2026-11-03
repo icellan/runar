@@ -45,25 +45,9 @@ def compute_op_push_tx(
     byte. Defaults to 0x41 (ALL|FORKID); it must match the method's declared
     ``@sighash`` mode or the on-chain OP_PUSH_TX binding fails to verify.
     """
-    # If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
-    effective_subscript = subscript
-    if code_separator_index >= 0:
-        # R-178: an out-of-range index used to leave the subscript UNTRIMMED
-        # and sign it — a wrong scriptCode, silently, from a fund-moving
-        # primitive. There is no correct signature for a separator offset that
-        # is not in the script.
-        trim_pos = (code_separator_index + 1) * 2
-        if trim_pos > len(subscript):
-            raise ValueError(
-                f"compute_op_push_tx: code_separator_index {code_separator_index} is "
-                f"past the end of the subscript ({len(subscript) // 2} bytes)"
-            )
-        effective_subscript = subscript[trim_pos:]
-    tx_bytes = bytes.fromhex(tx_hex)
-    tx = _parse_raw_tx(tx_bytes)
-    subscript_bytes = bytes.fromhex(effective_subscript)
-
-    preimage = _bip143_preimage(tx, input_index, subscript_bytes, satoshis, sig_hash_type)
+    preimage = _op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )
     sighash = _sha256d(preimage)
 
     # Sign with k=1 private key
@@ -80,6 +64,75 @@ def compute_op_push_tx(
     preimage_hex = preimage.hex()
 
     return sig_hex, preimage_hex
+
+
+def compute_op_push_tx_preimage(
+    tx_hex: str,
+    input_index: int,
+    subscript: str,
+    satoshis: int,
+    code_separator_index: int = -1,
+    sig_hash_type: int = SIGHASH_ALL_FORKID,
+) -> str:
+    """N-253: the BIP-143 preimage hex ``compute_op_push_tx`` returns, WITHOUT
+    the k=1 ECDSA signature -- same arguments, same validation, same bytes.
+
+    Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from the preimage
+    and the unlocking script has no slot for one, so the stateful prepare_call
+    path uses this instead of signing and discarding a signature.
+    """
+    return _op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    ).hex()
+
+
+def _op_push_tx_preimage_bytes(
+    tx_hex: str,
+    input_index: int,
+    subscript: str,
+    satoshis: int,
+    code_separator_index: int,
+    sig_hash_type: int,
+) -> bytes:
+    # N-041: the subscript is the locking script of the UTXO being spent (e.g.
+    # a provider's contract UTXO). An empty one can never match the script the
+    # node executes, so refuse it.
+    if not subscript:
+        raise ValueError(
+            f"compute_op_push_tx: refusing to build a preimage for input {input_index} "
+            "with an empty subscript (scriptCode)"
+        )
+    # If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
+    effective_subscript = subscript
+    if code_separator_index >= 0:
+        # R-178: an out-of-range index used to leave the subscript UNTRIMMED
+        # and sign it — a wrong scriptCode, silently, from a fund-moving
+        # primitive. There is no correct signature for a separator offset that
+        # is not in the script.
+        trim_pos = (code_separator_index + 1) * 2
+        if trim_pos > len(subscript):
+            raise ValueError(
+                f"compute_op_push_tx: code_separator_index {code_separator_index} is "
+                f"past the end of the subscript ({len(subscript) // 2} bytes)"
+            )
+        effective_subscript = subscript[trim_pos:]
+
+        # N-155: a code_separator_index pointing at the LAST byte of the
+        # subscript passes the "past the end" check above (trim_pos == len,
+        # not >) but trims effective_subscript down to the empty string --
+        # the same unsignable condition the empty-subscript check above
+        # exists to catch, just reached a different way. Refuse it too, with
+        # the same message.
+        if not effective_subscript:
+            raise ValueError(
+                f"compute_op_push_tx: refusing to build a preimage for input {input_index} "
+                "with an empty subscript (scriptCode)"
+            )
+    tx_bytes = bytes.fromhex(tx_hex)
+    tx = _parse_raw_tx(tx_bytes)
+    subscript_bytes = bytes.fromhex(effective_subscript)
+
+    return _bip143_preimage(tx, input_index, subscript_bytes, satoshis, sig_hash_type)
 
 
 # ---------------------------------------------------------------------------

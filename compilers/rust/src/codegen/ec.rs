@@ -238,6 +238,8 @@ impl<'a> ECTracker<'a> {
         (self.e)(StackOp::If {
             then_ops,
             else_ops,
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         if let Some(rn) = result_name {
             self.nm.push(rn.to_string());
@@ -658,6 +660,24 @@ fn affine_add(t: &mut ECTracker) {
     t.raw_block(&["_xeq", "_cond_c"], Some("_notinf"), |e| {
         e(StackOp::Opcode("OP_SUB".into()));
         e(StackOp::Opcode("OP_NOT".into()));
+    });
+
+    // N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+    // field_inv is Fermat, so inv(0) = 0 would silently return (p - 2px, 0)).
+    // No secp256k1 point has y == 0, so only an off-curve operand gets here.
+    // ABORT — the one failure channel this adder has besides the operand gates:
+    //   ok = NOT(cond AND px != 0 AND py == 0)
+    // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    t.copy_to_top("px", "_px_g");
+    t.copy_to_top("py", "_py_g");
+    t.copy_to_top("_cond", "_cond_g");
+    t.raw_block(&["_px_g", "_py_g", "_cond_g"], None, |e| {
+        e(StackOp::Opcode("OP_SWAP".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
     });
 
     // chord numerator / denominator
@@ -1320,6 +1340,8 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
         (t.e)(StackOp::If {
             then_ops: add_ops,
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -1470,6 +1492,8 @@ pub fn emit_ec_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);

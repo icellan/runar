@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
+import { compile } from '../index.js';
+// @ts-expect-error vitest resolves this via alias (runar-testing is not a tsc dep of runar-compiler)
+import { ScriptVM } from 'runar-testing';
 import type { ContractNode } from '../ir/index.js';
 import type {
   ANFProgram,
@@ -1258,5 +1261,89 @@ describe('Pass 4: ANF Lower', () => {
       const newAmountParam = method.params.find(p => p.name === '_newAmount');
       expect(newAmountParam).toBeUndefined();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-345: equality on the result of a ByteString-returning builtin
+// ---------------------------------------------------------------------------
+//
+// Pass 4 picks OP_EQUAL over OP_NUMEQUAL (and OP_CAT over OP_ADD) from a list
+// of builtins that return bytes. This tier's list lacked toByteString, pack,
+// sha256Compress, sha256Finalize, split and buildChangeOutput, so `===` on
+// their results compiled to OP_NUMEQUAL: the numbers 0100 and 01 are both 1,
+// and 80 is negative zero, so byte strings that differ compared equal.
+//
+// What this proves: pass 4 marks `===` / `!==` / `+` on each of those
+// builtins' results as bytes, and on the @bsv/sdk interpreter (ScriptVM) the
+// compiled `toByteString(a) === toByteString(b)` rejects 0100 vs 01, a 5-byte
+// string vs the same string with a trailing zero byte, 80 vs empty, and two
+// different 5-byte strings, and accepts two identical 5-byte strings -- while
+// the pre-fix bytes (OP_NUMEQUAL) accept the first three pairs.
+// What it does NOT prove: the six peer tiers' lists
+// (conformance/negatives/n345-bytestring-builtin-equality-parity.test.ts pins
+// every tier's bytes for these shapes), or byte-returning builtins outside
+// this set.
+describe('N-345: ByteString-returning builtins lower to byte equality', () => {
+  const src = (body: string) => `
+    class C extends SmartContract {
+      constructor() { super(); }
+      public m(a: ByteString, b: ByteString, x: bigint, y: bigint) {
+        ${body}
+      }
+    }
+  `;
+  const resultTypeOf = (body: string, op: string): string | undefined => {
+    const method = findMethod(lowerSource(src(body)), 'm');
+    const bin = bindingsOfKindDeep(method.body, 'bin_op').find(b => (b.value as { op: string }).op === op);
+    expect(bin).toBeDefined();
+    return (bin!.value as { result_type?: string }).result_type;
+  };
+
+  for (const [body, op] of [
+    ['assert(toByteString(a) === toByteString(b));', '==='],
+    ['assert(toByteString(a) !== toByteString(b));', '!=='],
+    ['assert(len(toByteString(a) + toByteString(b)) === x);', '+'],
+    ['assert(pack(x) === pack(y));', '==='],
+    ['assert(len(pack(x) + pack(y)) === x);', '+'],
+    ['assert(sha256Compress(a, b) === sha256Compress(b, a));', '==='],
+    ['assert(sha256Finalize(a, b, x) === sha256Finalize(b, a, x));', '==='],
+    ['assert(split(a, x) === split(b, x));', '==='],
+    ['assert(buildChangeOutput(a, x) === buildChangeOutput(b, x));', '==='],
+  ] as const) {
+    it(`marks \`${op}\` in \`${body}\` as bytes`, () => {
+      expect(resultTypeOf(body, op)).toBe('bytes');
+    });
+  }
+
+  it('the compiled toByteString(a) === toByteString(b) compares bytes on the @bsv/sdk interpreter', () => {
+    const r = compile(`import { SmartContract, assert, ByteString, toByteString } from 'runar-lang';
+
+class TbsTwo extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock(a: ByteString, b: ByteString) {
+    assert(toByteString(a) === toByteString(b));
+  }
+}
+`, { fileName: 'TbsTwo.runar.ts', disableConstantFolding: true });
+    expect(r.success).toBe(true);
+    const fixed = r.scriptHex!;
+    expect(fixed).toBe('87'); // OP_EQUAL
+    const preFix = '9c'; // OP_NUMEQUAL: what this tier emitted before N-345
+    const bytes = (hex: string) => Uint8Array.from((hex.match(/../g) ?? []).map((h) => Number.parseInt(h, 16)));
+    const push = (h: string) => (h === '' ? '00' : (h.length / 2).toString(16).padStart(2, '0') + h);
+    const accepts = (locking: string, a: string, b: string) =>
+      new ScriptVM().execute(bytes(push(a) + push(b)), bytes(locking)).success;
+
+    expect(accepts(fixed, '0102030405', '0102030405')).toBe(true);
+    expect(accepts(fixed, '0102030405', '0102030406')).toBe(false);
+    for (const [a, b] of [['0100', '01'], ['0102030405', '010203040500'], ['80', '']] as const) {
+      expect(accepts(fixed, a, b)).toBe(false);
+      // The pre-fix script accepted these byte-different pairs as equal.
+      expect(accepts(preFix, a, b)).toBe(true);
+    }
   });
 });

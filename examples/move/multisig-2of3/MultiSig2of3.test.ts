@@ -44,6 +44,16 @@ function buildLockingScript(pks: [string, string, string]): string {
 }
 
 describe('MultiSig2of3 (Move)', () => {
+  it('compiles a 2-of-3 multisig to Bitcoin Script with OP_CHECKMULTISIG', () => {
+    const contract = TestContract.fromSource(source, { pk1: PK1, pk2: PK2, pk3: PK3 }, FILE_NAME);
+    const result = contract.call('unlock', { sig1: SIG1, sig2: SIG2 });
+    // R-112: the interpreter's checkMultiSig refuses (it cannot verify a signature
+    // set without array values), so it has no opinion about this contract; the
+    // assertion says so. Real spendability is the ScriptVM block below.
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toMatch(/not supported|checkMultiSig/i);
+  });
+
   it('compiles and exposes pubkeys', () => {
     const c = TestContract.fromSource(source, { pk1: PK1, pk2: PK2, pk3: PK3 }, FILE_NAME);
     expect(c.state.pk1).toBeDefined();

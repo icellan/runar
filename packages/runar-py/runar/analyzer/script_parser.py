@@ -81,6 +81,8 @@ _OPCODE_NAMES: dict = {
     0x88: "OP_EQUALVERIFY",
     0x8b: "OP_1ADD",
     0x8c: "OP_1SUB",
+    0x8d: "OP_2MUL",  # Chronicle
+    0x8e: "OP_2DIV",  # Chronicle
     0x8f: "OP_NEGATE",
     0x90: "OP_ABS",
     0x91: "OP_NOT",
@@ -114,6 +116,12 @@ _OPCODE_NAMES: dict = {
     0xad: "OP_CHECKSIGVERIFY",
     0xae: "OP_CHECKMULTISIG",
     0xaf: "OP_CHECKMULTISIGVERIFY",
+    # Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+    0xb3: "OP_SUBSTR",
+    0xb4: "OP_LEFT",
+    0xb5: "OP_RIGHT",
+    0xb6: "OP_LSHIFTNUM",
+    0xb7: "OP_RSHIFTNUM",
 }
 
 
@@ -124,15 +132,59 @@ def opcode_name(byte: int) -> str:
     return f"OP_UNKNOWN(0x{byte:02x})"
 
 
+#: Codepoints matched by JS's regex `\s` class: the fixed set ECMA-262
+#: assigns to it (WhiteSpace + LineTerminator production), not Python's
+#: notion of Unicode whitespace. str.isspace() disagrees in both
+#: directions: it treats U+0085 (NEL) and U+001C-U+001F (file/group/
+#: record/unit separator) as whitespace (JS does not), and does not
+#: treat U+FEFF (the BOM) as whitespace (JS does). Verified by
+#: enumerating every BMP codepoint against a live `node` /\s/ regex.
+_JS_WHITESPACE_CODEPOINTS = frozenset(
+    [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20]  # TAB,LF,VT,FF,CR,SPACE
+    + [0xA0]  # NBSP
+    + [0x1680]  # OGHAM SPACE MARK
+    + list(range(0x2000, 0x200B))  # EN QUAD..HAIR SPACE
+    + [0x2028, 0x2029]  # LINE/PARAGRAPH SEPARATOR
+    + [0x202F]  # NARROW NBSP
+    + [0x205F]  # MEDIUM MATHEMATICAL SPACE
+    + [0x3000]  # IDEOGRAPHIC SPACE
+    + [0xFEFF]  # ZERO WIDTH NO-BREAK SPACE (BOM)
+)
+
+
 def normalize_hex(hex_script: str) -> str:
     """Strip whitespace and lowercase; return canonical hex."""
-    # Strip any whitespace anywhere (spaces, tabs, newlines).
+    # Strip exactly what JS's /\s/g matches (what the TS reference
+    # strips), not what str.isspace() considers whitespace.
     out_chars = []
     for ch in hex_script:
-        if ch.isspace():
+        if ord(ch) in _JS_WHITESPACE_CODEPOINTS:
             continue
         out_chars.append(ch)
     return "".join(out_chars).lower()
+
+
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _decode_hex(hex_script: str) -> bytes:
+    """Decode a normalized hex string into bytes.
+
+    Raises `ValueError` with the TS reference's exact diagnostic text
+    (`hexToBytes`/`hexVal` in packages/runar-testing/src/vm/utils.ts) on
+    odd length or a non-hex-digit character, instead of silently
+    truncating the input to the longest clean prefix (N-176: the old
+    behaviour here was documented as a deliberate TS-mirroring "defensive"
+    fallback, but TS actually throws on this input — confirmed against the
+    live TS analyzer and recorded in F-272's dispatcher notes — so the old
+    comment's premise was wrong, not a feature anything relies on).
+    """
+    if len(hex_script) % 2 != 0:
+        raise ValueError(f"Invalid hex string: odd length ({len(hex_script)})")
+    for ch in hex_script:
+        if ch not in _HEX_DIGITS:
+            raise ValueError(f"Invalid hex character: {ch}")
+    return bytes.fromhex(hex_script)
 
 
 def parse_script(hex_script: str) -> List[ParsedOpcode]:
@@ -142,23 +194,7 @@ def parse_script(hex_script: str) -> List[ParsedOpcode]:
     stop the parser. No findings are emitted from this layer.
     """
     # Convert hex to bytes. Caller passes already-normalized hex.
-    try:
-        data = bytes.fromhex(hex_script)
-    except ValueError:
-        # Odd-length or invalid hex — treat as empty stream of bytes by
-        # parsing as much as we can. The TS reference parses byte-by-byte
-        # from the hex string; we mirror this by truncating to even length
-        # then stopping on bad chars. The 8 canonical fixtures are all
-        # valid hex, so this branch is defensive.
-        clean = []
-        for ch in hex_script:
-            if ch in "0123456789abcdef":
-                clean.append(ch)
-            else:
-                break
-        if len(clean) % 2:
-            clean.pop()
-        data = bytes.fromhex("".join(clean))
+    data = _decode_hex(hex_script)
 
     out: List[ParsedOpcode] = []
     i = 0

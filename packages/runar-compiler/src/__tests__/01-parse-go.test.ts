@@ -12,6 +12,7 @@ import type {
   VariableDeclStatement,
   ExpressionStatement,
   ReturnStatement,
+  MemberExpr,
 } from '../ir/index.js';
 
 // ---------------------------------------------------------------------------
@@ -439,7 +440,7 @@ func (c *C) M() { runar.Assert(true) }
       expect(boolLit.value).toBe(true);
     });
 
-    it('parses hex string literals', () => {
+    it('parses hex integer literals (F-026: `0x` is a Go integer, not a ByteString)', () => {
       const go = `
 package contract
 import runar "github.com/icellan/runar/packages/runar-go"
@@ -454,9 +455,9 @@ func (c *C) M() {
       const result = parseGoSource(go);
       const method = result.contract!.methods[0]!;
       const decl = method.body[0] as VariableDeclStatement;
-      expect(decl.init.kind).toBe('bytestring_literal');
-      if (decl.init.kind === 'bytestring_literal') {
-        expect(decl.init.value).toBe('abcd');
+      expect(decl.init.kind).toBe('bigint_literal');
+      if (decl.init.kind === 'bigint_literal') {
+        expect(decl.init.value).toBe(0xabcdn);
       }
     });
 
@@ -1032,4 +1033,227 @@ func (c *AliasSpelling) Unlock(value runar.Int, width runar.Int) {
       expect(callee.name).toBe('int2str');
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// F-010 — a method is a contract method only if its receiver IS the contract.
+//
+// The parser skipped the receiver type entirely, so an exported method on any
+// other type in the file became a public spending entry point:
+//
+//   type Unrelated struct{}
+//   func (u Unrelated) Drain(amount runar.Bigint) { runar.Assert(true) }
+//
+// compiled into the Guarded contract as `drain` — a selector anyone can
+// satisfy with `<amount> <1>` and no key. And the contract itself was
+// "whichever struct came last", so a helper struct declared after the
+// contract renamed it and added its fields as properties.
+//
+// The rule (user decision R9, held identically by all seven tiers):
+//   - the contract is THE struct embedding runar.SmartContract /
+//     StatefulSmartContract / UnsafeSmartContract; other structs are ignored;
+//   - zero or several such structs refuse the file;
+//   - a method whose receiver (value or pointer) is another type refuses it;
+//   - a free function, exported or not, is a private helper.
+//
+// Proves: the TS .runar.go parser's diagnostics and method set for each shape.
+// Does NOT prove: the other six tiers (each has the same cases in its own
+// suite, and conformance/negatives/N51 gates the CLI verdict), nor anything
+// on chain (remediation-logs/F-010 holds the Spend.validate evidence).
+// ---------------------------------------------------------------------------
+
+describe('F-010: the contract struct and its receivers', () => {
+  const PRELUDE = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+`;
+  const GUARDED = `
+type Guarded struct {
+	runar.SmartContract
+	PubKey runar.PubKey \`runar:"readonly"\`
+}
+
+func (c *Guarded) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckSig(sig, c.PubKey))
+}
+`;
+  const unrelated = (recv: string) => `
+type Unrelated struct{}
+
+func (${recv}) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+  const RECEIVER_ERROR =
+    "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; " +
+    'methods on other types are not allowed';
+
+  const errorsOf = (src: string) =>
+    parseGoSource(src, 'Guarded.runar.go').errors
+      .filter((e) => e.severity === 'error')
+      .map((e) => e.message);
+  const methodsOf = (src: string) =>
+    parseGoSource(src, 'Guarded.runar.go').contract!.methods.map(
+      (m) => `${m.name}(${m.visibility})`,
+    );
+
+  it.each([
+    ['value receiver, helper after the contract', PRELUDE + GUARDED + unrelated('u Unrelated')],
+    ['pointer receiver, helper after the contract', PRELUDE + GUARDED + unrelated('u *Unrelated')],
+    ['value receiver, helper before the contract', PRELUDE + unrelated('u Unrelated') + GUARDED],
+    ['pointer receiver, helper before the contract', PRELUDE + unrelated('u *Unrelated') + GUARDED],
+  ])('refuses a method on another type (%s)', (_label, src) => {
+    expect(errorsOf(src)).toEqual([RECEIVER_ERROR]);
+  });
+
+  it('refuses a method on a type the file never declares', () => {
+    const src = PRELUDE + GUARDED + `
+func (u Unrelated) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+    expect(errorsOf(src)).toEqual([RECEIVER_ERROR]);
+  });
+
+  it('keeps value- and pointer-receiver methods on the contract type', () => {
+    const src = PRELUDE + GUARDED + `
+func (c Guarded) Drain(amount runar.Bigint) {
+	runar.Assert(amount > 0)
+}
+`;
+    expect(errorsOf(src)).toEqual([]);
+    expect(methodsOf(src)).toEqual(['unlock(public)', 'drain(public)']);
+  });
+
+  it('keeps an exported free function as a private helper', () => {
+    const src = PRELUDE + GUARDED + `
+func Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+    expect(errorsOf(src)).toEqual([]);
+    expect(methodsOf(src)).toEqual(['unlock(public)', 'drain(private)']);
+  });
+
+  it('a helper struct never renames the contract or replaces its properties', () => {
+    for (const src of [
+      PRELUDE + GUARDED + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n',
+      PRELUDE + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n' + GUARDED,
+    ]) {
+      const result = parseGoSource(src, 'Guarded.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+      expect(result.contract!.name).toBe('Guarded');
+      expect(result.contract!.properties.map((p) => p.name)).toEqual(['pubKey']);
+    }
+  });
+
+  it('refuses a file with no contract struct', () => {
+    const src = PRELUDE + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n';
+    expect(errorsOf(src)).toEqual(['no Rúnar contract struct found in Go source']);
+  });
+
+  it('refuses a file with two contract structs', () => {
+    const src = PRELUDE + GUARDED + '\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n';
+    expect(errorsOf(src)).toEqual([
+      "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; " +
+        'exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract ' +
+        'or runar.UnsafeSmartContract',
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // N-018: free `init`/`main` functions and the unnamed `(T)` receiver.
+  //
+  // A free (no-receiver) function is a private helper (F-010) -- EXCEPT a
+  // free `init`/`main`, which real Go treats specially (the package
+  // initializer / entry point, never callable as an ordinary function): the
+  // Go/Rust/Python/Java tiers skip it entirely and it never becomes a
+  // method. Before this fix, the TS reference kept it as an ordinary private
+  // method named `init`/`main`, diverging from those four tiers (Ruby and
+  // Zig carried the identical bug and are fixed alongside this one -- see
+  // their own test suites).
+  //
+  // A 0-param free `init()` is NOT a case this test reaches: the existing
+  // init-extraction pass below (`m.name === 'init' && m.params.length ===
+  // 0`) already absorbs it regardless of receiver, so it never surfaced as
+  // a divergence. A free `init` WITH a parameter does reach it.
+  //
+  // Proves: this tier's .runar.go parser drops a free `init(param)`/`main()`
+  // from the method set. Does NOT prove: the other six tiers (each gets the
+  // identical case in its own suite), nor anything on chain.
+  it('drops a free init(param)/main() -- they are not ordinary private helpers', () => {
+    const src = PRELUDE + GUARDED + `
+func main() {
+	runar.Assert(true)
+}
+
+func init(amount runar.Bigint) {
+	runar.Assert(amount > 0)
+}
+`;
+    expect(errorsOf(src)).toEqual([]);
+    expect(methodsOf(src)).toEqual(['unlock(public)']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-018: the unnamed receiver `(T)` must leave the receiver unreferenceable.
+//
+// Real Go forbids referencing an unnamed receiver in the method body at all
+// -- there is no name bound to it. The TS reference already gets this right
+// (the receiver name is set to '', so a same-spelled identifier elsewhere in
+// the body -- e.g. a parameter literally named `c` -- stays an ordinary
+// identifier/member access). This locks that behaviour in; the Go, Rust and
+// Zig tiers instead defaulted the unnamed receiver's name to "c", which
+// wrongly turned a parameter named `c` into a self-reference (fixed
+// alongside this test; see their own suites). Python and Java instead
+// failed to parse `(T)` at all (also fixed; see their own suites).
+//
+// Proves: this tier's .runar.go parser does not bind any name for an
+// unnamed receiver, so `c.Field` with a same-named parameter `c` parses as
+// an ordinary member access, not a property_access on the contract.
+// Does NOT prove: the other six tiers.
+// ---------------------------------------------------------------------------
+describe('N-018: unnamed receiver `(T)` is unreferenceable', () => {
+  const PRELUDE = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+`;
+  const GUARDED = `
+type Guarded struct {
+	runar.SmartContract
+	PubKey runar.PubKey \`runar:"readonly"\`
+}
+
+func (c *Guarded) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckSig(sig, c.PubKey))
+}
+`;
+
+  it('a parameter named like the (missing) receiver stays a plain identifier', () => {
+    const src = PRELUDE + GUARDED + `
+func (Guarded) CheckC(c runar.PubKey) {
+	runar.Assert(c.PubKey)
+}
+`;
+    const result = parseGoSource(src, 'Guarded.runar.go');
+    expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+    const method = result.contract!.methods.find((m) => m.name === 'checkC')!;
+    expect(method).toBeDefined();
+    const stmt = method.body[0] as ExpressionStatement;
+    const assertCall = stmt.expression as CallExpr;
+    const arg = assertCall.args[0]!;
+    // Correct: `c` is just the parameter, so `c.PubKey` is a member access
+    // on it, not a property_access on the contract (which would mean the
+    // unnamed receiver was wrongly bound to the name "c").
+    expect(arg.kind).toBe('member_expr');
+    if (arg.kind === 'member_expr') {
+      const member = arg as MemberExpr;
+      expect(member.object.kind).toBe('identifier');
+      if (member.object.kind === 'identifier') {
+        expect((member.object as Identifier).name).toBe('c');
+      }
+      expect(member.property).toBe('pubKey');
+    }
+  });
 });

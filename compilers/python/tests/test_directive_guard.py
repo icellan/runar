@@ -56,7 +56,7 @@ def test_non_ts_surface_rejects_embed_always_directive() -> None:
 
 
 def test_word_boundary_identifier_does_not_trip_guard() -> None:
-    # A field named `sighashType` must NOT trip the `@sighash\b` guard.
+    # A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard.
     src = (
         "class C extends SmartContract {\n"
         "  readonly sighashType: bigint;\n"

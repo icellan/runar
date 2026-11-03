@@ -77,6 +77,7 @@ module RunarCompiler
     :state_fields,
     :constructor_slots,
     :code_sep_index_slots,
+    :code_part_len_slots,
     :code_separator_index,
     :code_separator_indices,
     :raw_script_spans,
@@ -97,6 +98,7 @@ module RunarCompiler
       state_fields: [],
       constructor_slots: [],
       code_sep_index_slots: [],
+      code_part_len_slots: [],
       code_separator_index: nil,
       code_separator_indices: nil,
       raw_script_spans: nil,
@@ -143,6 +145,17 @@ module RunarCompiler
   #
   # Returns a ParseResult-like object (from the frontend package).
   def self._parse_source(source, file_name)
+    result = _parse_source_dispatch(source, file_name)
+    # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+    unless result.contract.nil?
+      require_relative "frontend/loop_condition"
+      Frontend::LoopCondition.normalize_contract(result.contract)
+    end
+    result
+  end
+  private_class_method :_parse_source
+
+  def self._parse_source_dispatch(source, file_name)
     # DoS-bound size guard. Reject oversized source BEFORE any
     # format-specific parser touches the input. Raises
     # InputLimits::SourceSizeExceededError on rejection. BUG-008 follow-up.
@@ -170,7 +183,11 @@ module RunarCompiler
       Frontend.parse_python(source, file_name)
     elsif lower.end_with?(".runar.ts")
       require_relative "frontend/parser_ts"
-      Frontend.parse_ts(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_ts(source, file_name)
+      # N-342: +const+ locals cannot be reassigned (+.runar.ts+ only).
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.sol")
       require_relative "frontend/parser_sol"
       Frontend.parse_sol(source, file_name)
@@ -182,13 +199,21 @@ module RunarCompiler
       Frontend.parse_go(source, file_name)
     elsif lower.end_with?(".runar.rs")
       require_relative "frontend/parser_rust"
-      Frontend.parse_rust(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_rust(source, file_name)
+      # N-344: an immutable +let+ (no +mut+) cannot be reassigned.
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.rb")
       require_relative "frontend/parser_ruby"
       Frontend.parse_ruby(source, file_name)
     elsif lower.end_with?(".runar.zig")
       require_relative "frontend/parser_zig"
-      Frontend.parse_zig(source, file_name)
+      require_relative "frontend/const_reassign"
+      result = Frontend.parse_zig(source, file_name)
+      # N-344: a +const+ local cannot be reassigned.
+      result.errors.concat(Frontend::ConstReassign.check(result.contract)) unless result.contract.nil?
+      result
     elsif lower.end_with?(".runar.java")
       require_relative "frontend/parser_java"
       Frontend.parse_java(source, file_name)
@@ -198,31 +223,51 @@ module RunarCompiler
             "Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
     end
   end
-  private_class_method :_parse_source
+  private_class_method :_parse_source_dispatch
 
-  # Detect the first unsupported author-facing comment directive in +source+,
-  # or nil when the source is clean. Word-boundary matched (\b) to mirror the
-  # TypeScript compiler's +/@sighash\b/+ / +/@embedAlways\b/+ scans so an
-  # identifier like +sighashType+ does not trip the guard.
+  # Non-TS extension -> [human-readable surface name, format doc, native
+  # @sighash spelling, native @embedAlways spelling] for the shared guard
+  # diagnostic (N-244, N-093). Same table as every other tier's guard.
+  NON_TS_SURFACES = {
+    ".runar.sol" => ["Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways"],
+    ".runar.move" => ["Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"],
+    ".runar.py" => ["Python", "python", '@public(sighash="<FLAGS>")', "the wrapper type EmbedAlways[T]"],
+    ".runar.go" => ["Go DSL", "go", "the directive //runar:sighash <FLAGS>", 'the struct tag option runar:"readonly,embedAlways"'],
+    ".runar.rs" => ["Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]"],
+    ".runar.rb" => ["Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true"],
+    ".runar.zig" => ["Zig", "zig", 'the return type runar.Sighash("<FLAGS>")', "the type function runar.EmbedAlways(T)"],
+    ".runar.java" => ["Java", "java", 'the annotation @Sighash("<FLAGS>")', "the annotation @EmbedAlways"],
+  }.freeze
+  private_constant :NON_TS_SURFACES
+
+  # Detect the first unsupported author-facing COMMENT directive in +source+,
+  # or nil when the source is clean. +@embedAlways+ is word-boundary matched
+  # (\b) so an identifier like +sighashType+ does not trip the guard;
+  # +@sighash+ is a plain substring match (N-244): N-039 made every occurrence
+  # of the marker a directive, so a glued +@sighashSINGLE|FORKID+ is refused
+  # too, with the message every tier shares.
   #
-  # The directives are honored ONLY on the +.runar.ts+ surface (matching the
-  # TypeScript reference). For +.runar.ts+ the implemented directives are
-  # allowed through to the parser; the other 8 formats always fail closed.
+  # The comment directives are read ONLY on the +.runar.ts+ surface (matching
+  # the TypeScript reference). The other 8 surfaces spell both directives
+  # natively (N-093, user decision R38) and their parsers drop comments, so a
+  # COMMENT directive there would be silently ignored: fail closed and name
+  # the native spelling. None of the native spellings contains either marker.
   def self._unsupported_directive_error(source, file_name)
-    is_ts = file_name.downcase.end_with?(".runar.ts")
+    lower = file_name.downcase
+    # An unrecognised extension has no surface entry and is refused by the
+    # dispatcher's unsupported-format error instead; .runar.ts is absent.
+    entry = NON_TS_SURFACES.find { |ext, _| lower.end_with?(ext) }&.last
+    return nil if entry.nil?
 
-    # @sighash (#123) is implemented for the .runar.ts surface; only the other
-    # 8 formats fail closed.
-    if source =~ /@sighash\b/ && !is_ts
-      return "@sighash directive is not supported by the Ruby compiler for " \
-             "this format (issue #123); it is honored only on the .runar.ts surface"
+    surface, doc, sighash_spelling, embed_spelling = entry
+    if source.include?("@sighash")
+      return "@sighash directive (issue #123) is not supported as a comment by the #{surface} " \
+             "surface parser; write it as #{sighash_spelling} (see docs/formats/#{doc}.md)"
     end
 
-    # @embedAlways (#109) is implemented for the .runar.ts surface; only the
-    # other 8 formats fail closed.
-    if source =~ /@embedAlways\b/ && !is_ts
-      return "@embedAlways directive is not supported by the Ruby compiler for " \
-             "this format (issue #109); it is honored only on the .runar.ts surface"
+    if source =~ /@embedAlways\b/
+      return "@embedAlways directive (issue #109) is not supported as a comment by the #{surface} " \
+             "surface parser; write it as #{embed_spelling} (see docs/formats/#{doc}.md)"
     end
 
     nil
@@ -289,7 +334,7 @@ module RunarCompiler
   # Constant folding: evaluate compile-time-known expressions (Pass 4.25).
   def self._fold_constants(program)
     require_relative "frontend/constant_fold"
-    Frontend::ConstantFold.fold_constants(program)
+    Frontend::ConstantFold.fold_constants_and_prune(program)
   end
   private_class_method :_fold_constants
 
@@ -300,15 +345,29 @@ module RunarCompiler
   end
   private_class_method :_optimize_ec
 
-  # Dead Code Elimination -- discrete named pass (Pass 4.75).
-  # See frontend/dce.rb. Idempotent w.r.t. the EC optimizer's internal DCE;
-  # runs as a safety net for any post-EC residual dead bindings and to
-  # mirror the standalone DCE pass shape used by the Zig reference compiler.
-  def self._eliminate_dead_code(program)
-    require_relative "frontend/dce"
-    Frontend::DCE.eliminate_dead_code(program)
-  end
-  private_class_method :_eliminate_dead_code
+  # F-326 (CX-GAP-020): a `_eliminate_dead_code` wrapper used to sit here,
+  # documented as "Dead Code Elimination -- discrete named pass (Pass 4.75)"
+  # that "runs as a safety net for any post-EC residual dead bindings". It
+  # was called by neither pipeline entry point below, so it ran never and
+  # guarded nothing.
+  #
+  # Where dead-binding elimination actually happens: frontend/anf_optimize.rb's
+  # optimize_ec calls Frontend::DCE.eliminate_dead_bindings per method, but
+  # only when the program contains EC calls -- see the
+  # `return program unless any_changed` gate. A program with no EC calls is
+  # not swept by this path at all.
+  #
+  # That gate mirrors the same early-exit DCE already has in the Python
+  # (R-240) and TypeScript (R-194) tiers. Measured here too: forcing the
+  # sweep to run unconditionally diverges this tier's golden/cross-tier
+  # output for `all-readonly-cleanstack` (1 of 87 conformance fixtures --
+  # see frontend/dce.rb for detail). A shared defect in DCE's
+  # binding-removal rules (N-140), not a wiring gap to close here.
+  #
+  # `Frontend::DCE.eliminate_dead_code` (the whole-program entry) is still
+  # used directly, on deep-copied probes, by `_collect_referenced_props`
+  # below and by `Frontend::EmbedAlwaysDCE.collect_warnings`, to compute the
+  # @embedAlways warning.
 
   # Stack lowering: ANF -> Stack IR.
   def self._lower_to_stack(program)
@@ -389,6 +448,12 @@ module RunarCompiler
             "Nothing would be baked for this key."
     end
 
+    # (d) Value kind / width check (F-101), in property declaration order.
+    type_errors = program.properties.filter_map do |prop|
+      _constructor_arg_type_error(prop.name, prop.type, args[prop.name]) if args.key?(prop.name)
+    end
+    raise CompilationError, type_errors.join("; ") unless type_errors.empty?
+
     # Bake values into ANF property initial_values.
     program.properties.each do |prop|
       prop.initial_value = args[prop.name] if args.key?(prop.name)
@@ -399,6 +464,53 @@ module RunarCompiler
     raise CompilationError, unbaked.join("; ") unless unbaked.empty?
   end
   private_class_method :_apply_constructor_args
+
+  # F-101: the diagnostic for a constructorArgs value that does not match its
+  # property's declared type, or nil when it matches. Stack lowering pushes
+  # whatever it is handed -- `true` as OP_1, `42` as a 1-byte number, a 6-byte
+  # hex string as a 6-byte push -- so without this a wrong-typed value where a
+  # 20-byte hash belongs compiles cleanly into an unspendable script. Message
+  # text is shared verbatim with the TypeScript reference
+  # (`constructorArgTypeError` in packages/runar-compiler/src/index.ts).
+  def self._constructor_arg_type_error(name, type, value)
+    require_relative "frontend/typecheck"
+    require_relative "codegen/stack"
+
+    is_bool = value == true || value == false
+    is_int = value.is_a?(Integer)
+    hex_len = value.length / 2 if value.is_a?(String) && value.length.even? && value.match?(/\A[0-9a-fA-F]*\z/)
+
+    if Frontend.bigint_family?(type)
+      expected = "an integer"
+      ok = is_int
+    elsif type == "boolean"
+      expected = "a boolean"
+      ok = is_bool
+    elsif Frontend.byte_family?(type)
+      width = Codegen.fixed_width_state_bytes(type)
+      if width.positive?
+        expected = "exactly #{width} bytes of hex"
+        ok = hex_len == width
+      else
+        expected = "a hex string"
+        ok = !hex_len.nil?
+      end
+    else
+      return "constructorArgs value for property '#{name}' (#{type}) cannot be baked: " \
+             "unsupported property type."
+    end
+    return nil if ok
+
+    got = if is_bool then "a boolean"
+          elsif is_int then "an integer"
+          elsif hex_len then "#{hex_len} bytes of hex"
+          elsif value.is_a?(String) then "a non-hex string"
+          else "an unsupported value"
+          end
+    "constructorArgs value for property '#{name}' (#{type}) must be #{expected}, " \
+      "got #{got}. Baking it would silently put the wrong value in the locking script."
+  end
+  private_class_method :_constructor_arg_type_error
 
   # After baking constructor args, find readonly properties that are
   # REFERENCED by at least one method body but still have no baked
@@ -483,9 +595,9 @@ module RunarCompiler
   # dead-binding elimination), which stack-lowering emits as wasteful push+drop
   # sequences — diverging from the fold-OFF goldens and from the Zig tier, whose
   # compileFromIR never folds IR input. Force folding off here; peephole still folds.
-  def self.compile_from_ir(ir_path, disable_constant_folding: false)
+  def self.compile_from_ir(ir_path, disable_constant_folding: false, constructor_args: nil)
     program = _load_ir(ir_path)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true, constructor_args: constructor_args)
   end
 
   # Compile from raw ANF IR JSON bytes.
@@ -493,17 +605,26 @@ module RunarCompiler
   # @param data [String] raw ANF IR JSON
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @return [Artifact]
-  def self.compile_from_ir_bytes(data, disable_constant_folding: false)
+  def self.compile_from_ir_bytes(data, disable_constant_folding: false, constructor_args: nil)
     program = _load_ir_from_bytes(data)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true, constructor_args: constructor_args)
   end
 
   # Compile a parsed ANF program to a Runar artifact.
   #
   # @param program [IR::ANFProgram] the ANF program
   # @param disable_constant_folding [Boolean] skip constant folding pass
+  # @param constructor_args [Hash, nil] property values to bake. N-095: validated
+  #   and baked as the source pipeline does (and TS compileFromANF / Rust F-103),
+  #   before folding and the EC optimizer. The caller's program is not mutated.
   # @return [Artifact]
-  def self.compile_from_program(program, disable_constant_folding: false)
+  def self.compile_from_program(program, disable_constant_folding: false, constructor_args: nil)
+    unless constructor_args.nil? || (!constructor_args.is_a?(Array) && constructor_args.empty?)
+      program = program.dup
+      program.properties = program.properties.map(&:dup)
+      _apply_constructor_args(program, constructor_args)
+    end
+
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
@@ -530,6 +651,7 @@ module RunarCompiler
       emit_result.code_separator_index,
       emit_result.code_separator_indices,
       code_sep_index_slots: emit_result.code_sep_index_slots,
+      code_part_len_slots: emit_result.code_part_len_slots,
       source_map: emit_result.source_map,
       raw_script_spans: emit_result.raw_script_spans,
       stack_methods: stack_methods
@@ -623,6 +745,25 @@ module RunarCompiler
   # @param constructor_args [Hash, nil] constructor argument overrides
   # @return [IR::ANFProgram]
   def self.compile_source_to_ir(source_path, disable_constant_folding: false, constructor_args: nil)
+    program, = compile_source_to_ir_collecting_warnings(
+      source_path,
+      disable_constant_folding: disable_constant_folding,
+      constructor_args: constructor_args
+    )
+    program
+  end
+
+  # .compile_source_to_ir plus the warnings it would discard: the same set
+  # .compile_from_source_collecting_warnings reports (validator warnings and
+  # the issue-#109 DCE notice, from the same expanded contract and lowered
+  # program).
+  #
+  # F-220: cli.rb's --emit-ir used .compile_source_to_ir, so every warning
+  # (the H2 locktime-bypass advisory among them) was dropped on that path.
+  #
+  # @return [Array(IR::ANFProgram, Array<String>)]
+  def self.compile_source_to_ir_collecting_warnings(source_path, disable_constant_folding: false,
+                                                    constructor_args: nil)
     source = _read_file(source_path)
 
     parse_result = _parse_source(source, source_path)
@@ -637,6 +778,7 @@ module RunarCompiler
     if valid_result.errors.any?
       raise CompilationError, "validation errors:\n  #{valid_result.error_strings.join("\n  ")}"
     end
+    warnings = valid_result.warning_strings
 
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors.any?
@@ -655,6 +797,8 @@ module RunarCompiler
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
 
+    warnings += Frontend::EmbedAlwaysDCE.collect_warnings(expanded_contract, program)
+
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
@@ -662,7 +806,7 @@ module RunarCompiler
     # for dead-binding cleanup).
     program = _optimize_ec(program)
 
-    program
+    [program, warnings]
   end
 
   # -------------------------------------------------------------------------
@@ -845,6 +989,7 @@ module RunarCompiler
     code_separator_index = -1,
     code_separator_indices = nil,
     code_sep_index_slots: [],
+    code_part_len_slots: [],
     source_map: nil,
     raw_script_spans: nil,
     stack_methods: nil,
@@ -906,20 +1051,36 @@ module RunarCompiler
       sf
     end
 
-    is_stateful = !state_fields.empty?
+    # N-139: statefulness follows parent_class (the TS reference rule for
+    # isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    # keeps both. An IR input without parentClass falls back to state_fields.
+    is_stateful =
+      if program.parent_class.nil? || program.parent_class.empty?
+        !state_fields.empty?
+      else
+        program.parent_class == "StatefulSmartContract"
+      end
 
     # Build method ABIs (exclude constructor -- it's in abi.constructor, not methods)
     methods = []
     program.methods.each do |method|
       next if method.name == "constructor"
 
-      params = method.params.map { |p| ABIParam.new(name: p.name, type: p.type) }
+      # N-360: a reassigned property-named public param is bound in the ANF
+      # under its `<name>@local` slot; the ABI keeps the source name the
+      # caller passes.
+      params = method.params.map do |p|
+        name = method.is_public && p.name.end_with?("@local") ? p.name.delete_suffix("@local") : p.name
+        ABIParam.new(name: name, type: p.type)
+      end
 
-      # For stateful contracts, mark public methods without _changePKH as terminal
+      # For stateful contracts, mark public methods without a continuation as
+      # terminal. N-038: a SIGHASH_SINGLE method continues without _changePKH,
+      # so its continuation is read off the IR (the --ir scaffolding shape).
       is_terminal = nil
       if is_stateful && method.is_public
         has_change = method.params.any? { |p| p.name == "_changePKH" }
-        is_terminal = true unless has_change
+        is_terminal = true unless has_change || IR::StatefulScaffold.shape(program, method)[0]
       end
 
       # Propagate the authoritative _codePart decision from stack-lowering into
@@ -982,6 +1143,7 @@ module RunarCompiler
       state_fields: state_fields,
       constructor_slots: constructor_slots,
       code_sep_index_slots: code_sep_index_slots,
+      code_part_len_slots: code_part_len_slots,
       code_separator_index: cs_index,
       code_separator_indices: cs_indices,
       raw_script_spans: (raw_script_spans && !raw_script_spans.empty? ? raw_script_spans : nil),
@@ -1103,6 +1265,14 @@ module RunarCompiler
       end
     end
 
+    # N-051 -- deploy-time code-part length pins. Omitted when every pin is
+    # exact at compile time.
+    if artifact.code_part_len_slots && !artifact.code_part_len_slots.empty?
+      d["codePartLenSlots"] = artifact.code_part_len_slots.map do |slot|
+        { "byteOffset" => slot.byte_offset }
+      end
+    end
+
     d["codeSeparatorIndex"] = artifact.code_separator_index unless artifact.code_separator_index.nil?
     d["codeSeparatorIndices"] = artifact.code_separator_indices unless artifact.code_separator_indices.nil?
 
@@ -1194,25 +1364,41 @@ module RunarCompiler
     end
 
     ser_binding = lambda do |b|
-      { "name" => b.name, "value" => ser_value.call(b.value) }
+      d = { "name" => b.name, "value" => ser_value.call(b.value) }
+      # N-498: same {file, line, column} shape and 0-based column as TS.
+      unless b.source_loc.nil?
+        d["sourceLoc"] = { "file" => b.source_loc.file, "line" => b.source_loc.line, "column" => b.source_loc.column }
+      end
+      d
     end
 
-    {
+    out = {
       "contractName" => program.contract_name,
       "properties" => program.properties.map do |p|
         pd = { "name" => p.name, "type" => p.type, "readonly" => p.readonly }
         pd["initialValue"] = p.initial_value unless p.initial_value.nil?
+        # N-095: the FixedArray regrouping chain, omitted on ordinary fields.
+        chain = p.synthetic_array_chain
+        pd["syntheticArrayChain"] = chain unless chain.nil? || chain.empty?
         pd
       end,
       "methods" => program.methods.map do |m|
-        {
+        md = {
           "name" => m.name,
           "params" => m.params.map { |p| { "name" => p.name, "type" => p.type } },
           "body" => m.body.map { |b| ser_binding.call(b) },
           "isPublic" => m.is_public,
         }
+        # F-065: a non-default @sighash mode is wire data (omitted for ALL|FORKID).
+        unless m.sighash_type.nil? || m.sighash_type == Frontend::SighashDirective::SIGHASH_DEFAULT
+          md["sigHashType"] = m.sighash_type
+        end
+        md
       end,
     }
+    # F-038: the base class is wire data (omitted only when unknown).
+    out["parentClass"] = program.parent_class unless program.parent_class.nil? || program.parent_class.empty?
+    out
   end
   private_class_method :_serialize_anf_program
 

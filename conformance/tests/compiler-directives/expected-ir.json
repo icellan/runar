@@ -1,0 +1,275 @@
+{
+  "contractName": "Directives",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "deployTag"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "update_prop",
+            "name": "pubKeyHash",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "deployTag"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "deployTag",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "pubKeyHash",
+          "type": "Addr"
+        },
+        {
+          "name": "deployTag",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "deployTag"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t1"
+            ],
+            "func": "hash160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "t6",
+              "t7"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "assert",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "spendAll",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "pubKey",
+          "type": "PubKey"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "hash160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "spendSingle",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "pubKey",
+          "type": "PubKey"
+        }
+      ],
+      "sigHashType": 67
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": [
+    {
+      "name": "pubKeyHash",
+      "readonly": true,
+      "type": "Addr"
+    },
+    {
+      "name": "deployTag",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}

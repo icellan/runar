@@ -1,20 +1,25 @@
-"""SLH-DSA (FIPS 205, SPHINCS+) wrapper using the slhdsa package.
+"""SLH-DSA keygen/sign wrapper (slhdsa package) and verify (repo variant).
 
-Provides keygen, sign, and verify for SLH-DSA-SHA2-128s.
+Signatures are the repo's SHA-256-only SLH-DSA variant, the one the compiled
+on-chain verifier and the other six SDKs implement (F-133). For the 192/256
+sets that is NOT real FIPS 205 (which uses SHA-512 there), so keygen/sign
+instantiate the upstream package's SHA-256-only `Sha2_1Parameter` at the
+FIPS 205 Table 2 dimensions instead of its FIPS `sha2_192*` / `sha2_256*`.
 
-This module fails closed when the optional `slh-dsa` PyPI package is not
-installed: keygen and verify both raise `RuntimeError` instead of silently
-returning a mock-true value. The previous mock-fallback gave false-pass
-behaviour to tests that genuinely required real SLH-DSA verification — see
-the SPHINCSWallet / post-quantum-slhdsa-naive integration tests, which now
-gate themselves on `_HAS_SLHDSA` and skip explicitly rather than running
-against a no-op verifier.
+`slh_verify` is pure stdlib (runar/slh_dsa.py) and needs no optional package.
+`slh_keygen` fails closed when the optional `slh-dsa` PyPI package is not
+installed: it raises `RuntimeError` instead of returning a mock key. The
+SPHINCSWallet / post-quantum-slhdsa-naive integration tests gate themselves on
+`_HAS_SLHDSA` and skip explicitly.
 
 Install: pip install slh-dsa
 """
 
+from runar.slh_dsa import slh_verify as _slh_verify_repo
+
 try:
-    from slhdsa import KeyPair as _KeyPair, PublicKey as _PublicKey
+    from slhdsa import KeyPair as _KeyPair
+    from slhdsa.lowlevel.parameters import Sha2_1Parameter as _Sha2_1Parameter
     import slhdsa as _slhdsa
     _HAS_SLHDSA = True
 except ImportError:
@@ -23,15 +28,20 @@ except ImportError:
 
 # -- Parameter set mapping ---------------------------------------------------
 
+def _sha256_only(p):
+    """The upstream FIPS parameter set's dimensions, SHA-256-only hashing."""
+    return _Sha2_1Parameter(p.oid_no, p.n, p.h, p.d, p.h_m, p.a, p.k, p.lgw, p.m)
+
+
 _PARAM_SETS = {}
 if _HAS_SLHDSA:
     _PARAM_SETS = {
         'sha2_128s': _slhdsa.sha2_128s,
         'sha2_128f': _slhdsa.sha2_128f,
-        'sha2_192s': _slhdsa.sha2_192s,
-        'sha2_192f': _slhdsa.sha2_192f,
-        'sha2_256s': _slhdsa.sha2_256s,
-        'sha2_256f': _slhdsa.sha2_256f,
+        'sha2_192s': _sha256_only(_slhdsa.sha2_192s),
+        'sha2_192f': _sha256_only(_slhdsa.sha2_192f),
+        'sha2_256s': _sha256_only(_slhdsa.sha2_256s),
+        'sha2_256f': _sha256_only(_slhdsa.sha2_256f),
     }
 
 
@@ -72,7 +82,7 @@ def slh_keygen(param_set: str = 'sha2_128s') -> SLHKeyPair:
 
 
 def slh_verify(msg: bytes, sig: bytes, pk: bytes, param_set: str = 'sha2_128s') -> bool:
-    """Verify an SLH-DSA signature.
+    """Verify an SLH-DSA signature (repo SHA-256-only variant).
 
     Args:
         msg: Original message bytes.
@@ -83,15 +93,4 @@ def slh_verify(msg: bytes, sig: bytes, pk: bytes, param_set: str = 'sha2_128s') 
     Returns:
         True if valid, False otherwise.
     """
-    if not _HAS_SLHDSA:
-        raise RuntimeError(
-            "slh-dsa package not installed; cannot verify SLH-DSA signatures. "
-            "Install with: pip install slh-dsa"
-        )
-
-    ps = _PARAM_SETS.get(param_set)
-    if ps is None:
-        raise ValueError(f"Unknown parameter set: {param_set}")
-
-    pub = _PublicKey.from_digest(pk, ps)
-    return pub.verify(msg, sig)
+    return _slh_verify_repo(param_set, msg, sig, pk)

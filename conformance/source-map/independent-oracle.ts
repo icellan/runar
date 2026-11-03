@@ -37,6 +37,36 @@
  * limitations" in README.md) but it is unconditionally sound — it never
  * consults the source-map generator, the golden, or any Rúnar compiler
  * pass, only `fs.readFileSync` + the mapping under test.
+ *
+ * F-293 — WHOLE-MAP check (`checkAgainstReference`). Every check above is
+ * per-mapping, so N identical valid positions pass exactly as well as one:
+ * Rust's `if-else` golden maps 17 consecutive opcodes spanning both branch
+ * bodies onto the single line of the enclosing `if`, and Zig's
+ * `stateful-counter` maps ~420 compiler-injected preamble opcodes onto one
+ * method-signature anchor, and neither trips a per-mapping rule. The rule
+ * below is relative to the TypeScript tier, which README.md designates the
+ * reference, and rests on one fact: hex parity (CLAUDE.md invariant 2) makes
+ * opcode N the SAME opcode, produced by the SAME source construct, in every
+ * tier. Coordinates differ per surface syntax, so they are never compared;
+ * only the PARTITION of opcodes into anchors is:
+ *
+ *   1. mergedAnchors -- no merging. Two opcodes both tiers map and that the
+ *      reference anchors to different constructs must not share one anchor
+ *      in the tier (an anchor that is not the innermost construct that
+ *      produced the opcode swallows its children). Counted as, per tier
+ *      anchor, (distinct reference anchors it covers - 1), summed. Splitting
+ *      (tier finer than reference) is allowed: granularity is tier-chosen.
+ *   2. extraMappings -- no invention. An opcode the reference leaves
+ *      unmapped is, by README ("tiers may omit a mapping for ops the
+ *      lowering pass had no sourceLoc for"), compiler-synthesized; mapping
+ *      it onto a user line misattributes generated code (this is what turns
+ *      a ~10 mapping table into 400+). Counted as opcodes mapped by the tier
+ *      and not by the reference.
+ *
+ * Neither rule is a density ratio: both are exact, tier-independent, and
+ * pinned per (fixture, tier) in anchor-known-issues.json. Residual: the
+ * reference is trusted (it cannot flag itself); its correctness rests on
+ * the per-mapping rules and on review of the committed TS goldens.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -201,6 +231,40 @@ export function checkSourceAnchors(sm: SourceMap, repoRoot: string): AnchorRepor
   };
 }
 
+export interface ReferenceShapeReport {
+  /** Sum over tier anchors of (distinct reference anchors covered - 1). */
+  mergedAnchors: number;
+  /** Tracked opcodes the tier maps that the reference does not. */
+  extraMappings: number;
+}
+
+const anchorKey = (m: SourceMapping): string => `${m.sourceFile}:${m.line}:${m.column}`;
+
+/**
+ * Whole-map comparison of `sm` against the reference tier's map for the same
+ * fixture (F-293). Untracked (line === 0) mappings are ignored on both sides.
+ * See the F-293 paragraph in the file header for the rule and its justification.
+ */
+export function checkAgainstReference(sm: SourceMap, ref: SourceMap): ReferenceShapeReport {
+  const refByOpcode = new Map<number, string>();
+  for (const m of ref.mappings) if (m.line > 0) refByOpcode.set(m.opcodeIndex, anchorKey(m));
+
+  const refAnchorsPerTierAnchor = new Map<string, Set<string>>();
+  let extraMappings = 0;
+  for (const m of sm.mappings) {
+    if (m.line === 0) continue;
+    const refAnchor = refByOpcode.get(m.opcodeIndex);
+    if (refAnchor === undefined) { extraMappings++; continue; }
+    const k = anchorKey(m);
+    let set = refAnchorsPerTierAnchor.get(k);
+    if (!set) { set = new Set(); refAnchorsPerTierAnchor.set(k, set); }
+    set.add(refAnchor);
+  }
+  let mergedAnchors = 0;
+  for (const set of refAnchorsPerTierAnchor.values()) mergedAnchors += set.size - 1;
+  return { mergedAnchors, extraMappings };
+}
+
 // ---------------------------------------------------------------------------
 // Known-issues allowlist (mirrors conformance/fold-on-allowlist.json).
 // ---------------------------------------------------------------------------
@@ -217,6 +281,10 @@ export interface KnownIssueEntry {
    *  recording them as violations). */
   trackedCount: number;
   totalCount: number;
+  /** F-293 whole-map signature vs the TS reference (checkAgainstReference);
+   *  omitted means 0. Pinned exactly, like the three fields above. */
+  mergedAnchors?: number;
+  extraMappings?: number;
   reason: string;
   tracking?: string;
 }
@@ -276,4 +344,26 @@ export function evaluateAgainstKnownIssues(
     };
   }
   return { ok: true, reason: `matches recorded known issue: ${entry.reason}` };
+}
+
+/**
+ * Evaluate a ReferenceShapeReport (F-293) against the allowlist. No entry means
+ * (0, 0) is required; an entry must match exactly in both fields, so a fix that
+ * lands without removing the entry fails just as a regression does.
+ */
+export function evaluateShapeAgainstKnownIssues(
+  fixture: string,
+  tier: string,
+  shape: ReferenceShapeReport,
+  knownIssues: KnownIssueEntry[],
+): { ok: boolean; reason: string } {
+  const entry = knownIssues.find((e) => e.fixture === fixture && e.tier === tier);
+  const want = { mergedAnchors: entry?.mergedAnchors ?? 0, extraMappings: entry?.extraMappings ?? 0 };
+  if (shape.mergedAnchors === want.mergedAnchors && shape.extraMappings === want.extraMappings) {
+    return { ok: true, reason: entry ? `matches recorded known issue: ${entry.reason}` : 'clean' };
+  }
+  return {
+    ok: false,
+    reason: `${fixture}/${tier} vs the TS reference: observed {mergedAnchors:${shape.mergedAnchors}, extraMappings:${shape.extraMappings}}, anchor-known-issues.json records {mergedAnchors:${want.mergedAnchors}, extraMappings:${want.extraMappings}}${entry ? '' : ' (no entry)'} — fix the generator, or pin the exact signature with a justified reason`,
+  };
 }

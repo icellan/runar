@@ -1,0 +1,72 @@
+{
+  "contractName": "EcChainedRewrite",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_const",
+            "value": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "name": "r",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "p"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "r",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": [
+        {
+          "name": "p",
+          "type": "Point"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": []
+}

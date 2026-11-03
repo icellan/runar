@@ -11,12 +11,34 @@ common token use-case.
 
 from __future__ import annotations
 
+import warnings
+
 from runar.sdk.types import RunarArtifact, Utxo
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.contract import RunarContract
-from runar.sdk.calling import build_call_transaction
 from runar.sdk.deployment import build_p2pkh_script
+from runar.sdk.script_utils import is_hex_bytes, matches_artifact
+from runar.sdk.state import find_last_op_return
+
+
+# N-239 (user decision R92): ``merge`` and ``transfer`` drive an ABI that
+# cannot be made sound, so they are deprecated rather than redesigned or
+# removed. ``warnings`` reports each once per call site by default.
+_MERGE_DEPRECATION = (
+    'runar-sdk: TokenWallet.merge is deprecated and unsafe. Its '
+    'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the '
+    'companion input, so a holder can call merge on ONE input with a made-up '
+    'otherSupply (supply inflation). Use the token-ft example '
+    '(FungibleTokenExample, examples/*/token-ft/) instead (N-239).'
+)
+_TRANSFER_DEPRECATION = (
+    'runar-sdk: TokenWallet.transfer is deprecated and unsafe. Its '
+    'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an '
+    'Addr, so the token stays with the current holder instead of moving to '
+    'the recipient. Use the token-ft example (FungibleTokenExample, '
+    'examples/*/token-ft/) instead (N-239).'
+)
 
 
 class TokenWallet:
@@ -69,7 +91,13 @@ class TokenWallet:
 
         Returns:
             The txid of the transfer transaction.
+
+        .. deprecated::
+            Unsafe (N-239): the ``transfer(sig, to: Addr)`` ABI cannot re-key a
+            PubKey holder, so the token does not move to ``recipient_addr``.
+            Use the token-ft example (FungibleTokenExample) instead.
         """
+        warnings.warn(_TRANSFER_DEPRECATION, DeprecationWarning, stacklevel=2)
         utxos = self.get_utxos()
         if not utxos:
             raise RuntimeError('TokenWallet.transfer: no token UTXOs found')
@@ -91,33 +119,15 @@ class TokenWallet:
 
             if balance >= amount:
                 # FungibleToken.transfer(sig: Sig, to: Addr)
-                # Build a preliminary unlocking script with a placeholder sig
-                placeholder_sig = '00' * 72
-                prelim_unlock = contract.build_unlocking_script(
-                    'transfer', [placeholder_sig, recipient_addr]
-                )
-
-                change_address = self.signer.get_address()
-                fee_rate = self.provider.get_fee_rate()
-                additional_utxos = self.provider.get_utxos(change_address)
-                change_script = build_p2pkh_script(change_address)
-
-                build_call_transaction(
-                    utxo,
-                    prelim_unlock,
-                    '',  # FungibleToken is stateless (SmartContract base)
-                    0,
-                    change_address,
-                    change_script,
-                    additional_utxos if additional_utxos else None,
-                    fee_rate,
-                )
-
-                # Sign input 0 against the contract UTXO's locking script
+                # F-045: pass None for the Sig so contract.call auto-signs the
+                # transaction it actually builds and broadcasts.
+                # An Addr is a 20-byte hash160: accept a Base58 address (as
+                # documented), a raw hash160, or a public key.
+                to_pkh = build_p2pkh_script(recipient_addr)[6:46]
                 contract.connect(self.provider, self.signer)
                 txid, _ = contract.call(
                     'transfer',
-                    [None, recipient_addr],
+                    [None, to_pkh],
                     options=None,
                 )
                 return txid
@@ -135,7 +145,13 @@ class TokenWallet:
 
         Returns:
             The txid of the merge transaction.
+
+        .. deprecated::
+            Unsafe (N-239): the ``merge(sig, otherSupply, otherHolder)`` ABI
+            cannot authenticate its companion input, so a holder can inflate
+            supply. Use the token-ft example (FungibleTokenExample) instead.
         """
+        warnings.warn(_MERGE_DEPRECATION, DeprecationWarning, stacklevel=2)
         utxos = self.get_utxos()
         if len(utxos) < 2:
             raise RuntimeError('TokenWallet.merge: need at least 2 UTXOs to merge')
@@ -166,6 +182,18 @@ class TokenWallet:
         other_holder = second_state.get('holder', '')
 
         # FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
+        # F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        # the OTHER input's supply/holder, and every Sig is None so
+        # contract.call signs each input over the tx it actually broadcasts.
+        first_state = contract.get_state()
+        first_supply = int(
+            first_state.get('supply')
+            or first_state.get('balance')
+            or first_state.get('amount')
+            or 0
+        )
+        first_holder = first_state.get('holder', '')
+
         contract.connect(self.provider, self.signer)
         change_address = self.signer.get_address()
 
@@ -173,7 +201,11 @@ class TokenWallet:
         txid, _ = contract.call(
             'merge',
             [None, other_supply, other_holder],
-            options=CallOptions(change_address=change_address),
+            options=CallOptions(
+                change_address=change_address,
+                additional_contract_inputs=[second_utxo],
+                additional_contract_input_args=[[None, first_supply, first_holder]],
+            ),
         )
 
         return txid
@@ -187,16 +219,45 @@ class TokenWallet:
         address = self.signer.get_address()
         all_utxos = self.provider.get_utxos(address)
 
-        script_prefix = self.artifact.script
+        # N-076: the artifact script is the TEMPLATE; every slot (constructor
+        # arg, codeSepIndex, code-part length) is a placeholder that
+        # deployment replaces, so a raw prefix of it never matches a slotted
+        # deployment. With constructor slots, use the slot-aware
+        # ``matches_artifact``; a template with none is deployed verbatim, so
+        # its literal prefix is exact.
+        template = self.artifact.script
+        slotted = bool(self.artifact.constructor_slots)
 
         result: list[Utxo] = []
         for utxo in all_utxos:
-            # If we have the script, check it starts with the contract code.
+            # If we have the script, compare it with the contract code.
             # Otherwise, include all UTXOs (caller can filter further).
-            if utxo.script and script_prefix:
-                if utxo.script.startswith(script_prefix):
+            if not utxo.script or not template:
+                result.append(utxo)
+            elif not slotted:
+                if utxo.script.startswith(template):
                     result.append(utxo)
             else:
-                result.append(utxo)
+                # N-317: any UTXO the provider lists is attacker-influenced. A
+                # script that is not whole hex bytes, or that fails to parse in
+                # any way below, is not an instance of this contract; it must
+                # never abort the listing.
+                if not is_hex_bytes(utxo.script):
+                    continue
+                try:
+                    code_hex = utxo.script
+                    # matches_artifact strips the state section only for
+                    # artifacts that declare state fields; cut it here for the
+                    # rest.
+                    if not self.artifact.state_fields:
+                        pos = find_last_op_return(code_hex)
+                        if pos != -1:
+                            code_hex = code_hex[:pos]
+                    if matches_artifact(self.artifact, code_hex):
+                        result.append(utxo)
+                except Exception:  # noqa: BLE001 - per-UTXO, see N-317 above
+                    # Not well-formed at the artifact's slot offsets (F-238):
+                    # not an instance of this contract.
+                    pass
 
         return result

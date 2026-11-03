@@ -20,12 +20,16 @@ func OptimizeStackOps(ops []StackOp) []StackOp {
 		current[i] = optimizeNestedIf(op)
 	}
 
+	// Passes alternate between two buffers instead of allocating a fresh
+	// output each time: a multi-million-op program (bn254-pairing) otherwise
+	// allocates passes x output and keeps the GC heap growing.
+	var spare []StackOp
 	for iteration := 0; iteration < maxOptimizationIterations; iteration++ {
-		result, changed := applyOnePass(current)
+		result, changed := applyOnePassInto(spare, current)
 		if !changed {
 			break
 		}
-		current = result
+		current, spare = result, current
 	}
 
 	return current
@@ -39,16 +43,44 @@ func optimizeNestedIf(op StackOp) StackOp {
 			optimizedElse = OptimizeStackOps(op.Else)
 		}
 		return StackOp{
-			Op:   "if",
-			Then: optimizedThen,
-			Else: optimizedElse,
+			Op:        "if",
+			Then:      optimizedThen,
+			Else:      optimizedElse,
+			SourceLoc: op.SourceLoc,
 		}
 	}
 	return op
 }
 
+// withHeadSourceLoc gives every replacement op that has no location of its
+// own the location of the first op of the matched window (F-179; the TS,
+// Python and Rust convention), so the emitter still maps the fused /
+// rewritten opcode to its statement.
+func withHeadSourceLoc(head StackOp, replacement []StackOp) []StackOp {
+	if head.SourceLoc == nil {
+		return replacement
+	}
+	for i := range replacement {
+		if replacement[i].SourceLoc == nil {
+			replacement[i].SourceLoc = head.SourceLoc
+		}
+	}
+	return replacement
+}
+
 func applyOnePass(ops []StackOp) ([]StackOp, bool) {
-	var result []StackOp
+	return applyOnePassInto(nil, ops)
+}
+
+// applyOnePassInto writes the pass's output into dst's backing array (which
+// must not alias ops), growing it only when it is too small.
+func applyOnePassInto(dst, ops []StackOp) ([]StackOp, bool) {
+	// Output is never much longer than the input; growing by append allocated
+	// ~5x the output per pass on multi-million-op programs.
+	result := dst[:0]
+	if cap(result) < len(ops) {
+		result = make([]StackOp, 0, len(ops))
+	}
 	changed := false
 	i := 0
 
@@ -56,7 +88,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 4-op window
 		if i+3 < len(ops) {
 			if replacement, ok := matchWindow4(ops[i], ops[i+1], ops[i+2], ops[i+3]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 4
 				changed = true
 				continue
@@ -65,7 +97,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 3-op window
 		if i+2 < len(ops) {
 			if replacement, ok := matchWindow3(ops[i], ops[i+1], ops[i+2]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 3
 				changed = true
 				continue
@@ -74,7 +106,7 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 		// Try 2-op window
 		if i+1 < len(ops) {
 			if replacement, ok := matchWindow2(ops[i], ops[i+1]); ok {
-				result = append(result, replacement...)
+				result = append(result, withHeadSourceLoc(ops[i], replacement)...)
 				i += 2
 				changed = true
 				continue
@@ -126,25 +158,17 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 		return []StackOp{{Op: "opcode", Code: "OP_1SUB"}}, true
 	}
 
-	// PUSH 0, OP_ADD -> remove both (x + 0 = x)
-	if isPushBigInt(a, 0) && isOpcodeOp(b, "OP_ADD") {
-		return nil, true
-	}
-
-	// PUSH 0, OP_SUB -> remove both (x - 0 = x)
-	if isPushBigInt(a, 0) && isOpcodeOp(b, "OP_SUB") {
-		return nil, true
-	}
+	// NOTE (F-001): no `PUSH 0, OP_ADD`, `PUSH 0, OP_SUB` or
+	// `OP_NEGATE, OP_NEGATE` elimination. x+0, x-0 and -(-x) are identities
+	// over integers, not over stack elements: the opcode decodes its operand
+	// as a CScriptNum (rejecting a non-minimal encoding under strict rules)
+	// and pushes back the minimal re-encoding. Deleting it changes
+	// accept/reject and the value for a witness-supplied operand.
 
 	// NOTE: `OP_NOT, OP_NOT` is NOT eliminated here — see the guarded 3-op
 	// rule in matchWindow3 (C17). The pair is boolean normalisation, not
 	// numeric identity, so it may only be dropped when the producer of the
 	// negated value provably leaves a canonical 0/1 behind.
-
-	// OP_NEGATE, OP_NEGATE -> remove both
-	if isOpcodeOp(a, "OP_NEGATE") && isOpcodeOp(b, "OP_NEGATE") {
-		return nil, true
-	}
 
 	// OP_EQUAL, OP_VERIFY -> OP_EQUALVERIFY
 	if isOpcodeOp(a, "OP_EQUAL") && isOpcodeOp(b, "OP_VERIFY") {
@@ -182,27 +206,31 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	}
 
 	// PUSH(0n) + Roll{depth:0} -> remove both (roll 0 is a no-op)
-	if isPushBigInt(a, 0) && b.Op == "roll" && b.Depth == 0 {
+	// F-392: also matches the opcode-string form (SLH-DSA-adjacent codegen
+	// emits Opcode("OP_ROLL")/("OP_PICK") instead of the typed node); the
+	// depth comes from the preceding PUSH either way. Matches
+	// compilers/python and compilers/ruby, which already accept both forms.
+	if isPushBigInt(a, 0) && ((b.Op == "roll" && b.Depth == 0) || isOpcodeOp(b, "OP_ROLL")) {
 		return nil, true
 	}
 
 	// PUSH(1n) + Roll{depth:1} -> SWAP
-	if isPushBigInt(a, 1) && b.Op == "roll" && b.Depth == 1 {
+	if isPushBigInt(a, 1) && ((b.Op == "roll" && b.Depth == 1) || isOpcodeOp(b, "OP_ROLL")) {
 		return []StackOp{{Op: "swap"}}, true
 	}
 
 	// PUSH(2n) + Roll{depth:2} -> ROT
-	if isPushBigInt(a, 2) && b.Op == "roll" && b.Depth == 2 {
+	if isPushBigInt(a, 2) && ((b.Op == "roll" && b.Depth == 2) || isOpcodeOp(b, "OP_ROLL")) {
 		return []StackOp{{Op: "rot"}}, true
 	}
 
 	// PUSH(0n) + Pick{depth:0} -> DUP
-	if isPushBigInt(a, 0) && b.Op == "pick" && b.Depth == 0 {
+	if isPushBigInt(a, 0) && ((b.Op == "pick" && b.Depth == 0) || isOpcodeOp(b, "OP_PICK")) {
 		return []StackOp{{Op: "dup"}}, true
 	}
 
 	// PUSH(1n) + Pick{depth:1} -> OVER
-	if isPushBigInt(a, 1) && b.Op == "pick" && b.Depth == 1 {
+	if isPushBigInt(a, 1) && ((b.Op == "pick" && b.Depth == 1) || isOpcodeOp(b, "OP_PICK")) {
 		return []StackOp{{Op: "over"}}, true
 	}
 
@@ -283,6 +311,14 @@ func producesCanonicalBool(op StackOp) bool {
 func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
 	if isRawBytes(a) || isRawBytes(b) || isRawBytes(c) {
 		return nil, false
+	}
+
+	// ROT, ROT, ROT -> remove all three (N-376). OP_ROT is a 3-cycle on the
+	// top three items, so three in a row are the identity; the fixed-point
+	// loop leaves a run of n as n mod 3. Matches the opcode-string form too
+	// (F-392 convention), as every tier does.
+	if isRotOp(a) && isRotOp(b) && isRotOp(c) {
+		return nil, true
 	}
 
 	// <canonical-bool producer>, OP_NOT, OP_NOT -> <canonical-bool producer>
@@ -366,6 +402,11 @@ func isPushBigInt(op StackOp, n int64) bool {
 		return false
 	}
 	return op.Value.BigInt.Cmp(big.NewInt(n)) == 0
+}
+
+// isRotOp reports whether op is a typed rot or the opcode-string OP_ROT (N-376).
+func isRotOp(op StackOp) bool {
+	return op.Op == "rot" || isOpcodeOp(op, "OP_ROT")
 }
 
 func isOpcodeOp(op StackOp, code string) bool {

@@ -30,12 +30,15 @@
 //! - Types before names (Solidity convention)
 
 use num_bigint::{BigInt, Sign};
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{char_index_positions, lex_error_at_index, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::resolve_native_sighash;
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, type_too_deep, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -44,19 +47,40 @@ use super::parser::ParseResult;
 
 /// Parse a Solidity-format Rúnar contract source.
 pub fn parse_solidity(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_solidity_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_solidity`], on the parse stack segment.
+fn parse_solidity_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.sol");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
-    let mut parser = SolParser::new(tokens, file, &mut errors);
+    let (tokens, positions) = tokenize(source, file, &mut errors);
+    let mut parser = SolParser::new(tokens, positions, file, &mut errors);
 
     let contract = parser.parse_contract();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
 
-    ParseResult {
+    enforce_ast_nesting(ParseResult {
         contract,
         errors,
         source_size_err: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -138,17 +162,32 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+/// Returns the tokens and, index for index, the (1-based line, 1-based
+/// column — the AST convention; codegen/emit.rs converts) where each one
+/// starts (F-337).
+fn tokenize(
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> (Vec<Token>, Vec<(usize, usize)>) {
     let mut tokens = Vec::new();
+    // F-337: char index where each token starts.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0usize;
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
+        // Tokens pushed by the previous iteration started at `at`.
+        starts.resize(tokens.len(), at);
+        at = i;
         let ch = chars[i];
 
         // Whitespace
-        if ch.is_whitespace() {
+        // N-407: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             i += 1;
             continue;
         }
@@ -292,26 +331,39 @@ fn tokenize(source: &str) -> Vec<Token> {
         // String literals
         if ch == '\'' || ch == '"' {
             let quote = ch;
+            let open = i;
             i += 1;
             let start = i;
-            while i < len && chars[i] != quote {
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while i < len && chars[i] != quote && chars[i] != '\n' && chars[i] != '\r' {
                 if chars[i] == '\\' {
-                    i += 1; // skip escaped char
+                    if i + 1 >= len || chars[i + 1] == '\n' || chars[i + 1] == '\r' {
+                        break;
+                    }
+                    i += 1;
                 }
                 i += 1;
             }
             let val: String = chars[start..i].iter().collect();
             tokens.push(Token::StringLit(val));
-            if i < len {
+            if i < len && chars[i] == quote {
                 i += 1;
+                // N-019: this surface has no quoted literal; a terminated one
+                // is refused as an unexpected character (as the TS reference).
+                errors.push(lex_error_at_index(&format!("Unexpected character '{}'", quote), file, &chars, open));
+            } else {
+                errors.push(lex_error_at_index(UNTERMINATED_STRING_LITERAL, file, &chars, open));
             }
             continue;
         }
 
         // Numbers (and hex byte string literals: 0x...)
         if ch.is_ascii_digit() {
-            // Hex byte string literal -> ByteString
-            if ch == '0' && i + 1 < len && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+            // Hex byte string literal -> ByteString (lowercase x only, as the
+            // TS reference; `0X` is an invalid integer literal).
+            if ch == '0' && i + 1 < len && chars[i + 1] == 'x' {
                 i += 2;
                 let hex_start = i;
                 while i < len && chars[i].is_ascii_hexdigit() {
@@ -321,14 +373,17 @@ fn tokenize(source: &str) -> Vec<Token> {
                 tokens.push(Token::HexLit(hex_str));
                 continue;
             }
+            // F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
             let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == 'n') {
-                i += 1;
-            }
-            let num_str: String = chars[start..i].iter().collect();
-            let num_str = num_str.trim_end_matches('n');
-            let val = <BigInt as Num>::from_str_radix(num_str, 10)
-                .unwrap_or_else(|_| BigInt::from(0));
+            i = scan_number_end(&chars, i);
+            let text: String = chars[start..i].iter().collect();
+            let val = match parse_int_literal("sol", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error_at_index(&invalid_integer_literal("sol", &text), file, &chars, start));
+                    BigInt::from(0)
+                }
+            };
             tokens.push(Token::NumberLit(val));
             continue;
         }
@@ -363,12 +418,16 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Skip unrecognized characters
+        // N-214: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error_at_index(&format!("Unexpected character '{}'", ch), file, &chars, i));
         i += 1;
     }
 
     tokens.push(Token::Eof);
-    tokens
+    starts.resize(tokens.len(), at);
+    let positions = char_index_positions(&chars, &starts);
+    (tokens, positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -377,19 +436,60 @@ fn tokenize(source: &str) -> Vec<Token> {
 
 struct SolParser<'a> {
     tokens: Vec<Token>,
+    /// F-337: start (line, column) of each token in `tokens`.
+    positions: Vec<(usize, usize)>,
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> SolParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
+    fn new(
+        tokens: Vec<Token>,
+        positions: Vec<(usize, usize)>,
+        file: &'a str,
+        errors: &'a mut Vec<Diagnostic>,
+    ) -> Self {
         Self {
             tokens,
+            positions,
             pos: 0,
             file,
             errors,
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn peek(&self) -> &Token {
@@ -427,11 +527,18 @@ impl<'a> SolParser<'a> {
         }
     }
 
+    /// Where the current token starts (F-337).
     fn loc(&self) -> SourceLocation {
+        let (line, column) = self
+            .positions
+            .get(self.pos)
+            .or_else(|| self.positions.last())
+            .copied()
+            .unwrap_or((1, 0));
         SourceLocation {
             file: self.file.to_string(),
-            line: 1,
-            column: 0,
+            line,
+            column,
         }
     }
 
@@ -451,13 +558,32 @@ impl<'a> SolParser<'a> {
             return None;
         }
 
+        // N-490: a synthesized constructor is anchored at the `contract` keyword.
+        let contract_loc = self.loc();
         self.expect(&Token::Contract);
         let name = self.expect_ident();
 
-        // 'is' BaseClass
+        // 'is' BaseClass. Only the three real bases are honoured; any other
+        // name is refused at parse (N-014, formerly folded to SmartContract by
+        // F-022), in every tier, with one shared diagnostic.
         let parent_class = if *self.peek() == Token::Is {
             self.advance();
-            self.expect_ident()
+            let parent_loc = self.loc();
+            let parent = self.expect_ident();
+            match parent.as_str() {
+                "SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract" => parent,
+                _ => {
+                    // N-014: an unknown base is refused, never folded to SmartContract.
+                    self.errors.push(Diagnostic::error(
+                        format!(
+                            "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
+                            parent
+                        ),
+                        Some(parent_loc),
+                    ));
+                    "SmartContract".to_string()
+                }
+            }
         } else {
             "SmartContract".to_string()
         };
@@ -504,7 +630,7 @@ impl<'a> SolParser<'a> {
         // refused — an accept/reject split is a frontend-parity breach.
         // Mirrors compilers/go/frontend/parser_sol.go:495-530.
         let constructor = constructor.unwrap_or_else(|| {
-            let loc = self.loc();
+            let loc = contract_loc;
             let uninit: Vec<&PropertyNode> =
                 properties.iter().filter(|p| p.initializer.is_none()).collect();
             let params: Vec<ParamNode> = uninit
@@ -518,10 +644,11 @@ impl<'a> SolParser<'a> {
                 expression: Expression::CallExpr {
                     callee: Box::new(Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }),
                     args: uninit
                         .iter()
-                        .map(|p| Expression::Identifier { name: p.name.clone() })
+                        .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
                         .collect(),
                     asm_return_type: None,
                 },
@@ -531,8 +658,9 @@ impl<'a> SolParser<'a> {
                 body.push(Statement::Assignment {
                     target: Expression::PropertyAccess {
                         property: p.name.clone(),
+                        source_location: None,
                     },
-                    value: Expression::Identifier { name: p.name.clone() },
+                    value: Expression::Identifier { name: p.name.clone(), source_location: None },
                     source_location: loc.clone(),
                 });
             }
@@ -588,13 +716,27 @@ impl<'a> SolParser<'a> {
 
         let type_node = self.parse_type();
 
-        // Handle "Type immutable name;" syntax (immutable after type)
-        let is_immutable = if !is_immutable && *self.peek() == Token::Immutable {
-            self.advance(); // consume 'immutable'
-            true
-        } else {
-            is_immutable
-        };
+        // Modifiers after the type, any order: `immutable` (readonly) and
+        // N-093's `embedAlways` (the native spelling of the `@embedAlways`
+        // directive). An `embedAlways` directly followed by `;` or `=` is the
+        // property NAME, not a modifier.
+        let mut is_immutable = is_immutable;
+        let mut embed_always = false;
+        loop {
+            if *self.peek() == Token::Immutable {
+                self.advance(); // consume 'immutable'
+                is_immutable = true;
+                continue;
+            }
+            if matches!(self.peek(), Token::Ident(w) if w == "embedAlways")
+                && !matches!(self.tokens.get(self.pos + 1), Some(Token::Semicolon) | Some(Token::Eq))
+            {
+                self.advance();
+                embed_always = true;
+                continue;
+            }
+            break;
+        }
 
         let name = self.expect_ident();
 
@@ -615,7 +757,7 @@ impl<'a> SolParser<'a> {
             initializer,
             source_location: self.loc(),
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always,
         }
     }
 
@@ -630,7 +772,7 @@ impl<'a> SolParser<'a> {
         if name == "FixedArray" {
             if *self.peek() == Token::Lt {
                 self.advance(); // <
-                let element = self.parse_type();
+                let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
                 self.expect(&Token::Comma);
                 let length = match self.advance() {
                     Token::NumberLit(n) => n.to_usize().unwrap_or(0),
@@ -689,6 +831,11 @@ impl<'a> SolParser<'a> {
                 element: Box::new(result),
                 length,
             };
+            // F-213: this loop builds the type; stop once it is too deep.
+            if type_too_deep(&result) {
+                self.bail();
+                break;
+            }
         }
         result
     }
@@ -730,9 +877,11 @@ impl<'a> SolParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 }),
                 args: params.iter().map(|p| Expression::Identifier {
                     name: p.name.clone(),
+                    source_location: None,
                 }).collect(),
                 asm_return_type: None,
             },
@@ -763,6 +912,7 @@ impl<'a> SolParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_function(&mut self) -> MethodNode {
+        let location = self.loc();
         self.advance(); // consume 'function'
         let name = self.expect_ident();
         self.expect(&Token::LParen);
@@ -770,8 +920,13 @@ impl<'a> SolParser<'a> {
         self.expect(&Token::RParen);
 
         // Parse Solidity-style modifiers in any order: visibility (public/private/
-        // external/internal), state mutability (view/pure/payable), and returns.
+        // external/internal), state mutability (view/pure/payable), returns,
+        // and N-093's `sighash(FLAGS)` (the native spelling of the `@sighash`
+        // directive). FLAGS must be identifiers separated by `|`; any other
+        // token makes the spelling malformed.
         let mut visibility = Visibility::Private;
+        let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        let mut pending_ret: Option<TypeNode> = None;
         loop {
             match self.peek().clone() {
                 Token::Public => {
@@ -791,11 +946,22 @@ impl<'a> SolParser<'a> {
                         "internal" | "view" | "pure" | "payable" => {
                             self.advance();
                         }
+                        "sighash" if matches!(self.tokens.get(self.pos + 1), Some(Token::LParen)) => {
+                            self.advance();
+                            let spec = self.parse_sighash_flag_tokens();
+                            sighash_specs.push(spec);
+                        }
                         "returns" => {
                             self.advance();
                             // Skip the parenthesised return type list
                             if *self.peek() == Token::LParen {
                                 self.advance();
+                                // N-331: the AST keeps no return type; an unknown name is refused.
+                                // N-332: checked after the modifier loop, because
+                                // `public` may follow `returns (...)`.
+                                if matches!(self.peek(), Token::Ident(_)) {
+                                    pending_ret = Some(self.parse_type());
+                                }
                                 let mut depth: i32 = 1;
                                 while depth > 0 && *self.peek() != Token::Eof {
                                     if *self.peek() == Token::LParen {
@@ -818,16 +984,63 @@ impl<'a> SolParser<'a> {
             }
         }
 
+        if let Some(ret) = pending_ret {
+            if let Some(msg) = unknown_return_type_message(&ret, &name, visibility == Visibility::Public) {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+            }
+        }
+
         let body = self.parse_block();
+
+        let sighash_type = match resolve_native_sighash(&name, visibility == Visibility::Public, &sighash_specs) {
+            Some(Ok(v)) => Some(v),
+            Some(Err(msg)) => {
+                self.errors.push(Diagnostic::error(msg, Some(location.clone())));
+                None
+            }
+            None => None,
+        };
 
         MethodNode {
             name,
             params,
             body,
             visibility,
-            source_location: self.loc(),
-            sighash_type: None,
+            source_location: location,
+            sighash_type,
         }
+    }
+
+    /// N-093: `( IDENT ( '|' IDENT )* )` after `sighash` → the flag text, or
+    /// `None` when anything else appears inside the parentheses. Always
+    /// consumes through the matching `)` so a malformed spelling does not
+    /// derail parsing. Mirrors `parseSighashFlagTokens` (01-parse-sol.ts).
+    fn parse_sighash_flag_tokens(&mut self) -> Option<String> {
+        self.expect(&Token::LParen);
+        let mut text = String::new();
+        let mut ok = true;
+        let mut depth = 1;
+        while *self.peek() != Token::Eof {
+            match self.peek().clone() {
+                Token::LParen => {
+                    depth += 1;
+                    ok = false;
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    ok = false;
+                }
+                Token::Ident(n) => text.push_str(&n),
+                Token::BitOr => text.push('|'),
+                _ => ok = false,
+            }
+            self.advance();
+        }
+        self.expect(&Token::RParen);
+        if ok { Some(text) } else { None }
     }
 
     // -----------------------------------------------------------------------
@@ -871,6 +1084,17 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        // F-337: a statement is located at its first token; the inner
+        // parsers build it only after consuming it.
+        let start = self.loc();
+        let mut stmt = self.nested(None, |p| p.parse_statement_inner());
+        if let Some(s) = stmt.as_mut() {
+            *s.source_location_mut() = start;
+        }
+        stmt
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         // Check for Solidity-style local variable declaration: Type name = expr; or Type name;
         if self.is_type_then_name() {
             return Some(self.parse_typed_var_decl());
@@ -905,6 +1129,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Add,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -920,6 +1145,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Sub,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -935,6 +1161,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Mul,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -950,6 +1177,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Div,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -965,6 +1193,7 @@ impl<'a> SolParser<'a> {
                             op: BinaryOp::Mod,
                             left: Box::new(expr.clone()),
                             right: Box::new(rhs),
+                            source_location: None,
                         };
                         self.expect(&Token::Semicolon);
                         Some(Statement::Assignment {
@@ -1066,6 +1295,7 @@ impl<'a> SolParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier {
                     name: "assert".to_string(),
+                    source_location: None,
                 }),
                 args: vec![expr],
                 asm_return_type: None,
@@ -1075,6 +1305,9 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_if(&mut self) -> Statement {
+        // F-337: located at the `if` token (an `else if` never passes
+        // through parse_statement).
+        let loc = self.loc();
         self.advance(); // consume 'if'
         self.expect(&Token::LParen);
         let condition = self.parse_expression();
@@ -1085,9 +1318,9 @@ impl<'a> SolParser<'a> {
         let else_branch = if *self.peek() == Token::Else {
             self.advance();
             if *self.peek() == Token::If {
-                // else if -> wrapped in a single-element branch
-                let nested = self.parse_if();
-                Some(vec![nested])
+                // else if -> wrapped in a single-element branch. F-213: the
+                // nested `if` is a statement of the else branch (+1).
+                self.nested(Some(Vec::new()), |p| Some(vec![p.parse_if()]))
             } else {
                 Some(self.parse_block())
             }
@@ -1099,7 +1332,7 @@ impl<'a> SolParser<'a> {
             condition,
             then_branch,
             else_branch,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 
@@ -1146,49 +1379,15 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_for_update(&mut self) -> Statement {
+        // N-133: the TS reference's Solidity parser takes one expression
+        // here (with an optional postfix `++`/`--`) and then expects `)`, so
+        // `i += 1`, `i -= 1` and `i = i + 1` are refused at the `)`. Leave the
+        // assignment token unconsumed so the caller's `expect(RParen)` refuses
+        // them the same way instead of desugaring them into an Assignment.
         let expr = self.parse_expression();
-
-        // Check for assignment
-        match self.peek() {
-            Token::Eq => {
-                self.advance();
-                let value = self.parse_expression();
-                Statement::Assignment {
-                    target: expr,
-                    value,
-                    source_location: self.loc(),
-                }
-            }
-            Token::PlusEq => {
-                self.advance();
-                let rhs = self.parse_expression();
-                Statement::Assignment {
-                    target: expr.clone(),
-                    value: Expression::BinaryExpr {
-                        op: BinaryOp::Add,
-                        left: Box::new(expr),
-                        right: Box::new(rhs),
-                    },
-                    source_location: self.loc(),
-                }
-            }
-            Token::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expression();
-                Statement::Assignment {
-                    target: expr.clone(),
-                    value: Expression::BinaryExpr {
-                        op: BinaryOp::Sub,
-                        left: Box::new(expr),
-                        right: Box::new(rhs),
-                    },
-                    source_location: self.loc(),
-                }
-            }
-            _ => Statement::ExpressionStatement {
-                expression: expr,
-                source_location: self.loc(),
-            },
+        Statement::ExpressionStatement {
+            expression: expr,
+            source_location: self.loc(),
         }
     }
 
@@ -1214,16 +1413,18 @@ impl<'a> SolParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expression(&mut self) -> Expression {
-        self.parse_ternary()
+        self.nested(zero(), |p| p.parse_ternary())
     }
 
     fn parse_ternary(&mut self) -> Expression {
         let cond = self.parse_or();
         if *self.peek() == Token::Question {
             self.advance();
-            let cons = self.parse_ternary();
+            // F-213: the arms recurse into the ternary parser directly; the
+            // TS reference parses them with parseExpression, +1 each.
+            let cons = self.nested(zero(), |p| p.parse_ternary());
             self.expect(&Token::Colon);
-            let alt = self.parse_ternary();
+            let alt = self.nested(zero(), |p| p.parse_ternary());
             Expression::TernaryExpr {
                 condition: Box::new(cond),
                 consequent: Box::new(cons),
@@ -1235,95 +1436,121 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::Or {
             self.advance();
             let right = self.parse_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::And {
             self.advance();
             let right = self.parse_bit_or();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitOr {
             self.advance();
             let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitXor {
             self.advance();
             let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while *self.peek() == Token::BitAnd {
             self.advance();
             let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::EqEq | Token::EqEqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::NotEq | Token::NotEqEq => {
                     self.advance();
                     let right = self.parse_comparison();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::StrictNe,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1333,43 +1560,53 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Le => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Gt => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Ge => {
                     self.advance();
                     let right = self.parse_shift();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1379,25 +1616,31 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_additive();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Shl => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shl,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Shr => {
                     self.advance();
                     let right = self.parse_additive();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1407,25 +1650,31 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_additive(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_multiplicative();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Plus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Add,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Minus => {
                     self.advance();
                     let right = self.parse_multiplicative();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Sub,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1435,34 +1684,42 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mul,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Slash => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Div,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 Token::Percent => {
                     self.advance();
                     let right = self.parse_unary();
+                    if !self.grow(&mut dt, &left, &[&right]) { break; }
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Mod,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: Some(start.clone()),
                     };
                 }
                 _ => break,
@@ -1472,29 +1729,33 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.peek() {
             Token::Not => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::Tilde => {
                 self.advance();
-                let operand = self.parse_unary();
+                let operand = self.nested(zero(), |p| p.parse_unary());
                 Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 }
             }
             Token::PlusPlus => {
@@ -1519,15 +1780,18 @@ impl<'a> SolParser<'a> {
 
     fn parse_postfix(&mut self) -> Expression {
         let mut expr = self.parse_primary();
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.peek().clone() {
                 Token::Dot => {
                     self.advance();
                     let prop = self.expect_ident();
-                    if matches!(&expr, Expression::Identifier { name } if name == "this") {
-                        expr = Expression::PropertyAccess { property: prop };
+                    if matches!(&expr, Expression::Identifier { name, .. } if name == "this") {
+                        expr = Expression::PropertyAccess { property: prop, source_location: None };
+                        dt = DepthTracker::new();
                     } else {
+                        if !self.grow(&mut dt, &expr, &[]) { break; }
                         expr = Expression::MemberExpr {
                             object: Box::new(expr),
                             property: prop,
@@ -1545,6 +1809,8 @@ impl<'a> SolParser<'a> {
                         }
                     }
                     self.expect(&Token::RParen);
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1555,6 +1821,7 @@ impl<'a> SolParser<'a> {
                     self.advance();
                     let index = self.parse_expression();
                     self.expect(&Token::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -1562,6 +1829,7 @@ impl<'a> SolParser<'a> {
                 }
                 Token::PlusPlus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::IncrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1569,6 +1837,7 @@ impl<'a> SolParser<'a> {
                 }
                 Token::MinusMinus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::DecrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1582,23 +1851,26 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        let lit_loc = self.loc(); // N-449: the literal's position, before it is consumed
         match self.advance() {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
-            Token::HexLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::HexLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
-            Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
+            Token::StringLit(v) => Expression::ByteStringLiteral { value: v, source_location: Some(lit_loc) },
             Token::Ident(name) => {
                 if name == "this" {
                     Expression::Identifier {
                         name: "this".to_string(),
+                        source_location: None,
                     }
                 } else if name == "super" {
                     Expression::Identifier {
                         name: "super".to_string(),
+                        source_location: None,
                     }
                 } else {
-                    Expression::Identifier { name }
+                    Expression::Identifier { name, source_location: Some(lit_loc) }
                 }
             }
             Token::Require => {
@@ -1609,6 +1881,7 @@ impl<'a> SolParser<'a> {
                 Expression::CallExpr {
                     callee: Box::new(Expression::Identifier {
                         name: "assert".to_string(),
+                        source_location: None,
                     }),
                     args: vec![arg],
                     asm_return_type: None,
@@ -1639,6 +1912,11 @@ impl<'a> SolParser<'a> {
             }
         }
     }
+}
+
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,13 +1998,14 @@ fn sol_rename_identifiers_in_expr(
     rename_map: &std::collections::HashMap<String, String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, source_location } => {
             if let Some(new_name) = rename_map.get(&name) {
                 Expression::Identifier {
                     name: new_name.clone(),
+                    source_location: None,
                 }
             } else {
-                Expression::Identifier { name }
+                Expression::Identifier { name, source_location }
             }
         }
         Expression::CallExpr { callee, args, .. } => Expression::CallExpr {
@@ -1737,14 +2016,16 @@ fn sol_rename_identifiers_in_expr(
                 .collect(),
             asm_return_type: None,
         },
-        Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rename_identifiers_in_expr(*left, rename_map)),
             right: Box::new(sol_rename_identifiers_in_expr(*right, rename_map)),
+            source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rename_identifiers_in_expr(*operand, rename_map)),
+            source_location: source_location,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rename_identifiers_in_expr(*object, rename_map)),
@@ -1780,11 +2061,12 @@ fn sol_fix_property_assignment(
         source_location,
     } = stmt
     {
-        if let Expression::Identifier { ref name } = target {
+        if let Expression::Identifier { ref name, .. } = target {
             if prop_names.contains(name) {
                 return Statement::Assignment {
                     target: Expression::PropertyAccess {
                         property: name.clone(),
+                        source_location: None,
                     },
                     value,
                     source_location,
@@ -1812,15 +2094,15 @@ fn sol_rewrite_expr_bare_props(
     method_names: &std::collections::HashSet<String>,
 ) -> Expression {
     match expr {
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, source_location } => {
             if prop_names.contains(&name) && !locals.contains(&name) {
-                Expression::PropertyAccess { property: name }
+                Expression::PropertyAccess { property: name, source_location: None }
             } else {
-                Expression::Identifier { name }
+                Expression::Identifier { name, source_location }
             }
         }
         Expression::CallExpr { callee, args, .. } => {
-            if let Expression::Identifier { ref name } = *callee {
+            if let Expression::Identifier { ref name, .. } = *callee {
                 if method_names.contains(name) && !locals.contains(name) && !prop_names.contains(name) {
                     let new_args: Vec<Expression> = args
                         .into_iter()
@@ -1830,6 +2112,7 @@ fn sol_rewrite_expr_bare_props(
                         callee: Box::new(Expression::MemberExpr {
                             object: Box::new(Expression::Identifier {
                                 name: "this".to_string(),
+                                source_location: None,
                             }),
                             property: name.clone(),
                         }),
@@ -1847,14 +2130,16 @@ fn sol_rewrite_expr_bare_props(
                 asm_return_type: None,
             }
         }
-        Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+        Expression::BinaryExpr { op, left, right, source_location  } => Expression::BinaryExpr {
             op,
             left: Box::new(sol_rewrite_expr_bare_props(*left, prop_names, locals, method_names)),
             right: Box::new(sol_rewrite_expr_bare_props(*right, prop_names, locals, method_names)),
+            source_location: source_location,
         },
-        Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+        Expression::UnaryExpr { op, operand, source_location  } => Expression::UnaryExpr {
             op,
             operand: Box::new(sol_rewrite_expr_bare_props(*operand, prop_names, locals, method_names)),
+            source_location: source_location,
         },
         Expression::MemberExpr { object, property } => Expression::MemberExpr {
             object: Box::new(sol_rewrite_expr_bare_props(*object, prop_names, locals, method_names)),
@@ -2224,5 +2509,65 @@ contract TwoProps is SmartContract {
         );
         assert_eq!(contract.properties[0].name, "addr");
         assert_eq!(contract.properties[1].name, "key");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-022 / CL-BUG-247, N-014: unknown base class after `is`
+    //
+    // Proves: the Rust `.runar.sol` frontend REFUSES `is <UnknownName>` at
+    // parse with the shared diagnostic (as every other tier does), instead of
+    // folding it to SmartContract (the F-022 behaviour, which let a read-only
+    // contract compile under a base the author never wrote). Also pins that
+    // the three real bases are preserved verbatim.
+    // Does NOT prove: parity of the other six tiers (see
+    // conformance/negatives/n014-unknown-base-class-parity.test.ts), nor
+    // anything about on-chain behaviour of the accepted programs.
+    // -----------------------------------------------------------------------
+
+    const BOGUS_MUTABLE_SOL: &str = r#"
+contract Bogus is TotallyMadeUp {
+    bigint total;
+
+    constructor(bigint _total) {
+        total = _total;
+    }
+
+    function bump() public {
+        this.total = this.total + 1;
+    }
+}
+"#;
+
+    #[test]
+    fn test_unknown_base_class_is_refused_at_parse() {
+        let result = parse_solidity(BOGUS_MUTABLE_SOL, Some("Bogus.runar.sol"));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains(
+                "unknown parent class: 'TotallyMadeUp', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
+            )),
+            "errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_known_base_classes_preserved() {
+        for base in ["SmartContract", "StatefulSmartContract", "UnsafeSmartContract"] {
+            let src = BOGUS_MUTABLE_SOL.replace("TotallyMadeUp", base);
+            let result = parse_solidity(&src, Some("Bogus.runar.sol"));
+            assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+            assert_eq!(result.contract.unwrap().parent_class, base);
+        }
+    }
+
+    #[test]
+    fn test_unknown_base_with_mutable_property_is_refused() {
+        let err = crate::compile_from_source_str(BOGUS_MUTABLE_SOL, Some("Bogus.runar.sol"))
+            .expect_err("an unknown base must not compile");
+        assert!(
+            err.contains("unknown parent class: 'TotallyMadeUp'"),
+            "expected the unknown-parent-class diagnostic, got: {}",
+            err
+        );
     }
 }

@@ -5,12 +5,12 @@
 //!
 //! Mirrors the TypeScript optimizer in `packages/runar-compiler/src/optimizer/anf-ec.ts`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use num_bigint::BigInt;
 use num_traits::Num;
 
-use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
+use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFProperty, ANFValue, ConstValue};
 
 // ---------------------------------------------------------------------------
 // EC constants
@@ -57,7 +57,103 @@ const G_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f
 // Value resolution helpers (uses owned ANFValue map for borrow-checker safety)
 // ---------------------------------------------------------------------------
 
-type ValueMap = HashMap<String, ANFValue>;
+/// Binding name -> its value as already rewritten in the current pass, plus
+/// the method's rebound names. `get` follows `@ref:` aliases (F-269, see
+/// `canonical`), so every rule resolves through them.
+struct ValueMap {
+    values: HashMap<String, ANFValue>,
+    rebound: HashSet<String>,
+}
+
+impl ValueMap {
+    fn new(rebound: HashSet<String>) -> Self {
+        ValueMap { values: HashMap::new(), rebound }
+    }
+
+    /// N-510: an `if`/`loop` binding is stored as an opaque stub, never as
+    /// its value. No rule resolves a name to an `if`/`loop` (every lookup
+    /// matches a `Call` / `LoadConst`), but the value carries its whole nested
+    /// subtree, and `nested_scope` clones this map once per nesting level —
+    /// 3,840 levels deep that was cubic work (30 s on N-264's D=32 x 120).
+    fn insert(&mut self, name: String, value: ANFValue) {
+        let value = match value {
+            ANFValue::If { .. } | ANFValue::Loop { .. } => ANFValue::LoadParam { name: String::new() },
+            v => v,
+        };
+        self.values.insert(name, value);
+    }
+
+    /// N-201: the map an `if` arm or a loop body starts from (the TS
+    /// `ValueMap.nestedScope`) — every binding visible at the `if`/`loop`,
+    /// and nothing the nested scope binds flows back out. `hidden` is a
+    /// loop's iteration variable, never resolved through an outer binding.
+    fn nested_scope(&self, hidden: Option<&str>) -> ValueMap {
+        let mut scope = ValueMap { values: self.values.clone(), rebound: self.rebound.clone() };
+        if let Some(h) = hidden {
+            scope.values.remove(h);
+        }
+        scope
+    }
+
+    /// F-269 (user decision R77): the binding `arg` ultimately names,
+    /// following `load_const "@ref:<x>"` aliases — pass 04's
+    /// `const y = <expr>` and the ones R1/R2/R3/R7 leave behind. The TS
+    /// `canonicalName` in anf-ec.ts.
+    ///
+    /// `None` when `arg` has no position-independent identity: ANF re-emits a
+    /// local's name when the source reassigns it (top level or in an if/loop
+    /// arm), so a REBOUND name means different values at different sites. Two
+    /// uses of one are not "the same $x", and nothing lifted out of an earlier
+    /// binding may name one (F-269 attempt 2). An alias cycle (only
+    /// hand-written `--ir`) is `None` too. A hop is never taken INTO a rebound
+    /// name: the chain stops at the last name bound once, which is itself a
+    /// fixed value, and its value is the opaque alias. Matching only —
+    /// rewrites emit the literal names they matched.
+    fn canonical(&self, arg: &str) -> Option<String> {
+        if self.rebound.contains(arg) {
+            return None;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(arg.to_string());
+        let mut cur = arg.to_string();
+        loop {
+            let next = match self.values.get(&cur) {
+                Some(ANFValue::LoadConst { value: serde_json::Value::String(s) })
+                    if s.len() > 5 && s.starts_with("@ref:") => s[5..].to_string(),
+                _ => return Some(cur),
+            };
+            if self.rebound.contains(&next) {
+                return Some(cur);
+            }
+            if seen.contains(&next) {
+                return None;
+            }
+            seen.insert(next.clone());
+            cur = next;
+        }
+    }
+
+    /// The value `name` resolves to, through aliases; `None` for a name with
+    /// no fixed identity.
+    fn get(&self, name: &str) -> Option<&ANFValue> {
+        self.values.get(&self.canonical(name)?)
+    }
+
+    /// Do two arguments name the same binding, through aliases? (R8, R8r, R11.)
+    /// Never for a name with no fixed identity.
+    fn same(&self, a: &str, b: &str) -> bool {
+        match (self.canonical(a), self.canonical(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    /// F-269 attempt 2: may a name lifted out of an earlier binding be
+    /// emitted at the current site? Only when it denotes one value (R7, R9).
+    fn stable(&self, name: &str) -> bool {
+        self.canonical(name).is_some()
+    }
+}
 
 fn is_call_to<'a>(value: &'a ANFValue, func_name: &str) -> Option<&'a Vec<String>> {
     match value {
@@ -185,12 +281,310 @@ fn make_alias(target: &str) -> ANFValue {
 // Rewrite engine
 // ---------------------------------------------------------------------------
 
+/// F-086: every name the method already uses — binding names at any depth
+/// (if/loop arms included), loop iteration variables, params, and the
+/// contract's properties. A scalar-fusing rewrite mints a new binding; ANF is
+/// single-assignment and stack lowering resolves a name to its shallowest
+/// slot, so a minted name that is already in use silently aliases the two
+/// values. `--ir` input chooses these names freely.
+fn collect_used_names(method: &ANFMethod, properties: &[ANFProperty]) -> HashSet<String> {
+    fn walk(bindings: &[ANFBinding], used: &mut HashSet<String>) {
+        for b in bindings {
+            used.insert(b.name.clone());
+            match &b.value {
+                ANFValue::LoadParam { name } | ANFValue::LoadProp { name, .. } => {
+                    used.insert(name.clone());
+                }
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, used);
+                    walk(else_branch, used);
+                }
+                ANFValue::Loop { body, iter_var, .. } => {
+                    used.insert(iter_var.clone());
+                    walk(body, used);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut used: HashSet<String> = properties.iter().map(|p| p.name.clone()).collect();
+    used.extend(method.params.iter().map(|p| p.name.clone()));
+    walk(&method.body, &mut used);
+    used
+}
+
+/// F-269: every name bound more than once in the method — binding names at
+/// any depth (if/loop arms included) and loop iteration variables (the TS
+/// `collectReboundNames`). `ValueMap::canonical` never resolves through one.
+fn collect_rebound_names(method: &ANFMethod) -> HashSet<String> {
+    fn bind(name: &str, seen: &mut HashSet<String>, rebound: &mut HashSet<String>) {
+        if !seen.insert(name.to_string()) {
+            rebound.insert(name.to_string());
+        }
+    }
+    fn walk(bindings: &[ANFBinding], seen: &mut HashSet<String>, rebound: &mut HashSet<String>) {
+        for b in bindings {
+            bind(&b.name, seen, rebound);
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, seen, rebound);
+                    walk(else_branch, seen, rebound);
+                }
+                ANFValue::Loop { body, iter_var, .. } => {
+                    bind(iter_var, seen, rebound);
+                    walk(body, seen, rebound);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut rebound = HashSet::new();
+    walk(&method.body, &mut seen, &mut rebound);
+    rebound
+}
+
+/// F-086: `base` when the method does not use it (every non-colliding program
+/// keeps its historical name), else the first unused `base_<i>`. Reserves the
+/// returned name.
+fn fresh_name(base: String, used_names: &mut HashSet<String>) -> String {
+    let mut name = base.clone();
+    let mut i = 1;
+    while used_names.contains(&name) {
+        name = format!("{}_{}", base, i);
+        i += 1;
+    }
+    used_names.insert(name.clone());
+    name
+}
+
+/// secp256k1 field prime.
+const FIELD_P_HEX: &str = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f";
+
+/// N-104 — the operand gate a rewrite must leave behind. Byte-for-byte the TS
+/// reference (`emitAddOperandGate` / `emitMulOperandGate` in
+/// packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries in
+/// optimizer/ec-rules.json:
+///
+///   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+///   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+///
+/// R1-R4 replace a builtin whose first act is to validate q; without this a
+/// malformed or off-curve q was accepted by the default compile and aborted
+/// under disableEcOptimizer. Built only from forms no rule matches, so the
+/// fixed-point loop below cannot rewrite it on a later pass. Each gate ends in
+/// an assert, which DCE keeps along with what it reads.
+fn emit_operand_gate(of_mul: bool, base: &str, q: &str, out: &mut Vec<ANFBinding>, used_names: &mut HashSet<String>) {
+    let mut add = |suffix: &str, value: ANFValue, out: &mut Vec<ANFBinding>| -> String {
+        let name = fresh_name(format!("{}{}", base, suffix), used_names);
+        out.push(ANFBinding { name: name.clone(), value, source_loc: None });
+        name
+    };
+    let call = |func: &str, arg: &str| ANFValue::Call { func: func.to_string(), args: vec![arg.to_string()] };
+    let bin = |op: &str, l: &str, r: &str, t: Option<&str>| ANFValue::BinOp {
+        op: op.to_string(),
+        left: l.to_string(),
+        right: r.to_string(),
+        result_type: t.map(|s| s.to_string()),
+    };
+    let ok = if !of_mul {
+        let px = add("_px", call("ecPointX", q), out);
+        let py = add("_py", call("ecPointY", q), out);
+        let p = BigInt::from_str_radix(FIELD_P_HEX, 16).expect("field prime");
+        let fp = add("_fp", make_load_const_int(&p), out);
+        let x_ok = add("_pxok", bin("<", &px, &fp, None), out);
+        let y_ok = add("_pyok", bin("<", &py, &fp, None), out);
+        add("_ok", bin("&&", &x_ok, &y_ok, None), out)
+    } else {
+        let inf = add("_inf", make_load_const_hex(INFINITY_HEX), out);
+        let is_inf = add("_isinf", bin("===", q, &inf, Some("bytes")), out);
+        let on_curve = add("_oncurve", call("ecOnCurve", q), out);
+        add("_ok", bin("||", &is_inf, &on_curve, None), out)
+    };
+    add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
+}
+
+/// N-251 — the gate R8/R8r (`ecAdd(q, ecNegate(q)) -> O` and its mirror) must
+/// leave behind (user decision R96). Byte-for-byte the TS reference
+/// (`emitNegCancelGate` in packages/runar-compiler/src/optimizer/anf-ec.ts):
+///
+///   assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+///
+/// The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the adder
+/// abort on a doubling with px != 0 and py == 0; the px == 0 term keeps
+/// O + O = O. Width and canonicity are checked by the inner ecNegate(q) call,
+/// which is never dead-code-eliminated.
+fn emit_neg_cancel_gate(base: &str, q: &str, out: &mut Vec<ANFBinding>, used_names: &mut HashSet<String>) {
+    let mut add = |suffix: &str, value: ANFValue, out: &mut Vec<ANFBinding>| -> String {
+        let name = fresh_name(format!("{}{}", base, suffix), used_names);
+        out.push(ANFBinding { name: name.clone(), value, source_loc: None });
+        name
+    };
+    let call = |func: &str, arg: &str| ANFValue::Call { func: func.to_string(), args: vec![arg.to_string()] };
+    let bin = |op: &str, l: &str, r: &str| ANFValue::BinOp {
+        op: op.to_string(),
+        left: l.to_string(),
+        right: r.to_string(),
+        result_type: None,
+    };
+    let px = add("_px", call("ecPointX", q), out);
+    let py = add("_py", call("ecPointY", q), out);
+    let zero = add("_zero", make_load_const_int(&BigInt::from(0)), out);
+    let x_zero = add("_pxz", bin("===", &px, &zero), out);
+    let y_non_zero = add("_pynz", bin("!==", &py, &zero), out);
+    let ok = add("_ok", bin("||", &x_zero, &y_non_zero), out);
+    add("_gate", ANFValue::Assert { value: ok, is_auto_injected_state_check: false }, out);
+}
+
+/// N-460 — what a fusing rule (R9, R10, R11) needs to know at its fire site
+/// (the TS `FusionScope` in anf-ec.ts).
+///
+/// A fusion replaces the outer call with ONE new scalar multiplication, so it
+/// shrinks the script only if `remove_gate_subsumed_ec_calls` then drops an
+/// inner call it read. Each fusing rule therefore fires only when at least one
+/// of its inner operands is ELIMINABLE (`fusion_eliminates`):
+///
+///  - every name on its alias chain (the operand, each `@ref:` hop, the call
+///    binding itself — `canonical`'s walk) has exactly one referrer: the
+///    rewritten binding for the operand, the previous hop for the rest. Any
+///    other reader keeps the inner call alive after the fusion;
+///  - the call is an `ecMulGen` bound in the current scope or an enclosing one
+///    inside the same loop body (`frame`). It needs no witness, but one bound
+///    outside a loop the fusion sits in would trade one multiplication for one
+///    per iteration;
+///  - or the call is an `ecMul` bound in the current scope itself (`local`):
+///    the fused `ecMul` on the same point is then its witness. One bound in an
+///    enclosing scope has no witness (the fused call is nested) and stays.
+///
+/// `referrers` is computed once per sweep, from the body the sweep starts with
+/// (`count_referrers`), and not updated as the sweep rewrites. A rewrite only
+/// adds a reference to a name its own binding, or the inner binding it lifts
+/// from, already read, so a stale count is never too low. Every tier computes
+/// it the same way, because which rules fire decides the bytes.
+///
+/// N-465: R9 alone (`shared`) also accepts a name whose every referrer is one
+/// of `mul_readers`: a binding of the current scope `ecMul(<name>, k)` with k a
+/// constant other than 0 and 1 (R3/R4 would rewrite it first and keep reading
+/// the name). Each such reader fires R9 in this same sweep — everything R9
+/// checks besides k is a property of the shared inner, the same for all of
+/// them — so the inner loses every reader, and the fused calls, `ecMul`s on
+/// its point in its own scope, are its witness. R10/R11 never use this: an
+/// ecAdd reader beside R9 readers is not one of them, so the two would decide
+/// differently and the inner would stay.
+struct FusionScope<'a> {
+    referrers: &'a HashMap<String, usize>,
+    local: HashSet<String>,
+    frame: HashSet<String>,
+    mul_readers: HashMap<String, usize>,
+}
+
+/// N-465: per name, the bindings of this scope (`body`, not its arms or loop
+/// bodies) that are `ecMul(<name>, k)` with k resolving to a constant other
+/// than 0 and 1 — resolved as R9 will resolve it at that binding, against the
+/// bindings before it. Taken from the body the sweep starts with: a rewrite
+/// never turns a binding into an integer constant, so k resolves the same way
+/// after the rewrites ahead of it.
+fn count_mul_readers(body: &[ANFBinding], outer: &ValueMap, hidden: Option<&str>) -> HashMap<String, usize> {
+    let mut value_map = outer.nested_scope(hidden);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for b in body {
+        value_map.insert(b.name.clone(), b.value.clone());
+        let args = match is_call_to(&b.value, "ecMul") {
+            Some(args) if args.len() == 2 => args,
+            _ => continue,
+        };
+        let k = match value_map.get(args[1].as_str()).and_then(get_const_int) {
+            Some(k) => k,
+            None => continue,
+        };
+        if k == BigInt::from(0) || k == BigInt::from(1) {
+            continue;
+        }
+        *counts.entry(args[0].clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// N-460: referrer count per name — the bindings, at any depth, whose value
+/// reads it (once per binding, however many operands name it; an `if` reads
+/// its `cond`, its arms' bindings are counted themselves), plus one for each
+/// name in an `if`'s `results` and one for a private method's return binding
+/// (F-108): the two things `remove_gate_subsumed_ec_calls` protects.
+fn count_referrers(body: &[ANFBinding], method: &ANFMethod) -> HashMap<String, usize> {
+    fn walk(bindings: &[ANFBinding], counts: &mut HashMap<String, usize>) {
+        for b in bindings {
+            let mut reads: HashSet<String> = HashSet::new();
+            match &b.value {
+                ANFValue::If { cond, results, .. } => {
+                    reads.insert(cond.clone());
+                    for r in results {
+                        reads.insert(r.clone());
+                    }
+                }
+                ANFValue::Loop { .. } => {}
+                v => super::dce::collect_refs_from_value(v, &mut reads),
+            }
+            for name in reads {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, counts);
+                    walk(else_branch, counts);
+                }
+                ANFValue::Loop { body, .. } => walk(body, counts),
+                _ => {}
+            }
+        }
+    }
+    let mut counts = HashMap::new();
+    walk(body, &mut counts);
+    if method.name != "constructor" && !method.is_public {
+        if let Some(last) = body.last() {
+            *counts.entry(last.name.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// N-460: does fusing these inner operands let at least one inner call go?
+fn fusion_eliminates(operands: &[&String], value_map: &ValueMap, scope: &FusionScope, shared: bool) -> bool {
+    operands.iter().any(|operand| {
+        let c = match value_map.canonical(operand) {
+            Some(c) => c,
+            None => return false,
+        };
+        // `canonical` already walked this chain, so every hop is an `@ref:`.
+        let mut cur = operand.to_string();
+        loop {
+            let n = scope.referrers.get(&cur).copied().unwrap_or(0);
+            if n != 1 && !(shared && n > 1 && n == scope.mul_readers.get(&cur).copied().unwrap_or(0)) {
+                return false;
+            }
+            if cur == c {
+                break;
+            }
+            cur = match value_map.values.get(&cur) {
+                Some(ANFValue::LoadConst { value: serde_json::Value::String(s) }) => s[5..].to_string(),
+                _ => return false,
+            };
+        }
+        match value_map.values.get(&c) {
+            Some(ANFValue::Call { func, .. }) if func == "ecMulGen" => scope.frame.contains(&c),
+            Some(ANFValue::Call { func, .. }) if func == "ecMul" => scope.local.contains(&c),
+            _ => false,
+        }
+    })
+}
+
 /// Try to rewrite a single binding. Returns Some(new_value) if rewritten.
 /// May push extra bindings (e.g., computed scalars) into `extra_bindings`.
 fn try_rewrite(
     binding: &ANFBinding,
     value_map: &ValueMap,
     extra_bindings: &mut Vec<ANFBinding>,
+    used_names: &mut HashSet<String>,
+    scope: &FusionScope,
 ) -> Option<ANFValue> {
     let value = &binding.value;
 
@@ -227,13 +621,15 @@ fn try_rewrite(
             let scalar_arg = &args[1];
             let scalar_val = value_map.get(scalar_arg.as_str())?;
 
-            // Rule 4: ecMul(x, 0) -> INFINITY
+            // Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
             if is_const_int(scalar_val, 0) {
+                emit_operand_gate(true, &binding.name, point_arg, extra_bindings, used_names);
                 return Some(make_load_const_hex(INFINITY_HEX));
             }
 
-            // Rule 3: ecMul(x, 1) -> x (alias)
+            // Rule 3: ecMul(x, 1) -> x (alias), keeping ecMul's operand gate (N-104)
             if is_const_int(scalar_val, 1) {
+                emit_operand_gate(true, &binding.name, point_arg, extra_bindings, used_names);
                 return Some(make_alias(point_arg));
             }
 
@@ -248,15 +644,18 @@ fn try_rewrite(
             // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2)
             if let Some(point_val) = value_map.get(point_arg.as_str()) {
                 if let Some(inner_args) = is_call_to(point_val, "ecMul") {
-                    if inner_args.len() == 2 {
+                    if inner_args.len() == 2 && value_map.stable(&inner_args[0]) {
                         let inner_point = inner_args[0].clone();
                         let inner_scalar = inner_args[1].clone();
                         if let Some(inner_scalar_val) = value_map.get(inner_scalar.as_str()) {
                             let k1 = get_const_int(inner_scalar_val);
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[point_arg], value_map, scope, true) {
+                                    return None;
+                                }
                                 let product = reduce_mod_n(k1 * k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&product),
@@ -282,20 +681,23 @@ fn try_rewrite(
             let left_arg = &args[0];
             let right_arg = &args[1];
 
-            // Rule 1: ecAdd(x, INFINITY) -> x
+            // Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
             if arg_is_infinity(right_arg, value_map) {
+                emit_operand_gate(false, &binding.name, left_arg, extra_bindings, used_names);
                 return Some(make_alias(left_arg));
             }
 
-            // Rule 2: ecAdd(INFINITY, x) -> x
+            // Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
             if arg_is_infinity(left_arg, value_map) {
+                emit_operand_gate(false, &binding.name, right_arg, extra_bindings, used_names);
                 return Some(make_alias(right_arg));
             }
 
-            // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+            // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
             if let Some(right_val) = value_map.get(right_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(right_val, "ecNegate") {
-                    if negate_args.len() == 1 && negate_args[0] == *left_arg {
+                    if negate_args.len() == 1 && value_map.same(&negate_args[0], left_arg) {
+                        emit_neg_cancel_gate(&binding.name, left_arg, extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
                 }
@@ -311,10 +713,13 @@ fn try_rewrite(
             //
             // Placed after Rule 8 and before Rules 10/11 to match the JSON's
             // rule order, which is the order the Go engine tries them in.
-            // Name equality, not value equality, exactly as Rule 8 above.
+            // Name equality, not value equality, exactly as Rule 8 above
+            // (through aliases, F-269). The gate reads the ecNegate operand —
+            // the name the JSON's `$x` binds first, as the Go engine binds it.
             if let Some(left_val) = value_map.get(left_arg.as_str()) {
                 if let Some(negate_args) = is_call_to(left_val, "ecNegate") {
-                    if negate_args.len() == 1 && negate_args[0] == *right_arg {
+                    if negate_args.len() == 1 && value_map.same(&negate_args[0], right_arg) {
+                        emit_neg_cancel_gate(&binding.name, &negate_args[0], extra_bindings, used_names);
                         return Some(make_load_const_hex(INFINITY_HEX));
                     }
                 }
@@ -339,8 +744,11 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope, false) {
+                                    return None;
+                                }
                                 let sum = reduce_mod_n(k1 + k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&sum),
@@ -361,7 +769,7 @@ fn try_rewrite(
                 {
                     if left_mul_args.len() == 2
                         && right_mul_args.len() == 2
-                        && left_mul_args[0] == right_mul_args[0]
+                        && value_map.same(&left_mul_args[0], &right_mul_args[0])
                     {
                         let point_name = left_mul_args[0].clone();
                         let k1_name = left_mul_args[1].clone();
@@ -373,8 +781,11 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
+                                if !fusion_eliminates(&[left_arg, right_arg], value_map, scope, false) {
+                                    return None;
+                                }
                                 let sum = reduce_mod_n(k1 + k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&sum),
@@ -401,7 +812,9 @@ fn try_rewrite(
 
             // Rule 7: ecNegate(ecNegate(x)) -> x
             if let Some(negate_args) = is_call_to(inner_val, "ecNegate") {
-                if negate_args.len() == 1 {
+                // F-269 attempt 2: x is lifted out of the inner binding and
+                // re-emitted here, so it must denote one value at both sites.
+                if negate_args.len() == 1 && value_map.stable(&negate_args[0]) {
                     return Some(make_alias(&negate_args[0]));
                 }
             }
@@ -448,15 +861,26 @@ use super::dce::eliminate_dead_bindings_method;
 /// A cross-tier byte divergence in the default mode, which is exactly what the
 /// fold-ON parity gate exists to prevent; no conformance fixture happened to
 /// carry a scalar pair that summed to 0 mod N.
-fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
+fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMethod, bool) {
     let mut body = method.body.clone();
     let mut changed = false;
+    let mut used_names = collect_used_names(method, properties);
+    let rebound = collect_rebound_names(method);
 
     // Same cap-free shape as the Go tier: every rule strictly reduces the
     // number of EC calls or replaces a call with a constant, so the loop
     // terminates.
     loop {
-        let (next, pass_changed) = optimize_method_ec_once(&body);
+        // N-460: the fusion guard's referrer counts, once per sweep.
+        let referrers = count_referrers(&body, method);
+        let (next, pass_changed) = optimize_method_ec_once(
+            &body,
+            &mut used_names,
+            &ValueMap::new(rebound.clone()),
+            None,
+            &referrers,
+            &HashSet::new(),
+        );
         body = next;
         if !pass_changed {
             break;
@@ -477,9 +901,27 @@ fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
     }, true)
 }
 
-/// One rewrite pass over `body`. Returns the new body and whether it changed.
-fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
-    let mut value_map: ValueMap = HashMap::new();
+/// One rewrite pass over a scope. Returns the new body and whether it changed.
+///
+/// N-201: the pass descends into `if` arms (then before else) and loop bodies
+/// at the position of their binding, each with its own scope seeded from the
+/// enclosing one (`ValueMap::nested_scope`), exactly as the TS
+/// `optimizeBodyOnce`; it used to visit the top level only.
+fn optimize_method_ec_once(
+    body: &[ANFBinding],
+    used_names: &mut HashSet<String>,
+    outer: &ValueMap,
+    hidden: Option<&str>,
+    referrers: &HashMap<String, usize>,
+    outer_frame: &HashSet<String>,
+) -> (Vec<ANFBinding>, bool) {
+    let mut value_map = outer.nested_scope(hidden);
+    // N-460: an `if` arm sees its enclosing frame, a loop body starts a new one.
+    let local: HashSet<String> = body.iter().map(|b| b.name.clone()).collect();
+    let mut frame = outer_frame.clone();
+    frame.extend(local.iter().cloned());
+    let mul_readers = count_mul_readers(body, outer, hidden);
+    let scope = FusionScope { referrers, local, frame, mul_readers };
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 
@@ -487,14 +929,55 @@ fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
         // Register binding value for lookups
         value_map.insert(binding.name.clone(), binding.value.clone());
 
+        if matches!(binding.value, ANFValue::If { .. } | ANFValue::Loop { .. }) {
+            let mut value = binding.value.clone();
+            let nested_changed = match &mut value {
+                ANFValue::If { then, else_branch, .. } => {
+                    let (then_b, then_c) =
+                        optimize_method_ec_once(then, used_names, &value_map, None, referrers, &scope.frame);
+                    let (else_b, else_c) =
+                        optimize_method_ec_once(else_branch, used_names, &value_map, None, referrers, &scope.frame);
+                    *then = then_b;
+                    *else_branch = else_b;
+                    then_c || else_c
+                }
+                ANFValue::Loop { body: loop_body, iter_var, .. } => {
+                    let hidden = iter_var.clone();
+                    let (body_b, body_c) =
+                        optimize_method_ec_once(loop_body, used_names, &value_map, Some(&hidden), referrers, &HashSet::new());
+                    *loop_body = body_b;
+                    body_c
+                }
+                _ => unreachable!(),
+            };
+            if nested_changed {
+                value_map.insert(binding.name.clone(), value.clone());
+                result.push(ANFBinding { name: binding.name.clone(), value, source_loc: binding.source_loc.clone() });
+                changed = true;
+            } else {
+                result.push(binding.clone());
+            }
+            continue;
+        }
+
         let mut extra_bindings = Vec::new();
-        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings);
+        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names, &scope);
 
         if let Some(new_value) = rewritten {
-            // Add any new helper bindings (e.g., computed scalars)
+            // Add any new helper bindings (e.g., computed scalars).
+            // N-218: every helper a rewrite mints (the N-104/N-251 gate
+            // bindings, the fused-scalar helper) takes the rewritten
+            // binding's own source_loc, mirroring F-343 in the TS reference
+            // (anf-ec.ts optimizeBodyOnce) — it exists only because of that
+            // source expression, and stack lowering maps opcodes through
+            // binding.source_loc.
             for extra in &extra_bindings {
                 value_map.insert(extra.name.clone(), extra.value.clone());
-                result.push(extra.clone());
+                result.push(ANFBinding {
+                    name: extra.name.clone(),
+                    value: extra.value.clone(),
+                    source_loc: binding.source_loc.clone(),
+                });
             }
             // Update the value map with the rewritten value
             value_map.insert(binding.name.clone(), new_value.clone());
@@ -518,15 +1001,30 @@ fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
 
 /// Optimize EC operations in an ANF program (Pass 4.5).
 ///
-/// Applies algebraic simplification rules to EC function calls,
-/// then eliminates dead bindings. Always-on, runs before stack lowering.
+/// Applies algebraic simplification rules to EC function calls. Always-on (no
+/// flag), runs before stack lowering. Dead-binding elimination runs ONLY when
+/// some rewrite fired: if `any_changed` is false the program is returned
+/// untouched, dead bindings included (F-219; same gate as TS `optimizeEC`).
 pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
+    // N-201: the names each method references before any rewrite — the
+    // candidate set of the nested prune below.
+    let candidates: Vec<HashSet<String>> = program
+        .methods
+        .iter()
+        .map(|m| {
+            let mut refs = HashSet::new();
+            for b in &m.body {
+                super::dce::collect_refs_from_value(&b.value, &mut refs);
+            }
+            refs
+        })
+        .collect();
     let mut any_changed = false;
     let optimized_methods: Vec<ANFMethod> = program
         .methods
         .iter()
         .map(|m| {
-            let (opt, changed) = optimize_method_ec(m);
+            let (opt, changed) = optimize_method_ec(m, &program.properties);
             if changed {
                 any_changed = true;
             }
@@ -539,9 +1037,23 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
     }
 
     // Run dead binding elimination to clean up orphaned bindings
+    // N-201: then prune the operands a rewrite inside an if arm or a loop
+    // body orphaned there — the DCE above filters only the top level, and an
+    // orphan left in an arm unbalances the arms (the N-446 hazard). Same
+    // candidate rule as the constant folder's prune.
     let cleaned_methods: Vec<ANFMethod> = optimized_methods
         .iter()
         .map(eliminate_dead_bindings_method)
+        .zip(candidates.iter())
+        .map(|(m, refs)| {
+            let mut m = super::dce::eliminate_dead_bindings_among(&m, refs);
+            // N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned
+            // whose abort is still performed, then prune what that orphans.
+            while let Some(next) = remove_gate_subsumed_ec_calls(&m, refs) {
+                m = super::dce::eliminate_dead_bindings_among(&next, refs);
+            }
+            m
+        })
         .collect();
 
     ANFProgram {
@@ -550,6 +1062,147 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         methods: cleaned_methods,
         parent_class: program.parent_class,
     }
+}
+
+/// N-113 (the TS reference's anf-ec.ts `removeGateSubsumedEcCalls`): remove
+/// dead scalar multiplications whose only effect, a possible abort, is
+/// provably still performed. `None` when nothing was removed.
+///
+/// - `ecMulGen(<const k>)` cannot abort: its point is the fixed generator,
+///   which passes ecMul's operand gate, and the ladder reduces any k.
+/// - `ecMul(q, <const k>)` aborts exactly when its operand gate
+///   `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+///   performs the same gate: another `ecMul(q', _)`, q' the same binding as q
+///   (F-269), not itself removable, in the same scope or an ENCLOSING one —
+///   never a nested one, which runs only on some paths.
+/// - `ecNegate` is never removed: R7, R8 and R8r rely on it as a gate.
+///
+/// Only a removal candidate goes (a name referenced before the EC pass ran —
+/// the inner call a fusion orphaned), referenced nowhere in the method now,
+/// not a private method's return value (F-108) and not one of its if's
+/// `results`.
+fn remove_gate_subsumed_ec_calls(method: &ANFMethod, candidates: &HashSet<String>) -> Option<ANFMethod> {
+    let mut value_map = ValueMap::new(collect_rebound_names(method));
+    let mut refs: HashSet<String> = HashSet::new();
+    fn index(bindings: &[ANFBinding], vm: &mut ValueMap, refs: &mut HashSet<String>) {
+        for b in bindings {
+            vm.insert(b.name.clone(), b.value.clone());
+            super::dce::collect_refs_from_value(&b.value, refs);
+            match &b.value {
+                ANFValue::If { then, else_branch, .. } => {
+                    index(then, vm, refs);
+                    index(else_branch, vm, refs);
+                }
+                ANFValue::Loop { body, .. } => index(body, vm, refs),
+                _ => {}
+            }
+        }
+    }
+    index(&method.body, &mut value_map, &mut refs);
+    let keep_last = method.name != "constructor" && !method.is_public;
+
+    struct Ctx<'a> {
+        vm: ValueMap,
+        refs: HashSet<String>,
+        cands: &'a HashSet<String>,
+    }
+    impl Ctx<'_> {
+        fn is_const_scalar(&self, name: &str) -> bool {
+            self.vm.get(name).and_then(get_const_int).is_some()
+        }
+        fn removable(&self, b: &ANFBinding, protect: &HashSet<String>, is_return: bool) -> bool {
+            if is_return || !self.cands.contains(&b.name) || self.refs.contains(&b.name) || protect.contains(&b.name) {
+                return false;
+            }
+            match &b.value {
+                ANFValue::Call { func, args } if func == "ecMulGen" => {
+                    args.len() == 1 && self.is_const_scalar(&args[0])
+                }
+                ANFValue::Call { func, args } if func == "ecMul" => {
+                    args.len() == 2 && self.is_const_scalar(&args[1]) && self.vm.stable(&args[0])
+                }
+                _ => false,
+            }
+        }
+        fn filter(
+            &self,
+            bindings: &[ANFBinding],
+            outer: &[String],
+            protect: &HashSet<String>,
+            top_level: bool,
+            keep_last: bool,
+        ) -> Option<Vec<ANFBinding>> {
+            let n = bindings.len();
+            let is_cand: Vec<bool> = bindings
+                .iter()
+                .enumerate()
+                .map(|(i, b)| self.removable(b, protect, top_level && keep_last && i + 1 == n))
+                .collect();
+            let mut witnesses: Vec<String> = outer.to_vec();
+            for (i, b) in bindings.iter().enumerate() {
+                if let ANFValue::Call { func, args } = &b.value {
+                    if !is_cand[i] && func == "ecMul" && args.len() == 2 {
+                        if let Some(c) = self.vm.canonical(&args[0]) {
+                            witnesses.push(c);
+                        }
+                    }
+                }
+            }
+            let mut changed = false;
+            let mut out: Vec<ANFBinding> = Vec::with_capacity(n);
+            for (i, b) in bindings.iter().enumerate() {
+                if is_cand[i] {
+                    if let ANFValue::Call { func, args } = &b.value {
+                        let gated = func == "ecMulGen"
+                            || self.vm.canonical(&args[0]).is_some_and(|c| witnesses.contains(&c));
+                        if gated {
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+                match &b.value {
+                    ANFValue::If { cond, then, else_branch, results } => {
+                        let rs: HashSet<String> = results.iter().cloned().collect();
+                        let t = self.filter(then, &witnesses, &rs, false, keep_last);
+                        let e = self.filter(else_branch, &witnesses, &rs, false, keep_last);
+                        if t.is_some() || e.is_some() {
+                            changed = true;
+                            let mut nb = b.clone();
+                            nb.value = ANFValue::If {
+                                cond: cond.clone(),
+                                then: t.unwrap_or_else(|| then.clone()),
+                                else_branch: e.unwrap_or_else(|| else_branch.clone()),
+                                results: results.clone(),
+                            };
+                            out.push(nb);
+                            continue;
+                        }
+                    }
+                    ANFValue::Loop { body, .. } => {
+                        if let Some(nbody) = self.filter(body, &witnesses, &HashSet::new(), false, keep_last) {
+                            changed = true;
+                            let mut nb = b.clone();
+                            if let ANFValue::Loop { body: ref mut bb, .. } = nb.value {
+                                *bb = nbody;
+                            }
+                            out.push(nb);
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                out.push(b.clone());
+            }
+            if changed { Some(out) } else { None }
+        }
+    }
+
+    let ctx = Ctx { vm: value_map, refs, cands: candidates };
+    let body = ctx.filter(&method.body, &[], &HashSet::new(), true, keep_last)?;
+    let mut m = method.clone();
+    m.body = body;
+    Some(m)
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1808,296 @@ mod tests {
                 assert_eq!(value.as_str(), Some(G_HEX), "method2 t1: expected G");
             }
             other => panic!("method2 t1: expected LoadConst(G), got {other:?}"),
+        }
+    }
+}
+
+/// N-104: the EC identity rewrites R1-R4 must leave the replaced builtin's
+/// operand validation in place of the call. Pins the exact gate bindings —
+/// names, kinds, operands, order — that every tier emits (the "gate" entries in
+/// optimizer/ec-rules.json), so the seven tiers stay ANF- and hex-identical.
+/// Proves this tier emits the gate; the gate's script semantics are executed on
+/// the real Spend engine by
+/// packages/runar-testing/src/__tests__/n104-ec-optimizer-operand-gate.test.ts.
+#[cfg(test)]
+mod n104_tests {
+    use super::*;
+
+    const FIELD_P_DEC: &str =
+        "115792089237316195423570985008687907853269984665640564039457584007908834671663";
+
+    fn bnd(name: &str, value: ANFValue) -> ANFBinding {
+        ANFBinding { name: name.to_string(), value, source_loc: None }
+    }
+
+    fn describe(b: &ANFBinding) -> String {
+        let d = match &b.value {
+            ANFValue::LoadParam { name } => format!("load_param {name}"),
+            ANFValue::LoadConst { value } => match value {
+                serde_json::Value::String(s) if s == INFINITY_HEX => "const INFINITY".to_string(),
+                serde_json::Value::String(s) if s.starts_with("@ref:") => format!("ref {}", &s[5..]),
+                serde_json::Value::String(s) => format!("const {}", s.trim_end_matches('n')),
+                other => format!("const {other}"),
+            },
+            ANFValue::Call { func, args } => format!("call {func} {}", args.join(" ")),
+            ANFValue::BinOp { op, left, right, result_type } => match result_type {
+                Some(t) => format!("bin_op {op} {left} {right} {t}"),
+                None => format!("bin_op {op} {left} {right}"),
+            },
+            ANFValue::Assert { value, .. } => format!("assert {value}"),
+            _ => "other".to_string(),
+        };
+        format!("{} = {}", b.name, d)
+    }
+
+    fn program(scalar_or_inf: ANFBinding, call: ANFValue) -> ANFProgram {
+        ANFProgram {
+            contract_name: "Test".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "test".to_string(),
+                params: vec![],
+                body: vec![
+                    bnd("p", ANFValue::LoadParam { name: "pt".to_string() }),
+                    scalar_or_inf,
+                    bnd("t", call),
+                    bnd("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+                ],
+                is_public: true,
+                sighash_type: None,
+            }],
+        }
+    }
+
+    fn call(func: &str, args: &[&str]) -> ANFValue {
+        ANFValue::Call { func: func.to_string(), args: args.iter().map(|s| s.to_string()).collect() }
+    }
+
+    fn add_gate() -> Vec<String> {
+        vec![
+            "t_px = call ecPointX p".to_string(),
+            "t_py = call ecPointY p".to_string(),
+            format!("t_fp = const {FIELD_P_DEC}"),
+            "t_pxok = bin_op < t_px t_fp".to_string(),
+            "t_pyok = bin_op < t_py t_fp".to_string(),
+            "t_ok = bin_op && t_pxok t_pyok".to_string(),
+            "t_gate = assert t_ok".to_string(),
+        ]
+    }
+
+    fn mul_gate() -> Vec<String> {
+        vec![
+            "t_inf = const INFINITY".to_string(),
+            "t_isinf = bin_op === p t_inf bytes".to_string(),
+            "t_oncurve = call ecOnCurve p".to_string(),
+            "t_ok = bin_op || t_isinf t_oncurve".to_string(),
+            "t_gate = assert t_ok".to_string(),
+        ]
+    }
+
+    fn expect(gate: Vec<String>, result: &str) -> Vec<String> {
+        let mut v = vec!["p = load_param pt".to_string()];
+        v.extend(gate);
+        v.push(format!("t = {result}"));
+        v.push("a = assert t".to_string());
+        v
+    }
+
+    fn run(p: ANFProgram) -> Vec<String> {
+        optimize_ec(p).methods[0].body.iter().map(describe).collect()
+    }
+
+    fn inf() -> ANFBinding {
+        bnd("inf", ANFValue::LoadConst { value: serde_json::Value::String(INFINITY_HEX.to_string()) })
+    }
+
+    fn int(name: &str, n: i64) -> ANFBinding {
+        bnd(name, ANFValue::LoadConst { value: serde_json::json!(n) })
+    }
+
+    #[test]
+    fn n104_ec_add_identity_right_keeps_gate() {
+        assert_eq!(run(program(inf(), call("ecAdd", &["p", "inf"]))), expect(add_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_add_identity_left_keeps_gate() {
+        assert_eq!(run(program(inf(), call("ecAdd", &["inf", "p"]))), expect(add_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_mul_one_keeps_gate() {
+        assert_eq!(run(program(int("one", 1), call("ecMul", &["p", "one"]))), expect(mul_gate(), "ref p"));
+    }
+
+    #[test]
+    fn n104_ec_mul_zero_keeps_gate() {
+        assert_eq!(run(program(int("zero", 0), call("ecMul", &["p", "zero"]))), expect(mul_gate(), "const INFINITY"));
+    }
+
+    /// N-251: R8/R8r keep the adder's y = 0 doubling abort (N-110) as
+    /// assert(ecPointX(q) === 0 || ecPointY(q) !== 0), ahead of the INFINITY
+    /// binding (user decision R96). Pins the gate ANF only; its script
+    /// semantics are executed on the real Spend engine, in both optimizer
+    /// modes, by packages/runar-testing/src/__tests__/n251-ec-negate-cancel-y0.test.ts.
+    fn neg_cancel_expect() -> Vec<String> {
+        vec![
+            "p = load_param pt".to_string(),
+            "n = call ecNegate p".to_string(),
+            "t_px = call ecPointX p".to_string(),
+            "t_py = call ecPointY p".to_string(),
+            "t_zero = const 0".to_string(),
+            "t_pxz = bin_op === t_px t_zero".to_string(),
+            "t_pynz = bin_op !== t_py t_zero".to_string(),
+            "t_ok = bin_op || t_pxz t_pynz".to_string(),
+            "t_gate = assert t_ok".to_string(),
+            "t = const INFINITY".to_string(),
+            "a = assert t".to_string(),
+        ]
+    }
+
+    #[test]
+    fn n251_ec_add_negate_cancel_keeps_y_zero_abort() {
+        let neg = bnd("n", call("ecNegate", &["p"]));
+        assert_eq!(run(program(neg, call("ecAdd", &["p", "n"]))), neg_cancel_expect());
+    }
+
+    #[test]
+    fn n251_ec_add_negate_cancel_reversed_keeps_y_zero_abort() {
+        let neg = bnd("n", call("ecNegate", &["p"]));
+        assert_eq!(run(program(neg, call("ecAdd", &["n", "p"]))), neg_cancel_expect());
+    }
+}
+
+/// N-218: port of F-343 to this tier. The TS reference's `optimizeBodyOnce`
+/// (packages/runar-compiler/src/optimizer/anf-ec.ts) keeps the rewritten
+/// binding's source location on every helper binding a rule mints — the
+/// N-104 operand gate, the N-251 neg-cancel gate, and the fused-scalar
+/// helper — because stack lowering maps opcodes through `binding.source_loc`.
+/// Before this fix, `optimize_method_ec_once` pushed every helper with
+/// `source_loc: None` regardless of the rewritten binding's own location, so
+/// none of a rewritten EC call's gate opcodes reached the source map.
+///
+/// Proves: a located ecMul(p, 0) rewrite's mul gate (5 bindings), a located
+/// ecAdd(p, ecNegate(p)) rewrite's neg-cancel gate (7 bindings), and a located
+/// nested-ecMul fusion's `_k` helper all carry the rewritten binding's
+/// `source_loc`; an unlocated rewrite mints unlocated helpers.
+///
+/// Does not prove: exact file/line/column assignment upstream in the ANF
+/// lowerer, or end-to-end script-map behavior (covered by the TS test
+/// f343-ec-optimizer-source-loc.test.ts and by conformance, which strips
+/// `sourceLoc` as debug-only and so cannot regress from this change).
+#[cfg(test)]
+mod n218_tests {
+    use super::*;
+    use crate::ir::SourceLocation;
+
+    fn loc() -> SourceLocation {
+        SourceLocation { file: "T.runar.ts".to_string(), line: 7, column: 4 }
+    }
+
+    fn same_loc(a: &Option<SourceLocation>, b: &SourceLocation) -> bool {
+        matches!(a, Some(l) if l.file == b.file && l.line == b.line && l.column == b.column)
+    }
+
+    fn located_call(name: &str, func: &str, args: &[&str]) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::Call {
+                func: func.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+            },
+            source_loc: Some(loc()),
+        }
+    }
+
+    fn unlocated(name: &str, value: ANFValue) -> ANFBinding {
+        ANFBinding { name: name.to_string(), value, source_loc: None }
+    }
+
+    fn find<'a>(body: &'a [ANFBinding], name: &str) -> &'a ANFBinding {
+        body.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("missing binding {name}"))
+    }
+
+    fn program_with(body: Vec<ANFBinding>) -> ANFProgram {
+        ANFProgram {
+            contract_name: "Test".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "test".to_string(),
+                params: vec![],
+                body,
+                is_public: true,
+                sighash_type: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn rule4_mul_gate_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("zero", ANFValue::LoadConst { value: serde_json::json!(0) }),
+            located_call("t", "ecMul", &["p", "zero"]),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        for name in ["t_inf", "t_isinf", "t_oncurve", "t_ok", "t_gate"] {
+            let b = find(out, name);
+            assert!(same_loc(&b.source_loc, &loc()), "{name}: source_loc = {:?}, want {:?}", b.source_loc, loc());
+        }
+        let t = find(out, "t");
+        assert!(same_loc(&t.source_loc, &loc()), "t: source_loc = {:?}, want {:?}", t.source_loc, loc());
+    }
+
+    #[test]
+    fn rule8_neg_cancel_gate_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("n", ANFValue::Call { func: "ecNegate".to_string(), args: vec!["p".to_string()] }),
+            located_call("t", "ecAdd", &["p", "n"]),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        for name in ["t_px", "t_py", "t_zero", "t_pxz", "t_pynz", "t_ok", "t_gate"] {
+            let b = find(out, name);
+            assert!(same_loc(&b.source_loc, &loc()), "{name}: source_loc = {:?}, want {:?}", b.source_loc, loc());
+        }
+    }
+
+    #[test]
+    fn rule9_fused_scalar_helper_carries_source_loc() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("k1", ANFValue::LoadConst { value: serde_json::json!(3) }),
+            unlocated("k2", ANFValue::LoadConst { value: serde_json::json!(5) }),
+            unlocated("inner", ANFValue::Call { func: "ecMul".to_string(), args: vec!["p".to_string(), "k1".to_string()] }),
+            located_call("outer", "ecMul", &["inner", "k2"]),
+            unlocated("a", ANFValue::Assert { value: "outer".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        let out = &result.methods[0].body;
+        let helper = find(out, "outer_k");
+        assert!(same_loc(&helper.source_loc, &loc()), "outer_k: source_loc = {:?}, want {:?}", helper.source_loc, loc());
+        let outer = find(out, "outer");
+        assert!(same_loc(&outer.source_loc, &loc()), "outer: source_loc = {:?}, want {:?}", outer.source_loc, loc());
+    }
+
+    #[test]
+    fn unlocated_rewrite_mints_unlocated_helpers() {
+        let body = vec![
+            unlocated("p", ANFValue::LoadParam { name: "pt".to_string() }),
+            unlocated("zero", ANFValue::LoadConst { value: serde_json::json!(0) }),
+            unlocated("t", ANFValue::Call { func: "ecMul".to_string(), args: vec!["p".to_string(), "zero".to_string()] }),
+            unlocated("a", ANFValue::Assert { value: "t".to_string(), is_auto_injected_state_check: false }),
+        ];
+        let result = optimize_ec(program_with(body));
+        for b in &result.methods[0].body {
+            assert!(b.source_loc.is_none(), "{}: expected no source_loc, got {:?}", b.name, b.source_loc);
         }
     }
 }

@@ -295,6 +295,51 @@ describe('assembleMultiContractCall — argument validation', () => {
     await expect(assembleMultiContractCall(inputs, f.outputs)).rejects.toThrow(/requires `changePKH`/);
   });
 
+  // N-149: the arity filter must be the shared `isSdkSuppliedParam`, which
+  // treats SigHashPreimage as SDK-supplied ONLY on stateful contracts. The
+  // old local filter dropped it unconditionally. Proves: on a stateless
+  // artifact whose method declares a SigHashPreimage param, that param counts
+  // as a user arg (2 args are accepted, no arity error). Does not prove the
+  // assembled tx for such a contract validates (the arity check is the
+  // first gate; later stages are exercised by the happy-path suites above).
+  it('counts a SigHashPreimage param as a user arg on a STATELESS contract', async () => {
+    const f = makeFixture();
+    const statelessArtifact: RunarArtifact = {
+      version: 'runar-v0.1.0',
+      compilerVersion: '0.0.0',
+      contractName: 'PlainPre',
+      abi: {
+        constructor: { params: [] },
+        methods: [
+          {
+            name: 'spend',
+            params: [
+              { name: 'x', type: 'bigint' },
+              { name: 'pre', type: 'SigHashPreimage' },
+            ],
+            isPublic: true,
+          },
+        ],
+      },
+      script: '51',
+      asm: 'OP_1',
+      stateFields: [],
+      constructorSlots: [],
+      parentClass: 'SmartContract',
+      buildTimestamp: '2024-01-01T00:00:00.000Z',
+    } as unknown as RunarArtifact;
+    const plain = new RunarContract(statelessArtifact, []);
+    const utxo = { txid: 'cc'.repeat(32), outputIndex: 0, satoshis: 1000, script: '51' };
+    const inputs = [{ contract: plain, method: 'spend', args: [1n, 'aa'], utxo, signer: ownerSigner }];
+    let message = '';
+    try {
+      await assembleMultiContractCall(inputs, f.outputs);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).not.toMatch(/expects \d+ args/);
+  });
+
   it('rejects empty inputs / outputs', async () => {
     const f = makeFixture();
     await expect(assembleMultiContractCall([], f.outputs)).rejects.toThrow(/at least one input/);

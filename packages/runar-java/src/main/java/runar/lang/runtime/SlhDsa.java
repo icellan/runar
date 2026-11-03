@@ -51,7 +51,7 @@ public final class SlhDsa {
     public static final Params SHA2_192s = new Params("SLH-DSA-SHA2-192s", 24, 63, 7, 9, 14, 17, 16);
     public static final Params SHA2_192f = new Params("SLH-DSA-SHA2-192f", 24, 66, 22, 3, 8, 33, 16);
     public static final Params SHA2_256s = new Params("SLH-DSA-SHA2-256s", 32, 64, 8, 8, 14, 22, 16);
-    public static final Params SHA2_256f = new Params("SLH-DSA-SHA2-256f", 32, 68, 17, 4, 8, 35, 16);
+    public static final Params SHA2_256f = new Params("SLH-DSA-SHA2-256f", 32, 68, 17, 4, 9, 35, 16);
 
     public static final class KeyPair {
         public final byte[] sk; // SK.seed || SK.prf || PK.seed || PK.root
@@ -591,7 +591,9 @@ public final class SlhDsa {
         for (int i = 0; i < treeIdxLen; i++) {
             treeIdx = (treeIdx << 8) | (digest[mdLen + i] & 0xff);
         }
-        treeIdx &= (1L << (params.h - hp)) - 1;
+        // h - h' is 64 for SHA2-256f; Java masks long shift counts mod 64, so
+        // (1L << 64) - 1 would be 0. Mask only below 64 bits (F-130).
+        if (params.h - hp < 64) treeIdx &= (1L << (params.h - hp)) - 1;
 
         int leafIdx = 0;
         for (int i = 0; i < leafIdxLen; i++) {
@@ -641,6 +643,12 @@ public final class SlhDsa {
         byte[] pkSeed = Arrays.copyOfRange(pk, 0, n);
         byte[] pkRoot = Arrays.copyOfRange(pk, n, 2 * n);
 
+        // F-232: FIPS 205 fixes the signature length per parameter set at
+        // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+        // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+        // garbage or truncation) is rejected.
+        if (sig.length != n + k * (1 + a) * n + d * (len + hp) * n) return false;
+
         int offset = 0;
         if (sig.length < n) return false;
         byte[] R = Arrays.copyOfRange(sig, offset, offset + n);
@@ -662,7 +670,9 @@ public final class SlhDsa {
         for (int i = 0; i < treeIdxLen; i++) {
             treeIdx = (treeIdx << 8) | (digest[mdLen + i] & 0xff);
         }
-        treeIdx &= (1L << (params.h - hp)) - 1;
+        // h - h' is 64 for SHA2-256f; Java masks long shift counts mod 64, so
+        // (1L << 64) - 1 would be 0. Mask only below 64 bits (F-130).
+        if (params.h - hp < 64) treeIdx &= (1L << (params.h - hp)) - 1;
 
         int leafIdx = 0;
         for (int i = 0; i < leafIdxLen; i++) {
@@ -691,6 +701,7 @@ public final class SlhDsa {
             currentLeafIdx = (int) (currentTreeIdx & ((1L << hp) - 1));
             currentTreeIdx = currentTreeIdx >>> hp;
         }
+        if (offset != sig.length) return false;
 
         return Arrays.equals(currentMsg, pkRoot);
     }

@@ -73,6 +73,42 @@ pub fn expectAssertFailure(probe_case: []const u8) !void {
     try runar.expectAssertFailure(std.testing.allocator, probe_case);
 }
 
+/// F-033: an on-chain `abort` vector must abort natively too. The probe prints
+/// `F033_VECTOR_CALL` right before the contract call, so dying earlier (bad
+/// index, JSON error) does not count; after that the process must die with a
+/// Runar assertion (the script's OP_VERIFY guards) or a division by zero (the
+/// script's OP_DIV by zero). Returning normally exits 0 and fails here.
+pub fn expectVectorAbort(probe_case: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ assert_probe_path, probe_case },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    const aborted = switch (result.term) {
+        .exited => |code| code != 0,
+        .signal => true,
+        else => false,
+    };
+    const out = result.stderr;
+    const reached = std.mem.indexOf(u8, out, "F033_VECTOR_CALL") != null;
+    const expected_abort =
+        std.mem.indexOf(u8, out, runtime.assertFailureMessage) != null or
+        std.mem.indexOf(u8, out, "division by zero") != null;
+    if (!(aborted and reached and expected_abort)) {
+        std.debug.print(
+            "vector probe {s}: aborted={} reached={} expected_abort={}\nstdout:\n{s}\nstderr:\n{s}\n",
+            .{ probe_case, aborted, reached, expected_abort, result.stdout, result.stderr },
+        );
+        return error.TestUnexpectedResult;
+    }
+}
+
 test {
     _ = @import("./auction/Auction_test.zig");
     _ = @import("./babybear/BabyBearDemo_test.zig");
@@ -128,4 +164,75 @@ test {
     _ = @import("./stateful/Stateful_test.zig");
     _ = @import("./post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure_test.zig");
     _ = @import("./post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.zig");
+    _ = @import("./compiler-directives/Directives_test.zig");
+    _ = @import("./compiler-directives/EmbedTags_test.zig");
+    _ = @import("./all-readonly-cleanstack/AllReadonlyCleanstack_test.zig");
+    _ = @import("./annotated-vault/AnnotatedVault_test.zig");
+    _ = @import("./asm-raw-script/Anyone_test.zig");
+    _ = @import("./branch-merged-locals/BranchMergedLocals_test.zig");
+    _ = @import("./branched-readonly-len/BranchedReadonlyLen_test.zig");
+    _ = @import("./byte-builtins/ByteBuiltins_test.zig");
+    _ = @import("./cond-write-multi-field/CondWriteMultiField_test.zig");
+    _ = @import("./conditional-data-output/ConditionalDataOutput_test.zig");
+    _ = @import("./countdown-loop/CountdownLoop_test.zig");
+    _ = @import("./fixed-array-index/ArrayIndex_test.zig");
+    _ = @import("./fixed-array-write/ArrayWrite_test.zig");
+    _ = @import("./go-dsl-bytestring-literal/GoDslBytestringLiteral_test.zig");
+    _ = @import("./integer-boundary/IntegerBoundary_test.zig");
+    _ = @import("./intent-current-block-height/IntentCurrentBlockHeight_test.zig");
+    _ = @import("./intent-output-p2pkh/IntentOutputP2PKH_test.zig");
+    _ = @import("./intent-prev-output-script/IntentPrevOutputScript_test.zig");
+    _ = @import("./loop-shapes/LoopShapes_test.zig");
+    _ = @import("./p256-encode-negate/P256EncodeNegate_test.zig");
+    _ = @import("./p384-encode-negate/P384EncodeNegate_test.zig");
+    _ = @import("./param-shadow-branch-arm/ParamShadowBranchArm_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s_test.zig");
+    _ = @import("./property-shadow/PropertyShadow_test.zig");
+    _ = @import("./r1-k1-wallet/R1K1Wallet_test.zig");
+    _ = @import("./selector/Selector_test.zig");
+    _ = @import("./sighash-single-stateful/SingleCounter_test.zig");
+    _ = @import("./state-covenant-mechanics/StateCovenantMechanics_test.zig");
+    _ = @import("./stateful-wots-gate/StatefulWOTSGate_test.zig");
+    _ = @import("./terminal-varlen-read/TerminalVarlenRead_test.zig");
+    _ = @import("./token-wallet-naive-INSECURE/WalletToken_test.zig");
+}
+
+// F-294: the `test {}` block above is a hand-maintained import list, so a new
+// `<dir>/<Name>_test.zig` that nobody added to it registers nothing and the
+// build still reports success. This walks every example directory and fails
+// naming each `*_test.zig` whose `@import` line is missing from this file.
+// Proves: no on-disk test file under examples/zig is unregistered.
+// Does not prove: that every `.runar.zig` contract HAS a test file (some
+// directories have none) or that a registered file contains any `test` blocks.
+test "every example *_test.zig is imported by the test root" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const root_source = @embedFile("examples_test.zig");
+
+    var missing: usize = 0;
+    var root = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var dirs = root.iterate();
+    while (try dirs.next(io)) |d| {
+        if (d.kind != .directory) continue;
+        if (std.mem.eql(u8, d.name, "zig-out") or std.mem.eql(u8, d.name, "zig-pkg") or
+            std.mem.startsWith(u8, d.name, ".")) continue;
+        var sub = try root.openDir(io, d.name, .{ .iterate = true });
+        defer sub.close(io);
+        var files = sub.iterate();
+        while (try files.next(io)) |f| {
+            if (f.kind != .file or !std.mem.endsWith(u8, f.name, "_test.zig")) continue;
+            const needle = try std.fmt.allocPrint(allocator, "@import(\"./{s}/{s}\")", .{ d.name, f.name });
+            defer allocator.free(needle);
+            if (std.mem.indexOf(u8, root_source, needle) == null) {
+                std.debug.print("F-294: {s}/{s} is not imported by examples_test.zig\n", .{ d.name, f.name });
+                missing += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing);
 }

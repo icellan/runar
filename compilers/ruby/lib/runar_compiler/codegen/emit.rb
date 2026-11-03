@@ -153,6 +153,17 @@ module RunarCompiler
       end
     end
 
+    # N-051 -- a verify_code_part_len length field whose value is only known
+    # at deploy time (a readonly constructor arg of variable width is baked
+    # into the code part). The SDK overwrites the 4 bytes at +byte_offset+
+    # with the deployed code-part length, little-endian. +byte_offset+ is the
+    # TEMPLATE offset of the first length byte (the byte after the 04 push).
+    CodePartLenSlot = Struct.new(:byte_offset, keyword_init: true) do
+      def initialize(byte_offset: 0)
+        super
+      end
+    end
+
     # ------------------------------------------------------------------
     # RawScriptSpan
     # ------------------------------------------------------------------
@@ -174,6 +185,7 @@ module RunarCompiler
       :source_map,
       :constructor_slots,
       :code_sep_index_slots,
+      :code_part_len_slots,
       :code_separator_index,
       :code_separator_indices,
       :raw_script_spans,
@@ -185,6 +197,7 @@ module RunarCompiler
         source_map: [],
         constructor_slots: [],
         code_sep_index_slots: [],
+        code_part_len_slots: [],
         code_separator_index: -1,
         code_separator_indices: [],
         raw_script_spans: []
@@ -408,6 +421,7 @@ module RunarCompiler
     # @api private
     class EmitContext
       attr_reader :source_map, :constructor_slots, :code_sep_index_slots,
+                  :code_part_len_slots,
                   :code_separator_index, :code_separator_indices,
                   :raw_script_spans
 
@@ -420,6 +434,8 @@ module RunarCompiler
         @pending_source_loc = nil
         @constructor_slots = []
         @code_sep_index_slots = []
+        # N-051 -- pin length fields the SDK patches at deploy time.
+        @code_part_len_slots = []
         @code_separator_index = -1
         @code_separator_indices = []
         @raw_script_spans = []
@@ -470,7 +486,7 @@ module RunarCompiler
       # R-095 -- emit the 9-byte SIZE(_codePart) pin and register its length
       # field for back-patching.
       #
-      #   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+      #   OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
       #
       # `LL LL LL LL` is a FIXED-WIDTH little-endian field, not a minimal Script
       # number push: the value being patched IS the length of the script that
@@ -481,8 +497,22 @@ module RunarCompiler
       # `exact` is known here (the stack lowerer resolved it once every method
       # had been lowered), so only the four length bytes need patching.
       #
+      # N-051 -- the comparison is ALWAYS an equality. It used to degrade to
+      # OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+      # deployed length unknown here, and a lower bound lets a spender claim a
+      # TRUNCATED `_codePart` that ends at any 0x6a byte inside the baked value
+      # (clause 8b's `rest[0] == 0x6a` is then satisfied by the script's own
+      # bytes), planting attacker-chosen code in the continuation. When the
+      # length is not exact at compile time, the field is recorded as a
+      # `codePartLenSlots` entry and the SDK writes the real deployed code-part
+      # length into it at deploy time. The template keeps the compile-time
+      # lower bound, so an SDK that does not patch produces a contract whose
+      # honest spends fail (funds stuck), never one that accepts a truncated
+      # code part.
+      #
       # @param delta [Integer] deploy-time growth of the OP_0 placeholders
-      # @param exact [Boolean] true -> equality pin, false -> lower-bound pin
+      # @param exact [Boolean] true -> the value is the deployed length;
+      #   false -> the SDK patches it at deploy time (codePartLenSlots)
       def emit_verify_code_part_len(delta, exact)
         emit_opcode("OP_DUP")
         # +1 skips the single-byte push header the 4-byte data push carries.
@@ -490,13 +520,14 @@ module RunarCompiler
         asm_index = @asm_parts.length
         emit_push({ kind: "bytes", bytes_val: "\x00\x00\x00\x00".b })
         emit_opcode("OP_BIN2NUM")
-        emit_opcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL")
+        emit_opcode("OP_NUMEQUAL")
         emit_opcode("OP_VERIFY")
         @code_part_len_fixups << {
           value_byte_offset: value_byte_offset,
           asm_index: asm_index,
           delta: delta
         }
+        @code_part_len_slots << CodePartLenSlot.new(byte_offset: value_byte_offset) unless exact
       end
 
       def emit_code_sep_index_placeholder(code_sep_idx)
@@ -638,9 +669,60 @@ module RunarCompiler
 
     # @api private
     def self.emit_stack_op(op, ctx)
-      # Propagate source location from StackOp to the emit context
-      ctx.set_source_loc(op[:source_loc]) if op[:source_loc]
+      emit_ops([op], ctx)
+    end
 
+    # Emit +root+ in order, descending into if-op arms on an explicit stack.
+    #
+    # N-264: this used to recurse (emit_stack_op -> emit_if -> emit_stack_op),
+    # one level per nested if-op. Private methods are inlined, so a chain of D
+    # helpers each calling the next under K nested ifs nests D*K if-ops, too
+    # deep for the VM stack. Each op is emitted in the same order with the
+    # same source-location bookkeeping as before: an op's location is set
+    # before it, cleared after it, and an if-op's OP_ELSE / OP_ENDIF are
+    # emitted under whatever location its last arm op left.
+    #
+    # @api private
+    def self.emit_ops(root, ctx)
+      # Frames: [ops, next index, arm (:root / :then / :else), else ops].
+      stack = [[root, 0, :root, nil]]
+      until stack.empty?
+        frame = stack.last
+        ops, i, arm, else_ops = frame
+        if i < ops.length
+          frame[1] = i + 1
+          op = ops[i]
+          # Propagate source location from StackOp to the emit context
+          ctx.set_source_loc(op[:source_loc]) if op[:source_loc]
+          if op[:op] == "if"
+            # An OP_IF / OP_ELSE / OP_ENDIF structure: the arms follow.
+            ctx.emit_opcode("OP_IF")
+            stack.push([op[:then] || [], 0, :then, op[:else_ops] || []])
+            next
+          end
+          emit_leaf_op(op, ctx)
+          # Clear after emitting so the location doesn't leak to the next op
+          ctx.set_source_loc(nil)
+          next
+        end
+        stack.pop
+        next if arm == :root
+
+        if arm == :then && !else_ops.empty?
+          ctx.emit_opcode("OP_ELSE")
+          stack.push([else_ops, 0, :else, nil])
+          next
+        end
+        ctx.emit_opcode("OP_ENDIF")
+        # The if-op is done: clear its location like any other op's.
+        ctx.set_source_loc(nil)
+      end
+    end
+
+    # Emit one op that is not an if-op.
+    #
+    # @api private
+    def self.emit_leaf_op(op, ctx)
       case op[:op]
       when "push"
         ctx.emit_push(op[:value])
@@ -664,8 +746,6 @@ module RunarCompiler
         ctx.emit_opcode("OP_TUCK")
       when "opcode"
         ctx.emit_opcode(op[:code])
-      when "if"
-        emit_if(op[:then] || [], op[:else_ops] || [], ctx)
       when "placeholder"
         ctx.emit_placeholder(op[:param_index] || 0)
       when "raw_bytes"
@@ -676,7 +756,8 @@ module RunarCompiler
         ctx.emit_raw_bytes(op[:raw_bytes], op[:in_arity] || 0, op[:out_arity] || 0)
       when "verify_code_part_len"
         # R-095: pin SIZE(_codePart) against the code part's own deployed byte
-        # length. Fixed-width field, back-patched after the whole script exists.
+        # length. Fixed-width field, back-patched after the whole script exists;
+        # always OP_NUMEQUAL, and a deploy-time slot when not exact (N-051).
         ctx.emit_verify_code_part_len(op[:code_part_len_delta] || 0,
                                       op[:code_part_len_exact] || false)
       when "push_codesep_index"
@@ -687,23 +768,6 @@ module RunarCompiler
       else
         raise ArgumentError, "unknown stack op: #{op[:op]}"
       end
-
-      # Clear after emitting so the location doesn't leak to the next op
-      ctx.set_source_loc(nil)
-    end
-
-    # @api private
-    def self.emit_if(then_ops, else_ops, ctx)
-      ctx.emit_opcode("OP_IF")
-
-      then_ops.each { |op| emit_stack_op(op, ctx) }
-
-      unless else_ops.empty?
-        ctx.emit_opcode("OP_ELSE")
-        else_ops.each { |op| emit_stack_op(op, ctx) }
-      end
-
-      ctx.emit_opcode("OP_ENDIF")
     end
 
     # ------------------------------------------------------------------
@@ -804,6 +868,7 @@ module RunarCompiler
         source_map: ctx.source_map,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         raw_script_spans: ctx.raw_script_spans
@@ -825,6 +890,7 @@ module RunarCompiler
         source_map: ctx.source_map,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         raw_script_spans: ctx.raw_script_spans

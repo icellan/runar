@@ -10,6 +10,7 @@ package codegen
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 
 	bn254 "github.com/consensys/gnark-crypto/ecc/bn254"
@@ -582,4 +583,158 @@ func tryComputeSubgroupGradients(P bn254.G2Affine) ([]*big.Int, bool) {
 		out = append(out, a0, a1)
 	}
 	return out, true
+}
+
+// -----------------------------------------------------------------------
+// emitWAG2AddAffine same-point (T == Q) regression tests — F-077
+// -----------------------------------------------------------------------
+//
+// emitWAG2AddAffine verifies the prover's chord slope via
+// λ·(Qx − Tx) == (Qy − Ty). When T == Q both differences are zero, so the
+// check holds for EVERY λ and the "sum" collapses to (λ² − 2·Tx, …) with
+// λ chosen by the attacker. The helper is the G2 addition step of the
+// [6·x²]·P chain in the Scott subgroup check (both the witness-assisted
+// Groth16 preamble and the unassisted pairing-builtin validation), so it
+// must abort on Qx == Tx rather than trust the degenerate gradient check.
+
+// e2Big converts a big.Int pair into gnark's E2.
+func e2Big(a0, a1 *big.Int) bn254.E2 {
+	var e bn254.E2
+	e.A0.SetBigInt(a0)
+	e.A1.SetBigInt(a1)
+	return e
+}
+
+// buildWAG2AddAffineHarness pushes T, Q and the witness slope λ, runs
+// emitWAG2AddAffine, and then OP_EQUALVERIFYs the (mod-p-reduced) result
+// against `want`, finishing with OP_1. A successful execution therefore
+// proves the helper both accepted the witness AND produced exactly `want`.
+//
+// qAtBottom selects the tracker mode: true mirrors the witness-assisted
+// Groth16 preamble (q pinned at stack bottom, prime cache on), false the
+// default mode used by the unassisted pairing-builtin validation.
+func buildWAG2AddAffineHarness(T, Q bn254.G2Affine, lam bn254.E2, want [4]*big.Int, qAtBottom bool) []StackOp {
+	tx0, tx1 := bigFromE2(T.X)
+	ty0, ty1 := bigFromE2(T.Y)
+	qx0, qx1 := bigFromE2(Q.X)
+	qy0, qy1 := bigFromE2(Q.Y)
+	l0, l1 := bigFromE2(lam)
+
+	var initNames []string
+	var vals []*big.Int
+	if qAtBottom {
+		initNames = append(initNames, "_q")
+		vals = append(vals, bn254FieldP)
+	}
+	initNames = append(initNames,
+		"_T_x_0", "_T_x_1", "_T_y_0", "_T_y_1",
+		"_Q_x_0", "_Q_x_1", "_Q_y_0", "_Q_y_1",
+		"_lam_0", "_lam_1")
+	vals = append(vals, tx0, tx1, ty0, ty1, qx0, qx1, qy0, qy1, l0, l1)
+
+	preamble := make([]StackOp, 0, len(vals))
+	for _, v := range vals {
+		preamble = append(preamble, StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
+	}
+
+	var ops []StackOp
+	tr := NewBN254Tracker(initNames, func(op StackOp) { ops = append(ops, op) })
+	if qAtBottom {
+		tr.SetQAtBottom()
+		tr.primeCacheActive = true
+	}
+
+	emitWAG2AddAffine(tr, "_T", "_Q", "_lam", "_R", "f077")
+
+	for i, comp := range []string{"_x_0", "_x_1", "_y_0", "_y_1"} {
+		bn254FieldMod(tr, "_R"+comp, "_Rr"+comp)
+		tr.pushBigInt("_want"+comp, want[i])
+		tr.rawBlock([]string{"_Rr" + comp, "_want" + comp}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+		})
+	}
+	for len(tr.nm) > 0 {
+		tr.drop()
+	}
+	tr.e(StackOp{Op: "push", Value: bigIntPush(1)})
+
+	return append(preamble, ops...)
+}
+
+// TestWAG2AddAffine_SamePoint_RejectsAttackerLambda is the F-077 attack:
+// T = Q = the G2 generator with an arbitrary prover-chosen λ. The harness
+// also asserts the output equals the attacker-predicted (λ² − 2·Tx,
+// λ·(Tx − Rx) − Ty), so before the fix the script SUCCEEDS and hands the
+// attacker a chosen point; after the fix it must abort at the Qx ≠ Tx
+// assertion.
+//
+// Proves: the helper no longer accepts a same-point addition under any of
+// the tested λ, in both tracker modes, and the abort happens before the
+// result is produced (the error is OP_VERIFY, not the result EQUALVERIFY).
+// Does not prove: soundness of the full [6·x²] chain against every
+// non-subgroup P — that rests on the Scott identity plus this abort and
+// the doubling helper's own Ty ≠ 0 behaviour.
+func TestWAG2AddAffine_SamePoint_RejectsAttackerLambda(t *testing.T) {
+	_, _, _, g2 := bn254.Generators()
+
+	// Sanity: the honest doubling of G2 is NOT the attacker's output, so a
+	// pre-fix success is a genuine forgery, not an accidental 2·G.
+	var dbl bn254.G2Affine
+	dbl.Double(&g2)
+
+	lambdas := [][2]int64{{1, 0}, {5, 7}, {0, 0}}
+	for _, mode := range []bool{true, false} {
+		for _, l := range lambdas {
+			lam := e2Big(big.NewInt(l[0]), big.NewInt(l[1]))
+
+			// Attacker-predicted "sum": Rx = λ² − 2Tx, Ry = λ(Tx − Rx) − Ty.
+			var rx, ry, lsq, twoX, d bn254.E2
+			lsq.Square(&lam)
+			twoX.Double(&g2.X)
+			rx.Sub(&lsq, &twoX)
+			d.Sub(&g2.X, &rx)
+			ry.Mul(&lam, &d)
+			ry.Sub(&ry, &g2.Y)
+			if rx.Equal(&dbl.X) && ry.Equal(&dbl.Y) {
+				t.Fatalf("λ=%v happens to be the true tangent; pick another", l)
+			}
+			rx0, rx1 := bigFromE2(rx)
+			ry0, ry1 := bigFromE2(ry)
+
+			ops := buildWAG2AddAffineHarness(g2, g2, lam, [4]*big.Int{rx0, rx1, ry0, ry1}, mode)
+			err := buildAndExecute(t, ops)
+			if err == nil {
+				t.Errorf("qAtBottom=%v λ=%v: same-point add accepted; output is the attacker-chosen (λ²−2Tx, …), not 2·G2", mode, l)
+				continue
+			}
+			if msg := err.Error(); !strings.Contains(msg, "OP_VERIFY") || strings.Contains(msg, "OP_EQUALVERIFY") {
+				t.Errorf("qAtBottom=%v λ=%v: aborted for the wrong reason (want the Qx≠Tx OP_VERIFY): %v", mode, l, err)
+			}
+		}
+	}
+}
+
+// TestWAG2AddAffine_DistinctPoints_ComputesSum pins that the Qx ≠ Tx
+// abort does not reject a legitimate addition: T = 2·G2, Q = G2 with the
+// honest chord slope must yield exactly 3·G2 (gnark-crypto reference).
+func TestWAG2AddAffine_DistinctPoints_ComputesSum(t *testing.T) {
+	_, _, _, g2 := bn254.Generators()
+	var T, want bn254.G2Affine
+	T.Double(&g2)
+	want.Add(&T, &g2)
+
+	var num, den, lam bn254.E2
+	num.Sub(&g2.Y, &T.Y)
+	den.Sub(&g2.X, &T.X)
+	den.Inverse(&den)
+	lam.Mul(&num, &den)
+
+	w0, w1 := bigFromE2(want.X)
+	w2, w3 := bigFromE2(want.Y)
+	for _, mode := range []bool{true, false} {
+		ops := buildWAG2AddAffineHarness(T, g2, lam, [4]*big.Int{w0, w1, w2, w3}, mode)
+		if err := buildAndExecute(t, ops); err != nil {
+			t.Errorf("qAtBottom=%v: honest T+Q rejected: %v", mode, err)
+		}
+	}
 }

@@ -30,10 +30,19 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic } from '../errors.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
+import {
+  makeDiagnostic,
+  staticMethodMessage,
+  unexpectedClassBodyTokenMessage,
+  unexpectedTokenAfterClassMessage,
+  unsupportedStatementMessage,
+  UNTERMINATED_STRING_LITERAL,
+} from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -68,12 +77,24 @@ const KEYWORDS = new Map<string, TokenType>([
   ['super', 'super'], ['require', 'require'], ['assert', 'assert'], ['do', 'do'],
 ]);
 
+/**
+ * N-053: the tokens that can begin an expression and are not already a
+ * statement form of their own. A statement starting with one of these is an
+ * expression statement; a statement starting with anything else is refused.
+ */
+const RB_EXPRESSION_START: ReadonlySet<TokenType> = new Set<TokenType>([
+  'number', 'string', 'hexstring', 'true', 'false', 'nil',
+  '(', '[', '-', '~', '!', 'not',
+]);
+
 function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   const lines = source.split('\n');
 
   // Track parenthesis depth for multi-line expressions
   let parenDepth = 0;
+  // Line number of an open `=begin` embedded document, or 0.
+  let blockCommentStart = 0;
 
   function add(type: TokenType, value: string, line: number, col: number) {
     tokens.push({ type, value, line, column: col });
@@ -86,6 +107,21 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     // Strip trailing \r
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
 
+    // N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+    // own). `=begin` / `=end` open and close a block comment only at column 0
+    // and only as a whole word (followed by whitespace or end of line). Every
+    // line from `=begin` through `=end` is a comment. Before this, a method
+    // "commented out" this way compiled as a live spend path and the `end` of
+    // `=end` closed the class early.
+    if (blockCommentStart !== 0) {
+      if (isEmbeddedDocMarker(line, '=end')) blockCommentStart = 0;
+      continue;
+    }
+    if (isEmbeddedDocMarker(line, '=begin')) {
+      blockCommentStart = lineNum;
+      continue;
+    }
+
     // Skip blank lines and comment-only lines
     const stripped = line.trimStart();
     if (stripped === '' || stripped.startsWith('#')) {
@@ -97,7 +133,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     while (pos < line.length) {
       const ch = line[pos]!;
-      const col = pos + 1;
+      const col = pos;
 
       // Whitespace within line
       if (ch === ' ' || ch === '\t') {
@@ -263,6 +299,9 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           }
         }
         if (pos < line.length) pos++; // skip closing quote
+        // F-011: the tokenizer is line-based, so a literal that reaches the
+        // line break is unterminated; refuse it rather than end it silently.
+        else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: lineNum, column: col }));
         add('hexstring', val, lineNum, col);
         continue;
       }
@@ -282,27 +321,19 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           }
         }
         if (pos < line.length) pos++; // skip closing quote
+        else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: lineNum, column: col }));
         add('string', val, lineNum, col);
         continue;
       }
 
-      // Numbers (decimal and hex)
+      // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
       if (ch >= '0' && ch <= '9') {
-        let num = '';
-        if (ch === '0' && pos + 1 < line.length && (line[pos + 1] === 'x' || line[pos + 1] === 'X')) {
-          num = '0x';
-          pos += 2;
-          while (pos < line.length && /[0-9a-fA-F_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        } else {
-          while (pos < line.length && /[0-9_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        }
-        add('number', num, lineNum, col);
+        const end = scanNumberEnd(line, pos);
+        const text = line.slice(pos, end);
+        pos = end;
+        const lit = parseIntLiteral('rb', text);
+        if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('rb', text), 'error', { file, line: lineNum, column: col }));
+        add('number', lit ? lit.value.toString() : '0', lineNum, col);
         continue;
       }
 
@@ -334,12 +365,27 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     // Emit NEWLINE at end of significant line (only if not inside parens)
     if (parenDepth === 0) {
-      add('NEWLINE', '', lineNum, line.length + 1);
+      add('NEWLINE', '', lineNum, line.length);
     }
   }
 
-  add('eof', '', lines.length + 1, 1);
+  if (blockCommentStart !== 0) {
+    errors.push(makeDiagnostic(
+      `unterminated '=begin' block comment starting at line ${blockCommentStart}: missing '=end'`,
+      'error',
+      { file, line: blockCommentStart, column: 0 },
+    ));
+  }
+
+  add('eof', '', lines.length + 1, 0);
   return tokens;
+}
+
+/** Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
+ *  whole word: followed by ASCII whitespace (Ruby's `\s`) or end of line. */
+function isEmbeddedDocMarker(line: string, marker: string): boolean {
+  if (!line.startsWith(marker)) return false;
+  return line.length === marker.length || ' \t\n\v\f\r'.includes(line[marker.length]!);
 }
 
 // ---------------------------------------------------------------------------
@@ -558,9 +604,22 @@ class RbParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   /** Track locally declared variables per method scope to distinguish decl from assignment. */
   private declaredLocals: Set<string> = new Set();
+
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
@@ -628,6 +687,22 @@ class RbParser {
       return { contract: null, errors: this.errors };
     }
 
+    // N-004: nothing may follow the class's `end`.
+    this.skipNewlines();
+    const trailing = this.peek();
+    if (trailing.type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        unexpectedTokenAfterClassMessage(trailing.value || trailing.type),
+        'error',
+        { file: this.file, line: trailing.line, column: trailing.column },
+      ));
+    }
+
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -679,7 +754,7 @@ class RbParser {
       parentClass !== 'UnsafeSmartContract'
     ) {
       this.errors.push(makeDiagnostic(
-        `Unknown parent class: ${parentClass}`,
+        `unknown parent class: '${parentClass}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
         'error',
         { file: this.file, line: firstPart.line, column: firstPart.column },
       ));
@@ -694,6 +769,7 @@ class RbParser {
     // Pending visibility/param types for the next method
     let pendingVisibility: 'public' | 'private' | null = null;
     let pendingParamTypes: Map<string, TypeNode> | null = null;
+    let pendingSighash: Array<{ spec: string | null; loc: SourceLocation }> = [];
 
     while (this.peek().type !== 'end' && this.peek().type !== 'eof') {
       this.skipNewlines();
@@ -703,6 +779,23 @@ class RbParser {
       if (this.checkIdent('prop')) {
         const prop = this.parseProp(parentClass);
         if (prop) properties.push(prop);
+        this.skipNewlines();
+        continue;
+      }
+
+      // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+      // `@sighash` directive; it applies to the next `def`.
+      if (this.checkIdent('runar_sighash')) {
+        const sighashLoc = this.loc();
+        this.advance(); // 'runar_sighash'
+        const arg = this.peek();
+        let count = 0;
+        while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+          this.advance();
+          count++;
+        }
+        const isStr = arg.type === 'string' || arg.type === 'hexstring';
+        pendingSighash.push({ spec: count === 1 && isStr ? arg.value : null, loc: sighashLoc });
         this.skipNewlines();
         continue;
       }
@@ -728,21 +821,61 @@ class RbParser {
       if (this.peek().type === 'def') {
         const method = this.parseMethod(pendingVisibility, pendingParamTypes);
         if (method.name === 'constructor') {
+          // N-093: the constructor is not a spending entry point.
+          for (const p of pendingSighash) {
+            this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', p.loc));
+          }
           constructor = method;
         } else {
+          const sighash = resolveNativeSighash(
+            method.name,
+            method.visibility === 'public',
+            pendingSighash.map((p) => p.spec),
+          );
+          if (sighash && 'error' in sighash) {
+            this.errors.push(makeDiagnostic(sighash.error, 'error', method.sourceLocation));
+          } else if (sighash) {
+            method.sighashType = sighash.value;
+          }
           methods.push(method);
         }
         pendingVisibility = null;
         pendingParamTypes = null;
+        pendingSighash = [];
         this.skipNewlines();
         continue;
       }
 
-      // Skip unknown tokens
-      this.advance();
+      // Ruby's bare visibility markers are no-ops here (visibility comes from
+      // `runar_public`); examples/ruby uses them.
+      if (this.checkIdent('private') || this.checkIdent('public')) {
+        this.advance();
+        continue;
+      }
+
+      // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+      const stray = this.advance();
+      this.errors.push(makeDiagnostic(
+        unexpectedClassBodyTokenMessage(stray.value || stray.type),
+        'error',
+        { file: this.file, line: stray.line, column: stray.column },
+      ));
     }
 
-    this.match('end'); // end of class
+    // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+    for (const p of pendingSighash) {
+      this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', p.loc));
+    }
+
+    // N-319: the class `end` is required; EOF here means it is missing.
+    if (!this.match('end')) {
+      const eofTok = this.current();
+      this.errors.push(makeDiagnostic(
+        "unterminated class: missing closing 'end'",
+        'error',
+        { file: this.file, line: eofTok.line, column: eofTok.column },
+      ));
+    }
 
     // Auto-generate constructor if not provided
     if (!constructor) {
@@ -865,10 +998,27 @@ class RbParser {
     // Check for optional trailing options: readonly: true/false, default: <literal>
     // Multiple options are comma-separated and may appear in any order.
     let isReadonly = false;
+    let embedAlways = false;
     let initializer: Expression | undefined;
+    let optionError = false;
     while (this.peek().type === ',') {
       this.advance(); // ','
-      if (this.checkIdent('readonly')) {
+      if (this.checkIdent('embed_always')) {
+        // N-093: the native spelling of the `@embedAlways` directive.
+        this.advance(); // 'embed_always'
+        this.expect(':');
+        if (this.peek().type === 'true') {
+          this.advance();
+          embedAlways = true;
+        } else if (this.peek().type === 'false') {
+          this.advance();
+          embedAlways = false;
+        } else {
+          this.badBooleanPropOption('embed_always');
+          optionError = true;
+          break;
+        }
+      } else if (this.checkIdent('readonly')) {
         this.advance(); // 'readonly'
         this.expect(':');
         if (this.peek().type === 'true') {
@@ -877,15 +1027,50 @@ class RbParser {
         } else if (this.peek().type === 'false') {
           this.advance();
           isReadonly = false;
+        } else {
+          this.badBooleanPropOption('readonly');
+          optionError = true;
+          break;
         }
       } else if (this.checkIdent('default')) {
         this.advance(); // 'default'
         this.expect(':');
-        initializer = this.parseUnary();
+        if (this.peek().type === 'nil') {
+          // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+          this.errors.push(makeDiagnostic(
+            "prop default 'nil' is not a literal (expected a number, true, false or a hex string)",
+            'error',
+            this.loc(),
+          ));
+          this.advance(); // 'nil'
+        } else {
+          initializer = this.parseUnary();
+        }
       } else {
-        // Unknown trailing option -- stop parsing options
+        // N-301: an unknown option (e.g. a typo of `embed_always`) is refused,
+        // never silently dropped. Same text in all seven tiers.
+        this.errors.push(makeDiagnostic(
+          `unknown prop option '${this.peek().value || this.peek().type}' (expected readonly, embed_always or default)`,
+          'error',
+          this.loc(),
+        ));
+        optionError = true;
         break;
       }
+    }
+
+    // N-413: nothing may follow the type or an option value except `,` (the
+    // next option) or end of line. `default:` takes one literal, so
+    // `default: 1 + 2` or `default: '00' * 33` is refused here rather than
+    // silently truncated to its first operand; `readonly: true false` and a
+    // missing comma (`default: 3 readonly: true`) likewise. Same text in all
+    // seven tiers, at the leftover token's line:col.
+    if (!optionError && this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof') {
+      this.errors.push(makeDiagnostic(
+        `unexpected '${this.peek().value || this.peek().type}' in prop declaration (expected ',' or end of line)`,
+        'error',
+        this.loc(),
+      ));
     }
 
     // In stateless contracts (SmartContract and UnsafeSmartContract),
@@ -901,12 +1086,28 @@ class RbParser {
 
     return {
       kind: 'property',
-      name: snakeToCamel(rawName),
+      name: this.declare(rawName),
       type: typeNode,
       readonly: isReadonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
+  }
+
+  /**
+   * N-313: `readonly:` and `embed_always:` take a literal `true` or `false`.
+   * Any other value (`maybe`, `1`, a missing value) is refused, never
+   * silently dropped. Same text in all seven tiers, at the value's line:col.
+   */
+  private badBooleanPropOption(option: string): void {
+    const tok = this.peek();
+    const got = tok.type === 'NEWLINE' || tok.type === 'eof' ? '<end of line>' : (tok.value || tok.type);
+    this.errors.push(makeDiagnostic(
+      `invalid value '${got}' for prop option '${option}' (expected true or false)`,
+      'error',
+      this.loc(),
+    ));
   }
 
   private parseType(): TypeNode {
@@ -916,7 +1117,7 @@ class RbParser {
     // Check for FixedArray[T, N] style generic
     if (this.peek().type === '[' && rawName === 'FixedArray') {
       this.advance(); // '['
-      const elemType = this.parseType();
+      const elemType = this.nest.nested(this.loc(), () => this.parseType());
       this.expect(',');
       const sizeTok = this.expect('number');
       const size = parseInt(sizeTok.value, 10);
@@ -935,7 +1136,14 @@ class RbParser {
     const loc = this.loc();
     this.expect('def');
 
-    const nameTok = this.advance();
+    let nameTok = this.advance();
+    // N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+    // method, not a contract method.
+    if (this.peek().type === '.') {
+      this.advance(); // '.'
+      nameTok = this.advance();
+      this.errors.push(makeDiagnostic(staticMethodMessage(nameTok.value), 'error', loc));
+    }
     const rawName = nameTok.value;
 
     // Reset local variable tracking for this method scope
@@ -971,7 +1179,7 @@ class RbParser {
     }
 
     const isPublic = pendingVisibility === 'public';
-    const methodName = snakeToCamel(rawName);
+    const methodName = this.declare(rawName);
 
     return {
       kind: 'method',
@@ -989,7 +1197,7 @@ class RbParser {
     while (this.peek().type !== ')' && this.peek().type !== 'eof') {
       const nameTok = this.advance();
       const rawName = nameTok.value;
-      const camelName = snakeToCamel(rawName);
+      const camelName = this.declare(rawName);
 
       // Look up the type from the preceding runar_public/params declaration
       let typeNode: TypeNode | undefined;
@@ -1073,6 +1281,10 @@ class RbParser {
   }
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
 
     // assert statement: assert expr
@@ -1115,8 +1327,14 @@ class RbParser {
       return this.parseIdentStatement(loc);
     }
 
-    // Skip unknown
-    this.advance();
+    // N-053: a token that can begin an expression begins an expression
+    // statement (a private helper's last one is its implicit return value);
+    // any other token is refused. Skipping it dropped `!` / `(` / literals.
+    if (RB_EXPRESSION_START.has(this.peek().type)) {
+      return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
+    }
+    const tok = this.advance();
+    this.errors.push(makeDiagnostic(unsupportedStatementMessage(tok.value || tok.type), 'error', loc));
     return null;
   }
 
@@ -1157,7 +1375,7 @@ class RbParser {
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElsifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElsifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
@@ -1192,7 +1410,7 @@ class RbParser {
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
-      elseBranch = [this.parseElsifStatement(elifLoc)];
+      elseBranch = [this.nest.nested(elifLoc, () => this.parseElsifStatement(elifLoc))];
       this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
@@ -1241,7 +1459,7 @@ class RbParser {
     this.advance(); // 'for'
 
     const iterVar = this.advance(); // loop variable
-    const varName = snakeToCamel(iterVar.value);
+    const varName = this.declare(iterVar.value);
 
     this.expect('in');
 
@@ -1377,6 +1595,7 @@ class RbParser {
 
   private parseIvarStatement(loc: SourceLocation): Statement {
     // @var = expr | @var += expr | @var[idx] = expr | @var.field = expr | @var as expression
+    const start = this.pos;
     const ivarTok = this.advance(); // ivar token
     const rawName = ivarTok.value;
     const propName = snakeToCamel(rawName);
@@ -1419,13 +1638,12 @@ class RbParser {
       }
     }
 
-    // Expression statement (rare: just @var on its own line, or @var.method(...))
-    // Continue parsing any remaining postfix operations (e.g. method calls)
-    // that are not valid on the LHS of an assignment.
-    let expr: Expression = target;
-    expr = this.parsePostfixFrom(expr);
-
-    return { kind: 'expression_statement', expression: expr, sourceLocation: loc };
+    // Expression statement (@var on its own line, @var.method(...), or a
+    // private helper's implicit return such as `@x + 1`). N-053: re-parse
+    // from the ivar as a whole expression; continuing only the postfix chain
+    // left `+ 1` behind, and the statement dispatcher skipped it.
+    this.pos = start;
+    return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
   }
 
   private parseIdentStatement(loc: SourceLocation): Statement | null {
@@ -1437,7 +1655,7 @@ class RbParser {
       this.advance(); // consume ident
       this.advance(); // consume '='
       const value = this.parseExpression();
-      const camelName = snakeToCamel(rawName);
+      const camelName = this.declare(rawName);
 
       if (this.declaredLocals.has(camelName)) {
         // Already declared: this is an assignment
@@ -1492,7 +1710,7 @@ class RbParser {
   // ---------------------------------------------------------------------------
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   // Ruby ternary: condition ? consequent : alternate
@@ -1511,75 +1729,89 @@ class RbParser {
   }
 
   private parseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAnd();
     while (this.peek().type === 'or' || this.peek().type === '||') {
       this.advance();
       const right = this.parseAnd();
-      left = { kind: 'binary_expr', op: '||', left, right };
+      left = { kind: 'binary_expr', op: '||', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseNot();
     while (this.peek().type === 'and' || this.peek().type === '&&') {
       this.advance();
       const right = this.parseNot();
-      left = { kind: 'binary_expr', op: '&&', left, right };
+      left = { kind: 'binary_expr', op: '&&', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseNot(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.peek().type === 'not' || this.peek().type === '!') {
       this.advance();
-      const operand = this.parseNot();
-      return { kind: 'unary_expr', op: '!', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseNot());
+      return { kind: 'unary_expr', op: '!', operand, sourceLocation: at };
     }
     return this.parseBitwiseOr();
   }
 
   private parseBitwiseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitwiseXor();
     while (this.peek().type === '|') {
       this.advance();
       const right = this.parseBitwiseXor();
-      left = { kind: 'binary_expr', op: '|', left, right };
+      left = { kind: 'binary_expr', op: '|', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseBitwiseXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitwiseAnd();
     while (this.peek().type === '^') {
       this.advance();
       const right = this.parseBitwiseAnd();
-      left = { kind: 'binary_expr', op: '^', left, right };
+      left = { kind: 'binary_expr', op: '^', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseBitwiseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.peek().type === '&') {
       this.advance();
       const right = this.parseEquality();
-      left = { kind: 'binary_expr', op: '&', left, right };
+      left = { kind: 'binary_expr', op: '&', left, right, sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (true) {
       if (this.peek().type === '==') {
         this.advance();
         const right = this.parseComparison();
-        left = { kind: 'binary_expr', op: '===', left, right };
+        left = { kind: 'binary_expr', op: '===', left, right, sourceLocation: start };
       } else if (this.peek().type === '!=') {
         this.advance();
         const right = this.parseComparison();
-        left = { kind: 'binary_expr', op: '!==', left, right };
+        left = { kind: 'binary_expr', op: '!==', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1588,13 +1820,15 @@ class RbParser {
   }
 
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (true) {
       const t = this.peek().type;
       if (t === '<' || t === '<=' || t === '>' || t === '>=') {
         const op = this.advance().type as BinaryOp;
         const right = this.parseShift();
-        left = { kind: 'binary_expr', op, left, right };
+        left = { kind: 'binary_expr', op, left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1603,16 +1837,18 @@ class RbParser {
   }
 
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (true) {
       if (this.peek().type === '<<') {
         this.advance();
         const right = this.parseAddSub();
-        left = { kind: 'binary_expr', op: '<<', left, right };
+        left = { kind: 'binary_expr', op: '<<', left, right, sourceLocation: start };
       } else if (this.peek().type === '>>') {
         this.advance();
         const right = this.parseAddSub();
-        left = { kind: 'binary_expr', op: '>>', left, right };
+        left = { kind: 'binary_expr', op: '>>', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1621,16 +1857,18 @@ class RbParser {
   }
 
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (true) {
       if (this.peek().type === '+') {
         this.advance();
         const right = this.parseMulDiv();
-        left = { kind: 'binary_expr', op: '+', left, right };
+        left = { kind: 'binary_expr', op: '+', left, right, sourceLocation: start };
       } else if (this.peek().type === '-') {
         this.advance();
         const right = this.parseMulDiv();
-        left = { kind: 'binary_expr', op: '-', left, right };
+        left = { kind: 'binary_expr', op: '-', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1639,20 +1877,22 @@ class RbParser {
   }
 
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (true) {
       if (this.peek().type === '*') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '*', left, right };
+        left = { kind: 'binary_expr', op: '*', left, right, sourceLocation: start };
       } else if (this.peek().type === '/') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '/', left, right };
+        left = { kind: 'binary_expr', op: '/', left, right, sourceLocation: start };
       } else if (this.peek().type === '%') {
         this.advance();
         const right = this.parseUnary();
-        left = { kind: 'binary_expr', op: '%', left, right };
+        left = { kind: 'binary_expr', op: '%', left, right, sourceLocation: start };
       } else {
         break;
       }
@@ -1661,20 +1901,22 @@ class RbParser {
   }
 
   private parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.peek().type === '-') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '-', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '-', operand, sourceLocation: at };
     }
     if (this.peek().type === '~') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '~', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '~', operand, sourceLocation: at };
     }
     if (this.peek().type === '!') {
       this.advance();
-      const operand = this.parseUnary();
-      return { kind: 'unary_expr', op: '!', operand };
+      const operand = this.nest.nested(this.loc(), () => this.parseUnary());
+      return { kind: 'unary_expr', op: '!', operand, sourceLocation: at };
     }
     return this.parsePower();
   }
@@ -1685,7 +1927,7 @@ class RbParser {
     // ** is right-associative
     if (this.peek().type === '**') {
       this.advance();
-      const exp = this.parsePower(); // right-recursive for right-associativity
+      const exp = this.nest.nested(this.loc(), () => this.parsePower()); // right-recursive for right-associativity
       // ** maps to pow() call
       return {
         kind: 'call_expr',
@@ -1783,17 +2025,22 @@ class RbParser {
     // Hex string literal (single-quoted)
     if (tok.type === 'hexstring') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // String literal (double-quoted)
     if (tok.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: tok.value };
+      return { kind: 'bytestring_literal', value: tok.value, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
-    // nil -> 0
+    // N-416: `nil` is not a Rúnar value; refused, never read as 0.
     if (tok.type === 'nil') {
+      this.errors.push(makeDiagnostic(
+        "'nil' is not a Rúnar value (use a number, true, false or a hex string)",
+        'error',
+        this.loc(),
+      ));
       this.advance();
       return { kind: 'bigint_literal', value: 0n };
     }
@@ -1830,7 +2077,7 @@ class RbParser {
       this.advance();
       const rawName = tok.value;
       const name = mapBuiltinName(rawName);
-      return { kind: 'identifier', name };
+      return { kind: 'identifier', name, sourceLocation: { file: this.file, line: tok.line, column: tok.column } };
     }
 
     // super keyword (as expression, e.g., in super.method)
@@ -1889,5 +2136,5 @@ export function parseRubySource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new RbParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

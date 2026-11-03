@@ -299,8 +299,8 @@ class TestAliasCarriesScriptBytes:
     AND the chained byte-op threading, on exactly the shape the compiler emits.
 
     ``conformance/tests/shift-ops`` is a live example: ``left = this.a << 3n;
-    assert(left >= 0n || left < 0n)``. With ``a = 32`` the shift leaves the
-    1-byte ``[0x00]`` and OP_GREATERTHANOREQUAL aborts on chain.
+    assert(left === expectedLeft)``. With ``a = 32`` the shift leaves the
+    1-byte ``[0x00]`` and OP_NUMEQUALVERIFY (the left check; the final assert is OP_NUMEQUAL) aborts on chain.
     """
 
     def test_aliased_non_minimal_result_aborts_numeric_consumer(self):

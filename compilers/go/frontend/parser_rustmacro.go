@@ -16,14 +16,25 @@ import (
 // produces the standard Rúnar AST. Uses a hand-written tokenizer and
 // recursive descent parser.
 func ParseRustMacro(source []byte, fileName string) *ParseResult {
-	tokens := rustTokenize(string(source))
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseRustMacroSurface(source, fileName) })
+}
+
+func parseRustMacroSurface(source []byte, fileName string) *ParseResult {
+	tokens, lexErrors := rustTokenize(string(source), fileName)
 	p := &rustMacroParser{
 		tokens:   tokens,
 		pos:      0,
 		fileName: fileName,
+		errors:   lexErrors,
 	}
 
 	contract := p.parse()
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	return &ParseResult{
 		Contract: contract,
 		Errors:   p.errors,
@@ -102,15 +113,20 @@ type rustToken struct {
 	value string
 	line  int
 	col   int
+	// F-026: a number token's text as written, and whether it is valid
+	// only under a unary minus (`128i8`).
+	raw     string
+	negOnly bool
 }
 
 // ---------------------------------------------------------------------------
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-func rustTokenize(source string) []rustToken {
+func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 	chars := []rune(source)
 	var tokens []rustToken
+	var errs []Diagnostic
 	pos := 0
 	line := 1
 	// 0-based column, matching this tier's other format parsers
@@ -130,7 +146,9 @@ func rustTokenize(source string) []rustToken {
 			pos++
 			continue
 		}
-		if unicode.IsSpace(ch) {
+		// N-407: whitespace is exactly the TS reference's ' ', '\t', '\r'
+		// ('\n' above); a non-ASCII space such as U+00A0 is refused below.
+		if ch == ' ' || ch == '\t' || ch == '\r' {
 			col++
 			pos++
 			continue
@@ -291,24 +309,29 @@ func rustTokenize(source string) []rustToken {
 			continue
 		}
 
-		// Number
+		// Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+		// integer literal (a lowercase `0x` was taken above as a ByteString).
 		if ch >= '0' && ch <= '9' {
-			var val strings.Builder
-			for pos < len(chars) && (chars[pos] >= '0' && chars[pos] <= '9' || chars[pos] == '_') {
-				if chars[pos] != '_' {
-					val.WriteRune(chars[pos])
-				}
-				pos++
-				col++
+			end := scanNumberEndRunes(chars, pos)
+			text := string(chars[pos:end])
+			col += end - pos
+			pos = end
+			tok := rustToken{kind: rustTokNumber, value: "0", line: l, col: c, raw: text}
+			if lit := parseIntLiteral("rs", text); lit != nil {
+				tok.value, tok.negOnly = lit.Value.String(), lit.NegOnly
+			} else {
+				errs = append(errs, lexDiag(invalidIntegerLiteralMsg("rs", text), fileName, l, c))
 			}
-			tokens = append(tokens, rustToken{kind: rustTokNumber, value: val.String(), line: l, col: c})
+			tokens = append(tokens, tok)
 			continue
 		}
 
 		// Identifier / keyword
-		if ch == '_' || unicode.IsLetter(ch) {
+		// N-407: ASCII only, as the TS reference ([A-Za-z_][A-Za-z0-9_]*);
+		// a non-ASCII letter is refused below.
+		if ch == '_' || isASCIILetter(ch) {
 			var val strings.Builder
-			for pos < len(chars) && (chars[pos] == '_' || unicode.IsLetter(chars[pos]) || unicode.IsDigit(chars[pos])) {
+			for pos < len(chars) && (chars[pos] == '_' || isASCIILetter(chars[pos]) || (chars[pos] >= '0' && chars[pos] <= '9')) {
 				val.WriteRune(chars[pos])
 				pos++
 				col++
@@ -336,25 +359,44 @@ func rustTokenize(source string) []rustToken {
 			pos++
 			col++
 			for pos < len(chars) && chars[pos] != '"' {
+				// A backslash escapes the next character (as in the TS
+				// reference), so `\"` does not close the literal.
+				if chars[pos] == '\\' && pos+1 < len(chars) {
+					val.WriteRune(chars[pos])
+					pos++
+					col++
+				}
 				val.WriteRune(chars[pos])
+				// N-406: a newline inside the literal advances the line, as TS.
+				if chars[pos] == '\n' {
+					line++
+					col = 0
+				} else {
+					col++
+				}
 				pos++
-				col++
 			}
+			// F-011: Rust strings may span lines, so only end of file leaves
+			// one unterminated.
 			if pos < len(chars) {
 				pos++ // skip closing "
 				col++
+			} else {
+				errs = append(errs, lexDiag(UnterminatedStringLiteralMsg, fileName, l, c))
 			}
 			tokens = append(tokens, rustToken{kind: rustTokHexString, value: val.String(), line: l, col: c})
 			continue
 		}
 
-		// Skip unrecognised character
+		// N-020: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		errs = append(errs, lexDiag(fmt.Sprintf("Unexpected character '%c'", ch), fileName, l, c))
 		pos++
 		col++
 	}
 
 	tokens = append(tokens, rustToken{kind: rustTokEOF, line: line, col: col})
-	return tokens
+	return tokens, errs
 }
 
 func rustKeyword(name string) rustTokKind {
@@ -406,6 +448,12 @@ type rustMacroParser struct {
 	pos      int
 	fileName string
 	errors   []Diagnostic
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *rustMacroParser) current() rustToken {
@@ -472,6 +520,9 @@ func (p *rustMacroParser) parse() *ContractNode {
 	var parentClass string
 	var properties []PropertyNode
 	var methods []MethodNode
+	// N-490: the synthesized constructor is anchored at the contract's
+	// `struct` keyword, not a fake 1:1.
+	var ctorLoc SourceLocation
 
 	for p.current().kind != rustTokEOF {
 		if p.current().kind == rustTokHashBracket {
@@ -486,6 +537,7 @@ func (p *rustMacroParser) parse() *ContractNode {
 				}
 				// Parse: (pub)? struct Name { ... }
 				p.match(rustTokPub)
+				ctorLoc = p.loc()
 				p.expect(rustTokStruct)
 				if p.current().kind == rustTokIdent {
 					contractName = p.current().value
@@ -494,11 +546,21 @@ func (p *rustMacroParser) parse() *ContractNode {
 				p.expect(rustTokLBrace)
 
 				for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
-					// Field may have a #[readonly] attribute
+					// Field attributes, any number and order: #[readonly], and
+					// N-093's #[embed_always] (the native spelling of
+					// `@embedAlways`). A #[sighash(...)] here annotates
+					// nothing and is refused.
 					readonly := false
-					if p.current().kind == rustTokHashBracket {
-						fieldAttr := p.parseAttribute()
-						if fieldAttr == "readonly" {
+					embedAlways := false
+					for p.current().kind == rustTokHashBracket {
+						fieldAttr := p.parseDirectiveAttribute()
+						switch {
+						case fieldAttr.kind == "embed_always":
+							embedAlways = true
+						case fieldAttr.kind == "sighash":
+							errLoc := fieldAttr.loc
+							p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+						case fieldAttr.content == "readonly":
 							readonly = true
 						}
 					}
@@ -515,12 +577,13 @@ func (p *rustMacroParser) parse() *ContractNode {
 						p.match(rustTokComma)
 
 						// Skip txPreimage — implicit stateful param, not a contract property
-						camelName := rustSnakeToCamel(fieldName)
+						camelName := p.idents.declare(fieldName, rustSnakeToCamel(fieldName))
 						if camelName != "txPreimage" {
 							properties = append(properties, PropertyNode{
 								Name:           camelName,
 								Type:           fieldType,
 								Readonly:       readonly,
+								EmbedAlways:    embedAlways,
 								SourceLocation: loc,
 							})
 						}
@@ -574,6 +637,12 @@ func (p *rustMacroParser) parse() *ContractNode {
 	var finalMethods []MethodNode
 	for _, m := range methods {
 		if m.Name == "init" && len(m.Params) == 0 {
+			// N-093: init() is not a spending entry point, so a #[sighash]
+			// on it would be dropped with the method.
+			if m.SighashType != nil {
+				errLoc := m.SourceLocation
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+			}
 			for _, stmt := range m.Body {
 				if assign, ok := stmt.(AssignmentStmt); ok {
 					if pa, ok := assign.Target.(PropertyAccessExpr); ok {
@@ -610,7 +679,6 @@ func (p *rustMacroParser) parse() *ContractNode {
 		superArgs[i] = Identifier{Name: prop.Name}
 	}
 
-	ctorLoc := SourceLocation{File: p.fileName, Line: 1, Column: 1}
 	superCall := ExpressionStmt{
 		Expr: CallExpr{
 			Callee: Identifier{Name: "super"},
@@ -648,6 +716,69 @@ func (p *rustMacroParser) parse() *ContractNode {
 // ---------------------------------------------------------------------------
 // Attribute parsing
 // ---------------------------------------------------------------------------
+
+// rustDirectiveAttr (N-093) classifies one field/method attribute: kind is
+// "embed_always", "sighash" (flags = the |-joined identifier list, nil when
+// malformed) or "other" (content = the compact attribute text).
+type rustDirectiveAttr struct {
+	kind    string
+	flags   *string
+	content string
+	loc     SourceLocation
+}
+
+// parseDirectiveAttribute (N-093) parses one attribute and classifies it as
+// one of the two directives. `#[embed_always]` and `#[sighash(FLAGS)]`
+// (optionally `runar::`-qualified) are the native spellings of
+// `@embedAlways` / `@sighash`. For `sighash`, flags is the `|`-joined
+// identifier list, or nil when the parentheses are missing or hold any other
+// token. Every other attribute is returned as "other" with its compact text,
+// exactly as parseAttribute returns it. Mirrors the TS reference
+// parseDirectiveAttribute (01-parse-rust.ts).
+func (p *rustMacroParser) parseDirectiveAttribute() rustDirectiveAttr {
+	loc := p.loc()
+	start := p.pos
+	content := p.parseAttribute()
+	end := p.pos - 1 // the closing `]`
+	if end < start+1 {
+		end = start + 1
+	}
+	toks := p.tokens[start+1 : end] // inside `#[` ... `]`
+	i := 0
+	if len(toks) >= 2 && toks[0].kind == rustTokIdent && toks[0].value == "runar" && toks[1].kind == rustTokColonColon {
+		i = 2
+	}
+	name := ""
+	if i < len(toks) && toks[i].kind == rustTokIdent {
+		name = toks[i].value
+	}
+	rest := toks[min(i+1, len(toks)):]
+	if name == "embed_always" && len(rest) == 0 {
+		return rustDirectiveAttr{kind: "embed_always", loc: loc}
+	}
+	if name == "sighash" {
+		ok := len(rest) >= 2 && rest[0].kind == rustTokLParen && rest[len(rest)-1].kind == rustTokRParen
+		text := ""
+		if ok {
+			for _, t := range rest[1 : len(rest)-1] {
+				switch t.kind {
+				case rustTokIdent:
+					text += t.value
+				case rustTokPipe:
+					text += "|"
+				default:
+					ok = false
+				}
+			}
+		}
+		var flags *string
+		if ok {
+			flags = nativeSighashSpec(text)
+		}
+		return rustDirectiveAttr{kind: "sighash", flags: flags, loc: loc}
+	}
+	return rustDirectiveAttr{kind: "other", content: content}
+}
 
 // parseAttribute consumes an already-peeked HashBracket (#[) and collects
 // the attribute text up to the matching ].
@@ -697,7 +828,7 @@ func (p *rustMacroParser) parseRustType() TypeNode {
 	// tiers build.
 	if p.current().kind == rustTokLBracket {
 		p.advance()
-		element := p.parseRustType()
+		element := nested(&p.nest, p.loc(), p.parseRustType)
 		p.expect(rustTokSemi)
 		lengthTok := p.current()
 		p.expect(rustTokNumber)
@@ -774,9 +905,17 @@ func (p *rustMacroParser) parseImplBlock() []MethodNode {
 
 	for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
 		// #[public] is no longer supported — `pub fn` marks public methods.
+		// N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+		// #[embed_always] on a method annotates nothing and is refused.
+		var sighashSpecs []*string
 		for p.current().kind == rustTokHashBracket {
-			methodAttr := p.parseAttribute()
-			if methodAttr == "public" {
+			methodAttr := p.parseDirectiveAttribute()
+			if methodAttr.kind == "sighash" {
+				sighashSpecs = append(sighashSpecs, methodAttr.flags)
+			} else if methodAttr.kind == "embed_always" {
+				errLoc := methodAttr.loc
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: &errLoc})
+			} else if methodAttr.content == "public" {
 				p.errors = append(p.errors, Diagnostic{
 					Message:  "#[public] is no longer supported — use 'pub fn' for public methods",
 					Severity: SeverityError,
@@ -789,7 +928,21 @@ func (p *rustMacroParser) parseImplBlock() []MethodNode {
 			p.advance()
 			visibility = "public"
 		}
-		methods = append(methods, p.parseFunction(visibility))
+		if p.current().kind != rustTokFn {
+			for range sighashSpecs {
+				errLoc := p.loc()
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+			}
+			sighashSpecs = nil
+		}
+		method := p.parseFunction(visibility)
+		sighashType, sighashErr := resolveNativeSighash(method.Name, visibility == "public", sighashSpecs)
+		if sighashErr != "" {
+			errLoc := method.SourceLocation
+			p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+		}
+		method.SighashType = sighashType
+		methods = append(methods, method)
 	}
 	p.expect(rustTokRBrace)
 	return methods
@@ -808,10 +961,11 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 		rawName = p.current().value
 		p.advance()
 	}
-	name := rustSnakeToCamel(rawName)
+	name := p.idents.declare(rawName, rustSnakeToCamel(rawName))
 
 	p.expect(rustTokLParen)
 	var params []ParamNode
+	hasSelf := false
 
 	for p.current().kind != rustTokRParen && p.current().kind != rustTokEOF {
 		// Skip &self, &mut self, self
@@ -819,12 +973,14 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 			p.advance()
 			p.match(rustTokMut)
 			if p.current().kind == rustTokSelf {
+				hasSelf = true
 				p.advance()
 				p.match(rustTokComma)
 				continue
 			}
 		}
 		if p.current().kind == rustTokSelf {
+			hasSelf = true
 			p.advance()
 			p.match(rustTokComma)
 			continue
@@ -836,7 +992,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 			p.expect(rustTokColon)
 			paramType := p.parseRustType()
 			params = append(params, ParamNode{
-				Name: rustSnakeToCamel(paramName),
+				Name: p.idents.declare(paramName, rustSnakeToCamel(paramName)),
 				Type: paramType,
 			})
 		} else {
@@ -846,10 +1002,19 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 	}
 	p.expect(rustTokRParen)
 
+	// N-050: a `pub fn` without a self receiver is an associated (static)
+	// function, not a contract method. A private one stays a helper (R9).
+	if visibility == "public" && !hasSelf {
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(rawName), Severity: SeverityError, Loc: &loc})
+	}
+
 	// Optional return type: -> Type
 	if p.current().kind == rustTokArrow {
 		p.advance()
-		p.parseRustType() // consume and discard
+		// The AST keeps no return type; N-331 refuses an unknown name.
+		if d := UnknownReturnTypeDiagnostic(p.parseRustType(), rawName, loc, visibility == "public"); d != nil {
+			p.errors = append(p.errors, *d)
+		}
 	}
 
 	p.expect(rustTokLBrace)
@@ -875,6 +1040,10 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 // ---------------------------------------------------------------------------
 
 func (p *rustMacroParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *rustMacroParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// assert!(expr)
@@ -921,7 +1090,7 @@ func (p *rustMacroParser) parseStatement() Statement {
 		mutable := p.match(rustTokMut)
 		varName := "unknown"
 		if p.current().kind == rustTokIdent {
-			varName = rustSnakeToCamel(p.current().value)
+			varName = p.idents.declare(p.current().value, rustSnakeToCamel(p.current().value))
 			p.advance()
 		}
 		var typeNode TypeNode
@@ -977,7 +1146,7 @@ func (p *rustMacroParser) parseStatement() Statement {
 		p.advance()
 		varName := "_i"
 		if p.current().kind == rustTokIdent {
-			varName = rustSnakeToCamel(p.current().value)
+			varName = p.idents.declare(p.current().value, rustSnakeToCamel(p.current().value))
 			p.advance()
 		}
 		p.match(rustTokIn)
@@ -1149,56 +1318,64 @@ func rustConvertSelfAccess(expr Expression) Expression {
 // Expression parsing — precedence climbing
 // ---------------------------------------------------------------------------
 
-func (p *rustMacroParser) parseExpression() Expression { return p.parseOr() }
+func (p *rustMacroParser) parseExpression() Expression {
+	return nested(&p.nest, p.loc(), p.parseOr)
+}
 
 func (p *rustMacroParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.current().kind == rustTokPipePipe {
 		p.advance()
 		right := p.parseAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitOr()
 	for p.current().kind == rustTokAmpAmp {
 		p.advance()
 		right := p.parseBitOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitOr() Expression {
+	start := p.loc()
 	left := p.parseBitXor()
 	for p.current().kind == rustTokPipe {
 		p.advance()
-		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor()}
+		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitXor() Expression {
+	start := p.loc()
 	left := p.parseBitAnd()
 	for p.current().kind == rustTokCaret {
 		p.advance()
-		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd()}
+		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseBitAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.current().kind == rustTokAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality()}
+		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *rustMacroParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		var op string
@@ -1211,11 +1388,12 @@ func (p *rustMacroParser) parseEquality() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseComparison()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseComparison(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		var op string
@@ -1232,11 +1410,12 @@ func (p *rustMacroParser) parseComparison() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAddSub()
 	for {
 		var op string
@@ -1249,11 +1428,12 @@ func (p *rustMacroParser) parseShift() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseAddSub() Expression {
+	start := p.loc()
 	left := p.parseMulDiv()
 	for {
 		var op string
@@ -1266,11 +1446,12 @@ func (p *rustMacroParser) parseAddSub() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseMulDiv() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		var op string
@@ -1285,26 +1466,46 @@ func (p *rustMacroParser) parseMulDiv() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary(), SourceLocation: start}
 	}
 }
 
 func (p *rustMacroParser) parseUnary() Expression {
+	opLoc := p.loc()
 	switch p.current().kind {
 	case rustTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokMinus:
 		p.advance()
-		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
+		// F-026: a signed-suffix minimum (`128i8`) is legal under this
+		// minus, through parentheses, as rustc's overflowing_literals lint.
+		k, opens := p.pos, 0
+		for k < len(p.tokens) && p.tokens[k].kind == rustTokLParen {
+			k++
+			opens++
+		}
+		if k < len(p.tokens) && p.tokens[k].kind == rustTokNumber && p.tokens[k].negOnly {
+			closed := true
+			for j := 1; j <= opens; j++ {
+				if k+j >= len(p.tokens) || p.tokens[k+j].kind != rustTokRParen {
+					closed = false
+				}
+			}
+			if closed {
+				p.tokens[k].negOnly = false
+			}
+		}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case rustTokAmp:
-		// & and &mut are reference-taking operators — skip them
+		// & and &mut are reference-taking operators — skip them. Counted
+		// as a prefix operator (F-213), as the TS reference counts it.
 		p.advance()
 		p.match(rustTokMut)
-		return p.parsePostfix()
+		return nested(&p.nest, p.loc(), p.parsePostfix)
 	}
 	return p.parsePostfix()
 }
@@ -1373,6 +1574,9 @@ func (p *rustMacroParser) parsePrimary() Expression {
 	t := p.current()
 	switch t.kind {
 	case rustTokNumber:
+		if t.negOnly {
+			p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("rs", t.raw), p.fileName, t.line, t.col))
+		}
 		p.advance()
 		bi := new(big.Int)
 		if _, ok := bi.SetString(t.value, 0); !ok {
@@ -1387,7 +1591,7 @@ func (p *rustMacroParser) parsePrimary() Expression {
 
 	case rustTokHexString:
 		p.advance()
-		return ByteStringLiteral{Value: t.value}
+		return ByteStringLiteral{Value: t.value, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	case rustTokTrue:
 		p.advance()
@@ -1414,7 +1618,7 @@ func (p *rustMacroParser) parsePrimary() Expression {
 	case rustTokIdent:
 		p.advance()
 		mapped := rustMapBuiltin(t.value)
-		return Identifier{Name: mapped}
+		return Identifier{Name: mapped, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	default:
 		p.advance()

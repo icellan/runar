@@ -415,7 +415,7 @@ def _c_emit_coord_canon_verify(t: ECTracker, x_name: str, y_name: str, field_p: 
     t.raw_block(["_cc_xok", "_cc_yok"], "", _and_verify)
 
 
-def _c_affine_add(t: ECTracker, field_p: int, p_minus_2: int) -> None:
+def _c_affine_add(t: ECTracker, field_p: int, p_minus_2: int, abort_on_y0_tangent: bool) -> None:
     """Perform affine point addition.
 
     Expects px, py, qx, qy on tracker. Produces rx, ry. Consumes all four inputs.
@@ -478,6 +478,30 @@ def _c_affine_add(t: ECTracker, field_p: int, p_minus_2: int) -> None:
         e(_make_stack_op(op="opcode", code="OP_NOT"))
 
     t.raw_block(["_xeq", "_cond_c"], "_notinf", _sub_not)
+
+    # N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+    # when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+    # silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+    # order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+    #   ok = NOT(cond AND px != 0 AND py == 0)
+    # px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    # Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+    # total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+    # cond = 1 with py == 0 there already means px == 0, the exempt case.
+    if abort_on_y0_tangent:
+        t.copy_to_top("px", "_px_g")
+        t.copy_to_top("py", "_py_g")
+        t.copy_to_top("_cond", "_cond_g")
+
+        def _tangent_y0_verify(e: Callable) -> None:
+            e(_make_stack_op(op="opcode", code="OP_SWAP"))
+            e(_make_stack_op(op="opcode", code="OP_NOT"))
+            e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+            e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+            e(_make_stack_op(op="opcode", code="OP_NOT"))
+            e(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+        t.raw_block(["_px_g", "_py_g", "_cond_g"], "", _tangent_y0_verify)
 
     # chord numerator / denominator
     t.copy_to_top("qy", "_qy1")
@@ -1434,7 +1458,7 @@ def _c_emit_verify_ecdsa(
             t.nm[i] = "qy"
             break
 
-    _c_affine_add(t, field_p, p_minus_2)
+    _c_affine_add(t, field_p, p_minus_2, False)
 
     # Step 8: x_R mod n == r
     t.to_top("ry")
@@ -1478,7 +1502,7 @@ def emit_p256_add(emit: Callable) -> None:
     # R-117: _c_affine_add's selectors compare these four values RAW.
     _c_emit_coord_canon_verify(t, "px", "py", P256_P)
     _c_emit_coord_canon_verify(t, "qx", "qy", P256_P)
-    _c_affine_add(t, P256_P, P256_P_MINUS_2)
+    _c_affine_add(t, P256_P, P256_P_MINUS_2, True)
     _c_compose_point(t, "rx", "ry", "_result", 32, _emit_reverse32)
 
 
@@ -1602,7 +1626,7 @@ def emit_p384_add(emit: Callable) -> None:
     # R-117: _c_affine_add's selectors compare these four values RAW.
     _c_emit_coord_canon_verify(t, "px", "py", P384_P)
     _c_emit_coord_canon_verify(t, "qx", "qy", P384_P)
-    _c_affine_add(t, P384_P, P384_P_MINUS_2)
+    _c_affine_add(t, P384_P, P384_P_MINUS_2, True)
     _c_compose_point(t, "rx", "ry", "_result", 48, _emit_reverse48)
 
 

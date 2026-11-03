@@ -2,7 +2,7 @@ module PriceBet {
     use runar::types::{PubKey, Sig, ByteString, RabinSig, RabinPubKey};
     use runar::crypto::{check_sig, verify_rabin_sig, num2bin};
 
-    resource struct PriceBet {
+    struct PriceBet {
         alice_pub_key: PubKey,
         bob_pub_key: PubKey,
         oracle_pub_key: RabinPubKey,

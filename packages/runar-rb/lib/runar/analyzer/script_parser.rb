@@ -67,6 +67,8 @@ module Runar
         0x88 => 'OP_EQUALVERIFY',
         0x8b => 'OP_1ADD',
         0x8c => 'OP_1SUB',
+        0x8d => 'OP_2MUL', # Chronicle
+        0x8e => 'OP_2DIV', # Chronicle
         0x8f => 'OP_NEGATE',
         0x90 => 'OP_ABS',
         0x91 => 'OP_NOT',
@@ -99,7 +101,13 @@ module Runar
         0xac => 'OP_CHECKSIG',
         0xad => 'OP_CHECKSIGVERIFY',
         0xae => 'OP_CHECKMULTISIG',
-        0xaf => 'OP_CHECKMULTISIGVERIFY'
+        0xaf => 'OP_CHECKMULTISIGVERIFY',
+        # Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+        0xb3 => 'OP_SUBSTR',
+        0xb4 => 'OP_LEFT',
+        0xb5 => 'OP_RIGHT',
+        0xb6 => 'OP_LSHIFTNUM',
+        0xb7 => 'OP_RSHIFTNUM'
       }.freeze
 
       # Return the canonical opcode name string per spec §4.
@@ -114,18 +122,37 @@ module Runar
         format('OP_UNKNOWN(0x%02x)', byte)
       end
 
+      # Decode a normalized lowercase-hex string into a byte array.
+      #
+      # Raises ArgumentError with the TS reference's exact diagnostic text
+      # (`hexToBytes`/`hexVal` in packages/runar-testing/src/vm/utils.ts)
+      # on odd length or a non-hex-digit character, instead of silently
+      # decoding the bad pair as byte 0x00 via String#to_i (N-176: that
+      # was the pre-existing leniency; `to_i(16)` also stops at the first
+      # unpaired trailing character on odd length, which this replaces).
+      def self.decode_hex(hex)
+        raise ArgumentError, "Invalid hex string: odd length (#{hex.length})" if hex.length.odd?
+
+        bytes = []
+        i = 0
+        len = hex.length
+        while i < len
+          pair = hex[i, 2]
+          unless pair =~ /\A[0-9a-fA-F]{2}\z/
+            bad = pair.chars.find { |ch| ch !~ /[0-9a-fA-F]/ }
+            raise ArgumentError, "Invalid hex character: #{bad}"
+          end
+          bytes << pair.to_i(16)
+          i += 2
+        end
+        bytes
+      end
+
       # Parse the hex string into a list of opcode records.
       # Truncated pushes are silently retained with whatever data was
       # available. Returns Array of Hashes.
       def self.parse(hex)
-        # Decode hex into byte array.
-        bytes = []
-        i = 0
-        len = hex.length
-        while i + 1 < len
-          bytes << hex[i, 2].to_i(16)
-          i += 2
-        end
+        bytes = decode_hex(hex)
 
         ops = []
         idx = 0

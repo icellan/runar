@@ -17,8 +17,30 @@
 # deleted whenever its arms happened to be pure, and the merged locals kept
 # their pre-branch values. See +conformance/dce/live-if.test.ts+.
 #
-# This module is the canonical, standalone DCE pass for the Ruby
-# compiler. It mirrors the Zig reference implementation in
+# F-326: this used to say "the canonical, standalone DCE pass for the
+# Ruby compiler". It is canonical -- every dead-binding sweep in this
+# tier comes from here -- but it is NOT standalone. Its only pipeline
+# caller is +Frontend::ANFOptimize.optimize_ec+, which runs it (via
+# +eliminate_dead_bindings+, per method) only when the program contains
+# EC calls -- see the +return program unless any_changed+ gate. A
+# program with no EC calls is never swept by this path at all.
+# +eliminate_dead_code+ (the whole-program entry) has two other
+# callers, +Compiler._collect_referenced_props+ and
+# +Frontend::EmbedAlwaysDCE.collect_warnings+, each running on a
+# deep-copied probe purely to compute the @embedAlways warning.
+#
+# The gate is load-bearing, measured rather than assumed: forcing the
+# sweep to run unconditionally (bypassing +any_changed+) makes this
+# tier diverge from the golden/cross-tier IR and script hex for
+# `all-readonly-cleanstack` -- 1 of 87 conformance fixtures. Smaller
+# than the 11 TypeScript (R-194) and Python (R-240) fail under the same
+# probe, because this tier's deep-copy already carries the fuller
+# +IR::ANFValue::FIELDS+ list (see +anf_optimize.rb+'s N-140 comment
+# above +deep_copy_value+), but still a real, measured divergence and
+# not zero. "Make DCE standalone" remains a defect to fix inside DCE
+# before it is a wiring change, same as the other two tiers.
+#
+# This mirrors the Zig reference implementation in
 # +compilers/zig/src/passes/dce.zig+. The earlier inline implementation
 # in +anf_optimize.rb+ has been surgically extracted here.
 #
@@ -27,8 +49,9 @@
 # conformance suite (cross-tier hex parity) and the unknown-kind
 # exhaustiveness tests.
 #
-# N-140 is the one deliberate behaviour change since: liveness considers
-# the names a binding DEFINES, not only its own +name+.
+# N-140 is a deliberate behaviour change since: liveness considers
+# the names a binding DEFINES, not only its own +name+. F-108 is the other:
+# a private method's last binding (its return value) is a liveness root.
 
 require "set"
 require_relative "../ir/types"
@@ -74,7 +97,15 @@ module RunarCompiler
       #
       # Uses iterative elimination to handle transitive dead code
       # (e.g., if A references B and A is dead, B may also become dead).
-      def self.eliminate_dead_bindings(method)
+      #
+      # N-138: when +candidates+ (a Set of names) is given, only a binding
+      # whose name is in it may be removed; every other binding is kept as if
+      # live. The constant folder uses this to drop the operand bindings its
+      # own rewrites orphaned (the +1+ under a folded +-1n+) without also
+      # deleting bindings that were already dead before folding, so fold-ON
+      # output does not move for a program the folder did not change.
+      def self.eliminate_dead_bindings(method, candidates = nil)
+        keep_last = returns_last_binding?(method)
         current = method.body
         changed = true
 
@@ -90,7 +121,10 @@ module RunarCompiler
 
           filtered = []
           current.each_with_index do |binding, i|
-            if referenced_externally?(binding, own_refs[i], ref_count) || has_side_effect?(binding.value)
+            if (keep_last && i == current.length - 1) ||
+               (!candidates.nil? && !candidates.include?(binding.name)) ||
+               referenced_externally?(binding, own_refs[i], ref_count) ||
+               has_side_effect?(binding.value)
               filtered << binding
             else
               changed = true
@@ -98,9 +132,108 @@ module RunarCompiler
           end
 
           current = filtered
+
+          # N-446: the fold also orphans operands INSIDE +if+ arms and loop
+          # bodies (+-5n+ in an else arm). Filtering only the top level left
+          # them there, stack lowering pushed them, and the arms ended at
+          # different depths. Prune the nested scopes too, then re-filter the
+          # top level (a nested removal can orphan a top-level operand).
+          if !changed && !candidates.nil?
+            pruned = prune_nested_orphans(current, candidates)
+            unless pruned.equal?(current)
+              current = pruned
+              changed = true
+            end
+          end
         end
 
         method.body = current
+      end
+
+      # N-446: remove fold-orphaned pure bindings from every nested scope
+      # (+if+ arms, +loop+ bodies, recursively); returns +bindings+ itself
+      # when nothing was removed.
+      #
+      # A nested binding is removed only if it is a candidate (referenced
+      # before folding), is referenced by NO binding anywhere in the method
+      # now (arm bindings can be read after the +if+ by name, so an arm is
+      # never filtered against its own references alone), is not one of its
+      # +if+'s declared +results+ (stack lowering requires those slots in both
+      # arms), is side-effect free, and is not itself an +if+ / +loop+ (those
+      # are recursed into instead). Only the candidate-restricted fold prune
+      # calls this; the EC-gated DCE stays top-level, so fold-OFF output
+      # cannot move. Changed bindings are copied, never edited in place.
+      def self.prune_nested_orphans(bindings, candidates)
+        current = bindings
+        loop do
+          refs = Set.new
+          current.each { |b| collect_refs(b.value, refs) }
+          changed = false
+
+          filter_scope = lambda do |scope, nested, protect|
+            out = []
+            scope_changed = false
+            scope.each do |b|
+              v = b.value
+              if v.kind == "if"
+                res = Set.new(v.results || [])
+                then_src = v.then || []
+                else_src = v.else_ || []
+                then_b = filter_scope.call(then_src, true, res)
+                else_b = filter_scope.call(else_src, true, res)
+                if !then_b.equal?(then_src) || !else_b.equal?(else_src)
+                  nv = v.dup
+                  nv.then = then_b unless then_b.equal?(then_src)
+                  nv.else_ = else_b unless else_b.equal?(else_src)
+                  nb = b.dup
+                  nb.value = nv
+                  out << nb
+                  scope_changed = true
+                else
+                  out << b
+                end
+              elsif v.kind == "loop"
+                body_src = v.body || []
+                body = filter_scope.call(body_src, true, Set.new)
+                if !body.equal?(body_src)
+                  nv = v.dup
+                  nv.body = body
+                  nb = b.dup
+                  nb.value = nv
+                  out << nb
+                  scope_changed = true
+                else
+                  out << b
+                end
+              elsif nested && candidates.include?(b.name) && !refs.include?(b.name) &&
+                    !protect.include?(b.name) && !has_side_effect?(v)
+                scope_changed = true
+              else
+                out << b
+              end
+            end
+            next scope unless scope_changed
+
+            changed = true
+            out
+          end
+
+          nxt = filter_scope.call(current, false, Set.new)
+          return current unless changed
+
+          current = nxt
+        end
+      end
+
+      # F-108: whether +method+'s LAST binding is its return value. Stack
+      # lowering inlines a private method at each +method_call+ and takes that
+      # binding as the call's result, so it is a liveness root even though
+      # nothing inside the method references it; without the root a pure
+      # return expression (+return n + 1n+) was deleted and the helper emptied.
+      # The predicate is the one stack lowering uses to collect inlinable
+      # private methods. A public method's last binding is never a return value.
+      def self.returns_last_binding?(method)
+        method.name != "constructor" && !method.is_public
       end
 
       # Collect every SSA name a binding brings into scope: its own +name+,
@@ -150,7 +283,12 @@ module RunarCompiler
       # (which would cause DCE to drop a live binding).
       def self.collect_refs(v, used)
         case v.kind
-        when "load_param", "load_prop", "get_state_script"
+        when "load_param"
+          # N-356: a reassigned parameter is bound under its own name and read
+          # back as `load_param <name>`; count the read so DCE keeps the
+          # rebinding. Matches TS collectRefsFromValue.
+          used.add(v.name) if v.name
+        when "load_prop", "get_state_script"
           # No refs.
         when "load_const"
           if v.const_string && v.const_string.start_with?("@ref:")

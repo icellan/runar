@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./HexToBytesInitializer.runar.ts",
+    ".runar.sol": "./HexToBytesInitializer.runar.sol",
+    ".runar.move": "./HexToBytesInitializer.runar.move",
+    ".runar.go": "./HexToBytesInitializer.runar.go",
+    ".runar.rs": "./HexToBytesInitializer.runar.rs",
+    ".runar.py": "./HexToBytesInitializer.runar.py",
+    ".runar.zig": "./HexToBytesInitializer.runar.zig",
+    ".runar.rb": "./HexToBytesInitializer.runar.rb",
+    ".runar.java": "./HexToBytesInitializer.runar.java"
+  }
+}

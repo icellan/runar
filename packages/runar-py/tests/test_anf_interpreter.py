@@ -625,3 +625,41 @@ def test_num2bin_round_trip_is_smoke_test_only():
 
     for n in (-1000, -128, -1, 0, 1, 128, 1000):
         assert _bin2num_int(_num2bin_hex(n, 8)) == n
+
+
+# ---------------------------------------------------------------------------
+# N-102: binary `/` and `%` refuse a zero divisor and truncate toward zero
+# ---------------------------------------------------------------------------
+
+def _div_body(op: str, a: int, b: int) -> list:
+    return [
+        {"name": "t0", "value": {"kind": "load_const", "value": a}},
+        {"name": "t1", "value": {"kind": "load_const", "value": b}},
+        {"name": "t2", "value": {"kind": "bin_op", "op": op, "left": "t0", "right": "t1"}},
+        {"name": "t3", "value": {"kind": "update_prop", "name": "result", "value": "t2"}},
+    ]
+
+
+class TestBinaryDivModN102:
+    """What this proves: the Python ANF interpreter's binary ``/`` and ``%``
+    refuse a zero divisor (OP_DIV / OP_MOD abort the script, so there is no
+    post-state) and truncate toward zero (-7/2 == -3, -7%2 == -1, as the
+    script does), where it used to return 0 for a zero divisor.
+
+    What it does not prove: agreement with a real script run (the expected
+    values are the OP_DIV/OP_MOD semantics, not an execution), nor native
+    ``//`` in a ``.runar.py`` contract, which floors and is not this
+    interpreter.
+    """
+
+    @pytest.mark.parametrize("op", ["/", "%"])
+    def test_zero_divisor_is_refused(self, op):
+        with pytest.raises(ValueError, match="by zero"):
+            compute_new_state(_byte_op_anf(_div_body(op, 7, 0)), 'compute', {'result': 0}, {})
+
+    @pytest.mark.parametrize("op,a,b,want", [
+        ("/", -7, 2, -3), ("%", -7, 2, -1), ("/", 7, -2, -3), ("%", 7, -2, 1),
+    ])
+    def test_truncates_toward_zero(self, op, a, b, want):
+        state = compute_new_state(_byte_op_anf(_div_body(op, a, b)), 'compute', {'result': 0}, {})
+        assert state['result'] == want

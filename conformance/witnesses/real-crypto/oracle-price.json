@@ -1,0 +1,91 @@
+{
+  "fixture": "oracle-price",
+  "kind": "stateless-signed",
+  "note": "verifyRabinSig on a real @bsv/sdk Spend with a real ECDSA receiver signature over the real BIP-143 sighash. Pins the F-047 semantics: the on-chain check is (sig^2 + padding) mod n == SHA256(msg) mod n, the definition every off-chain verifier uses (rabinVerify, runar-go RabinVerify). The interpreter verdict (off-chain rabinVerify) is asserted equal to the Spend verdict on every row. receiver = alice. F-144: each Rabin operand (n, padding, sig) is read on chain as an UNSIGNED little-endian integer (0x00 sign byte + OP_BIN2NUM), so a raw push whose last byte has its high bit set keeps the value every off-chain verifier gives it; a non-negative Script number is unchanged.",
+  "goldenHashes": {
+    "expected-script.hex": "faa9f7cb345d3d070dae39e9b54c5eb739f145bbc98f2c011f52ea5867dc71fe",
+    "expected-ir.json": "9db6022cc803ef1311c1d212788dd2a78859d16393ba324dfe5d6c2cbc45b79e"
+  },
+  "constructorArgs": {
+    "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+    "receiver": { "$pubkey": "alice" }
+  },
+  "spends": [
+    {
+      "method": "settle",
+      "args": ["50003n", "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "Real Rabin signature from packages/runar-go RabinSign over num2bin(50003, 8) = 53c3000000000000 under the ~2^260 oracle key (n > digest, so the F-047 digest reduction is the identity here). Same vector as witnesses/oracle-price.json."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x406deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "Forged Rabin signature (sig+1) under the real oracle key: both engines refuse it."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0xd478216cab60ec851fba8b4224be3127c8829d6b6e6ed7acf69fff42c61d440c13", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "N-380 / F-368 non-canonical signature: the accepted sig + 1*n (same padding), which squares to the same residue. The script asserts sig < n and aborts; the off-chain verifiers reject it too (R172)."
+    },
+    {
+      "method": "settle",
+      "args": ["50003n", "0x6984575cac60ec851fba8b4224be3127f0e5ff6d6e6ed7acf69fff42c61d440c23", "0x1b", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "N-380 / F-368 non-canonical signature: the accepted sig + 2*n (same padding), which squares to the same residue. The script asserts sig < n and aborts; the off-chain verifiers reject it too (R172)."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "251n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "", "0x71", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "F-047 forced near-miss. n = 251, sig = 0 (empty push), padding = SHA256(53c3000000000000) read little-endian mod 251 = 113 (0x71). The off-chain verifiers accept this by construction ((0 + 113) mod 251 == digest mod 251). Before F-047 the emitted script compared against the UNREDUCED 256-bit digest and refused it on a real Spend while the interpreter accepted it. A modulus of 251 is trivially forgeable: accepting it is the defined semantics, not a security property."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "251n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "", "0x72", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "F-047 wrong-padding near-miss: padding 114 = residue + 1, so (0 + 114) mod 251 != digest mod 251. Both engines refuse it, so the digest reduction is not vacuous."
+    },
+    {
+      "method": "settle",
+      "args": ["50004n", "0xc57ad35ff0e4671d2ba9997d92777fa8e94ef748a61246517c4b153e1c8e383f04", "0xc8", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "F-144 forced near-miss: honest Rabin signature over num2bin(50004, 8) under the real ~2^260 oracle key, with the signer's padding chosen as 200 and pushed raw as [0xC8] (high bit set). Off-chain the padding is unsigned 200. Before F-144 the script read [0xC8] as the Script number -72 and OP_WITHIN aborted this honest spend."
+    },
+    {
+      "method": "settle",
+      "args": ["50004n", "0xc67ad35ff0e4671d2ba9997d92777fa8e94ef748a61246517c4b153e1c8e383f04", "0xc8", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "F-144 near-miss: sig+1 with the same high-bit padding [0xC8]. Both engines refuse it, so the padding normalization is not vacuous."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "105312291668557186697918027513529248857806893649219117400977309697n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "0xb3a65947c35cdd7c9e6b6ebc16f1b0bb60f6da6b1981e13d0650e5", "0x11", { "$sig": "alice" }],
+      "expect": "accept",
+      "note": "F-144 forced near-miss: n = (2^127-1)(2^89-1), a 216-bit modulus whose most-significant (last LE) byte is 0xFF. The constructor bakes it as a Script number (the compiler refuses raw bytes for a RabinPubKey slot), so this row also pins that normalization leaves a Script-number modulus unchanged. Honest RabinSign signature over num2bin(50003, 8), padding 17, with the signature pushed RAW as 27 unsigned LE bytes whose last byte 0xE5 has the high bit set. Before F-144 the script read that signature as a negative Script number and refused the honest spend. Not a secure Rabin key; it only fixes the byte shape."
+    },
+    {
+      "method": "settle",
+      "constructorArgs": {
+        "oraclePubKey": "105312291668557186697918027513529248857806893649219117400977309697n",
+        "receiver": { "$pubkey": "alice" }
+      },
+      "args": ["50003n", "0xb4a65947c35cdd7c9e6b6ebc16f1b0bb60f6da6b1981e13d0650e5", "0x11", { "$sig": "alice" }],
+      "expect": "reject",
+      "note": "F-144 near-miss: raw sig+1 under the high-bit modulus. Both engines refuse it."
+    }
+  ]
+}

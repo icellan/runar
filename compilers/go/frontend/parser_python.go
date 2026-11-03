@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,6 +16,15 @@ import (
 // ParsePython parses a Python-syntax Rúnar contract (.runar.py) and produces
 // the standard AST.
 func ParsePython(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parsePythonSurface(source, fileName) })
+}
+
+func parsePythonSurface(source []byte, fileName string) *ParseResult {
 	p := &pyParser{
 		fileName: fileName,
 	}
@@ -25,8 +35,16 @@ func ParsePython(source []byte, fileName string) *ParseResult {
 
 	contract, err := p.parseContract()
 	if err != nil {
-		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
+		// N-077: tokenizer diagnostics (e.g. an unterminated string literal)
+		// are accumulated in p.errors during tokenize() above, before this
+		// parse error is raised. Surface them ahead of the parse error
+		// instead of discarding them, matching the TS reference (which
+		// keeps a single running errors array across tokenize + parse).
+		errs := append([]Diagnostic{}, p.errors...)
+		errs = append(errs, Diagnostic{Message: err.Error(), Severity: SeverityError})
+		return &ParseResult{Errors: errs}
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -94,6 +112,9 @@ type pyToken struct {
 	value string
 	line  int
 	col   int
+	// isBytes marks a pyTokString that came from a b'..' literal (its value
+	// is hex). N-093: only a str literal is a sighash flag spec.
+	isBytes bool
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +126,51 @@ type pyParser struct {
 	tokens   []pyToken
 	pos      int
 	errors   []Diagnostic
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
+
+	// N-046: the locals already bound in the current method, so a later
+	// `name = expr` of one of them is emitted as an AssignmentStmt, not a
+	// fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+	// existing local inside a loop body or an if-arm IS an assignment; ANF
+	// lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+	// binding's name. Snapshot/restored around if-branches and loop bodies
+	// exactly as the Ruby parser's declaredLocals.
+	declaredLocals map[string]bool
+}
+
+func (p *pyParser) snapshotLocals() map[string]bool {
+	out := make(map[string]bool, len(p.declaredLocals))
+	for k := range p.declaredLocals {
+		out[k] = true
+	}
+	return out
+}
+
+// restoreLocals (N-046) resets the tracked locals to a COPY of saved, so a
+// later branch cannot mutate the snapshot.
+func (p *pyParser) restoreLocals(saved map[string]bool) {
+	p.declaredLocals = make(map[string]bool, len(saved))
+	for k := range saved {
+		p.declaredLocals[k] = true
+	}
+}
+
+// bindLocal (N-046) returns the statement for `name = init`: an assignment
+// when the method already bound name, otherwise a declaration.
+func (p *pyParser) bindLocal(name string, typ TypeNode, init Expression, loc SourceLocation) Statement {
+	if p.declaredLocals[name] {
+		return AssignmentStmt{Target: Identifier{Name: name}, Value: init, SourceLocation: loc}
+	}
+	if p.declaredLocals == nil {
+		p.declaredLocals = make(map[string]bool)
+	}
+	p.declaredLocals[name] = true
+	return VariableDeclStmt{Name: name, Type: typ, Mutable: true, Init: init, SourceLocation: loc}
 }
 
 func (p *pyParser) addError(msg string) {
@@ -171,8 +237,16 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			i += 2
 			col += 2
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: a single-line literal that reaches a line break (escaped
+			// or not) or end of file is unterminated; it must never run on
+			// into the following lines.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -180,13 +254,18 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
-			// Convert Python byte string escapes to hex
-			hexVal := pyByteStringToHex(val)
-			tokens = append(tokens, pyToken{kind: pyTokString, value: hexVal, line: line, col: startCol})
+			// F-203: decode escapes as CPython does for a bytes literal.
+			_, hexVal, decErr := decodePyLiteral(val, true)
+			if decErr != "" {
+				p.errors = append(p.errors, lexDiag(decErr, p.fileName, line, startCol))
+			}
+			tokens = append(tokens, pyToken{kind: pyTokString, value: hexVal, line: line, col: startCol, isBytes: true})
 			continue
 		}
 
@@ -199,6 +278,7 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				// Skip it without emitting a token.
 				i += 3
 				col += 3
+				openLine := line
 				for i+2 < len(source) {
 					if source[i] == quote && source[i+1] == quote && source[i+2] == quote {
 						break
@@ -214,14 +294,24 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				if i+2 < len(source) {
 					i += 3
 					col += 3
+				} else {
+					// F-011: still open at end of file.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, openLine, startCol))
+					i = len(source)
 				}
 				continue
 			}
 			i++
 			col++
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: see the byte-string case above.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -229,31 +319,33 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
-			tokens = append(tokens, pyToken{kind: pyTokString, value: val, line: line, col: startCol})
+			// F-203: a str literal decodes the same escapes as CPython does.
+			text, _, decErr := decodePyLiteral(val, false)
+			if decErr != "" {
+				p.errors = append(p.errors, lexDiag(decErr, p.fileName, line, startCol))
+			}
+			tokens = append(tokens, pyToken{kind: pyTokString, value: text, line: line, col: startCol})
 			continue
 		}
 
-		// Numbers
+		// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
 		if ch >= '0' && ch <= '9' {
-			start := i
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				i += 2
-				col += 2
-				for i < len(source) && isHexDigit(source[i]) {
-					i++
-					col++
-				}
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			numStr := "0"
+			if lit := parseIntLiteral("py", text); lit != nil {
+				numStr = lit.Value.String()
 			} else {
-				for i < len(source) && (source[i] >= '0' && source[i] <= '9' || source[i] == '_') {
-					i++
-					col++
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("py", text), p.fileName, line, startCol))
 			}
-			numStr := strings.ReplaceAll(source[start:i], "_", "")
 			tokens = append(tokens, pyToken{kind: pyTokNumber, value: numStr, line: line, col: startCol})
 			continue
 		}
@@ -360,22 +452,12 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			if parenDepth > 0 {
 				parenDepth--
 			}
-		case '{':
-			oneKind = pyTokLBrace
-			parenDepth++
-		case '}':
-			oneKind = pyTokRBrace
-			if parenDepth > 0 {
-				parenDepth--
-			}
 		case ',':
 			oneKind = pyTokComma
 		case '.':
 			oneKind = pyTokDot
 		case ':':
 			oneKind = pyTokColon
-		case ';':
-			oneKind = pyTokSemicolon
 		case '=':
 			oneKind = pyTokAssign
 		case '<':
@@ -415,8 +497,11 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-033: a character the TS reference does not tokenize (`;`, `{`,
+		// `}`, `$`, `?`, ...) is refused, never skipped.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, col)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 
@@ -480,23 +565,95 @@ func (p *pyParser) insertIndentation(raw []pyToken) []pyToken {
 	return result
 }
 
-// pyByteStringToHex converts Python byte string content like \xde\xad to hex "dead".
-func pyByteStringToHex(s string) string {
-	var hex strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\\' && i+1 < len(s) {
-			if s[i+1] == 'x' && i+3 < len(s) {
-				hex.WriteString(s[i+2 : i+4])
-				i += 4
-				continue
-			}
+// pySimpleEscapes are the single-character escapes CPython defines for both
+// bytes and str literals (F-203).
+var pySimpleEscapes = map[byte]byte{
+	'\\': 0x5c, '\'': 0x27, '"': 0x22, 'a': 0x07, 'b': 0x08,
+	'f': 0x0c, 'n': 0x0a, 'r': 0x0d, 't': 0x09, 'v': 0x0b,
+}
+
+func pyIsOctal(c byte) bool { return c >= '0' && c <= '7' }
+
+func pyIsHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// decodePyLiteral decodes the body of a .runar.py quoted literal (the text
+// between the quotes) the way CPython decodes a bytes (bytes = true) or str
+// literal — the TS reference's decodePyLiteral (F-203). It returns the decoded
+// text, its bytes as hex (meaningful for bytes only; \xHH keeps its two hex
+// digits verbatim) and the first refusal, or "". A body ending in a lone
+// backslash only arises for an unterminated literal, which the tokenizer
+// already refuses; it is dropped.
+func decodePyLiteral(body string, bytes bool) (string, string, string) {
+	var text, hex strings.Builder
+	push := func(v int) {
+		if bytes {
+			text.WriteByte(byte(v))
+		} else {
+			text.WriteRune(rune(v))
 		}
-		// Non-escape byte: encode as hex
-		hex.WriteString(fmt.Sprintf("%02x", s[i]))
-		i++
+		fmt.Fprintf(&hex, "%02x", v)
 	}
-	return hex.String()
+	i := 0
+	for i < len(body) {
+		c := body[i]
+		if bytes && c >= 0x80 {
+			return text.String(), hex.String(), PyBytesNonASCIIMsg
+		}
+		if c != '\\' {
+			text.WriteByte(c)
+			if bytes {
+				fmt.Fprintf(&hex, "%02x", c)
+			}
+			i++
+			continue
+		}
+		if i+1 >= len(body) {
+			break
+		}
+		e := body[i+1]
+		if v, ok := pySimpleEscapes[e]; ok {
+			push(int(v))
+			i += 2
+			continue
+		}
+		if pyIsOctal(e) {
+			j := i + 1
+			for j < len(body) && j < i+4 && pyIsOctal(body[j]) {
+				j++
+			}
+			v, _ := strconv.ParseInt(body[i+1:j], 8, 32)
+			if v > 0xff {
+				return text.String(), hex.String(), InvalidEscapeSequenceMsg(body[i:j])
+			}
+			push(int(v))
+			i = j
+			continue
+		}
+		if e == 'x' {
+			if i+3 >= len(body) || !pyIsHexDigit(body[i+2]) || !pyIsHexDigit(body[i+3]) {
+				return text.String(), hex.String(), InvalidEscapeSequenceMsg(`\x`)
+			}
+			v, _ := strconv.ParseUint(body[i+2:i+4], 16, 8)
+			if bytes {
+				text.WriteByte(byte(v))
+			} else {
+				text.WriteRune(rune(v))
+			}
+			hex.WriteString(body[i+2 : i+4])
+			i += 4
+			continue
+		}
+		if bytes && e >= 0x80 {
+			return text.String(), hex.String(), PyBytesNonASCIIMsg
+		}
+		// Anything else — including str's \N{..}, \u and \U, which the
+		// surface does not support — is refused.
+		r, _ := utf8.DecodeRuneInString(body[i+1:])
+		return text.String(), hex.String(), InvalidEscapeSequenceMsg(`\` + string(r))
+	}
+	return text.String(), hex.String(), ""
 }
 
 func pyIsIdentStart(ch byte) bool {
@@ -798,7 +955,7 @@ func (p *pyParser) parsePyTypeAnnotation() TypeNode {
 	// Check for Readonly[T]
 	if name == "Readonly" {
 		if p.match(pyTokLBracket) {
-			inner := p.parsePyTypeAnnotation()
+			inner := nested(&p.nest, p.loc(), p.parsePyTypeAnnotation)
 			p.expect(pyTokRBracket)
 			// Return the inner type — Readonly-ness is handled at the property level
 			return inner
@@ -809,7 +966,7 @@ func (p *pyParser) parsePyTypeAnnotation() TypeNode {
 	// Check for FixedArray[T, N]
 	if name == "FixedArray" {
 		if p.match(pyTokLBracket) {
-			elemType := p.parsePyTypeAnnotation()
+			elemType := nested(&p.nest, p.loc(), p.parsePyTypeAnnotation)
 			p.expect(pyTokComma)
 			sizeTok := p.expect(pyTokNumber)
 			size, err := strconv.Atoi(sizeTok.value)
@@ -878,7 +1035,7 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 	}
 
 	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
-		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
+		return nil, fmt.Errorf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentClass)
 	}
 
 	p.expect(pyTokColon)
@@ -895,16 +1052,65 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 			break
 		}
 
-		// Decorator: @public or @private
+		// Decorators: @public (any others make a private method). N-050: a
+		// method may carry several (`@public @staticmethod`), so read them all.
 		if p.check(pyTokAt) {
-			p.advance()
-			decoratorTok := p.expect(pyTokIdent)
-			decorator := decoratorTok.value
-			p.skipNewlines()
+			var decorators []string
+			var sighashSpecs []*string
+			for p.check(pyTokAt) {
+				p.advance()
+				decoratorTok := p.expect(pyTokIdent)
+				decorators = append(decorators, decoratorTok.value)
+				// N-093: `@public(sighash="FLAGS")` is the native spelling of
+				// the `@sighash` directive.
+				if decoratorTok.value == "public" && p.check(pyTokLParen) {
+					sighashSpecs = append(sighashSpecs, p.parsePublicDecoratorArgs()...)
+				}
+				p.skipNewlines()
+			}
+			decorator := decorators[len(decorators)-1]
+
+			// N-093: the constructor is not a spending entry point.
+			if len(sighashSpecs) > 0 && p.checkIdent("def") && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].value == "__init__" {
+				errLoc := p.loc()
+				p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: &errLoc})
+				sighashSpecs = nil
+			}
 
 			// The next thing should be a def
 			if p.checkIdent("def") {
-				method := p.parsePyMethod(decorator)
+				visibility := "private"
+				for _, d := range decorators {
+					if d == "public" {
+						visibility = "public"
+					}
+				}
+				for _, d := range decorators {
+					if d == "staticmethod" || d == "classmethod" {
+						// N-050: a class-level function is not a contract method.
+						loc := p.loc()
+						name := ""
+						if p.pos+1 < len(p.tokens) {
+							name = p.tokens[p.pos+1].value
+						}
+						p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+						break
+					}
+				}
+				if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].value == "__init__" {
+					// N-303: the TS reference decides "constructor" from the
+					// name alone; decorators on __init__ are ignored.
+					ctor := p.parsePyConstructor(properties)
+					constructor = &ctor
+					continue
+				}
+				method := p.parsePyMethod(visibility)
+				sighashType, sighashErr := resolveNativeSighash(method.Name, visibility == "public", sighashSpecs)
+				if sighashErr != "" {
+					errLoc := method.SourceLocation
+					p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+				}
+				method.SighashType = sighashType
 				methods = append(methods, method)
 			} else {
 				p.addError(fmt.Sprintf("line %d: expected 'def' after @%s decorator", p.peek().line, decorator))
@@ -940,11 +1146,18 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 			continue
 		}
 
-		// Skip unknown tokens to avoid infinite loops
-		p.advance()
+		// N-033: any other token is refused, never skipped.
+		p.refuseClassBodyToken()
 	}
 
 	p.match(pyTokDedent)
+
+	// N-410: nothing but blank lines may follow the class (N-004 did this for
+	// .runar.rb); a method or class after it used to be dropped unread.
+	p.skipNewlines()
+	if trailing := p.peek(); trailing.kind != pyTokEOF {
+		p.errors = append(p.errors, lexDiag(UnexpectedTokenAfterClassMsg(pyTokenText(trailing)), p.fileName, trailing.line, trailing.col))
+	}
 
 	if constructor == nil {
 		// Only non-initialized properties become constructor params
@@ -999,6 +1212,21 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 	}, nil
 }
 
+// refuseClassBodyToken is N-033: a class-body token that begins no property,
+// method, decorator or `pass` is refused at that token (N-004's diagnostic),
+// and the rest of its line is skipped.
+func (p *pyParser) refuseClassBodyToken() {
+	tok := p.advance()
+	text := tok.value
+	if tok.kind == pyTokIndent {
+		text = "INDENT"
+	}
+	p.errors = append(p.errors, lexDiag(UnexpectedClassBodyTokenMsg(text), p.fileName, tok.line, tok.col))
+	for !p.check(pyTokNewline) && !p.check(pyTokDedent) && !p.check(pyTokEOF) {
+		p.advance()
+	}
+}
+
 // isPyPropertyDecl checks if current position is a property declaration: name: Type
 func (p *pyParser) isPyPropertyDecl() bool {
 	if p.pos+1 >= len(p.tokens) {
@@ -1016,14 +1244,24 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 	loc := p.loc()
 
 	nameTok := p.expect(pyTokIdent)
-	propName := pyConvertName(nameTok.value)
+	propName := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
 
 	p.expect(pyTokColon)
 
-	// Check for Readonly[T]
+	// Check for Readonly[T]. N-093: `EmbedAlways[T]` is the native spelling
+	// of the `@embedAlways` directive; the two wrappers compose in either
+	// order.
 	isReadonly := false
-	if p.checkIdent("Readonly") {
-		isReadonly = true
+	embedAlways := false
+	wrappers := 0
+	for p.checkIdent("Readonly") || p.checkIdent("EmbedAlways") {
+		if p.advance().value == "Readonly" {
+			isReadonly = true
+		} else {
+			embedAlways = true
+		}
+		p.expect(pyTokLBracket)
+		wrappers++
 	}
 	// In SmartContract (and UnsafeSmartContract), all properties are
 	// automatically readonly.
@@ -1032,6 +1270,9 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 	}
 
 	typNode := p.parsePyTypeAnnotation()
+	for w := 0; w < wrappers; w++ {
+		p.expect(pyTokRBracket)
+	}
 
 	// Optional initializer: = value
 	var initializer Expression
@@ -1039,6 +1280,8 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 		initializer = p.parsePyExpression()
 	}
 
+	// F-026: the field declaration ends at its line break.
+	p.expectStatementEnd()
 	p.skipNewlines()
 
 	return &PropertyNode{
@@ -1046,8 +1289,54 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 		Type:           typNode,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
+}
+
+// parsePublicDecoratorArgs (N-093) parses the argument list of
+// `@public(...)`. The only argument is the keyword `sighash=<str>`; each one
+// yields its string, and any other argument (positional, another keyword, a
+// non-str value) yields nil, which is refused as a malformed spelling.
+// Mirrors parsePublicDecoratorArgs in the TS reference (01-parse-python.ts).
+func (p *pyParser) parsePublicDecoratorArgs() []*string {
+	var specs []*string
+	p.expect(pyTokLParen)
+	for !p.check(pyTokRParen) && !p.check(pyTokNewline) && !p.check(pyTokEOF) {
+		isSighashKw := p.checkIdent("sighash") && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].kind == pyTokAssign
+		if isSighashKw {
+			p.advance() // 'sighash'
+			p.advance() // '='
+		}
+		// One argument value: up to the next top-level ',' or ')'.
+		first := p.peek()
+		count := 0
+		depth := 0
+		for !p.check(pyTokNewline) && !p.check(pyTokEOF) {
+			k := p.peek().kind
+			if (k == pyTokComma || k == pyTokRParen) && depth == 0 {
+				break
+			}
+			if k == pyTokLParen || k == pyTokLBracket {
+				depth++
+			}
+			if k == pyTokRParen || k == pyTokRBracket {
+				depth--
+			}
+			p.advance()
+			count++
+		}
+		if isSighashKw && count == 1 && first.kind == pyTokString && !first.isBytes {
+			specs = append(specs, nativeSighashSpec(first.value))
+		} else {
+			specs = append(specs, nil)
+		}
+		if !p.match(pyTokComma) {
+			break
+		}
+	}
+	p.expect(pyTokRParen)
+	return specs
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1347,9 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 	loc := p.loc()
 	p.expectIdent("def")
 	p.expectIdent("__init__")
+
+	// N-046: reset local tracking for this method's scope.
+	p.declaredLocals = make(map[string]bool)
 
 	params := p.parsePyParams()
 
@@ -1074,7 +1366,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 	// Note: __init__ is converted to "constructor" by pyConvertName during parsing,
 	// so we check for both "constructor" and "__init__".
 	var constructorBody []Statement
-	foundSuper := false
 
 	for _, stmt := range body {
 		if es, ok := stmt.(ExpressionStmt); ok {
@@ -1091,7 +1382,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 								},
 								SourceLocation: es.SourceLocation,
 							})
-							foundSuper = true
 							continue
 						}
 					}
@@ -1099,23 +1389,6 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 			}
 		}
 		constructorBody = append(constructorBody, stmt)
-	}
-
-	// If no super() call was found, generate one with all param names
-	if !foundSuper {
-		superArgs := make([]Expression, len(params))
-		for i, param := range params {
-			superArgs[i] = Identifier{Name: param.Name}
-		}
-		constructorBody = append([]Statement{
-			ExpressionStmt{
-				Expr: CallExpr{
-					Callee: Identifier{Name: "super"},
-					Args:   superArgs,
-				},
-				SourceLocation: loc,
-			},
-		}, constructorBody...)
 	}
 
 	return MethodNode{
@@ -1136,14 +1409,23 @@ func (p *pyParser) parsePyMethod(visibility string) MethodNode {
 	p.expectIdent("def")
 
 	nameTok := p.expect(pyTokIdent)
-	name := pyConvertName(nameTok.value)
+	name := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
+
+	// N-046: reset local tracking for this method's scope.
+	p.declaredLocals = make(map[string]bool)
 
 	params := p.parsePyParams()
 
 	// Parse optional return type annotation: -> Type
 	if p.match(pyTokArrow) {
-		// Skip return type
-		p.parsePyTypeAnnotation()
+		// The AST keeps no return type; N-331 refuses an unknown name. `None`
+		// is Python's spelling of "returns nothing".
+		rt := p.parsePyTypeAnnotation()
+		if ct, ok := rt.(CustomType); !ok || ct.Name != "None" {
+			if d := UnknownReturnTypeDiagnostic(rt, nameTok.value, loc, visibility == "public"); d != nil {
+				p.errors = append(p.errors, *d)
+			}
+		}
 	}
 
 	p.expect(pyTokColon)
@@ -1184,7 +1466,7 @@ func (p *pyParser) parsePyParams() []ParamNode {
 		}
 
 		params = append(params, ParamNode{
-			Name: pyConvertName(paramName),
+			Name: p.idents.declare(paramName, pyConvertName(paramName)),
 			Type: typ,
 		})
 
@@ -1215,10 +1497,31 @@ func (p *pyParser) parsePyBlock() []Statement {
 		if stmt != nil {
 			stmts = append(stmts, stmt)
 		}
+		p.expectStatementEnd()
 	}
 
 	p.match(pyTokDedent)
 	return stmts
+}
+
+// expectStatementEnd refuses more code on a statement's line (F-026). A
+// simple statement ends at its line break; compound statements end on a
+// NEWLINE / DEDENT they consumed themselves. Pre-fix, `lim = 0b1010` parsed
+// as `lim = 0` plus a second statement `b1010`.
+func (p *pyParser) expectStatementEnd() {
+	next := p.peek()
+	if next.kind == pyTokNewline || next.kind == pyTokDedent || next.kind == pyTokEOF {
+		return
+	}
+	if p.pos > 0 {
+		if prev := p.tokens[p.pos-1]; prev.kind == pyTokNewline || prev.kind == pyTokDedent {
+			return
+		}
+	}
+	p.errors = append(p.errors, lexDiag(PyStatementLineBreakMsg, p.fileName, next.line, next.col))
+	for !p.check(pyTokNewline) && !p.check(pyTokDedent) && !p.check(pyTokEOF) {
+		p.advance()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1529,10 @@ func (p *pyParser) parsePyBlock() []Statement {
 // ---------------------------------------------------------------------------
 
 func (p *pyParser) parsePyStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parsePyStatementInner)
+}
+
+func (p *pyParser) parsePyStatementInner() Statement {
 	loc := p.loc()
 
 	// assert expr or assert_(expr)
@@ -1254,8 +1561,51 @@ func (p *pyParser) parsePyStatement() Statement {
 		return nil
 	}
 
+	// N-053: a statement must start with a name or a token that can begin an
+	// expression; anything else (a stray `elif`, `from`, `@`, an unexpected
+	// indent, ...) is refused with the shared diagnostic.
+	if tok := p.peek(); (tok.kind == pyTokIdent && pyNonExprKeywords[tok.value]) ||
+		(tok.kind != pyTokIdent && !pyExprStartKinds[tok.kind]) {
+		p.advance()
+		p.errors = append(p.errors, lexDiag(UnsupportedStatementMsg(pyTokenText(tok)), p.fileName, tok.line, tok.col))
+		return nil
+	}
+
 	// Variable declarations or expression statements
 	return p.parsePyExprOrAssignStatement(loc)
+}
+
+// pyExprStartKinds are the non-name tokens that can begin an expression
+// (N-053, mirrors the TS reference's PY_EXPRESSION_START).
+var pyExprStartKinds = map[pyTokenKind]bool{
+	pyTokNumber: true, pyTokString: true, pyTokLParen: true, pyTokLBracket: true,
+	pyTokMinus: true, pyTokTilde: true, pyTokBang: true,
+}
+
+// pyNonExprKeywords are the keywords the TS reference lexes as their own
+// tokens and that begin neither a statement form nor an expression (N-053).
+var pyNonExprKeywords = map[string]bool{
+	"class": true, "def": true, "elif": true, "else": true, "in": true,
+	"range": true, "from": true, "import": true,
+}
+
+// pyTokenText is a token's source text for a diagnostic.
+func pyTokenText(tok pyToken) string {
+	switch tok.kind {
+	case pyTokIndent:
+		return "INDENT"
+	case pyTokDedent:
+		return "DEDENT"
+	case pyTokNewline:
+		return "NEWLINE"
+	case pyTokEOF:
+		return "eof"
+	case pyTokAmpAmp:
+		return "and"
+	case pyTokPipePipe:
+		return "or"
+	}
+	return tok.value
 }
 
 func (p *pyParser) parsePyAssert(loc SourceLocation) Statement {
@@ -1305,7 +1655,10 @@ func (p *pyParser) parsePyIfBody(loc SourceLocation) Statement {
 	condition := p.parsePyExpression()
 	p.expect(pyTokColon)
 
+	// N-046: a name first bound inside a branch stays branch-local.
+	localsBefore := p.snapshotLocals()
 	thenBlock := p.parsePyBlock()
+	p.restoreLocals(localsBefore)
 
 	var elseBlock []Statement
 	p.skipNewlines()
@@ -1313,11 +1666,13 @@ func (p *pyParser) parsePyIfBody(loc SourceLocation) Statement {
 		elifLoc := p.loc()
 		p.advance() // consume 'elif'
 		// Recurse using parsePyIfBody which handles the rest identically
-		elifStmt := p.parsePyIfBody(elifLoc)
+		elifStmt := nested(&p.nest, elifLoc, func() Statement { return p.parsePyIfBody(elifLoc) })
 		elseBlock = []Statement{elifStmt}
+		p.restoreLocals(localsBefore)
 	} else if p.matchIdent("else") {
 		p.expect(pyTokColon)
 		elseBlock = p.parsePyBlock()
+		p.restoreLocals(localsBefore)
 	}
 
 	return IfStmt{
@@ -1332,7 +1687,7 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 	p.expectIdent("for")
 
 	varTok := p.expect(pyTokIdent)
-	varName := pyConvertName(varTok.value)
+	varName := p.idents.declare(varTok.value, pyConvertName(varTok.value))
 
 	p.expectIdent("in")
 	p.expectIdent("range")
@@ -1380,7 +1735,13 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 	p.expect(pyTokRParen)
 	p.expect(pyTokColon)
 
+	// N-046: the loop variable and the body's first bindings are body-local;
+	// a rebinding of the loop variable inside the body is an assignment.
+	localsBeforeBody := p.snapshotLocals()
+	p.restoreLocals(localsBeforeBody)
+	p.declaredLocals[varName] = true
 	body := p.parsePyBlock()
+	p.restoreLocals(localsBeforeBody)
 
 	// Build: for (let varName = initExpr; varName < limitExpr; varName++)
 	initStmt := VariableDeclStmt{
@@ -1441,7 +1802,7 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 		// Could be a property-like declaration or a variable declaration
 		// In a method body, "name: Type = expr" is a typed variable declaration
 		nameTok := p.advance()
-		varName := pyConvertName(nameTok.value)
+		varName := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
 		p.expect(pyTokColon) // consume ':'
 
 		typNode := p.parsePyTypeAnnotation()
@@ -1453,15 +1814,11 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 			init = BigIntLiteral{Value: big.NewInt(0)}
 		}
 		p.skipNewlines()
-		return VariableDeclStmt{
-			Name:           varName,
-			Type:           typNode,
-			Mutable:        true,
-			Init:           init,
-			SourceLocation: loc,
-		}
+		// N-046: rebinding a local of this method is an assignment in Python.
+		return p.bindLocal(varName, typNode, init, loc)
 	}
 
+	targetTok := p.peek()
 	expr := p.parsePyExpression()
 	if expr == nil {
 		p.advance()
@@ -1476,13 +1833,13 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 		// If the target is a plain identifier, it's a variable declaration (first assignment)
 		// But we can't always tell — emit assignment for now (the validator/ANF handles it)
 		if ident, ok := expr.(Identifier); ok {
-			// Treat bare "name = expr" as a variable declaration for simple identifiers
-			return VariableDeclStmt{
-				Name:           ident.Name,
-				Mutable:        true,
-				Init:           value,
-				SourceLocation: loc,
+			if targetTok.kind == pyTokIdent {
+				p.idents.declare(targetTok.value, ident.Name)
 			}
+			// Treat bare "name = expr" as a variable declaration for simple
+			// identifiers — or, N-046, an assignment when the method already
+			// bound the name (Python is function-scoped).
+			return p.bindLocal(ident.Name, nil, value, loc)
 		}
 		return AssignmentStmt{Target: expr, Value: value, SourceLocation: loc}
 	}
@@ -1513,7 +1870,7 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *pyParser) parsePyExpression() Expression {
-	return p.parsePyTernary()
+	return nested(&p.nest, p.loc(), p.parsePyTernary)
 }
 
 // Python ternary: value_if_true if condition else value_if_false
@@ -1526,7 +1883,7 @@ func (p *pyParser) parsePyTernary() Expression {
 		p.advance() // consume 'if'
 		condition := p.parsePyOr()
 		p.expectIdent("else")
-		alternate := p.parsePyTernary()
+		alternate := nested(&p.nest, p.loc(), p.parsePyTernary)
 		return TernaryExpr{
 			Condition:  condition,
 			Consequent: expr,
@@ -1538,67 +1895,74 @@ func (p *pyParser) parsePyTernary() Expression {
 }
 
 func (p *pyParser) parsePyOr() Expression {
+	start := p.loc()
 	left := p.parsePyAnd()
 	for p.match(pyTokPipePipe) {
 		right := p.parsePyAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyAnd() Expression {
+	start := p.loc()
 	left := p.parsePyNot()
 	for p.match(pyTokAmpAmp) {
 		right := p.parsePyNot()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyNot() Expression {
+	opLoc := p.loc()
 	if p.match(pyTokBang) {
-		operand := p.parsePyNot()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parsePyNot)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePyBitwiseOr()
 }
 
 func (p *pyParser) parsePyBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parsePyBitwiseXor()
 	for p.match(pyTokPipe) {
 		right := p.parsePyBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parsePyBitwiseAnd()
 	for p.match(pyTokCaret) {
 		right := p.parsePyBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parsePyEquality()
 	for p.match(pyTokAmp) {
 		right := p.parsePyEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *pyParser) parsePyEquality() Expression {
+	start := p.loc()
 	left := p.parsePyComparison()
 	for {
 		if p.match(pyTokEqEq) {
 			right := p.parsePyComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(pyTokNotEq) {
 			right := p.parsePyComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1607,20 +1971,21 @@ func (p *pyParser) parsePyEquality() Expression {
 }
 
 func (p *pyParser) parsePyComparison() Expression {
+	start := p.loc()
 	left := p.parsePyShift()
 	for {
 		if p.match(pyTokLt) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokLtEq) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokGt) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokGtEq) {
 			right := p.parsePyShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1629,14 +1994,15 @@ func (p *pyParser) parsePyComparison() Expression {
 }
 
 func (p *pyParser) parsePyShift() Expression {
+	start := p.loc()
 	left := p.parsePyAdditive()
 	for {
 		if p.match(pyTokLShift) {
 			right := p.parsePyAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokRShift) {
 			right := p.parsePyAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1645,14 +2011,15 @@ func (p *pyParser) parsePyShift() Expression {
 }
 
 func (p *pyParser) parsePyAdditive() Expression {
+	start := p.loc()
 	left := p.parsePyMultiplicative()
 	for {
 		if p.match(pyTokPlus) {
 			right := p.parsePyMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokMinus) {
 			right := p.parsePyMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1661,21 +2028,22 @@ func (p *pyParser) parsePyAdditive() Expression {
 }
 
 func (p *pyParser) parsePyMultiplicative() Expression {
+	start := p.loc()
 	left := p.parsePyUnary()
 	for {
 		if p.match(pyTokStar) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokSlashSlash) {
 			// Python // (integer division) maps to / in Rúnar
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokSlash) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(pyTokPercent) {
 			right := p.parsePyUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1684,17 +2052,18 @@ func (p *pyParser) parsePyMultiplicative() Expression {
 }
 
 func (p *pyParser) parsePyUnary() Expression {
+	opLoc := p.loc()
 	if p.match(pyTokMinus) {
-		operand := p.parsePyUnary()
-		return UnaryExpr{Op: "-", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(pyTokTilde) {
-		operand := p.parsePyUnary()
-		return UnaryExpr{Op: "~", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(pyTokBang) {
-		operand := p.parsePyUnary()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parsePyUnary)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	return p.parsePyPower()
 }
@@ -1703,7 +2072,7 @@ func (p *pyParser) parsePyUnary() Expression {
 func (p *pyParser) parsePyPower() Expression {
 	base := p.parsePyPostfix()
 	if p.match(pyTokStarStar) {
-		exp := p.parsePyUnary() // right-associative
+		exp := nested(&p.nest, p.loc(), p.parsePyUnary) // right-associative
 		return CallExpr{Callee: Identifier{Name: "pow"}, Args: []Expression{base, exp}}
 	}
 	return base
@@ -1772,7 +2141,7 @@ func (p *pyParser) parsePyPrimary() Expression {
 		return parsePyNumber(tok.value)
 	case pyTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case pyTokIdent:
 		p.advance()
 		name := tok.value
@@ -1811,10 +2180,10 @@ func (p *pyParser) parsePyPrimary() Expression {
 		// Function call
 		if p.check(pyTokLParen) {
 			args := p.parsePyCallArgs()
-			return CallExpr{Callee: Identifier{Name: converted}, Args: args}
+			return CallExpr{Callee: Identifier{Name: converted, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: converted}
+		return Identifier{Name: converted, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 
 	case pyTokLParen:
 		p.advance()
@@ -1842,7 +2211,7 @@ func (p *pyParser) parsePyBytesMethod() Expression {
 		p.expect(pyTokLParen)
 		strTok := p.expect(pyTokString)
 		p.expect(pyTokRParen)
-		return ByteStringLiteral{Value: strTok.value}
+		return ByteStringLiteral{Value: strTok.value, SourceLocation: SourceLocation{File: p.fileName, Line: strTok.line, Column: strTok.col}}
 	}
 	// Unknown bytes method — return as a member call
 	if p.check(pyTokLParen) {

@@ -46,7 +46,8 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { checkReturnType, makeDiagnostic, OPTIONAL_CHAINING, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
 import { parseMoveSource } from './01-parse-move.js';
@@ -56,8 +57,11 @@ import { parseRustSource } from './01-parse-rust.js';
 import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
-import { extractSighashDirective } from './sighash-directive.js';
+import { extractSighashDirective, lostDirectiveMessage } from './sighash-directive.js';
+import { normalizeLoopConditions } from './loop-condition.js';
+import { checkConstReassignment } from './const-reassign.js';
 import { OPCODES } from './06-emit.js';
+import { SourceNestingError, withNestingLimit } from './source-limits.js';
 import {
   encodePushBigIntHex,
   encodePushBytesHex,
@@ -78,44 +82,55 @@ export interface ParseResult {
 // ---------------------------------------------------------------------------
 
 // The author-facing comment directives `@sighash <FLAGS>` (#123, per-method
-// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out) are
-// honoured ONLY on the TypeScript (.runar.ts) surface below — the default
-// branch reads leading trivia / JSDoc. The eight non-TS surface parsers this
-// compiler dispatches to (.sol/.move/.py/.go/.rs/.rb/.zig/.java) ignore
-// comments, so a directive in one of those sources would be silently dropped
-// and change signing / DCE semantics. Fail closed on those formats rather than
-// miscompile — this matches the Go/Rust/Python/Zig/Ruby/Java tiers. No
-// conformance fixture uses either directive, so this has zero golden impact.
-// Word-boundary anchored (matching the `/@sighash\b/` / `/@embedAlways\b/`
-// scans used to detect the directives) so an identifier like `sighashType`
-// does not trip the guard.
-const SIGHASH_DIRECTIVE_RE = /@sighash\b/;
+// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out) are read
+// from COMMENTS only on the TypeScript (.runar.ts) surface below — the default
+// branch reads leading trivia / JSDoc. The eight non-TS surfaces spell both
+// directives natively instead (N-093, user decision R38: a modifier mirroring
+// each surface's readonly idiom — see NATIVE_DIRECTIVE_SPELLINGS), and their
+// parsers drop comments, so a COMMENT directive in one of those sources would
+// be silently ignored and change signing / DCE semantics. Fail closed on those
+// formats rather than miscompile, and name the native spelling to use. None
+// of the native spellings contains either marker, so this guard never trips
+// on them. `@embedAlways` is word-boundary anchored so an identifier like
+// `sighashType` does not trip the guard. `@sighash` is NOT (N-244): N-039
+// made every occurrence of the marker a directive on `.runar.ts`, so a glued
+// `@sighashSINGLE|FORKID` is refused here too instead of being read as prose.
+// The message is identical in all seven tiers.
+const SIGHASH_DIRECTIVE_RE = /@sighash/;
 const EMBED_ALWAYS_DIRECTIVE_RE = /@embedAlways\b/;
 
-// Extension → human-readable surface name for the diagnostic. `.runar.ts` is
-// intentionally absent: the default branch implements the directives.
-const NON_TS_SURFACES: ReadonlyArray<readonly [string, string]> = [
-  ['.runar.sol', 'Solidity'],
-  ['.runar.move', 'Move'],
-  ['.runar.py', 'Python'],
-  ['.runar.go', 'Go DSL'],
-  ['.runar.rs', 'Rust'],
-  ['.runar.rb', 'Ruby'],
-  ['.runar.zig', 'Zig'],
-  ['.runar.java', 'Java'],
+// Extension → human-readable surface name, the format doc, and the native
+// spelling of each directive on that surface (N-093). `.runar.ts` is
+// intentionally absent: the default branch implements the comment directives.
+const NON_TS_SURFACES: ReadonlyArray<readonly [string, string, string, string, string]> = [
+  ['.runar.sol', 'Solidity', 'solidity', 'the function modifier sighash(<FLAGS>)', 'the property modifier embedAlways'],
+  ['.runar.move', 'Move', 'move', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  ['.runar.py', 'Python', 'python', '@public(sighash="<FLAGS>")', 'the wrapper type EmbedAlways[T]'],
+  ['.runar.go', 'Go DSL', 'go', 'the directive //runar:sighash <FLAGS>', 'the struct tag option runar:"readonly,embedAlways"'],
+  ['.runar.rs', 'Rust', 'rust', 'the attribute #[sighash(<FLAGS>)]', 'the attribute #[embed_always]'],
+  ['.runar.rb', 'Ruby', 'ruby', "runar_sighash '<FLAGS>'", 'the prop option embed_always: true'],
+  ['.runar.zig', 'Zig', 'zig', 'the return type runar.Sighash("<FLAGS>")', 'the type function runar.EmbedAlways(T)'],
+  ['.runar.java', 'Java', 'java', 'the annotation @Sighash("<FLAGS>")', 'the annotation @EmbedAlways'],
 ];
 
 /**
  * Return a fail-closed diagnostic message when `source` carries a `@sighash`
- * (#123) or `@embedAlways` (#109) directive on a non-TS surface whose parser
- * ignores comments (so the directive would be silently dropped), else null.
+ * (#123) or `@embedAlways` (#109) COMMENT directive on a non-TS surface whose
+ * parser ignores comments (so the directive would be silently dropped), else
+ * null. The message names the surface's native spelling (N-093).
  */
-function unsupportedDirectiveError(source: string, surfaceName: string): string | null {
+function unsupportedDirectiveError(
+  source: string,
+  surfaceName: string,
+  doc: string,
+  sighashSpelling: string,
+  embedSpelling: string,
+): string | null {
   if (SIGHASH_DIRECTIVE_RE.test(source)) {
-    return `@sighash directive (issue #123) is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured`;
+    return `@sighash directive (issue #123) is not supported as a comment by the ${surfaceName} surface parser; write it as ${sighashSpelling} (see docs/formats/${doc}.md)`;
   }
   if (EMBED_ALWAYS_DIRECTIVE_RE.test(source)) {
-    return `@embedAlways directive (issue #109) is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured`;
+    return `@embedAlways directive (issue #109) is not supported as a comment by the ${surfaceName} surface parser; write it as ${embedSpelling} (see docs/formats/${doc}.md)`;
   }
   return null;
 }
@@ -127,6 +142,13 @@ function unsupportedDirectiveError(source: string, surfaceName: string): string 
  * appropriate parser. All parsers produce the same Rúnar AST.
  */
 export function parse(source: string, fileName?: string): ParseResult {
+  const result = parseDispatch(source, fileName);
+  // N-115: `10n > i` is `i < 10n`; every later pass sees the canonical form.
+  if (result.contract) normalizeLoopConditions(result.contract);
+  return result;
+}
+
+function parseDispatch(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const file = fileName ?? 'contract.ts';
 
@@ -147,9 +169,9 @@ export function parse(source: string, fileName?: string): ParseResult {
   // Fail-closed directive guard: reject `@sighash` / `@embedAlways` on any
   // non-TS surface (whose parser ignores comments) before dispatching. The
   // `.runar.ts` / default branch is exempt because it honours the directives.
-  for (const [ext, surfaceName] of NON_TS_SURFACES) {
+  for (const [ext, surfaceName, doc, sighashSpelling, embedSpelling] of NON_TS_SURFACES) {
     if (file.endsWith(ext)) {
-      const directiveMsg = unsupportedDirectiveError(source, surfaceName);
+      const directiveMsg = unsupportedDirectiveError(source, surfaceName, doc, sighashSpelling, embedSpelling);
       if (directiveMsg) {
         return {
           contract: null,
@@ -174,19 +196,45 @@ export function parse(source: string, fileName?: string): ParseResult {
     return parseGoSource(source, file);
   }
   if (file.endsWith('.runar.rs')) {
-    return parseRustSource(source, file);
+    // N-344: a `let` without `mut` cannot be reassigned.
+    return withConstReassignment(parseRustSource(source, file));
   }
   if (file.endsWith('.runar.rb')) {
     return parseRubySource(source, file);
   }
   if (file.endsWith('.runar.zig')) {
-    return parseZigSource(source, file);
+    // N-344: a `const` local cannot be reassigned.
+    return withConstReassignment(parseZigSource(source, file));
   }
   if (file.endsWith('.runar.java')) {
     return parseJavaSource(source, file);
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
+  const result = withNestingLimit(file, () => parseTsSurface(source, file, errors));
+  // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+  if (result.contract) result.errors.push(...checkConstReassignment(result.contract));
+  return result;
+}
+
+/** N-344: append the immutable-local reassignment diagnostics to a parse result. */
+function withConstReassignment(result: ParseResult): ParseResult {
+  if (result.contract) result.errors.push(...checkConstReassignment(result.contract));
+  return result;
+}
+
+/** The `.runar.ts` surface: ts-morph parse, then conversion to the Rúnar AST. */
+function parseTsSurface(source: string, file: string, errors: CompilerDiagnostic[]): ParseResult {
+
+  // N-423 (user decision R163): ts-morph accepts ECMAScript's Unicode
+  // identifiers and whitespace; Rúnar takes only ASCII outside comments and
+  // string literals, as on every other surface.
+  const nonAscii = firstNonAsciiOutsideLiterals(source);
+  if (nonAscii >= 0) {
+    const ch = String.fromCodePoint(source.codePointAt(nonAscii)!);
+    errors.push(makeDiagnostic(`Unexpected character '${ch}'`, 'error', locFromPos(source, nonAscii, file)));
+    return { contract: null, errors };
+  }
 
   const project = new Project({
     useInMemoryFileSystem: true,
@@ -198,6 +246,33 @@ export function parse(source: string, fileName?: string): ParseResult {
   });
 
   const sourceFile = project.createSourceFile(file, source);
+
+  // F-213 measure (A), before anything walks the tree recursively. ts-morph
+  // has no hook inside its parser, so the counter the hand-written surfaces
+  // keep is recomputed here, iteratively, from the TypeScript AST.
+  const tooDeep = tsParseNestingViolation(sourceFile.compilerNode);
+  if (tooDeep) {
+    const lc = sourceFile.compilerNode.getLineAndCharacterOfPosition(tooDeep.getStart(sourceFile.compilerNode));
+    throw new SourceNestingError({ file, line: lc.line + 1, column: lc.character });
+  }
+
+  // F-011: ts-morph ends an unterminated string literal at the line break and
+  // records a syntax diagnostic that nothing here reads, so `"cafe;` used to
+  // compile. Refuse it with the diagnostic every tier emits.
+  reportUnterminatedLiterals(sourceFile.compilerNode, file, errors);
+
+  // F-026: ts-morph records syntax errors (`0b102`, `0o19`, `10_`, `012`, an
+  // unclosed call) in parseDiagnostics and then recovers, so the program used
+  // to compile with its own reading of the broken text (`0b102` as 2). Refuse
+  // every malformed integer literal with the shared diagnostic, then every
+  // remaining TypeScript syntax error.
+  reportInvalidNumericLiterals(sourceFile.compilerNode, source, file, errors);
+  reportSyntaxDiagnostics(sourceFile.compilerNode, file, errors);
+
+  // N-121: TypeScript parses `this?.t` / `this?.m()` / `this.m?.()` as an
+  // optional chain, and the conversion below reads it as a plain access, so
+  // it used to compile. Optional chaining is disallowed; refuse it.
+  reportOptionalChaining(sourceFile.compilerNode, file, errors);
 
   // Find the class that extends SmartContract, StatefulSmartContract,
   // or UnsafeSmartContract (the asm() escape hatch).
@@ -265,6 +340,9 @@ export function parse(source: string, fileName?: string): ParseResult {
 
   // Extract methods
   const methods = parseMethods(contractClass, file, errors);
+
+  // N-199 (R75): a directive in the class body that no member reads.
+  reportLostDirectives(contractClass, file, errors);
 
   const contract: ContractNode = {
     kind: 'contract',
@@ -398,7 +476,20 @@ function parseMethod(
   errors: CompilerDiagnostic[],
 ): MethodNode {
   const name = method.getName();
+
+  // N-050: a static method is not a contract method. It used to get a
+  // dispatch selector like any `public` one — an unsigned spend path.
+  if (method.isStatic()) {
+    errors.push(makeDiagnostic(staticMethodMessage(name), 'error', locFromNode(method, file)));
+  }
+
   const params = parseParams(method.getParameters(), file, errors);
+
+  // N-331: the AST keeps no return type, so an unknown name is refused here.
+  const returnTypeNode = method.getReturnTypeNode();
+  if (returnTypeNode) {
+    checkReturnType(parseTypeNode(returnTypeNode, file, errors), name, locFromNode(method, file), errors, method.hasModifier(SyntaxKind.PublicKeyword));
+  }
 
   let visibility: 'public' | 'private' = 'private';
   if (method.hasModifier(SyntaxKind.PublicKeyword)) {
@@ -438,16 +529,16 @@ function parseSighashOnMethod(
   file: string,
   errors: CompilerDiagnostic[],
 ): number | undefined {
-  let text: string | undefined;
-  for (const jsdoc of method.getJsDocs()) {
-    if (SIGHASH_TOKEN_RE.test(jsdoc.getText())) { text = jsdoc.getText(); break; }
+  // Collect EVERY leading comment (JSDoc blocks and ordinary trivia, deduped
+  // by position — ts-morph reports a JSDoc on both surfaces) so a second
+  // directive is seen and refused rather than silently ignored (F-039).
+  const comments = new Map<number, string>();
+  for (const jsdoc of method.getJsDocs()) comments.set(jsdoc.getStart(), jsdoc.getText());
+  for (const range of method.getLeadingCommentRanges()) {
+    if (!comments.has(range.getPos())) comments.set(range.getPos(), range.getText());
   }
-  if (text === undefined) {
-    for (const range of method.getLeadingCommentRanges()) {
-      if (SIGHASH_TOKEN_RE.test(range.getText())) { text = range.getText(); break; }
-    }
-  }
-  if (text === undefined) return undefined;
+  const text = [...comments.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).join('\n');
+  if (!SIGHASH_TOKEN_RE.test(text)) return undefined;
 
   if (visibility !== 'public') {
     errors.push(makeDiagnostic(
@@ -458,8 +549,9 @@ function parseSighashOnMethod(
     return undefined;
   }
 
-  const result = extractSighashDirective(text);
-  if (result === null) return undefined;
+  // Non-null: the marker is present (checked above). A malformed or
+  // duplicated directive comes back as an error, never as "no directive".
+  const result = extractSighashDirective(text)!;
   if ('error' in result) {
     errors.push(makeDiagnostic(
       `Method '${name}': ${result.error}`,
@@ -471,7 +563,51 @@ function parseSighashOnMethod(
   return result.value;
 }
 
-const SIGHASH_TOKEN_RE = /@sighash\b/;
+// N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType` reach
+// extractSighashDirective and are refused as malformed, not ignored as prose.
+const SIGHASH_TOKEN_RE = /@sighash/;
+
+/**
+ * N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker inside
+ * the contract class body that is not in the leading comments of a member of
+ * the kind that reads it — `@sighash` of a method, `@embedAlways` of a
+ * property. ts-morph never attaches a comment that shares a line with the
+ * preceding token (it is that token's trailing trivia), so before this check
+ * `foo(): void {} // @sighash SINGLE|FORKID` above a public method compiled
+ * under the default ALL|FORKID with no diagnostic; a directive above the
+ * constructor, at the end of the body, inside a method body or on the wrong
+ * member kind was dropped the same way. Markers are matched in the raw text
+ * with the same rules as the non-TS guard (`@sighash` anywhere,
+ * `@embedAlways` word-bounded). Text outside the class braces (file and class
+ * doc comments) is prose and is not scanned.
+ */
+function reportLostDirectives(cls: ClassDeclaration, file: string, errors: CompilerDiagnostic[]): void {
+  const open = cls.getFirstChildByKind(SyntaxKind.OpenBraceToken);
+  const close = cls.getLastChildByKind(SyntaxKind.CloseBraceToken);
+  if (!open || !close) return;
+  const text = cls.getSourceFile().getFullText();
+  const bodyStart = open.getEnd();
+  const body = text.slice(bodyStart, close.getStart());
+  const spansOf = (members: Array<MethodDeclaration | PropertyDeclaration>): Array<[number, number]> =>
+    members.flatMap((m) => [
+      ...m.getJsDocs().map((j): [number, number] => [j.getStart(), j.getEnd()]),
+      ...m.getLeadingCommentRanges().map((r): [number, number] => [r.getPos(), r.getEnd()]),
+    ]);
+  const lost: Array<{ pos: number; directive: '@sighash' | '@embedAlways' }> = [];
+  for (const [re, directive, spans] of [
+    [/@sighash/g, '@sighash', spansOf(cls.getMethods())],
+    [/@embedAlways\b/g, '@embedAlways', spansOf(cls.getProperties())],
+  ] as const) {
+    for (const m of body.matchAll(re)) {
+      const pos = bodyStart + m.index!;
+      if (!spans.some(([s, e]) => s <= pos && pos < e)) lost.push({ pos, directive });
+    }
+  }
+  lost.sort((a, b) => a.pos - b.pos);
+  for (const { pos, directive } of lost) {
+    errors.push(makeDiagnostic(lostDirectiveMessage(directive), 'error', locFromPos(text, pos, file)));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -608,7 +744,10 @@ function parseTypeNode(
       const sizeText = typeArgs[1]!.getText().trim();
       const size = parseInt(sizeText, 10);
 
-      if (isNaN(size) || size <= 0) {
+      // N-307: a bigint suffix (`2n`) or a numeric separator (`1_0`) is
+      // refused outright; parseInt would read `1_0` as 1 while every other
+      // tier reads 10.
+      if (isNaN(size) || size <= 0 || /[n_]/.test(sizeText)) {
         errors.push(makeDiagnostic(
           `FixedArray size must be a positive integer literal, got '${sizeText}'`,
           'error',
@@ -652,11 +791,13 @@ function parseStatements(
 ): Statement[] {
   const result: Statement[] = [];
 
-  // Block can be a Block node or a SourceFile
-  const stmts = blockOrBody.getChildrenOfKind(SyntaxKind.Block).length > 0
-    ? blockOrBody.getFirstChildByKindOrThrow(SyntaxKind.Block).getStatements()
-    : (blockOrBody.isKind(SyntaxKind.Block)
-        ? blockOrBody.getStatements()
+  // F-064: a Block's own statements come first. Probing for a child Block
+  // before checking `isKind(Block)` picked a NESTED bare block `{ ... }` inside
+  // the body and used its statements AS the body, silently dropping the rest.
+  const stmts = blockOrBody.isKind(SyntaxKind.Block)
+    ? blockOrBody.getStatements()
+    : (blockOrBody.getChildrenOfKind(SyntaxKind.Block).length > 0
+        ? blockOrBody.getFirstChildByKindOrThrow(SyntaxKind.Block).getStatements()
         : []);
 
   for (const stmt of stmts) {
@@ -1142,17 +1283,11 @@ function parseExpression(
     case SyntaxKind.Identifier:
       return { kind: 'identifier', name: node.getText(), sourceLocation: locFromNode(node, file) };
 
-    case SyntaxKind.BigIntLiteral: {
-      const text = node.getText();
-      // BigInt literals in TS end with 'n', e.g. '42n'
-      const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-      return { kind: 'bigint_literal', value: BigInt(numStr) };
-    }
-
+    case SyntaxKind.BigIntLiteral:
     case SyntaxKind.NumericLiteral: {
-      // Plain numeric literals (e.g., 42) -- treat as bigint for Rúnar
-      const numText = node.getText();
-      return { kind: 'bigint_literal', value: BigInt(numText) };
+      // `42n` and plain `42` are both Rúnar bigints. A malformed literal was
+      // already refused by reportInvalidNumericLiterals (F-026).
+      return { kind: 'bigint_literal', value: tsLiteralValue(node.getText()) ?? 0n };
     }
 
     case SyntaxKind.TrueKeyword:
@@ -1192,6 +1327,13 @@ function parseExpression(
     case SyntaxKind.AsExpression: {
       // Type assertions: ignore the type part and just parse the expression
       const asExpr = node.asKindOrThrow(SyntaxKind.AsExpression);
+      // N-359: `number` is not a Rúnar type, so an assertion may not smuggle it
+      // past the declaration-site refusal. Every other asserted type (including
+      // `const`) stays erased, as in all seven tiers.
+      const assertedType = asExpr.getTypeNode();
+      if (assertedType && (assertedType.getKind() === SyntaxKind.NumberKeyword || assertedType.getText().trim() === 'number')) {
+        parseTypeNode(assertedType, file, errors);
+      }
       return parseExpression(asExpr.getExpression(), file, errors);
     }
 
@@ -1680,10 +1822,8 @@ function encodeAsmPushLiteral(
 ): string | undefined {
   if (node.isKind(SyntaxKind.BigIntLiteral)) {
     const text = node.getText();
-    const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-    try {
-      return encodePushBigIntHex(BigInt(numStr));
-    } catch {
+    const v = tsLiteralValue(text);
+    if (v === null) {
       errors.push(makeDiagnostic(
         `push() argument is not a valid BigInt literal: '${text}'`,
         'error',
@@ -1691,12 +1831,13 @@ function encodeAsmPushLiteral(
       ));
       return undefined;
     }
+    return encodePushBigIntHex(v);
   }
 
   if (node.isKind(SyntaxKind.NumericLiteral)) {
     const text = node.getText();
-    const n = Number(text);
-    if (!Number.isFinite(n) || Math.floor(n) !== n) {
+    const v = tsLiteralValue(text);
+    if (v === null) {
       errors.push(makeDiagnostic(
         `push() numeric argument must be an integer, got '${text}'`,
         'error',
@@ -1704,7 +1845,7 @@ function encodeAsmPushLiteral(
       ));
       return undefined;
     }
-    return encodePushBigIntHex(BigInt(n));
+    return encodePushBigIntHex(v);
   }
 
   if (node.isKind(SyntaxKind.PrefixUnaryExpression)) {
@@ -1715,18 +1856,10 @@ function encodeAsmPushLiteral(
       if (inner === undefined) return undefined;
       // Re-encode as negative by reparsing — simplest way to keep the
       // script-number sign-bit logic in one place.
-      if (operand.isKind(SyntaxKind.BigIntLiteral)) {
-        const text = operand.getText();
-        const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-        try {
-          return encodePushBigIntHex(-BigInt(numStr));
-        } catch {
-          // already diagnosed
-          return undefined;
-        }
-      }
-      if (operand.isKind(SyntaxKind.NumericLiteral)) {
-        return encodePushBigIntHex(-BigInt(operand.getText()));
+      if (operand.isKind(SyntaxKind.BigIntLiteral) || operand.isKind(SyntaxKind.NumericLiteral)) {
+        const v = tsLiteralValue(operand.getText());
+        // null was already diagnosed by the recursive call above
+        return v === null ? undefined : encodePushBigIntHex(-v);
       }
     }
     errors.push(makeDiagnostic(
@@ -1785,8 +1918,7 @@ function parseArityLiteral(
   // BigInt literal: `0n`, `1n`, ...
   if (initNode.isKind(SyntaxKind.BigIntLiteral)) {
     const text = initNode.getText();
-    const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-    const n = Number(numStr);
+    const n = Number(tsLiteralValue(text) ?? NaN);
     if (!Number.isFinite(n) || Math.floor(n) !== n || n < 0) {
       errors.push(makeDiagnostic(
         `asm() ${fieldName} must be a non-negative integer literal, got '${text}'`,
@@ -1801,7 +1933,7 @@ function parseArityLiteral(
   // Plain numeric literal: `0`, `1`, ...
   if (initNode.isKind(SyntaxKind.NumericLiteral)) {
     const text = initNode.getText();
-    const n = Number(text);
+    const n = Number(tsLiteralValue(text) ?? NaN);
     if (!Number.isFinite(n) || Math.floor(n) !== n || n < 0) {
       errors.push(makeDiagnostic(
         `asm() ${fieldName} must be a non-negative integer literal, got '${text}'`,
@@ -1891,15 +2023,260 @@ function parseTernaryExpression(
 // Source location helpers
 // ---------------------------------------------------------------------------
 
-function locFromNode(node: Node, file: string): SourceLocation {
-  const start = node.getStartLineNumber();
-  const pos = node.getStart();
-  const sourceFile = node.getSourceFile();
-  const lineAndCol = sourceFile.getLineAndColumnAtPos(pos);
+/** F-026: the exact value of a .runar.ts numeric literal, or null. */
+function tsLiteralValue(text: string): bigint | null {
+  return parseIntLiteral('ts', text)?.value ?? null;
+}
 
+/**
+ * F-026: every NumericLiteral / BigIntLiteral, extended over the
+ * [0-9A-Za-z_] characters glued to it (TypeScript ends `0b102` at `0b10` and
+ * starts a new literal at `2`), must be a TypeScript integer literal.
+ */
+function reportInvalidNumericLiterals(
+  sf: ts.SourceFile,
+  source: string,
+  file: string,
+  errors: CompilerDiagnostic[],
+): void {
+  let coveredTo = -1;
+  const visit = (node: ts.Node): void => {
+    if (node.kind === ts.SyntaxKind.NumericLiteral || node.kind === ts.SyntaxKind.BigIntLiteral) {
+      const start = node.getStart(sf);
+      if (start >= coveredTo) {
+        let end = node.getEnd();
+        while (end < source.length && isNumberContinue(source[end])) end++;
+        coveredTo = end;
+        const text = source.slice(start, end);
+        if (parseIntLiteral('ts', text) === null) {
+          const { line, character } = sf.getLineAndCharacterOfPosition(start);
+          errors.push(makeDiagnostic(invalidIntegerLiteral('ts', text), 'error', { file, line: line + 1, column: character }));
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
+
+/** F-026: TypeScript's own syntax errors, which ts-morph records and recovers from. */
+function reportSyntaxDiagnostics(sf: ts.SourceFile, file: string, errors: CompilerDiagnostic[]): void {
+  const diags = (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+  for (const d of diags) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(d.start ?? 0);
+    errors.push(makeDiagnostic(
+      TS_SYNTAX_ERROR_PREFIX + ts.flattenDiagnosticMessageText(d.messageText, ' '),
+      'error',
+      { file, line: line + 1, column: character },
+    ));
+  }
+}
+
+/** N-121: the first `?.` (a QuestionDotToken), located at its `?`. */
+function reportOptionalChaining(sf: ts.SourceFile, file: string, errors: CompilerDiagnostic[]): void {
+  let found: ts.Node | undefined;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node.kind === ts.SyntaxKind.QuestionDotToken) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  if (found) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(found.getStart(sf));
+    errors.push(makeDiagnostic(OPTIONAL_CHAINING, 'error', { file, line: line + 1, column: character }));
+  }
+}
+
+function reportUnterminatedLiterals(
+  sf: ts.SourceFile,
+  file: string,
+  errors: CompilerDiagnostic[],
+): void {
+  const visit = (node: ts.Node): void => {
+    if ((node as ts.Node & Partial<ts.LiteralLikeNode>).isUnterminated === true) {
+      const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: line + 1, column: character }));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
+
+/**
+ * N-423: the offset of the first non-ASCII code unit of `src` outside a
+ * comment or a string / template literal, or -1. `//` comments end at a line
+ * break (`\n`, `\r`, U+2028, U+2029), `/* *\/` at its close or end of file;
+ * `'` / `"` strings at the matching quote or a `\n` / `\r`; templates at the
+ * matching backtick (they may span lines, and `${` is not tracked). A
+ * backslash in a string or template skips the next character (or `\r\n`).
+ * Go (parser.go) and Rust (parser.rs) port this scan exactly.
+ */
+function firstNonAsciiOutsideLiterals(src: string): number {
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    if (c === 0x2f && src.charCodeAt(i + 1) === 0x2f) {
+      i += 2;
+      while (i < n) {
+        const d = src.charCodeAt(i);
+        if (d === 0x0a || d === 0x0d || d === 0x2028 || d === 0x2029) break;
+        i++;
+      }
+    } else if (c === 0x2f && src.charCodeAt(i + 1) === 0x2a) {
+      const end = src.indexOf('*/', i + 2);
+      i = end < 0 ? n : end + 2;
+    } else if (c === 0x27 || c === 0x22 || c === 0x60) {
+      i++;
+      while (i < n) {
+        const d = src.charCodeAt(i);
+        if (d === c) { i++; break; }
+        if (c !== 0x60 && (d === 0x0a || d === 0x0d)) break;
+        if (d === 0x5c) i += src.startsWith('\r\n', i + 1) ? 3 : 2;
+        else i++;
+      }
+    } else if (c >= 0x80) {
+      return i;
+    } else {
+      i++;
+    }
+  }
+  return -1;
+}
+
+function locFromNode(node: Node, file: string): SourceLocation {
+  return locFromPos(node.getSourceFile().getFullText(), node.getStart(), file);
+}
+
+/** `locFromNode` for a raw offset into the source text. */
+function locFromPos(text: string, pos: number, file: string): SourceLocation {
+  const breaks = lineBreaksOf(text);
+  // N-180: the same numbers ts-morph's getStartLineNumber() / getLineAndColumnAtPos()
+  // give (line = 1 + count of '\n' before pos; column = distance from the last
+  // '\n' or '\r' before pos), but by binary search over a per-text index —
+  // ts-morph rescans the text from offset 0 on every call, which made parsing
+  // quadratic in file size (a 20 000-method file ran past 200 s of CPU).
   return {
     file,
-    line: start,
-    column: lineAndCol.column - 1, // 0-based
+    line: 1 + countBelow(breaks.nl, pos),
+    column: pos - (breaks.any[countBelow(breaks.any, pos) - 1] ?? -1) - 1, // 0-based
   };
+}
+
+const lineBreakCache = new Map<string, { nl: number[]; any: number[] }>();
+
+/** Ascending offsets of every '\n', and of every '\n' or '\r', in `text`. */
+function lineBreaksOf(text: string): { nl: number[]; any: number[] } {
+  let hit = lineBreakCache.get(text);
+  if (!hit) {
+    hit = { nl: [], any: [] };
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 10) hit.nl.push(i);
+      if (c === 10 || c === 13) hit.any.push(i);
+    }
+    lineBreakCache.clear(); // one source at a time; never grows past one entry
+    lineBreakCache.set(text, hit);
+  }
+  return hit;
+}
+
+/** Number of entries of the ascending array `xs` that are < `pos`. */
+function countBelow(xs: number[], pos: number): number {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (xs[mid]! < pos) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// ---------------------------------------------------------------------------
+// F-213 measure (A) for the .runar.ts surface
+// ---------------------------------------------------------------------------
+
+function isStatementKind(k: ts.SyntaxKind): boolean {
+  return k === ts.SyntaxKind.Block
+    || (k >= ts.SyntaxKind.FirstStatement && k <= ts.SyntaxKind.LastStatement);
+}
+
+/**
+ * The parse-nesting counter (measure A) of `child`, given its parent's.
+ * Mirrors what the hand-written surface parsers count: a statement inside a
+ * body (+1; a block is free unless it is itself a nested statement), each
+ * expression slot of a statement / declaration, a parenthesised group, a call
+ * or `new` argument, an element-access index, an array element, a ternary arm,
+ * a prefix-unary operand, a nested type argument, an operand of an
+ * intersection / union type. Binary operands, member objects and callees add
+ * nothing.
+ */
+function tsChildNesting(parent: ts.Node, child: ts.Node, level: number): number {
+  const pk = parent.kind;
+  if (isStatementKind(child.kind) && (pk === ts.SyntaxKind.Block || isStatementKind(pk))) {
+    if (child.kind === ts.SyntaxKind.Block && pk !== ts.SyntaxKind.Block) return level;
+    return level + 1;
+  }
+  switch (pk) {
+    case ts.SyntaxKind.ExpressionStatement:
+    case ts.SyntaxKind.IfStatement:
+    case ts.SyntaxKind.ReturnStatement:
+    case ts.SyntaxKind.ThrowStatement:
+    case ts.SyntaxKind.WhileStatement:
+    case ts.SyntaxKind.DoStatement:
+    case ts.SyntaxKind.SwitchStatement:
+      return child === (parent as ts.ExpressionStatement).expression ? level + 1 : level;
+    case ts.SyntaxKind.ForStatement: {
+      const f = parent as ts.ForStatement;
+      return child === f.condition || child === f.incrementor
+        || (child === f.initializer && child.kind !== ts.SyntaxKind.VariableDeclarationList)
+        ? level + 1 : level;
+    }
+    case ts.SyntaxKind.VariableDeclaration:
+    case ts.SyntaxKind.PropertyDeclaration:
+    case ts.SyntaxKind.Parameter:
+      return child === (parent as ts.VariableDeclaration).initializer ? level + 1 : level;
+    case ts.SyntaxKind.ParenthesizedExpression:
+    case ts.SyntaxKind.PrefixUnaryExpression:
+    case ts.SyntaxKind.ArrayLiteralExpression:
+      return level + 1;
+    case ts.SyntaxKind.CallExpression:
+    case ts.SyntaxKind.NewExpression: {
+      const args = (parent as ts.CallExpression).arguments;
+      return args !== undefined && args.includes(child as ts.Expression) ? level + 1 : level;
+    }
+    case ts.SyntaxKind.ElementAccessExpression:
+      return child === (parent as ts.ElementAccessExpression).argumentExpression ? level + 1 : level;
+    case ts.SyntaxKind.ConditionalExpression:
+      return child === (parent as ts.ConditionalExpression).condition ? level : level + 1;
+    case ts.SyntaxKind.TypeReference: {
+      const typeArgs = (parent as ts.TypeReferenceNode).typeArguments;
+      return typeArgs !== undefined && typeArgs.includes(child as ts.TypeNode) ? level + 1 : level;
+    }
+    // N-311: each operand of an intersection / union type. TypeScript keeps
+    // `A & B & C` as one flat list, so its operands share a level.
+    case ts.SyntaxKind.IntersectionType:
+    case ts.SyntaxKind.UnionType:
+      return level + 1;
+    default:
+      return level;
+  }
+}
+
+/** The first node whose parse nesting exceeds the limit, or null. Iterative. */
+function tsParseNestingViolation(sf: ts.SourceFile): ts.Node | null {
+  const limit = InputLimits.MAX_SOURCE_NESTING;
+  const work: Array<[ts.Node, number]> = [[sf, 0]];
+  while (work.length > 0) {
+    const [node, level] = work.pop()!;
+    if (level > limit) return node;
+    ts.forEachChild(node, (child) => {
+      work.push([child, tsChildNesting(node, child, level)]);
+    });
+  }
+  return null;
 }

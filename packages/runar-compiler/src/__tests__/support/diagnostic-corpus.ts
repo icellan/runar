@@ -390,6 +390,29 @@ export class Neg extends SmartContract {
 }
 `,
   },
+  {
+    // N-180: 130 private helpers h0 -> h1 -> ... -> h129; `go` sits at call
+    // depth 130, past MAX_CALL_DEPTH (128).
+    target: "call depth of method '*' exceeds MAX_CALL_DEPTH",
+    name: 'call-chain-too-deep',
+    source: `import { SmartContract, assert } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  readonly a: bigint;
+
+  constructor(a: bigint) {
+    super(a);
+    this.a = a;
+  }
+
+${Array.from({ length: 129 }, (_, i) => `  private h${i}(x: bigint): bigint { return this.h${i + 1}(x); }\n`).join('')}  private h129(x: bigint): bigint { return x; }
+
+  public go(x: bigint) {
+    assert(this.h0(x) > 0n);
+  }
+}
+`,
+  },
 
   // ------------------------------------------------------------------
   // 02-validate: statements and literals
@@ -934,5 +957,40 @@ export class Neg extends SmartContract {
     assert(len(s) > 0n);`,
       { imports: 'StatefulSmartContract, assert, ByteString, len, extractPrevOutputScript' },
     ),
+  },
+  {
+    // N-398: the Go-only refusal for a real builtin that this tier has no codegen for.
+    target: "belongs to the * family, which is scoped to the Go tier by project policy",
+    name: 'bn254-pairing-go-only-builtin',
+    source: `import { SmartContract, assert, bn254Pairing } from 'runar-lang';
+import type { Point } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public go(p: Point, x: bigint) {
+    assert(bn254Pairing(p, x, x, x, x) !== undefined);
+  }
+}
+`,
+  },
+  {
+    // N-403: the other Go-only builtins get the same refusal as the BN254 pairing names.
+    target: "belongs to the * family, which is scoped to the Go tier by project policy",
+    name: 'groth16-public-input-go-only-builtin',
+    source: `import { SmartContract, assert } from 'runar-lang';
+
+export class Neg extends SmartContract {
+  constructor() {
+    super();
+  }
+
+  public go(x: bigint) {
+    assert(groth16PublicInput(x, x) !== undefined);
+  }
+}
+`,
   },
 ];

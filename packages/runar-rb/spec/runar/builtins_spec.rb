@@ -131,6 +131,32 @@ RSpec.describe Runar::Builtins do
       expected = ctx.sha256(sha_empty)
       expect(ctx.hash256('')).to eq(expected)
     end
+
+    # F-142: the compiled script accepts 0..119 bytes of `remaining` (its
+    # two-block path pads to 120) and aborts on more. Proves the boundary
+    # lengths equal standard SHA-256 over a chained state and that 120 is
+    # refused instead of returning a digest the chain never reproduces.
+    # Does not prove anything about the compiled script itself.
+    describe 'sha256_finalize remaining-length band' do
+      let(:first) { (0...64).to_a.pack('C*') }
+      let(:state) do
+        ctx.sha256_compress('6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19',
+                            first.unpack1('H*'))
+      end
+
+      it 'matches standard SHA-256 at the boundary lengths 0..119' do
+        [0, 1, 55, 56, 63, 64, 65, 100, 118, 119].each do |n|
+          tail = (0...n).map { |i| (0xA0 + i) & 0xff }.pack('C*')
+          expect(ctx.sha256_finalize(state, tail.unpack1('H*'), (64 + n) * 8))
+            .to eq(Digest::SHA256.hexdigest(first + tail)), "remaining len #{n}"
+        end
+      end
+
+      it 'refuses 120 bytes like the compiled script' do
+        expect { ctx.sha256_finalize(state, '00' * 120, 184 * 8) }
+          .to raise_error(ArgumentError, /sha256_finalize: remaining must be 0-119 bytes/)
+      end
+    end
   end
 
   describe 'math functions' do
@@ -139,13 +165,14 @@ RSpec.describe Runar::Builtins do
       expect(ctx.safediv(-7, 2)).to eq(-3)
       expect(ctx.safediv(7, -2)).to eq(-3)
       expect(ctx.safediv(0, 5)).to eq(0)
-      expect(ctx.safediv(5, 0)).to eq(0)
+      # The script aborts on a zero divisor (OP_0NOTEQUAL OP_VERIFY) (F-134).
+      expect { ctx.safediv(5, 0) }.to raise_error(ZeroDivisionError)
     end
 
     it 'safemod matches Bitcoin Script behaviour' do
       expect(ctx.safemod(7, 3)).to eq(1)
       expect(ctx.safemod(-7, 3)).to eq(-1)
-      expect(ctx.safemod(7, 0)).to eq(0)
+      expect { ctx.safemod(7, 0) }.to raise_error(ZeroDivisionError)
     end
 
     it 'clamp constrains values' do
@@ -304,17 +331,51 @@ RSpec.describe Runar::Builtins do
   end
 
   describe 'preimage extraction' do
-    it 'extract_output_hash returns first 32 bytes when preimage is long enough' do
-      # hash256 produces 32 bytes (64 hex chars) -- long enough to extract from
-      preimage = ctx.hash256('deadbeef')
+    # N-246: extract_output_hash must return the preimage's actual
+    # hashOutputs field, not the leading 32 bytes (which cover nVersion +
+    # most of hashPrevouts in a real BIP-143 preimage). Mirrors the landed
+    # TS fix (N-245, packages/runar-lang/src/runtime/preimage.ts) and the
+    # Java fix (N-188, Preimage.extractOutputHash).
+    #
+    # build_preimage_hex_n246 lays out a syntactically valid BIP-143
+    # preimage with a zero-length scriptCode, so every field lands at its
+    # fixed offset:
+    #   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    #   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    #   locktime(4) sighashType(4)
+    def build_preimage_hex_n246(hash_prevouts_byte, hash_outputs_byte)
+      version = '01000000'
+      hash_prevouts = hash_prevouts_byte * 32
+      hash_sequence = '00' * 32
+      outpoint = '00' * 36
+      script_code_len = '00'
+      amount = '1027000000000000' # 10000 satoshis, LE int64
+      sequence = 'feffffff'
+      hash_outputs = hash_outputs_byte * 32
+      locktime = '00000000'
+      sighash_type = '41000000'
+      version + hash_prevouts + hash_sequence + outpoint + script_code_len +
+        amount + sequence + hash_outputs + locktime + sighash_type
+    end
+
+    # Proves extract_output_hash reads the end-relative hashOutputs window,
+    # matching the compiled opcode sequence (OP_SIZE 40 OP_SUB OP_SPLIT
+    # OP_NIP 32 OP_SPLIT OP_DROP), instead of echoing the leading bytes
+    # (nVersion + most of hashPrevouts). Does not prove anything about
+    # on-chain behaviour, which this mock never touches.
+    it 'extract_output_hash returns hashOutputs, not the leading bytes' do
+      preimage = build_preimage_hex_n246('aa', 'bb')
       result = ctx.extract_output_hash(preimage)
-      expect(result.length).to eq(64)
-      expect(result).to eq(preimage[0, 64])
+      expect(result).to eq('bb' * 32)
+      expect(result).not_to eq('aa' * 32)
     end
 
     it 'extract_output_hash returns 32 zero bytes when preimage is too short' do
       expect(ctx.extract_output_hash('')).to eq('00' * 32)
       expect(ctx.extract_output_hash('aabb')).to eq('00' * 32) # 2 bytes = too short
+      # 32 bytes (64 hex chars) is still too short: hashOutputs needs 40
+      # bytes to exist (it sits 40 bytes before the end of the preimage).
+      expect(ctx.extract_output_hash(ctx.hash256('deadbeef'))).to eq('00' * 32)
     end
 
     it 'extract_output_hash handles nil by treating it as empty string' do

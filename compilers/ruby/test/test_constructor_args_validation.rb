@@ -126,4 +126,67 @@ class TestConstructorArgsValidation < Minitest::Test
     artifact = RunarCompiler.compile_from_program(program, disable_constant_folding: true)
     assert_operator artifact.constructor_slots.length, :>=, 1
   end
+
+  # F-101 -- (d) value kind / byte-width check.
+  #
+  # Before the fix `_apply_constructor_args` baked any value into the property:
+  # `true` against a 20-byte hash pushed OP_1, `42` a 1-byte number, a 6-byte
+  # hex string a 6-byte push -- every one compiled and is unspendable. Proves:
+  # each mismatch is refused with the TypeScript reference's diagnostic, naming
+  # the property, its declared type and the expected shape. Does NOT prove
+  # anything about the SDK's deploy-time constructorSlots path.
+  def f101_p2pkh(type)
+    <<~TS
+      class P2PKH extends SmartContract {
+        readonly pubKeyHash: #{type};
+        constructor(pubKeyHash: #{type}) { super(pubKeyHash); this.pubKeyHash = pubKeyHash; }
+        public unlock(sig: Sig, pubKey: PubKey) {
+          assert(hash160(pubKey) === this.pubKeyHash);
+          assert(checkSig(sig, pubKey));
+        }
+      }
+    TS
+  end
+
+  F101_FLAGGED = <<~TS
+    class Flagged extends SmartContract {
+      readonly target: bigint;
+      readonly on: boolean;
+      constructor(target: bigint, on: boolean) { super(target, on); this.target = target; this.on = on; }
+      public check(x: bigint) { assert(this.on); assert(x === this.target); }
+    }
+  TS
+
+  def test_f101_rejects_a_value_that_does_not_match_the_property_type
+    [
+      ["ByteString", true, "must be a hex string, got a boolean"],
+      ["Addr", true, "must be exactly 20 bytes of hex, got a boolean"],
+      ["Addr", 42, "must be exactly 20 bytes of hex, got an integer"],
+      ["Addr", "aabbccddeeff", "must be exactly 20 bytes of hex, got 6 bytes of hex"],
+      ["Addr", "zzzz-not-hex", "must be exactly 20 bytes of hex, got a non-hex string"],
+      ["ByteString", "abc", "must be a hex string, got a non-hex string"],
+      ["ByteString", 1.5, "must be a hex string, got an unsupported value"],
+    ].each do |type, value, want|
+      err = assert_raises(RunarCompiler::CompilationError, "#{type} <- #{value.inspect}") do
+        compile_with_args(f101_p2pkh(type), { "pubKeyHash" => value }, "P2PKH.runar.ts")
+      end
+      assert_includes err.message, "property 'pubKeyHash' (#{type})"
+      assert_includes err.message, want
+    end
+  end
+
+  def test_f101_rejects_bigint_and_boolean_mismatches
+    err = assert_raises(RunarCompiler::CompilationError) do
+      compile_with_args(F101_FLAGGED, { "target" => "2a", "on" => 1 }, "Flagged.runar.ts")
+    end
+    assert_includes err.message, "property 'target' (bigint) must be an integer, got 1 bytes of hex"
+    assert_includes err.message, "property 'on' (boolean) must be a boolean, got an integer"
+  end
+
+  def test_f101_accepts_correctly_typed_values
+    artifact = compile_with_args(f101_p2pkh("Addr"), { "pubKeyHash" => "AB" * 20 }, "P2PKH.runar.ts")
+    assert_includes artifact.script.downcase, "ab" * 20
+    compile_with_args(f101_p2pkh("ByteString"), { "pubKeyHash" => "" }, "P2PKH.runar.ts")
+    compile_with_args(F101_FLAGGED, { "target" => 42, "on" => true }, "Flagged.runar.ts")
+  end
 end

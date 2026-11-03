@@ -11,13 +11,19 @@
  * across `crypto-exempt.json` / `harness-inapplicable.json`) and got NO real
  * execution — all seven tiers agreed on bytes nobody ever ran.
  *
- * Two spec kinds:
+ * Three spec kinds:
  *   - `stateless-signed` — a stateless SmartContract; `$sig` args are filled
  *     with real DER signatures; the accept path is additionally cross-checked
  *     against the ANF interpreter (source-vs-script agreement).
  *   - `stateful` — a StatefulSmartContract driven deploy→call through the SDK
  *     and re-validated on `Spend` (real checkPreimage + OP_CODESEPARATOR +
  *     optional user checkSig).
+ *   - `precompiled-hex` (N-314) — a constructor-less stateless fixture whose
+ *     `compilers` allowlist excludes ts (Go-only codegen), so nothing here can
+ *     compile it. The COMMITTED `expected-script.hex` is executed as-is, with
+ *     argument types read from the committed `expected-ir.json`, and the spec
+ *     must content-pin that hex in `goldenHashes` — the pin is checked below,
+ *     so a spec can never silently run bytes other than the ones it vouches for.
  *
  * Every spend asserts the REAL engine matches the declared expectation. Each
  * fixture carries ≥1 accept and ≥1 reject/near-miss (wrong key, wrong signer,
@@ -29,9 +35,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
   runStatelessSigned,
   runStatefulSpend,
+  runPrecompiledHexSpend,
   testKey,
   type StatelessArg,
 } from '../../packages/runar-testing/src/index.js';
@@ -42,7 +50,9 @@ const SPEC_DIR = join(__dirname, 'real-crypto');
 
 interface Spec {
   fixture: string;
-  kind: 'stateless-signed' | 'stateful';
+  kind: 'stateless-signed' | 'stateful' | 'precompiled-hex';
+  /** precompiled-hex: sha256 pins of the committed goldens it executes. */
+  goldenHashes?: Record<string, string>;
   signerKey?: string;
   constructorArgs?: unknown;
   spends: SpendSpec[];
@@ -63,7 +73,21 @@ interface SpendSpec {
    *  an all-final transaction, whose nLockTime consensus ignores entirely. */
   sequence?: number;
   satoshis?: number;
+  /** Satoshis the deploy locks (F-024 value-conservation specs). */
+  deploySatoshis?: number;
   tamperOutput?: boolean;
+  /** N-045: build the call with an attacker SDK that believes these
+   *  fixed-width types have these byte widths (see `attackerFieldWidths` in
+   *  real-crypto-execution.ts), so the covenant's own width check rejects. */
+  attackerFieldWidths?: Record<string, number>;
+  /** N-051: claim a truncated `_codePart` ending at a 0x6a inside a baked
+   *  readonly value (see `truncatedCodePart` in real-crypto-execution.ts). */
+  truncatedCodePart?: { within: string; at: number };
+  /** F-134-FU: build the call as an attacker who skips the SDK's local ANF
+   *  pre-check and commits this continuation state (see `attackerNewState` in
+   *  real-crypto-execution.ts). Only for a `cryptoNearMiss` reject: the row
+   *  also asserts the default SDK path still refuses the same call. */
+  attackerNewState?: Record<string, unknown>;
   /** Independent, hand-authored expected continuation state after an accepted
    *  stateful spend (audit #4). Property → scalar ("1n" | true | "0x.."). The
    *  on-chain state decoded from the call tx MUST equal this — accept/reject
@@ -82,6 +106,9 @@ interface SpendSpec {
   issue?: string;
   // both
   cryptoNearMiss?: boolean;
+  /** precompiled-hex reject: the engine error must match this (case-insensitive)
+   *  regex, pinning the FAILURE CLASS and not just the verdict. */
+  vmErrorPattern?: string;
 }
 
 /** Resolve the `.runar.ts` source for a fixture. */
@@ -189,6 +216,11 @@ function resolveStatefulArgs(raw: unknown[]): unknown[] {
 
 const specFiles = readdirSync(SPEC_DIR).filter((f) => f.endsWith('.json'));
 
+/** Per-test budget for a `precompiled-hex` spend only: the bn254-pairing golden
+ *  is a ~4.7 MB script (~2.5 s per spend on @bsv/sdk Spend locally). Every other
+ *  kind keeps the default timeout. */
+const PRECOMPILED_TIMEOUT_MS = 120_000;
+
 /** A crypto near-miss reject must be rejected BY THE SCRIPT GUARD on the real
  *  Spend engine, not by a harness/SDK error before the engine ran — otherwise a
  *  reject that fails for an unrelated SDK reason silently passes and the guard it
@@ -219,7 +251,24 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
         } [${s.note ?? ''}]`;
 
         it(label, async () => {
-          if (spec.kind === 'stateless-signed') {
+          if (spec.kind === 'precompiled-hex') {
+            const dir = join(TESTS_DIR, spec.fixture);
+            const r = runPrecompiledHexSpend({
+              scriptHex: readFileSync(join(dir, 'expected-script.hex'), 'utf-8'),
+              irJson: readFileSync(join(dir, 'expected-ir.json'), 'utf-8'),
+              method: s.method,
+              args: resolveStatelessArgs(s.args) as (bigint | boolean | Uint8Array)[],
+            });
+            expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
+            if (s.expect === 'reject') {
+              // Every precompiled reject is a script rejection: no interpreter
+              // runs, so a harness error must never pass for one.
+              expect(r.reachedEngine, `harness error before the engine ran: ${r.vmError}`).toBe(true);
+              if (s.vmErrorPattern !== undefined) {
+                expect(r.vmError ?? '').toMatch(new RegExp(s.vmErrorPattern, 'i'));
+              }
+            }
+          } else if (spec.kind === 'stateless-signed') {
             const r = runStatelessSigned({
               source,
               fileName,
@@ -240,7 +289,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
             }
             assertNearMissReachedEngine(spec.fixture, s, r);
           } else {
-            const r = await runStatefulSpend({
+            const spendOpts = {
               source,
               fileName,
               method: s.method,
@@ -250,8 +299,29 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               lockTime: s.lockTime,
               sequence: s.sequence,
               satoshis: s.satoshis,
+              deploySatoshis: s.deploySatoshis,
               tamperOutput: s.tamperOutput,
-            });
+              attackerFieldWidths: s.attackerFieldWidths,
+              truncatedCodePart: s.truncatedCodePart,
+            };
+            let attackerNewState: Record<string, unknown> | undefined;
+            if (s.attackerNewState !== undefined) {
+              // The attacker path exists only to put a REJECTED spend in front
+              // of the engine; it must never manufacture an accept.
+              expect(
+                s.expect === 'reject' && s.cryptoNearMiss === true,
+                `${spec.fixture}.${s.method}: attackerNewState is only valid on a cryptoNearMiss reject`,
+              ).toBe(true);
+              attackerNewState = {};
+              for (const [k, v] of Object.entries(s.attackerNewState)) attackerNewState[k] = stateValue(v);
+              // F-134 default stays fail-closed: the honest SDK refuses this
+              // call before any transaction exists.
+              const honest = await runStatefulSpend(spendOpts);
+              expect(honest.vmAccepted).toBe(false);
+              expect(honest.reachedEngine, `honest SDK must refuse before the engine: ${honest.vmError}`).toBe(false);
+              expect(honest.vmError).toMatch(/the ANF interpreter could not evaluate the method body/);
+            }
+            const r = await runStatefulSpend({ ...spendOpts, attackerNewState });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
             assertNearMissReachedEngine(spec.fixture, s, r);
             // Independent state-VALUE check (audit #4): accept/reject is blind to
@@ -300,8 +370,37 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               }
             }
           }
-        });
+        }, spec.kind === 'precompiled-hex' ? PRECOMPILED_TIMEOUT_MS : undefined);
       }
+    });
+  }
+});
+
+// N-314: a `precompiled-hex` spec is route (A) evidence for a golden nothing in
+// TS can re-derive, so it must be held to the bytes it vouches for. Every such
+// spec pins the CURRENT sha256 of the hex it executes (and of the IR it reads
+// argument types from), and is only legal for a fixture whose `compilers`
+// allowlist excludes ts — anywhere TS can compile the fixture, compiling fresh
+// (`stateless-signed`) is the stronger check and must be used instead.
+describe('real-crypto precompiled-hex specs pin the exact goldens they execute (N-314)', () => {
+  const sha256 = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  const precompiled = specFiles
+    .map((f) => JSON.parse(readFileSync(join(SPEC_DIR, f), 'utf-8')) as Spec)
+    .filter((sp) => sp.kind === 'precompiled-hex');
+
+  it('at least one precompiled-hex spec exists (the bn254-pairing Go-only fixture)', () => {
+    expect(precompiled.map((sp) => sp.fixture)).toContain('bn254-pairing');
+  });
+
+  for (const sp of precompiled) {
+    it(`${sp.fixture}: goldenHashes equal the committed goldens; allowlist excludes ts`, () => {
+      const dir = join(TESTS_DIR, sp.fixture);
+      for (const g of ['expected-script.hex', 'expected-ir.json']) {
+        expect(sp.goldenHashes?.[g], `${sp.fixture}: goldenHashes["${g}"]`).toBe(sha256(join(dir, g)));
+      }
+      const cfg = JSON.parse(readFileSync(join(dir, 'source.json'), 'utf-8')) as { compilers?: string[] };
+      expect(Array.isArray(cfg.compilers), `${sp.fixture}: needs a "compilers" allowlist`).toBe(true);
+      expect(cfg.compilers).not.toContain('ts');
     });
   }
 });

@@ -105,8 +105,10 @@ def asBytes? : Value → Option ByteArray
   -- NARROW slice of full numeric→bytes coercion: only the zero literal, which is the
   -- only int value the EC `reverse32` accumulator initialization (`OP_0`) produces.
   -- Non-zero `vBigint` is left rejected to avoid disturbing the existing typed-VM
-  -- semantics of `OP_EQUAL` / `OP_SIZE` / `OP_CHECKSIG` proofs (a full
+  -- semantics of `OP_EQUAL` / `OP_CHECKSIG` proofs (a full
   -- `vBigint n → encodeMinimalLE n` total form is faithful too but cascades).
+  -- `OP_SIZE` / `OP_SPLIT` read a non-zero `vBigint` through `asBytesNum?` below
+  -- instead (N-384).
   | .vBigint 0 => some ByteArray.empty
   | _          => none
 
@@ -119,6 +121,37 @@ theorem asBytes?_vBigint_ne_zero {x : Int} (hx : x ≠ 0) : asBytes? (.vBigint x
   | (0 : Int), hx => exact absurd rfl hx
   | (n + 1 : Nat), _ => rfl
   | Int.negSucc n, _ => rfl
+
+/-- **Byte view of a numeric operand (N-384).** `asBytes?` plus the full
+`vBigint i ↦ encodeMinimalLE i` arm, used ONLY by the length-reading byte ops
+`OP_SIZE` and `OP_SPLIT`. On a real Script stack a number IS its minimal
+sign-magnitude little-endian encoding, so `OP_SIZE` / `OP_SPLIT` on a numeric
+element read those bytes (the N-103 `log2` lowering does exactly this). The
+coercion is kept out of `asBytes?` itself so `OP_EQUAL`, `OP_CAT`, the hashes
+and `OP_CHECKSIG` keep their typed-VM semantics (see the comment above). Every
+value `asBytes?` already accepts goes through unchanged, `vBigint 0` included
+(`encodeMinimalLE 0` is the same empty vector). -/
+def asBytesNum? (v : Value) : Option ByteArray :=
+  match asBytes? v with
+  | some b => some b
+  | none =>
+      match v with
+      | .vBigint i => some (encodeMinimalLE i)
+      | _          => none
+
+@[simp] theorem asBytesNum?_vBytes (b : ByteArray) :
+    asBytesNum? (.vBytes b) = some b := rfl
+
+@[simp] theorem asBytesNum?_vOpaque (b : ByteArray) :
+    asBytesNum? (.vOpaque b) = some b := rfl
+
+/-- Every integer value reads as its minimal Script-number encoding. -/
+@[simp] theorem asBytesNum?_vBigint (i : Int) :
+    asBytesNum? (.vBigint i) = some (encodeMinimalLE i) := by
+  by_cases hi : i = 0
+  · subst hi
+    simp [asBytesNum?, encodeMinimalLE_zero]
+  · simp [asBytesNum?, asBytes?_vBigint_ne_zero hi]
 
 def asNonNegativeNat? (v : Value) : Option Nat :=
   match asInt? v with
@@ -668,7 +701,7 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       | .ok (vs, s') =>
           match vs with
           | [idx, v] =>
-              match asBytes? v, asNonNegativeNat? idx with
+              match asBytesNum? v, asNonNegativeNat? idx with
               | some bs, some i =>
                   if i > bs.size then
                     .error (.unsupported "OP_SPLIT: index past end")
@@ -681,7 +714,7 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       match s.stack with
       | [] => .error (.unsupported "OP_SIZE: empty stack")
       | v :: _ =>
-          match asBytes? v with
+          match asBytesNum? v with
           | some b => .ok (s.push (.vBigint b.size))
           | none   => .error (.typeError "OP_SIZE: not bytes")
   | "OP_BIN2NUM" =>
@@ -690,7 +723,14 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       | some (v, s') =>
           match asBytes? v with
           | some b => .ok (s'.push (.vBigint (decodeMinimalLE b)))
-          | none   => .error (.typeError "OP_BIN2NUM: not bytes")
+          | none   =>
+              -- N-384: a numeric element already IS the minimal encoding of
+              -- its value, and `OP_BIN2NUM` of a minimal encoding is that
+              -- value, so a non-zero `vBigint` passes through unchanged
+              -- (`vBigint 0` takes the `asBytes?` arm above and decodes to 0).
+              match v with
+              | .vBigint i => .ok (s'.push (.vBigint i))
+              | _          => .error (.typeError "OP_BIN2NUM: not bytes")
   | "OP_NUM2BIN" =>
       match popN s 2 with
       | .error e => .error e

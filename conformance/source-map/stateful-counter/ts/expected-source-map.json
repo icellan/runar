@@ -7,43 +7,55 @@
       "column": 4
     },
     {
+      "opcodeIndex": 108,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 39,
+      "column": 4
+    },
+    {
       "opcodeIndex": 109,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 39,
       "column": 4
     },
     {
-      "opcodeIndex": 324,
+      "opcodeIndex": 339,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 47,
       "column": 4
     },
     {
-      "opcodeIndex": 325,
+      "opcodeIndex": 340,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 47,
       "column": 4
     },
     {
-      "opcodeIndex": 326,
+      "opcodeIndex": 341,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 47,
       "column": 4
     },
     {
-      "opcodeIndex": 327,
+      "opcodeIndex": 342,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 47,
       "column": 4
     },
     {
-      "opcodeIndex": 328,
+      "opcodeIndex": 343,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 48,
       "column": 4
     },
     {
-      "opcodeIndex": 330,
+      "opcodeIndex": 344,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 48,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 345,
       "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
       "line": 48,
       "column": 4

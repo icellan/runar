@@ -86,7 +86,7 @@ class TestBlake3Codegen < Minitest::Test
   def test_blake3_compress_op_count_golden
     ops = []
     RunarCompiler::Codegen::Blake3.emit_blake3_compress(->(op) { ops << op })
-    assert_equal 10373, ops.length, "blake3Compress op count drift"
+    assert_equal 10379, ops.length, "blake3Compress op count drift"
   end
 
   def test_blake3_hash_op_count_golden

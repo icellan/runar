@@ -34,6 +34,11 @@ function isPushOne(op: StackOp): boolean {
   return isPushBigInt(op, 1n);
 }
 
+/** A typed `rot` op or its opcode-string form `OP_ROT` (N-376). */
+function isRot(op: StackOp): boolean {
+  return op.op === 'rot' || isOpcode(op, 'OP_ROT');
+}
+
 /**
  * Opcodes whose result is guaranteed to be a CANONICAL boolean — the minimal
  * script-number encoding of 0 (the empty element) or 1 (`{0x01}`), and nothing
@@ -126,6 +131,28 @@ const rules: PeepholeRule[] = [
   },
 
   // -------------------------------------------------------------------------
+  // ROT, ROT, ROT → remove all three (identity, N-376)
+  //
+  // OP_ROT is a 3-cycle on the top three items, so three in a row leave the
+  // stack as it was (given three items — with fewer the first ROT fails, and
+  // the input program fails the same way on the ops that consume them).
+  // Stack lowering emits the run when a three-argument consumer's arguments
+  // already sit on top in order. With the fixed-point loop a run of n ROTs
+  // ends as n mod 3; ROT ROT and a lone ROT are kept. Like the F-392 roll/pick
+  // rules it also matches the opcode-string form (`OP_ROT`) some codegen
+  // paths emit, so every tier deletes the same runs whichever form it uses.
+  // -------------------------------------------------------------------------
+  {
+    windowSize: 3,
+    match(ops) {
+      if (isRot(ops[0]!) && isRot(ops[1]!) && isRot(ops[2]!)) {
+        return [];
+      }
+      return null;
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // PUSH 1, OP_ADD → OP_1ADD
   // -------------------------------------------------------------------------
   {
@@ -152,30 +179,18 @@ const rules: PeepholeRule[] = [
   },
 
   // -------------------------------------------------------------------------
-  // PUSH 0, OP_ADD → remove both (identity: x + 0 = x)
+  // NO `PUSH 0, OP_ADD → []`, `PUSH 0, OP_SUB → []` or
+  // `OP_NEGATE, OP_NEGATE → []` rule (F-001).
+  //
+  // `x + 0`, `x - 0` and `-(-x)` are identities over integers, not over stack
+  // elements: OP_ADD / OP_SUB / OP_NEGATE decode their operand as a CScriptNum
+  // (rejecting a non-minimal encoding under strict rules) and push back the
+  // minimal re-encoding. A witness-supplied operand reaches the stack with no
+  // other normalisation, so deleting the opcode changes accept/reject and the
+  // value (e.g. into serialised state). Same class of bug as the OP_NOT pair
+  // below; unlike it, no local producer guard buys anything here — a constant
+  // producer is already folded by `const-fold-add` / `const-fold-sub`.
   // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isPushZero(ops[0]!) && isOpcode(ops[1]!, 'OP_ADD')) {
-        return [];
-      }
-      return null;
-    },
-  },
-
-  // -------------------------------------------------------------------------
-  // PUSH 0, OP_SUB → remove both (identity: x - 0 = x)
-  // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isPushZero(ops[0]!) && isOpcode(ops[1]!, 'OP_SUB')) {
-        return [];
-      }
-      return null;
-    },
-  },
 
   // -------------------------------------------------------------------------
   // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
@@ -205,19 +220,6 @@ const rules: PeepholeRule[] = [
         isOpcode(ops[2]!, 'OP_NOT')
       ) {
         return [ops[0]!];
-      }
-      return null;
-    },
-  },
-
-  // -------------------------------------------------------------------------
-  // OP_NEGATE, OP_NEGATE → remove both (double negation)
-  // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isOpcode(ops[0]!, 'OP_NEGATE') && isOpcode(ops[1]!, 'OP_NEGATE')) {
-        return [];
       }
       return null;
     },
@@ -328,13 +330,21 @@ const rules: PeepholeRule[] = [
   // New 2-op rules: Roll/Pick depth simplification
   // The stack lowerer emits PUSH(depth) + Roll/Pick pairs. These rules
   // consume both the push and the roll/pick, replacing with a single opcode.
+  //
+  // F-392: each rule also matches the opcode-string form (`{op:'opcode',
+  // code:'OP_ROLL'|'OP_PICK'}`) that some codegen paths (e.g. WOTS+-adjacent
+  // constructions) emit instead of the typed node -- the depth in that case
+  // comes from the preceding PUSH, same as the typed form. Matches
+  // Python's/Ruby's `optimizer.py`/`optimizer.rb`, which already accept
+  // both representations here.
   // =========================================================================
 
   // PUSH 0, Roll{0} → remove both (no-op)
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'roll' && ops[1]!.depth === 0) return [];
+      if (isPushBigInt(ops[0]!, 0n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_ROLL'))) return [];
       return null;
     },
   },
@@ -343,7 +353,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'roll' && ops[1]!.depth === 1) return [{ op: 'swap' }];
+      if (isPushBigInt(ops[0]!, 1n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 1) || isOpcode(ops[1]!, 'OP_ROLL'))) return [{ op: 'swap' }];
       return null;
     },
   },
@@ -352,7 +363,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 2n) && ops[1]!.op === 'roll' && ops[1]!.depth === 2) return [{ op: 'rot' }];
+      if (isPushBigInt(ops[0]!, 2n) &&
+          ((ops[1]!.op === 'roll' && ops[1]!.depth === 2) || isOpcode(ops[1]!, 'OP_ROLL'))) return [{ op: 'rot' }];
       return null;
     },
   },
@@ -361,7 +373,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'pick' && ops[1]!.depth === 0) return [{ op: 'dup' }];
+      if (isPushBigInt(ops[0]!, 0n) &&
+          ((ops[1]!.op === 'pick' && ops[1]!.depth === 0) || isOpcode(ops[1]!, 'OP_PICK'))) return [{ op: 'dup' }];
       return null;
     },
   },
@@ -370,7 +383,8 @@ const rules: PeepholeRule[] = [
   {
     windowSize: 2,
     match(ops) {
-      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'pick' && ops[1]!.depth === 1) return [{ op: 'over' }];
+      if (isPushBigInt(ops[0]!, 1n) &&
+          ((ops[1]!.op === 'pick' && ops[1]!.depth === 1) || isOpcode(ops[1]!, 'OP_PICK'))) return [{ op: 'over' }];
       return null;
     },
   },
@@ -501,12 +515,37 @@ const rules: PeepholeRule[] = [
  * Rules are applied in a single left-to-right pass, then the entire pass
  * is repeated until no more changes occur (fixed-point iteration).
  *
- * If-ops are recursively optimized: the then/else branches are each
- * optimized independently.
+ * If-ops are optimized bottom-up: the then/else branches are each
+ * optimized independently, before the list that holds them.
+ *
+ * N-264: bottom-up by an explicit list, not recursion. Private methods are
+ * inlined, so a chain of D helpers that each call the next under K nested
+ * ifs nests D*K if-ops here, and the recursive walk overflowed the JS stack
+ * at D=32 x 120. Every op list reachable through if arms is collected parents
+ * first, then optimized in reverse — children before parents, each list
+ * exactly as the recursive version optimized it.
  */
 export function optimizeStackIR(ops: StackOp[]): StackOp[] {
-  // First, recursively optimize nested if-blocks
-  let current = ops.map(op => optimizeNestedIf(op));
+  const lists: StackOp[][] = [ops];
+  for (let k = 0; k < lists.length; k++) {
+    for (const op of lists[k]!) {
+      if (op.op === 'if') {
+        lists.push(op.then);
+        if (op.else) lists.push(op.else);
+      }
+    }
+  }
+  const optimized = new Map<StackOp[], StackOp[]>();
+  for (let k = lists.length - 1; k >= 0; k--) {
+    const list = lists[k]!;
+    optimized.set(list, optimizeOneLevel(list.map(op => withOptimizedArms(op, optimized))));
+  }
+  return optimized.get(ops)!;
+}
+
+/** The fixed-point rule loop over one op list whose if-arms are already done. */
+function optimizeOneLevel(ops: StackOp[]): StackOp[] {
+  let current = ops;
 
   const MAX_ITERATIONS = 100;
   let iteration = 0;
@@ -522,19 +561,32 @@ export function optimizeStackIR(ops: StackOp[]): StackOp[] {
 }
 
 /**
- * Recursively optimize if-op branches.
+ * An if-op rebuilt with its already-optimized branches (the shape the
+ * recursive `optimizeNestedIf` returned); any other op unchanged.
  */
-function optimizeNestedIf(op: StackOp): StackOp {
+function withOptimizedArms(op: StackOp, optimized: Map<StackOp[], StackOp[]>): StackOp {
   if (op.op === 'if') {
-    const optimizedThen = optimizeStackIR(op.then);
-    const optimizedElse = op.else ? optimizeStackIR(op.else) : undefined;
+    const optimizedThen = optimized.get(op.then)!;
+    const optimizedElse = op.else ? optimized.get(op.else)! : undefined;
     return {
       op: 'if',
       then: optimizedThen,
       else: optimizedElse,
+      ...(op.sourceLoc ? { sourceLoc: op.sourceLoc } : {}),
     };
   }
   return op;
+}
+
+/**
+ * F-224: a replacement op with no location of its own inherits the location
+ * of the first op of the matched window (the Python and Rust convention), so
+ * the emitter still maps the fused / rewritten opcode to its statement.
+ */
+function withHeadSourceLoc(head: StackOp, replacement: StackOp[]): StackOp[] {
+  const loc = head.sourceLoc;
+  if (!loc) return replacement;
+  return replacement.map(r => (r.sourceLoc ? r : { ...r, sourceLoc: loc }));
 }
 
 /**
@@ -590,7 +642,7 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
       for (const rule of sizeRules) {
         const replacement = rule.match(window);
         if (replacement !== null) {
-          result.push(...replacement);
+          result.push(...withHeadSourceLoc(window[0]!, replacement));
           i += size;
           changed = true;
           matched = true;

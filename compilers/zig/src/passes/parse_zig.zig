@@ -16,11 +16,17 @@
 //!   - Types: `runar.Bigint`, `runar.PubKey`, `runar.Sig`, `runar.Addr`, `runar.ByteString`, `i64`, `bool`, `void`
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
+const const_reassign = @import("const_reassign.zig");
 const types = @import("../ir/types.zig");
+const operand_loc = @import("operand_loc.zig");
+const loop_condition = @import("loop_condition.zig");
 const readonly_inference = @import("../frontend/readonly_inference.zig");
 
 const Allocator = std.mem.Allocator;
+const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -63,8 +69,29 @@ pub const ParseResult = struct {
 };
 
 pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry,
+    // not just runPipeline's Pass 0. N-136.
+    if (input_limits.sourceSizeGuardErrors(allocator, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
+    // F-011: tokenize the whole source once more so an unterminated literal
+    // is reported even where the parser stopped before reaching it.
+    var t = Tokenizer.init(source);
+    var guard: usize = 0;
+    while (guard <= source.len) : (guard += 1) {
+        if (t.next().kind == .eof) break;
+    }
+    const lex_errs = lex_diag.prepend(allocator, lex_diag.prependUnexpected(allocator, r.errors, file_name, t.unexpected), file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    // N-344: a `const` local cannot be reassigned.
+    const errs = if (r.contract) |c| const_reassign.check(allocator, file_name, c, lex_errs) else lex_errs;
+    return .{ .contract = r.contract, .errors = errs };
 }
 
 
@@ -91,6 +118,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -99,6 +130,10 @@ const Token = struct {
 
 const Tokenizer = struct {
     source: []const u8,
+    /// F-011: the first unterminated quoted literal, if any.
+    unterminated: ?lex_diag.Pos = null,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -143,6 +178,16 @@ const Tokenizer = struct {
         }
     }
 
+    /// N-214: record the first character this surface does not recognise
+    /// (its whole UTF-8 sequence, one column; `advance` took its first byte)
+    /// and hand it on as a one-character token.
+    fn unexpectedChar(self: *Tokenizer, start: usize, sl: u32, sc: u32) Token {
+        self.pos = start + lex_diag.charLen(self.source, start);
+        const text = self.source[start..self.pos];
+        if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = sl, .col = sc }, .text = text };
+        return .{ .kind = .ident, .text = text, .line = sl, .col = sc };
+    }
+
     fn next(self: *Tokenizer) Token {
         self.skipWhitespaceAndComments();
         if (self.pos >= self.source.len) return .{ .kind = .eof, .text = "", .line = self.line, .col = self.col };
@@ -154,16 +199,31 @@ const Tokenizer = struct {
 
         if (c == '"') {
             _ = self.advance();
-            while (self.pos < self.source.len and self.source[self.pos] != '"') {
-                if (self.source[self.pos] == '\\') _ = self.advance();
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while (self.pos < self.source.len and self.source[self.pos] != '"' and self.source[self.pos] != '\n' and self.source[self.pos] != '\r') {
+                if (self.source[self.pos] == '\\') {
+                    const nx = self.peekAt(1);
+                    if (self.pos + 1 >= self.source.len or nx == '\n' or nx == '\r') break;
+                    _ = self.advance();
+                }
                 _ = self.advance();
             }
-            if (self.pos < self.source.len) _ = self.advance();
-            return .{ .kind = .string_literal, .text = self.source[start + 1 .. self.pos - 1], .line = sl, .col = sc };
+            const content_end = self.pos;
+            if (self.pos < self.source.len and self.source[self.pos] == '"') {
+                _ = self.advance();
+            } else if (self.unterminated == null) {
+                self.unterminated = .{ .line = sl, .col = sc };
+            }
+            return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
         if (c >= '0' and c <= '9') {
-            while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') _ = self.advance();
-            return .{ .kind = .number, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            // F-026: the whole glued [0-9A-Za-z_] run is one Zig integer literal;
+            // stopping at the first non-digit read `0b1010` as `0` + `b1010`.
+            while (self.pos < self.source.len and int_literal.isNumberContinue(self.source[self.pos])) _ = self.advance();
+            const lit_text = self.source[start..self.pos];
+            return .{ .kind = .number, .text = lit_text, .raw = lit_text, .line = sl, .col = sc };
         }
         if (isIdentStart(c)) {
             while (self.pos < self.source.len and isIdentChar(self.source[self.pos])) _ = self.advance();
@@ -199,7 +259,7 @@ const Tokenizer = struct {
             '%' => if (c2 == '=') blk: { _ = self.advance(); break :blk .{ .kind = .percent_eq, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .percent, .text = t, .line = sl, .col = sc },
             '&' => if (c2 == '&') blk: { _ = self.advance(); break :blk .{ .kind = .amp_amp, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .ampersand, .text = t, .line = sl, .col = sc },
             '|' => if (c2 == '|') blk: { _ = self.advance(); break :blk .{ .kind = .pipe_pipe, .text = self.source[start..self.pos], .line = sl, .col = sc }; } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
-            else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            else => self.unexpectedChar(start, sl, sc),
         };
     }
 
@@ -222,40 +282,177 @@ const Tokenizer = struct {
 // Parser
 // ============================================================================
 
+const BarePending = struct { ptr: [*]const u8, len: usize, err_idx: usize };
+
 const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
     current: Token,
+    /// N-464: the argument locations of the list `parseArgList` returned
+    /// last; `makeCall` / `makeMethodCall` copy them onto the node, as
+    /// parse_ts.zig does (N-463). Both are only ever handed a list
+    /// `parseArgList` just returned.
+    last_arg_locs: []const ?types.SourceLocation = &.{},
     file_name: []const u8,
+    /// N-492: parenthesised-primary positions, for operand locations.
+    operand_locs: operand_loc.OperandLocs(Token) = .{},
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
-
-    const max_depth: u32 = 256;
+    nest: input_limits.NestingCounter = .{},
+    nest_error: ?[]const u8 = null,
+    /// N-448: bare string literals refused so far, withdrawable by
+    /// `exemptBareLiteral` (matched by the literal's bytes pointer).
+    bare_pending: std.ArrayListUnmanaged(BarePending) = .empty,
+    /// N-490: the contract struct's `struct` keyword, where the constructor
+    /// statements an `init` implies (the super() call and the field writes)
+    /// are anchored.
+    ctor_loc: types.SourceLocation = .{ .file = "", .line = 1, .column = 1 },
 
     const ParsedFieldType = struct {
         type_node: TypeNode,
         explicit_readonly: bool,
+        /// N-093: `runar.EmbedAlways(T)`, the native spelling of `@embedAlways`.
+        embed_always: bool = false,
     };
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty };
+        p.current = p.normalizeNumber(p.current);
+        return p;
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.source.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
+    }
+
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: `runar.Sighash("FLAGS")` in place of a return type is the native
+    /// spelling of the `@sighash` directive (natively it is `void`). Returns
+    /// null (consuming nothing) when the return type is not that spelling;
+    /// otherwise consumes it and returns the flag text, or null-in-optional
+    /// when the argument is not exactly one string literal.
+    fn parseSighashReturnType(self: *Parser) ??[]const u8 {
+        if (!self.checkIdent("runar")) return null;
+        const sp = self.tokenizer.pos; const sline = self.tokenizer.line;
+        const scol = self.tokenizer.col; const sc = self.current;
+        _ = self.bump();
+        if (self.current.kind != .dot) {
+            self.tokenizer.pos = sp; self.tokenizer.line = sline; self.tokenizer.col = scol; self.current = sc;
+            return null;
+        }
+        _ = self.bump();
+        if (!self.checkIdent("Sighash")) {
+            self.tokenizer.pos = sp; self.tokenizer.line = sline; self.tokenizer.col = scol; self.current = sc;
+            return null;
+        }
+        _ = self.bump();
+        _ = self.expect(.lparen);
+        const arg = self.current;
+        var count: usize = 0;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            const k = self.current.kind;
+            if (k == .rparen and depth == 0) break;
+            if (k == .lparen) depth += 1;
+            if (k == .rparen) depth -= 1;
+            _ = self.bump();
+            count += 1;
+        }
+        _ = self.expect(.rparen);
+        const spec: ?[]const u8 = if (count == 1 and arg.kind == .string_literal) arg.text else null;
+        return spec;
+    }
+
+    /// N-448: a bare non-empty string literal used as a ByteString value is
+    /// refused. Natively it is ASCII text; the compiler reads it as hex. The
+    /// error is recorded now and withdrawn by `exemptBareLiteral` when the
+    /// literal turns out to be the argument of the explicit hex helper or the
+    /// body of an `asm` call (both parse their arguments as ordinary
+    /// expressions first). Exempt outright: the empty string.
+    fn refuseBareLiteral(self: *Parser, tok: Token, value: []const u8) void {
+        if (value.len == 0) return;
+        const msg = std.fmt.allocPrint(self.allocator, lex_diag.ZIG_BARE_STRING_LITERAL_FMT, .{ value, value }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch return;
+        // A speculative re-parse of the same tokens must not repeat the refusal.
+        for (self.errors.items) |e| if (std.mem.eql(u8, e, f)) return;
+        self.errors.append(self.allocator, f) catch return;
+        self.bare_pending.append(self.allocator, .{ .ptr = value.ptr, .len = value.len, .err_idx = self.errors.items.len - 1 }) catch {};
+    }
+
+    fn exemptBareLiteral(self: *Parser, e: Expression) void {
+        if (e != .literal_bytes) return;
+        const v = e.literal_bytes.value;
+        var i: usize = 0;
+        while (i < self.bare_pending.items.len) : (i += 1) {
+            const it = self.bare_pending.items[i];
+            if (it.ptr == v.ptr and it.len == v.len) {
+                _ = self.errors.orderedRemove(it.err_idx);
+                _ = self.bare_pending.orderedRemove(i);
+                for (self.bare_pending.items) |*o| {
+                    if (o.err_idx > it.err_idx) o.err_idx -= 1;
+                }
+                return;
+            }
+        }
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
 
-    fn bump(self: *Parser) Token { const prev = self.current; self.current = self.tokenizer.next(); return prev; }
+    fn bump(self: *Parser) Token { const prev = self.current; self.operand_locs.consumed(prev); self.current = self.fetch(); return prev; }
+
+    fn tokenSourceLoc(self: *const Parser, tok: Token) types.SourceLocation {
+        return .{ .file = self.file_name, .line = tok.line, .column = tok.col };
+    }
 
     fn currentSourceLoc(self: *const Parser) types.SourceLocation {
         return .{ .file = self.file_name, .line = self.current.line, .column = self.current.col };
@@ -283,21 +480,35 @@ const Parser = struct {
         return Expression{ .binary_op = bin };
     }
 
-    fn makeUnaryOp(self: *Parser, op: UnaryOperator, operand: Expression) ?Expression {
+    fn makeLocatedBinOp(self: *Parser, op: BinOperator, left: Expression, left_loc: ?types.SourceLocation, right: Expression, right_loc: ?types.SourceLocation) ?Expression {
+        const bin = self.allocator.create(BinaryOp) catch return null;
+        bin.* = .{ .op = op, .left = left, .right = right, .left_loc = left_loc, .right_loc = right_loc };
+        return Expression{ .binary_op = bin };
+    }
+
+    /// N-492: where the TS reference locates the operand that began at token
+    /// `start` and ends at the token just consumed. See `operand_loc.zig`.
+    fn operandLocFrom(self: *const Parser, start: Token) ?types.SourceLocation {
+        return self.tokenSourceLoc(self.operand_locs.startOf(start));
+    }
+
+    fn makeUnaryOp(self: *Parser, op: UnaryOperator, operand: Expression, location: ?types.SourceLocation) ?Expression {
         const u = self.allocator.create(UnaryOp) catch return null;
-        u.* = .{ .op = op, .operand = operand };
+        u.* = .{ .op = op, .operand = operand, .location = location };
         return Expression{ .unary_op = u };
     }
 
     fn makeCall(self: *Parser, callee: []const u8, args: []Expression) ?Expression {
         const c = self.allocator.create(CallExpr) catch return null;
-        c.* = .{ .callee = callee, .args = args };
+        const arg_locs: []const ?types.SourceLocation = if (self.last_arg_locs.len == args.len) self.last_arg_locs else &.{};
+        c.* = .{ .callee = callee, .args = args, .arg_locs = arg_locs };
         return Expression{ .call = c };
     }
 
     fn makeMethodCall(self: *Parser, object: []const u8, method: []const u8, args: []Expression) ?Expression {
         const mc = self.allocator.create(MethodCall) catch return null;
-        mc.* = .{ .object = object, .method = method, .args = args };
+        const arg_locs: []const ?types.SourceLocation = if (self.last_arg_locs.len == args.len) self.last_arg_locs else &.{};
+        mc.* = .{ .object = object, .method = method, .args = args, .arg_locs = arg_locs };
         return Expression{ .method_call = mc };
     }
 
@@ -315,7 +526,10 @@ const Parser = struct {
         // an 8-byte ASCII string. Allows the Zig DSL source to also compile
         // as a native Zig file, where runar.hexToBytes is a comptime helper
         // returning `*const [N]u8` (which coerces to ByteString).
+        // N-448: the argument of the explicit hex spelling is a legal literal.
+        if (std.mem.eql(u8, member, "asm") and args.len > 0) self.exemptBareLiteral(args[0]);
         if (std.mem.eql(u8, member, "hexToBytes")) {
+            if (args.len == 1) self.exemptBareLiteral(args[0]);
             if (args.len != 1) {
                 self.addError("runar.hexToBytes expects exactly 1 argument");
                 return null;
@@ -362,6 +576,7 @@ const Parser = struct {
         if (self.expect(.kw_const) == null) return null;
         const name_tok = self.expect(.ident) orelse return null;
         if (self.expect(.assign) == null) return null;
+        self.ctor_loc = self.currentSourceLoc();
         if (self.expect(.kw_struct) == null) return null;
         if (self.expect(.lbrace) == null) return null;
 
@@ -413,11 +628,16 @@ const Parser = struct {
                 continue;
             }
 
-            if (self.parseField(&fields_with_defaults, &explicit_readonly_fields)) |f| {
-                properties.append(self.allocator, f) catch {};
-            } else {
-                _ = self.bump();
+            if (self.current.kind == .ident) {
+                if (self.parseField(&fields_with_defaults, &explicit_readonly_fields)) |f| {
+                    properties.append(self.allocator, f) catch {};
+                }
+                continue;
             }
+
+            // N-410: any other token is refused, never skipped.
+            self.addErrorFmt(lex_diag.UNEXPECTED_STRUCT_BODY_TOKEN_FMT, .{self.current.text});
+            _ = self.bump();
         }
 
         _ = self.expect(.rbrace); _ = self.expect(.semicolon);
@@ -447,15 +667,57 @@ const Parser = struct {
             }
         }
 
+        // F-213 measure (B), before the recursive pass below walks the bodies.
+        if (self.nest_error == null and !self.nest.exceeded) self.nest_error = input_limits.membersNestingError(self.allocator, self.file_name, properties.items, methods.items);
+        if (self.nest.exceeded or input_limits.membersTooDeep(properties.items, methods.items)) {
+            self.refuseNesting();
+            return null;
+        }
+
         // Rule 3: a field with no default that a method body ASSIGNS is state,
         // not a constructor constant. Without this the no-default shape was
         // inferred fully-readonly and the stateful continuation was dropped.
-        readonly_inference.applyMutationInference(self.allocator, pc, properties.items, methods.items, explicit_readonly_fields.items);
+        readonly_inference.applyMutationInference(self.allocator, pc, properties.items, methods.items, explicit_readonly_fields.items) catch {
+            // N-219: swallowing this here would be the same bug one level up
+            // -- a stateful contract compiled under memory pressure would
+            // keep whatever readonly flags rules 1/2 left it with (silently
+            // wrong, not refused) instead of failing closed.
+            self.addError("out of memory while inferring mutable fields");
+            return null;
+        };
 
         return ContractNode{
             .name = name_tok.text, .parent_class = pc, .properties = properties.items,
-            .constructor = constructor orelse .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+            .constructor = constructor orelse self.fallbackConstructor(properties.items),
             .methods = methods.items,
+        };
+    }
+
+    /// N-501: a contract with no `init` gets the constructor TS synthesizes
+    /// (`createFallbackConstructor` in 01-parse-zig.ts): one parameter per
+    /// field without a default, passed to `super(...)` and assigned to its
+    /// field, anchored at the `struct` keyword (N-490). An empty constructor
+    /// here left every such field unassigned and the validator refused it.
+    fn fallbackConstructor(self: *Parser, properties: []const PropertyNode) ConstructorNode {
+        var params: std.ArrayListUnmanaged(ParamNode) = .empty;
+        var super_args: std.ArrayListUnmanaged(Expression) = .empty;
+        var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        for (properties) |prop| {
+            if (prop.initializer != null) continue;
+            params.append(self.allocator, .{
+                .name = prop.name,
+                .type_info = prop.type_info,
+                .type_name = prop.type_name,
+                .spelled_type = types.spelledIfUnknown(prop.type_info, prop.type_name),
+            }) catch {};
+            super_args.append(self.allocator, .{ .identifier = prop.name }) catch {};
+            assignments.append(self.allocator, .{ .target = prop.name, .value = .{ .identifier = prop.name } }) catch {};
+        }
+        return .{
+            .params = params.items,
+            .super_args = super_args.items,
+            .assignments = assignments.items,
+            .super_loc = self.ctor_loc,
         };
     }
 
@@ -467,7 +729,7 @@ const Parser = struct {
         if (std.mem.eql(u8, ct.text, "SmartContract")) return .smart_contract;
         if (std.mem.eql(u8, ct.text, "StatefulSmartContract")) return .stateful_smart_contract;
         if (std.mem.eql(u8, ct.text, "UnsafeSmartContract")) return .unsafe_smart_contract;
-        self.addErrorFmt("unknown contract type: '{s}'", .{ct.text});
+        self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{ct.text});
         return null;
     }
 
@@ -481,8 +743,8 @@ const Parser = struct {
         if (self.current.kind == .kw_pub) _ = self.bump();
         if (self.current.kind != .ident) return null;
         const name_tok = self.bump();
-        if (self.current.kind != .colon) return null;
-        _ = self.bump();
+        // N-410: an identifier that is no field (no `:`) is refused, as TS does.
+        if (self.expect(.colon) == null) return null;
         const parsed_type = self.parseFieldTypeNode();
         var has_default = false;
         var initializer: ?*const Expression = null;
@@ -492,7 +754,8 @@ const Parser = struct {
         }
         if (has_default) fwd.append(self.allocator, name_tok.text) catch {};
         if (parsed_type.explicit_readonly) explicit_readonly_fields.append(self.allocator, name_tok.text) catch {};
-        if (self.current.kind == .comma) { _ = self.bump(); } else if (self.current.kind == .semicolon) { _ = self.bump(); }
+        // N-033: fields are separated by `,`; only the last before `}` may omit it.
+        _ = self.expectListSeparator(.rbrace);
         const expr_val: ?Expression = if (initializer) |init_ptr| init_ptr.* else null;
 
         // Capture FixedArray shape (outer + optional nested length) so
@@ -514,6 +777,7 @@ const Parser = struct {
             .type_info = typeNodeToRunarType(parsed_type.type_node),
             .readonly = false,
             .initializer = expr_val,
+            .embed_always = parsed_type.embed_always,
             // N-109: spelled type name + field-name token, for the validator's
             // unsupported-type diagnostic. Diagnostics only.
             .type_name = types.typeNodeName(parsed_type.type_node),
@@ -541,9 +805,17 @@ const Parser = struct {
                 if (self.expect(.lparen) == null) {
                     return .{ .type_node = .{ .custom_type = "unknown" }, .explicit_readonly = true };
                 }
-                const inner = self.parseFieldTypeNode();
+                const inner = self.nestedValue(ParsedFieldType, .{ .type_node = .{ .primitive_type = .void }, .explicit_readonly = false }, Parser.parseFieldTypeNode, .{});
                 _ = self.expect(.rparen);
-                return .{ .type_node = inner.type_node, .explicit_readonly = true };
+                return .{ .type_node = inner.type_node, .explicit_readonly = true, .embed_always = inner.embed_always };
+            }
+            // N-093: `runar.EmbedAlways(T)`, the native spelling of
+            // `@embedAlways`; composes with `runar.Readonly` in either order.
+            if (std.mem.eql(u8, name, "EmbedAlways") and self.current.kind == .lparen) {
+                _ = self.bump();
+                const inner = self.nestedValue(ParsedFieldType, .{ .type_node = .{ .primitive_type = .void }, .explicit_readonly = false }, Parser.parseFieldTypeNode, .{});
+                _ = self.expect(.rparen);
+                return .{ .type_node = inner.type_node, .explicit_readonly = inner.explicit_readonly, .embed_always = true };
             }
 
             return .{ .type_node = resolveRunarTypeNode(name), .explicit_readonly = false };
@@ -568,7 +840,7 @@ const Parser = struct {
             const size_tok = self.bump();
             const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
             _ = self.expect(.rbracket);
-            const inner = self.parseTypeNode();
+            const inner = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseTypeNode, .{});
             const inner_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "unknown" };
             inner_ptr.* = inner;
             return .{ .fixed_array_type = .{ .element = inner_ptr, .length = size } };
@@ -593,7 +865,7 @@ const Parser = struct {
     }
 
     pub fn resolveRunarTypeNode(name: []const u8) TypeNode {
-        if (std.mem.eql(u8, name, "Bigint")) return .{ .primitive_type = .bigint };
+        if (std.mem.eql(u8, name, "Bigint") or std.mem.eql(u8, name, "BigintBig")) return .{ .primitive_type = .bigint };
         if (std.mem.eql(u8, name, "PubKey")) return .{ .primitive_type = .pub_key };
         if (std.mem.eql(u8, name, "Sig")) return .{ .primitive_type = .sig };
         if (std.mem.eql(u8, name, "Addr")) return .{ .primitive_type = .addr };
@@ -620,14 +892,20 @@ const Parser = struct {
     // ---- Constructor ----
 
     fn parseConstructor(self: *Parser, properties: []const PropertyNode) ?ConstructorNode {
+        const ctor_loc = self.currentSourceLoc();
         if (self.expect(.lparen) == null) return null;
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             if (self.parseParam()) |p| params.append(self.allocator, p) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: parameters are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rparen)) break;
         }
         _ = self.expect(.rparen);
-        if (self.current.kind == .ident) _ = self.bump(); // return type
+        // N-093: the constructor is not a spending entry point, so a
+        // `runar.Sighash(...)` return type on `init` would be dropped.
+        if (self.parseSighashReturnType() != null) {
+            self.addErrorAtLoc(ctor_loc, sighash_directive.LOST_SIGHASH_ERROR);
+        } else if (self.current.kind == .ident) _ = self.bump(); // return type
         if (self.expect(.lbrace) == null) return null;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
         var found_struct_return = false;
@@ -678,10 +956,15 @@ const Parser = struct {
             }
         }
 
+        // N-487: the struct-return writes have no statement of their own; TS
+        // locates them (and the super call) at the contract struct's `struct`
+        // keyword (N-490), as it does every statement `init` implies.
+        const placeholder_loc = self.ctor_loc;
         for (assignments.items) |assign| {
             ctor_body.append(self.allocator, .{ .assign = .{
                 .target = assign.target,
                 .value = assign.value,
+                .source_loc = placeholder_loc,
                 .target_is_property = true,
             } }) catch {};
         }
@@ -698,13 +981,19 @@ const Parser = struct {
             .super_args = super_args.items,
             .assignments = assignments.items,
             .body = ctor_body.items,
+            .super_loc = placeholder_loc,
         };
     }
 
     fn parseStructReturnAssignments(self: *Parser, assignments: *std.ArrayListUnmanaged(AssignmentNode)) void {
         _ = self.expect(.lbrace);
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
-            if (self.current.kind == .dot) _ = self.bump();
+            // N-410: Zig requires the leading `.` of a struct-init field.
+            if (self.current.kind == .dot) {
+                _ = self.bump();
+            } else {
+                self.addError(lex_diag.ZIG_STRUCT_INIT_DOT);
+            }
             const field = self.expect(.ident) orelse return;
             if (self.expect(.assign) == null) return;
             const value = self.parseExpression() orelse return;
@@ -712,7 +1001,8 @@ const Parser = struct {
                 .target = field.text,
                 .value = value,
             }) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rbrace)) break;
         }
         _ = self.expect(.rbrace);
     }
@@ -722,21 +1012,58 @@ const Parser = struct {
     fn parseMethod(self: *Parser, name: []const u8, is_public: bool) ?MethodNode {
         const method_loc = self.currentSourceLoc();
         if (self.expect(.lparen) == null) return null;
-        if (self.current.kind == .kw_self) {
+        const has_receiver = self.current.kind == .kw_self;
+        if (has_receiver) {
             _ = self.bump();
             if (self.current.kind == .colon) { _ = self.bump(); self.skipTypeAnnotation(); }
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: the receiver is separated from the next parameter by `,`.
+            _ = self.expectListSeparator(.rparen);
         }
+        // N-050: a `pub fn` without a receiver is a namespace (static)
+        // function, not a contract method. A private one stays a helper (the
+        // multi-method golden's computeThreshold), like R9. (`init` never
+        // reaches here.)
+        if (is_public and !has_receiver) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{name});
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             if (self.parseParam()) |p| params.append(self.allocator, p) catch {};
-            if (self.current.kind == .comma) _ = self.bump();
+            // N-033: parameters are separated by `,` (a trailing one is allowed).
+            if (!self.expectListSeparator(.rparen)) break;
         }
         _ = self.expect(.rparen);
-        if (self.current.kind != .lbrace) _ = self.parseTypeNode();
+        // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+        // native spelling of the `@sighash` directive.
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        if (self.parseSighashReturnType()) |spec| {
+            sighash_specs.append(self.allocator, spec) catch {};
+        } else if (self.current.kind != .lbrace) {
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            // `init` returns the contract struct itself, which is not a type
+            // to check.
+            const rt = self.parseTypeNode();
+            if (!std.mem.eql(u8, name, "init")) {
+                const rt_unknown = types.spelledIfUnknown(typeNodeToRunarType(rt), typeNodeName(rt));
+                if (rt_unknown.len > 0) {
+                    self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ rt_unknown, name });
+                } else if (is_public and typeNodeToRunarType(rt) != .void) {
+                    // N-332: public methods return nothing.
+                    self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{name});
+                }
+            }
+        }
         if (self.expect(.lbrace) == null) return null;
         const body = self.parseBlock();
-        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .source_loc = method_loc };
+        var sighash_type: ?i32 = null;
+        if (std.mem.eql(u8, name, "init")) {
+            // N-093: a (non-`pub`) `fn init` is still the constructor's name,
+            // not a spending entry point (the TS reference checks the name
+            // before visibility).
+            if (sighash_specs.items.len > 0) self.addErrorAtLoc(method_loc, sighash_directive.LOST_SIGHASH_ERROR);
+        } else if (sighash_directive.resolveNativeSighash(self.allocator, name, is_public, sighash_specs.items)) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| self.addErrorAtLoc(method_loc, e),
+        };
+        return MethodNode{ .name = name, .is_public = is_public, .params = params.items, .body = body, .sighash_type = sighash_type, .source_loc = method_loc };
     }
 
     fn parseParam(self: *Parser) ?ParamNode {
@@ -744,10 +1071,12 @@ const Parser = struct {
         const n = self.bump();
         if (self.expect(.colon) == null) return null;
         const type_node = self.parseTypeNode();
+        const param_ti = typeNodeToRunarType(type_node);
         return ParamNode{
             .name = n.text,
-            .type_info = typeNodeToRunarType(type_node),
+            .type_info = param_ti,
             .type_name = typeNodeName(type_node),
+            .spelled_type = types.spelledIfUnknown(param_ti, typeNodeName(type_node)),
         };
     }
 
@@ -765,30 +1094,59 @@ const Parser = struct {
             if (self.parseStatement()) |s| {
                 // Merge `var i: i64 = 0; while (i < N) : (i += 1) { ... }` into a single for_stmt
                 // by patching the init_value from the preceding let_decl.
-                if (s == .for_stmt and stmts.items.len > 0) {
-                    const last = &stmts.items[stmts.items.len - 1];
-                    if (last.* == .let_decl) {
-                        const ld = last.let_decl;
-                        if (std.mem.eql(u8, ld.name, s.for_stmt.var_name)) {
-                            // N-138: a negated literal is a literal.
-                            // N-137: a declaration whose value is not a literal
-                            // at all leaves the start unknown, which the
-                            // unrolled loop model cannot represent.
-                            var init_val: i64 = 0;
-                            var init_const = true;
-                            if (ld.value) |v| {
-                                if (loopStartLiteral(v)) |n| init_val = n else {
-                                    init_const = false;
-                                }
+                //
+                // N-008: fold exactly as the reference (01-parse-zig.ts) does —
+                // only when the preceding statement declares the variable the
+                // UPDATE advances — and otherwise keep its ` __while_no_init`
+                // placeholder iterator, which the condition never tests, so
+                // validate.zig refuses the loop with the reference's sentence.
+                // This tier used to fold on the name the CONDITION tests and,
+                // when nothing folded, keep that name with a start of 0: a
+                // non-adjacent `var i = 3;` compiled from 0, a silent
+                // miscompile every other tier refuses.
+                if (s == .for_stmt) {
+                    const upd_name = whileUpdateTargetName(s.for_stmt);
+                    const last: ?*Statement = if (stmts.items.len > 0) &stmts.items[stmts.items.len - 1] else null;
+                    if (last != null and last.?.* == .let_decl and upd_name != null and
+                        std.mem.eql(u8, last.?.let_decl.name, upd_name.?))
+                    {
+                        const ld = last.?.let_decl;
+                        // N-138: a negated literal is a literal.
+                        // N-137: a declaration whose value is not a literal
+                        // at all leaves the start unknown, which the
+                        // unrolled loop model cannot represent.
+                        var init_val: i64 = 0;
+                        var init_const = true;
+                        if (ld.value) |v| {
+                            if (loopStartLiteral(v)) |n| init_val = n else {
+                                init_const = false;
                             }
-                            stmts.items.len -= 1; // pop the let_decl
-                            var merged = s.for_stmt;
-                            merged.init_value = init_val;
-                            merged.init_is_const = init_const;
-                            stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
-                            continue;
                         }
+                        stmts.items.len -= 1; // pop the let_decl
+                        var merged = s.for_stmt;
+                        merged.init_value = init_val;
+                        merged.init_is_const = init_const;
+                        // The folded declaration is the iterator. A
+                        // condition naming some other variable does not
+                        // test it.
+                        if (!std.mem.eql(u8, merged.var_name, ld.name)) merged.cond_tests_iter = false;
+                        merged.var_name = ld.name;
+                        stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
+                        continue;
                     }
+                    var unfolded = s.for_stmt;
+                    // N-009: a LEADING SPACE makes this unspellable in
+                    // `.runar.zig` source, so a developer local literally
+                    // named "__while_no_init" can never alias this
+                    // placeholder by string equality (this tier's own
+                    // `cond_tests_iter` is already decided by this point and
+                    // does not depend on the name, but the diagnostic text
+                    // below interpolates `var_name` and must match the other
+                    // six tiers' sentinel verbatim).
+                    unfolded.var_name = " __while_no_init";
+                    unfolded.cond_tests_iter = false;
+                    stmts.append(self.allocator, .{ .for_stmt = unfolded }) catch {};
+                    continue;
                 }
                 stmts.append(self.allocator, s) catch {};
             }
@@ -798,6 +1156,12 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         return switch (self.current.kind) {
             .kw_const => self.parseVarDeclStmt(false),
             .kw_var => self.parseVarDeclStmt(true),
@@ -814,14 +1178,20 @@ const Parser = struct {
         _ = self.bump();
         const n = self.expect(.ident) orelse return null;
         var ti: ?RunarType = null;
-        if (self.current.kind == .colon) { _ = self.bump(); ti = typeNodeToRunarType(self.parseTypeNode()); }
+        var spelled: []const u8 = "";
+        if (self.current.kind == .colon) {
+            _ = self.bump();
+            const tn = self.parseTypeNode();
+            ti = typeNodeToRunarType(tn);
+            spelled = types.typeNodeName(tn);
+        }
         if (self.expect(.assign) == null) return null;
         const v = self.parseExpression() orelse return null;
         _ = self.expect(.semicolon);
         if (mutable) {
-            return Statement{ .let_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc } };
+            return Statement{ .let_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc, .type_name = spelled } };
         } else {
-            return Statement{ .const_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc } };
+            return Statement{ .const_decl = .{ .name = n.text, .type_info = ti, .value = v, .source_loc = loc, .type_name = spelled } };
         }
     }
 
@@ -838,7 +1208,7 @@ const Parser = struct {
         if (self.current.kind == .kw_else) {
             _ = self.bump();
             if (self.current.kind == .kw_if) {
-                const nested = self.parseIfStmt() orelse return null;
+                const nested = self.nestedParse(Statement, Parser.parseIfStmt) orelse return null;
                 const a = self.allocator.alloc(Statement, 1) catch return null;
                 a[0] = nested;
                 else_body = a;
@@ -867,7 +1237,7 @@ const Parser = struct {
     /// Supports common Runar patterns:
     ///   var i: i64 = 0; while (i < 10) : (i += 1) { ... }   // count up
     ///   var i: i64 = 10; while (i > 0) : (i -= 1) { ... }   // count down
-    ///   while (10 > i) : (i += 1) { ... }                    // reversed operands
+    ///   while (10 > i) : (i += 1) { ... }                    // reversed (N-115)
     ///
     /// `while (i != N)` is NOT one of them — see the `.neq` branch below.
     ///
@@ -886,6 +1256,9 @@ const Parser = struct {
             return null;
         };
         if (has_paren) _ = self.expect(.rparen);
+        // N-115: `N > i` is `i < N` (and `N < i` is `i > N`, …), on this
+        // surface exactly as in every other tier.
+        loop_condition.normalize(cond, null);
 
         // Extract var_name and bound from condition.
         // Supported patterns:
@@ -894,8 +1267,7 @@ const Parser = struct {
         //   ident > literal   → var_name=ident, bound=literal (countdown)
         //   ident >= literal  → var_name=ident, bound=literal (countdown)
         //   ident != literal  → var_name=ident, bound=literal (until value)
-        //   literal > ident   → var_name=ident, bound=literal (reversed)
-        //   literal >= ident  → var_name=ident, bound=literal (reversed)
+        // A reversed comparison (`literal > ident`, …) was mirrored above.
         var var_name: []const u8 = "_loop_var";
         var bound: i64 = 0;
         // R-102: `descending` was never set here, so `while (i > 1) : (i -= 1)`
@@ -917,6 +1289,14 @@ const Parser = struct {
         // was still read from the right -- the phantom-lap shape, on the
         // `.runar.zig` surface. Rejected by passes/validate.zig.
         var cond_tests_iter: bool = true;
+        // F-025: see `ForStmt.bound_is_const`. Only a (possibly negated)
+        // integer literal is unrollable; a bound this function did not
+        // recognise used to stay at 0 and compile a loop that runs zero times.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
+        // N-008: see `ForStmt.cond_lhs_name`.
+        var cond_lhs_name: ?[]const u8 = null;
+        if (cond == .binary_op and cond.binary_op.left == .identifier) cond_lhs_name = cond.binary_op.left.identifier;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
@@ -926,25 +1306,31 @@ const Parser = struct {
                     } else {
                         cond_tests_iter = false;
                     }
-                    if (bop.right == .literal_int) {
-                        bound = bop.right.literal_int;
+                    if (loopStartLiteral(bop.right)) |v| {
+                        bound = v;
                         if (bop.op == .lte) bound += 1;
+                        bound_is_const = true;
+                    } else if (bop.right == .identifier) {
+                        bound_ident = bop.right.identifier;
                     }
                 } else if (bop.op == .gt or bop.op == .gte) {
                     if (bop.left != .identifier and bop.right != .identifier) {
                         cond_tests_iter = false;
                     }
-                    if (bop.left == .identifier and bop.right == .literal_int) {
+                    if (bop.left == .identifier and loopStartLiteral(bop.right) != null) {
                         // ident > N or ident >= N (countdown)
                         var_name = bop.left.identifier;
-                        bound = bop.right.literal_int;
+                        bound = loopStartLiteral(bop.right).?;
+                        bound_is_const = true;
                         descending = true;
                         inclusive = bop.op == .gte;
-                    } else if (bop.left == .literal_int and bop.right == .identifier) {
-                        // N > ident or N >= ident (reversed operands → ident < N)
-                        var_name = bop.right.identifier;
-                        bound = bop.left.literal_int;
-                        if (bop.op == .gte) bound += 1;
+                    } else if (bop.left == .identifier) {
+                        // ident > <non-literal> (countdown) -- F-025: refused
+                        // by validate.zig through `bound_is_const = false`.
+                        var_name = bop.left.identifier;
+                        if (bop.right == .identifier) bound_ident = bop.right.identifier;
+                        descending = true;
+                        inclusive = bop.op == .gte;
                     }
                 } else if (bop.op == .neq) {
                     // `i != N` is NOT a loop bound. `spec/grammar.md`'s RelOp
@@ -1001,6 +1387,12 @@ const Parser = struct {
                         } });
                     }
                 }
+            } else if (lhs) |e| {
+                // N-116: a bare continue expression (`: (i)`) is recorded as
+                // the expression statement the reference builds, so the fold
+                // and validate.zig see it. It used to be dropped, leaving
+                // `update == null`, which nothing checks.
+                update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
             }
             if (self.current.kind == .rparen) _ = self.bump();
         }
@@ -1011,27 +1403,49 @@ const Parser = struct {
         return Statement{ .for_stmt = .{
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
+            .init_is_const = true, // N-026: no declaration folded in => the reference's literal 0
             .bound = bound,
+            .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .inclusive = inclusive,
             .cond_tests_iter = cond_tests_iter,
             .update = update,
+            .cond_lhs_name = cond_lhs_name,
             .body = body,
             .source_loc = loc,
         } };
     }
 
+    /// N-008: the variable a while loop's continue expression advances — the
+    /// name the reference folds the preceding declaration on — or null when
+    /// the loop has no continue expression this parser records.
+    fn whileUpdateTargetName(f: types.ForStmt) ?[]const u8 {
+        const u = f.update orelse return null;
+        return switch (u.*) {
+            .assign => |a| if (a.target_is_property) null else a.target,
+            // N-116: the reference folds on a bare-identifier continue
+            // expression too (`getLoopUpdateTargetName`).
+            .expr_stmt => |es| switch (es.expr) {
+                .identifier => |name| name,
+                else => null,
+            },
+            else => null,
+        };
+    }
+
     fn parseReturnStmt(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump();
-        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = null }; }
+        if (self.current.kind == .semicolon) { _ = self.bump(); return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } }; }
         if (self.current.kind == .dot) {
             _ = self.bump();
-            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = null }; }
+            if (self.current.kind == .lbrace) { self.skipStructLiteral(); _ = self.expect(.semicolon); return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } }; }
         }
         const expr = self.parseExpression();
         _ = self.expect(.semicolon);
-        if (expr) |e| return Statement{ .return_stmt = e };
-        return Statement{ .return_stmt = null };
+        if (expr) |e| return Statement{ .return_stmt = .{ .value = e, .source_loc = loc } };
+        return Statement{ .return_stmt = .{ .value = null, .source_loc = loc } };
     }
 
     fn skipStructLiteral(self: *Parser) void {
@@ -1065,6 +1479,15 @@ const Parser = struct {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
             _ = self.expect(.semicolon);
+            // N-053: Zig's discard `_ = expr;` drops the VALUE, not the
+            // evaluation -- a helper called for its asserts must keep them, so
+            // `expr` lowers as an expression statement. Only a bare name (the
+            // unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+            // reading a name has no effect.
+            if (expr == .identifier and std.mem.eql(u8, expr.identifier, "_")) {
+                if (rhs == .identifier) return null;
+                return Statement{ .expr_stmt = .{ .expr = rhs, .source_loc = loc } };
+            }
             const target_name = extractAssignTarget(expr);
             // `self.arr[idx] = value` — carry the index-access target on
             // the Assign so `expand_fixed_arrays.zig` can rewrite it into
@@ -1099,110 +1522,130 @@ const Parser = struct {
     // ---- Expressions ----
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseLogicalOr();
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseLogicalAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .pipe_pipe or self.current.kind == .kw_or) {
             _ = self.bump();
-            const right = self.parseLogicalAnd() orelse return null;
-            left = self.makeBinOp(.or_op, left, right) orelse return null;
+            const right_start = self.current; const right = self.parseLogicalAnd() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.or_op, left, left_loc, right, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseLogicalAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseOr() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .amp_amp or self.current.kind == .kw_and) {
             _ = self.bump();
-            const right = self.parseBitwiseOr() orelse return null;
-            left = self.makeBinOp(.and_op, left, right) orelse return null;
+            const right_start = self.current; const right = self.parseBitwiseOr() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.and_op, left, left_loc, right, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseXor() orelse return null;
-        while (self.current.kind == .pipe) { _ = self.bump(); const r = self.parseBitwiseXor() orelse return null;
-            left = self.makeBinOp(.bitor, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .pipe) { _ = self.bump(); const right_start = self.current; const r = self.parseBitwiseXor() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitor, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseBitwiseXor(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseAnd() orelse return null;
-        while (self.current.kind == .caret) { _ = self.bump(); const r = self.parseBitwiseAnd() orelse return null;
-            left = self.makeBinOp(.bitxor, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .caret) { _ = self.bump(); const right_start = self.current; const r = self.parseBitwiseAnd() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitxor, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseBitwiseAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseEquality() orelse return null;
-        while (self.current.kind == .ampersand) { _ = self.bump(); const r = self.parseEquality() orelse return null;
-            left = self.makeBinOp(.bitand, left, r) orelse return null; }
+        var left_loc = self.operandLocFrom(left_start);
+        while (self.current.kind == .ampersand) { _ = self.bump(); const right_start = self.current; const r = self.parseEquality() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(.bitand, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start); }
         return left;
     }
 
     fn parseEquality(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseComparison() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .eqeq or self.current.kind == .bang_eq) {
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
-            _ = self.bump(); const r = self.parseComparison() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseComparison() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
+            // N-505: the comparison node is located at its first token (a leading
+            // `(` included), as the TS reference locates it; `===` / `!==` type
+            // errors anchor here.
+            left.binary_op.loc = left_loc;
         }
         return left;
     }
 
     fn parseComparison(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseShift() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lt or self.current.kind == .lt_eq or self.current.kind == .gt or self.current.kind == .gt_eq) {
             const op: BinOperator = switch (self.current.kind) { .lt => .lt, .lt_eq => .lte, .gt => .gt, .gt_eq => .gte, else => unreachable };
-            _ = self.bump(); const r = self.parseShift() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseShift() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseShift(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseAdditive() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lshift or self.current.kind == .rshift) {
             const op: BinOperator = if (self.current.kind == .lshift) .lshift else .rshift;
-            _ = self.bump(); const r = self.parseAdditive() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseAdditive() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseAdditive(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseMultiplicative() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .plus or self.current.kind == .minus) {
             const op: BinOperator = if (self.current.kind == .plus) .add else .sub;
-            _ = self.bump(); const r = self.parseMultiplicative() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseMultiplicative() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseMultiplicative(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseUnary() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .star or self.current.kind == .slash or self.current.kind == .percent) {
             const op: BinOperator = switch (self.current.kind) { .star => .mul, .slash => .div, .percent => .mod, else => unreachable };
-            _ = self.bump(); const r = self.parseUnary() orelse return null;
-            left = self.makeBinOp(op, left, r) orelse return null;
+            _ = self.bump(); const right_start = self.current; const r = self.parseUnary() orelse return null; const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinOp(op, left, left_loc, r, right_loc) orelse return null; left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseUnary(self: *Parser) ?Expression {
-        if (self.current.kind == .minus) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.negate, o); }
-        if (self.current.kind == .bang) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.not, o); }
-        if (self.current.kind == .tilde) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.bitnot, o); }
+        if (self.current.kind == .minus) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.negate, o, op_loc); }
+        if (self.current.kind == .bang) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.not, o, op_loc); }
+        if (self.current.kind == .tilde) { const op_loc = self.tokenSourceLoc(self.bump()); const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null; return self.makeUnaryOp(.bitnot, o, op_loc); }
         // Zig's `&` is the address-of operator used for slice coercion at
         // call sites like `&.{sig1, sig2}` (an anonymous-struct literal
         // coerced to a slice). Slices have no Rúnar IR analogue — the inner
@@ -1280,48 +1723,25 @@ const Parser = struct {
                 _ = self.bump();
                 if (self.current.kind != .lbrace) { self.addError("expected '{' after '&.'"); break :blk null; }
                 _ = self.bump();
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .dot => blk: {
                 _ = self.bump();
                 if (self.current.kind != .lbrace) break :blk null;
                 _ = self.bump();
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .number => blk: {
                 const tok = self.bump();
-                if (std.fmt.parseInt(i64, tok.text, 10)) |val| {
-                    break :blk Expression{ .literal_int = val };
-                } else |_| {
-                    // Oversize decimal literal — carry as `literal_bigint`.
-                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-                    // ordinary way to write secp256k1's group order, and accepted by the
-                    // other six tiers -- used to fall into the `invalid integer` arm
-                    // below, because this fallback only recognised decimal digits.
-                    if (int_literal.oversizeToDecimal(self.allocator, tok.text)) |decimal| {
-                        break :blk Expression{ .literal_bigint = decimal };
-                    }
-                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
-                    break :blk null;
-                }
+                break :blk self.numberLiteral(tok);
             },
             .kw_true => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = true }; },
             .kw_false => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = false }; },
-            .string_literal => blk: { const tok = self.bump(); break :blk Expression{ .literal_bytes = tok.text }; },
+            .string_literal => blk: { const tok = self.bump(); self.refuseBareLiteral(tok, tok.text); break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = .{ .file = self.file_name, .line = tok.line, .column = tok.col } } }; },
             .kw_self => blk: { _ = self.bump(); break :blk Expression{ .identifier = "self" }; },
             .ident => blk: { const tok = self.bump();
                 if (self.current.kind == .lparen) { _ = self.bump(); const args = self.parseArgList();
@@ -1329,7 +1749,7 @@ const Parser = struct {
                 }
                 break :blk Expression{ .identifier = tok.text };
             },
-            .lparen => blk: { _ = self.bump(); const inner = self.parseExpression() orelse break :blk null; _ = self.expect(.rparen); break :blk inner; },
+            .lparen => blk: { const open = self.bump(); const inner_first = self.current; const inner = self.parseExpression() orelse break :blk null; if (self.expect(.rparen)) |close| self.operand_locs.recordParen(self.allocator, open, inner_first, close); break :blk inner; },
             .lbracket => blk: {
                 // `[_]T{...}` — typed array literal with inferred length. The
                 // element type is parsed and discarded; Rúnar infers element
@@ -1344,14 +1764,9 @@ const Parser = struct {
                 _ = self.expect(.rbracket) orelse break :blk null;
                 _ = self.parseTypeNode(); // discard element type
                 _ = self.expect(.lbrace) orelse break :blk null;
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .at_sign => blk: {
                 // Zig builtins: @divTrunc(a,b) → a/b, @rem(a,b) → a%b, @mod(a,b) → a%b,
@@ -1383,15 +1798,67 @@ const Parser = struct {
         };
     }
 
+    /// N-033: after a field, parameter or struct-init entry, consume the `,`
+    /// that separates it from the next one. Reports ZIG_LIST_COMMA at the
+    /// current token and returns false when that token is neither `,` nor
+    /// `close`; never consumes `close`.
+    fn expectListSeparator(self: *Parser, close: TokenKind) bool {
+        if (self.current.kind == .comma) {
+            _ = self.bump();
+            return true;
+        }
+        if (self.current.kind == close) return true;
+        self.addError(lex_diag.ZIG_LIST_COMMA);
+        return false;
+    }
+
+    /// N-464: the first token of the argument about to be parsed, as
+    /// parse_ts.zig's `operandLoc` (null on `(`, whose inner expression
+    /// this one-token view cannot see).
+    fn argLoc(self: *const Parser) ?types.SourceLocation {
+        if (self.current.kind == .lparen) return null;
+        return self.currentSourceLoc();
+    }
+
     fn parseArgList(self: *Parser) []Expression {
         var args: std.ArrayListUnmanaged(Expression) = .empty;
+        // N-464: published only once the whole list is parsed, so a call
+        // nested inside an argument cannot clobber it.
+        var locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty;
+        defer self.last_arg_locs = if (locs.items.len == args.items.len) locs.items else &.{};
         while (self.current.kind != .rparen and self.current.kind != .eof) {
+            const arg_loc = self.argLoc();
             const arg = self.parseExpression() orelse break;
             args.append(self.allocator, arg) catch {};
-            if (self.current.kind == .comma) _ = self.bump() else break;
+            locs.append(self.allocator, arg_loc) catch {};
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+                continue;
+            }
+            // F-026: Zig requires the comma between arguments.
+            if (self.current.kind != .rparen) self.addError(lex_diag.ZIG_LIST_COMMA);
+            break;
         }
         _ = self.expect(.rparen);
         return args.items;
+    }
+
+    /// F-026: the elements of an array literal up to (not including) `close`.
+    /// Zig requires `,` between elements (a trailing one is allowed); without
+    /// it a stray token after a literal used to become an extra element.
+    fn parseListElements(self: *Parser, close: TokenKind) ?[]Expression {
+        var elems: std.ArrayListUnmanaged(Expression) = .empty;
+        while (self.current.kind != close and self.current.kind != .eof) {
+            const elem = self.parseExpression() orelse return null;
+            elems.append(self.allocator, elem) catch return null;
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+                continue;
+            }
+            if (self.current.kind != close) self.addError(lex_diag.ZIG_LIST_COMMA);
+            break;
+        }
+        return elems.items;
     }
 
     // ---- Helpers ----
@@ -1415,8 +1882,57 @@ const Parser = struct {
     }
 
     fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
-        return switch (k) { .plus_eq => .add, .minus_eq => .sub, .star_eq => .mul, .slash_eq => .div, .percent_eq => .mod, else => .add };
+        return switch (k) { .plus_eq => .add, .minus_eq => .sub, .star_eq => .mul, .slash_eq => .div, .percent_eq => .mod, else => unreachable }; // N-057: guarded by isCompoundAssignOp above; no fallback to add
     }
+
+    test "N-057: binOpFromCompoundAssign has no silent fallback to add (Zig)" {
+        // Proves: this file's source for binOpFromCompoundAssign's switch no longer
+        // contains a default arm that maps every otherwise-unmapped compound
+        // assignment token to the add operator. The needle is built by
+        // concatenation so this assertion's own text cannot satisfy itself.
+        // Does not prove runtime behavior of the removed default arm: every call
+        // site already narrows to compound-assignment tokens via
+        // isCompoundAssignOp (over the identical set the switch maps) before
+        // calling binOpFromCompoundAssign, so that arm was unreachable before this
+        // change and is `unreachable` now (a checked panic under Debug/ReleaseSafe,
+        // undefined behavior under ReleaseFast/ReleaseSmall) — this test cannot and
+        // does not exercise that code path directly.
+        const bad_arm = "else " ++ "=> ." ++ "add";
+        const src = @embedFile("parse_zig.zig");
+        try std.testing.expect(std.mem.indexOf(u8, src, bad_arm) == null);
+    }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "zig", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "zig", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        _ = self;
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================
@@ -1522,6 +2038,75 @@ test "parse Counter contract (stateful)" {
     try std.testing.expectEqual(std.meta.Tag(Statement).expr_stmt, std.meta.activeTag(c.methods[0].body[0]));
     try std.testing.expectEqual(std.meta.Tag(Statement).assign, std.meta.activeTag(c.methods[0].body[1]));
     try std.testing.expectEqual(std.meta.Tag(Statement).expr_stmt, std.meta.activeTag(c.methods[0].body[2]));
+}
+
+// N-182 / R93: runar.BigintBig is the 256-bit native spelling (u256 in
+// packages/runar-zig) for EC coordinates. Proves: it lowers to the same AST
+// bigint as runar.Bigint, for a property and a parameter. Does NOT prove the
+// native u256 runtime or any codegen.
+test "parse runar.BigintBig as bigint (N-182)" {
+    const source =
+        \\const runar = @import("runar");
+        \\pub const BigCoord = struct {
+        \\    pub const Contract = runar.SmartContract;
+        \\    x: runar.BigintBig,
+        \\    pub fn init(x: runar.BigintBig) BigCoord { return .{ .x = x }; }
+        \\    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        \\        runar.assert(self.x == y);
+        \\    }
+        \\};
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseZig(arena.allocator(), source, "BigCoord.runar.zig");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const c = r.contract.?;
+    try std.testing.expectEqual(@as(usize, 1), c.properties.len);
+    try std.testing.expectEqual(RunarType.bigint, c.properties[0].type_info);
+    try std.testing.expectEqual(@as(usize, 1), c.methods.len);
+    try std.testing.expectEqual(@as(usize, 1), c.methods[0].params.len);
+    try std.testing.expectEqual(RunarType.bigint, c.methods[0].params[0].type_info);
+    try std.testing.expectEqualStrings("bigint", c.methods[0].params[0].type_name);
+}
+
+// N-501: with no `init`, the constructor is synthesized from the fields that
+// have no default (TS `createFallbackConstructor`): each is a parameter, a
+// `super` argument and an assignment, anchored at the `struct` keyword. A
+// defaulted field is left to its initializer. Proves the parser shape only;
+// the all-tier verdict and bytes are pinned in
+// conformance/negatives/n490-synthesized-constructor-loc-parity.test.ts.
+test "N-501: no init synthesizes the constructor from fields without a default" {
+    const source =
+        \\const runar = @import("runar");
+        \\pub const NoInit = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\    owner: runar.PubKey,
+        \\    count: i64 = 0,
+        \\    pub fn bump(self: *NoInit, sig: runar.Sig) void {
+        \\        runar.assert(runar.checkSig(sig, self.owner));
+        \\        self.count += 1;
+        \\    }
+        \\};
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = parseZig(arena.allocator(), source, "NoInit.runar.zig");
+    try std.testing.expectEqual(@as(usize, 0), res.errors.len);
+    const ctor = res.contract.?.constructor;
+    try std.testing.expectEqual(@as(usize, 1), ctor.params.len);
+    try std.testing.expectEqualStrings("owner", ctor.params[0].name);
+    try std.testing.expectEqual(RunarType.pub_key, ctor.params[0].type_info);
+    try std.testing.expectEqual(@as(usize, 1), ctor.super_args.len);
+    try std.testing.expectEqual(@as(usize, 1), ctor.assignments.len);
+    try std.testing.expectEqualStrings("owner", ctor.assignments[0].target);
+    switch (ctor.assignments[0].value) {
+        .identifier => |name| try std.testing.expectEqualStrings("owner", name),
+        else => return error.UnexpectedVariant,
+    }
+    // `pub const NoInit = struct`: the `struct` keyword, line 2, 1-based column 20 (0-based 19).
+    try std.testing.expectEqual(@as(u32, 2), ctor.super_loc.?.line);
+    try std.testing.expectEqual(@as(u32, 20), ctor.super_loc.?.column);
 }
 
 test "parse constructor struct return assignments" {
@@ -1807,8 +2392,8 @@ test "return statement with expression" {
     const res = parseZig(arena2.allocator(), source, "R.runar.zig");
     try std.testing.expectEqual(@as(usize, 0), res.errors.len);
     const body = res.contract.?.methods[0].body;
-    try std.testing.expect(body[0].return_stmt != null);
-    switch (body[0].return_stmt.?) { .binary_op => |b| try std.testing.expectEqual(BinOperator.gt, b.op), else => return error.UnexpectedVariant }
+    try std.testing.expect(body[0].return_stmt.value != null);
+    switch (body[0].return_stmt.value.?) { .binary_op => |b| try std.testing.expectEqual(BinOperator.gt, b.op), else => return error.UnexpectedVariant }
 }
 
 test "logical or operator" {

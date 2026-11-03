@@ -235,6 +235,66 @@ RSpec.describe 'Runar::SDK::State' do
       # offset 10: opcode 0x6a → OP_RETURN at hex offset 10
       expect(mod.find_last_op_return(script)).to eq(10)
     end
+
+    # N-167 (sibling of F-367): find_last_op_return's comment must describe
+    # the first-match walk it actually performs, not a "last OP_RETURN"
+    # search, and the method must not keep a dead `last_pos` accumulator
+    # implying it tracks a later match it never reassigns.
+    #
+    # Proves: the comment above find_last_op_return in state.rb no longer
+    # claims to find the LAST OP_RETURN, and the dead last_pos variable is
+    # gone. All seven SDKs implement the same "stop at the first
+    # opcode-boundary 0x6a" walk, which is correct here (the on-chain
+    # interpreter stops at the first OP_RETURN it executes, and the compiler
+    # emits exactly one separator), so "first" and "last" coincide for every
+    # script this method will ever see.
+    # Does not prove: runtime behaviour — that is already pinned by the
+    # examples above, unchanged by this fix.
+    describe 'doc comment and dead code' do
+      it 'does not claim to find the last OP_RETURN and has no dead last_pos' do
+        file, def_line = mod.method(:find_last_op_return).source_location
+        lines = File.readlines(file)
+
+        # Walk backward from the `def` line over contiguous `#` comment
+        # lines to collect just this method's doc comment.
+        doc_lines = []
+        (def_line - 2).downto(0) do |i|
+          stripped = lines[i].strip
+          if stripped.start_with?('#')
+            doc_lines.unshift(stripped)
+          elsif stripped.empty?
+            next
+          else
+            break
+          end
+        end
+        doc = doc_lines.join("\n")
+
+        # Anchor: fails loudly (empty doc) if the slicing above ever points
+        # at the wrong comment instead of silently passing.
+        expect(doc).to include('OP_RETURN')
+        expect(doc.downcase).not_to match(/last\s+op_return/)
+
+        # Collect exactly this method's body by tracking block nesting
+        # depth (def/if/unless/while/until/case/begin open a level, `end`
+        # closes one) so unrelated code below the method is never included.
+        depth = 1
+        body_lines = []
+        ((def_line)..(lines.length - 1)).each do |i|
+          line = lines[i]
+          body_lines << line
+          stripped = line.strip
+          if stripped.match?(/^(if|unless|while|until|case|begin)\b/) || stripped.end_with?(' do')
+            depth += 1
+          elsif stripped == 'end'
+            depth -= 1
+            break if depth.zero?
+          end
+        end
+        body = body_lines.join
+        expect(body).not_to include('last_pos')
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------

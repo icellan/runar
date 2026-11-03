@@ -2,7 +2,7 @@
   "fixture": "state-ripemd160",
   "kind": "stateful",
   "signerKey": "alice",
-  "note": "HashRegistry update(): a Ripemd160 (20-byte) state field with a real checkPreimage continuation.",
+  "note": "HashRegistry update(): a Ripemd160 (20-byte) state field with a real checkPreimage continuation. N-045: update() copies its argument into the 20-byte state field; the continuation now asserts OP_SIZE 20 OP_NUMEQUALVERIFY first. The two WideHash near-misses below are built by an attacker SDK (attackerFieldWidths) because our own SDK refuses a wrong-width Ripemd160.",
   "constructorArgs": [
     "0000000000000000000000000000000000000000"
   ],
@@ -27,9 +27,33 @@
       "cryptoNearMiss": true,
       "expect": "reject",
       "note": "tampered continuation output"
+    },
+    {
+      "method": "update",
+      "args": [
+        "0x222222222222222222222222222222222222222222"
+      ],
+      "attackerFieldWidths": {
+        "Ripemd160": 21
+      },
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-045 WIDEHASH: a 21-byte Ripemd160 committed to the continuation. Pre-fix it was ACCEPTED and the next spend's reader took the last 20 bytes of the script, so the registered hash was not the one written; post-fix the covenant's own width check rejects it on the real Spend engine."
+    },
+    {
+      "method": "update",
+      "args": [
+        "0x22222222222222222222222222222222222222"
+      ],
+      "attackerFieldWidths": {
+        "Ripemd160": 19
+      },
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-045 WIDEHASH: a 19-byte Ripemd160 committed to the continuation. Pre-fix it was ACCEPTED and the next spend's reader took the last 20 bytes of the script, so the registered hash was not the one written; post-fix the covenant's own width check rejects it on the real Spend engine."
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "2cabb37a4c0268855ffa95c5632c7ebfe65a8699efa1fa94e68810071345d3e7"
+    "expected-script.hex": "cc3e79c08ee6a0bec1be4b488a2190f1d5d9a05e32901d1b2688a24b626da2a6"
   }
 }

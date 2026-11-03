@@ -176,6 +176,8 @@ export class TestSmartContract {
  *   adjusted codeSeparatorIndex (template index shifted by constructor-arg
  *   expansion and earlier codeSepIndex slot expansions), exactly as the
  *   SDK does at deploy time.
+ * - `codePartLenSlots` present (N-051): each 4-byte code-part length field
+ *   gets the baked code length, exactly as the SDK does at deploy time.
  */
 function bakeConstructorArgsIntoScript(
   artifact: RunarArtifact,
@@ -236,6 +238,21 @@ function bakeConstructorArgsIntoScript(
     const hexOffset = sub.byteOffset * 2;
     // Replace the 1-byte OP_0 placeholder (2 hex chars) with the encoded push.
     script = script.slice(0, hexOffset) + sub.encoded + script.slice(hexOffset + 2);
+  }
+
+  // N-051: write the deployed code-part length into every deploy-time
+  // `verify_code_part_len` field, as the SDK does (`patchCodePartLenSlots`).
+  // The 4-byte field is fixed-width, so no offset moves.
+  const codeLen = script.length / 2;
+  let le = '';
+  for (let i = 0; i < 4; i++) le += ((codeLen >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  for (const slot of artifact.codePartLenSlots ?? []) {
+    let shift = 0;
+    for (const s of subs) {
+      if (s.byteOffset < slot.byteOffset) shift += s.encoded.length / 2 - 1;
+    }
+    const at = (slot.byteOffset + shift) * 2;
+    script = script.slice(0, at) + le + script.slice(at + 8);
   }
   return script;
 }

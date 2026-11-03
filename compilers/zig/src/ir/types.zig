@@ -169,8 +169,9 @@ pub const PropertyNode = struct {
     /// emitted), silently dropping deploy-time metadata an author intends to
     /// recover from the on-chain script later. When set, ANF lowering forces
     /// the field into the script (a constructor slot) so its bytes survive.
-    /// Only meaningful on readonly fields; honoured only on the `.runar.ts`
-    /// surface (the other 8 formats fail closed at the parse dispatch).
+    /// Only meaningful on readonly fields. The other 8 surfaces set it from
+    /// their native spelling (N-093; e.g. `runar.EmbedAlways(T)` on
+    /// `.runar.zig`) and refuse the comment form at the parse dispatch.
     embed_always: bool = false,
     /// Non-zero when `type_info == .fixed_array` (set by the parser) or when
     /// we want to remember the original outer length for post-expansion.
@@ -198,6 +199,15 @@ pub const ConstructorNode = struct {
     params: []ParamNode,
     super_args: []Expression,
     assignments: []AssignmentNode,
+    /// N-481: the location of the source `super(...)` statement, when the
+    /// surface has one. ANF lowering stamps the `super` call binding (and the
+    /// `load_prop` bindings of its arguments) with it, as the TS reference
+    /// does. N-487: a surface with no `super` statement records the
+    /// constructor token (.sol) or, for a constructor synthesized from the
+    /// property list, the contract declaration's `struct` / `contract`
+    /// keyword the TS parsers use (N-490; the column is 1-based here, like
+    /// every Zig-tier location).
+    super_loc: ?SourceLocation = null,
     /// R-040: the constructor's FULL statement body, in source order, minus
     /// the `super(...)` call (ANF lowering emits that from `super_args`,
     /// because several surfaces have no `super` for the author to write).
@@ -228,10 +238,19 @@ pub const MethodNode = struct {
     /// directive = the default ALL|FORKID (0x41), byte-identical to the
     /// historically-pinned mode. Drives the auto-injected preimage-type assert,
     /// the OP_PUSH_TX binding flag, the ABI sigHashType, and the SDK-side
-    /// preimage construction. Honoured only on the `.runar.ts` surface.
+    /// preimage construction. The other 8 surfaces set it from their native
+    /// spelling (N-093; e.g. `runar.Sighash("SINGLE|FORKID")` on `.runar.zig`).
     sighash_type: ?i32 = null,
 };
-pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };
+/// `spelled_type` is the annotation as the author spelled it, set ONLY when it did not
+/// resolve to a known type (`type_info == .unknown`); empty otherwise, and when there is
+/// no annotation. Only a diagnostic reads it: N-325.
+pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "", spelled_type: []const u8 = "" };
+
+/// The spelled annotation, kept only when it failed to resolve (see `ParamNode.spelled_type`).
+pub fn spelledIfUnknown(ti: RunarType, spelled: []const u8) []const u8 {
+    return if (ti == .unknown) spelled else "";
+}
 pub const ANFParam = ParamNode;
 pub const AssignmentNode = struct { target: []const u8, value: Expression };
 
@@ -244,7 +263,11 @@ pub fn targetIsProperty(target: Expression) bool {
     return node == .property_access;
 }
 
-pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, assign: Assign, if_stmt: IfStmt, for_stmt: ForStmt, expr_stmt: ExprStmt, assert_stmt: AssertStmt, return_stmt: ?Expression };
+pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, assign: Assign, if_stmt: IfStmt, for_stmt: ForStmt, expr_stmt: ExprStmt, assert_stmt: AssertStmt, return_stmt: ReturnStmt };
+/// `source_loc` is the `return` keyword (N-467). Only the .runar.ts parser sets
+/// it, as the TS reference locates a return statement; elsewhere it is null and
+/// the return's bindings keep the enclosing location.
+pub const ReturnStmt = struct { value: ?Expression, source_loc: ?SourceLocation = null };
 // Mirrors the canonical AST's `ExpressionStatement.sourceLocation`
 // (`packages/runar-ir-schema/src/runar-ast.ts`). `source_loc` is populated by
 // every frontend parser at the statement's FIRST token, in the AST-wide
@@ -255,8 +278,10 @@ pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, as
 // expr_stmt rather than a dedicated assert_stmt) anchored to the enclosing
 // method instead of their own line.
 pub const ExprStmt = struct { expr: Expression, source_loc: ?SourceLocation = null };
-pub const ConstDecl = struct { name: []const u8, type_info: ?RunarType = null, value: Expression, source_loc: ?SourceLocation = null };
-pub const LetDecl = struct { name: []const u8, type_info: ?RunarType = null, value: ?Expression = null, source_loc: ?SourceLocation = null };
+/// `type_name` is the annotation as the author spelled it (empty when none, or when
+/// the parser has no single spelled name). Only a diagnostic reads it: N-323.
+pub const ConstDecl = struct { name: []const u8, type_info: ?RunarType = null, value: Expression, source_loc: ?SourceLocation = null, type_name: []const u8 = "" };
+pub const LetDecl = struct { name: []const u8, type_info: ?RunarType = null, value: ?Expression = null, source_loc: ?SourceLocation = null, type_name: []const u8 = "" };
 pub const Assign = struct {
     target: []const u8,
     value: Expression,
@@ -302,8 +327,19 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 // 0), so a runtime bound (`i < this.x`) or an identifier bound (`i < N`) would
 // otherwise silently become a 0-iteration loop. When false, the validator
 // rejects the loop with a compile-time-constant diagnostic (matching the
-// reference TS compiler). Defaults to true so unrelated construction sites and
-// format parsers stay literal-bounded by default.
+// reference TS compiler).
+//
+// F-025: it used to default to `true` "so unrelated construction sites and
+// format parsers stay literal-bounded by default" -- and seven of the nine
+// format parsers never set it, so on `.sol`/`.go`/`.rs`/`.py`/`.zig`/`.rb`/
+// `.java` a runtime bound compiled to a script with the loop body gone. It now
+// defaults to `false` (fail-closed): a parser that forgets it gets a refusal,
+// not a silently empty loop. Every parser sets it to `true` exactly when it
+// recognised a (possibly negated) integer literal and stored it in `bound`.
+// `bound_ident` names the bound when it was a bare identifier (a parameter or
+// a local). The reference refuses that shape from ANF lowering with a
+// different sentence than a `this.<prop>` bound, and validate.zig picks the
+// sentence from it. `null` for a literal or any other expression.
 /// A pre-digested loop shape: the surface parsers resolve the iterator, its
 /// start value, the bound and the direction, so there is no init/condition/
 /// update triple here the way the other six tiers carry one.
@@ -317,6 +353,11 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// surface syntax carries no update clause at all (`for i in 0..N`,
 /// `range(N)`, a bare `while (c)`), which is always representable.
 /// `init_is_const` is the START's counterpart to `bound_is_const` (N-137).
+/// N-026: it defaults to `false` (fail closed), like `bound_is_const`: a
+/// constructor that never decided whether the start is a literal gets the
+/// refusal, not a silent `0`. A parser whose surface has no start expression
+/// (a bare `while`, `loop`) sets it `true` explicitly with `init_value = 0`,
+/// which is the literal the reference supplies there.
 /// The unrolled loop model synthesises iteration k as `start + k*step`, so a
 /// start that is not a compile-time literal cannot be represented. The bound
 /// had a flag; the start did not, and every surface parser's initializer
@@ -343,11 +384,16 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// anything but the iterator; the range-based surfaces (`for i in 0..N`,
 /// `range(N)`, `while (c) : (i += 1)`) test it by construction and keep the
 /// `true` default.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
+/// N-008: `cond_lhs_name` is the identifier the condition's left-hand side
+/// names, when it is one. Only the `.runar.zig` while parser sets it: there
+/// `var_name` becomes the reference's `__while_no_init` placeholder when no
+/// adjacent declaration folds in, and the reference's update rule still lets
+/// the update advance the variable the condition tests.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = false, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, cond_lhs_name: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
-    literal_int: i64, literal_bool: bool, literal_bytes: []const u8, identifier: []const u8,
+    literal_int: i64, literal_bool: bool, literal_bytes: BytesLiteral, identifier: []const u8,
     /// Oversize decimal integer literal — produced by frontend parsers when the
     /// source text is a base-10 integer that overflows `i64`. The payload is the
     /// raw decimal text (optionally leading `-`, no `n` suffix, no underscores)
@@ -360,9 +406,22 @@ pub const Expression = union(enum) {
     call: *CallExpr, method_call: *MethodCall, ternary: *Ternary, index_access: *IndexAccess,
     increment: *IncrementExpr, decrement: *DecrementExpr, array_literal: []const Expression,
 };
+/// A ByteString literal. `location` is the literal's opening quote (N-432);
+/// only the .runar.ts parser sets it, as the TS reference does, so elsewhere
+/// it is null and the hex diagnostics print no location.
+pub const BytesLiteral = struct { value: []const u8, location: ?SourceLocation = null };
 pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
-pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression };
-pub const UnaryOp = struct { op: UnaryOperator, operand: Expression };
+/// `left_loc` / `right_loc` are the first tokens of the two operands (N-463).
+/// Every surface parser sets them for operator-syntax nodes (N-492), as the
+/// TS reference locates its operands; nodes a parser synthesizes carry null
+/// and an operand type error on them prints no location. `loc` is where the
+/// whole node starts, a leading `(` included; only `==` / `!=` nodes carry it
+/// (N-505), for the `===` / `!==` type error.
+pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression, left_loc: ?SourceLocation = null, right_loc: ?SourceLocation = null, loc: ?SourceLocation = null };
+/// `location` is the operator token (N-472); every surface parser sets it for
+/// operator-syntax unaries (N-492), as the TS reference locates a unary node
+/// there. Synthesized unaries (Java `.negate()` / `.not()`) carry null.
+pub const UnaryOp = struct { op: UnaryOperator, operand: Expression, location: ?SourceLocation = null };
 pub const CallExpr = struct {
     callee: []const u8,
     args: []Expression,
@@ -371,9 +430,14 @@ pub const CallExpr = struct {
     /// "ByteString" when present; empty for the statement form and every
     /// non-asm call.
     asm_return_type: []const u8 = "",
+    /// First token of each argument (N-463); .runar.ts parser only, empty
+    /// elsewhere. See `BinaryOp.left_loc`.
+    arg_locs: []const ?SourceLocation = &.{},
 };
-pub const MethodCall = struct { object: []const u8, method: []const u8, args: []Expression };
-pub const Ternary = struct { condition: Expression, then_expr: Expression, else_expr: Expression };
+/// `arg_locs`: as on `CallExpr` (N-463).
+pub const MethodCall = struct { object: []const u8, method: []const u8, args: []Expression, arg_locs: []const ?SourceLocation = &.{} };
+/// `location` is the ternary's first token (N-463); .runar.ts parser only.
+pub const Ternary = struct { condition: Expression, then_expr: Expression, else_expr: Expression, location: ?SourceLocation = null };
 pub const IndexAccess = struct { object: Expression, index: Expression };
 pub const IncrementExpr = struct { operand: Expression, prefix: bool };
 pub const DecrementExpr = struct { operand: Expression, prefix: bool };
@@ -420,7 +484,10 @@ pub const UnaryOperator = enum {
 // ============================================================================
 
 pub const ANFProgram = struct {
-    contract_name: []const u8, parent_class: ParentClass = .smart_contract,
+    /// F-038: wire data (`parentClass`), so `--emit-ir` -> `compile-ir` keeps
+    /// the artifact's parentClass. Null only for IR that does not carry it; the
+    /// artifact then omits the field instead of inventing "SmartContract".
+    contract_name: []const u8, parent_class: ?ParentClass = null,
     properties: []ANFProperty, constructor: ANFConstructor = .{ .params = &.{}, .assertions = &.{} },
     methods: []ANFMethod,
     pub fn deinit(self: *const ANFProgram, allocator: std.mem.Allocator) void {
@@ -451,11 +518,11 @@ pub const ANFMethod = struct {
     body: []ANFBinding = &.{},
     /// Non-default BIP-143 sighash mode a `@sighash` directive declared for
     /// this (public) method (issue #123), e.g. 0x43 for SINGLE|FORKID. Null =
-    /// default ALL|FORKID (0x41). In-memory carrier only — never serialized
-    /// into the ANF IR JSON compared cross-tier (the codegen-relevant flag
-    /// rides on each check_preimage node's sighash_flag). The artifact
-    /// assembler copies it to ABIMethod.sighash_type so the SDK builds a
-    /// matching preimage.
+    /// default ALL|FORKID (0x41). F-065 / F-088: wire data (`sigHashType`,
+    /// omitted for the default), so `--emit-ir` -> `compile-ir` keeps it; the
+    /// codegen-relevant flag rides on each check_preimage node's sighash_flag.
+    /// The artifact assembler copies it to ABIMethod.sighash_type so the SDK
+    /// builds a matching preimage.
     sighash_type: ?i32 = null,
 };
 pub const ANFBinding = struct { name: []const u8, value: ANFValue, source_loc: ?SourceLocation = null };
@@ -698,10 +765,12 @@ pub const StackInstruction = union(enum) {
 ///
 /// `delta` is the deploy-time byte growth of the template's OP_0 constructor
 /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`. `exact`
-/// says whether every placeholder's growth is type-determined: true pins with
-/// OP_NUMEQUAL, false with OP_GREATERTHANOREQUAL (a variable-width readonly
-/// constructor argument has no compile-time width, and placeholder growth is
-/// never negative, so the sum is still a sound LOWER bound).
+/// says whether every placeholder's growth is type-determined. The pin is
+/// ALWAYS an OP_NUMEQUAL equality (N-051). When `exact` is false (a
+/// variable-width readonly constructor argument has no compile-time width) the
+/// compile-time value is only a lower bound, so the emitter records the field
+/// in the artifact's `codePartLenSlots` and the SDK writes the real deployed
+/// code-part length into it at deploy time.
 pub const VerifyCodePartLen = struct { delta: i64, exact: bool };
 
 /// Backing payload for the `raw_bytes` StackInstruction variant. Bytes are
@@ -755,6 +824,9 @@ pub const ABIMethod = struct {
 pub const ABIParam = struct { name: []const u8, type_name: []const u8 };
 pub const ConstructorSlot = struct { param_index: usize, byte_offset: usize };
 pub const CodeSepIndexSlot = struct { byte_offset: usize, code_sep_index: usize };
+/// N-051 — template byte offset of the first of the 4 little-endian length
+/// bytes of a `verify_code_part_len` pin whose value the SDK fills in.
+pub const CodePartLenSlot = struct { byte_offset: usize };
 pub const StateField = struct { name: []const u8, type_name: []const u8, index: usize, initial_value: ?ConstValue = null };
 pub const SourceMapping = struct { opcode_index: u32, source_file: []const u8, line: u32, column: u32 };
 pub const SourceMap = struct { mappings: []SourceMapping };

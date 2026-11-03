@@ -186,6 +186,24 @@ public final class ExpandFixedArrays {
         final Map<String, ArrayMeta> syntheticArrays = new HashMap<>();
         int tempCounter = 0;
 
+        // N-048: evaluation-order state for the statement being rewritten. A
+        // computed index is hoisted to a `const __idx_K` in front of its whole
+        // statement, which is only sound when nothing the statement evaluates
+        // earlier can observe or be observed by the move. orderEffect: a side
+        // effect (`++`/`--`, a non-builtin call) was already evaluated;
+        // orderRead: a non-literal value was already read; orderCond: inside
+        // an operand that is only conditionally evaluated (right of &&/||, a
+        // ternary arm).
+        boolean orderEffect = false;
+        boolean orderRead = false;
+        int orderCond = 0;
+
+        void resetOrder() {
+            orderEffect = false;
+            orderRead = false;
+            orderCond = 0;
+        }
+
         Ctx(ContractNode contract) {
             this.contract = contract;
         }
@@ -296,8 +314,9 @@ public final class ExpandFixedArrays {
             if (er.error) {
                 return List.of();
             }
+            // F-098 (R35): @embedAlways on a FixedArray propagates to every slot.
             return expandArrayMeta(meta, prop.readonly(), prop.sourceLocation(),
-                er.elements, List.of());
+                er.elements, List.of(), prop.embedAlways());
         }
 
         private static final class ExtractResult {
@@ -350,8 +369,18 @@ public final class ExpandFixedArrays {
             return null;
         }
 
-        /** The literal family of an initializer element, or null. N-133. */
+        /**
+         * The literal family of an initializer element, or null. N-133.
+         *
+         * <p>N-234: {@code toByteString('<hex>')} IS the ByteStringLiteral
+         * production (see {@code Validate.isToByteStringLiteral} and
+         * spec/grammar.md section 11). Checking only the bare {@code
+         * ByteStringLiteral} AST node let a call-wrapped ByteString element
+         * ({@code FixedArray<bigint, 2> = [toByteString('ab'), 0n]}) slip
+         * past this family check.
+         */
         private static String familyOfLiteral(Expression expr) {
+            if (Validate.isToByteStringLiteral(expr)) return "ByteString";
             if (expr instanceof BigIntLiteral) return "bigint";
             if (expr instanceof BoolLiteral) return "boolean";
             if (expr instanceof ByteStringLiteral) return "ByteString";
@@ -363,7 +392,8 @@ public final class ExpandFixedArrays {
             boolean readonly,
             SourceLocation loc,
             List<Expression> initializer,
-            List<SyntheticArrayChainEntry> parentChain
+            List<SyntheticArrayChainEntry> parentChain,
+            boolean embedAlways
         ) {
             List<PropertyNode> out = new ArrayList<>();
             for (int i = 0; i < meta.slotNames.size(); i++) {
@@ -395,7 +425,7 @@ public final class ExpandFixedArrays {
                         }
                         nestedInit = nested.elements();
                     }
-                    out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
+                    out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere, embedAlways));
                 } else {
                     // N-133: the element-type check. Typecheck's array-literal
                     // branch never sees a property initializer -- it is
@@ -425,7 +455,8 @@ public final class ExpandFixedArrays {
                         readonly,
                         slotInit,
                         loc,
-                        List.copyOf(chainHere)
+                        List.copyOf(chainHere),
+                        embedAlways
                     ));
                 }
             }
@@ -463,6 +494,7 @@ public final class ExpandFixedArrays {
         }
 
         List<Statement> rewriteStatement(Statement stmt) {
+            resetOrder();
             if (stmt instanceof VariableDeclStatement v) return rewriteVariableDecl(v);
             if (stmt instanceof AssignmentStatement a) return rewriteAssignment(a);
             if (stmt instanceof IfStatement i) return rewriteIfStmt(i);
@@ -535,6 +567,18 @@ public final class ExpandFixedArrays {
                 Expression newIndex = rewriteExpression(idx.index(), prelude);
                 Expression newObj = rewriteExpression(idx.object(), prelude);
                 Expression newValue = rewriteExpression(stmt.value(), prelude);
+                // `this.grid[1][i] = v`: the literal outer hop has become the
+                // synthetic sub-array `grid__1`, and indexing it at runtime has
+                // no slot to address. Refuse here rather than in stack lowering
+                // (N-036).
+                if (newObj instanceof PropertyAccessExpr npa
+                    && syntheticArrays.containsKey(npa.property())) {
+                    error(
+                        "Runtime index assignment on a nested FixedArray is not supported",
+                        stmt.sourceLocation()
+                    );
+                    return new ArrayList<>(prelude);
+                }
                 List<Statement> outAll = new ArrayList<>(prelude);
                 outAll.add(new AssignmentStatement(
                     new IndexAccessExpr(newObj, newIndex),
@@ -585,6 +629,7 @@ public final class ExpandFixedArrays {
             List<Statement> prelude = new ArrayList<>();
             Expression newCond = rewriteExpression(stmt.condition(), prelude);
 
+            resetOrder();
             List<Statement> initPrelude = new ArrayList<>();
             Expression newInitInit = null;
             if (stmt.init() != null && stmt.init().init() != null) {
@@ -735,7 +780,12 @@ public final class ExpandFixedArrays {
             }
             if (expr instanceof BinaryExpr be) {
                 Expression left = rewriteExpression(be.left(), prelude);
+                // spec §3.7: the right operand of && / || is conditional.
+                boolean shortCircuit = be.op() == Expression.BinaryOp.AND
+                    || be.op() == Expression.BinaryOp.OR;
+                if (shortCircuit) orderCond++;
                 Expression right = rewriteExpression(be.right(), prelude);
+                if (shortCircuit) orderCond--;
                 return new BinaryExpr(be.op(), left, right);
             }
             if (expr instanceof UnaryExpr ue) {
@@ -743,11 +793,15 @@ public final class ExpandFixedArrays {
                 return new UnaryExpr(ue.op(), operand);
             }
             if (expr instanceof CallExpr ce) {
+                // The callee names a function; it is not a value read.
+                boolean readBeforeCallee = orderRead;
                 Expression callee = rewriteExpression(ce.callee(), prelude);
+                orderRead = readBeforeCallee;
                 List<Expression> args = new ArrayList<>(ce.args().size());
                 for (Expression a : ce.args()) {
                     args.add(rewriteExpression(a, prelude));
                 }
+                if (isEffectfulCall(ce)) orderEffect = true;
                 // R-026: the 2-arg convenience constructor defaults
                 // asmReturnType to null. It carries the captured return type of
                 // an expression-form `asm<T>()`, without which the call is
@@ -760,18 +814,22 @@ public final class ExpandFixedArrays {
             }
             if (expr instanceof TernaryExpr te) {
                 Expression cond = rewriteExpression(te.condition(), prelude);
+                orderCond++;
                 Expression cons = rewriteExpression(te.consequent(), prelude);
                 Expression alt = rewriteExpression(te.alternate(), prelude);
+                orderCond--;
                 return new TernaryExpr(cond, cons, alt);
             }
             if (expr instanceof IncrementExpr ie) {
                 rejectArrayElementMutationInExpression(ie.operand(), "++");
                 Expression operand = rewriteExpression(ie.operand(), prelude);
+                orderEffect = true;
                 return new IncrementExpr(operand, ie.prefix());
             }
             if (expr instanceof DecrementExpr de) {
                 rejectArrayElementMutationInExpression(de.operand(), "--");
                 Expression operand = rewriteExpression(de.operand(), prelude);
+                orderEffect = true;
                 return new DecrementExpr(operand, de.prefix());
             }
             if (expr instanceof ArrayLiteralExpr al) {
@@ -783,7 +841,33 @@ public final class ExpandFixedArrays {
             }
             // Identifier, BigIntLiteral, BoolLiteral, ByteStringLiteral,
             // PropertyAccessExpr — leaf, no rewriting needed.
+            if (expr instanceof Identifier || expr instanceof PropertyAccessExpr) {
+                orderRead = true;
+            }
             return expr;
+        }
+
+        /**
+         * Rewrite a runtime FixedArray index and hoist it if impure, refusing
+         * the hoist when it would change evaluation order (N-048). The binding
+         * lands in front of the whole statement, so it is refused when the read
+         * sits in a conditionally-evaluated operand, when an earlier part of
+         * the statement already had a side effect, or when the index's own side
+         * effect would move ahead of an earlier read. The AST has no
+         * let-expression, so binding the index at the read's own position is
+         * not expressible here.
+         */
+        Expression rewriteAndHoistIndex(Expression index, List<Statement> prelude, SourceLocation loc) {
+            boolean effectBefore = orderEffect;
+            boolean readBefore = orderRead;
+            Expression rewritten = rewriteExpression(index, prelude);
+            if (!isPureReference(rewritten)) {
+                boolean effectInIndex = orderEffect && !effectBefore;
+                if (orderCond > 0 || effectBefore || (effectInIndex && readBefore)) {
+                    error(HOIST_ORDER_DIAGNOSTIC, loc);
+                }
+            }
+            return hoistIfImpure(rewritten, prelude, loc, "idx");
         }
 
         Expression rewriteIndexAccess(IndexAccessExpr expr, List<Statement> prelude) {
@@ -793,6 +877,7 @@ public final class ExpandFixedArrays {
                 return new BigIntLiteral(BigInteger.ZERO);
             }
             if (nested.status == ResolveStatus.OK) {
+                orderRead = true;
                 return new PropertyAccessExpr(nested.name);
             }
 
@@ -800,6 +885,15 @@ public final class ExpandFixedArrays {
             if (baseName == null) {
                 Expression obj = rewriteExpression(expr.object(), prelude);
                 Expression idx = rewriteExpression(expr.index(), prelude);
+                // `this.grid[1][i]`: see the matching check in rewriteAssignment (N-036).
+                if (obj instanceof PropertyAccessExpr opa
+                    && syntheticArrays.containsKey(opa.property())) {
+                    error(
+                        "Runtime index access on a nested FixedArray is not supported",
+                        new SourceLocation("", 0, 0)
+                    );
+                    return new BigIntLiteral(BigInteger.ZERO);
+                }
                 return new IndexAccessExpr(obj, idx);
             }
 
@@ -814,6 +908,7 @@ public final class ExpandFixedArrays {
             SourceLocation loc = new SourceLocation("", 0, 0);
             BigInteger lit = asLiteralIndex(expr.index());
             if (lit != null) {
+                orderRead = true;
                 if (lit.signum() < 0
                     || lit.compareTo(BigInteger.valueOf(meta.type.length())) >= 0) {
                     error(
@@ -832,8 +927,8 @@ public final class ExpandFixedArrays {
                 return new BigIntLiteral(BigInteger.ZERO);
             }
 
-            Expression rewrittenIndex = rewriteExpression(expr.index(), prelude);
-            Expression indexRef = hoistIfImpure(rewrittenIndex, prelude, loc, "idx");
+            Expression indexRef = rewriteAndHoistIndex(expr.index(), prelude, loc);
+            orderRead = true;
             return buildReadDispatchTernary(meta, indexRef);
         }
 
@@ -868,8 +963,7 @@ public final class ExpandFixedArrays {
             if (meta.slotIsArray) return null;
 
             List<Statement> prelude = new ArrayList<>();
-            Expression rewrittenIndex = rewriteExpression(idx.index(), prelude);
-            Expression indexRef = hoistIfImpure(rewrittenIndex, prelude, loc, "idx");
+            Expression indexRef = rewriteAndHoistIndex(idx.index(), prelude, loc);
 
             int n = meta.slotNames.size();
             if (n < 2) {
@@ -935,7 +1029,14 @@ public final class ExpandFixedArrays {
                 return outAll;
             }
 
+            // Source order is index THEN value, but the value is rewritten first
+            // so hoisted names are allocated as before; for the N-048 order
+            // checks the value's nested reads are judged as if the target index
+            // had already been evaluated. The target index itself is first.
+            orderEffect = exprHasEffect(idx.index());
+            orderRead = exprHasRead(idx.index());
             Expression rewrittenValue = rewriteExpression(stmt.value(), prelude);
+            resetOrder();
             Expression rewrittenIndex = rewriteExpression(idx.index(), prelude);
             SourceLocation loc = stmt.sourceLocation();
 
@@ -966,6 +1067,13 @@ public final class ExpandFixedArrays {
             if (meta.slotIsArray) {
                 error("Runtime index assignment on a nested FixedArray is not supported", loc);
                 return new ArrayList<>(prelude);
+            }
+
+            // A side-effecting value is hoisted to `__val_K` in front of the
+            // dispatch, which reads a pure (unhoisted) index only afterwards:
+            // that would move the value's effect ahead of the index read (N-048).
+            if (isPureReference(rewrittenIndex) && exprHasEffect(stmt.value())) {
+                error(HOIST_ORDER_DIAGNOSTIC, loc);
             }
 
             Expression indexRef = hoistIfImpure(rewrittenIndex, prelude, loc, "idx");
@@ -1111,6 +1219,74 @@ public final class ExpandFixedArrays {
     // Stateless helpers
     // ------------------------------------------------------------------
 
+    /**
+     * N-048: the one diagnostic every tier emits when hoisting a computed
+     * FixedArray index would reorder evaluation. Shared verbatim with the TS
+     * reference.
+     */
+    static final String HOIST_ORDER_DIAGNOSTIC =
+        "FixedArray index would be evaluated out of source order: hoisting it "
+            + "would move it past an earlier side effect in the same statement, move "
+            + "its own side effect past an earlier read, or lift it out of a "
+            + "conditionally-evaluated operand of &&, || or ?:. Compute the index into "
+            + "a local variable in a separate statement first";
+
+    /**
+     * A call is side-effecting unless its callee is a bare identifier (a
+     * built-in function). Method calls — output intrinsics and inlined private
+     * methods, which may write state — count as effects.
+     */
+    private static boolean isEffectfulCall(CallExpr ce) {
+        return !(ce.callee() instanceof Identifier);
+    }
+
+    /** Syntactic: does evaluating {@code expr} perform a side effect? */
+    private static boolean exprHasEffect(Expression expr) {
+        if (expr instanceof IncrementExpr || expr instanceof DecrementExpr) return true;
+        if (expr instanceof CallExpr ce) {
+            if (isEffectfulCall(ce)) return true;
+            for (Expression a : ce.args()) if (exprHasEffect(a)) return true;
+            return false;
+        }
+        if (expr instanceof BinaryExpr be) return exprHasEffect(be.left()) || exprHasEffect(be.right());
+        if (expr instanceof UnaryExpr ue) return exprHasEffect(ue.operand());
+        if (expr instanceof MemberExpr me) return exprHasEffect(me.object());
+        if (expr instanceof TernaryExpr te) {
+            return exprHasEffect(te.condition()) || exprHasEffect(te.consequent())
+                || exprHasEffect(te.alternate());
+        }
+        if (expr instanceof IndexAccessExpr ia) return exprHasEffect(ia.object()) || exprHasEffect(ia.index());
+        if (expr instanceof ArrayLiteralExpr al) {
+            for (Expression e : al.elements()) if (exprHasEffect(e)) return true;
+            return false;
+        }
+        return false;
+    }
+
+    /** Syntactic: does evaluating {@code expr} read a non-literal value? */
+    private static boolean exprHasRead(Expression expr) {
+        if (expr instanceof Identifier || expr instanceof PropertyAccessExpr) return true;
+        if (expr instanceof CallExpr ce) {
+            for (Expression a : ce.args()) if (exprHasRead(a)) return true;
+            return false;
+        }
+        if (expr instanceof BinaryExpr be) return exprHasRead(be.left()) || exprHasRead(be.right());
+        if (expr instanceof UnaryExpr ue) return exprHasRead(ue.operand());
+        if (expr instanceof IncrementExpr ie) return exprHasRead(ie.operand());
+        if (expr instanceof DecrementExpr de) return exprHasRead(de.operand());
+        if (expr instanceof MemberExpr me) return exprHasRead(me.object());
+        if (expr instanceof TernaryExpr te) {
+            return exprHasRead(te.condition()) || exprHasRead(te.consequent())
+                || exprHasRead(te.alternate());
+        }
+        if (expr instanceof IndexAccessExpr ia) return exprHasRead(ia.object()) || exprHasRead(ia.index());
+        if (expr instanceof ArrayLiteralExpr al) {
+            for (Expression e : al.elements()) if (exprHasRead(e)) return true;
+            return false;
+        }
+        return false;
+    }
+
     private static boolean isPureReference(Expression expr) {
         if (expr instanceof Identifier
             || expr instanceof BigIntLiteral
@@ -1130,7 +1306,7 @@ public final class ExpandFixedArrays {
     private static Expression cloneExpression(Expression expr) {
         if (expr instanceof BigIntLiteral lit) return new BigIntLiteral(lit.value());
         if (expr instanceof BoolLiteral lit) return new BoolLiteral(lit.value());
-        if (expr instanceof ByteStringLiteral lit) return new ByteStringLiteral(lit.value());
+        if (expr instanceof ByteStringLiteral lit) return new ByteStringLiteral(lit.value(), lit.sourceLocation());
         if (expr instanceof Identifier id) return new Identifier(id.name());
         if (expr instanceof PropertyAccessExpr pa) return new PropertyAccessExpr(pa.property());
         if (expr instanceof BinaryExpr be) {

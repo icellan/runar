@@ -2,6 +2,7 @@ const std = @import("std");
 const runar = @import("runar");
 
 const Auction = @import("auction/Auction.runar.zig").Auction;
+const BitwiseOps = @import("bitwise-ops/BitwiseOps.runar.zig").BitwiseOps;
 const Blake3Test = @import("blake3/Blake3Test.runar.zig").Blake3Test;
 const BSV20Token = @import("bsv20-token/BSV20Token.runar.zig").BSV20Token;
 const BSV21Token = @import("bsv21-token/BSV21Token.runar.zig").BSV21Token;
@@ -10,6 +11,8 @@ const CovenantVault = @import("covenant-vault/CovenantVault.runar.zig").Covenant
 const ECDemo = @import("ec-demo/ECDemo.runar.zig").ECDemo;
 const FunctionPatterns = @import("function-patterns/FunctionPatterns.runar.zig").FunctionPatterns;
 const MathDemo = @import("math-demo/MathDemo.runar.zig").MathDemo;
+const math_demo_vectors = @import("math-demo/onchain_vectors.zig");
+const function_patterns_vectors = @import("function-patterns/onchain_vectors.zig");
 const OraclePriceFeed = @import("oracle-price/OraclePriceFeed.runar.zig").OraclePriceFeed;
 const OrdinalNFT = @import("ordinal-nft/OrdinalNFT.runar.zig").OrdinalNFT;
 const P2Blake3PKH = @import("p2blake3pkh/P2Blake3PKH.runar.zig").P2Blake3PKH;
@@ -19,11 +22,38 @@ const BoundedCounter = @import("property-initializers/BoundedCounter.runar.zig")
 // SchnorrZKP omitted — see examples/zig/schnorr-zkp/SchnorrZKP_test.zig
 // for the BUG-001 rationale (native i64 Bigint can't hold the 256-bit
 // secp256k1 group order embedded in the malleability gate).
+const ShiftOps = @import("shift-ops/ShiftOps.runar.zig").ShiftOps;
 const Sha256CompressTest = @import("sha256-compress/Sha256CompressTest.runar.zig").Sha256CompressTest;
 const Sha256FinalizeTest = @import("sha256-finalize/Sha256FinalizeTest.runar.zig").Sha256FinalizeTest;
 const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
 const SPHINCSWallet = @import("sphincs-wallet/SPHINCSWallet.runar.zig").SPHINCSWallet;
+const StateCovenant = @import("state-covenant/StateCovenant.runar.zig").StateCovenant;
+const state_covenant_witness = @import("state-covenant/witness.zig");
+const IntentCurrentBlockHeight = @import("intent-current-block-height/IntentCurrentBlockHeight.runar.zig").IntentCurrentBlockHeight;
+const IntentOutputP2PKH = @import("intent-output-p2pkh/IntentOutputP2PKH.runar.zig").IntentOutputP2PKH;
+const IntentPrevOutputScript = @import("intent-prev-output-script/IntentPrevOutputScript.runar.zig").IntentPrevOutputScript;
+const ByteBuiltins = @import("byte-builtins/ByteBuiltins.runar.zig").ByteBuiltins;
+const P256EncodeNegate = @import("p256-encode-negate/P256EncodeNegate.runar.zig").P256EncodeNegate;
+const p256_vectors = @import("p256-encode-negate/vectors.zig");
+const P384EncodeNegate = @import("p384-encode-negate/P384EncodeNegate.runar.zig").P384EncodeNegate;
+const p384_vectors = @import("p384-encode-negate/vectors.zig");
 const Counter = @import("stateful-counter/Counter.runar.zig").Counter;
+const AnnotatedVault = @import("annotated-vault/AnnotatedVault.runar.zig").AnnotatedVault;
+const CountdownLoop = @import("countdown-loop/CountdownLoop.runar.zig").CountdownLoop;
+const LoopShapes = @import("loop-shapes/LoopShapes.runar.zig").LoopShapes;
+const ParamShadowBranchArm = @import("param-shadow-branch-arm/ParamShadowBranchArm.runar.zig").ParamShadowBranchArm;
+const PropertyShadow = @import("property-shadow/PropertyShadow.runar.zig").PropertyShadow;
+const R1K1Wallet = @import("r1-k1-wallet/R1K1Wallet.runar.zig").R1K1Wallet;
+const Selector = @import("selector/Selector.runar.zig").Selector;
+const SingleCounter = @import("sighash-single-stateful/SingleCounter.runar.zig").SingleCounter;
+const StatefulWOTSGate = @import("stateful-wots-gate/StatefulWOTSGate.runar.zig").StatefulWOTSGate;
+const TerminalVarlenRead = @import("terminal-varlen-read/TerminalVarlenRead.runar.zig").TerminalVarlenRead;
+const WalletToken = @import("token-wallet-naive-INSECURE/WalletToken.runar.zig").WalletToken;
+const SLHDSANaive128f = @import("post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f.runar.zig").PostQuantumSLHDSANaiveInsecure128f;
+const SLHDSANaive192f = @import("post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f.runar.zig").PostQuantumSLHDSANaiveInsecure192f;
+const SLHDSANaive192s = @import("post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s.runar.zig").PostQuantumSLHDSANaiveInsecure192s;
+const SLHDSANaive256f = @import("post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f.runar.zig").PostQuantumSLHDSANaiveInsecure256f;
+const SLHDSANaive256s = @import("post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s.runar.zig").PostQuantumSLHDSANaiveInsecure256s;
 const TicTacToe = @import("tic-tac-toe/TicTacToe.runar.zig").TicTacToe;
 const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleToken;
 const NFTExample = @import("token-nft/NFTExample.runar.zig").SimpleNFT;
@@ -45,7 +75,17 @@ pub fn main(init: std.process.Init) !void {
     try runCase(probe_case);
 }
 
+/// F-033 on-chain vectors: run one natively. `run` announces
+/// `F033_VECTOR_CALL` right before the contract call, so a probe that dies
+/// earlier (bad index, JSON error) cannot pass as the call aborting.
+fn runVector(comptime vectors: type, index_text: []const u8) !void {
+    const index = try std.fmt.parseInt(usize, index_text, 10);
+    _ = try vectors.run(std.heap.page_allocator, index, true);
+}
+
 fn runCase(probe_case: []const u8) !void {
+    if (std.mem.startsWith(u8, probe_case, "math-demo-vector:")) return runVector(math_demo_vectors, probe_case["math-demo-vector:".len..]);
+    if (std.mem.startsWith(u8, probe_case, "function-patterns-vector:")) return runVector(function_patterns_vectors, probe_case["function-patterns-vector:".len..]);
     if (std.mem.eql(u8, probe_case, "p2pkh-wrong-pubkey")) return probeP2PKHWrongPubkey();
     if (std.mem.eql(u8, probe_case, "p2pkh-wrong-sig")) return probeP2PKHWrongSig();
     if (std.mem.eql(u8, probe_case, "p2blake3pkh-wrong-pubkey")) return probeP2Blake3PKHWrongPubkey();
@@ -56,6 +96,10 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "bsv21-token-wrong-sig")) return probeBSV21TokenWrongSig();
     if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-pubkey")) return probeOrdinalNFTWrongPubkey();
     if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-sig")) return probeOrdinalNFTWrongSig();
+    if (std.mem.eql(u8, probe_case, "bitwise-ops-wrong-shift")) return probeBitwiseOpsWrongShift();
+    if (std.mem.eql(u8, probe_case, "bitwise-ops-wrong-bitwise")) return probeBitwiseOpsWrongBitwise();
+    if (std.mem.eql(u8, probe_case, "shift-ops-wrong-left")) return probeShiftOpsWrongLeft();
+    if (std.mem.eql(u8, probe_case, "shift-ops-wrong-right")) return probeShiftOpsWrongRight();
     if (std.mem.eql(u8, probe_case, "blake3-hash-mismatch")) return probeBlake3HashMismatch();
     if (std.mem.eql(u8, probe_case, "blake3-compress-mismatch")) return probeBlake3CompressMismatch();
     if (std.mem.eql(u8, probe_case, "sha256-compress-mismatch")) return probeSha256CompressMismatch();
@@ -67,6 +111,8 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "bounded-counter-inactive")) return probeBoundedCounterInactive();
     if (std.mem.eql(u8, probe_case, "counter-underflow")) return probeCounterUnderflow();
     if (std.mem.eql(u8, probe_case, "auction-bid-too-low")) return probeAuctionBidTooLow();
+    if (std.mem.eql(u8, probe_case, "auction-bid-unpaid")) return probeAuctionBidWithContinuation(10000);
+    if (std.mem.eql(u8, probe_case, "auction-bid-short")) return probeAuctionBidWithContinuation(10000 + 150 - 1);
     if (std.mem.eql(u8, probe_case, "auction-close-too-early")) return probeAuctionCloseTooEarly();
     if (std.mem.eql(u8, probe_case, "auction-close-wrong-sig")) return probeAuctionCloseWrongSig();
     if (std.mem.eql(u8, probe_case, "covenant-vault-wrong-output")) return probeCovenantVaultWrongOutput();
@@ -80,6 +126,9 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "oracle-price-below-threshold")) return probeOraclePriceBelowThreshold();
     if (std.mem.eql(u8, probe_case, "oracle-price-wrong-receiver-sig")) return probeOraclePriceWrongReceiverSig();
     if (std.mem.eql(u8, probe_case, "tictactoe-join-twice")) return probeTicTacToeJoinTwice();
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-unpaid")) return probeTicTacToeJoinWithContinuation(10000);
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-short")) return probeTicTacToeJoinWithContinuation(10000 + 100 - 1);
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-over")) return probeTicTacToeJoinWithContinuation(10000 + 100 + 1);
     if (std.mem.eql(u8, probe_case, "tictactoe-move-wrong-player")) return probeTicTacToeMoveWrongPlayer();
     if (std.mem.eql(u8, probe_case, "tictactoe-move-occupied-cell")) return probeTicTacToeMoveOccupiedCell();
     if (std.mem.eql(u8, probe_case, "tictactoe-cancel-before-join-wrong-sig")) return probeTicTacToeCancelBeforeJoinWrongSig();
@@ -111,7 +160,240 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-wrong-slhdsa-key")) return probeSPHINCSWalletWrongSLHDSAKey();
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-invalid-slhdsa-proof")) return probeSPHINCSWalletInvalidSLHDSAProof();
     // schnorr-zkp-invalid-r-point omitted — see SchnorrZKP_test.zig (BUG-001).
+    if (std.mem.eql(u8, probe_case, "state-covenant-block-not-increasing")) return probeStateCovenantBlockNotIncreasing();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-prestate-root")) return probeStateCovenantWrongPreStateRoot();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-babybear-proof")) return probeStateCovenantWrongBabyBearProof();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-merkle-proof")) return probeStateCovenantWrongMerkleProof();
+    if (std.mem.eql(u8, probe_case, "state-covenant-wrong-batch-hash")) return probeStateCovenantWrongBatchHash();
+    if (std.mem.eql(u8, probe_case, "annotated-vault-wrong-sig")) return probeAnnotatedVaultWrongSig();
+    if (std.mem.eql(u8, probe_case, "countdown-loop-wrong-target")) return probeCountdownLoopWrongTarget();
+    if (std.mem.eql(u8, probe_case, "loop-shapes-wrong-target")) return probeLoopShapesWrongTarget();
+    if (std.mem.eql(u8, probe_case, "param-shadow-branch-arm-flagged-wrong-count")) return probeParamShadowFlaggedWrongCount();
+    if (std.mem.eql(u8, probe_case, "property-shadow-wrong-target")) return probePropertyShadowWrongTarget();
+    if (std.mem.eql(u8, probe_case, "property-shadow-count-not-greater")) return probePropertyShadowCountNotGreater();
+    if (std.mem.eql(u8, probe_case, "r1-k1-wallet-wrong-k1-key")) return probeR1K1WrongKey();
+    if (std.mem.eql(u8, probe_case, "r1-k1-wallet-wrong-k1-sig")) return probeR1K1WrongSig();
+    if (std.mem.eql(u8, probe_case, "selector-out-of-range")) return probeSelectorOutOfRange();
+    if (std.mem.eql(u8, probe_case, "sighash-single-stateful-reset-zero")) return probeSingleCounterResetZero();
+    if (std.mem.eql(u8, probe_case, "stateful-wots-gate-tampered-sig")) return probeStatefulWOTSGateTamperedSig();
+    if (std.mem.eql(u8, probe_case, "terminal-varlen-read-too-short")) return probeTerminalVarlenReadTooShort();
+    if (std.mem.eql(u8, probe_case, "token-wallet-transfer-wrong-sig")) return probeWalletTokenTransferWrongSig();
+    if (std.mem.eql(u8, probe_case, "token-wallet-transfer-short-addr")) return probeWalletTokenTransferShortAddr();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-wrong-sig")) return probeWalletTokenMergeWrongSig();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-other-holder")) return probeWalletTokenMergeOtherHolder();
+    if (std.mem.eql(u8, probe_case, "token-wallet-merge-negative-supply")) return probeWalletTokenMergeNegativeSupply();
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-128f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive128f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-192f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive192f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-192s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive192s);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-256f-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256f);
+    if (std.mem.eql(u8, probe_case, "slhdsa-naive-256s-malformed-sig")) return probeSLHDSANaiveMalformedSig(SLHDSANaive256s);
+    if (std.mem.eql(u8, probe_case, "intent-current-block-height-past-deadline")) return probeIntentCurrentBlockHeightPastDeadline();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-pkh")) return probeIntentOutputP2PKHWrongPkh();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-wrong-amount")) return probeIntentOutputP2PKHWrongAmount();
+    if (std.mem.eql(u8, probe_case, "intent-output-p2pkh-no-outputs")) return probeIntentOutputP2PKHNoOutputs();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-wrong-hash")) return probeIntentPrevOutputScriptWrongHash();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-no-witness")) return probeIntentPrevOutputScriptNoWitness();
+    if (std.mem.eql(u8, probe_case, "intent-prev-output-script-empty-witness")) return probeIntentPrevOutputScriptEmptyWitness();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-split-wrong")) return probeByteBuiltinsSplitWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-int2str-wrong")) return probeByteBuiltinsInt2StrWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-reverse-wrong")) return probeByteBuiltinsReverseWrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-sha256-wrong")) return probeByteBuiltinsSha256Wrong();
+    if (std.mem.eql(u8, probe_case, "byte-builtins-ripemd-wrong")) return probeByteBuiltinsRipemdWrong();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-wrong-negation")) return probeP256EncodeNegateWrongNegation();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-wrong-prefix")) return probeP256EncodeNegateWrongPrefix();
+    if (std.mem.eql(u8, probe_case, "p256-encode-negate-negate-then-encode-wrong")) return probeP256EncodeNegateNegateThenEncodeWrong();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-wrong-negation")) return probeP384EncodeNegateWrongNegation();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-wrong-prefix")) return probeP384EncodeNegateWrongPrefix();
+    if (std.mem.eql(u8, probe_case, "p384-encode-negate-negate-then-encode-wrong")) return probeP384EncodeNegateNegateThenEncodeWrong();
     return error.UnknownProbeCase;
+}
+
+fn probeByteBuiltinsSplitWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkSplit("abcdef", 2, "bcdef");
+}
+
+fn probeByteBuiltinsInt2StrWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkInt2Str(258, 4, &[_]u8{ 0x01, 0x02, 0x00, 0x00 });
+}
+
+fn probeByteBuiltinsReverseWrong() !void {
+    const c = ByteBuiltins.init("", "");
+    c.checkReverse("abc", "abc");
+}
+
+fn probeByteBuiltinsSha256Wrong() !void {
+    const c = ByteBuiltins.init(runar.sha256("abc"), runar.ripemd160("abc"));
+    c.checkSha256("abd");
+}
+
+fn probeByteBuiltinsRipemdWrong() !void {
+    const c = ByteBuiltins.init(runar.sha256("abc"), runar.ripemd160("abc"));
+    c.checkRipemd("abd");
+}
+
+fn probeP256EncodeNegateWrongNegation() !void {
+    const c = P256EncodeNegate.init(p256_vectors.neg_g_compressed);
+    c.checkNegate(p256_vectors.g, p256_vectors.g);
+}
+
+fn probeP256EncodeNegateWrongPrefix() !void {
+    const c = P256EncodeNegate.init(p256_vectors.neg_g_compressed);
+    c.checkEncode(p256_vectors.g, p256_vectors.neg_g_compressed);
+}
+
+fn probeP256EncodeNegateNegateThenEncodeWrong() !void {
+    const c = P256EncodeNegate.init(p256_vectors.g_compressed);
+    c.checkNegateThenEncode(p256_vectors.g);
+}
+
+fn probeP384EncodeNegateWrongNegation() !void {
+    const c = P384EncodeNegate.init(p384_vectors.neg_g_compressed);
+    c.checkNegate(p384_vectors.g, p384_vectors.g);
+}
+
+fn probeP384EncodeNegateWrongPrefix() !void {
+    const c = P384EncodeNegate.init(p384_vectors.neg_g_compressed);
+    c.checkEncode(p384_vectors.g, p384_vectors.neg_g_compressed);
+}
+
+fn probeP384EncodeNegateNegateThenEncodeWrong() !void {
+    const c = P384EncodeNegate.init(p384_vectors.g_compressed);
+    c.checkNegateThenEncode(p384_vectors.g);
+}
+
+fn probeIntentCurrentBlockHeightPastDeadline() !void {
+    _ = runar.setMockBlockHeight(101);
+    var c = IntentCurrentBlockHeight.init(100, 0);
+    c.spend();
+}
+
+fn probeIntentOutputP2PKHWrongPkh() !void {
+    _ = runar.setMockSerialisedOutputs(runar.buildChangeOutput(runar.hash160(runar.BOB.pubKey), 5000));
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentOutputP2PKHWrongAmount() !void {
+    _ = runar.setMockSerialisedOutputs(runar.buildChangeOutput(runar.hash160(runar.ALICE.pubKey), 4999));
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentOutputP2PKHNoOutputs() !void {
+    var c = IntentOutputP2PKH.init(runar.hash160(runar.ALICE.pubKey), 5000, 0);
+    c.payBond();
+}
+
+fn probeIntentPrevOutputScriptWrongHash() !void {
+    _ = runar.setMockPrevOutputScript(0, "attacker-script");
+    var c = IntentPrevOutputScript.init(runar.hash256("prev-output-script"), 0);
+    c.bind();
+}
+
+fn probeIntentPrevOutputScriptNoWitness() !void {
+    var c = IntentPrevOutputScript.init(runar.hash256("prev-output-script"), 0);
+    c.bind();
+}
+
+fn probeIntentPrevOutputScriptEmptyWitness() !void {
+    _ = runar.setMockPrevOutputScript(0, "");
+    var c = IntentPrevOutputScript.init(runar.hash256(""), 0);
+    c.bind();
+}
+
+fn probeAnnotatedVaultWrongSig() !void {
+    const c = AnnotatedVault.init("", runar.ALICE.pubKey, 5);
+    c.withdraw(runar.signTestMessage(runar.BOB));
+}
+
+fn probeCountdownLoopWrongTarget() !void {
+    CountdownLoop.init(15).verify(0);
+}
+
+fn probeLoopShapesWrongTarget() !void {
+    LoopShapes.init(19).verify(0);
+}
+
+fn probeParamShadowFlaggedWrongCount() !void {
+    var c = ParamShadowBranchArm.init(1);
+    c.set(4, true);
+}
+
+fn probePropertyShadowWrongTarget() !void {
+    var c = PropertyShadow.init(6, 1);
+    c.bump(4);
+}
+
+fn probePropertyShadowCountNotGreater() !void {
+    var c = PropertyShadow.init(6, 0);
+    c.bump(5);
+}
+
+fn probeR1K1WrongKey() !void {
+    const c = R1K1Wallet.init(runar.hash160("r1"), runar.hash160(runar.ALICE.pubKey));
+    c.recoverK1(runar.signTestMessage(runar.BOB), runar.BOB.pubKey);
+}
+
+fn probeR1K1WrongSig() !void {
+    const c = R1K1Wallet.init(runar.hash160("r1"), runar.hash160(runar.ALICE.pubKey));
+    c.recoverK1(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
+}
+
+fn probeSelectorOutOfRange() !void {
+    var c = Selector.init(1, 2);
+    c.set(2, 7);
+}
+
+fn probeSingleCounterResetZero() !void {
+    var c = SingleCounter.init(0);
+    c.reset();
+}
+
+fn probeStatefulWOTSGateTamperedSig() !void {
+    const seed = [_]u8{0x42} ** 32;
+    const pub_seed = [_]u8{0x13} ** 32;
+    const wots_pub_key = runar.testing.wotsPublicKeyFromSeed(&seed, &pub_seed);
+    var wots_sig = runar.testing.wotsSignDeterministic("gate-message", &seed, &pub_seed);
+    wots_sig[17] ^= 0xff;
+    var c = StatefulWOTSGate.init(4);
+    c.advance("gate-message", &wots_sig, &wots_pub_key);
+}
+
+fn probeTerminalVarlenReadTooShort() !void {
+    const c = TerminalVarlenRead.init("hello");
+    c.reveal(5);
+}
+
+fn probeWalletTokenTransferWrongSig() !void {
+    const c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.transfer(runar.signTestMessage(runar.BOB), runar.hash160(runar.BOB.pubKey));
+}
+
+fn probeWalletTokenTransferShortAddr() !void {
+    const c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.transfer(runar.signTestMessage(runar.ALICE), runar.hash160(runar.BOB.pubKey)[0..19]);
+}
+
+fn probeWalletTokenMergeWrongSig() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.BOB), 50, runar.ALICE.pubKey);
+}
+
+fn probeWalletTokenMergeOtherHolder() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.ALICE), 50, runar.BOB.pubKey);
+}
+
+fn probeWalletTokenMergeNegativeSupply() !void {
+    var c = WalletToken.init(100, runar.ALICE.pubKey);
+    c.merge(runar.signTestMessage(runar.ALICE), -1, runar.ALICE.pubKey);
+}
+
+fn probeSLHDSANaiveMalformedSig(comptime Contract: type) !void {
+    const c = Contract.init("slhdsa-pub-key-bytes-fake");
+    c.spend("message", "not-a-signature");
 }
 
 fn payoutOutput(amount: i64, pub_key: []const u8) []const u8 {
@@ -220,6 +502,27 @@ fn probeFunctionPatternsOverdraw() !void {
     contract.withdraw(runar.signTestMessage(runar.ALICE), 980, 500);
 }
 
+// F-167: a wrong caller-supplied result must trip the contract's assert.
+fn probeBitwiseOpsWrongShift() !void {
+    const c = BitwiseOps.init(12, 10);
+    c.testShift(49, 6);
+}
+
+fn probeBitwiseOpsWrongBitwise() !void {
+    const c = BitwiseOps.init(12, 10);
+    c.testBitwise(14, 8, 6);
+}
+
+fn probeShiftOpsWrongLeft() !void {
+    const c = ShiftOps.init(12);
+    c.testShift(97, 3);
+}
+
+fn probeShiftOpsWrongRight() !void {
+    const c = ShiftOps.init(12);
+    c.testShift(96, 2);
+}
+
 fn probeMathDemoOverdraw() !void {
     var demo = MathDemo.init(1000);
     demo.withdrawWithFee(980, 500);
@@ -245,7 +548,20 @@ fn probeAuctionBidTooLow() !void {
     defer runtime.deinit();
     var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
+    // Paid (N-027), so the only failing assert is `bidAmount > highestBid`.
+    _ = runar.setMockContinuationAmount(10000 + 100);
     auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 100);
+}
+
+// N-027: carrying the pot forward unpaid passes F-024's `>= input` floor but
+// not bid's `continuationAmount() >= extractAmount(ctx.txPreimage) + bidAmount`.
+fn probeAuctionBidWithContinuation(amount: i64) !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
+    _ = runar.setMockContinuationAmount(amount);
+    auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 150);
 }
 
 fn probeAuctionCloseTooEarly() !void {
@@ -381,21 +697,49 @@ fn probeOraclePriceWrongReceiverSig() !void {
     contract.settle(price, &[_]u8{0x00}, padding, runar.signTestMessage(runar.BOB));
 }
 
+/// Join paying exactly the bet: extractAmount (the input, player X's bet) is
+/// 10000 off-chain, so the continuation is 10000 + betAmount (N-027).
+fn ticTacToeJoinPaying(game: *TicTacToe, ctx: runar.StatefulContext, joiner: runar.TestKeyPair) void {
+    const prev = runar.setMockContinuationAmount(10000 + game.betAmount);
+    defer _ = runar.setMockContinuationAmount(prev);
+    game.join(ctx, joiner.pubKey, runar.signTestMessage(joiner));
+}
+
 fn probeTicTacToeJoinTwice() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
-    game.join(runar.CHARLIE.pubKey, runar.signTestMessage(runar.CHARLIE));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
+    ticTacToeJoinPaying(&game, ctx, runar.CHARLIE);
+}
+
+// N-027: carrying the input forward unpaid passes F-024's `>= input` floor but
+// not join's `continuationAmount() == extractAmount(ctx.txPreimage) + betAmount`.
+fn probeTicTacToeJoinWithContinuation(amount: i64) !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
+    var game = TicTacToe.init(runar.ALICE.pubKey, 100);
+    _ = runar.setMockContinuationAmount(amount);
+    game.join(ctx, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
 
 fn probeTicTacToeMoveWrongPlayer() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.move(0, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
 
 fn probeTicTacToeMoveOccupiedCell() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.move(0, runar.ALICE.pubKey, runar.signTestMessage(runar.ALICE));
     game.move(0, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
@@ -425,12 +769,12 @@ fn probeTicTacToeCancelWrongSigX() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const out1 = payoutOutput(100, runar.ALICE.pubKey);
     const out2 = payoutOutput(100, runar.BOB.pubKey);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256(runar.cat(out1, out2)),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.CHARLIE), runar.signTestMessage(runar.BOB), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 
@@ -438,12 +782,12 @@ fn probeTicTacToeCancelWrongSigO() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const out1 = payoutOutput(100, runar.ALICE.pubKey);
     const out2 = payoutOutput(100, runar.BOB.pubKey);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256(runar.cat(out1, out2)),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.ALICE), runar.signTestMessage(runar.CHARLIE), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 
@@ -451,10 +795,10 @@ fn probeTicTacToeCancelWrongOutput() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256("wrong-output"),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.ALICE), runar.signTestMessage(runar.BOB), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 
@@ -672,3 +1016,43 @@ fn probeSPHINCSWalletInvalidSLHDSAProof() !void {
 }
 
 // probeSchnorrZKPInvalidRPoint deleted — see SchnorrZKP_test.zig (BUG-001).
+
+// F-168: one deliberately invalid input per `advanceState` assertion, each
+// built from the same valid witness (state_covenant_witness.valid()) with
+// exactly one field corrupted, so the panic is attributable to the named
+// assertion and not an earlier one in the sequence.
+
+fn probeStateCovenantBlockNotIncreasing() !void {
+    const w = state_covenant_witness.valid();
+    // Init the covenant's blockNumber at the same value as newBlockNumber:
+    // `newBlockNumber > self.blockNumber` is false (equal, not greater).
+    var c = StateCovenant.init(w.preStateRoot, w.newBlockNumber, w.verifyingKeyHash);
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongPreStateRoot() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_pre_state_root = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, wrong_pre_state_root, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongBabyBearProof() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC + 1, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongMerkleProof() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_leaf = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, w.batchDataHash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, wrong_leaf, w.merkleProof, w.merkleIndex);
+}
+
+fn probeStateCovenantWrongBatchHash() !void {
+    const w = state_covenant_witness.valid();
+    var c = StateCovenant.init(w.preStateRoot, 0, w.verifyingKeyHash);
+    const wrong_batch_hash = "zz" ** 32;
+    c.advanceState(w.newStateRoot, w.newBlockNumber, wrong_batch_hash, w.preStateRoot, w.proofFieldA, w.proofFieldB, w.proofFieldC, w.merkleLeaf, w.merkleProof, w.merkleIndex);
+}

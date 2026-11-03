@@ -7,8 +7,26 @@ import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
-import { buildCallTransaction } from './calling.js';
-import { buildP2PKHScript } from './script-utils.js';
+import { buildP2PKHScript, isHexBytes, matchesArtifact } from './script-utils.js';
+import { findLastOpReturn } from './state.js';
+
+// N-239 (user decision R92): `merge` and `transfer` drive an ABI that cannot
+// be made sound, so they are deprecated rather than redesigned or removed.
+// Each warns once per process on first use.
+const MERGE_DEPRECATION =
+  'runar-sdk: warning: TokenWallet.merge is deprecated and unsafe. Its ' +
+  'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion ' +
+  'input, so a holder can call merge on ONE input with a made-up otherSupply ' +
+  '(supply inflation). Use the token-ft example (FungibleTokenExample, ' +
+  'examples/*/token-ft/) instead (N-239).';
+const TRANSFER_DEPRECATION =
+  'runar-sdk: warning: TokenWallet.transfer is deprecated and unsafe. Its ' +
+  'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, ' +
+  'so the token stays with the current holder instead of moving to the ' +
+  'recipient. Use the token-ft example (FungibleTokenExample, ' +
+  'examples/*/token-ft/) instead (N-239).';
+let mergeDeprecationWarned = false;
+let transferDeprecationWarned = false;
 
 /**
  * Manages token UTXOs for a fungible token contract.
@@ -60,8 +78,15 @@ export class TokenWallet {
    * @param recipientAddr - The BSV address (Addr) of the recipient.
    * @param amount - Minimum token balance required in the source UTXO.
    * @returns The txid of the transfer transaction.
+   * @deprecated Unsafe (N-239): the `transfer(sig, to: Addr)` ABI cannot
+   * re-key a PubKey holder, so the token does not move to `recipientAddr`.
+   * Use the token-ft example (FungibleTokenExample) instead.
    */
   async transfer(recipientAddr: string, amount: bigint): Promise<string> {
+    if (!transferDeprecationWarned) {
+      transferDeprecationWarned = true;
+      console.warn(TRANSFER_DEPRECATION);
+    }
     const utxos = await this.getUtxos();
     if (utxos.length === 0) {
       throw new Error('TokenWallet.transfer: no token UTXOs found');
@@ -80,34 +105,18 @@ export class TokenWallet {
 
       if (balance >= amount) {
         // FungibleToken.transfer(sig: Sig, to: Addr)
-        // Build a preliminary unlocking script with a placeholder sig so we
-        // can construct the transaction, then BIP-143 sign input 0.
-        const placeholderSig = '00'.repeat(72); // DER sig placeholder
-        const prelimUnlock = contract.buildUnlockingScript('transfer', [placeholderSig, recipientAddr]);
-
-        // Build the preliminary transaction to obtain a signable tx hex
+        // F-045: pass `null` for the Sig so contract.call auto-signs the
+        // transaction it actually builds and broadcasts. Signing a locally
+        // built preliminary tx and passing that signature in covers a
+        // different tx (coin selection, unlock size, change, subscript) and
+        // is rejected on-chain.
+        // An Addr is a 20-byte hash160: accept a Base58 address (as
+        // documented), a raw hash160, or a public key.
+        const toPKH = buildP2PKHScript(recipientAddr).slice(6, 46);
         const changeAddress = await this.signer.getAddress();
-        const feeRate = await this.provider.getFeeRate();
-        const additionalUtxos = await this.provider.getUtxos(changeAddress);
-        const changeScript = buildP2PKHScript(changeAddress);
-
-        const { tx: prelimTx } = buildCallTransaction(
-          utxo,
-          prelimUnlock,
-          undefined, // FungibleToken is stateless (SmartContract base)
-          undefined,
-          changeAddress,
-          changeScript,
-          additionalUtxos.length > 0 ? additionalUtxos : undefined,
-          feeRate,
-        );
-
-        // Sign input 0 against the contract UTXO's locking script
-        const sig = await this.signer.sign(prelimTx.toHex(), 0, utxo.script, utxo.satoshis);
-
         const result = await contract.call(
           'transfer',
-          [sig, recipientAddr],
+          [null, toPKH],
           this.provider,
           this.signer,
           { changeAddress },
@@ -129,8 +138,15 @@ export class TokenWallet {
    * on-chain state and passed as arguments.
    *
    * @returns The txid of the merge transaction.
+   * @deprecated Unsafe (N-239): the `merge(sig, otherSupply, otherHolder)` ABI
+   * cannot authenticate its companion input, so a holder can inflate supply.
+   * Use the token-ft example (FungibleTokenExample) instead.
    */
   async merge(): Promise<string> {
+    if (!mergeDeprecationWarned) {
+      mergeDeprecationWarned = true;
+      console.warn(MERGE_DEPRECATION);
+    }
     const utxos = await this.getUtxos();
     if (utxos.length < 2) {
       throw new Error('TokenWallet.merge: need at least 2 UTXOs to merge');
@@ -158,35 +174,24 @@ export class TokenWallet {
     const otherHolder = (secondState['holder'] ?? '') as string;
 
     // FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-    // Build a preliminary transaction with a placeholder sig for BIP-143 signing.
-    const placeholderSig = '00'.repeat(72);
-    const prelimUnlock = contract.buildUnlockingScript('merge', [placeholderSig, otherSupply, otherHolder]);
+    // F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries the
+    // OTHER input's supply/holder, and every Sig is `null` so contract.call
+    // signs each input over the transaction it actually broadcasts.
+    const firstState = contract.state;
+    const firstSupply = BigInt((firstState['supply'] ?? firstState['balance'] ?? firstState['amount'] ?? 0) as number | bigint);
+    const firstHolder = (firstState['holder'] ?? '') as string;
 
     const changeAddress = await this.signer.getAddress();
-    const feeRate = await this.provider.getFeeRate();
-    const additionalUtxos = await this.provider.getUtxos(changeAddress);
-    const changeScript = buildP2PKHScript(changeAddress);
-
-    const { tx: prelimTx } = buildCallTransaction(
-      firstUtxo,
-      prelimUnlock,
-      undefined,
-      undefined,
-      changeAddress,
-      changeScript,
-      additionalUtxos.length > 0 ? additionalUtxos : undefined,
-      feeRate,
-    );
-
-    // Sign input 0 against the first contract UTXO's locking script
-    const sig = await this.signer.sign(prelimTx.toHex(), 0, firstUtxo.script, firstUtxo.satoshis);
-
     const result = await contract.call(
       'merge',
-      [sig, otherSupply, otherHolder],
+      [null, otherSupply, otherHolder],
       this.provider,
       this.signer,
-      { changeAddress },
+      {
+        changeAddress,
+        additionalContractInputs: [secondUtxo],
+        additionalContractInputArgs: [[null, firstSupply, firstHolder]],
+      },
     );
 
     return result.txid;
@@ -199,34 +204,42 @@ export class TokenWallet {
     const address = await this.signer.getAddress();
     const allUtxos = await this.provider.getUtxos(address);
 
-    // Filter to UTXOs whose script begins like this token contract's.
+    // Filter to UTXOs whose script was produced from this token contract.
     //
-    // R-274: this used to compare against `this.artifact.script` whole. That
-    // is the TEMPLATE — each constructor slot holds a one-byte OP_0 that
-    // deployment replaces with the encoded argument — so for any contract with
-    // a constructorSlot inside its code part, no deployed instance starts with
-    // it and this returned EMPTY. Silently: getBalance() answered 0n for a
-    // wallet holding tokens, and transfer() reported "no token UTXOs found".
-    //
-    // The comparison cannot run past the first slot: the substituted argument
-    // is variable-length, so every byte after it sits at a shifted offset.
-    // Matching the template up to the first slot is what every deployed
-    // instance of this contract genuinely shares. It is a FILTER, not proof of
-    // identity — callers that need certainty read the artifact's slot layout.
-    const firstSlotByteOffset = (this.artifact.constructorSlots ?? [])
-      .map((slot) => slot.byteOffset)
-      .reduce((lowest, offset) => Math.min(lowest, offset), Number.POSITIVE_INFINITY);
-    const scriptPrefix = Number.isFinite(firstSlotByteOffset)
-      ? this.artifact.script.slice(0, firstSlotByteOffset * 2)
-      : this.artifact.script;
+    // R-274: comparing against `this.artifact.script` whole is wrong — that is
+    // the TEMPLATE, and every slot (constructor arg, codeSepIndex, code-part
+    // length) holds a placeholder that deployment replaces. N-076: the R-274
+    // fix matched only up to the first CONSTRUCTOR slot, which still missed
+    // honest deployments whose template has a codeSepIndex slot earlier, and
+    // accepted any script sharing those leading bytes. When the artifact has
+    // slots, use the slot-aware matcher `matchesArtifact`; a template with no
+    // slots is deployed verbatim, so its literal prefix is exact.
+    const slotted = (this.artifact.constructorSlots ?? []).length > 0;
 
     return allUtxos.filter((utxo) => {
-      // With no script to compare, or a template that is all slot from byte 0,
-      // include everything and let the caller filter further.
-      if (utxo.script && scriptPrefix) {
-        return utxo.script.startsWith(scriptPrefix);
+      // With no script to compare, include everything and let the caller
+      // filter further.
+      if (!utxo.script || !this.artifact.script) return true;
+      if (!slotted) return utxo.script.startsWith(this.artifact.script);
+      // matchesArtifact strips the state section only for artifacts that
+      // declare stateFields; cut it here for the rest so the code part is
+      // what gets matched.
+      // N-317: any UTXO the provider lists is attacker-influenced. A script
+      // that is not whole hex bytes, or that fails to parse anywhere below,
+      // is not an instance of this contract; it must never abort the listing.
+      try {
+        if (!isHexBytes(utxo.script)) return false;
+        let codeHex = utxo.script;
+        if (!(this.artifact.stateFields && this.artifact.stateFields.length > 0)) {
+          const opReturnPos = findLastOpReturn(codeHex);
+          if (opReturnPos !== -1) codeHex = codeHex.slice(0, opReturnPos);
+        }
+        return matchesArtifact(this.artifact, codeHex);
+      } catch {
+        // A script that is not well-formed at the artifact's slot offsets
+        // (F-238) is not an instance of this contract.
+        return false;
       }
-      return true;
     });
   }
 }

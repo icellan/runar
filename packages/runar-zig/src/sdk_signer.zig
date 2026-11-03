@@ -1,7 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const state = @import("sdk_state.zig");
-const der_mod = @import("sdk_der.zig");
+const envelope_sign = @import("sdk_envelope_sign.zig");
 
 // ---------------------------------------------------------------------------
 // Signer interface
@@ -42,6 +42,9 @@ pub const SignerError = error{
     InvalidEncoding,
     InvalidLength,
     InvalidTransaction,
+    /// F-040: sign was handed an empty subscript (BIP-143 scriptCode). A
+    /// signature over it is one no OP_CHECKSIG accepts, so it is refused.
+    EmptySubscript,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,10 @@ pub const LocalSigner = struct {
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript_hex: []const u8, satoshis: i64, sighash_type: ?u32) SignerError![]u8 {
         const self: *LocalSigner = @ptrCast(@alignCast(ctx));
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if (subscript_hex.len == 0) return error.EmptySubscript;
+
         const scope = sighash_type orelse (bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all);
 
         // Decode transaction
@@ -120,9 +127,18 @@ pub const LocalSigner = struct {
         // Compute BIP-143 sighash digest
         const digest = bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope) catch return error.SigningFailed;
 
-        // Sign the digest and enforce low-S (BIP 62)
-        var der = self.private_key.signDigest256(digest.bytes) catch return error.SigningFailed;
-        der = der_mod.canonicalizeDer(der);
+        // N-170: bsvz's PrivateKey.signDigest256 derives its ECDSA nonce via
+        // Zig stdlib's "Deterministic ECDSA with Additional Randomness" draft,
+        // not canonical RFC 6979 (see sdk_envelope_sign.zig's GAP-064 doc
+        // comment) -- it folds a 32-byte zero "noise" block into the HMAC-DRBG
+        // seed that classic RFC 6979 does not have. The result is a VALID but
+        // non-reproducible signature: it verifies, but never matches the
+        // RFC-6979 signature every other tier (and conformance/sdk-bip143's
+        // fixture) produces for the same (key, digest). Sign with the same
+        // canonical RFC-6979 + low-S implementation the signed-envelope wire
+        // protocol already uses instead of bsvz's signDigest256.
+        var der_buf: [72]u8 = undefined;
+        const der = envelope_sign.signDigestLowSDer(self.private_key.bytes, digest.bytes, &der_buf) catch return error.SigningFailed;
 
         // Build hex: DER bytes + sighash type byte
         const sig_total_len = der.len + 1;
@@ -130,7 +146,7 @@ pub const LocalSigner = struct {
         errdefer allocator.free(hex_result);
 
         var sig_bytes: [73]u8 = undefined; // max DER + 1
-        @memcpy(sig_bytes[0..der.len], der.asSlice());
+        @memcpy(sig_bytes[0..der.len], der);
         sig_bytes[der.len] = @truncate(scope);
 
         _ = bsvz.primitives.hex.encodeLower(sig_bytes[0..sig_total_len], hex_result) catch {
@@ -225,6 +241,9 @@ pub const ExternalSigner = struct {
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript: []const u8, satoshis: i64, sighash_type: ?u32) SignerError![]u8 {
         const self: *ExternalSigner = @ptrCast(@alignCast(ctx));
+        // N-041: the subscript is the BIP-143 scriptCode. An empty one yields
+        // a signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if (subscript.len == 0) return error.EmptySubscript;
         return self.sign_fn(allocator, tx_hex, input_index, subscript, satoshis, sighash_type);
     }
 };
@@ -286,4 +305,55 @@ test "LocalSigner signs and returns hex sig" {
     try std.testing.expect(sig.len > 0);
     // Signature ends with sighash byte 0x41 (ALL|FORKID)
     try std.testing.expect(std.mem.endsWith(u8, sig, "41"));
+}
+
+// F-040: an empty subscript (what WoC's getUtxos used to return) is the
+// BIP-143 scriptCode of a signature no OP_CHECKSIG accepts, so sign must
+// refuse it with EmptySubscript. Proves the refusal; the Spend.validate harm
+// demo lives in packages/runar-sdk/src/__tests__/f040-woc-utxo-script.test.ts.
+test "F-040 LocalSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    var key_bytes = [_]u8{0} ** 32;
+    key_bytes[31] = 1;
+    var local = LocalSigner.fromBytes(key_bytes) catch unreachable;
+    var s = local.signer();
+
+    const tx = "01000000" ++ "01" ++ ("11" ** 32) ++ "00000000" ++ "00" ++ "ffffffff" ++
+        "01" ++ "8403000000000000" ++ "01" ++ "51" ++ "00000000";
+    if (s.sign(allocator, tx, 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
+}
+
+// N-041: ExternalSigner passed an empty subscript (BIP-143 scriptCode)
+// straight to its callback. Proves it now refuses one with EmptySubscript
+// without calling out, and still delegates a non-empty one; does not prove
+// anything about what the external signer does.
+var n041_external_calls: usize = 0;
+
+fn n041ExternalSign(allocator: std.mem.Allocator, _: []const u8, _: usize, _: []const u8, _: i64, _: ?u32) SignerError![]u8 {
+    n041_external_calls += 1;
+    return allocator.dupe(u8, "deadbeef") catch return error.OutOfMemory;
+}
+
+test "N-041 ExternalSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    n041_external_calls = 0;
+    var ext = ExternalSigner{ .pub_key = "02aabb", .address = "addr", .sign_fn = n041ExternalSign };
+    var s = ext.signer();
+    if (s.sign(allocator, "00", 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
+    try std.testing.expectEqual(@as(usize, 0), n041_external_calls);
+
+    const sig = try s.sign(allocator, "00", 0, "51", 1000, null);
+    defer allocator.free(sig);
+    try std.testing.expectEqualStrings("deadbeef", sig);
+    try std.testing.expectEqual(@as(usize, 1), n041_external_calls);
 }

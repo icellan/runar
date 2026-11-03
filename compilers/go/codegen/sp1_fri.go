@@ -110,16 +110,13 @@ func DefaultSP1FriParams() SP1FriVerifierParams {
 //   - args[1]: publicValues   (ByteString)
 //   - args[2]: sp1VKeyHash    (ByteString; 32 bytes / keccak256)
 //
-// The binding result is a boolean 1 on successful verification. The script
-// fails OP_VERIFY at the first detectable mismatch on an invalid proof.
-//
-// Status: the full Steps 1-11 verifier algorithm is implemented and
-// validated end-to-end in compilers/go/codegen/sp1_fri_test.go
-// (TestSp1FriVerifier_AcceptsMinimalGuestFixture exercises every emit
-// helper against the canonical Plonky3 KoalaBear FRI fixture; on-chain
-// alpha/zeta/alpha_fri/all-betas/query-indexes/per-query reduced-opening/
-// OOD-equality match the off-chain Go reference at
-// packages/runar-go/sp1fri/ byte-for-byte; the script VM accepts).
+// Status (F-007): NOT a verifier in v1. The emitted body binds the
+// Fiat-Shamir transcript and the grinding witnesses only, and then FAILS
+// CLOSED (OP_0 OP_VERIFY) — it never accepts. The per-query MMCS openings,
+// FRI fold chain, final-poly equality and Steps 6/7 OOD constraint check are
+// validated as standalone emitters in compilers/go/codegen/sp1_fri_test.go
+// but are not wired into this body. The compiler refuses verifySP1FRI before
+// this is reached (frontend/validator.go, compiler/sp1_fri_ir_guard.go).
 //
 // Stack-layout contract (data stack at entry, deepest → top):
 //
@@ -129,9 +126,10 @@ func DefaultSP1FriParams() SP1FriVerifierParams {
 //   - The 3 typed ByteString args (proofBlob, publicValues, sp1VKeyHash) on
 //     top, in declaration order.
 //
-// At exit: a single boolean (OP_1) on top — the binding result of the
-// runar.VerifySP1FRI(...) intrinsic. The stack-machine is updated to track
-// the new binding via `ctx.sm.push(bindingName)`.
+// At exit: never reached — the body is fail-closed and aborts with
+// OP_0 OP_VERIFY (F-007). One unreachable placeholder slot is modelled as the
+// binding result so the stack-machine accounting stays consistent; it is
+// tracked via `ctx.sm.push(bindingName)`.
 func (ctx *loweringContext) lowerVerifySP1FRI(
 	bindingName string, args []string, bindingIndex int, lastUses map[string]int,
 ) {
@@ -197,8 +195,9 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 	}
 	EmitFullSP1FriVerifierBody(ctx.emitOp, params)
 
-	// The helper leaves a single OP_1 on the stack as the binding result.
-	// Track it on the stack-machine so subsequent bindings see it.
+	// The helper aborts the script (F-007: fail-closed) and models one
+	// unreachable placeholder slot as the binding result. Track it on the
+	// stack-machine so subsequent bindings see consistent accounting.
 	ctx.sm.push(bindingName)
 }
 
@@ -302,8 +301,10 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numRounds, finalPoly
 //   - publicValues (single ByteString)
 //   - sp1VKeyHash (single ByteString; may be empty when params.SP1VKeyHashByteSize == 0)
 //
-// Stack at exit: a single boolean (OP_1) on top — the binding result of
-// the runar.VerifySP1FRI(...) intrinsic.
+// Stack at exit: never reached. F-007: the body ends in OP_0 OP_VERIFY and
+// can never accept, because the per-query MMCS openings, the FRI fold chain,
+// the final-poly equality and the Steps 6/7 OOD constraint check are not
+// emitted (see Step 12 below).
 //
 // Pipeline (mirrors `TestSp1FriVerifier_AcceptsMinimalGuestFixture`
 // sp1_fri_test.go:499-895 byte-for-byte):
@@ -330,7 +331,8 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numRounds, finalPoly
 //     trackers in the test — see TestSp1FriVerifier_PerQueryFoldsMatchReference
 //     and TestSp1FriVerifier_ReducedOpeningMatchesReference for the
 //     byte-identical acceptance gates against the off-chain reference).
-//  8. Drain every remaining slot off the data stack and push OP_1.
+//  8. Drain every remaining slot off the data stack and FAIL CLOSED with
+//     OP_0 OP_VERIFY (F-007; was: push OP_1).
 //
 // Cite `sp1fri` reference for every algorithmic decision:
 //   - Step 1 SHA-256 binding: docs/sp1-fri-verifier.md §2 (proof-blob
@@ -562,17 +564,39 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	}
 
 	// =====================================================================
-	// Step 12 — Drain every remaining slot off the data stack and push
-	// OP_1 as the binding result. All assertions above used OP_VERIFY to
-	// short-circuit on failure; reaching this point means the proof has
-	// been accepted by the validated sub-steps.
+	// Step 12 — FAIL CLOSED (F-007 / CL-BUG-037).
+	//
+	// This body used to drain the stack and push OP_1 here, i.e. ACCEPT.
+	// But the checks above bind only the Fiat-Shamir transcript and the
+	// grinding witnesses. The following are NEVER emitted, so reaching this
+	// point proves nothing about the proof itself:
+	//
+	//   - the per-query MMCS openings (input-batch Merkle verify of the
+	//     opened rows against the trace/quotient commitments),
+	//   - the FRI fold / colinearity chain (per-round commit-phase Merkle
+	//     verify + fold of each query down the rounds),
+	//   - the final-poly equality (Horner eval at each query's point),
+	//   - the Steps 6/7 out-of-domain constraint check (AIR constraint eval
+	//     at zeta vs. recomposed quotient) — emitFibAirConstraintEval /
+	//     emitQuotientRecompose exist but have no production caller.
+	//
+	// With OP_1 a proof with garbage per-query openings was accepted. For v1
+	// the compiler refuses verifySP1FRI outright (frontend/validator.go,
+	// compiler/sp1_fri_ir_guard.go); this is the second line: if the body is
+	// ever reached anyway, OP_0 OP_VERIFY aborts the script unconditionally.
+	// The trailing OP_0 is unreachable and exists only so the stack
+	// accounting still sees the one binding-result slot callers expect.
+	// Replace this with the real per-query verifier; see
+	// docs/sp1-fri-verifier.md for the post-v1 plan.
 	// =====================================================================
 
 	for len(tracker.nm) > 0 {
 		emit(StackOp{Op: "drop"})
 		tracker.nm = tracker.nm[:len(tracker.nm)-1]
 	}
-	emit(StackOp{Op: "opcode", Code: "OP_1"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: false}})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: false}})
 }
 
 // =============================================================================

@@ -355,7 +355,9 @@ class RustParserTest {
             RustParser.ParseException.class,
             () -> RustParser.parse(src, "nope.runar.rs")
         );
-        assertTrue(e.getMessage().contains("No Runar contract"));
+        // N-284: message unified across tiers to match Go/Ruby's existing
+        // "no Rúnar contract struct found in <X> source" wording.
+        assertTrue(e.getMessage().contains("no Rúnar contract struct found in Rust source"));
     }
 
     @Test

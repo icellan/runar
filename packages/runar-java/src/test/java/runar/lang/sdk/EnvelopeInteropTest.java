@@ -255,6 +255,36 @@ class EnvelopeInteropTest {
     }
 
     /**
+     * F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+     * signature, and the TS reference accepts it: BIP-62's low-S rule is
+     * transaction-script policy, not part of the envelope protocol. Ruby used
+     * to reject it as bad-sig. Proves this tier reaches the TS verdict on the
+     * fixture's high-S envelope; it does not prove anything about signing
+     * (every tier's signer still emits low-S).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void malleabilityVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("malleability_vectors");
+        assertFalse(vectors.isEmpty(), "malleability_vectors missing or empty");
+        for (Map<String, Object> mv : vectors) {
+            String vid = (String) mv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) mv.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(mv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(mv.get("reason"), r.reason.wire, vid);
+            }
+        }
+    }
+
+    /**
      * The bound is part of the wire contract, so the fixture pins it and every
      * tier asserts its own constant against the fixture's number.
      */
@@ -264,6 +294,49 @@ class EnvelopeInteropTest {
         assertEquals(
             ((Number) fixture.get("payload_depth_limit")).intValue(),
             Envelope.MAX_ENVELOPE_PAYLOAD_DEPTH);
+    }
+
+    /**
+     * F-296. The DoS size bound is hard-coded per tier; the fixture's
+     * {@code size_limits} is the shared source of truth and every tier pins its
+     * own constants to it. Does not prove the other six tiers agree -- each
+     * replays this same fixture.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void sizeLimitsMatchFixture() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Map<String, Object> limits = (Map<String, Object>) fixture.get("size_limits");
+        assertEquals(((Number) limits.get("max_payload_bytes")).intValue(), Envelope.MAX_ENVELOPE_PAYLOAD_BYTES);
+        assertEquals(((Number) limits.get("max_field_bytes")).intValue(), Envelope.MAX_ENVELOPE_FIELD_BYTES);
+    }
+
+    /**
+     * F-296. Replays {@code size_vectors}: one byte over each limit must be
+     * {@code too-large}; exactly at the limit must be rejected for a LATER
+     * reason (so the guard is not off by one). Proves this tier returns the
+     * fixture reason; says nothing about the sig/pubkey being well-formed.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void sizeVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        Map<String, Object> valid = (Map<String, Object>) fixture.get("valid_envelope");
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("size_vectors");
+        assertTrue(vectors != null && vectors.size() >= 6, "size_vectors missing or short");
+        for (Map<String, Object> sv : vectors) {
+            String vid = (String) sv.get("_vector_id");
+            Map<String, Object> m = new LinkedHashMap<>(valid);
+            m.put((String) sv.get("field"), "x".repeat(((Number) sv.get("length")).intValue()));
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap(m);
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            assertFalse(r.ok, vid + ": expected ok=false");
+            boolean tooLarge = r.reason == Envelope.VerifyEnvelopeReason.TOO_LARGE;
+            assertEquals(Boolean.TRUE.equals(sv.get("expect_too_large")), tooLarge, vid + ": reason=" + r.reason);
+        }
     }
 
     // -------------------------------------------------------------------

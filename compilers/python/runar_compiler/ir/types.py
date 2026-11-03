@@ -69,13 +69,13 @@ class ANFProgram:
     contract_name: str = ""
     properties: list[ANFProperty] = field(default_factory=list)
     methods: list[ANFMethod] = field(default_factory=list)
-    # Base class the source contract extends. In-memory carrier ONLY: it is
-    # excluded from the emitted ANF IR JSON (see _IR_EXCLUDED_FIELDS in
-    # __main__.py) so it never affects cross-tier conformance parity. The
-    # artifact assembler copies it to the top-level artifact field so SDKs can
-    # gate the issue-#42/#44 terminal sighash subscript trim on the parent
-    # class (a StatefulSmartContract with zero mutable fields still needs the
-    # trim even though state_fields is empty).
+    # Base class the source contract extends. F-038: wire data
+    # (``parentClass`` in anf-ir.schema.json), emitted by --emit-ir and read
+    # by --ir, so the round trip keeps it. The artifact assembler copies it to
+    # the top-level artifact field so SDKs can gate the issue-#42/#44 terminal
+    # sighash subscript trim on the parent class (a StatefulSmartContract with
+    # zero mutable fields still needs the trim even though state_fields is
+    # empty). "" only for IR loaded without it.
     parent_class: str = ""
 
 
@@ -103,7 +103,8 @@ class ANFMethod:
     # Issue #123: BIP-143 sighash type declared via @sighash on the source
     # method (e.g. 0x43 for SINGLE|FORKID). ``None`` = default ALL|FORKID.
     # Carried onto the ABI method descriptor so the SDK builds the matching
-    # preimage.
+    # preimage. F-065 / F-088: wire data (``sigHashType``, omitted for the
+    # default), so an --emit-ir -> --ir round trip keeps it.
     sighash_type: int | None = None
 
 
@@ -515,6 +516,8 @@ def anf_program_from_dict(d: dict[str, Any]) -> ANFProgram:
         contract_name=d.get("contractName", ""),
         properties=[_anf_property_from_dict(p) for p in d.get("properties", [])],
         methods=[_anf_method_from_dict(m) for m in d.get("methods", [])],
+        # F-038: wire data; "" when absent (IR written before it existed).
+        parent_class=d.get("parentClass") or "",
     )
 
 

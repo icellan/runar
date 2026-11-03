@@ -19,12 +19,10 @@
  * `cross-compiler.test.ts` ("mutable Rabin state is a fixed 8-byte word in all
  * 7 tiers"), which lowers this same ANF through every backend.
  *
- * NOT settled here: whether the Rabin types should ultimately be 8-byte numeric
- * or push-data framed. The SDK's `serializeState` frames them
- * (`runar-sdk/src/__tests__/state-curve-point-width.test.ts`), a third encoding
- * that disagrees with all seven compilers' readers. That decision moves all
- * seven compilers together; the invariant asserted here — writer agrees with
- * its own reader — holds under either answer.
+ * Settled by F-035 (user decision D2: the compiler is canonical): the shared
+ * STATE_FIELD_WIDTHS table and all seven SDK state codecs now write and read
+ * the Rabin types as this same 8-byte word
+ * (`runar-sdk/src/__tests__/state-rabin-width.test.ts`).
  */
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';

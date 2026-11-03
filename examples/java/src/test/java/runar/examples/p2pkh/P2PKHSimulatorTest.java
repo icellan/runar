@@ -14,9 +14,14 @@ import static org.junit.jupiter.api.Assertions.*;
  * in {@code examples/java/src/main/java/runar/examples/p2pkh/}. The
  * contract's assertions rely on a matching hash160(pubKey) == pubKeyHash
  * check — real in the simulator since hashes are deterministic — and a
- * checkSig call (mocked to true). This test is the end-to-end proof
- * that a plain .runar.java contract runs natively in Java under the
- * simulator and fails/succeeds on the same conditions it would on-chain.
+ * checkSig call that {@link runar.lang.runtime.MockCrypto#checkSig} mocks
+ * to a bare null-check on {@code sig} and {@code pubKey}, not real ECDSA.
+ * So only the hash-mismatch failure below is on-chain-equivalent: a
+ * signature from the wrong key, or arbitrary non-empty bytes, would still
+ * pass here but would fail on-chain. This test proves the matching-hash
+ * path runs natively in Java under the simulator and the mismatched-hash
+ * path fails the same way it would on-chain; it does not prove anything
+ * about signature validity.
  */
 class P2PKHSimulatorTest {
 

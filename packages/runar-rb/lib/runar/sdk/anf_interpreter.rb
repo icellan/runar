@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'digest'
+require 'set'
 require_relative '../ecdsa'
 
 # Lightweight ANF interpreter for auto-computing state transitions.
@@ -54,9 +55,10 @@ module Runar
     #   trailing sighash type byte stripped), and ECDSA-verifying against the
     #   sighash. Any mismatch returns +false+, which then trips the enclosing
     #   +assert(...)+ and raises {AssertionFailureError}.
-    # - verifies +checkMultiSig(sigs, pks)+ by iterating signatures
-    #   left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
-    #   +OP_CHECKMULTISIG+.
+    # - verifies +checkMultiSig(sigs, pks)+ as +OP_CHECKMULTISIG+ does: last
+    #   signature against last key first, the same encoding gates on every
+    #   examined pair, NULLFAIL on a failing check with a non-empty signature
+    #   (N-259, see +verify_multi_sig_real+).
     # - verifies +checkPreimage(preimage)+ by computing
     #   +SHA256(SHA256(preimage))+ and comparing it to +sighash+ byte-for-byte
     #   — the on-chain +OP_PUSH_TX+ semantic.
@@ -93,6 +95,19 @@ module Runar
 
       # Implicit params injected by the compiler — never required from the caller.
       IMPLICIT_PARAMS = %w[_changePKH _changeAmount _newAmount txPreimage].freeze
+
+      # F-024 (R14): a caller that knows the continuation's satoshis binds
+      # +_newAmount+ (what +continuationAmount()+ reads), and one that knows the
+      # spent UTXO's satoshis passes them as an INTEGER +txPreimage+ (a real
+      # preimage is hex), which +extractAmount+ then returns.
+      def self.caller_bound_continuation_arg?(pname, args)
+        v = args.key?(pname) ? args[pname] : args[pname.to_sym]
+        case pname
+        when '_newAmount' then args.key?(pname) || args.key?(pname.to_sym)
+        when 'txPreimage' then v.is_a?(Integer)
+        else false
+        end
+      end
 
       # The on-disk ANF spelling of a bigint literal: decimal digits with a
       # trailing +n+. Unambiguous against a hex ByteString literal, which never
@@ -352,10 +367,16 @@ module Runar
         # Load method params, skipping implicit compiler-injected ones.
         Array(method['params']).each do |param|
           pname = param['name']
-          next if IMPLICIT_PARAMS.include?(pname)
-          next unless args.key?(pname) || args.key?(pname.to_sym)
+          next if IMPLICIT_PARAMS.include?(pname) && !caller_bound_continuation_arg?(pname, args)
 
-          env[pname] = args.key?(pname) ? args[pname] : args[pname.to_sym]
+          # N-360: a property-named public param the method reassigns is bound
+          # in the ANF under its `<name>@local` slot; the caller's args (and
+          # the ABI) use the source name.
+          key = pname
+          key = pname.delete_suffix('@local') if !(args.key?(pname) || args.key?(pname.to_sym)) && pname.end_with?('@local')
+          next unless args.key?(key) || args.key?(key.to_sym)
+
+          env[pname] = args.key?(key) ? args[key] : args[key.to_sym]
         end
 
         state_delta = {}
@@ -377,6 +398,15 @@ module Runar
         # recorded here — data outputs are always emitted after every
         # state-class output, in their own +data_outputs+ list.
         ordered_outputs = []
+        # F-164 (round 2): compute the mocked-prologue-assert identity set
+        # once per method, for plain strict mode only (on-chain mode keeps
+        # enforcing both prologue asserts for real, unchanged).
+        Thread.current[:runar_mocked_prologue_asserts] =
+          if strict_method_name && !real_crypto_ctx
+            detect_auto_injected_prologue_asserts(Array(method['body']))
+          else
+            Set.new
+          end
         eval_bindings(Array(method['body']), env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf)
 
         [current_state.merge(state_delta), data_outputs, raw_outputs, ordered_outputs]
@@ -385,6 +415,7 @@ module Runar
         Thread.current[:runar_strict_method] = nil
         Thread.current[:runar_real_crypto] = nil
         Thread.current[:runar_script_bytes] = nil
+        Thread.current[:runar_mocked_prologue_asserts] = nil
       end
 
       # Walk a list of ANF bindings, updating env with each result.
@@ -658,6 +689,16 @@ module Runar
                check_preimage_assert?(value['value'])
               return nil
             end
+            # F-164 (round 2): the auto-injected prologue's checkPreimage
+            # assert and sighash-type assert (detected structurally -- see
+            # detect_auto_injected_prologue_asserts) are mocked in plain
+            # strict mode, matching PROTOCOL.md's documented "crypto
+            # built-ins still mock-return true" contract. Never populated
+            # for execute_on_chain_authoritative (run_method only sets it
+            # when real_crypto_ctx is nil), so on-chain mode keeps
+            # enforcing both for real.
+            mocked = Thread.current[:runar_mocked_prologue_asserts]
+            return nil if mocked && mocked.include?(value.object_id)
 
             pred = env[value['value']]
             unless is_truthy(pred)
@@ -741,9 +782,28 @@ module Runar
           ordered_outputs << { kind: :raw, satoshis: sats || 0, script: script_hex }
           nil
 
-        when 'check_preimage', 'deserialize_state', 'get_state_script'
+        when 'check_preimage'
+          # F-164: mirrors the 'checkPreimage' call-path case above (mock
+          # true unless a real-crypto context is active) — same mock/real
+          # split, regardless of whether a witness context is also present.
+          real_crypto = Thread.current[:runar_real_crypto]
+          if real_crypto
+            verify_preimage_real(env[value['preimage']], real_crypto.sighash)
+          else
+            true
+          end
+
+        when 'deserialize_state', 'get_state_script'
           # On-chain-only operations — skip in simulation.
           nil
+
+        when 'array_literal'
+          # N-259: the element values, in order. Its only consumer is
+          # +checkMultiSig+, which lenient mode mocks to +true+ and on-chain
+          # mode verifies over these lists; returning +nil+ made on-chain
+          # +checkMultiSig+ answer +false+ for every input, a valid multisig
+          # included.
+          (value['elements'] || []).map { |ref| env[ref] }
 
         else
           nil
@@ -778,8 +838,13 @@ module Runar
         when '+'  then l + r
         when '-'  then l - r
         when '*'  then l * r
-        when '/'  then r == 0 ? 0 : truncate_div(l, r)
-        when '%'  then r == 0 ? 0 : truncate_mod(l, r)
+        # N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is
+        # no post-state to compute (same refusal as safediv / safemod / divmod).
+        when '/'  then abort_div(l, r, 'OP_DIV')
+        when '%'
+          raise 'OP_MOD: modulo by zero' if r == 0
+
+          truncate_mod(l, r)
         when '==', '===' then l == r
         when '!=', '!==' then l != r
         when '<'  then l < r
@@ -809,11 +874,18 @@ module Runar
       # @param b [Integer]
       # @return [Integer]
       def truncate_div(a, b)
-        if (a < 0) != (b < 0) && (a % b != 0)
-          (a.to_f / b).truncate
-        else
-          a / b
-        end
+        # Exact integer arithmetic: a Float quotient loses the low digits
+        # once the operands pass 2^53 (F-134).
+        q = a.abs / b.abs
+        (a < 0) != (b < 0) ? -q : q
+      end
+
+      # OP_DIV as a builtin uses it: truncating, and a zero divisor aborts the
+      # script, so it raises here instead of inventing a value (F-134).
+      def abort_div(a, b, name)
+        raise "#{name}: division by zero" if b == 0
+
+        truncate_div(a, b)
       end
 
       # Modulo matching truncation toward zero.
@@ -900,7 +972,31 @@ module Runar
         #     verification returns false, which trips the enclosing
         #     assert(...) and raises AssertionFailureError.
         when 'checkSig'
-          real_crypto ? verify_ecdsa_real(args[0], args[1], real_crypto.sighash) : true
+          if real_crypto
+            # N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            # encoding; it does not push false. Answering false let
+            # `checkSig(a, A) || checkSig(b, B)` take the other arm and accept
+            # a spend the chain aborts on.
+            reason = check_sig_encoding_error(args[0], args[1])
+            if reason
+              raise "checkSig: #{reason} — OP_CHECKSIG aborts the script on a malformed " \
+                    'signature or public key encoding, it does not push false'
+            end
+            ok = verify_ecdsa_real(args[0], args[1], real_crypto.sighash)
+            # N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            # does not verify aborts the script; only an empty one pushes
+            # false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            # fail takes an empty signature (EMPTY_SIG, issue #106). Spend has
+            # no NULLFAIL.
+            if !ok && !to_hex_arg(args[0]).to_s.empty?
+              raise 'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' \
+                    'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push ' \
+                    'false; the arm that must fail takes an empty signature (EMPTY_SIG)'
+            end
+            ok
+          else
+            true
+          end
 
         when 'checkMultiSig'
           real_crypto ? verify_multi_sig_real(args[0], args[1], real_crypto.sighash) : true
@@ -930,11 +1026,23 @@ module Runar
         when 'cat'
           (args[0] || '').to_s + (args[1] || '').to_s
 
+        # R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+        # OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+        # REMAINDER `size(data) - start`. It ABORTS whenever `start` is
+        # outside [0, size(data)] or `length` is outside
+        # [0, size(data) - start], which collapses to: start<0, length<0,
+        # or start+length>size(data). This used to clamp via Ruby's
+        # `String#[]`; `extractScriptCode` now supplies a realistic
+        # scriptCode (R67) so the one caller that fed this an empty
+        # placeholder (FungibleToken#merge) no longer hits the abort path
+        # either.
         when 'substr'
           hex_str = (args[0] || '').to_s
           start   = to_int(args[1]).to_i
           length  = to_int(args[2]).to_i
-          hex_str[start * 2, length * 2] || ''
+          raise "substr: start #{start}, length #{length} is outside a #{hex_str.length / 2}-byte value" if start.negative? || length.negative? || (start + length) * 2 > hex_str.length
+
+          hex_str[start * 2, length * 2]
 
         when 'reverseBytes'
           hex_str = (args[0] || '').to_s
@@ -943,6 +1051,37 @@ module Runar
         when 'len'
           hex_str = (args[0] || '').to_s
           hex_str.length / 2
+
+        # F-274: `left`/`right` compile to an OP_SPLIT-based script that
+        # ABORTS whenever the computed split position is outside
+        # [0, size(data)] -- `left` splits at `length` directly, `right`
+        # splits at `size(data) - length`. A negative or past-the-end
+        # `length` must raise, never return a clamped or whole-string value.
+        when 'left'
+          hex_str = (args[0] || '').to_s
+          length  = to_int(args[1]).to_i
+          raise "left: length #{length} is outside a #{hex_str.length / 2}-byte value" if length.negative? || length * 2 > hex_str.length
+
+          hex_str[0, length * 2]
+
+        when 'right'
+          hex_str = (args[0] || '').to_s
+          length  = to_int(args[1]).to_i
+          raise "right: length #{length} is outside a #{hex_str.length / 2}-byte value" if length.negative? || length * 2 > hex_str.length
+
+          n = length * 2
+          n.zero? ? '' : hex_str[-n..]
+
+        # N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+        # RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+        # Unmodelled before this (fell through to `nil`), the same bug shape
+        # F-274 fixed for `left`/`right`.
+        when 'split'
+          hex_str = (args[0] || '').to_s
+          index   = to_int(args[1]).to_i
+          raise "split: index #{index} is outside a #{hex_str.length / 2}-byte value" if index.negative? || index * 2 > hex_str.length
+
+          hex_str[(index * 2)..]
 
         # Math built-ins.
         when 'abs'
@@ -958,19 +1097,24 @@ module Runar
           x = to_int(args[0])
           x >= to_int(args[1]) && x < to_int(args[2])
 
+        # The division-shaped builtins and pow/sqrt ABORT where the compiled
+        # script aborts (zero divisor, the pow exponent guard, the sqrt domain
+        # guards), like the other opcode-abort paths in this module (F-134).
         when 'safediv'
-          d = to_int(args[1])
-          d == 0 ? 0 : truncate_div(to_int(args[0]), d)
+          abort_div(to_int(args[0]), to_int(args[1]), 'safediv')
 
         when 'safemod'
           d = to_int(args[1])
-          d == 0 ? 0 : truncate_mod(to_int(args[0]), d)
+          raise 'safemod: modulo by zero' if d == 0
+
+          truncate_mod(to_int(args[0]), d)
 
         when 'clamp'
           v  = to_int(args[0])
           lo = to_int(args[1])
           hi = to_int(args[2])
-          v < lo ? lo : v > hi ? hi : v
+          # The script is OP_MAX then OP_MIN: min(max(v, lo), hi) (N-030).
+          [[v, lo].max, hi].min
 
         when 'sign'
           v = to_int(args[0])
@@ -979,22 +1123,31 @@ module Runar
         when 'pow'
           base = to_int(args[0])
           exp  = to_int(args[1])
-          exp < 0 ? 0 : base**exp
+          raise 'pow: negative exponent' if exp < 0
+          raise 'pow: exponent outside the supported domain (exp > 32)' if exp > 32
+
+          base**exp
 
         when 'sqrt'
           v = to_int(args[0])
+          raise 'sqrt: negative input' if v < 0
+          raise 'sqrt: input outside the supported domain (n >= 2^495)' if v >= 1 << 495
+
           integer_sqrt(v)
 
         when 'gcd'
           a = to_int(args[0]).abs
           b = to_int(args[1]).abs
-          a, b = b, a % b while b != 0
+          # The script unrolls exactly 256 Euclid steps (N-030).
+          256.times do
+            break if b.zero?
+
+            a, b = b, a % b
+          end
           a
 
         when 'divmod'
-          a = to_int(args[0])
-          b = to_int(args[1])
-          b == 0 ? 0 : truncate_div(a, b)
+          abort_div(to_int(args[0]), to_int(args[1]), 'divmod')
 
         when 'log2'
           v = to_int(args[0])
@@ -1004,7 +1157,7 @@ module Runar
           is_truthy(args[0]) ? 1 : 0
 
         when 'mulDiv'
-          truncate_div(to_int(args[0]) * to_int(args[1]), to_int(args[2]))
+          abort_div(to_int(args[0]) * to_int(args[1]), to_int(args[2]), 'mulDiv')
 
         when 'percentOf'
           truncate_div(to_int(args[0]) * to_int(args[1]), 10_000)
@@ -1034,7 +1187,10 @@ module Runar
 
         when 'extractAmount'
           mock_pre = Thread.current[:runar_mock_preimage]
-          if mock_pre && (mock_pre.key?('amount') || mock_pre.key?(:amount))
+          # F-024 (R14): an Integer txPreimage is the caller-supplied input amount.
+          if args[0].is_a?(Integer)
+            args[0]
+          elsif mock_pre && (mock_pre.key?('amount') || mock_pre.key?(:amount))
             to_int(mock_pre['amount'] || mock_pre[:amount])
           else
             '00' * 32
@@ -1055,6 +1211,15 @@ module Runar
           # type here too -- otherwise the pin assert spuriously fails.
           mock_pre = Thread.current[:runar_mock_preimage]
           to_int((mock_pre && (mock_pre['sigHashType'] || mock_pre[:sigHashType])) || 0x41)
+
+        # R67: the contract's own real codePart when the caller supplied it
+        # via the mock-preimage channel -- contract.rb's `call`/`prepare_call`
+        # always supplies it now. Falls back to the historical empty dummy
+        # for a bare `compute_new_state` call with no scriptCode set (e.g. a
+        # hand-built ANF probe in a test).
+        when 'extractScriptCode'
+          mock_bytes = Thread.current[:runar_mock_preimage_bytes]
+          (mock_bytes && mock_bytes['scriptCode']) || ''
 
         else
           nil
@@ -1183,11 +1348,52 @@ module Runar
         end
       end
 
+      # N-197: why +OP_CHECKSIG+ would ABORT the whole script on these
+      # operands, or +nil+ when it would run and push a boolean. Mirrors
+      # @bsv/sdk +Spend+'s +checkSignatureEncoding+ then
+      # +checkPublicKeyEncoding+ (version-1 rules): a non-empty signature must
+      # be strict DER (BIP66) with a low S; the public key -- checked even when
+      # the signature is empty -- must be 33 bytes behind 0x02/0x03 or 65 bytes
+      # behind 0x04 and decode to a curve point. An empty signature, or a
+      # well-formed one that does not verify, is not an encoding abort (+Spend+
+      # has no NULLFAIL; it pushes false); the +checkSig+ call site applies
+      # NULLFAIL after verification (N-198). A non-empty signature is in
+      # checksig format, DER followed by exactly one sighash-type byte, as
+      # +Spend+ requires: bare DER with no sighash byte aborts (N-255). Operands that are not hex at all are left to +verify_ecdsa_real+.
+      def check_sig_encoding_error(sig_val, pk_val)
+        sig_hex = to_hex_arg(sig_val)
+        pk_hex  = to_hex_arg(pk_val)
+        return nil if sig_hex.nil? || pk_hex.nil?
+
+        unless sig_hex.empty?
+          sig = [sig_hex].pack('H*').bytes
+          return 'the signature is not strict DER' if sig.length < 2 || sig.length != sig[1] + 3
+
+          parsed = Runar::ECDSA.parse_der_signature_bytes([sig_hex].pack('H*'))
+          return 'the signature is not strict DER' if parsed.nil?
+          return 'the signature does not have a low S value' unless parsed[1].between?(1, Runar::ECDSA::CURVE_N >> 1)
+        end
+        pk = [pk_hex].pack('H*').bytes
+        shape_ok = ([0x02, 0x03].include?(pk[0]) && pk.length == 33) || (pk[0] == 0x04 && pk.length == 65)
+        return 'the public key is not a 33-byte compressed or 65-byte uncompressed key' unless shape_ok
+
+        begin
+          x, y = Runar::ECDSA.decompress_pubkey_bytes(pk.pack('C*'))
+          return 'the public key is not a point on secp256k1' if x >= Runar::ECDSA::CURVE_P || y >= Runar::ECDSA::CURVE_P
+        rescue ArgumentError
+          return 'the public key is not a point on secp256k1'
+        end
+        nil
+      end
+
       # Verify an ECDSA signature against a 32-byte sighash. Pubkey must be
       # SEC1 (33-byte compressed or 65-byte uncompressed); signature must be
       # DER with an optional trailing sighash type byte (stripped by
       # +Runar::ECDSA.parse_der_signature_bytes+). Returns +false+ on any
-      # decode error so the enclosing +assert(...)+ fires.
+      # decode error so the enclosing +assert(...)+ fires. The +checkSig+ call
+      # site first applies +check_sig_encoding_error+ and aborts on a malformed
+      # encoding, as +OP_CHECKSIG+ does (N-197); so does +checkMultiSig+, per
+      # examined pair (N-259).
       #
       # The 32-byte sighash is the ECDSA digest itself (no extra hash) — this
       # mirrors the on-chain +OP_CHECKSIG+ semantic, where the script
@@ -1208,28 +1414,49 @@ module Runar
         end
       end
 
-      # Verify a list of signatures against a list of pubkeys. Mirrors
-      # Bitcoin's +OP_CHECKMULTISIG+: iterate sigs left-to-right, consume
-      # pubkeys greedily.
+      # N-259: +OP_CHECKMULTISIG+ as +@bsv/sdk+ +Spend+ runs it over the
+      # compiled layout +0 <sig1..sigN> N <pk1..pkM> M+. The LAST signature is
+      # examined against the LAST key first and both lists are walked toward
+      # the first. Each examined pair passes the N-197 encoding gates first and
+      # a malformed one aborts (a pair never reached is never checked); a
+      # signature that verifies consumes its key, a key is consumed either way,
+      # and the check fails once fewer keys remain than signatures. N > M
+      # aborts, as in +Spend+. NULLFAIL (BIP146, N-198): a failing check with
+      # ANY non-empty signature aborts on a node (+Spend+ has no NULLFAIL);
+      # only an all-empty one returns +false+.
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
       def verify_multi_sig_real(sigs_val, pks_val, sighash_bytes)
         return false unless sigs_val.is_a?(Array) && pks_val.is_a?(Array)
-        return false if sigs_val.length > pks_val.length
 
-        pk_idx = 0
-        sigs_val.each do |sig|
-          matched = false
-          while pk_idx < pks_val.length
-            ok = verify_ecdsa_real(sig, pks_val[pk_idx], sighash_bytes)
-            pk_idx += 1
-            if ok
-              matched = true
-              break
-            end
-          end
-          return false unless matched
+        if sigs_val.length > pks_val.length
+          raise "checkMultiSig: #{sigs_val.length} signatures for #{pks_val.length} public keys — " \
+                'OP_CHECKMULTISIG aborts the script when there are more signatures than keys'
         end
-        true
+
+        isig = sigs_val.length - 1
+        ikey = pks_val.length - 1
+        success = true
+        while success && isig >= 0
+          reason = check_sig_encoding_error(sigs_val[isig], pks_val[ikey])
+          if reason
+            raise "checkMultiSig: #{reason} — OP_CHECKMULTISIG aborts the script on a malformed " \
+                  'signature or public key encoding, it does not push false'
+          end
+          if !to_hex_arg(sigs_val[isig]).to_s.empty? &&
+             verify_ecdsa_real(sigs_val[isig], pks_val[ikey], sighash_bytes)
+            isig -= 1
+          end
+          ikey -= 1
+          success = false if isig > ikey # fewer keys left than signatures
+        end
+        if !success && sigs_val.any? { |s| !to_hex_arg(s).to_s.empty? }
+          raise 'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — ' \
+                'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push ' \
+                'false; a multisig that must fail takes empty signatures (EMPTY_SIG)'
+        end
+        success
       end
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
 
       # Verify that +SHA256(SHA256(preimage)) == sighash+ — the on-chain
       # +OP_PUSH_TX+ semantic for +checkPreimage+.
@@ -1678,15 +1905,10 @@ module Runar
       # @param v [Integer]
       # @return [Integer]
       def integer_log2(v)
-        return 0 if v <= 0
+        # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+        raise 'log2: non-positive input' if v <= 0
 
-        bits = 0
-        x    = v
-        while x > 1
-          x >>= 1
-          bits += 1
-        end
-        bits
+        v.bit_length - 1
       end
 
       # ---------------------------------------------------------------------------
@@ -1704,6 +1926,65 @@ module Runar
 
         pred = idx_map[pred_ref]
         pred.is_a?(Hash) && pred['kind'] == 'check_preimage'
+      end
+
+      # F-164 (round 2): Ruby port of the TS reference's
+      # +detectAutoInjectedPrologueAsserts+
+      # (packages/runar-sdk/src/anf-interpreter.ts) -- see that function's
+      # doc comment for the full rationale. Structural (shape/position-
+      # based, NOT binding-name-based) detection of the fixed 8-binding
+      # sequence +compilers/ruby/lib/runar_compiler/frontend/anf_lower.rb+'s
+      # stateful-prologue emitter injects at the START of every public
+      # StatefulSmartContract method:
+      #
+      #   [0] load_param txPreimage
+      #   [1] check_preimage(preimage: [0])
+      #   [2] assert([1])                              <- mocked in strict mode
+      #   [3] load_param txPreimage
+      #   [4] call extractSigHashType([3])
+      #   [5] load_const <declared sighash mode>
+      #   [6] bin_op === ([4], [5])
+      #   [7] assert([6])                              <- mocked in strict mode
+      #
+      # This sequence can only appear at index 0 of a method body -- the
+      # compiler emits it before a single line of developer code, so a
+      # user-written assert (even one that also calls
+      # +extractSigHashType+) is lowered AFTER it, at a later index, and is
+      # never matched here.
+      #
+      # We don't mark these two ANF nodes with the existing
+      # +isAutoInjectedStateCheck+ field the way the exit-time
+      # continuation-hash assert is marked: that field is part of the
+      # serialized ANF IR, and setting it on the prologue asserts would add
+      # a key to +conformance/tests/*/expected-ir.json+ for every stateful
+      # fixture -- a compiler-golden move this item must not cause.
+      #
+      # @param body [Array<Hash>] the method's top-level binding list
+      # @return [Set] identity set (by +object_id+ -- Ruby Hashes compare
+      #   by value with +==+, so this is the identity-equivalent of the TS
+      #   reference's +Set<ANFValue>+ object-reference check) of the two
+      #   mocked assert VALUE hashes
+      def detect_auto_injected_prologue_asserts(body)
+        return Set.new if body.length < 8
+
+        b0, b1, b2, b3, b4, b5, b6, b7 = body[0..7]
+        is_load_tx_preimage = lambda do |b|
+          b['value']['kind'] == 'load_param' && b['value']['name'] == 'txPreimage'
+        end
+        return Set.new unless is_load_tx_preimage.call(b0)
+
+        v1, v2, v3, v4, v5, v6, v7 = [b1, b2, b3, b4, b5, b6, b7].map { |b| b['value'] }
+        return Set.new unless v1['kind'] == 'check_preimage' && v1['preimage'] == b0['name']
+        return Set.new unless v2['kind'] == 'assert' && v2['value'] == b1['name']
+        return Set.new unless is_load_tx_preimage.call(b3)
+        return Set.new unless v4['kind'] == 'call' && v4['func'] == 'extractSigHashType' &&
+                               Array(v4['args']).first == b3['name']
+        return Set.new unless v5['kind'] == 'load_const'
+        return Set.new unless v6['kind'] == 'bin_op' && v6['op'] == '===' &&
+                               v6['left'] == b4['name'] && v6['right'] == b5['name']
+        return Set.new unless v7['kind'] == 'assert' && v7['value'] == b6['name']
+
+        Set.new([v2.object_id, v7.object_id])
       end
 
       # Detect whether an assert predicate ref is the auto-emitted

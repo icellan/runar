@@ -19,7 +19,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compile } from 'runar-compiler';
-import { RunarContract } from 'runar-sdk';
+import { RunarContract, InvalidConstructorArgError } from 'runar-sdk';
 import type { RunarArtifact } from 'runar-sdk';
 
 // Minimal real P2PKH — the canonical fund-losing case.
@@ -101,9 +101,13 @@ describe('R-036: deploy constructor args', () => {
     // The placeholder byte at the slot offset is OP_0.
     expect(artifact.script.slice(slot.byteOffset * 2, slot.byteOffset * 2 + 2)).toBe('00');
 
-    // And the old zero-fill deploy path leaves it as OP_0 — unspendable.
-    const zeroFilled = new RunarContract(artifact, [0n]);
-    expect(zeroFilled.getLockingScript()).toBe('76a90088ac');
+    // The old zero-fill deploy path (`new RunarContract(artifact, [0n])`) used to
+    // leave this placeholder as OP_0, i.e. an unspendable output. Since N-330 /
+    // N-073 the SDK refuses a non-hex Addr arg, so that script can no longer be
+    // produced from a numeric zero.
+    // Proves: 0n for an Addr is refused with InvalidConstructorArgError.
+    // Does not prove: the refusal covers every ByteString-family type (SDK tests do).
+    expect(() => new RunarContract(artifact, [0n])).toThrow(InvalidConstructorArgError);
   });
 
   // -------------------------------------------------------------------------
@@ -211,6 +215,41 @@ describe('R-036: deploy constructor args', () => {
     expect(process.exitCode).toBe(1);
     const msgs = errSpy.mock.calls.map((c) => String(c[0]));
     expect(msgs.some((m) => /--args/.test(m))).toBe(true);
+
+    process.exitCode = prevExitCode;
+  });
+
+  // The SDK (N-330 / N-073) enforces the Addr width even when the artifact's
+  // slot has no `fixedValueByteLength`. The CLI must turn that refusal into a
+  // clear CLI error, not an unhandled rejection after the key is decoded.
+  // Proves: a short Addr on a slot-descriptor-less artifact exits 1 with a message.
+  // Does not prove: behaviour against a live provider (the network is never reached).
+  it('deployCommand reports an SDK constructor-arg refusal as a CLI error', async () => {
+    const { deployCommand } = await import('../commands/deploy.js');
+    const artifact = compileP2PKH();
+    delete (artifact as { constructorSlots?: unknown }).constructorSlots;
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const prevExitCode = process.exitCode;
+    process.exitCode = 0;
+
+    const tmp = path.join(os.tmpdir(), `runar-n335-${process.pid}-${Date.now()}.json`);
+    fs.writeFileSync(tmp, JSON.stringify(artifact));
+    try {
+      await deployCommand(tmp, {
+        network: 'testnet',
+        key: 'cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA',
+        satoshis: '1000',
+        args: ['aabb'],
+      });
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+
+    expect(process.exitCode).toBe(1);
+    const msgs = errSpy.mock.calls.map((c) => String(c[0]));
+    expect(msgs.some((m) => /pubKeyHash/.test(m))).toBe(true);
 
     process.exitCode = prevExitCode;
   });

@@ -129,20 +129,34 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // W1 added a 3-byte zero-pad (`01 00 7e`) before the auto-injected
       // sighash-type pin's OP_BIN2NUM, so every shape here is 6 hex chars
       // longer than it was; the discriminating equalities are unchanged.
-      { shape: 0, type: 'Point', digest: '8d309734', hexLen: 1360 },
-      { shape: 0, type: 'P256Point', digest: '8d309734', hexLen: 1360 },
-      { shape: 0, type: 'P384Point', digest: '0aa41b99', hexLen: 1360 },
-      { shape: 0, type: 'PubKey', digest: 'c0ba2f04', hexLen: 1360 },
-      { shape: 0, type: 'Sha256', digest: '2e528831', hexLen: 1360 },
-      { shape: 0, type: 'ByteString', digest: '5f873f91', hexLen: 1616 },
-      { shape: 0, type: 'Sig', digest: '5f873f91', hexLen: 1616 },
+      // F-024 (R14) re-stamp: shape 0 (the mutating write) gains the injected
+      // `_newAmount >= extractAmount(txPreimage)` value check, +32 hex chars for
+      // every type; the check-stripped ANF re-emits each previous pin, and the
+      // discriminating equalities (Point == P256Point, ByteString == Sig) hold.
+      // N-044 re-stamp: only the push-data-framed rows move — the writer gains
+      // the PUSHDATA4 arm (+68 hex chars) and the reader reads PUSHDATA
+      // lengths unsigned, whitelists the header and asserts exact consumption
+      // (+28 hex chars). The fixed-width rows are byte-unchanged, and
+      // ByteString == Sig still holds.
+      // N-045 re-stamp: only the fixed-width rows of shape 0 (the mutating
+      // write) move — the continuation writer asserts OP_SIZE <width>
+      // OP_NUMEQUALVERIFY before committing the field (+8 hex chars). Re-measured
+      // byte-identical in all seven tiers; Point == P256Point still holds, and
+      // the read shape and the framed rows are byte-unchanged.
+      { shape: 0, type: 'Point', digest: 'd6148b45', hexLen: 1400 },
+      { shape: 0, type: 'P256Point', digest: 'd6148b45', hexLen: 1400 },
+      { shape: 0, type: 'P384Point', digest: 'e9ee2d74', hexLen: 1400 },
+      { shape: 0, type: 'PubKey', digest: '758f1fc8', hexLen: 1400 },
+      { shape: 0, type: 'Sha256', digest: '64697f2b', hexLen: 1400 },
+      { shape: 0, type: 'ByteString', digest: 'ffe905dc', hexLen: 1716 },
+      { shape: 0, type: 'Sig', digest: 'ffe905dc', hexLen: 1716 },
       { shape: 1, type: 'Point', digest: 'a1e544fa', hexLen: 942 },
       { shape: 1, type: 'P256Point', digest: 'a1e544fa', hexLen: 942 },
       { shape: 1, type: 'P384Point', digest: '69b87cde', hexLen: 942 },
       { shape: 1, type: 'PubKey', digest: '75d147d3', hexLen: 942 },
       { shape: 1, type: 'Sha256', digest: 'e2b1b50e', hexLen: 942 },
-      { shape: 1, type: 'ByteString', digest: 'ecfc6f7a', hexLen: 1270 },
-      { shape: 1, type: 'Sig', digest: 'ecfc6f7a', hexLen: 1270 },
+      { shape: 1, type: 'ByteString', digest: '0cff82c1', hexLen: 1298 },
+      { shape: 1, type: 'Sig', digest: '0cff82c1', hexLen: 1298 },
     ];
 
     for (const pin of PINS) {

@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,43 +26,66 @@ import (
 
 var multiFormats = []string{
 	".runar.ts", ".runar.sol", ".runar.move", ".runar.go",
-	".runar.rs", ".runar.py", ".runar.zig", ".runar.rb",
+	".runar.rs", ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
 }
 
-func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
-	t.Helper()
+// resolveConformanceFormat is the pure resolution logic behind
+// readConformanceFormat below: given a fixture name and a format extension,
+// it returns the resolved source bytes and path, or a descriptive error when
+// the fixture cannot be resolved. It takes no *testing.T and never calls
+// Fatal/Skip itself, so the fail-vs-skip decision (F-312) is unit-testable
+// directly on the returned error, without relying on subtest pass/fail
+// propagation to observe which T method a wrapper called — a subtest that
+// genuinely fails always marks its parent as failed too (see Go's testing.T
+// semantics), which would make any such observation report red forever.
+func resolveConformanceFormat(testName, ext string) ([]byte, string, error) {
 	// First try the legacy in-tree layout (conformance/tests/<name>/<name><ext>);
 	// fall back to source.json indirection used by post-migration fixtures.
 	fileName := filepath.Join(conformanceDir(), testName, testName+ext)
 	if _, err := os.Stat(fileName); err == nil {
 		source, err := os.ReadFile(fileName)
 		if err != nil {
-			t.Fatalf("failed to read %s: %v", fileName, err)
+			return nil, "", fmt.Errorf("failed to read %s: %w", fileName, err)
 		}
-		return source, fileName
+		return source, fileName, nil
 	}
 
 	sourceJSON := filepath.Join(conformanceDir(), testName, "source.json")
 	data, err := os.ReadFile(sourceJSON)
 	if err != nil {
-		t.Skipf("source file not found: neither %s nor %s exists", fileName, sourceJSON)
+		// FAILS rather than skips: every fixture carries all nine formats by
+		// the frontend-parity invariant (CLAUDE.md), so a fixture this helper
+		// cannot resolve is broken, not a reason to report a pass. See
+		// conformanceSourcePathExt below, which this mirrors (F-312).
+		return nil, "", fmt.Errorf("%s: neither %s nor %s exists — the fixture cannot be resolved",
+			testName, fileName, sourceJSON)
 	}
 	var manifest struct {
 		Sources map[string]string `json:"sources"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("failed to parse %s: %v", sourceJSON, err)
+		return nil, "", fmt.Errorf("failed to parse %s: %w", sourceJSON, err)
 	}
 	ref, ok := manifest.Sources[ext]
 	if !ok {
-		t.Skipf("source.json for %s has no %s entry", testName, ext)
+		return nil, "", fmt.Errorf("%s: source.json declares no %s source; every fixture must carry all "+
+			"nine formats (frontend-parity invariant)", testName, ext)
 	}
 	resolved := filepath.Join(conformanceDir(), testName, ref)
 	source, err := os.ReadFile(resolved)
 	if err != nil {
-		t.Fatalf("failed to read %s: %v", resolved, err)
+		return nil, "", fmt.Errorf("failed to read %s: %w", resolved, err)
 	}
-	return source, resolved
+	return source, resolved, nil
+}
+
+func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
+	t.Helper()
+	source, path, err := resolveConformanceFormat(testName, ext)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return source, path
 }
 
 // conformanceSourcePathExt resolves a conformance fixture's source path for one
@@ -258,10 +282,7 @@ func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source, ok := conformanceSourcePath(dir)
-			if !ok {
-				t.Skipf("%s: source not found", dir)
-			}
+			source := requireConformanceSource(t, dir)
 			artifact, err := CompileFromSource(source)
 			if err != nil {
 				t.Fatalf("CompileFromSource failed: %v", err)
@@ -370,9 +391,7 @@ func TestGoContract_CompileExamples(t *testing.T) {
 	for _, ex := range examples {
 		t.Run(ex.contractName, func(t *testing.T) {
 			source := filepath.Join(examplesDir, ex.dir, ex.file)
-			if _, err := os.Stat(source); os.IsNotExist(err) {
-				t.Skipf("source not found: %s", source)
-			}
+			requireFixtureFile(t, source)
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {
@@ -399,8 +418,14 @@ func TestGoContract_CompileExamples(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGoContract_CompileConformance(t *testing.T) {
-	// "stateful" excluded: Go compiler's stateful preimage injection needs deeper work
-	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method"}
+	// F-372: "stateful" was previously excluded behind a comment claiming the Go
+	// compiler's stateful preimage injection "needs deeper work". TestConformanceGoldens
+	// (conformance_goldens_test.go) already compiles every conformance/tests/*
+	// directory's .runar.go source — including "stateful" — with constant folding
+	// disabled and byte-matches it against the shared golden, so that premise is
+	// stale. Included here too, proving .runar.go compiles via this call path
+	// (default options, i.e. constant folding ON) to the same fold-OFF golden.
+	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method", "stateful"}
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -442,9 +467,14 @@ func TestGoContract_CompileConformance(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRubyContract_CompileConformance(t *testing.T) {
-	// "stateful" and "stateful-counter" excluded: stateful preimage injection
-	// requires deeper work in the Go compiler.
-	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method"}
+	// F-372: "stateful" and "stateful-counter" were previously excluded behind a
+	// comment claiming stateful preimage injection "requires deeper work in the
+	// Go compiler". TestConformanceGoldens (conformance_goldens_test.go) already
+	// compiles both via their .runar.go source and byte-matches the shared
+	// golden, so that premise is stale for the compiler itself. Included here to
+	// additionally prove the .runar.rb surface, parsed by the same Go compiler,
+	// reaches the identical golden.
+	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method", "stateful", "stateful-counter"}
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
@@ -546,26 +576,24 @@ class Simple extends SmartContract {
 // ---------------------------------------------------------------------------
 
 func TestParseSource_DispatchesRustFormat(t *testing.T) {
-	// The Go compiler does NOT have a Rust parser — .runar.rs falls back to
-	// the TypeScript parser (the default case in ParseSource switch).
-	// We verify: no panic, and a ParseResult is returned.
-	source := []byte(`
-// This is valid TypeScript that happens to use .runar.rs extension
-import { SmartContract, assert } from 'runar-lang';
-
-class Simple extends SmartContract {
-  readonly x: bigint;
-
-  constructor(x: bigint) {
-    super(x);
-    this.x = x;
-  }
-
-  public check(val: bigint): void {
-    assert(val === this.x);
-  }
-}
-`)
+	// The Go compiler DOES have a Rust-macro parser (ParseRustMacro,
+	// parser_rustmacro.go, 600+ lines), and ParseSource's switch dispatches
+	// `.runar.rs` to it (frontend/parser.go). This test used to claim the
+	// opposite — "the Go compiler does NOT have a Rust parser" — and fed
+	// plain TypeScript source under a `.runar.rs` name, asserting only that
+	// ParseSource didn't panic and returned a non-nil result. That assertion
+	// holds regardless of which parser actually ran, so it proved nothing
+	// about dispatch correctness: see F-371.
+	//
+	// This test instead parses a REAL Rust-DSL conformance fixture
+	// (examples/rust/arithmetic/Arithmetic.runar.rs, contract name
+	// "Arithmetic") through frontend.ParseSource and asserts the resulting
+	// AST actually names that contract. Only the Rust-macro parser
+	// understands this fixture's `struct` / `impl` / `#[runar::contract]`
+	// syntax; routing it to the TypeScript parser instead would either
+	// error out or silently produce a differently-shaped/unnamed contract,
+	// not one named "Arithmetic".
+	source, fileName := readConformanceFormat(t, "arithmetic", ".runar.rs")
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -573,17 +601,21 @@ class Simple extends SmartContract {
 		}
 	}()
 
-	result := frontend.ParseSource(source, "Contract.runar.rs")
+	result := frontend.ParseSource(source, fileName)
 
 	if result == nil {
 		t.Fatal("ParseSource returned nil for .runar.rs extension")
 	}
-
-	// The Go compiler has no Rust parser — it falls back to the TS parser.
-	// This tests that the dispatch doesn't panic (no .runar.rs case in the switch).
-	t.Logf(".runar.rs dispatch: contract=%v, errors=%v",
-		result.Contract != nil,
-		result.Errors)
+	if len(result.Errors) > 0 {
+		t.Fatalf("ParseSource reported errors parsing the Rust-DSL fixture via the %q path: %v", fileName, result.Errors)
+	}
+	if result.Contract == nil {
+		t.Fatal("expected a non-nil contract from the Rust-macro parser")
+	}
+	if result.Contract.Name != "Arithmetic" {
+		t.Fatalf("expected contract name %q (the Rust fixture's struct name) — ParseSource did not dispatch %q to the Rust-macro parser, got contract %q",
+			"Arithmetic", fileName, result.Contract.Name)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -610,4 +642,145 @@ func TestParseSource_DispatchesPythonFormat(t *testing.T) {
 	}
 
 	t.Logf(".runar.py dispatch: contract=%s", result.Contract.Name)
+}
+
+// ---------------------------------------------------------------------------
+// Test: resolveConformanceFormat/readConformanceFormat must fail, not skip,
+// on a missing manifest entry (F-312)
+//
+// readConformanceFormat historically called t.Skipf when a fixture's
+// source.json existed but declared no entry for the requested extension. Its
+// hardened twin conformanceSourcePathExt (above) was fixed to t.Fatalf for the
+// identical condition, citing the frontend-parity invariant (CLAUDE.md): every
+// conformance fixture must carry all nine formats, so a missing manifest entry
+// means a broken fixture, not something to silently skip and report green.
+// readConformanceFormat backs TestMultiFormat_PropertyConsistency,
+// TestMultiFormat_MethodParamConsistency, and several TestParse* subtests
+// above, so leaving it on t.Skipf left that whole dispatch suite one deleted
+// manifest key (or renamed extension) away from quietly skipping instead of
+// catching a real regression.
+//
+// This test builds a throwaway fixture directory under conformanceDir()
+// (removed via t.Cleanup) whose source.json deliberately omits a
+// ".runar.sol" entry — the same shape as the brief's verification recipe
+// (delete the .runar.sol key from conformance/tests/arithmetic/source.json)
+// — but on a disposable fixture so no real conformance fixture is touched.
+// It calls resolveConformanceFormat directly (the pure function
+// readConformanceFormat now wraps) rather than readConformanceFormat itself,
+// because a t.Fatalf from inside a nested subtest always marks its parent
+// test as failed too, which would make the fixed (correct) behavior
+// permanently report red in this very test. Testing the pure resolver's
+// returned error is the correct way to pin "this is now an error, not a
+// silent skip" without that propagation getting in the way.
+func TestResolveConformanceFormat_MissingManifestEntryIsError(t *testing.T) {
+	fixtureName := "f312-synthetic-missing-ext"
+	fixtureDir := filepath.Join(conformanceDir(), fixtureName)
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("failed to create synthetic fixture dir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(fixtureDir); err != nil {
+			t.Errorf("failed to clean up synthetic fixture dir: %v", err)
+		}
+	})
+
+	manifest := `{"sources": {".runar.ts": "does-not-matter.runar.ts"}}`
+	if err := os.WriteFile(filepath.Join(fixtureDir, "source.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("failed to write synthetic source.json: %v", err)
+	}
+
+	source, path, err := resolveConformanceFormat(fixtureName, ".runar.sol")
+	if err == nil {
+		t.Fatalf("resolveConformanceFormat must return an error when source.json declares no "+
+			".runar.sol entry, not a silent pass — got source=%q path=%q err=nil (F-312)",
+			source, path)
+	}
+	if !strings.Contains(err.Error(), "every fixture must carry all nine formats") {
+		t.Fatalf("resolveConformanceFormat failed, but not for the expected reason: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-127: every one of the nine source formats is covered by the per-format
+// golden test and the N-way identity test below.
+//
+// Proves: multiFormats names exactly the nine formats of the frontend-parity
+// invariant (CLAUDE.md), and basic-p2pkh compiled from each of them through
+// CompileFromSource reaches the shared golden expected-script.hex and
+// therefore the same bytes as every other format.
+// Does not prove: fixtures beyond basic-p2pkh, constructs beyond
+// hash160+checkSig, or the constant-folding-OFF output (CompileFromSource uses
+// default options; TestConformanceGoldens covers fold-OFF for .runar.go).
+// ---------------------------------------------------------------------------
+
+func TestMultiFormat_FormatListCoversAllNine(t *testing.T) {
+	want := map[string]bool{
+		".runar.ts": true, ".runar.sol": true, ".runar.move": true,
+		".runar.go": true, ".runar.rs": true, ".runar.py": true,
+		".runar.zig": true, ".runar.rb": true, ".runar.java": true,
+	}
+	got := map[string]bool{}
+	for _, ext := range multiFormats {
+		if got[ext] {
+			t.Errorf("multiFormats lists %s twice", ext)
+		}
+		got[ext] = true
+	}
+	for ext := range want {
+		if !got[ext] {
+			t.Errorf("multiFormats is missing %s", ext)
+		}
+	}
+	for ext := range got {
+		if !want[ext] {
+			t.Errorf("multiFormats lists unexpected format %s", ext)
+		}
+	}
+}
+
+func compileBasicP2PKHScripts(t *testing.T) map[string]string {
+	t.Helper()
+	scripts := map[string]string{}
+	for _, ext := range multiFormats {
+		source := conformanceSourcePathExt(t, "basic-p2pkh", ext)
+		artifact, err := CompileFromSource(source)
+		if err != nil {
+			t.Errorf("basic-p2pkh%s: compilation failed: %v", ext, err)
+			continue
+		}
+		scripts[ext] = artifact.Script
+	}
+	return scripts
+}
+
+func TestMultiFormat_BasicP2PKHMatchesGolden_AllFormats(t *testing.T) {
+	goldenPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-script.hex")
+	goldenHex, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("golden %s is unreadable: %v", goldenPath, err)
+	}
+	expected := strings.TrimSpace(string(goldenHex))
+	scripts := compileBasicP2PKHScripts(t)
+	for _, ext := range multiFormats {
+		if got, ok := scripts[ext]; ok && got != expected {
+			t.Errorf("basic-p2pkh%s: script %q does not match golden %q", ext, got, expected)
+		}
+	}
+}
+
+func TestMultiFormat_BasicP2PKHAllFormatsIdentical(t *testing.T) {
+	scripts := compileBasicP2PKHScripts(t)
+	ref, ok := scripts[".runar.ts"]
+	if !ok {
+		t.Fatal("no .runar.ts reference script")
+	}
+	for _, ext := range multiFormats {
+		got, ok := scripts[ext]
+		if !ok {
+			continue // compile failure already reported by compileBasicP2PKHScripts
+		}
+		if got != ref {
+			t.Errorf("basic-p2pkh%s: script %q differs from .runar.ts %q", ext, got, ref)
+		}
+	}
 }

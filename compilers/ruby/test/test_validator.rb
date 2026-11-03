@@ -848,4 +848,72 @@ class TestValidator < Minitest::Test
     refute result.errors.any? { |e| e.message.include?("countdown") },
            "did not expect a countdown error, got: #{result.error_strings}"
   end
+
+  # ---------------------------------------------------------------------------
+  # F-063: array-literal elements are walked by every validator walker
+  # ---------------------------------------------------------------------------
+  #
+  # ArrayLiteralExpr was missing from validate_expression, walk_expr,
+  # collect_method_calls_in_expr and sub_expressions, so a construct written
+  # inside `[...]` (the only place checkMultiSig's arguments can be written)
+  # escaped the rule those walkers enforce. Pre-fix the recursion shape died
+  # with SystemStackError in stack lowering instead of being refused.
+  #
+  # Proves: validate refuses each shape with the diagnostic the un-nested form
+  # gets. Does not prove: CLI exit status or cross-tier parity
+  # (conformance/negatives N99+).
+
+  F063_HEADER = <<~TS
+    class C extends SmartContract {
+      readonly pk: PubKey;
+      constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  TS
+
+  def f063_errors(body, header = F063_HEADER)
+    RunarCompiler::Frontend.validate(parse_ts(header + body + "\n}\n")).errors.map(&:message)
+  end
+
+  def test_f063_recursion_inside_array_literal_detected
+    errs = f063_errors(<<~TS)
+      private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+      public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+    TS
+    assert errs.any? { |m| m.include?("recursion detected: method 'h'") }, errs.inspect
+  end
+
+  def test_f063_odd_length_hex_inside_array_literal_rejected
+    errs = f063_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }")
+    assert errs.any? { |m| m.include?("ByteString literal 'abc' has odd length (3)") }, errs.inspect
+  end
+
+  def test_f063_non_hex_inside_array_literal_rejected
+    errs = f063_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }")
+    assert errs.any? { |m| m.include?("ByteString literal 'zz' contains non-hex characters") }, errs.inspect
+  end
+
+  def test_f063_readonly_increment_inside_array_literal_rejected
+    header = <<~TS
+      class C extends SmartContract {
+        readonly n: bigint;
+        readonly pk: PubKey;
+        constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+    TS
+    errs = f063_errors("public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }", header)
+    assert errs.any? { |m| m.include?("cannot assign to readonly property 'n'") }, errs.inspect
+  end
+
+  def test_f063_output_intrinsic_inside_array_literal_in_loop_rejected
+    header = <<~TS
+      class C extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+    TS
+    errs = f063_errors(<<~TS, header)
+      public step() {
+        for (let i = 0n; i < 2n; i++) { const a = [this.addOutput(1000n, this.count)]; }
+        assert(true);
+      }
+    TS
+    assert errs.any? { |m| m.include?("Output intrinsic 'addOutput'") }, errs.inspect
+  end
 end

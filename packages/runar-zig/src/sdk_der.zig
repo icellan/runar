@@ -184,3 +184,29 @@ test "canonicalizeDer enforces low-S" {
     try std.testing.expectEqual(@as(u8, 1), s_len); // S = 1, encoded as single byte
     try std.testing.expectEqual(@as(u8, 0x01), c[s_pos + 2]); // S value = 1
 }
+
+/// Strict DER (BIP66) check for an ECDSA signature — the rule a node applies
+/// to every OP_CHECKSIG signature (SCRIPT_VERIFY_DERSIG). F-242.
+///
+/// `der` is bare DER, without a sighash type byte. True only for the one
+/// canonical encoding of (r, s): the SEQUENCE length covers exactly r and s,
+/// both INTEGERs are non-empty, non-negative (top bit clear unless behind a
+/// 0x00 pad) and minimally encoded, and nothing follows s. Neither the Zig std
+/// ECDSA `fromDer` (sign bit checked on a 32-byte padded buffer) nor bsvz's lax
+/// reader (leading zeros stripped, trailing bytes ignored) enforces this, so
+/// every verifier in this SDK checks it first.
+pub fn isStrictDerSignature(der: []const u8) bool {
+    const n = der.len;
+    if (n < 8 or n > 72) return false;
+    if (der[0] != 0x30 or @as(usize, der[1]) != n - 2) return false;
+    const r_len: usize = der[3];
+    if (der[2] != 0x02 or r_len == 0 or 5 + r_len >= n) return false;
+    const s_len: usize = der[5 + r_len];
+    if (der[4 + r_len] != 0x02 or s_len == 0 or r_len + s_len + 6 != n) return false;
+    return isCanonicalDerInteger(der[4 .. 4 + r_len]) and isCanonicalDerInteger(der[6 + r_len ..]);
+}
+
+fn isCanonicalDerInteger(b: []const u8) bool {
+    if (b[0] & 0x80 != 0) return false;
+    return !(b.len > 1 and b[0] == 0x00 and b[1] & 0x80 == 0);
+}

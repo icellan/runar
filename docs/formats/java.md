@@ -133,6 +133,36 @@ Special identifiers:
 
 ---
 
+## Compiler Directives
+
+Both directives are annotations from `runar.lang.annotations`:
+
+```java
+class Directives extends SmartContract {
+    @Readonly Addr pubKeyHash;
+    @Readonly @EmbedAlways ByteString deployTag;          // @embedAlways
+
+    @Public
+    @Sighash("SINGLE|FORKID")                              // @sighash
+    void spendSingle(Sig sig, PubKey pubKey) { ... }
+}
+```
+
+- `@EmbedAlways` is a field annotation, next to `@Readonly`.
+- `@Sighash("FLAGS")` is a method annotation, next to `@Public`. Its argument
+  must be one string literal.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/java/src/main/java/runar/examples/compiler-directives/` for a worked
+port of both (N-093).
+
 ## Type Mappings
 
 | Java Type | Rúnar AST Type |
@@ -411,7 +441,7 @@ class P2PKHTest {
 }
 ```
 
-Mock crypto functions (`checkSig`, `checkPreimage`, `verifyWOTS`, etc.) always return `true` for business-logic testing. Hash functions (`hash160`, `hash256`, `sha256`, `ripemd160`) use real implementations.
+Mock crypto functions (`checkSig`, `verifyWOTS`, etc.) always return `true` for business-logic testing. `checkPreimage` does not: under `ContractSimulator` it holds only for the BIP-143 preimage of the spending transaction the call describes (`callStateful`, or `callWithSpend` for a stateless contract) and throws when the call describes none. Hash functions (`hash160`, `hash256`, `sha256`, `ripemd160`) use real implementations.
 
 A `runar.lang.CompileCheck` helper that runs the contract source through parse → validate → typecheck ships with **milestone 11 — the off-chain simulator** of the Java tier plan. Until then, tests instantiate the contract and verify business logic as native Java; the Rúnar compile pipeline is exercised via `./gradlew :compiler:test` rather than per-test hooks.
 

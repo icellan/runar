@@ -13,6 +13,15 @@ import (
 
 // ParseSolidity parses a Solidity-like Rúnar contract and produces the standard AST.
 func ParseSolidity(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseSolSurface(source, fileName) })
+}
+
+func parseSolSurface(source []byte, fileName string) *ParseResult {
 	p := &solParser{
 		fileName: fileName,
 	}
@@ -101,6 +110,8 @@ type solParser struct {
 	tokens   []solToken
 	pos      int
 	errors   []Diagnostic
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *solParser) addError(msg string) {
@@ -177,8 +188,16 @@ func (p *solParser) tokenize(source string) []solToken {
 			i++
 			col++
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: a literal that reaches a line break (escaped or not) or
+			// end of file is unterminated; it must never run on into the
+			// following lines.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -186,9 +205,14 @@ func (p *solParser) tokenize(source string) []solToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+				// N-019: this surface has no quoted literal; a terminated one
+				// is refused as an unexpected character (as the TS reference).
+				p.errors = append(p.errors, lexDiag(fmt.Sprintf("Unexpected character '%c'", quote), p.fileName, line, startCol))
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
 			tokens = append(tokens, solToken{kind: solTokString, value: val, line: line, col: startCol})
 			continue
@@ -196,9 +220,9 @@ func (p *solParser) tokenize(source string) []solToken {
 
 		// Numbers
 		if ch >= '0' && ch <= '9' {
-			start := i
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				// Hex byte string literal: 0x... -> ByteString
+			if ch == '0' && i+1 < len(source) && source[i+1] == 'x' {
+				// Hex byte string literal: 0x... -> ByteString (lowercase x
+				// only, as the TS reference; `0X` is an invalid integer).
 				i += 2
 				col += 2
 				hexStart := i
@@ -209,16 +233,18 @@ func (p *solParser) tokenize(source string) []solToken {
 				tokens = append(tokens, solToken{kind: solTokHexString, value: source[hexStart:i], line: line, col: startCol})
 				continue
 			}
-			for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-				i++
-				col++
+			// F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			value := "0"
+			if lit := parseIntLiteral("sol", text); lit != nil {
+				value = lit.Value.String()
+			} else {
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("sol", text), p.fileName, line, startCol))
 			}
-			// Skip trailing 'n' for bigint literals
-			if i < len(source) && source[i] == 'n' {
-				i++
-				col++
-			}
-			tokens = append(tokens, solToken{kind: solTokNumber, value: source[start:i], line: line, col: startCol})
+			tokens = append(tokens, solToken{kind: solTokNumber, value: value, line: line, col: startCol})
 			continue
 		}
 
@@ -343,8 +369,11 @@ func (p *solParser) tokenize(source string) []solToken {
 			continue
 		}
 
-		// Skip unknown characters
-		i++
+		// N-214: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+		d, size := unexpectedCharDiag(source, i, p.fileName, line, startCol)
+		p.errors = append(p.errors, d)
+		i += size
 		col++
 	}
 
@@ -371,6 +400,13 @@ func isIdentPart(ch byte) bool {
 func (p *solParser) peek() solToken {
 	if p.pos < len(p.tokens) {
 		return p.tokens[p.pos]
+	}
+	return solToken{kind: solTokEOF}
+}
+
+func (p *solParser) peekAt(n int) solToken {
+	if p.pos+n < len(p.tokens) {
+		return p.tokens[p.pos+n]
 	}
 	return solToken{kind: solTokEOF}
 }
@@ -451,6 +487,8 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 	}
 
 	// contract Name is ParentClass {
+	// N-490: a synthesized constructor is anchored at the `contract` keyword.
+	ctorLoc := p.loc()
 	if !p.matchIdent("contract") {
 		return nil, fmt.Errorf("expected 'contract' keyword")
 	}
@@ -465,7 +503,7 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 	}
 
 	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
-		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
+		return nil, fmt.Errorf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentClass)
 	}
 
 	p.expect(solTokLBrace)
@@ -514,24 +552,22 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 					Callee: Identifier{Name: "super"},
 					Args:   superArgs,
 				},
-				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+				SourceLocation: ctorLoc,
 			},
 		}
 		for _, prop := range uninitProps {
 			body = append(body, AssignmentStmt{
 				Target:         PropertyAccessExpr{Property: prop.Name},
 				Value:          Identifier{Name: prop.Name},
-				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+				SourceLocation: ctorLoc,
 			})
 		}
 		constructor = &MethodNode{
-			Name:       "constructor",
-			Params:     params,
-			Body:       body,
-			Visibility: "public",
-			SourceLocation: SourceLocation{
-				File: p.fileName, Line: 1, Column: 0,
-			},
+			Name:           "constructor",
+			Params:         params,
+			Body:           body,
+			Visibility:     "public",
+			SourceLocation: ctorLoc,
 		}
 	}
 
@@ -584,11 +620,23 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 	typeName := typeTok.value
 	propType := p.parseSolFixedArraySuffix(parseSolType(typeName))
 
-	// Check for immutable keyword
+	// Modifiers, any order: `immutable` (readonly) and N-093's `embedAlways`
+	// (the native spelling of the `@embedAlways` directive). An `embedAlways`
+	// directly followed by `;` or `=` is the property NAME, not a modifier.
 	isReadonly := false
-	if p.checkIdent("immutable") {
-		p.advance()
-		isReadonly = true
+	embedAlways := false
+	for {
+		if p.checkIdent("immutable") {
+			p.advance()
+			isReadonly = true
+			continue
+		}
+		if p.checkIdent("embedAlways") && p.peekAt(1).kind != solTokSemicolon && p.peekAt(1).kind != solTokAssign {
+			p.advance()
+			embedAlways = true
+			continue
+		}
+		break
 	}
 
 	// Property name
@@ -608,6 +656,7 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 		Type:           propType,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
+		EmbedAlways:    embedAlways,
 		SourceLocation: loc,
 	}
 }
@@ -662,7 +711,7 @@ func (p *solParser) parseSolFixedArraySuffix(base TypeNode) TypeNode {
 func (p *solParser) parseSolConstructor(properties []PropertyNode) MethodNode {
 	loc := p.loc()
 	p.expectIdent("constructor")
-	params := p.parseSolParams()
+	params := p.parseSolParams(true)
 	body := p.parseSolBlock()
 
 	// Build proper constructor body with super() call and assignments
@@ -961,14 +1010,23 @@ func (p *solParser) parseFunction() MethodNode {
 	nameTok := p.expect(solTokIdent)
 	name := nameTok.value
 
-	params := p.parseSolParams()
+	params := p.parseSolParams(false)
 
-	// Parse visibility modifiers
+	// Parse visibility modifiers. N-093: `sighash(FLAGS)` among them is the
+	// native spelling of the `@sighash` directive; FLAGS must be identifiers
+	// separated by `|`, any other token makes the spelling malformed.
 	visibility := "private"
+	var sighashSpecs []*string
+	var pendingRet TypeNode
 	for p.checkIdent("public") || p.checkIdent("private") || p.checkIdent("external") ||
 		p.checkIdent("internal") || p.checkIdent("view") || p.checkIdent("pure") ||
-		p.checkIdent("returns") || p.checkIdent("payable") {
+		p.checkIdent("returns") || p.checkIdent("payable") ||
+		(p.checkIdent("sighash") && p.peekAt(1).kind == solTokLParen) {
 		tok := p.advance()
+		if tok.value == "sighash" {
+			sighashSpecs = append(sighashSpecs, p.parseSighashFlagTokens())
+			continue
+		}
 		if tok.value == "public" || tok.value == "external" {
 			visibility = "public"
 		}
@@ -976,6 +1034,12 @@ func (p *solParser) parseFunction() MethodNode {
 		if tok.value == "returns" {
 			if p.check(solTokLParen) {
 				p.advance()
+				// N-331: the AST keeps no return type; an unknown name is refused.
+				// N-332: checked after the modifier loop, because `public`
+				// may follow `returns (...)`.
+				if p.check(solTokIdent) {
+					pendingRet = parseSolType(p.peek().value)
+				}
 				depth := 1
 				for depth > 0 && !p.check(solTokEOF) {
 					if p.check(solTokLParen) {
@@ -990,22 +1054,69 @@ func (p *solParser) parseFunction() MethodNode {
 		}
 	}
 
+	if pendingRet != nil {
+		if d := UnknownReturnTypeDiagnostic(pendingRet, name, loc, visibility == "public"); d != nil {
+			p.errors = append(p.errors, *d)
+		}
+	}
+
 	body := p.parseSolBlock()
+
+	sighashType, sighashErr := resolveNativeSighash(name, visibility == "public", sighashSpecs)
+	if sighashErr != "" {
+		errLoc := loc
+		p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+	}
 
 	return MethodNode{
 		Name:           name,
 		Params:         params,
 		Body:           body,
 		Visibility:     visibility,
+		SighashType:    sighashType,
 		SourceLocation: loc,
 	}
+}
+
+// parseSighashFlagTokens (N-093): `( IDENT ( '|' IDENT )* )` after `sighash`
+// -> the flag text, or nil when anything else appears inside the parentheses.
+// Always consumes through the matching `)` so a malformed spelling does not
+// derail parsing. Mirrors the TS reference parseSighashFlagTokens.
+func (p *solParser) parseSighashFlagTokens() *string {
+	p.expect(solTokLParen)
+	text := ""
+	ok := true
+	depth := 1
+	for !p.check(solTokEOF) {
+		t := p.peek()
+		if t.kind == solTokLParen {
+			depth++
+		}
+		if t.kind == solTokRParen {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+		if t.kind == solTokIdent || t.kind == solTokPipe {
+			text += t.value
+		} else {
+			ok = false
+		}
+		p.advance()
+	}
+	p.expect(solTokRParen)
+	if !ok {
+		return nil
+	}
+	return nativeSighashSpec(text)
 }
 
 // ---------------------------------------------------------------------------
 // Parameter parsing: (Type name, Type name, ...)
 // ---------------------------------------------------------------------------
 
-func (p *solParser) parseSolParams() []ParamNode {
+func (p *solParser) parseSolParams(stripUnderscore bool) []ParamNode {
 	p.expect(solTokLParen)
 	var params []ParamNode
 	for !p.check(solTokRParen) && !p.check(solTokEOF) {
@@ -1020,8 +1131,13 @@ func (p *solParser) parseSolParams() []ParamNode {
 
 		nameTok := p.expect(solTokIdent)
 		paramName := nameTok.value
-		// Strip leading underscore if present (Solidity convention)
-		cleanName := strings.TrimPrefix(paramName, "_")
+		// Strip leading underscore (Solidity convention) for CONSTRUCTOR
+		// params only, whose body parseSolConstructor renames. Method params
+		// keep their name verbatim, as in TS 01-parse-sol.ts (N-142).
+		cleanName := paramName
+		if stripUnderscore {
+			cleanName = strings.TrimPrefix(paramName, "_")
+		}
 
 		params = append(params, ParamNode{
 			Name: cleanName,
@@ -1058,6 +1174,10 @@ func (p *solParser) parseSolBlock() []Statement {
 // ---------------------------------------------------------------------------
 
 func (p *solParser) parseSolStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseSolStatementInner)
+}
+
+func (p *solParser) parseSolStatementInner() Statement {
 	loc := p.loc()
 
 	// require(...) -> assert(...)
@@ -1150,7 +1270,8 @@ func (p *solParser) parseSolIf(loc SourceLocation) Statement {
 	if p.matchIdent("else") {
 		if p.checkIdent("if") {
 			// else if — recurse
-			elseStmt := p.parseSolIf(p.loc())
+			elseLoc := p.loc()
+			elseStmt := nested(&p.nest, elseLoc, func() Statement { return p.parseSolIf(elseLoc) })
 			elseBlock = []Statement{elseStmt}
 		} else {
 			elseBlock = p.parseSolBlock()
@@ -1289,7 +1410,7 @@ func (p *solParser) parseSolExprStatement(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *solParser) parseSolExpression() Expression {
-	return p.parseSolTernary()
+	return nested(&p.nest, p.loc(), p.parseSolTernary)
 }
 
 func (p *solParser) parseSolTernary() Expression {
@@ -1304,59 +1425,65 @@ func (p *solParser) parseSolTernary() Expression {
 }
 
 func (p *solParser) parseSolOr() Expression {
+	start := p.loc()
 	left := p.parseSolAnd()
 	for p.match(solTokPipePipe) {
 		right := p.parseSolAnd()
-		left = BinaryExpr{Op: "||", Left: left, Right: right}
+		left = BinaryExpr{Op: "||", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolAnd() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseOr()
 	for p.match(solTokAmpAmp) {
 		right := p.parseSolBitwiseOr()
-		left = BinaryExpr{Op: "&&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseOr() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseXor()
 	for p.match(solTokPipe) {
 		right := p.parseSolBitwiseXor()
-		left = BinaryExpr{Op: "|", Left: left, Right: right}
+		left = BinaryExpr{Op: "|", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseXor() Expression {
+	start := p.loc()
 	left := p.parseSolBitwiseAnd()
 	for p.match(solTokCaret) {
 		right := p.parseSolBitwiseAnd()
-		left = BinaryExpr{Op: "^", Left: left, Right: right}
+		left = BinaryExpr{Op: "^", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolBitwiseAnd() Expression {
+	start := p.loc()
 	left := p.parseSolEquality()
 	for p.match(solTokAmp) {
 		right := p.parseSolEquality()
-		left = BinaryExpr{Op: "&", Left: left, Right: right}
+		left = BinaryExpr{Op: "&", Left: left, Right: right, SourceLocation: start}
 	}
 	return left
 }
 
 func (p *solParser) parseSolEquality() Expression {
+	start := p.loc()
 	left := p.parseSolComparison()
 	for {
 		if p.match(solTokEqEq) {
 			right := p.parseSolComparison()
-			left = BinaryExpr{Op: "===", Left: left, Right: right} // Map == to ===
+			left = BinaryExpr{Op: "===", Left: left, Right: right, SourceLocation: start} // Map == to ===
 		} else if p.match(solTokNotEq) {
 			right := p.parseSolComparison()
-			left = BinaryExpr{Op: "!==", Left: left, Right: right} // Map != to !==
+			left = BinaryExpr{Op: "!==", Left: left, Right: right, SourceLocation: start} // Map != to !==
 		} else {
 			break
 		}
@@ -1365,20 +1492,21 @@ func (p *solParser) parseSolEquality() Expression {
 }
 
 func (p *solParser) parseSolComparison() Expression {
+	start := p.loc()
 	left := p.parseSolShift()
 	for {
 		if p.match(solTokLt) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: "<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokLtEq) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: "<=", Left: left, Right: right}
+			left = BinaryExpr{Op: "<=", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokGt) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: ">", Left: left, Right: right}
+			left = BinaryExpr{Op: ">", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokGtEq) {
 			right := p.parseSolShift()
-			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+			left = BinaryExpr{Op: ">=", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1387,14 +1515,15 @@ func (p *solParser) parseSolComparison() Expression {
 }
 
 func (p *solParser) parseSolShift() Expression {
+	start := p.loc()
 	left := p.parseSolAdditive()
 	for {
 		if p.match(solTokShl) {
 			right := p.parseSolAdditive()
-			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+			left = BinaryExpr{Op: "<<", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokShr) {
 			right := p.parseSolAdditive()
-			left = BinaryExpr{Op: ">>", Left: left, Right: right}
+			left = BinaryExpr{Op: ">>", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1403,14 +1532,15 @@ func (p *solParser) parseSolShift() Expression {
 }
 
 func (p *solParser) parseSolAdditive() Expression {
+	start := p.loc()
 	left := p.parseSolMultiplicative()
 	for {
 		if p.match(solTokPlus) {
 			right := p.parseSolMultiplicative()
-			left = BinaryExpr{Op: "+", Left: left, Right: right}
+			left = BinaryExpr{Op: "+", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokMinus) {
 			right := p.parseSolMultiplicative()
-			left = BinaryExpr{Op: "-", Left: left, Right: right}
+			left = BinaryExpr{Op: "-", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1419,17 +1549,18 @@ func (p *solParser) parseSolAdditive() Expression {
 }
 
 func (p *solParser) parseSolMultiplicative() Expression {
+	start := p.loc()
 	left := p.parseSolUnary()
 	for {
 		if p.match(solTokStar) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "*", Left: left, Right: right}
+			left = BinaryExpr{Op: "*", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokSlash) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "/", Left: left, Right: right}
+			left = BinaryExpr{Op: "/", Left: left, Right: right, SourceLocation: start}
 		} else if p.match(solTokPercent) {
 			right := p.parseSolUnary()
-			left = BinaryExpr{Op: "%", Left: left, Right: right}
+			left = BinaryExpr{Op: "%", Left: left, Right: right, SourceLocation: start}
 		} else {
 			break
 		}
@@ -1438,25 +1569,26 @@ func (p *solParser) parseSolMultiplicative() Expression {
 }
 
 func (p *solParser) parseSolUnary() Expression {
+	opLoc := p.loc()
 	if p.match(solTokBang) {
-		operand := p.parseSolUnary()
-		return UnaryExpr{Op: "!", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
+		return UnaryExpr{Op: "!", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(solTokMinus) {
-		operand := p.parseSolUnary()
-		return UnaryExpr{Op: "-", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
+		return UnaryExpr{Op: "-", Operand: operand, SourceLocation: opLoc}
 	}
 	if p.match(solTokTilde) {
-		operand := p.parseSolUnary()
-		return UnaryExpr{Op: "~", Operand: operand}
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
+		return UnaryExpr{Op: "~", Operand: operand, SourceLocation: opLoc}
 	}
 	// Prefix increment/decrement
 	if p.match(solTokPlusPlus) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return IncrementExpr{Operand: operand, Prefix: true}
 	}
 	if p.match(solTokMinusMinus) {
-		operand := p.parseSolUnary()
+		operand := nested(&p.nest, p.loc(), p.parseSolUnary)
 		return DecrementExpr{Operand: operand, Prefix: true}
 	}
 	return p.parseSolPostfix()
@@ -1516,10 +1648,10 @@ func (p *solParser) parseSolPrimary() Expression {
 		return parseSolNumber(tok.value)
 	case solTokHexString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokString:
 		p.advance()
-		return ByteStringLiteral{Value: tok.value}
+		return ByteStringLiteral{Value: tok.value, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokIdent:
 		p.advance()
 		name := tok.value
@@ -1538,10 +1670,10 @@ func (p *solParser) parseSolPrimary() Expression {
 		// Function call
 		if p.check(solTokLParen) {
 			args := p.parseSolCallArgs()
-			return CallExpr{Callee: Identifier{Name: name}, Args: args}
+			return CallExpr{Callee: Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}, Args: args}
 		}
 
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: tok.line, Column: tok.col}}
 	case solTokLParen:
 		p.advance()
 		expr := p.parseSolExpression()

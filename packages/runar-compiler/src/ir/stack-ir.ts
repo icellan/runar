@@ -132,10 +132,10 @@ export interface PushCodeSepIndexOp {
  * exist after `emit`), so the emitter resolves it: it reserves a
  * FIXED-WIDTH 9-byte sequence
  *
- *     OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+ *     OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
  *
- * and back-patches `LL LL LL LL` (little-endian) plus the comparison opcode
- * once the whole script has been emitted. The width is fixed so that the
+ * and back-patches `LL LL LL LL` (little-endian) once the whole script has
+ * been emitted. The width is fixed so that the
  * patched value can never change the length it is describing — a minimal
  * script-number push would be self-referential.
  *
@@ -143,17 +143,21 @@ export interface PushCodeSepIndexOp {
  * so `deployedCodeLen = emittedTemplateLen + delta`. `exact` says whether
  * every placeholder's growth is type-determined:
  *
- *  - `exact: true`  → `SIZE(_codePart) == emittedLen + delta` (OP_NUMEQUAL).
- *  - `exact: false` → `SIZE(_codePart) >= emittedLen + delta`
- *    (OP_GREATERTHANOREQUAL). A variable-width readonly constructor argument
- *    (`bigint`, `ByteString`) has no compile-time width, and placeholder
- *    growth is never negative, so the sum is still a sound LOWER bound.
+ *  - `exact: true`  → `SIZE(_codePart) == emittedLen + delta`, final at
+ *    compile time.
+ *  - `exact: false` → a variable-width readonly constructor argument
+ *    (`bigint`, `ByteString`) has no compile-time width. The comparison is
+ *    still OP_NUMEQUAL (N-051: a lower bound let a spender claim a truncated
+ *    `_codePart` ending at a 0x6a inside the baked value), the template holds
+ *    `emittedLen + delta` as a placeholder, and the emitter records the field
+ *    as an artifact `codePartLenSlots` entry that the SDK overwrites with the
+ *    real deployed code-part length.
  */
 export interface VerifyCodePartLenOp {
   op: 'verify_code_part_len';
   /** Deploy-time byte growth of the template's OP_0 placeholders. */
   delta: number;
-  /** true → exact equality pin; false → lower-bound pin. */
+  /** true → value final at compile time; false → deploy-time slot (N-051). */
   exact: boolean;
   sourceLoc?: StackSourceLoc;
 }

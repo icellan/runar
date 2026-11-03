@@ -197,6 +197,22 @@ public final class StackLower {
     }
 
     /**
+     * N-045: declared byte width of a fixed-width byte state type, or 0 for
+     * every other type. MUST match the reader's size table in the
+     * deserializer and the shared STATE_FIELD_WIDTHS table.
+     */
+    private static int fixedWidthStateBytes(String t) {
+        return switch (t) {
+            case "PubKey" -> 33;
+            case "Addr", "Ripemd160" -> 20;
+            case "Sha256" -> 32;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            default -> 0;
+        };
+    }
+
+    /**
      * Unrolled-loop bound for {@code reverseBytes}: 520 is the maximum BSV
      * stack-element size, so the loop always drains the input. The count is
      * part of the emitted bytes, so it must match every peer tier exactly.
@@ -404,15 +420,37 @@ public final class StackLower {
     // ------------------------------------------------------------------
 
     static Map<String, Integer> computeLastUses(List<AnfBinding> bindings) {
+        return computeLastUses(bindings, null);
+    }
+
+    static Map<String, Integer> computeLastUses(List<AnfBinding> bindings,
+                                                Map<String, List<String>> inheritedArrays) {
         Map<String, Integer> lastUse = new HashMap<>();
         // Pre-scan: map each array_literal binding to its element refs. Used to
         // propagate last-use across the array indirection (the array binding is
         // pure metadata in lowerArrayLiteral — its elements must remain live
         // until the array's consumer, not until the array_literal binding itself).
+        //
+        // F-081: an if-arm or loop body can consume an array declared in an
+        // ENCLOSING scope. Its bindings do not contain that array_literal, so
+        // the enclosing scope's array metadata is seeded first; without it an
+        // element reached only through the outer array had no last-use here and
+        // was consumed at its first read.
         Map<String, List<String>> arrayElems = new HashMap<>();
+        if (inheritedArrays != null) arrayElems.putAll(inheritedArrays);
         for (AnfBinding b : bindings) {
             if (b.value() instanceof ArrayLiteral al) {
                 arrayElems.put(b.name(), new ArrayList<>(al.elements()));
+            } else if (b.value() instanceof LoadConst lc
+                && lc.value() instanceof BytesConst bc
+                && bc.hex() != null && bc.hex().startsWith("@ref:")) {
+                // F-081: `const sigs = [a, b]` lowers to `t = array_literal`
+                // plus the alias `sigs = @ref:t`, and checkMultiSig reads the
+                // ALIAS. Without following it the elements got no last-use at
+                // all and were consumed at the first checkMultiSig, so a second
+                // read failed.
+                List<String> elems = arrayElems.get(bc.hex().substring(5));
+                if (elems != null) arrayElems.put(b.name(), new ArrayList<>(elems));
             }
         }
         for (int i = 0; i < bindings.size(); i++) {
@@ -740,8 +778,8 @@ public final class StackLower {
      * placeholder, so it grows the script by nothing. {@code bigint}
      * (minimally-encoded Script number) and {@code ByteString}
      * (arbitrary-length data push) depend on the VALUE, which the compiler
-     * never sees — those return {@code null} and demote the pin to a lower
-     * bound.
+     * never sees — those return {@code null} and turn the pin into a
+     * deploy-time slot (N-051) that the SDK fills in.
      */
     private static Integer constructorSlotGrowth(String type) {
         if (type == null) return null;
@@ -792,8 +830,9 @@ public final class StackLower {
                 : null;
             Integer growth = constructorSlotGrowth(type);
             if (growth == null) {
-                // No compile-time width. Growth is never negative, so the
-                // running sum stays a sound lower bound — just not an exact one.
+                // No compile-time width: the emitter records the length field as
+                // a deploy-time codePartLenSlots entry (N-051) and the SDK
+                // patches it.
                 exact = false;
             } else {
                 delta += growth;
@@ -810,10 +849,20 @@ public final class StackLower {
         List<VerifyCodePartLenOp> pins,
         List<Integer> placeholders
     ) {
-        for (StackOp op : ops) {
+        // N-264: pre-order over nested if arms on an explicit stack — inlined
+        // private methods nest D*K if-ops here, too deep to recurse on.
+        java.util.ArrayDeque<java.util.Iterator<StackOp>> stack = new java.util.ArrayDeque<>();
+        stack.push(ops.iterator());
+        while (!stack.isEmpty()) {
+            java.util.Iterator<StackOp> it = stack.peek();
+            if (!it.hasNext()) {
+                stack.pop();
+                continue;
+            }
+            StackOp op = it.next();
             if (op instanceof IfOp ifo) {
-                collectCodePartPins(ifo.thenBranch(), pins, placeholders);
-                if (ifo.elseBranch() != null) collectCodePartPins(ifo.elseBranch(), pins, placeholders);
+                if (ifo.elseBranch() != null) stack.push(ifo.elseBranch().iterator());
+                stack.push(ifo.thenBranch().iterator());
             } else if (op instanceof PlaceholderOp ph) {
                 placeholders.add(ph.paramIndex().intValueExact());
             } else if (op instanceof VerifyCodePartLenOp v) {
@@ -974,24 +1023,67 @@ public final class StackLower {
             List<AnfBinding> body,
             Map<String, AnfMethod> privateMethods,
             java.util.Set<String> seen) {
-        for (AnfBinding b : body) {
-            AnfValue v = b.value();
-            if (v instanceof CheckPreimage) return true;
-            if (v instanceof If iv) {
-                if (methodUsesCheckPreimage(iv.thenBranch(), privateMethods, seen)) return true;
-                if (methodUsesCheckPreimage(iv.elseBranch(), privateMethods, seen)) return true;
-            }
-            if (v instanceof Loop loop) {
-                if (methodUsesCheckPreimage(loop.body(), privateMethods, seen)) return true;
-            }
-            if (v instanceof MethodCall mc && privateMethods != null) {
-                AnfMethod target = privateMethods.get(mc.method());
-                if (target != null && !seen.contains(target.name())) {
-                    java.util.Set<String> nextSeen = new java.util.HashSet<>(seen);
-                    nextSeen.add(target.name());
-                    if (methodUsesCheckPreimage(target.body(), privateMethods, nextSeen)) return true;
+        return someReachableBinding(body, privateMethods, seen, v -> v instanceof CheckPreimage);
+    }
+
+    /**
+     * True when {@code pred} holds for some binding reachable from
+     * {@code body} through if arms, loop bodies and (when
+     * {@code privateMethods} is non-null) the bodies of called private methods
+     * not in {@code seen}. N-264: an explicit work list, not recursion — a
+     * chain of D helpers each calling the next under K nested ifs is D*K levels
+     * deep through those edges. The answer is plain reachability, exactly what
+     * the recursive walk (which pruned a method only when it was already on
+     * the current call path) computed.
+     */
+    private static boolean someReachableBinding(
+            List<AnfBinding> body,
+            Map<String, AnfMethod> privateMethods,
+            java.util.Set<String> seen,
+            java.util.function.Predicate<AnfValue> pred) {
+        java.util.Set<String> visited = new java.util.HashSet<>(seen);
+        java.util.ArrayDeque<List<AnfBinding>> work = new java.util.ArrayDeque<>();
+        work.push(body);
+        while (!work.isEmpty()) {
+            for (AnfBinding b : work.pop()) {
+                AnfValue v = b.value();
+                if (pred.test(v)) return true;
+                if (v instanceof If iv) {
+                    work.push(iv.elseBranch());
+                    work.push(iv.thenBranch());
+                } else if (v instanceof Loop loop) {
+                    work.push(loop.body());
+                } else if (v instanceof MethodCall mc && privateMethods != null) {
+                    AnfMethod target = privateMethods.get(mc.method());
+                    if (target != null && visited.add(target.name())) {
+                        work.push(target.body());
+                    }
                 }
             }
+        }
+        return false;
+    }
+
+    /**
+     * N-055: the one diagnostic all seven tiers give an {@code --ir} program
+     * whose {@code method_call} reaches a private method holding an output
+     * intrinsic. The source frontend inlines such helpers before ANF, so the
+     * intrinsic always sits in the public method; {@code --ir} has no
+     * delegation support.
+     */
+    static final String IR_OUTPUT_DELEGATION_ERROR =
+        "output intrinsics must be called from the public method or an inlined helper; "
+        + "--ir method_call delegation is not supported";
+
+    /** True if {@code body}, at any if / loop depth, holds an output intrinsic. */
+    private static boolean containsOutputIntrinsic(List<AnfBinding> body) {
+        for (AnfBinding b : body) {
+            AnfValue v = b.value();
+            if (v instanceof AddOutput || v instanceof AddRawOutput || v instanceof AddDataOutput) return true;
+            if (v instanceof If iv && (containsOutputIntrinsic(iv.thenBranch()) || containsOutputIntrinsic(iv.elseBranch()))) {
+                return true;
+            }
+            if (v instanceof Loop l && containsOutputIntrinsic(l.body())) return true;
         }
         return false;
     }
@@ -1032,25 +1124,49 @@ public final class StackLower {
             java.util.Set<String> varLenProps,
             Map<String, AnfMethod> privateMethods,
             java.util.Set<String> seen) {
-        for (AnfBinding b : body) {
-            AnfValue v = b.value();
-            if (v instanceof LoadProp lp && varLenProps.contains(lp.name())) return true;
-            if (v instanceof If iv) {
-                if (methodReadsVarLenState(iv.thenBranch(), varLenProps, privateMethods, seen)
-                    || methodReadsVarLenState(iv.elseBranch(), varLenProps, privateMethods, seen)) return true;
-            }
-            if (v instanceof Loop l
-                && methodReadsVarLenState(l.body(), varLenProps, privateMethods, seen)) return true;
-            if (v instanceof MethodCall mc && privateMethods != null) {
-                AnfMethod target = privateMethods.get(mc.method());
-                if (target != null && !seen.contains(target.name())) {
-                    java.util.Set<String> nextSeen = new java.util.HashSet<>(seen);
-                    nextSeen.add(target.name());
-                    if (methodReadsVarLenState(target.body(), varLenProps, privateMethods, nextSeen)) return true;
-                }
+        return someReachableBinding(body, privateMethods, seen,
+            v -> v instanceof LoadProp lp && varLenProps.contains(lp.name()));
+    }
+
+    // ------------------------------------------------------------------
+    // N-264: iterative lowering
+    // ------------------------------------------------------------------
+
+    /**
+     * A suspended step of the lowering. {@link #step} runs the task until it
+     * either finishes ({@code null}) or needs a nested body lowered first: it
+     * then returns that child task and is stepped again once the child is
+     * done. {@code lowerBindings}, {@code lowerIf}, {@code lowerLoop} and
+     * {@code inlineMethodCall} are such tasks; each place one used to CALL
+     * another (an if's two arms, a loop body, an inlined private method's
+     * body) now RETURNS the child instead, and {@link #runLowerTasks} keeps
+     * the suspended parents on an explicit heap stack.
+     *
+     * <p>Why: private methods are inlined at every call site, so F-213's
+     * per-method nesting bound (128) and N-180's call-depth bound (128)
+     * compose multiplicatively — a chain of D helpers that each call the next
+     * under K nested ifs is D*K nested ifs here, and the recursive lowering
+     * threw StackOverflowError at D=16 x 120 (user decision R106: lower
+     * iteratively). Every statement runs in the same order, against the same
+     * state, as in the recursive version, so the emitted ops are unchanged.
+     * An exception abandons the whole method's lowering, as before.
+     */
+    interface LowerTask {
+        LowerTask step();
+    }
+
+    /** Run {@code root} and every child it returns, depth-first, on an explicit stack. */
+    static void runLowerTasks(LowerTask root) {
+        java.util.ArrayDeque<LowerTask> stack = new java.util.ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            LowerTask child = stack.peek().step();
+            if (child == null) {
+                stack.pop();
+            } else {
+                stack.push(child);
             }
         }
-        return false;
     }
 
     // ------------------------------------------------------------------
@@ -1210,7 +1326,12 @@ public final class StackLower {
                 if (v.sourceLoc() == null) v.setSourceLoc(sl);
                 return v;
             }
-            // RawBytesOp has no sourceLoc field — skip.
+            if (op instanceof runar.compiler.ir.stack.RawBytesOp r) {
+                // F-316: a raw_script span (asm({...})) is stamped like every
+                // other op, matching the TS reference's generic emitOp.
+                if (r.sourceLoc() != null) return r;
+                return new runar.compiler.ir.stack.RawBytesOp(r.bytes(), r.inArity(), r.outArity(), sl);
+            }
             return op;
         }
 
@@ -1228,9 +1349,19 @@ public final class StackLower {
             // separator, which executes AFTER the script-level one and
             // re-narrows scriptCode.
             c.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
-            // GAP-002: nested branches keep the outer statement's loc by
-            // default; the inner binding loop will override on each step.
-            c.currentSourceLoc = this.currentSourceLoc;
+            // F-081: an array declared before the `if` is visible in the arm,
+            // and `checkMultiSig(sigs, pks)` there needs its element refs; a
+            // fresh context had none and threw "array_literal metadata
+            // missing". Copies, so an arm-local array does not leak out.
+            for (Map.Entry<String, List<String>> e : this.arrayElements.entrySet()) {
+                c.arrayElements.put(e.getKey(), new ArrayList<>(e.getValue()));
+            }
+            c.arrayLengths.putAll(this.arrayLengths);
+            // GAP-002 / N-158: an arm starts with NO loc, as in TS. Each arm
+            // binding stamps its own; ops no arm statement owns (merge
+            // results, residue drains) stay unmapped instead of being
+            // attributed to the enclosing `if` line.
+            c.currentSourceLoc = null;
             return c;
         }
 
@@ -1451,62 +1582,113 @@ public final class StackLower {
         // ---------------- lower_bindings ----------------
 
         void lowerBindings(List<AnfBinding> bindings, boolean terminalAssert) {
-            localBindings = new HashMap<>();
-            for (AnfBinding b : bindings) localBindings.put(b.name(), true);
+            lowerBindings(bindings, terminalAssert, null);
+        }
 
-            Map<String, Integer> lastUses = computeLastUses(bindings);
+        void lowerBindings(List<AnfBinding> bindings, boolean terminalAssert,
+                           Map<String, List<String>> inheritedArrays) {
+            runLowerTasks(new BindingsTask(bindings, terminalAssert, inheritedArrays));
+        }
 
-            if (outerProtectedRefs != null) {
-                for (String ref : outerProtectedRefs) {
-                    lastUses.put(ref, bindings.size());
-                }
+        /** {@code lowerBindings} as a resumable {@link LowerTask} (N-264). */
+        final class BindingsTask implements LowerTask {
+            private final List<AnfBinding> bindings;
+            private final boolean terminalAssert;
+            private final Map<String, List<String>> inheritedArrays;
+            private boolean started;
+            private Map<String, Integer> lastUses;
+            private int lastAssertIdx = -1;
+            private int terminalIfIdx = -1;
+            private int i;
+            /** The location to restore once the child task in flight is done. */
+            private runar.compiler.ir.ast.SourceLocation prev;
+            private boolean awaitingChild;
+
+            BindingsTask(List<AnfBinding> bindings, boolean terminalAssert,
+                         Map<String, List<String>> inheritedArrays) {
+                this.bindings = bindings;
+                this.terminalAssert = terminalAssert;
+                this.inheritedArrays = inheritedArrays;
             }
 
-            int lastAssertIdx = -1;
-            int terminalIfIdx = -1;
-            if (terminalAssert && !bindings.isEmpty()) {
-                AnfBinding last = bindings.get(bindings.size() - 1);
-                if (last.value() instanceof If) {
-                    terminalIfIdx = bindings.size() - 1;
-                } else {
-                    for (int i = bindings.size() - 1; i >= 0; i--) {
-                        if (bindings.get(i).value() instanceof Assert) {
-                            lastAssertIdx = i;
-                            break;
+            @Override
+            public LowerTask step() {
+                if (!started) {
+                    started = true;
+                    localBindings = new HashMap<>();
+                    for (AnfBinding b : bindings) localBindings.put(b.name(), true);
+
+                    lastUses = computeLastUses(bindings, inheritedArrays);
+
+                    if (outerProtectedRefs != null) {
+                        for (String ref : outerProtectedRefs) {
+                            lastUses.put(ref, bindings.size());
                         }
                     }
-                }
-            }
 
-            for (int i = 0; i < bindings.size(); i++) {
-                AnfBinding b = bindings.get(i);
-                // GAP-002: stamp the binding's sourceLoc onto every StackOp
-                // emitted while it lowers. We deliberately keep the loc
-                // sticky AFTER the binding closes — nothing reads it until
-                // the next binding overwrites it — so peephole-survivable
-                // ops get a deterministic anchor.
-                runar.compiler.ir.ast.SourceLocation prev = currentSourceLoc;
-                if (b.sourceLoc() != null) {
-                    currentSourceLoc = b.sourceLoc();
-                }
-                try {
-                    if (b.value() instanceof Assert a && i == lastAssertIdx) {
-                        lowerAssert(a.value(), i, lastUses, true);
-                    } else if (b.value() instanceof If iv && i == terminalIfIdx) {
-                        lowerIf(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(),
-                            iv.results() == null ? List.of() : iv.results(), i, lastUses, true);
-                    } else {
-                        lowerBinding(b, i, lastUses);
+                    // Only an assert that IS the last binding may leave its value as
+                    // the result (N-005): any later binding (e.g. a terminal asm()
+                    // raw_script with out_arity 1) pushes its own result, the cleanup
+                    // NIPs the assert's value away, and the check is never enforced.
+                    // Such an assert gets OP_VERIFY.
+                    if (terminalAssert && !bindings.isEmpty()) {
+                        AnfBinding last = bindings.get(bindings.size() - 1);
+                        if (last.value() instanceof If) {
+                            terminalIfIdx = bindings.size() - 1;
+                        } else if (last.value() instanceof Assert) {
+                            lastAssertIdx = bindings.size() - 1;
+                        }
                     }
-                } finally {
+                } else if (awaitingChild) {
+                    awaitingChild = false;
+                    currentSourceLoc = prev;
+                    i++;
+                }
+
+                for (; i < bindings.size(); i++) {
+                    AnfBinding b = bindings.get(i);
+                    // GAP-002: stamp the binding's sourceLoc onto every StackOp
+                    // emitted while it lowers. We deliberately keep the loc
+                    // sticky AFTER the binding closes — nothing reads it until
+                    // the next binding overwrites it — so peephole-survivable
+                    // ops get a deterministic anchor.
+                    prev = currentSourceLoc;
+                    if (b.sourceLoc() != null) {
+                        currentSourceLoc = b.sourceLoc();
+                    }
+                    LowerTask child;
+                    try {
+                        if (b.value() instanceof Assert a && i == lastAssertIdx) {
+                            lowerAssert(a.value(), i, lastUses, true);
+                            child = null;
+                        } else if (b.value() instanceof If iv && i == terminalIfIdx) {
+                            child = new IfTask(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(),
+                                iv.results() == null ? List.of() : iv.results(), i, lastUses, true);
+                        } else {
+                            child = lowerBinding(b, i, lastUses);
+                        }
+                    } catch (RuntimeException | Error e) {
+                        currentSourceLoc = prev;
+                        throw e;
+                    }
+                    if (child != null) {
+                        awaitingChild = true;
+                        return child;
+                    }
                     currentSourceLoc = prev;
                 }
+                return null;
             }
         }
 
         // ---------------- lower_binding dispatch ----------------
 
-        void lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
+        /**
+         * Lowers {@code b}; for a binding that lowers a nested body (an inlined
+         * private call, an if, a loop) returns the task that does so instead,
+         * for the caller to run (N-264). Otherwise returns {@code null}.
+         */
+        LowerTask lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
             // R-144: the binding carries its own position — round-tripped
             // through the --ir JSON, so it is there even when this pass never
             // saw a source file. Published for the error path only.
@@ -1527,12 +1709,12 @@ public final class StackLower {
             } else if (v instanceof Call c) {
                 lowerCall(name, c.func(), c.args(), idx, lastUses);
             } else if (v instanceof MethodCall mc) {
-                lowerMethodCall(name, mc.object(), mc.method(), mc.args(), idx, lastUses);
+                return lowerMethodCall(name, mc.object(), mc.method(), mc.args(), idx, lastUses);
             } else if (v instanceof If iv) {
-                lowerIf(name, iv.cond(), iv.thenBranch(), iv.elseBranch(),
+                return new IfTask(name, iv.cond(), iv.thenBranch(), iv.elseBranch(),
                     iv.results() == null ? List.of() : iv.results(), idx, lastUses, false);
             } else if (v instanceof Loop l) {
-                lowerLoop(name, l.count(), l.body(), l.iterVar(), l.start(), l.step(), idx, lastUses);
+                return new LoopTask(name, l.count(), l.body(), l.iterVar(), l.start(), l.step(), idx, lastUses);
             } else if (v instanceof Assert a) {
                 lowerAssert(a.value(), idx, lastUses, false);
             } else if (v instanceof UpdateProp up) {
@@ -1560,6 +1742,7 @@ public final class StackLower {
                 // passing type-check while producing wrong on-chain bytes.
                 throw new UnknownAnfKindError(v.kind(), "stack-lower.lowerBinding");
             }
+            return null;
         }
 
         // ---------------- load_param / load_prop / load_const ----------------
@@ -1594,7 +1777,12 @@ public final class StackLower {
                 if (p.name().equals(propName)) { prop = p; break; }
             }
 
-            if (sm.has(propName)) {
+            // N-016: only a MUTABLE property ever lives on the stack
+            // (deserialize_state / update_prop). A readonly property is a
+            // deploy-time constant, so a slot that merely shares its name is a
+            // param, local or temp — reading it made `this.target` return
+            // whatever that slot held.
+            if ((prop == null || !prop.readonly()) && sm.has(propName)) {
                 bringToTop(propName, false);
                 sm.pop();
             } else if (prop != null && prop.initialValue() != null) {
@@ -1746,12 +1934,14 @@ public final class StackLower {
                     bringToTop(args.get(0), isLastUse(args.get(0), idx, lastUses));
                     sm.pop();
                     emitOp(new OpcodeOp("OP_VERIFY"));
-                    sm.push(bindingName);
+                    // No result slot: OP_VERIFY leaves nothing behind, and a
+                    // model-only slot puts every later PICK/ROLL one item too
+                    // deep (F-072). Same model as the dedicated assert lowering.
                 }
                 return;
             }
             if ("super".equals(funcName)) {
-                sm.push(bindingName);
+                // No opcode, so no stack slot either (F-072).
                 return;
             }
             if ("checkMultiSig".equals(funcName) && args.size() == 2) {
@@ -2666,11 +2856,20 @@ public final class StackLower {
         }
 
         // ------------------------------------------------------------------
-        // log2(n): floor(log2(n)) via 64-iteration bit-scan.
-        // Mirrors lowerLog2 in Go. push 0 (counter); each iteration:
-        //   swap, OP_DUP, push 1, OP_GREATERTHAN,
-        //   IF { push 2, OP_DIV, swap, OP_1ADD, swap }, swap.
-        // Final OP_NIP drops the input, leaving counter.
+        // log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts
+        // (N-103, user decision R86). No iteration cap: the bit length is
+        // read off the minimal Script-number encoding.
+        //
+        //   OP_BIN2NUM                              n        (minimal re-encoding)
+        //   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+        //   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+        //   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+        //   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+        //   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+        //   OP_NIP                                  b + #{c : t >= c}
+        //
+        // t = 0 only as the sign-padding byte, where n's bit length is
+        // exactly 8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
         // ------------------------------------------------------------------
         void lowerLog2(String bindingName, List<String> args, int idx,
                        Map<String, Integer> lastUses) {
@@ -2682,24 +2881,28 @@ public final class StackLower {
             bringToTop(n, isLastUse(n, idx, lastUses));
             sm.pop();
 
-            emitOp(new PushOp(PushValue.of(0))); // n 0
-
-            final int log2Iterations = 64;
-            for (int i = 0; i < log2Iterations; i++) {
-                emitOp(new SwapOp());                  // counter input
-                emitOp(new OpcodeOp("OP_DUP"));        // counter input input
-                emitOp(new PushOp(PushValue.of(1)));   // counter input input 1
-                emitOp(new OpcodeOp("OP_GREATERTHAN")); // counter input (input>1)
-                List<StackOp> thenOps = new ArrayList<>();
-                thenOps.add(new PushOp(PushValue.of(2))); // counter input 2
-                thenOps.add(new OpcodeOp("OP_DIV"));   // counter (input/2)
-                thenOps.add(new SwapOp());             // (input/2) counter
-                thenOps.add(new OpcodeOp("OP_1ADD"));  // (input/2) (counter+1)
-                thenOps.add(new SwapOp());             // (counter+1) (input/2)
-                emitOp(new IfOp(thenOps));
-                emitOp(new SwapOp());                  // input counter
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_DUP"));
+            emitOp(new PushOp(PushValue.of(0)));
+            emitOp(new OpcodeOp("OP_GREATERTHAN"));
+            emitOp(new OpcodeOp("OP_VERIFY"));
+            emitOp(new OpcodeOp("OP_SIZE"));
+            emitOp(new OpcodeOp("OP_1SUB"));
+            emitOp(new OpcodeOp("OP_TUCK"));
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            emitOp(new OpcodeOp("OP_NIP"));
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_SWAP"));
+            emitOp(new PushOp(PushValue.of(8)));
+            emitOp(new OpcodeOp("OP_MUL"));
+            emitOp(new OpcodeOp("OP_1SUB"));
+            for (int c : new int[]{1, 2, 4, 8, 16, 32, 64}) {
+                emitOp(new OpcodeOp("OP_OVER"));
+                emitOp(new PushOp(PushValue.of(c)));
+                emitOp(new OpcodeOp("OP_GREATERTHANOREQUAL"));
+                emitOp(new OpcodeOp("OP_ADD"));
             }
-            emitOp(new NipOp()); // counter
+            emitOp(new OpcodeOp("OP_NIP"));
 
             sm.push(bindingName);
             trackDepth();
@@ -2734,7 +2937,8 @@ public final class StackLower {
 
         // ---------------- method_call ----------------
 
-        void lowerMethodCall(String bindingName, String obj, String method,
+        /** Returns the inlining task for a private-method call (N-264), else {@code null}. */
+        LowerTask lowerMethodCall(String bindingName, String obj, String method,
                              List<String> args, int idx, Map<String, Integer> lastUses) {
             if ("getStateScript".equals(method)) {
                 if (sm.has(obj)) {
@@ -2743,7 +2947,7 @@ public final class StackLower {
                     sm.pop();
                 }
                 lowerGetStateScript(bindingName);
-                return;
+                return null;
             }
             AnfMethod pm = privateMethods.get(method);
             if (pm != null) {
@@ -2752,16 +2956,56 @@ public final class StackLower {
                     emitOp(new DropOp());
                     sm.pop();
                 }
-                inlineMethodCall(bindingName, pm, args, idx, lastUses);
-                return;
+                return new InlineTask(bindingName, pm, args, idx, lastUses);
             }
             // Treat as a function call
             lowerCall(bindingName, method, args, idx, lastUses);
+            return null;
         }
 
-        void inlineMethodCall(String bindingName, AnfMethod m, List<String> args,
-                              int idx, Map<String, Integer> lastUses) {
-            List<Map<String, String>> shadowed = new ArrayList<>();
+        /**
+         * {@code inlineMethodCall} as a resumable {@link LowerTask} (N-264): binds
+         * the arguments, lowers the private method's body in THIS context as a
+         * child task, then restores shadowed names and renames the result.
+         */
+        final class InlineTask implements LowerTask {
+            private final String bindingName;
+            private final AnfMethod m;
+            private final List<String> args;
+            private final int idx;
+            private final Map<String, Integer> lastUses;
+            private final List<Map<String, String>> shadowed = new ArrayList<>();
+            private boolean bodyLowered;
+
+            InlineTask(String bindingName, AnfMethod m, List<String> args,
+                       int idx, Map<String, Integer> lastUses) {
+                this.bindingName = bindingName;
+                this.m = m;
+                this.args = args;
+                this.idx = idx;
+                this.lastUses = lastUses;
+            }
+
+            @Override
+            public LowerTask step() {
+                if (!bodyLowered) {
+                    bodyLowered = true;
+                    inlineMethodCallHead(bindingName, m, args, idx, lastUses, shadowed);
+                    return new BindingsTask(m.body(), false, null);
+                }
+                inlineMethodCallTail(bindingName, m, shadowed);
+                return null;
+            }
+        }
+
+        void inlineMethodCallHead(String bindingName, AnfMethod m, List<String> args,
+                                  int idx, Map<String, Integer> lastUses,
+                                  List<Map<String, String>> shadowed) {
+
+            // N-055: see IR_OUTPUT_DELEGATION_ERROR.
+            if (containsOutputIntrinsic(m.body())) {
+                throw new RuntimeException(IR_OUTPUT_DELEGATION_ERROR);
+            }
 
             // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
             // checks its own -- checking in the lowerer rather than the typechecker also
@@ -2814,8 +3058,10 @@ public final class StackLower {
                 sm.push(paramName);
             }
 
-            lowerBindings(m.body(), false);
+        }
 
+        void inlineMethodCallTail(String bindingName, AnfMethod m,
+                                  List<Map<String, String>> shadowed) {
             for (Map<String, String> e : shadowed) {
                 String sn = e.get("shadowName");
                 String pn = e.get("paramName");
@@ -2843,11 +3089,70 @@ public final class StackLower {
          * that carries at most one result, and then every path below behaves
          * exactly as it did before the multi-result contract existed.
          */
-        void lowerIf(String bindingName, String cond,
-                     List<AnfBinding> thenB, List<AnfBinding> elseB,
-                     List<String> results,
-                     int idx, Map<String, Integer> lastUses,
-                     boolean terminalAssert) {
+        /** The state {@code lowerIf}'s three phases share across its two arms (N-264). */
+        static final class IfFrame {
+            String bindingName;
+            String cond;
+            List<AnfBinding> thenB;
+            List<AnfBinding> elseB;
+            List<String> results;
+            int idx;
+            Map<String, Integer> lastUses;
+            boolean terminalAssert;
+            Set<String> protectedRefs;
+            Set<String> preIfNames;
+            LoweringContext thenCtx;
+            LoweringContext elseCtx;
+        }
+
+        /**
+         * {@code lowerIf} as a resumable {@link LowerTask} (N-264): the head
+         * prepares the then-arm context, each arm is lowered as a child task,
+         * and the tail reconciles the arms exactly as the recursive version did.
+         */
+        final class IfTask implements LowerTask {
+            private final IfFrame f = new IfFrame();
+            private int phase;
+
+            IfTask(String bindingName, String cond,
+                   List<AnfBinding> thenB, List<AnfBinding> elseB,
+                   List<String> results,
+                   int idx, Map<String, Integer> lastUses,
+                   boolean terminalAssert) {
+                f.bindingName = bindingName;
+                f.cond = cond;
+                f.thenB = thenB;
+                f.elseB = elseB;
+                f.results = results;
+                f.idx = idx;
+                f.lastUses = lastUses;
+                f.terminalAssert = terminalAssert;
+            }
+
+            @Override
+            public LowerTask step() {
+                switch (phase++) {
+                    case 0:
+                        lowerIfHead(f);
+                        return f.thenCtx.new BindingsTask(f.thenB, f.terminalAssert, arrayElements);
+                    case 1:
+                        lowerIfMid(f);
+                        return f.elseCtx.new BindingsTask(f.elseB, f.terminalAssert, arrayElements);
+                    default:
+                        lowerIfTail(f);
+                        return null;
+                }
+            }
+        }
+
+        void lowerIfHead(IfFrame f) {
+            String bindingName = f.bindingName;
+            String cond = f.cond;
+            List<AnfBinding> thenB = f.thenB;
+            List<AnfBinding> elseB = f.elseB;
+            List<String> results = f.results;
+            int idx = f.idx;
+            Map<String, Integer> lastUses = f.lastUses;
             // The ANF wire format has no version field, and --ir / --ir-parity
             // are documented surfaces that feed a checked-in ANF JSON straight
             // into this pass. An ANF produced BEFORE the multi-result node
@@ -2984,7 +3289,16 @@ public final class StackLower {
             LoweringContext thenCtx = subContext();
             thenCtx.outerProtectedRefs = protectedRefs;
             thenCtx.insideBranch = true;
-            thenCtx.lowerBindings(thenB, terminalAssert);
+            f.protectedRefs = protectedRefs;
+            f.preIfNames = preIfNames;
+            f.thenCtx = thenCtx;
+        }
+
+        void lowerIfMid(IfFrame f) {
+            boolean terminalAssert = f.terminalAssert;
+            Set<String> protectedRefs = f.protectedRefs;
+            Set<String> preIfNames = f.preIfNames;
+            LoweringContext thenCtx = f.thenCtx;
 
             thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -2995,11 +3309,37 @@ public final class StackLower {
                     thenCtx.sm.removeAtDepth(1);
                 }
             }
+            // N-072: under a terminal assert the arm's one remaining slot is
+            // its VERDICT, which nothing reads by name. It must not keep the
+            // name of the parent local it asserted (`const x = a; if (c)
+            // { assert(x); } else { assert(b); }`): phase 1 below would then
+            // see "the else-arm consumed `x`, the then-arm did not", DROP the
+            // verdict to match, and phase 3 pad the depth back with OP_0 -- an
+            // arm that always fails.
+            if (terminalAssert && thenCtx.sm.depth() >= 1) {
+                thenCtx.sm.pop();
+                thenCtx.sm.push("");
+            }
 
             LoweringContext elseCtx = subContext();
             elseCtx.outerProtectedRefs = protectedRefs;
             elseCtx.insideBranch = true;
-            elseCtx.lowerBindings(elseB, terminalAssert);
+            f.elseCtx = elseCtx;
+        }
+
+        void lowerIfTail(IfFrame f) {
+            String bindingName = f.bindingName;
+            String cond = f.cond;
+            List<AnfBinding> thenB = f.thenB;
+            List<AnfBinding> elseB = f.elseB;
+            List<String> results = f.results;
+            int idx = f.idx;
+            Map<String, Integer> lastUses = f.lastUses;
+            boolean terminalAssert = f.terminalAssert;
+            Set<String> protectedRefs = f.protectedRefs;
+            Set<String> preIfNames = f.preIfNames;
+            LoweringContext thenCtx = f.thenCtx;
+            LoweringContext elseCtx = f.elseCtx;
 
             elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3009,6 +3349,11 @@ public final class StackLower {
                     elseCtx.emitOp(new NipOp());
                     elseCtx.sm.removeAtDepth(1);
                 }
+            }
+            // N-072, see thenCtx above
+            if (terminalAssert && elseCtx.sm.depth() >= 1) {
+                elseCtx.sm.pop();
+                elseCtx.sm.push("");
             }
 
             // Phase 1: consumed-name analysis.
@@ -3176,11 +3521,33 @@ public final class StackLower {
                     }
                     elseCtx.sm.push(thenName);
                 } else {
+                    // N-262: padding an EMPTY else arm is the legitimate #99
+                    // fallback; padding a NON-EMPTY one writes a placeholder
+                    // the post-ENDIF code reads as a value. Same sentence as
+                    // Go's R-161 guard.
+                    if (!elseB.isEmpty()) {
+                        throw new RuntimeException(
+                            "internal codegen error: conditional needs "
+                            + (thenCtx.sm.depth() - elseCtx.sm.depth())
+                            + " placeholder push(es) to balance a NON-EMPTY else arm (then depth "
+                            + thenCtx.sm.depth() + " != else depth " + elseCtx.sm.depth()
+                            + "); an empty push there becomes a value the post-ENDIF code reads "
+                            + "(see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding=\""
+                            + bindingName + "\"");
+                    }
                     elseCtx.emitOp(new PushOp(PushValue.ofHex("")));
                     elseCtx.sm.push("");
                 }
             }
             while (elseCtx.sm.depth() > thenCtx.sm.depth()) {
+                if (!thenB.isEmpty()) {
+                    throw new RuntimeException(
+                        "internal codegen error: conditional needs "
+                        + (elseCtx.sm.depth() - thenCtx.sm.depth())
+                        + " placeholder push(es) to balance a NON-EMPTY then arm (else depth "
+                        + elseCtx.sm.depth() + " != then depth " + thenCtx.sm.depth()
+                        + "); binding=\"" + bindingName + "\"");
+                }
                 thenCtx.emitOp(new PushOp(PushValue.ofHex("")));
                 thenCtx.sm.push("");
             }
@@ -3300,7 +3667,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3335,7 +3702,7 @@ public final class StackLower {
                     for (int j = 0; j < sinkBelow; j++) {
                         emitOp(new PushOp(PushValue.of(windowSize - 1)));
                         sm.push("");
-                        emitOp(new RollOp(windowSize));
+                        emitOp(new RollOp(windowSize - 1));
                         sm.pop();
                         String lifted = sm.removeAtDepth(windowSize - 1);
                         sm.push(lifted);
@@ -3362,7 +3729,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3450,7 +3817,7 @@ public final class StackLower {
                     } else {
                         emitOp(new PushOp(PushValue.of(d)));
                         sm.push("");
-                        emitOp(new RollOp(d + 1));
+                        emitOp(new RollOp(d));
                         sm.pop();
                         String rolled = sm.removeAtDepth(d);
                         sm.push(rolled);
@@ -3484,120 +3851,204 @@ public final class StackLower {
 
         // ---------------- loop ----------------
 
-        void lowerLoop(String bindingName, int count, List<AnfBinding> body, String iterVar,
-                       BigInteger start, int step,
-                       Integer loopBindingIndex, Map<String, Integer> enclosingLastUses) {
-            // Names (re)defined anywhere inside the loop body, nested branches
-            // included. A name the body itself binds is NOT an outer ref —
-            // reassigned locals (e.g. `off = off + ...` inside an if) flow
-            // through lowerIf's branch-reassignment reconciliation, not through
-            // protection here.
-            Set<String> deepBodyBindingNames = collectDeepBindingNames(body);
+        /**
+         * {@code lowerLoop} as a resumable {@link LowerTask} (N-264): the loop is
+         * unrolled exactly as before, but a body binding that lowers a nested
+         * body (if / inlined call / inner loop) runs as a child task.
+         */
+        final class LoopTask implements LowerTask {
+            private final String bindingName;
+            private final int count;
+            private final List<AnfBinding> body;
+            private final String iterVar;
+            private final BigInteger start;
+            private final int step;
+            private final Integer loopBindingIndex;
+            private final Map<String, Integer> enclosingLastUses;
+            private boolean started;
+            private Set<String> outerRefs;
+            private Map<String, List<String>> outerArrays;
+            private Map<String, Boolean> prevLocal;
+            /** Current iteration, and body index within it ({@code -1}: not begun). */
+            private int i;
+            private int j = -1;
+            private Map<String, Integer> lastUses;
+            private runar.compiler.ir.ast.SourceLocation loopLoc;
+            private boolean awaitingChild;
 
-            Map<String, Boolean> bodyNames = new HashMap<>();
-            for (AnfBinding b : body) bodyNames.put(b.name(), true);
-
-            // Collect ALL outer-scope refs used anywhere in the body — including
-            // refs that only occur inside nested if-branches (collectRefs
-            // recurses). The previous top-level-only scan missed nested
-            // references: a const defined before the loop and referenced only
-            // inside an if-branch was consumed by the first iteration, making
-            // iteration 2 fail with "Value 'X' not found on stack".
-            Set<String> outerRefs = new LinkedHashSet<>();
-            for (AnfBinding b : body) {
-                for (String ref : collectRefs(b.value())) {
-                    if (!ref.equals(iterVar) && !deepBodyBindingNames.contains(ref)) {
-                        outerRefs.add(ref);
-                    }
-                }
+            LoopTask(String bindingName, int count, List<AnfBinding> body, String iterVar,
+                     BigInteger start, int step,
+                     Integer loopBindingIndex, Map<String, Integer> enclosingLastUses) {
+                this.bindingName = bindingName;
+                this.count = count;
+                this.body = body;
+                this.iterVar = iterVar;
+                this.start = start;
+                this.step = step;
+                this.loopBindingIndex = loopBindingIndex;
+                this.enclosingLastUses = enclosingLastUses;
             }
 
-            // A local the body REBINDS and then READS AGAIN in the same
-            // iteration is carried across iterations through the rebound slot,
-            // so it must survive the body exactly like an outer ref.
-            // deepBodyBindingNames above excludes it precisely because the body
-            // binds it — which is what made the updated value consumable. See
-            // collectLoopCarriedRebinds.
-            for (String ref : collectLoopCarriedRebinds(body)) {
-                if (!ref.equals(iterVar)) {
-                    outerRefs.add(ref);
-                }
-            }
+            @Override
+            public LowerTask step() {
+                if (!started) {
+                    started = true;
+                    // Names (re)defined anywhere inside the loop body, nested branches
+                    // included. A name the body itself binds is NOT an outer ref —
+                    // reassigned locals (e.g. `off = off + ...` inside an if) flow
+                    // through lowerIf's branch-reassignment reconciliation, not through
+                    // protection here.
+                    Set<String> deepBodyBindingNames = collectDeepBindingNames(body);
 
-            Map<String, Boolean> prevLocal = localBindings;
-            Map<String, Boolean> newLocal = new HashMap<>(prevLocal);
-            newLocal.putAll(bodyNames);
-            localBindings = newLocal;
+                    Map<String, Boolean> bodyNames = new HashMap<>();
+                    for (AnfBinding b : body) bodyNames.put(b.name(), true);
 
-            for (int i = 0; i < count; i++) {
-                // Push the iteration variable value (in case the loop body uses
-                // it). Iteration `i` binds `start + i*step` (issue #121);
-                // zero-start counting-up loops (start=0, step=1) reduce to
-                // BigInteger.valueOf(i), preserving the historical byte-for-byte
-                // lowering.
-                emitOp(new PushOp(PushValue.of(
-                    start.add(BigInteger.valueOf((long) i * step)))));
-                sm.push(iterVar);
-                Map<String, Integer> lastUses = computeLastUses(body);
-
-                // Prevent outer-scope refs from being consumed by setting their
-                // last-use beyond any body binding index:
-                //  - non-final iterations: always (the next iteration re-reads them);
-                //  - the FINAL iteration: when the enclosing scope still references
-                //    them AFTER the loop. Previously the final iteration consumed
-                //    every outer ref at its last body use, so a method param (or
-                //    const) referenced after the loop was gone from the stack and
-                //    was silently lowered to an OP_0/empty push — compilation
-                //    succeeded, the env-based interpreter passed, but the emitted
-                //    Script failed at runtime (silent interpreter <-> Script
-                //    divergence).
-                boolean isFinalIteration = i == count - 1;
-                for (String ref : outerRefs) {
-                    boolean usedAfterLoop = enclosingLastUses != null
-                        && loopBindingIndex != null
-                        && enclosingLastUses.getOrDefault(ref, -1) > loopBindingIndex;
-                    if (!isFinalIteration || usedAfterLoop) {
-                        lastUses.put(ref, body.size());
+                    // Collect ALL outer-scope refs used anywhere in the body — including
+                    // refs that only occur inside nested if-branches (collectRefs
+                    // recurses). The previous top-level-only scan missed nested
+                    // references: a const defined before the loop and referenced only
+                    // inside an if-branch was consumed by the first iteration, making
+                    // iteration 2 fail with "Value 'X' not found on stack".
+                    outerRefs = new LinkedHashSet<>();
+                    for (AnfBinding b : body) {
+                        for (String ref : collectRefs(b.value())) {
+                            if (!ref.equals(iterVar) && !deepBodyBindingNames.contains(ref)) {
+                                outerRefs.add(ref);
+                            }
+                        }
                     }
-                }
 
-                for (int j = 0; j < body.size(); j++) {
-                    lowerBinding(body.get(j), j, lastUses);
-                }
-                // Clean up the iteration variable if it was not consumed by the body.
-                //
-                // R-186 / R-292: it is not always on TOP when that happens. A body
-                // whose last binding LEAVES a value — the accumulator
-                // `sum = sum + x`, which rebinds `sum` in place and ends holding it
-                // — buries the iteration variable one slot down. Dropping only at
-                // depth 0 left one slot behind per iteration, until the leak alone
-                // crossed MAX_STACK_DEPTH and the compiler refused a contract with
-                // a working set of three. Removing it wherever it sits is the same
-                // operation drainBranchPrivateResidue performs, spelled the same
-                // way.
-                if (sm.has(iterVar)) {
-                    int d = sm.findDepth(iterVar);
-                    if (d == 0) {
-                        emitOp(new DropOp());
-                        sm.pop();
-                    } else if (d == 1) {
-                        emitOp(new NipOp());
-                        sm.removeAtDepth(1);
-                    } else {
-                        emitOp(new PushOp(PushValue.of(d)));
-                        sm.push("");
-                        emitOp(new RollOp(d));
-                        sm.pop();
-                        String rolled = sm.removeAtDepth(d);
-                        sm.push(rolled);
-                        emitOp(new DropOp());
-                        sm.pop();
+                    // A local the body REBINDS and then READS AGAIN in the same
+                    // iteration is carried across iterations through the rebound slot,
+                    // so it must survive the body exactly like an outer ref.
+                    // deepBodyBindingNames above excludes it precisely because the body
+                    // binds it — which is what made the updated value consumable. See
+                    // collectLoopCarriedRebinds.
+                    for (String ref : collectLoopCarriedRebinds(body)) {
+                        if (!ref.equals(iterVar)) {
+                            outerRefs.add(ref);
+                        }
                     }
-                }
-            }
 
-            localBindings = prevLocal;
-            trackDepth();
+                    // F-081: an outer array_literal binding is metadata only — its
+                    // ELEMENTS are the stack slots. Protecting the array name protects
+                    // nothing, so the first iteration consumed the elements and the
+                    // second failed with "value 't0' not found on stack". Protect the
+                    // elements themselves.
+                    outerArrays = new HashMap<>(arrayElements);
+                    for (String ref : new ArrayList<>(outerRefs)) {
+                        List<String> elems = outerArrays.get(ref);
+                        if (elems != null) outerRefs.addAll(elems);
+                    }
+
+                    prevLocal = localBindings;
+                    Map<String, Boolean> newLocal = new HashMap<>(prevLocal);
+                    newLocal.putAll(bodyNames);
+                    localBindings = newLocal;
+                } else if (awaitingChild) {
+                    awaitingChild = false;
+                    currentSourceLoc = loopLoc;
+                    j++;
+                }
+
+                while (true) {
+                    if (j < 0) {
+                        if (i >= count) break;
+                        // Push the iteration variable value (in case the loop body uses
+                        // it). Iteration `i` binds `start + i*step` (issue #121);
+                        // zero-start counting-up loops (start=0, step=1) reduce to
+                        // BigInteger.valueOf(i), preserving the historical byte-for-byte
+                        // lowering.
+                        emitOp(new PushOp(PushValue.of(
+                            start.add(BigInteger.valueOf((long) i * step)))));
+                        sm.push(iterVar);
+                        lastUses = computeLastUses(body, outerArrays);
+
+                        // Prevent outer-scope refs from being consumed by setting their
+                        // last-use beyond any body binding index:
+                        //  - non-final iterations: always (the next iteration re-reads them);
+                        //  - the FINAL iteration: when the enclosing scope still references
+                        //    them AFTER the loop. Previously the final iteration consumed
+                        //    every outer ref at its last body use, so a method param (or
+                        //    const) referenced after the loop was gone from the stack and
+                        //    was silently lowered to an OP_0/empty push — compilation
+                        //    succeeded, the env-based interpreter passed, but the emitted
+                        //    Script failed at runtime (silent interpreter <-> Script
+                        //    divergence).
+                        boolean isFinalIteration = i == count - 1;
+                        for (String ref : outerRefs) {
+                            boolean usedAfterLoop = enclosingLastUses != null
+                                && loopBindingIndex != null
+                                && enclosingLastUses.getOrDefault(ref, -1) > loopBindingIndex;
+                            if (!isFinalIteration || usedAfterLoop) {
+                                lastUses.put(ref, body.size());
+                            }
+                        }
+
+                        // F-259: each body binding's ops carry that binding's own
+                        // location (a binding without one keeps the loop's). The
+                        // iteration-variable push above and the cleanup below stay on
+                        // the loop's location.
+                        loopLoc = currentSourceLoc;
+                        j = 0;
+                    }
+                    while (j < body.size()) {
+                        AnfBinding b = body.get(j);
+                        if (b.sourceLoc() != null) {
+                            currentSourceLoc = b.sourceLoc();
+                        }
+                        LowerTask child;
+                        try {
+                            child = lowerBinding(b, j, lastUses);
+                        } catch (RuntimeException | Error e) {
+                            currentSourceLoc = loopLoc;
+                            throw e;
+                        }
+                        if (child != null) {
+                            awaitingChild = true;
+                            return child;
+                        }
+                        currentSourceLoc = loopLoc;
+                        j++;
+                    }
+                    // Clean up the iteration variable if it was not consumed by the body.
+                    //
+                    // R-186 / R-292: it is not always on TOP when that happens. A body
+                    // whose last binding LEAVES a value — the accumulator
+                    // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+                    // — buries the iteration variable one slot down. Dropping only at
+                    // depth 0 left one slot behind per iteration, until the leak alone
+                    // crossed MAX_STACK_DEPTH and the compiler refused a contract with
+                    // a working set of three. Removing it wherever it sits is the same
+                    // operation drainBranchPrivateResidue performs, spelled the same
+                    // way.
+                    if (sm.has(iterVar)) {
+                        int d = sm.findDepth(iterVar);
+                        if (d == 0) {
+                            emitOp(new DropOp());
+                            sm.pop();
+                        } else if (d == 1) {
+                            emitOp(new NipOp());
+                            sm.removeAtDepth(1);
+                        } else {
+                            emitOp(new PushOp(PushValue.of(d)));
+                            sm.push("");
+                            emitOp(new RollOp(d));
+                            sm.pop();
+                            String rolled = sm.removeAtDepth(d);
+                            sm.push(rolled);
+                            emitOp(new DropOp());
+                            sm.pop();
+                        }
+                    }
+                    i++;
+                    j = -1;
+                }
+
+                localBindings = prevLocal;
+                trackDepth();
+                return null;
+            }
         }
 
         // ---------------- assert ----------------
@@ -3627,7 +4078,7 @@ public final class StackLower {
                         } else {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3664,6 +4115,9 @@ public final class StackLower {
                     emitOp(new PushOp(PushValue.of(0)));
                     sm.push("");
                 }
+
+                // N-045: a fixed-width byte value must have its declared width.
+                emitFixedWidthStateCheck(prop.type());
 
                 // The width MUST come from numericStateTypeWidth — the same
                 // table the reader splits on — or this continuation cannot be
@@ -3937,8 +4391,10 @@ public final class StackLower {
             //     Stack effect is NET ZERO — the stack map is untouched.
             if (hasStateSection() && fixedStateSectionLength() < 0) {
                 // delta / exact are refined by pinCodePartLength once every
-                // method has been lowered; the defaults are the SOUND ones (a
-                // lower bound of emittedLength + 0 holds for any deployment).
+                // method has been lowered; the defaults are the SAFE ones:
+                // exact=false makes the length a deploy-time slot (N-051) that
+                // the SDK fills with the real deployed code-part length, so no
+                // truncated _codePart can satisfy it.
                 emitOp(new VerifyCodePartLenOp(0, false));
             }
 
@@ -4249,10 +4705,9 @@ public final class StackLower {
                 AnfProperty p = stateProps.get(0);
                 if (isVariableLengthStateType(p.type())) {
                     // Single variable-length byte-string field: decode push-data
-                    // prefix, drop trailing empty.
+                    // prefix; the remainder must be empty (N-044).
                     emitPushDataDecode(); // [..., data, remaining]
-                    emitOp(new DropOp());
-                    sm.pop();
+                    emitAssertStateConsumed(); // [..., data]
                 } else if (isNumericStateType(p.type())) {
                     emitOp(new OpcodeOp("OP_BIN2NUM"));
                 }
@@ -4288,14 +4743,21 @@ public final class StackLower {
                             sm.push("");
                         }
                     } else {
+                        // Last field: it must consume the state section
+                        // exactly (N-044).
                         if (isVariableLengthStateType(p.type())) {
-                            // Last variable-length byte-string: decode push-data
-                            // prefix, drop trailing empty.
                             emitPushDataDecode(); // [..., data, remaining]
-                            emitOp(new DropOp());
-                            sm.pop();
-                        } else if (isNumericStateType(p.type())) {
-                            emitOp(new OpcodeOp("OP_BIN2NUM"));
+                            emitAssertStateConsumed(); // [..., data]
+                        } else {
+                            emitOp(new PushOp(PushValue.of(sizes.get(i))));
+                            sm.push("");
+                            emitOp(new OpcodeOp("OP_SPLIT"));
+                            sm.pop(); sm.pop();
+                            sm.push(""); sm.push("");
+                            emitAssertStateConsumed(); // [..., field]
+                            if (isNumericStateType(p.type())) {
+                                emitOp(new OpcodeOp("OP_BIN2NUM"));
+                            }
                         }
                         sm.pop();
                         sm.push(p.name());
@@ -4308,6 +4770,11 @@ public final class StackLower {
         // ByteString from the state bytes on top of the stack.
         // Expects stack: [..., state_bytes]
         // Leaves stack:  [..., data, remaining_state]
+        // Accepts exactly the headers emitPushDataEncode writes: < 76 (the
+        // header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+        // (4-byte LE); any other header fails the script. The header and every
+        // length are read UNSIGNED (emitUnsignedBin2Num) -- bare OP_BIN2NUM
+        // read 0x80 as 0 and 0x81..0xff as negative (N-044).
         // Mirrors {@code emitPushDataDecode} in
         // {@code compilers/go/codegen/stack.go}.
         private void emitPushDataDecode() {
@@ -4318,7 +4785,7 @@ public final class StackLower {
             sm.push(""); sm.push("");
             emitOp(new SwapOp());
             sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitUnsignedBin2Num(); // [..., rest, hb]
             emitOp(new DupOp());
             sm.push("");
             emitOp(new PushOp(PushValue.of(76)));
@@ -4331,7 +4798,7 @@ public final class StackLower {
             sm.pop();
             StackMap smAfterOuterIf = sm.clone0();
 
-            // THEN: fb < 76 → direct length
+            // THEN: hb < 76 → direct length
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
@@ -4341,6 +4808,27 @@ public final class StackLower {
             sm.slots.clear();
             sm.slots.addAll(smAfterOuterIf.slots);
 
+            // ELSE: map the header to its length width (1, 2 or 4).
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(76)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAfterPd1If = sm.clone0();
+            // 0x4c → width 1
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            StackMap smWidth = sm.clone0();
+
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAfterPd1If.slots);
             emitOp(new DupOp());
             sm.push("");
             emitOp(new PushOp(PushValue.of(77)));
@@ -4348,49 +4836,74 @@ public final class StackLower {
             emitOp(new OpcodeOp("OP_NUMEQUAL"));
             sm.pop(); sm.pop();
             sm.push("");
-
             emitOp(new OpcodeOp("OP_IF"));
             sm.pop();
-            StackMap smAfterInnerIf = sm.clone0();
-
-            // THEN: fb == 77 → 2-byte LE length
+            StackMap smAfterPd2If = sm.clone0();
+            // 0x4d → width 2
             emitOp(new DropOp());
             sm.pop();
             emitOp(new PushOp(PushValue.of(2)));
             sm.push("");
-            emitOp(new OpcodeOp("OP_SPLIT"));
-            sm.pop(); sm.pop();
-            sm.push(""); sm.push("");
-            emitOp(new SwapOp());
-            sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
-            emitOp(new OpcodeOp("OP_SPLIT"));
-            sm.pop(); sm.pop();
-            sm.push(""); sm.push("");
 
             emitOp(new OpcodeOp("OP_ELSE"));
             sm.slots.clear();
-            sm.slots.addAll(smAfterInnerIf.slots);
-
-            // ELSE: fb == 76 → 1-byte length
-            emitOp(new DropOp());
-            sm.pop();
-            emitOp(new PushOp(PushValue.of(1)));
+            sm.slots.addAll(smAfterPd2If.slots);
+            // 0x4e → width 4; any other header fails the script
+            emitOp(new PushOp(PushValue.of(78)));
             sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+            sm.pop(); sm.pop();
+            emitOp(new PushOp(PushValue.of(4)));
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            sm.slots.clear();
+            sm.slots.addAll(smWidth.slots);
+            // [..., rest, width]
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
             emitOp(new SwapOp());
             sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitUnsignedBin2Num(); // [..., rest2, len]
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
 
             emitOp(new OpcodeOp("OP_ENDIF"));
-            emitOp(new OpcodeOp("OP_ENDIF"));
             sm.slots.clear();
             sm.slots.addAll(smEndTarget.slots);
+        }
+
+        // Fail the script unless the value on top (the rest of the state
+        // section after the last field) is empty, and pop it: the last state
+        // field must consume the state section exactly (N-044).
+        private void emitAssertStateConsumed() {
+            emitOp(new PushOp(PushValue.of(0)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+            sm.pop(); sm.pop();
+        }
+
+        /**
+         * N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+         * Ripemd160, Point, P256Point, P384Point) is committed to a
+         * continuation, assert it has exactly its declared width:
+         * {@code [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]}.
+         * The writer copies these values as they are and the next spend's
+         * reader slices each at its declared width, so a wrong-width value
+         * shifts every later field. No-op for every other type.
+         */
+        private void emitFixedWidthStateCheck(String type) {
+            int width = fixedWidthStateBytes(type);
+            if (width == 0) return;
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(width)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+            sm.pop(); sm.pop();
         }
 
         private void splitFixedStateFields(List<AnfProperty> stateProps, List<Integer> sizes) {
@@ -4464,6 +4977,8 @@ public final class StackLower {
                 String valueRef = stateValues.get(i);
                 AnfProperty prop = stateProps.get(i);
                 bringToTop(valueRef, operandConsume(valueRef, outputOperands, idx, lastUses));
+                // N-045: a fixed-width byte value must have its declared width.
+                emitFixedWidthStateCheck(prop.type());
                 // Same table as the reader — see numericStateTypeWidth.
                 int numericWidth = numericStateTypeWidth(prop.type());
                 if (numericWidth > 0) {
@@ -5186,7 +5701,20 @@ public final class StackLower {
             sm.slots.clear();
             sm.slots.addAll(afterInnerIf.slots);
 
-            // ELSE: >=256 -> 0x4d + 2-byte LE
+            // ELSE: >= 256
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(65536)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_LESSTHAN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap afterPd4If = sm.clone0();
+
+            // THEN: 256-65535 -> 0x4d + 2-byte LE
             emitOp(new PushOp(PushValue.of(4)));
             sm.push("");
             emitOp(new OpcodeOp("OP_NUM2BIN"));
@@ -5212,6 +5740,39 @@ public final class StackLower {
             emitOp(new OpcodeOp("OP_CAT"));
             sm.push("");
 
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(afterPd4If.slots);
+
+            // ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044 / F-083: this arm was
+            // missing, so the length was silently truncated mod 65536).
+            // NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length.
+            emitOp(new PushOp(PushValue.of(5)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUM2BIN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(4)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.ofHex("4e")));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            sm.pop(); sm.pop();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            sm.pop(); sm.pop();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_ENDIF"));
             emitOp(new OpcodeOp("OP_ENDIF"));
             emitOp(new OpcodeOp("OP_ENDIF"));
             sm.slots.clear();

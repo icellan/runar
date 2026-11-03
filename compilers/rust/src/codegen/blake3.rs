@@ -480,9 +480,24 @@ fn emit_g_call(
 // Full compression ops generator
 // =========================================================================
 
-fn generate_compress_ops(block_len_from_alt: bool) -> Vec<StackOp> {
+/// `guard_operands` (F-114): abort unless the block is exactly 64 bytes and
+/// the chaining value exactly 32 bytes. Without it a 65-byte block `B || x`
+/// (the extra byte lands above bit 32 of an addend and is truncated away) or a
+/// 60..63-byte block (the short last word is zero-extended) yields the same
+/// digest as a different 64-byte block. blake3Hash builds its own operands, so
+/// only the blake3Compress builtin needs the check.
+fn generate_compress_ops(block_len_from_alt: bool, guard_operands: bool) -> Vec<StackOp> {
     let mut em = Emitter::new(2);
     let msg_schedule = compute_msg_schedule();
+
+    if guard_operands {
+        // [CV, block] -> abort unless len(block) == 64
+        em.oc("OP_SIZE");
+        em.depth += 1;
+        em.push_i(64);
+        em.oc("OP_EQUALVERIFY");
+        em.depth -= 2;
+    }
 
     // ================================================================
     // Phase 1: Unpack block into 16 LE message words
@@ -500,6 +515,14 @@ fn generate_compress_ops(block_len_from_alt: bool) -> Vec<StackOp> {
     // ================================================================
     // Move CV to alt (it's below the 16 msg words, at depth 16)
     em.roll(16);
+    if guard_operands {
+        // [m0..m15, CV] -> abort unless len(CV) == 32
+        em.oc("OP_SIZE");
+        em.depth += 1;
+        em.push_i(32);
+        em.oc("OP_EQUALVERIFY");
+        em.depth -= 2;
+    }
     em.to_alt();
     em.assert_depth(16, "after CV to alt");
     // Stack: [m0, m1, ..., m15]  Alt: [CV]
@@ -624,7 +647,7 @@ fn generate_compress_ops(block_len_from_alt: bool) -> Vec<StackOp> {
 static COMPRESS_OPS: OnceLock<Vec<StackOp>> = OnceLock::new();
 
 fn get_compress_ops() -> &'static Vec<StackOp> {
-    COMPRESS_OPS.get_or_init(|| generate_compress_ops(false))
+    COMPRESS_OPS.get_or_init(|| generate_compress_ops(false, true))
 }
 
 // =========================================================================
@@ -635,6 +658,7 @@ fn get_compress_ops() -> &'static Vec<StackOp> {
 /// Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
 /// Stack on exit:  [..., hash(32 LE)]
 /// Net depth: -1
+/// Aborts unless the chaining value is 32 bytes and the block 64 bytes (F-114).
 ///
 /// Uses block_len=64, counter=0, flags=CHUNK_START|CHUNK_END|ROOT — words are
 /// little-endian (standard BLAKE3): a 4-byte byte-string is already a LE word.
@@ -683,7 +707,7 @@ pub fn emit_blake3_hash(emit: &mut dyn FnMut(StackOp)) {
     em.swap(); // [IV(32 LE), paddedMessage(64 LE)]
 
     // Splice compression ops with the real block_len taken from the alt stack.
-    let compress_ops = generate_compress_ops(true);
+    let compress_ops = generate_compress_ops(true, false);
     for op in &compress_ops {
         em.e_raw(op.clone());
     }

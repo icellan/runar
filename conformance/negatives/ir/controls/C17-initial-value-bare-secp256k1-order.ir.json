@@ -1,0 +1,71 @@
+{
+  "contractName": "BareBigInteger",
+  "parentClass": "SmartContract",
+  "properties": [
+    {
+      "name": "n",
+      "type": "bigint",
+      "readonly": true,
+      "initialValue": 115792089237316195423570985008687907852837564279074904382605163141518161494337
+    }
+  ],
+  "methods": [
+    {
+      "name": "constructor",
+      "isPublic": false,
+      "params": [],
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "call",
+            "func": "super",
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "unlock",
+      "isPublic": true,
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        }
+      ],
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "n"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "bin_op",
+            "op": "===",
+            "left": "t0",
+            "right": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ]
+    }
+  ]
+}

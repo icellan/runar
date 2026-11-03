@@ -458,7 +458,7 @@ module RunarCompiler
       #
       # The mask is a bare OP_MUL with no reduction: rx, ry are already in
       # [0, p) and notinf is 0 or 1, so the product is canonical either way.
-      def self.c_affine_add(t, c)
+      def self.c_affine_add(t, c, abort_on_y0_tangent)
         t.copy_to_top("px", "_px_eq")
         t.copy_to_top("qx", "_qx_eq")
         t.raw_block(["_px_eq", "_qx_eq"], "_xeq",
@@ -479,6 +479,29 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_SUB"))
           e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
         })
+
+        # N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+        # when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+        # silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+        # order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+        #   ok = NOT(cond AND px != 0 AND py == 0)
+        # px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+        # Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+        # total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+        # cond = 1 with py == 0 there already means px == 0, the exempt case.
+        if abort_on_y0_tangent
+          t.copy_to_top("px", "_px_g")
+          t.copy_to_top("py", "_py_g")
+          t.copy_to_top("_cond", "_cond_g")
+          t.raw_block(["_px_g", "_py_g", "_cond_g"], "", ->(e) {
+            e.call(make_stack_op(op: "opcode", code: "OP_SWAP"))
+            e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
+            e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+            e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+            e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
+            e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+          })
+        end
 
         # chord numerator / denominator
         t.copy_to_top("qy", "_qy1")
@@ -1402,7 +1425,7 @@ module RunarCompiler
         rqx_idx = t.nm.rindex("_rqx"); t.nm[rqx_idx] = "qx" if rqx_idx
         rqy_idx = t.nm.rindex("_rqy"); t.nm[rqy_idx] = "qy" if rqy_idx
 
-        c_affine_add(t, c)
+        c_affine_add(t, c, false)
 
         # Step 8: x_R mod n == r
         t.to_top("ry")
@@ -1442,7 +1465,7 @@ module RunarCompiler
         # R-117: c_affine_add's selectors compare these four values RAW.
         c_emit_coord_canon_verify(t, "px", "py", P256_CURVE)
         c_emit_coord_canon_verify(t, "qx", "qy", P256_CURVE)
-        c_affine_add(t, P256_CURVE)
+        c_affine_add(t, P256_CURVE, true)
         c_compose_point(t, "rx", "ry", "_result", P256_CURVE)
       end
 
@@ -1540,7 +1563,7 @@ module RunarCompiler
         # R-117: c_affine_add's selectors compare these four values RAW.
         c_emit_coord_canon_verify(t, "px", "py", P384_CURVE)
         c_emit_coord_canon_verify(t, "qx", "qy", P384_CURVE)
-        c_affine_add(t, P384_CURVE)
+        c_affine_add(t, P384_CURVE, true)
         c_compose_point(t, "rx", "ry", "_result", P384_CURVE)
       end
 

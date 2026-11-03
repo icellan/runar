@@ -498,6 +498,57 @@ fn load_conformance_ir(test_name: &str) -> String {
         .unwrap_or_else(|e| panic!("failed to read conformance IR {}: {}", path.display(), e))
 }
 
+/// Discover every fixture under `conformance/tests/` that is NOT opted out of
+/// Rust Stack-IR / hex parity via a `source.json` `"compilers"` allowlist that
+/// omits `"rust"`. Mirrors `fixture_allowlisted_for_rust` in
+/// `conformance_goldens.rs` (which auto-discovers the full fixture set; this
+/// gate did not, per F-336). A fixture with no `source.json`, or one whose
+/// `source.json` has no `compilers` key, is eligible by default — the
+/// allowlist is opt-OUT, not opt-in.
+fn rust_eligible_conformance_fixtures() -> Vec<String> {
+    let tests_dir = conformance_dir();
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&tests_dir)
+        .unwrap_or_else(|e| panic!("readdir {}: {}", tests_dir.display(), e))
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+
+    let mut eligible = Vec::new();
+    let mut opted_out = Vec::new();
+    for dir in dirs {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let config_path = dir.join("source.json");
+        let allowed = if config_path.exists() {
+            let raw = std::fs::read_to_string(&config_path)
+                .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
+            let cfg: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
+            match cfg.get("compilers") {
+                Some(serde_json::Value::Array(arr)) => {
+                    arr.iter().any(|v| v.as_str() == Some("rust"))
+                }
+                _ => true,
+            }
+        } else {
+            true
+        };
+        if allowed {
+            eligible.push(name);
+        } else {
+            opted_out.push(name);
+        }
+    }
+    println!(
+        "rust_eligible_conformance_fixtures: {} eligible, {} opted out: {:?}",
+        eligible.len(),
+        opted_out.len(),
+        opted_out
+    );
+    eligible
+}
+
 // ---------------------------------------------------------------------------
 // Test: Bounded loop conformance
 // ---------------------------------------------------------------------------
@@ -575,41 +626,23 @@ fn load_expected_script_hex(test_name: &str) -> Option<String> {
     std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
 }
 
+// PROVES: for every rust-eligible conformance fixture (discovered from
+// `conformance/tests/`, not a hard-coded subset — F-336), compiling the
+// golden `expected-ir.json` through the Rust IR path produces script hex
+// byte-identical to `expected-script.hex`, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently-skipped check.
+// DOES NOT PROVE: `.runar.rs`-source-path parity (that's
+// `conformance_goldens.rs`, a separate declared gate — F-285, untouched
+// here), fold-ON cross-tier parity, or anything about the 4 fixtures
+// opted out of Rust via `source.json`'s `compilers` allowlist
+// (babybear, babybear-ext4, merkle-proof, state-covenant).
 #[test]
 fn test_all_conformance_tests() {
-    let test_dirs = [
-        "arithmetic",
-        "auction",
-        "basic-p2pkh",
-        "blake3",
-        "boolean-logic",
-        "bounded-loop",
-        "convergence-proof",
-        "covenant-vault",
-        "ec-demo",
-        "ec-primitives",
-        "escrow",
-        "function-patterns",
-        "if-else",
-        "if-without-else",
-        "math-demo",
-        "multi-method",
-        "oracle-price",
-        "post-quantum-slhdsa",
-        "post-quantum-wallet",
-        "post-quantum-wots",
-        "property-initializers",
-        // schnorr-zkp omitted — BUG-001's secp256k1-n inline literal
-        // (256 bits) overflows Rust's i128 BigIntLiteral. See
-        // conformance/tests/schnorr-zkp/source.json (compilers allowlist
-        // is ts/go/python only).
-        "sphincs-wallet",
-        "stateful",
-        "stateful-bytestring",
-        "stateful-counter",
-        "token-ft",
-        "token-nft",
-    ];
+    // Fixture list is discovered, not hard-coded (F-336): every fixture under
+    // `conformance/tests/` whose `source.json` does not opt Rust out via a
+    // `compilers` allowlist is exercised here. `schnorr-zkp` has no such
+    // allowlist and is included.
+    let test_dirs = rust_eligible_conformance_fixtures();
 
     let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
 
@@ -635,16 +668,22 @@ fn test_all_conformance_tests() {
         );
 
         // Compare against golden expected-script.hex (with folding disabled to
-        // match the golden files which were generated without constant folding)
-        if let Some(expected_hex) = load_expected_script_hex(dir) {
-            let artifact_no_fold = compile_from_ir_str_with_options(&ir_json, &no_fold)
-                .unwrap_or_else(|e| panic!("compilation (no-fold) failed for {}: {}", dir, e));
-            assert_eq!(
-                artifact_no_fold.script, expected_hex,
-                "{}: IR-compiled script hex does not match golden file",
+        // match the golden files which were generated without constant folding).
+        // Fail closed: a rust-eligible fixture with no golden file is a gate
+        // defect, not a free pass (F-336 — the old code silently skipped this).
+        let expected_hex = load_expected_script_hex(dir).unwrap_or_else(|| {
+            panic!(
+                "{}: missing golden expected-script.hex — the conformance gate must not silently skip a rust-eligible fixture",
                 dir
-            );
-        }
+            )
+        });
+        let artifact_no_fold = compile_from_ir_str_with_options(&ir_json, &no_fold)
+            .unwrap_or_else(|e| panic!("compilation (no-fold) failed for {}: {}", dir, e));
+        assert_eq!(
+            artifact_no_fold.script, expected_hex,
+            "{}: IR-compiled script hex does not match golden file",
+            dir
+        );
 
         println!(
             "{}: hex={} bytes, asm={} chars",
@@ -1045,43 +1084,21 @@ fn test_source_compile_stateful() {
     );
 }
 
+// PROVES: for every rust-eligible conformance fixture (same discovered set
+// as `test_all_conformance_tests` — F-336), compiling the fixture's
+// `.runar.ts` source through the Rust TS frontend produces script hex
+// byte-identical to `expected-script.hex`, and a missing golden for an
+// eligible fixture is a hard test failure, not a silently-skipped check.
+// DOES NOT PROVE: `.runar.rs`-source-path parity (that's
+// `conformance_goldens.rs` — F-285, untouched here), fold-ON cross-tier
+// parity, or anything about the 4 fixtures opted out of Rust via
+// `source.json`'s `compilers` allowlist.
 #[test]
 fn test_source_compile_all_conformance() {
-    // All 27 conformance tests — source files are resolved from either
+    // Fixture list is discovered, not hard-coded (F-336) — same set as
+    // `test_all_conformance_tests`. Source files are resolved from either
     // direct .runar.ts files or via source.json references.
-    let test_dirs = [
-        "arithmetic",
-        "auction",
-        "basic-p2pkh",
-        "blake3",
-        "boolean-logic",
-        "bounded-loop",
-        "convergence-proof",
-        "covenant-vault",
-        "ec-demo",
-        "ec-primitives",
-        "escrow",
-        "function-patterns",
-        "if-else",
-        "if-without-else",
-        "math-demo",
-        "multi-method",
-        "oracle-price",
-        "post-quantum-slhdsa",
-        "post-quantum-wallet",
-        "post-quantum-wots",
-        "property-initializers",
-        // schnorr-zkp omitted — BUG-001's secp256k1-n inline literal
-        // (256 bits) overflows Rust's i128 BigIntLiteral. See
-        // conformance/tests/schnorr-zkp/source.json (compilers allowlist
-        // is ts/go/python only).
-        "sphincs-wallet",
-        "stateful",
-        "stateful-bytestring",
-        "stateful-counter",
-        "token-ft",
-        "token-nft",
-    ];
+    let test_dirs = rust_eligible_conformance_fixtures();
 
     let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
 
@@ -1107,16 +1124,22 @@ fn test_source_compile_all_conformance() {
         );
 
         // Compare against golden expected-script.hex (with folding disabled to
-        // match the golden files which were generated without constant folding)
-        if let Some(expected_hex) = load_expected_script_hex(dir) {
-            let artifact_no_fold = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", dir)), &no_fold)
-                .unwrap_or_else(|e| panic!("source compilation (no-fold) failed for {}: {}", dir, e));
-            assert_eq!(
-                artifact_no_fold.script, expected_hex,
-                "{}: source-compiled script hex does not match golden file",
+        // match the golden files which were generated without constant folding).
+        // Fail closed: a rust-eligible fixture with no golden file is a gate
+        // defect, not a free pass (F-336 — the old code silently skipped this).
+        let expected_hex = load_expected_script_hex(dir).unwrap_or_else(|| {
+            panic!(
+                "{}: missing golden expected-script.hex — the conformance gate must not silently skip a rust-eligible fixture",
                 dir
-            );
-        }
+            )
+        });
+        let artifact_no_fold = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", dir)), &no_fold)
+            .unwrap_or_else(|e| panic!("source compilation (no-fold) failed for {}: {}", dir, e));
+        assert_eq!(
+            artifact_no_fold.script, expected_hex,
+            "{}: source-compiled script hex does not match golden file",
+            dir
+        );
 
         println!(
             "{}: hex={} bytes, asm={} chars",
@@ -1156,10 +1179,18 @@ fn test_source_vs_ir_both_produce_output() {
     let ir_json = load_conformance_ir("basic-p2pkh");
     let ir_artifact = compile_from_ir_str(&ir_json).expect("IR compilation");
 
-    // Compile from source
+    // Compile from source, fold-OFF. `compile_from_ir_str` always forces
+    // constant folding off on the --ir path (see `ir_input_options` in
+    // src/lib.rs), so a fair comparison must disable it on the source path
+    // too, or a divergence could hide behind a fold-vs-no-fold difference
+    // instead of the real question this test asks: do the two pipelines
+    // (parse-source-then-lower vs. load-already-lowered-IR) agree on the
+    // SAME underlying contract.
+    let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
     let source = conformance_source("basic-p2pkh");
-    let source_artifact = compile_from_source_str(&source, Some("basic-p2pkh.runar.ts"))
-        .expect("source compilation");
+    let source_artifact =
+        compile_from_source_str_with_options(&source, Some("basic-p2pkh.runar.ts"), &no_fold)
+            .expect("source compilation");
 
     // Both should produce P2PKH
     assert_eq!(ir_artifact.contract_name, source_artifact.contract_name);
@@ -1168,8 +1199,19 @@ fn test_source_vs_ir_both_produce_output() {
     assert!(!ir_artifact.script.is_empty());
     assert!(!source_artifact.script.is_empty());
 
-    println!("IR hex:     {}", ir_artifact.script);
-    println!("Source hex: {}", source_artifact.script);
+    // The name of this test is a parity claim: `basic-p2pkh`'s checked-in
+    // `expected-ir.json` is itself derived from `basic-p2pkh.runar.ts`, so
+    // compiling the source and compiling that same contract's IR must
+    // produce byte-identical Bitcoin Script hex. Printing both hexes and
+    // stopping at "both non-empty" (the old body) passes even when the two
+    // pipelines silently disagree — e.g. a binary-operator lowering bug that
+    // only reaches the source path changes the emitted bytes without
+    // touching contract_name or non-emptiness.
+    assert_eq!(
+        ir_artifact.script, source_artifact.script,
+        "IR-compiled and source-compiled basic-p2pkh must produce identical script hex\n  IR hex:     {}\n  Source hex: {}",
+        ir_artifact.script, source_artifact.script
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,77 +1656,150 @@ fn test_ir_validate_negative_loop_count() {
 
 #[test]
 fn test_ir_round_trip() {
-    let ir_json = r#"{
-        "contractName": "RoundTrip",
-        "properties": [
-            {"name": "pubKeyHash", "type": "Addr", "readonly": true}
-        ],
-        "methods": [{
-            "name": "unlock",
-            "params": [
-                {"name": "sig", "type": "Sig"},
-                {"name": "pubKey", "type": "PubKey"}
-            ],
-            "body": [
-                {"name": "t0", "value": {"kind": "load_param", "name": "sig"}},
-                {"name": "t1", "value": {"kind": "load_param", "name": "pubKey"}},
-                {"name": "t2", "value": {"kind": "load_prop", "name": "pubKeyHash"}},
-                {"name": "t3", "value": {"kind": "call", "func": "hash160", "args": ["t1"]}},
-                {"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t3", "right": "t2"}},
-                {"name": "t5", "value": {"kind": "assert", "value": "t4"}},
-                {"name": "t6", "value": {"kind": "call", "func": "checkSig", "args": ["t0", "t1"]}},
-                {"name": "t7", "value": {"kind": "assert", "value": "t6"}}
-            ],
-            "isPublic": true
-        }]
-    }"#;
+    // A real round trip: compile source -> ANF IR (passes 1-4) -> serialize
+    // that IR to JSON (the same bytes `--emit-ir` writes) -> reload it
+    // through `compile_from_ir_str` -> compile. Compare the result against
+    // compiling the SAME source directly.
+    //
+    // The old body never serialized anything: it parsed one hand-written IR
+    // JSON *literal* with `compile_from_ir_str`, then parsed the identical
+    // string again, and compared contract_name / method count between the
+    // two. That proves `compile_from_ir_str` is deterministic on a fixed
+    // input, not that `ANFProgram`'s `Serialize`/`Deserialize` round-trips
+    // losslessly -- no `serde_json::to_string` ever ran.
+    //
+    // `ZeroState` is deliberately a StatefulSmartContract with ZERO mutable
+    // properties: `state_fields` ends up empty, so a lossy round trip of the
+    // `parentClass` field (dropped, or silently reset to the empty-string
+    // default) is otherwise invisible -- `is_stateful`'s fallback
+    // (`state_fields.is_empty()` when `parent_class` is empty) can't tell a
+    // genuinely-stateless contract from a stateful one that merely lost its
+    // marker. That flips `abi.methods[].isTerminal` from `Some(true)` to
+    // `None` in the round-tripped artifact while leaving script/asm
+    // unaffected (stack-lowering's terminal-assert trim keys off
+    // `method.is_public`, not `parent_class`), so the ABI JSON is compared
+    // too, not just the script hex.
+    let source = r#"import { StatefulSmartContract, assert } from 'runar-lang';
 
-    let artifact1 = compile_from_ir_str(ir_json).expect("first load should succeed");
-    // Serialize the artifact's source data back — we verify contract name and method count
-    // by re-compiling from the same IR
-    let artifact2 = compile_from_ir_str(ir_json).expect("second load should succeed");
-    assert_eq!(artifact1.contract_name, artifact2.contract_name, "contract name should be identical");
-    assert_eq!(artifact1.abi.methods.len(), artifact2.abi.methods.len(), "method count should be identical");
+export class ZeroState extends StatefulSmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(x: bigint) {
+    assert(x > this.limit);
+  }
+}
+"#;
+    let no_fold = CompileOptions { disable_constant_folding: true, ..Default::default() };
+
+    let direct_artifact =
+        compile_from_source_str_with_options(source, Some("ZeroState.runar.ts"), &no_fold)
+            .expect("direct source compilation");
+
+    let program = runar_compiler_rust::compile_source_str_to_ir_with_options(
+        source,
+        Some("ZeroState.runar.ts"),
+        &no_fold,
+    )
+    .expect("compile to IR");
+    let ir_json = serde_json::to_string(&program).expect("serialize ANF program to JSON");
+
+    let round_tripped_artifact =
+        compile_from_ir_str(&ir_json).expect("round-tripped IR should compile");
+
+    assert_eq!(
+        direct_artifact.contract_name, round_tripped_artifact.contract_name,
+        "contract name should survive the IR round trip"
+    );
+    assert_eq!(
+        direct_artifact.script, round_tripped_artifact.script,
+        "script hex should survive the IR round trip\n  direct:  {}\n  reloaded: {}",
+        direct_artifact.script, round_tripped_artifact.script
+    );
+    assert_eq!(
+        serde_json::to_value(&direct_artifact.abi).unwrap(),
+        serde_json::to_value(&round_tripped_artifact.abi).unwrap(),
+        "ABI (incl. isTerminal, which derives from parentClass) must survive the IR round trip"
+    );
 }
 
 #[test]
 fn test_ir_empty_method_body_valid() {
-    // A method with an empty bindings array but still a final assert is valid.
-    // Actually a method with just assert(true) is the minimal valid form.
+    // The name is the invariant under test: a PUBLIC method whose IR body is
+    // truly `[]` (zero bindings). The old body here didn't test that at all
+    // -- its IR literal had a non-empty, two-binding body
+    // (`load_const true`; `assert`), so it only proved "a minimal valid
+    // method compiles", never touching an actually-empty body.
+    //
+    // The TS reference (packages/runar-compiler/src/index.ts, `compileFromANF`,
+    // rule N-071) REJECTS this case: `--ir` skips the source validator's
+    // ends-with-assert rule, and stack lowering leaves a method's LAST
+    // binding as the script result, so a public method with `"body": []`
+    // would compile to an EMPTY (anyone-can-spend) locking script. Rust's
+    // `ends_with_terminal_assert` (src/ir/loader.rs) enforces the identical
+    // rule with the identical diagnostic, so an actually-empty public-method
+    // body must be refused, not accepted -- "valid" in the old name was
+    // simply the wrong expectation once the body matches the name.
     let ir_json = r#"{
         "contractName": "Empty",
         "properties": [],
         "methods": [{
             "name": "check",
             "params": [],
-            "body": [
-                {"name": "t0", "value": {"kind": "load_const", "value": true}},
-                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
-            ],
+            "body": [],
             "isPublic": true
         }]
     }"#;
     let result = compile_from_ir_str(ir_json);
+    let err = result.expect_err(
+        "a public method with a truly empty IR body must be refused (anyone-can-spend risk), \
+         per the TS reference's N-071 rule",
+    );
     assert!(
-        result.is_ok(),
-        "method with only assert(true) should be valid; got: {:?}",
-        result.err()
+        err.contains("must end with an assert() call"),
+        "expected the N-071 ends-with-assert diagnostic, got: {}",
+        err
     );
 }
 
 #[test]
 fn test_ir_round_trip_with_initial_value() {
+    // The name claims the property's initialValue survives into the
+    // compiled artifact. The old body never checked that: its `check`
+    // method body was `load_const true; assert` -- it never referenced
+    // the `value` property at all (`load_prop "value"` never appears), so
+    // `initialValue` was dead data. Nothing here exercised the codepath
+    // that bakes a readonly property's initializer into the script
+    // (`push_json_value` in src/codegen/stack.rs, reached from
+    // `lower_load_prop` only when the property IS loaded).
+    //
+    // It also used the wrong IR shape: `"initialValue": {"kind":
+    // "load_const", "value": "42n"}` is an ANFValue-shaped wrapper, not the
+    // bare literal `push_json_value` / `parse_const_value` expect. Loading
+    // that property with the old (unused) shape panics ("non-literal
+    // initializer") -- masked only because the property was never loaded.
+    //
+    // This body loads `value` and compares it against a method parameter,
+    // so the baked constant must actually reach the script: 42 decimal is
+    // `0x2a`, pushed as a single-byte push (`01 2a`) immediately before the
+    // `OP_NUMEQUAL` the `===` comparison lowers to.
     let ir_json = r#"{
         "contractName": "InitTest",
         "properties": [
-            {"name": "value", "type": "bigint", "readonly": true, "initialValue": {"kind": "load_const", "value": "42n"}}
+            {"name": "value", "type": "bigint", "readonly": true, "initialValue": "42n"}
         ],
         "methods": [{
             "name": "check",
-            "params": [],
+            "params": [{"name": "x", "type": "bigint"}],
             "body": [
-                {"name": "t0", "value": {"kind": "load_const", "value": true}},
-                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+                {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                {"name": "t1", "value": {"kind": "load_prop", "name": "value"}},
+                {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
             ],
             "isPublic": true
         }]
@@ -1697,13 +1812,34 @@ fn test_ir_round_trip_with_initial_value() {
     );
     let artifact = result.unwrap();
     assert_eq!(artifact.contract_name, "InitTest");
-    // Properties with initialValue should be present in the compiled artifact
     assert!(!artifact.script.is_empty(), "script should not be empty");
+
+    // 012a = single-byte push of 0x2a (42 decimal) -- the property's
+    // initialValue baked directly into the script.
+    assert!(
+        artifact.script.contains("012a"),
+        "expected initialValue 42n baked into the script as a `012a` push \
+         (push 1 byte, value 0x2a); got script: {}",
+        artifact.script
+    );
+    assert!(
+        artifact.asm.contains("2a"),
+        "expected the baked constant 0x2a in the asm; got: {}",
+        artifact.asm
+    );
 }
 
 #[test]
 fn test_ir_round_trip_if_and_loop() {
-    // IR with both an if binding and a loop binding should load and compile correctly
+    // The name claims BOTH the if and the loop bindings round-trip
+    // correctly. The old body only ever checked the `if`
+    // (`asm.contains("OP_IF")`) -- nothing here asserted anything about the
+    // `loop` binding at all. Both `t2` (if) and `t5` (loop) are dead
+    // bindings (their results are never referenced by `t7`/`t8`, the
+    // unrelated `load_const true; assert` that actually drives the
+    // contract), so a loop that unrolled the wrong number of times, or
+    // dropped its body entirely, left OP_IF intact and the script
+    // non-empty -- this test passed regardless.
     let ir_json = r#"{
         "contractName": "IfLoop",
         "properties": [],
@@ -1749,6 +1885,27 @@ fn test_ir_round_trip_if_and_loop() {
     let artifact = result.unwrap();
     assert!(!artifact.script.is_empty(), "script should not be empty");
     assert!(artifact.asm.contains("OP_IF"), "expected OP_IF for if binding");
+
+    // The loop's `"count": 3` must unroll into exactly 3 copies of the body
+    // (`load_const 0`): each iteration pushes its counter then the body's
+    // `0`, and since the body never reads `i`, the counter is immediately
+    // discarded with OP_NIP -- so "OP_0 OP_NIP" appears once per iteration.
+    let loop_unroll_count = artifact.asm.matches("OP_0 OP_NIP").count();
+    assert_eq!(
+        loop_unroll_count, 3,
+        "expected the loop body to unroll exactly 3 times (count: 3); asm: {}",
+        artifact.asm
+    );
+
+    // Pin the exact script hex for this fixture: it reflects both the
+    // if/else shape and the loop unroll count in one check, so a lost `if`
+    // or `loop` node (or a wrong unroll count) changes it.
+    assert_eq!(
+        artifact.script,
+        "787600877c51879b697c6351675268000077510077520077517777777777",
+        "exact script hex for the if+loop fixture changed\n  got: {}",
+        artifact.script
+    );
 }
 
 // ---------------------------------------------------------------------------

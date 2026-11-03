@@ -377,7 +377,10 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
   });
 
   rl.on('close', () => {
-    process.exit(0);
+    // F-221: a session whose script reached a failing verdict (false result
+    // or an interpreter error) exits non-zero; quitting before a verdict
+    // was reached is not a failure.
+    process.exit(vm.isComplete && !vm.isSuccess ? 1 : 0);
   });
 }
 

@@ -30,8 +30,10 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { checkReturnType, makeDiagnostic, staticMethodMessage, unexpectedStructBodyTokenMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA, ZIG_STRUCT_INIT_DOT } from '../errors.js';
+import { assertSourceWithinLimits, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -80,13 +82,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Z
   const tokens: ZigToken[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
     if (ch === '\n') {
       line++;
-      column = 1;
+      column = 0;
     } else {
       column++;
     }
@@ -158,25 +160,31 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Z
     if (ch === '"') {
       let value = '';
       advance();
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Zig string literal cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
           advance();
+          if (peek() === '\n' || peek() === '') break;
           value += advance();
         } else {
           value += advance();
         }
       }
-      if (pos < source.length) advance();
+      if (peek() === '"') advance();
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: tokenLine, column: tokenColumn }));
       add('string', value, tokenLine, tokenColumn);
       continue;
     }
 
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Zig integer
+    // literal. Stopping at the first non-digit read `0b1010` as `0` + `b1010`.
     if (/[0-9]/.test(ch)) {
-      let value = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        value += advance();
-      }
-      add('number', value.replace(/_/g, ''), tokenLine, tokenColumn);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('zig', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('zig', text), 'error', { file, line: tokenLine, column: tokenColumn }));
+      add('number', lit ? lit.value.toString() : '0', tokenLine, tokenColumn);
       continue;
     }
 
@@ -223,6 +231,7 @@ const ZIG_TYPE_MAP: Record<string, string> = {
   bool: 'boolean',
   void: 'void',
   Bigint: 'bigint',
+  BigintBig: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey',
   Sig: 'Sig',
@@ -256,7 +265,29 @@ const PRIMITIVE_TYPES = new Set<PrimitiveTypeName>([
   'void',
 ]);
 
+/**
+ * N-009: the `while (cond) : (upd) { ... }` desugaring's merge placeholder.
+ * `parseWhileStatement` always synthesizes this name as the for-statement's
+ * init; `parseBlockStatements` replaces it with the real preceding
+ * declaration when one matches the update target. A LEADING SPACE makes the
+ * name unspellable in `.runar.zig` source (no surface's identifier lexer
+ * produces a token containing whitespace), so a developer local can never
+ * collide with it — if it were a plain identifier, a local literally named
+ * `__while_no_init` that is NOT adjacent to its `while` would alias the
+ * placeholder by string equality, and `04-anf-lower.ts`'s condition-iterator
+ * check (`condition.left.name !== stmt.init.name`) would then compare equal
+ * and silently unroll from this placeholder's start of 0 instead of the
+ * developer's real start.
+ */
+const WHILE_NO_INIT_PLACEHOLDER = ' __while_no_init';
+
 /** Map Zig-style builtin names to canonical Rúnar camelCase names. */
+/** N-448 — every tier's .runar.zig parser emits this verbatim. */
+export function zigBareStringLiteralMessage(lit: string): string {
+  return `bare string literal "${lit}" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex — ` +
+    `write runar.hexToBytes("${lit}") for hex bytes`;
+}
+
 const ZIG_BUILTIN_MAP: Record<string, string> = {
   verifyECDSAP256: 'verifyECDSA_P256',
   verifyECDSAP384: 'verifyECDSA_P384',
@@ -281,14 +312,29 @@ interface ParsedType {
   type: TypeNode;
   rawName: string;
   readonly?: boolean;
+  /** N-093: `runar.EmbedAlways(T)`, the native spelling of `@embedAlways`. */
+  embedAlways?: boolean;
 }
 
+/** The `ctx.<member>` intrinsics a StatefulContext handle exposes. */
+const STATEFUL_CONTEXT_MEMBERS = new Set(['txPreimage', 'getStateScript', 'addOutput', 'addRawOutput', 'addDataOutput']);
+
 class ZigParser extends ParserCore<ZigToken> {
+  /** N-448: string tokens whose bare use is legal (hexToBytes / asm bodies). */
+  private bareLiteralOk = new WeakSet<ZigToken>();
+
   private contractName = 'UnnamedContract';
   private parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
   private properties: PropertyNode[] = [];
   private methods: MethodNode[] = [];
   private constructorNode: MethodNode | null = null;
+  /**
+   * N-490: where the constructor statements the source does not write (the
+   * implied super() call and property assignments) are anchored: the contract
+   * struct's `struct` keyword once it is parsed. 1:0 only before that, on the
+   * no-contract error path.
+   */
+  private ctorLoc: SourceLocation = { file: '', line: 1, column: 0 };
   private selfNames = new Set<string>();
   private statefulContextNames = new Set<string>();
 
@@ -310,7 +356,7 @@ class ZigParser extends ParserCore<ZigToken> {
     this.errors.push(makeDiagnostic(
       'Expected Zig contract declaration `pub const Name = struct { ... };`',
       'error',
-      { file: this.file, line: 1, column: 1 },
+      { file: this.file, line: 1, column: 0 },
     ));
 
     return {
@@ -352,7 +398,7 @@ class ZigParser extends ParserCore<ZigToken> {
     this.errors.push(makeDiagnostic(
       'Expected `const runar = @import("runar");` at the top of the file',
       'error',
-      { file: this.file, line: 1, column: 1 },
+      { file: this.file, line: 1, column: 0 },
     ));
   }
 
@@ -379,7 +425,8 @@ class ZigParser extends ParserCore<ZigToken> {
     this.methods = [];
     this.constructorNode = null;
 
-    this.expect('struct');
+    const structToken = this.expect('struct');
+    this.ctorLoc = { file: this.file, line: structToken.line, column: structToken.column };
     this.expect('{');
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
@@ -408,7 +455,14 @@ class ZigParser extends ParserCore<ZigToken> {
         continue;
       }
 
-      this.advance();
+      // N-410: any other token is refused, never skipped (a skipped stray
+      // token is how a line of the struct body vanished without a word).
+      const stray = this.advance();
+      this.errors.push(makeDiagnostic(
+        unexpectedStructBodyTokenMessage(stray.value || stray.type),
+        'error',
+        { file: this.file, line: stray.line, column: stray.column },
+      ));
     }
 
     this.expect('}');
@@ -455,13 +509,22 @@ class ZigParser extends ParserCore<ZigToken> {
     if (this.current().type === 'ident' && this.current().value === 'runar') {
       this.advance();
       this.expect('.');
-      const parent = this.expect('ident').value;
+      const parentToken = this.expect('ident');
+      const parent = parentToken.value;
       if (parent === 'StatefulSmartContract') {
         this.parentClass = 'StatefulSmartContract';
       } else if (parent === 'UnsafeSmartContract') {
         this.parentClass = 'UnsafeSmartContract';
       } else {
         this.parentClass = 'SmartContract';
+        if (parent !== 'SmartContract') {
+          // N-014: an unknown base is refused, never folded to SmartContract.
+          this.errors.push(makeDiagnostic(
+            `unknown parent class: '${parent}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`,
+            'error',
+            { file: this.file, line: parentToken.line, column: parentToken.column },
+          ));
+        }
       }
     }
 
@@ -480,7 +543,9 @@ class ZigParser extends ParserCore<ZigToken> {
       initializer = this.parseExpression();
     }
 
-    if (this.current().type === ',') this.advance();
+    // N-033: Zig separates fields with `,`; only the last field before `}`
+    // may omit it.
+    this.expectListSeparator('}');
 
     return {
       kind: 'property',
@@ -488,6 +553,7 @@ class ZigParser extends ParserCore<ZigToken> {
       type: parsedType.type,
       readonly: parsedType.readonly ?? false,
       initializer,
+      ...(parsedType.embedAlways ? { embedAlways: true } : {}),
       sourceLocation,
     };
   }
@@ -499,8 +565,32 @@ class ZigParser extends ParserCore<ZigToken> {
     const name = this.expect('ident').value;
     const { params, receiverName, statefulContextNames } = this.parseParamList();
 
-    if (this.current().type !== '{') {
-      this.parseType();
+    // Return type. N-093: `runar.Sighash("FLAGS")` in its place is the
+    // native spelling of the `@sighash` directive (natively it is `void`).
+    const sighashSpecs: Array<string | null> = [];
+    if (this.current().type === 'ident' && this.current().value === 'runar' &&
+        this.tokens[this.pos + 1]?.type === '.' &&
+        this.tokens[this.pos + 2]?.type === 'ident' && this.tokens[this.pos + 2]?.value === 'Sighash') {
+      this.advance(); this.advance(); this.advance();
+      this.expect('(');
+      const arg = this.current();
+      let count = 0;
+      let depth = 0;
+      while (this.current().type !== 'eof') {
+        const t = this.current().type;
+        if (t === ')' && depth === 0) break;
+        if (t === '(') depth++;
+        if (t === ')') depth--;
+        this.advance();
+        count++;
+      }
+      this.expect(')');
+      sighashSpecs.push(count === 1 && arg.type === 'string' ? arg.value : null);
+    } else if (this.current().type !== '{') {
+      // The AST keeps no return type; N-331 refuses an unknown name. `init`
+      // returns the contract struct itself, which is not a type to check.
+      const returnType = this.parseType();
+      if (name !== 'init') checkReturnType(returnType.type, name, sourceLocation, this.errors, isPublic);
     }
 
     const previousSelfNames = this.selfNames;
@@ -508,7 +598,19 @@ class ZigParser extends ParserCore<ZigToken> {
     this.selfNames = receiverName ? new Set([receiverName]) : new Set();
     this.statefulContextNames = new Set(statefulContextNames);
 
+    // N-050: a `pub fn` without a receiver of the contract type is a
+    // namespace (static) function, not a contract method; it used to become
+    // an entry point. A private receiver-less `fn` stays a helper (the
+    // multi-method golden's `computeThreshold`), like a Go free function (R9).
+    if (isPublic && receiverName === null && name !== 'init') {
+      this.errors.push(makeDiagnostic(staticMethodMessage(name), 'error', sourceLocation));
+    }
+
     if (name === 'init') {
+      // N-093: the constructor is not a spending entry point.
+      if (sighashSpecs.length > 0) {
+        this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sourceLocation));
+      }
       this.constructorNode = this.parseConstructor(sourceLocation, params);
       this.selfNames = previousSelfNames;
       this.statefulContextNames = previousStatefulContextNames;
@@ -519,12 +621,18 @@ class ZigParser extends ParserCore<ZigToken> {
     this.selfNames = previousSelfNames;
     this.statefulContextNames = previousStatefulContextNames;
 
+    const sighash = resolveNativeSighash(name, isPublic, sighashSpecs);
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', sourceLocation));
+    }
+
     return {
       kind: 'method',
       name,
       params,
       body,
       visibility: isPublic ? 'public' : 'private',
+      ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
       sourceLocation,
     };
   }
@@ -562,17 +670,27 @@ class ZigParser extends ParserCore<ZigToken> {
         receiverName = paramName;
       } else {
         if (parsedType.rawName === 'StatefulContext') {
+          // N-304: the context is a surface artifact the compiler re-injects,
+          // not a spending parameter. Dropping it here (as the Go, Rust,
+          // Python, Ruby and Java Zig parsers do; the Zig tier keeps it in its
+          // AST and elides it in ANF lowering) keeps it out of the artifact
+          // ABI, which is built from the AST param list. `ctx.txPreimage` /
+          // `ctx.addOutput` are rewritten to `this.*` via
+          // statefulContextNames, and N-453: a bare `ctx` passed to
+          // `self.method(...)` is dropped from the call (parsePostfixChain).
           statefulContextNames.add(paramName);
+        } else {
+          params.push({
+            kind: 'param',
+            name: paramName,
+            type: parsedType.type,
+          });
         }
-        params.push({
-          kind: 'param',
-          name: paramName,
-          type: parsedType.type,
-        });
       }
 
       index++;
-      if (this.current().type === ',') this.advance();
+      // N-033: parameters are separated by `,` (a trailing one is allowed).
+      if (!this.expectListSeparator(')')) break;
     }
 
     this.expect(')');
@@ -593,7 +711,7 @@ class ZigParser extends ParserCore<ZigToken> {
       const lengthToken = this.expect('number');
       const length = Number.parseInt(lengthToken.value, 10);
       this.expect(']');
-      const element = this.parseType();
+      const element = this.nest.nested(this.loc(), () => this.parseType());
       return {
         type: { kind: 'fixed_array_type', element: element.type, length: Number.isFinite(length) ? length : 0 },
         rawName: element.rawName,
@@ -607,9 +725,15 @@ class ZigParser extends ParserCore<ZigToken> {
       const name = this.expect('ident').value;
       if (name === 'Readonly' && this.current().type === '(') {
         this.expect('(');
-        const inner = this.parseType();
+        const inner = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(')');
         return { ...inner, readonly: true };
+      }
+      if (name === 'EmbedAlways' && this.current().type === '(') {
+        this.expect('(');
+        const inner = this.nest.nested(this.loc(), () => this.parseType());
+        this.expect(')');
+        return { ...inner, embedAlways: true };
       }
       const mapped = mapZigType(name);
       return { type: makePrimitiveOrCustom(mapped), rawName: name };
@@ -642,7 +766,7 @@ class ZigParser extends ParserCore<ZigToken> {
           ? this.getLoopUpdateTargetName(statement)
           : null;
         if (statement.kind === 'for_statement' &&
-            (statement as ForStatement).init.name === '__while_no_init' &&
+            (statement as ForStatement).init.name === WHILE_NO_INIT_PLACEHOLDER &&
             lastStmt?.kind === 'variable_decl' &&
             loopInitName === lastStmt.name) {
           body.pop();
@@ -704,12 +828,19 @@ class ZigParser extends ParserCore<ZigToken> {
     this.expect('{');
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
-      if (this.current().type === '.') this.advance();
+      // N-410: Zig requires the leading `.` of a struct-init field.
+      if (this.current().type === '.') {
+        this.advance();
+      } else {
+        const t = this.current();
+        this.errors.push(makeDiagnostic(ZIG_STRUCT_INIT_DOT, 'error', { file: this.file, line: t.line, column: t.column }));
+      }
       const field = this.expect('ident').value;
       this.expect('=');
       const value = this.parseExpression();
       assignments.push(this.createPropertyAssignment(field, value));
-      if (this.current().type === ',') this.advance();
+      // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+      if (!this.expectListSeparator('}')) break;
     }
 
     this.expect('}');
@@ -717,6 +848,10 @@ class ZigParser extends ParserCore<ZigToken> {
   }
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const sourceLocation = this.loc();
 
     if (this.current().type === 'return') {
@@ -737,14 +872,19 @@ class ZigParser extends ParserCore<ZigToken> {
       return this.parseVariableDecl();
     }
 
+    // N-053: Zig's discard `_ = expr;` drops the VALUE, not the evaluation —
+    // a helper called for its asserts must keep them, so lower `expr` as an
+    // expression statement. Only a bare name (the unused-binding idiom
+    // `_ = self;` / `_ = param;`) is dropped: reading a name has no effect.
     if (this.current().type === 'ident' &&
         this.current().value === '_' &&
         this.tokens[this.pos + 1]?.type === '=') {
       this.advance();
       this.advance();
-      this.parseExpression();
+      const expression = this.parseExpression();
       if (this.current().type === ';') this.advance();
-      return null;
+      if (expression.kind === 'identifier') return null;
+      return { kind: 'expression_statement', expression, sourceLocation };
     }
 
     if (this.current().type === 'while') {
@@ -824,7 +964,7 @@ class ZigParser extends ParserCore<ZigToken> {
     if (this.current().type === 'else') {
       this.advance();
       if (this.current().type === 'if') {
-        elseBranch = [this.parseIfStatement()];
+        elseBranch = [this.nest.nested(this.loc(), () => this.parseIfStatement())];
       } else {
         elseBranch = this.parseBlockStatements();
       }
@@ -891,7 +1031,7 @@ class ZigParser extends ParserCore<ZigToken> {
       kind: 'for_statement',
       init: {
         kind: 'variable_decl',
-        name: '__while_no_init',
+        name: WHILE_NO_INIT_PLACEHOLDER,
         mutable: true,
         init: { kind: 'bigint_literal', value: 0n },
         sourceLocation,
@@ -920,7 +1060,7 @@ class ZigParser extends ParserCore<ZigToken> {
         callee: { kind: 'identifier', name: 'super' },
         args: params.map(param => ({ kind: 'identifier', name: param.name })),
       },
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 
@@ -929,7 +1069,7 @@ class ZigParser extends ParserCore<ZigToken> {
       kind: 'assignment',
       target: { kind: 'property_access', property: name },
       value,
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 
@@ -951,7 +1091,7 @@ class ZigParser extends ParserCore<ZigToken> {
         ...params.map(param => this.createPropertyAssignment(param.name, { kind: 'identifier', name: param.name })),
       ],
       visibility: 'public',
-      sourceLocation: { file: this.file, line: 1, column: 1 },
+      sourceLocation: { ...this.ctorLoc, file: this.file },
     };
   }
 
@@ -981,17 +1121,19 @@ class ZigParser extends ParserCore<ZigToken> {
   }
 
   protected parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     // Zig's `&` is the address-of operator used for slice coercion at call
     // sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a
@@ -1025,11 +1167,7 @@ class ZigParser extends ParserCore<ZigToken> {
       this.advance();
       this.advance();
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== '}' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements('}');
       this.expect('}');
       return { kind: 'array_literal', elements };
     }
@@ -1037,11 +1175,7 @@ class ZigParser extends ParserCore<ZigToken> {
     if (token.type === '.' && this.tokens[this.pos + 1]?.type === '{') {
       this.advance();
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== '}' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements('}');
       this.expect('}');
       return { kind: 'array_literal', elements };
     }
@@ -1053,7 +1187,14 @@ class ZigParser extends ParserCore<ZigToken> {
 
     if (token.type === 'string') {
       this.advance();
-      return { kind: 'bytestring_literal', value: token.value };
+      // N-448: a bare non-empty literal is REFUSED — natively it is ASCII text
+      // while the compiler reads hex. The hex spelling is
+      // runar.hexToBytes("..."); the empty string is exempt, and so is the
+      // opcode body of runar.asm(...) (see bareLiteralOk).
+      if (token.value !== '' && !this.bareLiteralOk.has(token)) {
+        this.errors.push(makeDiagnostic(zigBareStringLiteralMessage(token.value), 'error', { file: this.file, line: token.line, column: token.column }));
+      }
+      return { kind: 'bytestring_literal', value: token.value, sourceLocation: { file: this.file, line: token.line, column: token.column } };
     }
 
     if (token.type === 'true') {
@@ -1086,20 +1227,12 @@ class ZigParser extends ParserCore<ZigToken> {
         this.advance(); // ']'
         this.parseType(); // discard element type
         this.expect('{');
-        const elements: Expression[] = [];
-        while (this.current().type !== '}' && this.current().type !== 'eof') {
-          elements.push(this.parseExpression());
-          if (this.current().type === ',') this.advance();
-        }
+        const elements = this.parseListElements('}');
         this.expect('}');
         return { kind: 'array_literal', elements };
       }
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== ']' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements(']');
       this.expect(']');
       return { kind: 'array_literal', elements };
     }
@@ -1209,10 +1342,13 @@ class ZigParser extends ParserCore<ZigToken> {
         // Mirrors parse_zig.zig and parse_python.zig's bytes.fromhex(...).
         if (builtin === 'hexToBytes' && this.current().type === '(') {
           this.advance();
+          // N-448: the argument is the explicit hex spelling, so a literal
+          // here is legal (it is the only place one is, besides asm bodies).
+          if (this.current().type === 'string') this.bareLiteralOk.add(this.current());
           const arg = this.parseExpression();
           this.expect(')');
           if (arg.kind === 'bytestring_literal') {
-            return { kind: 'bytestring_literal', value: arg.value };
+            return { kind: 'bytestring_literal', value: arg.value, sourceLocation: arg.sourceLocation };
           }
           this.errors.push(makeDiagnostic(
             "runar.hexToBytes expects a string literal argument",
@@ -1221,10 +1357,15 @@ class ZigParser extends ParserCore<ZigToken> {
           ));
           return { kind: 'bytestring_literal', value: '' };
         }
+        // N-448: the first argument of runar.asm(...) is an opcode body, not a
+        // ByteString value, so a bare literal there stays legal.
+        if (builtin === 'asm' && this.current().type === '(' && this.tokens[this.pos + 1]?.type === 'string') {
+          this.bareLiteralOk.add(this.tokens[this.pos + 1]!);
+        }
         return { kind: 'identifier', name: ZIG_BUILTIN_MAP[builtin] ?? builtin };
       }
 
-      return { kind: 'identifier', name: token.value };
+      return { kind: 'identifier', name: token.value, sourceLocation: { file: this.file, line: token.line, column: token.column } };
     }
 
     // Nothing in the Zig surface syntax can start an expression with this
@@ -1419,16 +1560,60 @@ class ZigParser extends ParserCore<ZigToken> {
     }
   }
 
+  /**
+   * F-026: the elements of a call argument list or array literal, up to (not
+   * including) `close`. Zig requires `,` between elements; a trailing one is
+   * allowed. Without the comma a stray token after a literal (`0b1010` read as
+   * `0` + `b1010`) used to become an extra argument.
+   */
+  private parseListElements(close: string): Expression[] {
+    const elements: Expression[] = [];
+    while (this.current().type !== close && this.current().type !== 'eof') {
+      elements.push(this.parseExpression());
+      if (this.current().type === ',') {
+        this.advance();
+        continue;
+      }
+      if (this.current().type !== close) {
+        const t = this.current();
+        this.errors.push(makeDiagnostic(ZIG_LIST_COMMA, 'error', { file: this.file, line: t.line, column: t.column }));
+      }
+      break;
+    }
+    return elements;
+  }
+
+  /**
+   * N-033: after a field, parameter or struct-init entry, consume the `,`
+   * that separates it from the next one. Returns false (after reporting
+   * ZIG_LIST_COMMA at the current token) when the next token is neither `,`
+   * nor `close`; returns true otherwise, without consuming `close`.
+   */
+  private expectListSeparator(close: string): boolean {
+    if (this.current().type === ',') {
+      this.advance();
+      return true;
+    }
+    if (this.current().type === close) return true;
+    const t = this.current();
+    this.errors.push(makeDiagnostic(ZIG_LIST_COMMA, 'error', { file: this.file, line: t.line, column: t.column }));
+    return false;
+  }
+
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {
     while (true) {
       if (this.current().type === '(') {
         this.advance();
-        const args: Expression[] = [];
-        while (this.current().type !== ')' && this.current().type !== 'eof') {
-          args.push(this.parseExpression());
-          if (this.current().type === ',') this.advance();
-        }
+        let args = this.parseListElements(')');
         this.expect(')');
+        // N-453: the StatefulContext parameter is elided from every method's
+        // parameter list, so a `self.helper(ctx, ...)` call drops the bare
+        // handle too and the arities agree. Anywhere else (including the
+        // output intrinsics) a bare `ctx` stays an identifier and is refused
+        // as an undefined variable.
+        if (expr.kind === 'property_access' && !STATEFUL_CONTEXT_MEMBERS.has(expr.property)) {
+          args = args.filter((a) => !(a.kind === 'identifier' && this.statefulContextNames.has(a.name)));
+        }
         expr = { kind: 'call_expr', callee: expr, args };
       } else if (this.current().type === '.') {
         this.advance();
@@ -1470,5 +1655,5 @@ export function parseZigSource(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new ZigParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

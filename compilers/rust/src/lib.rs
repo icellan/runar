@@ -9,6 +9,7 @@ pub mod codegen;
 pub mod frontend;
 pub mod ir;
 pub mod refusal;
+mod stateful_scaffold;
 
 use artifact::{assemble_artifact, RunarArtifact};
 use codegen::emit::emit;
@@ -118,7 +119,11 @@ fn apply_constructor_args(
     let prop_name_set: std::collections::HashSet<&str> =
         program.properties.iter().map(|p| p.name.as_str()).collect();
     let mut shape_errors: Vec<String> = Vec::new();
-    for key in args.keys() {
+    // F-266: sorted, not `args.keys()` — HashMap order is randomised per map,
+    // which made this refusal text change from one compile to the next.
+    let mut keys: Vec<&String> = args.keys().collect();
+    keys.sort();
+    for key in keys {
         if !prop_name_set.contains(key.as_str()) {
             let prop_names: Vec<&str> =
                 program.properties.iter().map(|p| p.name.as_str()).collect();
@@ -129,6 +134,14 @@ fn apply_constructor_args(
                 program.contract_name,
                 prop_names.join(", ")
             ));
+        }
+    }
+    // (d) Value kind / width check (F-101), in property declaration order.
+    for prop in &program.properties {
+        if let Some(val) = args.get(&prop.name) {
+            if let Some(msg) = constructor_arg_type_error(&prop.name, &prop.prop_type, val) {
+                shape_errors.push(msg);
+            }
         }
     }
     if !shape_errors.is_empty() {
@@ -144,6 +157,72 @@ fn apply_constructor_args(
 
     // (c) Unbaked-referenced-readonly reject.
     find_unbaked_referenced_readonly(program)
+}
+
+/// F-101: the diagnostic for a `constructor_args` value that does not match
+/// its property's declared type, or `None` when it matches. Stack lowering
+/// pushes whatever it is handed — `true` as OP_1, `42` as a 1-byte number, a
+/// 6-byte hex string as a 6-byte push — so without this a wrong-typed value
+/// where a 20-byte hash belongs compiles cleanly into an unspendable script.
+/// Message text is shared verbatim with the TypeScript reference
+/// (`constructorArgTypeError` in packages/runar-compiler/src/index.ts).
+///
+/// "Integer" is what `ir::parse_const_value` reads as one: an integral JSON
+/// number or a `"<digits>n"` decimal-bigint string.
+fn constructor_arg_type_error(
+    name: &str,
+    prop_type: &str,
+    val: &serde_json::Value,
+) -> Option<String> {
+    use serde_json::Value;
+    use std::str::FromStr;
+    let is_int = match val {
+        Value::Number(n) => num_bigint::BigInt::from_str(&n.to_string()).is_ok(),
+        Value::String(s) => ir::is_decimal_bigint_literal(s),
+        _ => false,
+    };
+    let hex_len = match val {
+        Value::String(s)
+            if !is_int && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Some(s.len() / 2)
+        }
+        _ => None,
+    };
+    let (expected, ok) = if frontend::typecheck::is_bigint_subtype(prop_type) {
+        ("an integer".to_string(), is_int)
+    } else if prop_type == "boolean" {
+        ("a boolean".to_string(), matches!(val, Value::Bool(_)))
+    } else if frontend::typecheck::is_bytestring_subtype(prop_type) {
+        match codegen::stack::constructor_slot_value_bytes(prop_type) {
+            Some(w) => (
+                format!("exactly {} bytes of hex", w),
+                hex_len == Some(w as usize),
+            ),
+            None => ("a hex string".to_string(), hex_len.is_some()),
+        }
+    } else {
+        return Some(format!(
+            "constructorArgs value for property '{}' ({}) cannot be baked: \
+             unsupported property type.",
+            name, prop_type
+        ));
+    };
+    if ok {
+        return None;
+    }
+    let got = match (val, hex_len) {
+        (Value::Bool(_), _) => "a boolean".to_string(),
+        _ if is_int => "an integer".to_string(),
+        (_, Some(n)) => format!("{} bytes of hex", n),
+        (Value::String(_), None) => "a non-hex string".to_string(),
+        _ => "an unsupported value".to_string(),
+    };
+    Some(format!(
+        "constructorArgs value for property '{}' ({}) must be {}, got {}. \
+         Baking it would silently put the wrong value in the locking script.",
+        name, prop_type, expected, got
+    ))
 }
 
 /// After baking `constructor_args`, find readonly properties that are
@@ -253,6 +332,40 @@ impl CompileResult {
     }
 }
 
+/// F-217: `parse_only` / `validate_only` / `typecheck_only` are honored only
+/// by `compile_from_source_str_with_result` (and `compile_from_source_with_result`),
+/// which collects diagnostics into a `CompileResult` and can represent
+/// "stopped successfully after an earlier pass, no artifact yet" as a value.
+///
+/// The plain `Result<RunarArtifact, String>` / `Result<ir::ANFProgram, String>`
+/// entry points below cannot represent that outcome — there is no `Ok` value
+/// to return after stopping before an artifact (or, for the IR-producing
+/// entry points, before the ANF) exists. Before this fix they silently never
+/// checked these fields and ran every later pass anyway, so whether the
+/// option did anything depended on which return type the caller happened to
+/// pick rather than on the option itself. Reject explicitly instead, before
+/// any pass runs, and name the dedicated API that does honor it.
+fn reject_unsupported_stop_after_pass_options(opts: &CompileOptions) -> Result<(), String> {
+    let set: Vec<&str> = [
+        ("parse_only", opts.parse_only),
+        ("validate_only", opts.validate_only),
+        ("typecheck_only", opts.typecheck_only),
+    ]
+    .into_iter()
+    .filter_map(|(name, v)| if v { Some(name) } else { None })
+    .collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "CompileOptions.{} is not supported by this API: it would stop before an artifact exists, \
+         and this API has no way to return a value for that. Use compile_from_source_str_with_result \
+         (or compile_from_source_with_result), which honors this option and reports partial success via \
+         CompileResult.",
+        set.join(" / ")
+    ))
+}
+
 /// Compile from an ANF IR JSON file on disk.
 pub fn compile_from_ir(path: &Path) -> Result<RunarArtifact, String> {
     compile_from_ir_with_options(path, &CompileOptions::default())
@@ -317,6 +430,12 @@ pub fn compile_from_source_str_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<RunarArtifact, String> {
+    // N-285: prime the catch_refusal install here too, so a single-threaded
+    // caller who never read refusal::init's doc still gets the one-time
+    // install done before the first guarded pass runs below.
+    refusal::init();
+    reject_unsupported_stop_after_pass_options(opts)?;
+
     // Pass 1: Parse (auto-selects parser based on file extension)
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
         .map_err(|e| e.message)?;
@@ -385,7 +504,7 @@ pub fn compile_from_source_str_with_options(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         })
         .map_err(|e| e.message)?;
     }
@@ -409,13 +528,26 @@ pub fn compile_source_to_ir(path: &Path) -> Result<ir::ANFProgram, String> {
 
 /// Compile from a `.runar.ts` source file to ANF IR only (passes 1-4), with options.
 pub fn compile_source_to_ir_with_options(path: &Path, opts: &CompileOptions) -> Result<ir::ANFProgram, String> {
+    compile_source_to_ir_collecting_warnings(path, opts).map(|(program, _)| program)
+}
+
+/// `compile_source_to_ir_with_options`, plus the warning-severity diagnostics
+/// that function has to discard: the validator's warnings and the issue-#109
+/// DCE notice, the same set `compile_from_source_with_result` reports.
+///
+/// F-220: the CLI's `--emit-ir` used the plain function, so every warning
+/// (the H2 locktime-bypass advisory among them) was dropped on that path.
+pub fn compile_source_to_ir_collecting_warnings(
+    path: &Path,
+    opts: &CompileOptions,
+) -> Result<(ir::ANFProgram, Vec<frontend::diagnostic::Diagnostic>), String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("reading source file: {}", e))?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "contract.ts".to_string());
-    compile_source_str_to_ir_with_options(&source, Some(&file_name), opts)
+    compile_source_str_to_ir_collecting_warnings(&source, Some(&file_name), opts)
 }
 
 /// Compile from a `.runar.ts` source string to ANF IR only (passes 1-4).
@@ -432,6 +564,19 @@ pub fn compile_source_str_to_ir_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<ir::ANFProgram, String> {
+    compile_source_str_to_ir_collecting_warnings(source, file_name, opts).map(|(program, _)| program)
+}
+
+/// String form of `compile_source_to_ir_collecting_warnings` (F-220).
+pub fn compile_source_str_to_ir_collecting_warnings(
+    source: &str,
+    file_name: Option<&str>,
+    opts: &CompileOptions,
+) -> Result<(ir::ANFProgram, Vec<frontend::diagnostic::Diagnostic>), String> {
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
+    reject_unsupported_stop_after_pass_options(opts)?;
+
     let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
         .map_err(|e| e.message)?;
     if !parse_result.errors.is_empty() {
@@ -477,10 +622,10 @@ pub fn compile_source_str_to_ir_with_options(
             error_msgs.join("\n  ")
         ));
     }
-    let contract = expand_result.contract;
+    let expanded_contract = expand_result.contract;
 
     // Pass 4: ANF Lower (catch panics)
-    let mut anf_program = frontend::anf_lower::try_lower_to_anf(&contract)?;
+    let mut anf_program = frontend::anf_lower::try_lower_to_anf(&expanded_contract)?;
 
     // Bake constructor args into ANF properties (validated first).
     let arg_errors = apply_constructor_args(&mut anf_program, &opts.constructor_args);
@@ -494,13 +639,20 @@ pub fn compile_source_str_to_ir_with_options(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         })
         .map_err(|e| e.message)?;
     }
 
-    guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
-        .map_err(|e| e.message)
+    let anf_program =
+        guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
+            .map_err(|e| e.message)?;
+
+    // Same warning set, from the same (pre-expansion AST, post-EC-opt ANF)
+    // pair, as compile_from_source_str_with_result.
+    let mut warnings = validation.warnings;
+    warnings.extend(embed_always_dce_warnings(&contract, &anf_program));
+    Ok((anf_program, warnings))
 }
 
 /// Run only the parse + validate passes on a source string.
@@ -518,6 +670,323 @@ pub fn frontend_validate(source: &str, file_name: Option<&str>) -> (Vec<String>,
     (result.error_strings(), result.warning_strings())
 }
 
+/// F-107: a readonly property may only be written in the constructor
+/// ("cannot assign to readonly property"), and an `update_prop` must name a
+/// declared property. Walks every non-constructor method at every nesting
+/// depth (`if` arms, `loop` bodies). Port of Go F-004 `checkNoReadonlyWrites`
+/// (compilers/go/compiler/ir_frontend_rules.go), diagnostics verbatim.
+fn check_ir_no_readonly_writes(program: &ir::ANFProgram) -> Result<(), String> {
+    let readonly: std::collections::HashMap<&str, bool> = program
+        .properties
+        .iter()
+        .map(|p| (p.name.as_str(), p.readonly))
+        .collect();
+    for m in program.methods.iter().filter(|m| m.name != "constructor") {
+        check_no_readonly_writes(&m.body, &m.name, &readonly)?;
+    }
+    Ok(())
+}
+
+fn check_no_readonly_writes(
+    bindings: &[ir::ANFBinding],
+    method_name: &str,
+    readonly: &std::collections::HashMap<&str, bool>,
+) -> Result<(), String> {
+    for b in bindings {
+        match &b.value {
+            ir::ANFValue::UpdateProp { name, .. } => match readonly.get(name.as_str()) {
+                None => {
+                    return Err(format!(
+                        "IR validation: method '{}' assigns to undeclared property '{}'",
+                        method_name, name
+                    ))
+                }
+                Some(true) => {
+                    return Err(format!(
+                        "IR validation: cannot assign to readonly property '{}' in method '{}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script",
+                        name, method_name
+                    ))
+                }
+                Some(false) => {}
+            },
+            ir::ANFValue::If { then, else_branch, .. } => {
+                check_no_readonly_writes(then, method_name, readonly)?;
+                check_no_readonly_writes(else_branch, method_name, readonly)?;
+            }
+            ir::ANFValue::Loop { body, .. } => {
+                check_no_readonly_writes(body, method_name, readonly)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// N-265: `--ir` skips `frontend::validator`'s `check_no_recursion`, which
+/// enforces both the call-graph cycle rule and N-180's `MAX_CALL_DEPTH` (128)
+/// bound. Stack lowering (codegen/stack.rs's `inline_method_call`) inlines
+/// every `method_call` to a private method by lowering its body in place,
+/// with no cycle or depth guard, so a self/mutually-recursive method
+/// recurses the host call stack until it aborts, and an acyclic chain past
+/// the bound recurses it just as deep. Ported from Go's F-071
+/// `checkIRNoRecursion` (compilers/go/compiler/ir_frontend_rules.go), made
+/// iterative there too under this item, and extended with N-180's depth
+/// bound — Go's existing IR-path check was cycle-only.
+///
+/// Two passes, cycles checked before depth (a cyclic graph has no finite
+/// depth to measure), both iterative (explicit stack, no host recursion):
+///   1. `assert_ir_no_cycle` — the exact "hit" a recursive depth-first
+///      search would report the moment it finds a back edge: a method
+///      strictly ON the cycle, not every caller that merely reaches it.
+///   2. `assert_ir_call_depth_bound` — once known acyclic, a plain
+///      longest-path walk, refusing the first method (declaration order)
+///      whose inlining depth exceeds MAX_CALL_DEPTH.
+fn check_ir_no_recursion(program: &ir::ANFProgram) -> Result<(), String> {
+    fn collect_calls(bindings: &[ir::ANFBinding], out: &mut Vec<String>) {
+        for b in bindings {
+            if let ir::ANFValue::MethodCall { method, .. } = &b.value {
+                out.push(method.clone());
+            }
+            match &b.value {
+                ir::ANFValue::If { then, else_branch, .. } => {
+                    collect_calls(then, out);
+                    collect_calls(else_branch, out);
+                }
+                ir::ANFValue::Loop { body, .. } => collect_calls(body, out),
+                _ => {}
+            }
+        }
+    }
+
+    let mut callees: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for m in &program.methods {
+        if m.name == "constructor" {
+            continue;
+        }
+        let mut calls = Vec::new();
+        collect_calls(&m.body, &mut calls);
+        callees.insert(m.name.as_str(), calls);
+    }
+
+    assert_ir_no_cycle(&program.methods, &callees)?;
+    assert_ir_call_depth_bound(&program.methods, &callees)
+}
+
+/// Iterative (explicit-stack), three-state DFS over the IR `method_call`
+/// graph. Declaration order only decides which root the search starts from;
+/// the reported name is whichever back edge is found first — matches Go
+/// F-071's former host-recursive `visit` closure byte for byte.
+fn assert_ir_no_cycle(
+    methods: &[ir::ANFMethod],
+    callees: &std::collections::HashMap<&str, Vec<String>>,
+) -> Result<(), String> {
+    const UNVISITED: u8 = 0;
+    const ON_STACK: u8 = 1;
+    const DONE: u8 = 2;
+    let mut state: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+
+    struct Frame<'a> {
+        name: &'a str,
+        next: usize,
+    }
+
+    for m in methods {
+        let root = m.name.as_str();
+        if root == "constructor" || *state.get(root).unwrap_or(&UNVISITED) != UNVISITED {
+            continue;
+        }
+        let mut stack: Vec<Frame> = vec![Frame { name: root, next: 0 }];
+        state.insert(root, ON_STACK);
+        while !stack.is_empty() {
+            let idx = stack.len() - 1;
+            let name = stack[idx].name;
+            let next = stack[idx].next;
+            let calls = callees.get(name);
+            let calls_len = calls.map(|c| c.len()).unwrap_or(0);
+            if next >= calls_len {
+                state.insert(name, DONE);
+                stack.pop();
+                continue;
+            }
+            let callee: &str = &calls.unwrap()[next];
+            stack[idx].next += 1;
+            if !callees.contains_key(callee) {
+                continue;
+            }
+            match *state.get(callee).unwrap_or(&UNVISITED) {
+                ON_STACK => {
+                    return Err(format!(
+                        "IR validation: recursion detected: method '{}' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering",
+                        callee
+                    ));
+                }
+                UNVISITED => {
+                    state.insert(callee, ON_STACK);
+                    stack.push(Frame { name: callee, next: 0 });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Iterative longest-path walk over the (by this point known-acyclic) IR
+/// call graph, no host recursion: a method's call depth is 0 if it calls no
+/// contract method, else 1 + the largest call depth among the methods it
+/// calls. Private methods are inlined at every call site, so this is the
+/// inlining depth. Refuses the first method (declaration order) past
+/// `MAX_CALL_DEPTH`, with the diagnostic every tier shares.
+fn assert_ir_call_depth_bound(
+    methods: &[ir::ANFMethod],
+    callees: &std::collections::HashMap<&str, Vec<String>>,
+) -> Result<(), String> {
+    struct Frame<'a> {
+        name: &'a str,
+        next: usize,
+        depth: usize,
+    }
+    let mut depth: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut done: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for m in methods {
+        let root = m.name.as_str();
+        if root == "constructor" || done.contains(root) {
+            continue;
+        }
+        let mut stack: Vec<Frame> = vec![Frame { name: root, next: 0, depth: 0 }];
+        while !stack.is_empty() {
+            let idx = stack.len() - 1;
+            let name = stack[idx].name;
+            let next = stack[idx].next;
+            let calls = callees.get(name);
+            let calls_len = calls.map(|c| c.len()).unwrap_or(0);
+            if next < calls_len {
+                let callee: &str = &calls.unwrap()[next];
+                stack[idx].next += 1;
+                if !callees.contains_key(callee) {
+                    continue;
+                }
+                if done.contains(callee) {
+                    let d = 1 + depth.get(callee).copied().unwrap_or(0);
+                    if d > stack[idx].depth {
+                        stack[idx].depth = d;
+                    }
+                } else {
+                    stack.push(Frame { name: callee, next: 0, depth: 0 });
+                }
+                continue;
+            }
+            let finished_depth = stack[idx].depth;
+            done.insert(name);
+            depth.insert(name, finished_depth);
+            stack.pop();
+            if let Some(parent) = stack.last_mut() {
+                let d = 1 + finished_depth;
+                if d > parent.depth {
+                    parent.depth = d;
+                }
+            }
+        }
+    }
+
+    for m in methods {
+        if m.name == "constructor" {
+            continue;
+        }
+        let d = depth.get(m.name.as_str()).copied().unwrap_or(0);
+        if d > frontend::input_limits::MAX_CALL_DEPTH {
+            return Err(format!(
+                "IR validation: {}",
+                frontend::input_limits::call_depth_message(&m.name)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// N-087: the source validator's parentClass rules, which `--ir` never ran. A
+/// SmartContract property declared readonly:false got no constructor slot, so
+/// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which any
+/// key spends. Checked in this order, with the diagnostics all seven tiers share
+/// (conformance/negatives/ir-parent-class-cases.json): (1) SmartContract /
+/// UnsafeSmartContract properties must be readonly; (2) stateful-only nodes
+/// require StatefulSmartContract; (3) raw_script (asm) requires
+/// UnsafeSmartContract. An absent parentClass (IR older than F-038) is inferred
+/// fail-closed: StatefulSmartContract only from a stateful-only node, else
+/// UnsafeSmartContract from a raw_script, else SmartContract. Returns the
+/// (declared or inferred) parentClass.
+fn check_ir_parent_class_rules(program: &ir::ANFProgram) -> Result<String, String> {
+    fn stateful_only_kind(v: &ir::ANFValue) -> Option<&'static str> {
+        match v {
+            ir::ANFValue::AddOutput { .. } => Some("add_output"),
+            ir::ANFValue::AddRawOutput { .. } => Some("add_raw_output"),
+            ir::ANFValue::AddDataOutput { .. } => Some("add_data_output"),
+            ir::ANFValue::GetStateScript { .. } => Some("get_state_script"),
+            ir::ANFValue::DeserializeState { .. } => Some("deserialize_state"),
+            _ => None,
+        }
+    }
+    fn walk(bindings: &[ir::ANFBinding], f: &mut dyn FnMut(&ir::ANFValue) -> Result<(), String>) -> Result<(), String> {
+        for b in bindings {
+            f(&b.value)?;
+            match &b.value {
+                ir::ANFValue::If { then, else_branch, .. } => {
+                    walk(then, f)?;
+                    walk(else_branch, f)?;
+                }
+                ir::ANFValue::Loop { body, .. } => walk(body, f)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let (mut has_stateful, mut has_raw) = (false, false);
+    for m in &program.methods {
+        walk(&m.body, &mut |v| {
+            has_stateful |= stateful_only_kind(v).is_some();
+            has_raw |= matches!(v, ir::ANFValue::RawScript { .. });
+            Ok(())
+        })?;
+    }
+    let pc: &str = if !program.parent_class.is_empty() {
+        &program.parent_class
+    } else if has_stateful {
+        "StatefulSmartContract"
+    } else if has_raw {
+        "UnsafeSmartContract"
+    } else {
+        "SmartContract"
+    };
+    if pc != "StatefulSmartContract" {
+        if let Some(p) = program.properties.iter().find(|p| !p.readonly) {
+            return Err(format!(
+                "IR validation: Property '{}' in {} must be readonly. Use StatefulSmartContract for mutable state.",
+                p.name, pc
+            ));
+        }
+    }
+    for m in &program.methods {
+        walk(&m.body, &mut |v| match stateful_only_kind(v) {
+            Some(kind) if pc != "StatefulSmartContract" => Err(format!(
+                "IR validation: '{}' in method '{}' is only available in StatefulSmartContract; got {}",
+                kind, m.name, pc
+            )),
+            _ => Ok(()),
+        })?;
+    }
+    for m in &program.methods {
+        walk(&m.body, &mut |v| match v {
+            ir::ANFValue::RawScript { .. } if pc != "UnsafeSmartContract" => Err(format!(
+                "IR validation: 'raw_script' in method '{}' is only available in contracts extending UnsafeSmartContract; got {}",
+                m.name, pc
+            )),
+            _ => Ok(()),
+        })?;
+    }
+    Ok(pc.to_string())
+}
+
 /// Compile a parsed ANF program to a Rúnar artifact.
 pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
     compile_from_program_with_options(program, &CompileOptions::default())
@@ -525,17 +994,55 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
-    // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
+    reject_unsupported_stop_after_pass_options(opts)?;
+
+    // N-265: the source validator's `check_no_recursion` (cycle rule + N-180's
+    // MAX_CALL_DEPTH bound) never runs on the `--ir` path either. Stack
+    // lowering (codegen/stack.rs's `inline_method_call`) inlines every
+    // `method_call` to a private method by lowering its body in place, with
+    // no cycle or depth guard, so a self/mutually-recursive method recurses
+    // the host call stack until it aborts, and an acyclic chain past the
+    // bound recurses it just as deep. Checked before the parentClass rules
+    // below, same order as Go's F-004 `checkIRFrontendRules`.
+    check_ir_no_recursion(program)?;
+
+    // F-107: the source validator's readonly-write rule, re-asserted on every
+    // program that reaches this entry point (the `--ir` path never runs the
+    // validator). Same check and wording as Go F-004's checkIRFrontendRules.
+    let parent_class = check_ir_parent_class_rules(program)?;
+    check_ir_no_readonly_writes(program)?;
+    // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+    // the scaffolding the frontend injects. See stateful_scaffold.rs.
+    if parent_class == "StatefulSmartContract" {
+        stateful_scaffold::check_ir_stateful_scaffolding(program)?;
+    }
+
     let mut program = program.clone();
+
+    // F-103: bake constructor args (validated first) on the IR / direct-program
+    // entry points too, as the TS `compileFromANF` does. The source pipelines
+    // bake before calling here and pass empty args, so this is a no-op for them.
+    let arg_errors = apply_constructor_args(&mut program, &opts.constructor_args);
+    if !arg_errors.is_empty() {
+        return Err(format!(
+            "constructorArgs errors:\n  {}",
+            arg_errors.join("\n  ")
+        ));
+    }
+
+    // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
     if !opts.disable_constant_folding {
         program = guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&program)
+            frontend::constant_fold::fold_constants_and_prune(&program)
         })
         .map_err(|e| e.message)?;
     }
 
     // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR).
-    // Delegates internally to frontend::dce for dead-binding cleanup.
+    // Delegates internally to frontend::dce for dead-binding cleanup after any
+    // EC rewrite; with no rewrite, no DCE runs (F-219).
     let optimized = guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(program))
         .map_err(|e| e.message)?;
 
@@ -562,6 +1069,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
         &emit_result.script_asm,
         emit_result.constructor_slots,
         emit_result.code_sep_index_slots,
+        emit_result.code_part_len_slots,
         emit_result.code_separator_index,
         emit_result.code_separator_indices,
         true, // include ANF IR for SDK state auto-computation
@@ -576,6 +1084,43 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
 // CompileResult API — collect all diagnostics, return partial results
 // ---------------------------------------------------------------------------
 
+/// Issue #109: warn when DCE strips an un-annotated readonly field. Such a
+/// field carries no compile-time value (no initializer) and is referenced by
+/// no method, so it is eliminated from the locking script entirely —
+/// silently dropping deploy-time metadata an author may intend to recover
+/// from the on-chain script later. `@embedAlways` fields were forced back in
+/// during ANF lowering, so they are "referenced" here and never warn.
+///
+/// `contract` is the pre-expansion AST; `anf_program` is the ANF after
+/// constant folding and EC optimization.
+fn embed_always_dce_warnings(
+    contract: &frontend::ast::ContractNode,
+    anf_program: &ir::ANFProgram,
+) -> Vec<frontend::diagnostic::Diagnostic> {
+    let referenced = collect_referenced_props(anf_program);
+    contract
+        .properties
+        .iter()
+        .filter(|prop| {
+            prop.readonly
+                && !prop.embed_always
+                && prop.initializer.is_none()
+                && !referenced.contains(&prop.name)
+        })
+        .map(|prop| {
+            frontend::diagnostic::Diagnostic::warning(
+                format!(
+                    "readonly field '{}' is not referenced in any method body and may \
+                     be eliminated by DCE; mark it with the embedAlways directive to preserve it in \
+                     the on-chain script",
+                    prop.name
+                ),
+                Some(prop.source_location.clone()),
+            )
+        })
+        .collect()
+}
+
 /// Compile from a source string, collecting ALL diagnostics from ALL passes
 /// and returning partial results as they become available.
 ///
@@ -587,6 +1132,9 @@ pub fn compile_from_source_str_with_result(
     opts: &CompileOptions,
 ) -> CompileResult {
     use frontend::diagnostic::Diagnostic;
+
+    // N-285: see compile_from_source_str_with_options.
+    refusal::init();
 
     let mut result = CompileResult::new();
 
@@ -702,7 +1250,7 @@ pub fn compile_from_source_str_with_result(
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
         anf_program = match guarded_pass("constant folding", || {
-            frontend::constant_fold::fold_constants(&anf_program)
+            frontend::constant_fold::fold_constants_and_prune(&anf_program)
         }) {
             Ok(p) => p,
             Err(e) => {
@@ -712,7 +1260,8 @@ pub fn compile_from_source_str_with_result(
         };
     }
 
-    // Pass 4.5: EC optimization (delegates internally to frontend::dce)
+    // Pass 4.5: EC optimization (delegates internally to frontend::dce after
+    // any EC rewrite; with no rewrite, no DCE runs — F-219)
     anf_program =
         match guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program)) {
             Ok(p) => p,
@@ -723,33 +1272,10 @@ pub fn compile_from_source_str_with_result(
         };
     result.anf = Some(anf_program.clone());
 
-    // Issue #109: warn when DCE strips an un-annotated readonly field. Such a
-    // field carries no compile-time value (no initializer) and is referenced by
-    // no method, so it is eliminated from the locking script entirely —
-    // silently dropping deploy-time metadata an author may intend to recover
-    // from the on-chain script later. `@embedAlways` fields were forced back in
-    // during ANF lowering, so they are "referenced" here and never warn.
-    {
-        let referenced = collect_referenced_props(&anf_program);
-        if let Some(contract_ast) = result.contract.as_ref() {
-            for prop in &contract_ast.properties {
-                if prop.readonly
-                    && !prop.embed_always
-                    && prop.initializer.is_none()
-                    && !referenced.contains(&prop.name)
-                {
-                    result.diagnostics.push(Diagnostic::warning(
-                        format!(
-                            "readonly field '{}' is not referenced in any method body and was \
-                             eliminated by DCE; annotate it /** @embedAlways */ to preserve it in \
-                             the on-chain script",
-                            prop.name
-                        ),
-                        Some(prop.source_location.clone()),
-                    ));
-                }
-            }
-        }
+    if let Some(contract_ast) = result.contract.as_ref() {
+        result
+            .diagnostics
+            .extend(embed_always_dce_warnings(contract_ast, &anf_program));
     }
 
     // Pass 5: Stack lowering (catch panics)
@@ -813,6 +1339,7 @@ pub fn compile_from_source_str_with_result(
                 &emit_result.script_asm,
                 emit_result.constructor_slots,
                 emit_result.code_sep_index_slots,
+                emit_result.code_part_len_slots,
                 emit_result.code_separator_index,
                 emit_result.code_separator_indices,
                 true,

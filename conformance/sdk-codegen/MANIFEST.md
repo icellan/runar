@@ -5,8 +5,9 @@ It exists because the bug fixed in commit `c00cfe7` (Rust codegen emitted
 `vec![SdkValue::BigInt(count)]` instead of `vec![SdkValue::BigInt(args.count)]`)
 slipped through every SDK's per-language string-pattern tests — *none* of
 them tried to compile the generated wrapper. The shared fixtures here, plus
-each SDK's per-language conformance runner under `runners/`, prevent that
-class of drift from recurring.
+each SDK's per-language conformance runner (listed in README.md's "Layout"
+table, each living inside that SDK's own test tree — see the note there),
+prevent that class of drift from recurring.
 
 ## Fixtures
 
@@ -111,15 +112,25 @@ A pure structural assertion is not enough — the Rust bug shipped through
 exactly that kind of test. **Each SDK's runner must compile the generated
 wrapper end-to-end** (in-memory `javac`, `cargo check`, `tsc --noEmit`,
 `zig build-obj`, `python -c "compile(src, 'gen.py', 'exec')"`, etc.) and
-fail loudly if the output does not parse / type-check. The runner under
-`runners/<lang>/` documents exactly how it does so.
+fail loudly if the output does not parse / type-check. Each runner listed
+in README.md's "Layout" table documents exactly how it does so (and, where
+it falls short of a real compile — e.g. the Zig runner today — says so
+rather than silently passing).
 
 ## Adding a new SDK to the suite
 
-1. Create `runners/<lang>/<lang>_codegen_conformance_test.<ext>` mirroring
-   the existing runner pattern for that language's test framework.
-2. Make it load all three fixtures from `fixtures/`, run the SDK's
+1. Create a test file in that SDK's own test tree — e.g.
+   `packages/runar-<lang>/<test-dir>/f297_codegen_conformance.<ext>` —
+   following the naming and style of a sibling test file already in that
+   directory, and mirroring an existing runner's shape (see README.md's
+   "Layout" table). There is no `runners/<lang>/` directory; every runner
+   lives beside its generator's own tests instead.
+2. Make it load all five fixtures from `fixtures/`, run the SDK's
    codegen on each, and assert (a) every required element from the
-   relevant section above is present, and (b) the generated source
-   compiles cleanly.
-3. Wire it into the SDK's main test suite so it runs by default.
+   relevant section above that the generator actually emits is present —
+   documenting, not silently passing over, any element the generator does
+   not yet emit — and (b) the generated source compiles (or, at minimum,
+   executes/parses — document the gap if a real compile isn't feasible
+   in-process).
+3. Wire it into the SDK's main test suite so it runs by default. Add the
+   new runner to README.md's "Layout" table and "Running" section.

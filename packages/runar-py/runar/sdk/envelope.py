@@ -339,7 +339,7 @@ MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB — matches MAX_STRING_BY
 #:
 #: 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 #: so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-#: also far above what the wire needs: the deepest of the 165 checked-in
+#: also far above what the wire needs: the deepest of the 199 checked-in
 #: conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 #: tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 #: bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -528,7 +528,7 @@ def verify_envelope(
     except ValueError:
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_SIG, parsed)
     digest = hashlib.sha256(envelope.payload.encode("utf-8")).digest()
-    if not ecdsa_verify(sig_bytes, pk_bytes, digest):
+    if not ecdsa_verify(sig_bytes, pk_bytes, digest, sighash_byte=False):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_SIG, parsed)
 
     # 6. Allowlist.

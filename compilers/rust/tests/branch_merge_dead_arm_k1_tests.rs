@@ -106,17 +106,19 @@ fn compile_script_hex(source: &str, disable_constant_folding: bool) -> String {
 fn seven_tier_script_for_k1_merge_and_dead_arms() {
     let cases: &[(&str, &str, bool, &str)] = &[
         ("dead-arm-k2/fold-on", DEAD_ARM_K2, false,
-            "00014e01ce006351547a6e7b757b7567527978557a7568527a75537a75527a7c7ba177"),
+            // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
+            "0001ce006351537a6e7b757b75676e547a75687b757b757ca1"),
         ("dead-arm-k2/fold-off", DEAD_ARM_K2, true,
-            "00014e8f006351537a6e7b757b75676e547a7568527a75527a757ca1"),
+            "00014e8f006351537a6e7b757b75676e547a75687b757b757ca1"),
         ("self-read-both-arms/fold-on", SELF_READ_BOTH_ARMS, false,
-            "000340420f0340428f7b7ca069517b00a06351787c9376776751787c94767768517a750340420f0340428f7b7ca07777"),
+            // N-397 (2026-10-30): re-pinned; the folder now sees through `m0 = @ref:t`, so `m0 + 1n` / `m0 - 1n` fold to 2 / 0 in the arms (-8 B).
+            "000340428fa069517c00a06352767767007677687c750340428fa0"),
         ("self-read-both-arms/fold-off", SELF_READ_BOTH_ARMS, true,
-            "000340420f8fa069517c00a06351787c9376776751787c94767768517a750340420f8fa0"),
+            "000340420f8fa069517c00a06351787c9376776751787c947677687c750340420f8fa0"),
         ("const-condition-k1/fold-on", CONST_CONDITION_K1, false,
-            "000340420f0340428f7b7ca0695151635276776753767768517a750340420f0340428f7b7ca0777777"),
+            "000340428fa06951516352767767537677687c750340428fa077"),
         ("const-condition-k1/fold-off", CONST_CONDITION_K1, true,
-            "000340420f8fa0695151635276776753767768517a750340420f8fa077"),
+            "000340420f8fa06951516352767767537677687c750340420f8fa077"),
     ];
 
     for (label, source, disable, want) in cases {

@@ -22,6 +22,11 @@
 //! a `readonly` flag from true to false, and only for a stateful contract's
 //! non-explicit, non-defaulted, assigned fields. Every other flag the parser
 //! set is left alone.
+//!
+//! The walk allocates (a `NameSet` entry per distinct assigned name) and
+//! reports `error.OutOfMemory` on failure rather than swallowing it -- a
+//! dropped entry here would silently leave a mutated property readonly and
+//! drop its state continuation with no diagnostic (ZIG-R-06).
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
@@ -55,7 +60,7 @@ pub fn applyMutationInference(
     properties: []PropertyNode,
     methods: []const MethodNode,
     explicit_readonly: []const []const u8,
-) void {
+) Allocator.Error!void {
     // Stateless contracts carry no state continuation -- every field is
     // readonly and an assignment is a validator error, not a mutability
     // signal.
@@ -64,7 +69,7 @@ pub fn applyMutationInference(
     var mutated: NameSet = .empty;
     defer mutated.deinit(allocator);
 
-    for (methods) |m| collectInBody(allocator, m.body, &mutated);
+    for (methods) |m| try collectInBody(allocator, m.body, &mutated);
 
     for (properties) |*prop| {
         if (!prop.readonly) continue; // already mutable (rule 2)
@@ -84,74 +89,86 @@ fn isExplicitReadonly(explicit_readonly: []const []const u8, name: []const u8) b
 // Statement / expression walk
 // ---------------------------------------------------------------------------
 
-fn collectInBody(allocator: Allocator, body: []const Statement, out: *NameSet) void {
-    for (body) |stmt| collectInStmt(allocator, stmt, out);
+fn collectInBody(allocator: Allocator, body: []const Statement, out: *NameSet) Allocator.Error!void {
+    for (body) |stmt| try collectInStmt(allocator, stmt, out);
 }
 
-fn collectInStmt(allocator: Allocator, stmt: Statement, out: *NameSet) void {
+fn collectInStmt(allocator: Allocator, stmt: Statement, out: *NameSet) Allocator.Error!void {
     switch (stmt) {
         // The Zig AST flattens an assignment target to a bare name:
         // `self.count = ...` and a local `count = ...` both land here as
-        // `target = "count"`. Callers intersect the collected names with the
-        // property list, which matches how `anf_lower.zig` resolves the same
-        // statement (`ctx.isProperty(assign.target)` is checked before
-        // `ctx.isLocal`), so no new property/local ambiguity is introduced.
-        // Compound forms (`self.x += 1`) are already normalised by the parser
-        // into this same node with a synthesised binary RHS.
+        // `target = "count"` -- `target` alone cannot tell them apart.
+        // `target_is_property` is the parser's authoritative answer (set via
+        // `types.targetIsProperty` in `parse_zig.zig`), so only record the
+        // name when it is actually a property write; otherwise a local that
+        // shadows a property name would wrongly flip that property mutable.
+        // This mirrors the Go reference (`collectZigMutatedProperties` in
+        // `compilers/go/frontend/parser_zig.go`, which only records a target
+        // that type-asserts to `PropertyAccessExpr`) and `validate.zig`'s
+        // `checkReadonlyWrites`, which gates on the same flag for the same
+        // reason. Compound forms (`self.x += 1`) are already normalised by
+        // the parser into this same node with a synthesised binary RHS.
         .assign => |a| {
-            out.put(allocator, a.target, {}) catch {};
-            collectInExpr(allocator, a.value, out);
+            if (a.target_is_property) try out.put(allocator, a.target, {});
+            try collectInExpr(allocator, a.value, out);
         },
-        .const_decl => |d| collectInExpr(allocator, d.value, out),
-        .let_decl => |d| if (d.value) |v| collectInExpr(allocator, v, out),
-        .expr_stmt => |e| collectInExpr(allocator, e.expr, out),
-        .assert_stmt => |a| collectInExpr(allocator, a.condition, out),
-        .return_stmt => |maybe| if (maybe) |v| collectInExpr(allocator, v, out),
+        .const_decl => |d| try collectInExpr(allocator, d.value, out),
+        .let_decl => |d| if (d.value) |v| try collectInExpr(allocator, v, out),
+        .expr_stmt => |e| try collectInExpr(allocator, e.expr, out),
+        .assert_stmt => |a| try collectInExpr(allocator, a.condition, out),
+        .return_stmt => |maybe| if (maybe.value) |v| try collectInExpr(allocator, v, out),
         .if_stmt => |s| {
-            collectInExpr(allocator, s.condition, out);
-            collectInBody(allocator, s.then_body, out);
-            if (s.else_body) |eb| collectInBody(allocator, eb, out);
+            try collectInExpr(allocator, s.condition, out);
+            try collectInBody(allocator, s.then_body, out);
+            if (s.else_body) |eb| try collectInBody(allocator, eb, out);
         },
-        .for_stmt => |s| collectInBody(allocator, s.body, out),
+        // N-219: this used to walk only `s.body`, never `s.update` -- the
+        // loop's continue/update clause (`ForStmt.update`, N-061). A property
+        // assigned EXCLUSIVELY there (no write anywhere in the body) was
+        // invisible to inference and stayed readonly.
+        .for_stmt => |s| {
+            try collectInBody(allocator, s.body, out);
+            if (s.update) |u| try collectInStmt(allocator, u.*, out);
+        },
     }
 }
 
-fn collectInExpr(allocator: Allocator, expr: Expression, out: *NameSet) void {
+fn collectInExpr(allocator: Allocator, expr: Expression, out: *NameSet) Allocator.Error!void {
     switch (expr) {
         .increment => |i| {
-            recordIfProperty(allocator, i.operand, out);
-            collectInExpr(allocator, i.operand, out);
+            try recordIfProperty(allocator, i.operand, out);
+            try collectInExpr(allocator, i.operand, out);
         },
         .decrement => |d| {
-            recordIfProperty(allocator, d.operand, out);
-            collectInExpr(allocator, d.operand, out);
+            try recordIfProperty(allocator, d.operand, out);
+            try collectInExpr(allocator, d.operand, out);
         },
         .binary_op => |b| {
-            collectInExpr(allocator, b.left, out);
-            collectInExpr(allocator, b.right, out);
+            try collectInExpr(allocator, b.left, out);
+            try collectInExpr(allocator, b.right, out);
         },
-        .unary_op => |u| collectInExpr(allocator, u.operand, out),
-        .call => |c| for (c.args) |a| collectInExpr(allocator, a, out),
-        .method_call => |m| for (m.args) |a| collectInExpr(allocator, a, out),
+        .unary_op => |u| try collectInExpr(allocator, u.operand, out),
+        .call => |c| for (c.args) |a| try collectInExpr(allocator, a, out),
+        .method_call => |m| for (m.args) |a| try collectInExpr(allocator, a, out),
         .ternary => |t| {
-            collectInExpr(allocator, t.condition, out);
-            collectInExpr(allocator, t.then_expr, out);
-            collectInExpr(allocator, t.else_expr, out);
+            try collectInExpr(allocator, t.condition, out);
+            try collectInExpr(allocator, t.then_expr, out);
+            try collectInExpr(allocator, t.else_expr, out);
         },
         .index_access => |ia| {
-            collectInExpr(allocator, ia.object, out);
-            collectInExpr(allocator, ia.index, out);
+            try collectInExpr(allocator, ia.object, out);
+            try collectInExpr(allocator, ia.index, out);
         },
-        .array_literal => |elems| for (elems) |e| collectInExpr(allocator, e, out),
+        .array_literal => |elems| for (elems) |e| try collectInExpr(allocator, e, out),
         .literal_int, .literal_bool, .literal_bytes, .literal_bigint,
         .identifier, .property_access => {},
     }
 }
 
-fn recordIfProperty(allocator: Allocator, operand: Expression, out: *NameSet) void {
+fn recordIfProperty(allocator: Allocator, operand: Expression, out: *NameSet) Allocator.Error!void {
     switch (operand) {
-        .property_access => |pa| out.put(allocator, pa.property, {}) catch {},
-        .identifier => |id| out.put(allocator, id, {}) catch {},
+        .property_access => |pa| try out.put(allocator, pa.property, {}),
+        .identifier => |id| try out.put(allocator, id, {}),
         else => {},
     }
 }

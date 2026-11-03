@@ -87,6 +87,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run runar-zig tests");
     test_step.dependOn(&run_tests.step);
 
+    // ── N-173 panic-text probe (used by builtins_n173_panic_text_test.zig) ──
+    // A Zig `@panic` aborts the whole process, so the only way to assert on a
+    // panic's exact text is out-of-process: the test spawns this binary and
+    // checks its stderr. It only needs builtins.zig + bsvz, like the other
+    // CLI shims below.
+    const n173_panic_probe_module = b.createModule(.{
+        .root_source_file = b.path("src/builtins_n173_panic_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    n173_panic_probe_module.addImport("bsvz", bsvz_module);
+    const n173_panic_probe_exe = b.addExecutable(.{
+        .name = "runar-n173-panic-probe",
+        .root_module = n173_panic_probe_module,
+    });
+    const install_n173_panic_probe = b.addInstallArtifact(n173_panic_probe_exe, .{});
+    run_tests.step.dependOn(&install_n173_panic_probe.step);
+
     // ── Analyzer CLI executable (used by tools/analyzer-runner/zig.sh) ──
     const analyzer_cli_module = b.createModule(.{
         .root_source_file = b.path("src/analyzer_cli.zig"),
@@ -117,4 +135,41 @@ pub fn build(b: *std.Build) void {
     const install_canonicalise = b.addInstallArtifact(canonicalise_exe, .{});
     const canonicalise_step = b.step("canonicalise", "Build the runar-canonicalise CLI shim");
     canonicalise_step.dependOn(&install_canonicalise.step);
+
+    // ── N-190 codegen compile-check ──
+    // `sdk_codegen_conformance_test.zig` only ever asserted the generated
+    // SDK wrapper CONTAINS certain substrings — the gap that let `fromTxId`
+    // emit a call to a Provider method that doesn't exist. This step
+    // actually compiles (and runs) the generated wrapper: `codegen_check_gen`
+    // builds a fixture artifact, calls the real `generateZig`, appends a
+    // `test` block exercising `fromTxId`, and prints it to stdout; that
+    // output becomes `codegen_check_module`'s root source, importing
+    // "runar-zig" (the exact name generated code itself uses) -> `root_module`.
+    const codegen_check_gen_module = b.createModule(.{
+        .root_source_file = b.path("src/sdk_codegen_compile_check_gen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_check_gen_module.addImport("runar-zig", root_module);
+    const codegen_check_gen_exe = b.addExecutable(.{
+        .name = "runar-zig-codegen-check-gen",
+        .root_module = codegen_check_gen_module,
+    });
+    const run_codegen_check_gen = b.addRunArtifact(codegen_check_gen_exe);
+    const generated_wrapper_src = run_codegen_check_gen.captureStdOut(.{ .basename = "generated_wrapper.zig" });
+
+    const codegen_check_module = b.createModule(.{
+        .root_source_file = generated_wrapper_src,
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_check_module.addImport("runar-zig", root_module);
+    const codegen_check_test = b.addTest(.{
+        .root_module = codegen_check_module,
+        .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
+    });
+    const run_codegen_check_test = b.addRunArtifact(codegen_check_test);
+    const codegen_check_step = b.step("codegen-compile-check", "Compile + run a dynamically generated SDK wrapper's fromTxId against the real Provider (N-190)");
+    codegen_check_step.dependOn(&run_codegen_check_test.step);
+    test_step.dependOn(&run_codegen_check_test.step);
 }

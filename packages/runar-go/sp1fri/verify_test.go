@@ -68,8 +68,11 @@ func TestVerifyEvmGuest(t *testing.T) {
 	}
 	bs, err := os.ReadFile(abs)
 	if err != nil {
-		t.Skipf("evm-guest fixture missing (%v); regenerate with "+
-			"tests/vectors/sp1/fri/evm-guest/regen/", err)
+		// The fixture is committed to git; absence is a repo defect, not an
+		// environment condition, so it must fail rather than skip (N-479).
+		t.Fatalf("evm-guest fixture missing (%v); it is committed at "+
+			"tests/vectors/sp1/fri/evm-guest/proof.postcard (regen: "+
+			"tests/vectors/sp1/fri/evm-guest/regen/)", err)
 	}
 	p, err := DecodeProof(bs)
 	if err != nil {

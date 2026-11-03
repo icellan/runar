@@ -1,18 +1,30 @@
 {
   "fixture": "shift-ops",
-  "acceptOnly": true,
   "constructorArgs": {
     "a": "12n"
   },
   "spends": [
     {
       "method": "testShift",
-      "args": [],
+      "args": ["96n", "3n"],
       "expect": "accept",
-      "note": "a<<3 and a>>2; asserts are tautologies (x>=0 || x<0). No rejecting witness exists \u2014 accept-only."
+      "note": "12 << 3 = 96 and 12 >> 2 = 3: the 1-byte 0x0c shifted as a byte array, both results minimal and below 0x80"
+    },
+    {
+      "method": "testShift",
+      "args": ["97n", "3n"],
+      "expect": "reject",
+      "note": "near-miss: wrong left-shift result (97 != 96)"
+    },
+    {
+      "method": "testShift",
+      "args": ["96n", "2n"],
+      "expect": "reject",
+      "note": "near-miss: wrong right-shift result (2 != 3)"
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "5c8a6a51a8cfd3c769c67eed8deff91b3e63b7ef173dcf90c63017833a43ead5"
+    "expected-script.hex": "8c37371800680eccd39ffd4d0d8c4043e38bd6a68c4b3f3893001b1b42c7df8a",
+    "expected-ir.json": "c578c370fe50811e4606bc47ed56bb278ceab92dd3e4d763c19ab4afa0821899"
   }
 }

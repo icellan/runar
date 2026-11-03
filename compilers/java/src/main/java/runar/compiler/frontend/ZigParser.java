@@ -42,6 +42,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Hand-rolled tokenizer + recursive-descent parser for {@code .runar.zig}
@@ -73,9 +74,22 @@ public final class ZigParser {
 
     /** Parse a {@code .runar.zig} source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         State s = new State(tokens, filename);
-        return s.parseTopLevel();
+        // F-213: measures (A) and (B). parseTopLevel's recursive bare-call
+        // rewrite runs inside this guard, so the StackOverflowError backstop
+        // covers it on a loop-built tree too deep for it.
+        return SourceNesting.guard(s::parseTopLevel, ParseException::new);
     }
 
     /** Checked exception raised on parse-time problems. */
@@ -144,6 +158,23 @@ public final class ZigParser {
         COMPOUND_OPS.put(Kind.PERCENTEQ, Expression.BinaryOp.MOD);
     }
 
+    /**
+     * N-009: the {@code while (cond) : (upd) { ... }} desugaring's merge
+     * placeholder. {@code parseWhileStatement} always synthesizes this name
+     * as the ForStatement's init; {@code parseBlockStatements} replaces it
+     * with the real preceding declaration when one matches the update
+     * target. A LEADING SPACE makes the name unspellable in {@code
+     * .runar.zig} source (no surface's identifier lexer produces a token
+     * containing whitespace), so a developer local can never collide with it
+     * -- a plain-identifier placeholder would let a local literally named
+     * "__while_no_init" that is not adjacent to its while alias the
+     * placeholder by string equality, and the ANF lowerer's
+     * condition-iterator check would then compare equal and silently unroll
+     * from this placeholder's start of 0 instead of the developer's real
+     * start.
+     */
+    private static final String WHILE_NO_INIT_PLACEHOLDER = " __while_no_init";
+
     // ===================================================================
     // Type mapping
     // ===================================================================
@@ -166,6 +197,7 @@ public final class ZigParser {
         ZIG_TYPE_MAP.put("bool", "boolean");
         ZIG_TYPE_MAP.put("void", "void");
         ZIG_TYPE_MAP.put("Bigint", "bigint");
+        ZIG_TYPE_MAP.put("BigintBig", "bigint");
         ZIG_TYPE_MAP.put("ByteString", "ByteString");
         ZIG_TYPE_MAP.put("PubKey", "PubKey");
         ZIG_TYPE_MAP.put("Sig", "Sig");
@@ -216,18 +248,20 @@ public final class ZigParser {
     // ===================================================================
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_';
     }
 
-    static List<Token> tokenize(String source) {
+    static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> out = new ArrayList<>();
         int pos = 0;
         int line = 1;
-        int col = 1;
+        int col = 0;
         int n = source.length();
 
         while (pos < n) {
@@ -243,7 +277,7 @@ public final class ZigParser {
             if (ch == '\n') {
                 pos++;
                 line++;
-                col = 1;
+                col = 0;
                 continue;
             }
 
@@ -266,7 +300,7 @@ public final class ZigParser {
                     }
                     if (source.charAt(pos) == '\n') {
                         line++;
-                        col = 1;
+                        col = 0;
                     } else {
                         col++;
                     }
@@ -342,7 +376,13 @@ public final class ZigParser {
                 pos++;
                 col++;
                 StringBuilder sb = new StringBuilder();
-                while (pos < n && source.charAt(pos) != '"') {
+                // F-011: a Zig string literal cannot span lines; one that
+                // reaches a line break (escaped or not) or end of file is
+                // unterminated.
+                while (pos < n && source.charAt(pos) != '"' && source.charAt(pos) != '\n' && source.charAt(pos) != '\r') {
+                    if (source.charAt(pos) == '\\' && (pos + 1 >= n || source.charAt(pos + 1) == '\n' || source.charAt(pos + 1) == '\r')) {
+                        break;
+                    }
                     if (source.charAt(pos) == '\\' && pos + 1 < n) {
                         pos++;
                         col++;
@@ -355,34 +395,24 @@ public final class ZigParser {
                         col++;
                     }
                 }
-                if (pos < n) {
+                if (pos < n && source.charAt(pos) == '"') {
                     pos++; // skip closing quote
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, tokLine, tokCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 out.add(new Token(Kind.STRING, sb.toString(), tokLine, tokCol));
                 continue;
             }
 
-            // Number literal
-            if (Character.isDigit(ch)) {
-                StringBuilder sb = new StringBuilder();
-                if (ch == '0' && pos + 1 < n && (source.charAt(pos + 1) == 'x' || source.charAt(pos + 1) == 'X')) {
-                    sb.append("0x");
-                    pos += 2;
-                    col += 2;
-                    while (pos < n && isHexDigitOrUnderscore(source.charAt(pos))) {
-                        if (source.charAt(pos) != '_') sb.append(source.charAt(pos));
-                        pos++;
-                        col++;
-                    }
-                } else {
-                    while (pos < n && (Character.isDigit(source.charAt(pos)) || source.charAt(pos) == '_')) {
-                        if (source.charAt(pos) != '_') sb.append(source.charAt(pos));
-                        pos++;
-                        col++;
-                    }
-                }
-                out.add(new Token(Kind.NUMBER, sb.toString(), tokLine, tokCol));
+            // Number literal (F-026): the whole glued [0-9A-Za-z_] run is one
+            // Zig integer literal. Stopping at the first non-digit read
+            // `0b1010` as `0` + `b1010`.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("zig", source, pos, lex, filename, tokLine, tokCol);
+                col += sc.end() - pos;
+                pos = sc.end();
+                out.add(new Token(Kind.NUMBER, sc.value(), tokLine, tokCol));
                 continue;
             }
 
@@ -403,7 +433,9 @@ public final class ZigParser {
                 continue;
             }
 
-            // Skip unknown character
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, tokLine, tokCol, "Unexpected character '" + ch + "'"));
             pos++;
             col++;
         }
@@ -428,6 +460,13 @@ public final class ZigParser {
         final String file;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-448: token indexes of string literals whose bare use is legal. */
+        final Set<Integer> bareLiteralOk = new HashSet<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
+        /** N-344: the declarations read as {@code const} (the AST keeps no mutability). */
+        final java.util.Set<VariableDeclStatement> constDecls =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
         // Contract being built.
         String contractName = "UnnamedContract";
@@ -435,6 +474,12 @@ public final class ZigParser {
         List<PropertyNode> properties = new ArrayList<>();
         List<MethodNode> methods = new ArrayList<>();
         MethodNode constructor = null;
+        /**
+         * N-490: where the constructor statements the source does not write
+         * (the implied super() and property assignments) are anchored: the
+         * contract struct's {@code struct} keyword once it is parsed.
+         */
+        SourceLocation ctorLoc = null;
 
         // Per-method scope tracking.
         Set<String> selfNames = new HashSet<>();
@@ -561,6 +606,7 @@ public final class ZigParser {
             methods = new ArrayList<>();
             constructor = null;
 
+            ctorLoc = loc();
             expect(Kind.STRUCT, "struct");
             expect(Kind.LBRACE, "{");
 
@@ -590,7 +636,9 @@ public final class ZigParser {
                     properties.add(parseField());
                     continue;
                 }
-                advance();
+                // N-410: any other token is refused, never skipped.
+                Token stray = advance();
+                errors.add(LexDiag.at(file, stray.line, stray.col, LexDiag.unexpectedStructBodyToken(stray.value)));
             }
             expect(Kind.RBRACE, "}");
             match(Kind.SEMICOLON);
@@ -601,24 +649,22 @@ public final class ZigParser {
                 collectMutatedProperties(m.body(), mutated);
             }
 
-            // Constructor parameter names — used to strip property
-            // initializers overridden by an explicit ctor param.
-            Set<String> ctorParamNames = new HashSet<>();
-            if (constructor != null) {
-                for (ParamNode p : constructor.params()) {
-                    ctorParamNames.add(p.name());
-                }
-            }
+            // The initializer of a property the constructor assigns is no
+            // longer stripped here. AnfLower.java now applies that rule to
+            // EVERY surface (see constructorAssignedProperties), keyed on
+            // the constructor assignment rather than on a name match, so
+            // the Zig surface no longer needs -- and must not keep -- a
+            // private copy that only fired when the struct field and the
+            // `init` parameter happened to share a name. readonly
+            // inference still reads the ORIGINAL initializer, exactly as
+            // it did when the strip ran in the same expression.
 
-            // Apply readonly + initializer normalization.
+            // Apply readonly normalization.
             List<PropertyNode> normalized = new ArrayList<>(properties.size());
             for (PropertyNode prop : properties) {
                 boolean hadInitializer = prop.initializer() != null;
                 Expression init = prop.initializer();
                 boolean readonly = prop.readonly();
-                if (ctorParamNames.contains(prop.name())) {
-                    init = null;
-                }
                 if (parentClass == ParentClass.SMART_CONTRACT
                     || parentClass == ParentClass.UNSAFE_SMART_CONTRACT) {
                     readonly = true;
@@ -631,10 +677,17 @@ public final class ZigParser {
                     readonly,
                     init,
                     prop.sourceLocation(),
-                    null
+                    null,
+                    prop.embedAlways()
                 ));
             }
             properties = normalized;
+
+            // N-344: a `const` local cannot be reassigned. Checked before the
+            // rewrite below, which rebuilds declarations and so loses identity.
+            errors.addAll(ConstReassign.check(
+                new ContractNode(contractName, parentClass, properties, constructor, methods, file),
+                constDecls, file));
 
             // Rewrite bare method calls.
             Set<String> methodNames = new HashSet<>();
@@ -648,7 +701,7 @@ public final class ZigParser {
                 for (ParamNode p : m.params()) paramScope.add(p.name());
                 List<Statement> rewritten = rewriteStmts(m.body(), methodNames, paramScope);
                 rewrittenMethods.add(new MethodNode(
-                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation()));
+                    m.name(), m.params(), rewritten, m.visibility(), m.sourceLocation(), m.sighashType()));
             }
             methods = rewrittenMethods;
 
@@ -677,13 +730,20 @@ public final class ZigParser {
             if (current().kind == Kind.IDENT && "runar".equals(current().value)) {
                 advance();
                 expect(Kind.DOT, ".");
-                String parent = expect(Kind.IDENT, "identifier").value;
+                Token parentTok = expect(Kind.IDENT, "identifier");
+                String parent = parentTok.value;
                 if ("StatefulSmartContract".equals(parent)) {
                     parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 } else if ("UnsafeSmartContract".equals(parent)) {
                     parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 } else {
                     parentClass = ParentClass.SMART_CONTRACT;
+                    if (!"SmartContract".equals(parent)) {
+                        // N-014: an unknown base is refused, never folded to SmartContract.
+                        errors.add(file + ":" + parentTok.line + ":" + parentTok.col
+                            + ": unknown parent class: '" + parent
+                            + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
+                    }
                 }
             }
             match(Kind.SEMICOLON);
@@ -700,9 +760,10 @@ public final class ZigParser {
                 advance();
                 initializer = parseExpression();
             }
-            match(Kind.COMMA);
+            // N-033: fields are separated by `,`; only the last before `}` may omit it.
+            expectListSeparator(Kind.RBRACE);
 
-            return new PropertyNode(name, pt.type, pt.readonly, initializer, l, null);
+            return new PropertyNode(name, pt.type, pt.readonly, initializer, l, null, pt.embedAlways);
         }
 
         MethodNode parseMethod(boolean isPublic) {
@@ -713,9 +774,48 @@ public final class ZigParser {
 
             ParamListResult plr = parseParamList();
 
-            // Parse and discard the return type if present.
-            if (current().kind != Kind.LBRACE) {
-                parseType();
+            // N-050: a `pub fn` without a receiver of the contract type is a
+            // namespace (static) function, not a contract method. A private one
+            // stays a helper (the multi-method golden's computeThreshold), like R9.
+            if (isPublic && plr.receiverName == null && !"init".equals(name)) {
+                errors.add(file + ":" + l.line() + ":" + l.column() + ": " + LexDiag.staticMethod(name));
+            }
+
+            // Return type, parsed and discarded. N-093: `runar.Sighash("FLAGS")`
+            // in its place is the native spelling of the `@sighash` directive
+            // (natively it is `void`).
+            List<String> sighashSpecs = new ArrayList<>();
+            if (current().kind == Kind.IDENT && "runar".equals(current().value)
+                    && peekAhead(1).kind == Kind.DOT
+                    && peekAhead(2).kind == Kind.IDENT && "Sighash".equals(peekAhead(2).value)) {
+                advance();
+                advance();
+                advance();
+                expect(Kind.LPAREN, "(");
+                Token arg = current();
+                int count = 0;
+                int depth = 0;
+                while (current().kind != Kind.EOF) {
+                    Kind k = current().kind;
+                    if (k == Kind.RPAREN && depth == 0) break;
+                    if (k == Kind.LPAREN) depth++;
+                    if (k == Kind.RPAREN) depth--;
+                    advance();
+                    count++;
+                }
+                expect(Kind.RPAREN, ")");
+                sighashSpecs.add(count == 1 && arg.kind == Kind.STRING ? arg.value : null);
+            } else if (current().kind != Kind.LBRACE) {
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                // `init` returns the contract struct itself, which is not a
+                // type to check.
+                ParsedType returnType = parseType();
+                if (!"init".equals(name)) {
+                    String unknownReturn = LexDiag.unknownReturnType(returnType.type, name, isPublic);
+                    if (unknownReturn != null) {
+                        errors.add(file + ":" + l.line() + ":" + l.column() + ": " + unknownReturn);
+                    }
+                }
             }
 
             Set<String> prevSelf = selfNames;
@@ -725,14 +825,24 @@ public final class ZigParser {
 
             try {
                 if ("init".equals(name)) {
+                    // N-093: the constructor is not a spending entry point.
+                    if (!sighashSpecs.isEmpty()) {
+                        errors.add(file + ":" + l.line() + ":" + l.column() + ": "
+                            + SighashDirective.lostDirectiveMessage("@sighash"));
+                    }
                     constructor = parseConstructor(l, plr.params);
                     return null;
                 }
                 List<Statement> body = parseBlockStatements();
+                SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(name, isPublic, sighashSpecs);
+                if (sighash != null && sighash.isError()) {
+                    errors.add(file + ":" + l.line() + ":" + l.column() + ": " + sighash.error());
+                }
                 return new MethodNode(
                     name, plr.params, body,
                     isPublic ? Visibility.PUBLIC : Visibility.PRIVATE,
-                    l);
+                    l,
+                    sighash == null || sighash.isError() ? null : sighash.value());
             } finally {
                 selfNames = prevSelf;
                 statefulContextNames = prevCtx;
@@ -779,7 +889,8 @@ public final class ZigParser {
                     params.add(new ParamNode(paramName, pt.type));
                 }
                 index++;
-                match(Kind.COMMA);
+                // N-033: parameters are separated by `,` (a trailing one is allowed).
+                if (!expectListSeparator(Kind.RPAREN)) break;
             }
             expect(Kind.RPAREN, ")");
             return new ParamListResult(params, receiverName, statefulCtx);
@@ -800,11 +911,18 @@ public final class ZigParser {
             final TypeNode type;
             final String rawName;
             final boolean readonly;
+            /** N-093: {@code runar.EmbedAlways(T)}, the native spelling of {@code @embedAlways}. */
+            final boolean embedAlways;
 
             ParsedType(TypeNode type, String rawName, boolean readonly) {
+                this(type, rawName, readonly, false);
+            }
+
+            ParsedType(TypeNode type, String rawName, boolean readonly, boolean embedAlways) {
                 this.type = type;
                 this.rawName = rawName;
                 this.readonly = readonly;
+                this.embedAlways = embedAlways;
             }
         }
 
@@ -815,7 +933,7 @@ public final class ZigParser {
                 Token len = expect(Kind.NUMBER, "array length");
                 int length = parseLongLiteral(len.value).intValueExact();
                 expect(Kind.RBRACKET, "]");
-                ParsedType elem = parseType();
+                ParsedType elem = nest.nested(this::parseType);
                 return new ParsedType(new FixedArrayType(elem.type, length), elem.rawName, false);
             }
 
@@ -829,9 +947,15 @@ public final class ZigParser {
 
                 if ("Readonly".equals(name) && current().kind == Kind.LPAREN) {
                     expect(Kind.LPAREN, "(");
-                    ParsedType inner = parseType();
+                    ParsedType inner = nest.nested(this::parseType);
                     expect(Kind.RPAREN, ")");
-                    return new ParsedType(inner.type, inner.rawName, true);
+                    return new ParsedType(inner.type, inner.rawName, true, inner.embedAlways);
+                }
+                if ("EmbedAlways".equals(name) && current().kind == Kind.LPAREN) {
+                    expect(Kind.LPAREN, "(");
+                    ParsedType inner = nest.nested(this::parseType);
+                    expect(Kind.RPAREN, ")");
+                    return new ParsedType(inner.type, inner.rawName, inner.readonly, true);
                 }
                 String mapped = mapZigType(name);
                 return new ParsedType(makeTypeNode(mapped), name, false);
@@ -902,12 +1026,19 @@ public final class ZigParser {
             expect(Kind.DOT, ".");
             expect(Kind.LBRACE, "{");
             while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                if (current().kind == Kind.DOT) advance();
+                // N-410: Zig requires the leading `.` of a struct-init field.
+                if (current().kind == Kind.DOT) {
+                    advance();
+                } else {
+                    Token t = current();
+                    errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_STRUCT_INIT_DOT));
+                }
                 String field = expect(Kind.IDENT, "field name").value;
                 expect(Kind.ASSIGN, "=");
                 Expression value = parseExpression();
                 out.add(createPropertyAssignment(field, value));
-                match(Kind.COMMA);
+                // N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+                if (!expectListSeparator(Kind.RBRACE)) break;
             }
             expect(Kind.RBRACE, "}");
             return out;
@@ -924,7 +1055,7 @@ public final class ZigParser {
                     // Merge `var i = 0; while(...)` patterns into a ForStmt's init slot.
                     if (s instanceof ForStatement fs
                             && fs.init() != null
-                            && "__while_no_init".equals(fs.init().name())
+                            && WHILE_NO_INIT_PLACEHOLDER.equals(fs.init().name())
                             && !body.isEmpty()) {
                         Statement last = body.get(body.size() - 1);
                         String updateName = getLoopUpdateTargetName(fs);
@@ -955,6 +1086,10 @@ public final class ZigParser {
         }
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation l = loc();
 
             if (current().kind == Kind.RETURN) {
@@ -972,14 +1107,21 @@ public final class ZigParser {
             if (current().kind == Kind.CONST || current().kind == Kind.VAR) {
                 return parseVariableDecl();
             }
-            // _ = expr;
+            // _ = expr; (discard). N-053: Zig's discard drops the VALUE, not
+            // the evaluation -- a helper called for its asserts must keep
+            // them, so `expr` lowers as an expression statement. Only a bare
+            // name (the unused-binding idiom `_ = self;` / `_ = param;`) is
+            // dropped: reading a name has no effect.
             if (current().kind == Kind.IDENT && "_".equals(current().value)
                     && peekAhead(1).kind == Kind.ASSIGN) {
                 advance(); // _
                 advance(); // =
-                parseExpression();
+                Expression discarded = parseExpression();
                 match(Kind.SEMICOLON);
-                return null;
+                if (discarded instanceof Identifier) {
+                    return null;
+                }
+                return new ExpressionStatement(discarded, l);
             }
             if (current().kind == Kind.WHILE) {
                 return parseWhileStatement();
@@ -1014,8 +1156,9 @@ public final class ZigParser {
 
         Statement parseVariableDecl() {
             SourceLocation l = loc();
-            // 'const' or 'var' — mutability is not modelled in the Java AST,
-            // but we still consume the keyword.
+            // 'const' or 'var' — mutability is not modelled in the Java AST, so
+            // `const` is remembered by identity in constDecls (N-344).
+            boolean isConst = current().kind == Kind.CONST;
             advance();
             String name = expect(Kind.IDENT, "variable name").value;
 
@@ -1029,7 +1172,9 @@ public final class ZigParser {
             Expression init = parseExpression();
             match(Kind.SEMICOLON);
 
-            return new VariableDeclStatement(name, typeNode, init, l);
+            VariableDeclStatement decl = new VariableDeclStatement(name, typeNode, init, l);
+            if (isConst) constDecls.add(decl);
+            return decl;
         }
 
         Statement parseIfStatement() {
@@ -1045,7 +1190,8 @@ public final class ZigParser {
                 advance();
                 if (current().kind == Kind.IF) {
                     elseBranch = new ArrayList<>();
-                    elseBranch.add(parseIfStatement());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    elseBranch.add(nest.nested(this::parseIfStatement));
                 } else {
                     elseBranch = parseBlockStatements();
                 }
@@ -1085,7 +1231,7 @@ public final class ZigParser {
 
             // Placeholder init that may be patched up by parseBlockStatements.
             VariableDeclStatement init = new VariableDeclStatement(
-                "__while_no_init", null, new BigIntLiteral(BigInteger.ZERO), l);
+                WHILE_NO_INIT_PLACEHOLDER, null, new BigIntLiteral(BigInteger.ZERO), l);
             return new ForStatement(init, condition, update, body, l);
         }
 
@@ -1128,7 +1274,7 @@ public final class ZigParser {
         // ------------------ Expressions (precedence climbing) ------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1137,65 +1283,71 @@ public final class ZigParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (current().kind == Kind.PIPEPIPE) {
                 advance();
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (current().kind == Kind.AMPAMP) {
                 advance();
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (current().kind == Kind.PIPE) {
                 advance();
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (current().kind == Kind.CARET) {
                 advance();
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (current().kind == Kind.AMP) {
                 advance();
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.EQEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, parseComparison());
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, parseComparison(), start);
                 } else if (k == Kind.NOTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, parseComparison());
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, parseComparison(), start);
                 } else {
                     break;
                 }
@@ -1204,21 +1356,22 @@ public final class ZigParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.LT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, parseShift(), start);
                 } else if (k == Kind.LTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, parseShift(), start);
                 } else if (k == Kind.GT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, parseShift(), start);
                 } else if (k == Kind.GTEQ) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, parseShift());
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, parseShift(), start);
                 } else {
                     break;
                 }
@@ -1227,15 +1380,16 @@ public final class ZigParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAddSub();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.LSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub(), start);
                 } else if (k == Kind.RSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub(), start);
                 } else {
                     break;
                 }
@@ -1244,15 +1398,16 @@ public final class ZigParser {
         }
 
         Expression parseAddSub() {
+            SourceLocation start = loc();
             Expression left = parseMulDiv();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.PLUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv(), start);
                 } else if (k == Kind.MINUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv(), start);
                 } else {
                     break;
                 }
@@ -1261,18 +1416,19 @@ public final class ZigParser {
         }
 
         Expression parseMulDiv() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 Kind k = current().kind;
                 if (k == Kind.STAR) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary(), start);
                 } else if (k == Kind.SLASH) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary(), start);
                 } else if (k == Kind.PERCENT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary(), start);
                 } else {
                     break;
                 }
@@ -1281,18 +1437,32 @@ public final class ZigParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             Kind k = current().kind;
             if (k == Kind.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (k == Kind.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (k == Kind.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
+            }
+            // Zig's `&` is the address-of operator used for slice coercion
+            // at call sites like `&.{sig1, sig2}` (an anonymous-struct
+            // literal coerced to a slice) and typed forms like
+            // `&[_]T{...}`. Slices have no Rúnar IR analogue -- the inner
+            // array literal IS the IR node -- so we simply skip the `&`
+            // and parse the operand. Recurse into parsePrimary directly,
+            // mirroring 01-parse-zig.ts and parse_zig.zig: `&.foo()` is
+            // not legal Zig and `&` never pairs with a postfix chain in
+            // practice.
+            if (k == Kind.AMP) {
+                advance();
+                return parsePrimary();
             }
             Expression expr = parsePrimary();
             return parsePostfixChain(expr);
@@ -1310,11 +1480,7 @@ public final class ZigParser {
                 advance(); // '&'
                 advance(); // '.'
                 advance(); // '{'
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACE);
                 expect(Kind.RBRACE, "}");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1323,11 +1489,7 @@ public final class ZigParser {
             if (tok.kind == Kind.DOT && peekAhead(1).kind == Kind.LBRACE) {
                 advance(); // '.'
                 advance(); // '{'
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACE);
                 expect(Kind.RBRACE, "}");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1337,8 +1499,15 @@ public final class ZigParser {
                 return new BigIntLiteral(parseLongLiteral(tok.value));
             }
             if (tok.kind == Kind.STRING) {
+                int idx = pos;
                 advance();
-                return new ByteStringLiteral(tok.value);
+                // N-448: a bare non-empty literal is refused (natively ASCII text,
+                // to the compiler hex). Exempt: "", the argument of
+                // runar.hexToBytes and the body of runar.asm.
+                if (!tok.value.isEmpty() && !bareLiteralOk.contains(idx)) {
+                    errors.add(LexDiag.at(file, tok.line, tok.col, LexDiag.zigBareStringLiteral(tok.value)));
+                }
+                return new ByteStringLiteral(tok.value, new SourceLocation(file, tok.line, tok.col));
             }
             if (tok.kind == Kind.TRUE) {
                 advance();
@@ -1354,13 +1523,26 @@ public final class ZigParser {
                 expect(Kind.RPAREN, ")");
                 return e;
             }
+            // `[_]T{...}` — typed array literal with inferred length. The
+            // element type is parsed and discarded; Rúnar infers element
+            // types from the literal contents. The element list is the
+            // same `{...}` form used by `.{...}` anon-struct literals.
+            // Mirrors 01-parse-zig.ts and parse_zig.zig.
+            if (tok.kind == Kind.LBRACKET && peekAhead(1).kind == Kind.IDENT
+                    && "_".equals(peekAhead(1).value) && peekAhead(2).kind == Kind.RBRACKET) {
+                advance(); // '['
+                advance(); // '_'
+                advance(); // ']'
+                parseType(); // discard element type
+                expect(Kind.LBRACE, "{");
+                List<Expression> elements = parseListElements(Kind.RBRACE);
+                expect(Kind.RBRACE, "}");
+                return new ArrayLiteralExpr(elements);
+            }
+
             if (tok.kind == Kind.LBRACKET) {
                 advance();
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACKET && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACKET);
                 expect(Kind.RBRACKET, "]");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1440,25 +1622,88 @@ public final class ZigParser {
                         expect(Kind.RPAREN, ")");
                         return new BinaryExpr(Expression.BinaryOp.EQ, left, right);
                     }
+                    // runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+                    // Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+                    if ("hexToBytes".equals(builtin) && current().kind == Kind.LPAREN) {
+                        advance();
+                        if (current().kind == Kind.STRING) bareLiteralOk.add(pos); // N-448: the explicit hex spelling
+                        Expression arg = parseExpression();
+                        expect(Kind.RPAREN, ")");
+                        if (arg instanceof ByteStringLiteral lit) {
+                            return new ByteStringLiteral(lit.value(), lit.sourceLocation());
+                        }
+                        errors.add(file + ":" + tok.line + ":" + tok.col
+                            + ": runar.hexToBytes expects a string literal argument");
+                        return new ByteStringLiteral("");
+                    }
+                    // N-448: the first argument of runar.asm(...) is an opcode body.
+                    if ("asm".equals(builtin) && current().kind == Kind.LPAREN && pos + 1 < tokens.size()
+                        && tokens.get(pos + 1).kind == Kind.STRING) {
+                        bareLiteralOk.add(pos + 1);
+                    }
                     return new Identifier(builtin);
                 }
-                return new Identifier(tok.value);
+                return new Identifier(tok.value, new SourceLocation(file, tok.line, tok.col));
             }
             // Fallback: emit an Identifier placeholder.
             advance();
             return new Identifier(tok.value == null || tok.value.isEmpty() ? "unknown" : tok.value);
         }
 
+        /**
+         * F-026: the elements of a call argument list or array literal up to (not
+         * including) {@code close}. Zig requires {@code ,} between elements (a
+         * trailing one is allowed); without it a stray token after a literal used
+         * to become an extra element.
+         */
+        List<Expression> parseListElements(Kind close) {
+            List<Expression> elements = new ArrayList<>();
+            while (current().kind != close && current().kind != Kind.EOF) {
+                elements.add(parseExpression());
+                if (match(Kind.COMMA)) continue;
+                if (current().kind != close) {
+                    Token t = current();
+                    errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_LIST_COMMA));
+                }
+                break;
+            }
+            return elements;
+        }
+
+        /**
+         * N-033: after a field, parameter or struct-init entry, consume the
+         * {@code ,} that separates it from the next one. Reports ZIG_LIST_COMMA
+         * at the current token and returns false when that token is neither
+         * {@code ,} nor {@code close}; never consumes {@code close}.
+         */
+        boolean expectListSeparator(Kind close) {
+            if (match(Kind.COMMA) || current().kind == close) return true;
+            Token t = current();
+            errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_LIST_COMMA));
+            return false;
+        }
+
         Expression parsePostfixChain(Expression expr) {
             while (true) {
                 if (current().kind == Kind.LPAREN) {
                     advance();
-                    List<Expression> args = new ArrayList<>();
-                    while (current().kind != Kind.RPAREN && current().kind != Kind.EOF) {
-                        args.add(parseExpression());
-                        match(Kind.COMMA);
-                    }
+                    List<Expression> args = parseListElements(Kind.RPAREN);
                     expect(Kind.RPAREN, ")");
+                    // N-453: the StatefulContext parameter is elided from every
+                    // method's parameter list, so a `self.helper(ctx, ...)` call
+                    // drops the bare handle too and the arities agree. Anywhere
+                    // else (including the output intrinsics) a bare `ctx` stays
+                    // an identifier and is refused as an undefined variable.
+                    if (expr instanceof PropertyAccessExpr pa
+                            && !List.of("txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput")
+                                .contains(pa.property())) {
+                        List<Expression> kept = new ArrayList<>();
+                        for (Expression a : args) {
+                            if (a instanceof Identifier aid && statefulContextNames.contains(aid.name())) continue;
+                            kept.add(a);
+                        }
+                        args = kept;
+                    }
                     expr = new CallExpr(expr, args);
                     continue;
                 }
@@ -1494,7 +1739,7 @@ public final class ZigParser {
         // ------------------ Helpers ------------------
 
         Statement createSuperCall(List<ParamNode> params) {
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = ctorLocOrFileStart();
             List<Expression> args = new ArrayList<>(params.size());
             for (ParamNode p : params) {
                 args.add(new Identifier(p.name()));
@@ -1504,8 +1749,12 @@ public final class ZigParser {
         }
 
         Statement createPropertyAssignment(String name, Expression value) {
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = ctorLocOrFileStart();
             return new AssignmentStatement(new PropertyAccessExpr(name), value, l);
+        }
+
+        SourceLocation ctorLocOrFileStart() {
+            return ctorLoc != null ? ctorLoc : new SourceLocation(file, 1, 0);
         }
 
         MethodNode createFallbackConstructor() {
@@ -1517,7 +1766,7 @@ public final class ZigParser {
             for (PropertyNode p : required) {
                 params.add(new ParamNode(p.name(), p.type()));
             }
-            SourceLocation l = new SourceLocation(file, 1, 1);
+            SourceLocation l = ctorLocOrFileStart();
             List<Statement> body = new ArrayList<>();
             body.add(createSuperCall(params));
             for (PropertyNode p : required) {
@@ -1609,10 +1858,10 @@ public final class ZigParser {
         if (e instanceof BinaryExpr be) {
             return new BinaryExpr(be.op(),
                 rewriteExpr(be.left(), methodNames, scope),
-                rewriteExpr(be.right(), methodNames, scope));
+                rewriteExpr(be.right(), methodNames, scope), be.sourceLocation());
         }
         if (e instanceof UnaryExpr ue) {
-            return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames, scope));
+            return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames, scope), ue.sourceLocation());
         }
         if (e instanceof TernaryExpr te) {
             return new TernaryExpr(

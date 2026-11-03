@@ -602,6 +602,25 @@ public final class Ec {
             e.accept(new OpcodeOp("OP_NOT"));
         });
 
+        // N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+        // fieldInv is Fermat, so inv(0) = 0 would silently return (p - 2px, 0)).
+        // No secp256k1 point has y == 0, so only an off-curve operand gets here.
+        // ABORT — the one failure channel this adder has besides the operand
+        // gates:
+        //   ok = NOT(cond AND px != 0 AND py == 0)
+        // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+        t.copyToTop("px", "_px_g");
+        t.copyToTop("py", "_py_g");
+        t.copyToTop("_cond", "_cond_g");
+        t.rawBlock(List.of("_px_g", "_py_g", "_cond_g"), "", e -> {
+            e.accept(new OpcodeOp("OP_SWAP"));
+            e.accept(new OpcodeOp("OP_NOT"));
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+            e.accept(new OpcodeOp("OP_NOT"));
+            e.accept(new OpcodeOp("OP_VERIFY"));
+        });
+
         // chord numerator / denominator
         t.copyToTop("qy", "_qy1");
         t.copyToTop("py", "_py1");

@@ -9,7 +9,11 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, static_method_message, unknown_return_type_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::identifier_collision::DeclaredIdents;
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -22,6 +26,9 @@ enum TokenType {
     True, False, Self_,
     AssertMacro, AssertEqMacro,
     Ident(String), Number(String), HexString(String),
+    /// F-026: a signed-suffix minimum such as `128i8` (value, text as
+    /// written): legal only under a unary minus.
+    NegOnlyNumber(String, String),
     // Attributes
     HashBracket, // #[
     // Punctuation
@@ -37,6 +44,13 @@ enum TokenType {
     Eof,
 }
 
+/// N-093: one field/method attribute, classified by `parse_directive_attribute`.
+enum DirectiveAttr {
+    EmbedAlways { loc: SourceLocation },
+    Sighash { flags: Option<String>, loc: SourceLocation },
+    Other(String),
+}
+
 #[derive(Debug, Clone)]
 struct Token {
     typ: TokenType,
@@ -48,7 +62,7 @@ struct Token {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut pos = 0;
@@ -61,7 +75,9 @@ fn tokenize(source: &str) -> Vec<Token> {
         let c = col;
 
         // Whitespace
-        if ch.is_whitespace() {
+        // N-407: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             if ch == '\n' { line += 1; col = 1; } else { col += 1; }
             pos += 1;
             continue;
@@ -77,7 +93,8 @@ fn tokenize(source: &str) -> Vec<Token> {
         if ch == '/' && pos + 1 < chars.len() && chars[pos + 1] == '*' {
             pos += 2; col += 2;
             while pos + 1 < chars.len() {
-                if chars[pos] == '\n' { line += 1; col = 1; }
+                // N-406: a newline resets the column; it is not counted again.
+                if chars[pos] == '\n' { line += 1; col = 1; pos += 1; continue; }
                 if chars[pos] == '*' && chars[pos + 1] == '/' { pos += 2; col += 2; break; }
                 pos += 1; col += 1;
             }
@@ -162,21 +179,31 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Number
+        // Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+        // integer literal (a lowercase `0x` was taken above as a ByteString).
         if ch.is_ascii_digit() {
-            let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '_') {
-                if chars[pos] != '_' { val.push(chars[pos]); }
-                pos += 1; col += 1;
-            }
-            tokens.push(Token { typ: TokenType::Number(val), line: l, col: c });
+            let end = scan_number_end(&chars, pos);
+            let text: String = chars[pos..end].iter().collect();
+            col += end - pos;
+            pos = end;
+            let typ = match parse_int_literal("rs", &text) {
+                Some(lit) if lit.neg_only => TokenType::NegOnlyNumber(lit.value.to_string(), text),
+                Some(lit) => TokenType::Number(lit.value.to_string()),
+                None => {
+                    errors.push(lex_error(&invalid_integer_literal("rs", &text), file, l, c - 1));
+                    TokenType::Number("0".to_string())
+                }
+            };
+            tokens.push(Token { typ, line: l, col: c });
             continue;
         }
 
         // Identifier / keyword
-        if ch.is_alphabetic() || ch == '_' {
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        // as an unexpected character.
+        if ch.is_ascii_alphabetic() || ch == '_' {
             let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
+            while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
                 val.push(chars[pos]);
                 pos += 1; col += 1;
             }
@@ -214,14 +241,28 @@ fn tokenize(source: &str) -> Vec<Token> {
             let mut val = String::new();
             pos += 1; col += 1;
             while pos < chars.len() && chars[pos] != '"' {
+                // A backslash escapes the next character (as in the TS
+                // reference), so `\"` does not close the literal.
+                if chars[pos] == '\\' && pos + 1 < chars.len() {
+                    val.push(chars[pos]);
+                    pos += 1; col += 1;
+                }
                 val.push(chars[pos]);
-                pos += 1; col += 1;
+                // N-406: a newline inside the literal advances the line, as TS.
+                if chars[pos] == '\n' { line += 1; col = 1; } else { col += 1; }
+                pos += 1;
             }
+            // F-011: Rust strings may span lines, so only end of file leaves
+            // one unterminated.
             if pos < chars.len() { pos += 1; col += 1; } // skip closing quote
+            else { errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1)); }
             tokens.push(Token { typ: TokenType::HexString(val), line: l, col: c });
             continue;
         }
 
+        // N-020: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, l, c - 1));
         pos += 1; col += 1;
     }
 
@@ -238,11 +279,45 @@ struct RustDslParser {
     pos: usize,
     file: String,
     errors: Vec<Diagnostic>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: DeclaredIdents,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl RustDslParser {
     fn new(tokens: Vec<Token>, file: String) -> Self {
-        Self { tokens, pos: 0, file, errors: Vec::new() }
+        Self { tokens, pos: 0, file, errors: Vec::new(), idents: DeclaredIdents::default(), nest: NestingCounter::new() }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn current(&self) -> &Token {
@@ -257,7 +332,7 @@ impl RustDslParser {
 
     fn expect(&mut self, expected: &TokenType) {
         if std::mem::discriminant(&self.current().typ) != std::mem::discriminant(expected) {
-            self.errors.push(Diagnostic::error(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col), None));
+            self.errors.push(Diagnostic::error(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col.saturating_sub(1)), None));
         }
         self.advance_clone();
     }
@@ -287,6 +362,9 @@ impl RustDslParser {
         let mut contract_name = String::new();
         let mut parent_class = "SmartContract".to_string();
         let mut methods: Vec<MethodNode> = Vec::new();
+        // N-490: the synthesized constructor is anchored at the contract's
+        // `struct` keyword, not a fake 1:1.
+        let mut ctor_loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
 
         while !matches!(self.current().typ, TokenType::Eof) {
             // Attribute: #[...]
@@ -304,6 +382,7 @@ impl RustDslParser {
                     }
                     // Parse struct
                     if matches!(self.current().typ, TokenType::Pub) { self.advance_clone(); }
+                    ctor_loc = self.loc();
                     self.expect(&TokenType::Struct);
                     if let TokenType::Ident(name) = self.current().typ.clone() {
                         contract_name = name;
@@ -312,11 +391,23 @@ impl RustDslParser {
                     self.expect(&TokenType::LBrace);
 
                     while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
-                        // Check for #[readonly] attribute
+                        // Field attributes, any number and order: #[readonly],
+                        // and N-093's #[embed_always] (the native spelling of
+                        // `@embedAlways`). A #[sighash(...)] here annotates
+                        // nothing and is refused.
                         let mut readonly = false;
-                        if matches!(self.current().typ, TokenType::HashBracket) {
-                            let field_attr = self.parse_attribute();
-                            if field_attr == "readonly" { readonly = true; }
+                        let mut embed_always = false;
+                        while matches!(self.current().typ, TokenType::HashBracket) {
+                            match self.parse_directive_attribute() {
+                                DirectiveAttr::EmbedAlways { .. } => embed_always = true,
+                                DirectiveAttr::Sighash { loc, .. } => self.errors.push(Diagnostic::error(
+                                    lost_directive_message("@sighash"),
+                                    Some(loc),
+                                )),
+                                DirectiveAttr::Other(field_attr) => {
+                                    if field_attr == "readonly" { readonly = true; }
+                                }
+                            }
                         }
 
                         // Skip optional `pub` visibility modifier
@@ -336,7 +427,7 @@ impl RustDslParser {
                             }
 
                             // Skip txPreimage — it's an implicit stateful param, not a contract property
-                            let camel_name = snake_to_camel(&field_name);
+                            let camel_name = self.idents.declare(&field_name, snake_to_camel(&field_name));
                             if camel_name != "txPreimage" {
                                 properties.push(PropertyNode {
                                     name: camel_name,
@@ -345,7 +436,7 @@ impl RustDslParser {
                                     initializer: None,
                                     source_location: loc,
                                     synthetic_array_chain: None,
-                                    embed_always: false,
+                                    embed_always,
                                 });
                             }
                         } else {
@@ -374,13 +465,18 @@ impl RustDslParser {
             }
         }
 
-        // Determine parent class from property mutability
-        if properties.iter().any(|p| !p.readonly) {
+        // Determine parent class from property mutability. The explicit
+        // `#[runar::unsafe_contract]` attribute is authoritative and must
+        // not be silently overridden by this structural inference (F-204).
+        if parent_class != "UnsafeSmartContract" && properties.iter().any(|p| !p.readonly) {
             parent_class = "StatefulSmartContract".to_string();
         }
 
+        if self.nest.exceeded() {
+            return nesting_refusal(None);
+        }
         if contract_name.is_empty() {
-            self.errors.push(Diagnostic::error("No Rúnar contract struct found", None));
+            self.errors.push(Diagnostic::error("no Rúnar contract struct found in Rust source", None));
             return ParseResult { contract: None, errors: self.errors, source_size_err: None };
         }
 
@@ -389,9 +485,17 @@ impl RustDslParser {
         let mut final_methods = Vec::new();
         for m in methods {
             if m.name == "init" && m.params.is_empty() {
+                // N-093: init() is not a spending entry point, so a #[sighash]
+                // on it would be dropped with the method.
+                if m.sighash_type.is_some() {
+                    self.errors.push(Diagnostic::error(
+                        lost_directive_message("@sighash"),
+                        Some(m.source_location.clone()),
+                    ));
+                }
                 for stmt in &m.body {
                     if let Statement::Assignment { target, value, .. } = stmt {
-                        if let Expression::PropertyAccess { property } = target {
+                        if let Expression::PropertyAccess { property, .. } = target {
                             for p in properties.iter_mut() {
                                 if p.name == *property {
                                     p.initializer = Some(value.clone());
@@ -412,15 +516,15 @@ impl RustDslParser {
             .filter(|p| p.initializer.is_none())
             .collect();
 
-        let loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
+        let loc = ctor_loc;
 
         // super(...) call as first statement
         let super_args: Vec<Expression> = uninit_props.iter()
-            .map(|p| Expression::Identifier { name: p.name.clone() })
+            .map(|p| Expression::Identifier { name: p.name.clone(), source_location: None })
             .collect();
         let super_call = Statement::ExpressionStatement {
             expression: Expression::CallExpr {
-                callee: Box::new(Expression::Identifier { name: "super".to_string() }),
+                callee: Box::new(Expression::Identifier { name: "super".to_string(), source_location: None }),
                 args: super_args,
                 asm_return_type: None,
             },
@@ -431,8 +535,8 @@ impl RustDslParser {
         let mut ctor_body = vec![super_call];
         for p in &uninit_props {
             ctor_body.push(Statement::Assignment {
-                target: Expression::PropertyAccess { property: p.name.clone() },
-                value: Expression::Identifier { name: p.name.clone() },
+                target: Expression::PropertyAccess { property: p.name.clone(), source_location: None },
+                value: Expression::Identifier { name: p.name.clone(), source_location: None },
                 source_location: loc.clone(),
             });
         }
@@ -458,7 +562,12 @@ impl RustDslParser {
             source_file: self.file.clone(),
         };
 
-        ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None }
+        // F-213 measure (A), then measure (B) on the finished tree.
+        if self.nest.exceeded() {
+            return nesting_refusal(None);
+        }
+        self.errors.extend(self.idents.collision_diagnostic());
+        enforce_ast_nesting(ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None })
     }
 
     /// Parse a bare `impl ContractName { ... }` block and return its methods.
@@ -474,13 +583,23 @@ impl RustDslParser {
 
         while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
             // #[public] is no longer supported — `pub fn` marks public methods.
+            // N-093: #[sighash(FLAGS)] is the native spelling of `@sighash`;
+            // #[embed_always] on a method annotates nothing and is refused.
+            let mut sighash_specs: Vec<Option<String>> = Vec::new();
             while matches!(self.current().typ, TokenType::HashBracket) {
-                let method_attr = self.parse_attribute();
-                if method_attr == "public" {
-                    self.errors.push(Diagnostic::error(
-                        "#[public] is no longer supported — use 'pub fn' for public methods",
-                        None,
-                    ));
+                match self.parse_directive_attribute() {
+                    DirectiveAttr::Sighash { flags, .. } => sighash_specs.push(flags),
+                    DirectiveAttr::EmbedAlways { loc } => {
+                        self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
+                    }
+                    DirectiveAttr::Other(method_attr) => {
+                        if method_attr == "public" {
+                            self.errors.push(Diagnostic::error(
+                                "#[public] is no longer supported — use 'pub fn' for public methods",
+                                None,
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -489,10 +608,77 @@ impl RustDslParser {
                 self.advance_clone();
                 visibility = Visibility::Public;
             }
-            methods.push(self.parse_function(visibility));
+            if !matches!(self.current().typ, TokenType::Fn) {
+                // N-093: a #[sighash] not followed by a fn annotates nothing.
+                for _ in &sighash_specs {
+                    let loc = self.loc();
+                    self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
+                }
+                methods.push(self.parse_function(visibility));
+                continue;
+            }
+            let mut method = self.parse_function(visibility);
+            match resolve_native_sighash(&method.name, method.visibility == Visibility::Public, &sighash_specs) {
+                Some(Ok(v)) => method.sighash_type = Some(v),
+                Some(Err(msg)) => {
+                    self.errors.push(Diagnostic::error(msg, Some(method.source_location.clone())))
+                }
+                None => {}
+            }
+            methods.push(method);
         }
         self.expect(&TokenType::RBrace);
         methods
+    }
+
+    /// N-093: classify a field/method attribute as one of the two directives.
+    /// `#[embed_always]` and `#[sighash(FLAGS)]` (optionally `runar::`-qualified)
+    /// are the native spellings of `@embedAlways` / `@sighash`. For `sighash`,
+    /// `flags` is the `|`-joined identifier list, or `None` when the
+    /// parentheses are missing or hold any other token. Every other attribute
+    /// is returned as `Other` with its compact text, exactly as before.
+    /// Mirrors `parseDirectiveAttribute` in the TS reference (01-parse-rust.ts).
+    fn parse_directive_attribute(&mut self) -> DirectiveAttr {
+        let loc = self.loc();
+        let start = self.pos;
+        let content = self.parse_attribute();
+        // Inside `#[` ... `]`. `parse_attribute` stops at the final token
+        // without advancing past it, so guard the end index.
+        let end = if matches!(self.tokens.get(self.pos.wrapping_sub(1)).map(|t| &t.typ), Some(TokenType::RBracket)) {
+            self.pos - 1
+        } else {
+            self.pos
+        };
+        let toks: Vec<TokenType> = self.tokens[(start + 1).min(end)..end].iter().map(|t| t.typ.clone()).collect();
+        let mut i = 0;
+        if matches!(toks.first(), Some(TokenType::Ident(n)) if n == "runar") && matches!(toks.get(1), Some(TokenType::ColonColon)) {
+            i = 2;
+        }
+        let name = match toks.get(i) {
+            Some(TokenType::Ident(n)) => n.clone(),
+            _ => String::new(),
+        };
+        let rest = toks.get(i + 1..).unwrap_or(&[]);
+        if name == "embed_always" && rest.is_empty() {
+            return DirectiveAttr::EmbedAlways { loc };
+        }
+        if name == "sighash" {
+            let ok = rest.len() >= 2
+                && matches!(rest[0], TokenType::LParen)
+                && matches!(rest[rest.len() - 1], TokenType::RParen)
+                && rest[1..rest.len() - 1].iter().all(|t| matches!(t, TokenType::Ident(_) | TokenType::Pipe));
+            let flags = ok.then(|| {
+                rest[1..rest.len() - 1]
+                    .iter()
+                    .map(|t| match t {
+                        TokenType::Ident(n) => n.as_str(),
+                        _ => "|",
+                    })
+                    .collect::<String>()
+            });
+            return DirectiveAttr::Sighash { flags, loc };
+        }
+        DirectiveAttr::Other(content)
     }
 
     fn parse_attribute(&mut self) -> String {
@@ -522,7 +708,8 @@ impl RustDslParser {
         // Fixed-size array: `[T; N]` — maps to TypeNode::FixedArray.
         if matches!(self.current().typ, TokenType::LBracket) {
             self.advance_clone(); // consume [
-            let element = self.parse_rust_type();
+            // F-213: `[T; N]` element type is one level deeper (+1).
+            let element = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_rust_type());
             // Expect `;`
             self.match_tok(&TokenType::Semi);
             // Length must be a numeric literal.
@@ -563,10 +750,11 @@ impl RustDslParser {
             self.advance_clone();
             "unknown".to_string()
         };
-        let name = snake_to_camel(&raw_name);
+        let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         self.expect(&TokenType::LParen);
         let mut params: Vec<ParamNode> = Vec::new();
+        let mut has_self = false;
 
         while !matches!(self.current().typ, TokenType::RParen | TokenType::Eof) {
             // Skip &self, &mut self
@@ -574,12 +762,14 @@ impl RustDslParser {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }
                 if matches!(self.current().typ, TokenType::Self_) {
+                    has_self = true;
                     self.advance_clone();
                     if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                     continue;
                 }
             }
             if matches!(self.current().typ, TokenType::Self_) {
+                has_self = true;
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                 continue;
@@ -595,7 +785,7 @@ impl RustDslParser {
                 }
                 let param_type = self.parse_rust_type();
                 params.push(ParamNode {
-                    name: snake_to_camel(&param_name),
+                    name: self.idents.declare(&param_name, snake_to_camel(&param_name)),
                     param_type,
                 });
             } else {
@@ -605,10 +795,20 @@ impl RustDslParser {
         }
         self.expect(&TokenType::RParen);
 
+        // N-050: a `pub fn` without a self receiver is an associated (static)
+        // function, not a contract method. A private one stays a helper (R9).
+        if visibility == Visibility::Public && !has_self {
+            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(loc.clone())));
+        }
+
         // Optional return type
         if matches!(self.current().typ, TokenType::Arrow) {
             self.advance_clone();
-            self.parse_rust_type();
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            let ret_type = self.parse_rust_type();
+            if let Some(msg) = unknown_return_type_message(&ret_type, &raw_name, visibility == Visibility::Public) {
+                self.errors.push(Diagnostic::error(msg, Some(loc.clone())));
+            }
         }
 
         self.expect(&TokenType::LBrace);
@@ -624,6 +824,10 @@ impl RustDslParser {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         let loc = self.loc();
 
         // assert!(expr)
@@ -635,7 +839,7 @@ impl RustDslParser {
             self.match_tok(&TokenType::Semi);
             return Some(Statement::ExpressionStatement {
                 expression: Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: vec![expr],
                     asm_return_type: None,
                 },
@@ -654,11 +858,12 @@ impl RustDslParser {
             self.match_tok(&TokenType::Semi);
             return Some(Statement::ExpressionStatement {
                 expression: Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: vec![Expression::BinaryExpr {
                         op: BinaryOp::StrictEq,
                         left: Box::new(left),
                         right: Box::new(right),
+                        source_location: None,
                     }],
                     asm_return_type: None,
                 },
@@ -672,7 +877,7 @@ impl RustDslParser {
             let mutable = self.match_tok(&TokenType::Mut);
             let var_name = if let TokenType::Ident(name) = self.current().typ.clone() {
                 self.advance_clone();
-                snake_to_camel(&name)
+                self.idents.declare(&name, snake_to_camel(&name))
             } else {
                 self.advance_clone();
                 "unknown".to_string()
@@ -733,7 +938,7 @@ impl RustDslParser {
             self.advance_clone();
             let var_name = if let TokenType::Ident(name) = self.current().typ.clone() {
                 self.advance_clone();
-                snake_to_camel(&name)
+                self.idents.declare(&name, snake_to_camel(&name))
             } else {
                 self.advance_clone();
                 "i".to_string()
@@ -817,10 +1022,11 @@ impl RustDslParser {
             };
             let condition = Expression::BinaryExpr {
                 op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
-                left: Box::new(Expression::Identifier { name: var_name.clone() }),
+                left: Box::new(Expression::Identifier { name: var_name.clone(), source_location: None }),
                 right: Box::new(end_expr),
+                source_location: None,
             };
-            let update_operand = Box::new(Expression::Identifier { name: var_name });
+            let update_operand = Box::new(Expression::Identifier { name: var_name, source_location: None });
             let update = Statement::ExpressionStatement {
                 expression: if descending {
                     Expression::DecrementExpr { operand: update_operand, prefix: false }
@@ -873,7 +1079,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs) },
+                value: Expression::BinaryExpr { op: BinaryOp::Add, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -884,7 +1090,7 @@ impl RustDslParser {
             let target = self.convert_self_access(expr.clone());
             return Some(Statement::Assignment {
                 target: target.clone(),
-                value: Expression::BinaryExpr { op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs) },
+                value: Expression::BinaryExpr { op: BinaryOp::Sub, left: Box::new(target), right: Box::new(rhs), source_location: None },
                 source_location: loc,
             });
         }
@@ -899,9 +1105,9 @@ impl RustDslParser {
 
     fn convert_self_access(&self, expr: Expression) -> Expression {
         if let Expression::MemberExpr { ref object, ref property } = expr {
-            if let Expression::Identifier { ref name } = **object {
+            if let Expression::Identifier { ref name, .. } = **object {
                 if name == "self" {
-                    return Expression::PropertyAccess { property: snake_to_camel(property) };
+                    return Expression::PropertyAccess { property: snake_to_camel(property), source_location: None };
                 }
             }
         }
@@ -919,57 +1125,77 @@ impl RustDslParser {
     }
 
     // Expression parsing with precedence climbing
-    fn parse_expression(&mut self) -> Expression { self.parse_or() }
+    fn parse_expression(&mut self) -> Expression { self.nested(zero(), |p| p.parse_or()) }
 
     fn parse_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_and();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
             self.advance_clone();
             let right = self.parse_and();
-            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right) };
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_or();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
             self.advance_clone();
             let right = self.parse_bit_or();
-            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right) };
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_bit_or(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_xor();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(self.parse_bit_xor()) };
+            let right = self.parse_bit_xor();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_bit_xor(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_bit_and();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(self.parse_bit_and()) };
+            let right = self.parse_bit_and();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_bit_and(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_equality();
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
             self.advance_clone();
-            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(self.parse_equality()) };
+            let right = self.parse_equality();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_equality(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_comparison();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::EqEq => BinaryOp::StrictEq,
@@ -977,13 +1203,17 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_comparison()) };
+            let right = self.parse_comparison();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_comparison(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_shift();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Lt => BinaryOp::Lt,
@@ -993,13 +1223,17 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_shift()) };
+            let right = self.parse_shift();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_shift(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_add_sub();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Shl => BinaryOp::Shl,
@@ -1007,13 +1241,17 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_add_sub()) };
+            let right = self.parse_add_sub();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_add_sub(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_mul_div();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Plus => BinaryOp::Add,
@@ -1021,13 +1259,17 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_mul_div()) };
+            let right = self.parse_mul_div();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_mul_div(&mut self) -> Expression {
+        let start = self.loc();
         let mut left = self.parse_unary();
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Star => BinaryOp::Mul,
@@ -1036,16 +1278,36 @@ impl RustDslParser {
                 _ => break,
             };
             self.advance_clone();
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_unary()) };
+            let right = self.parse_unary();
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start.clone()) };
         }
         left
     }
 
     fn parse_unary(&mut self) -> Expression {
+        let op_loc = self.loc();
         match self.current().typ {
-            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.parse_unary()) } }
-            TokenType::Minus => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.parse_unary()) } }
-            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.parse_unary()) } }
+            TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
+            TokenType::Minus => {
+                self.advance_clone();
+                // F-026: a signed-suffix minimum (`128i8`) is legal under this
+                // minus, through parentheses, as rustc's overflowing_literals lint.
+                let mut k = self.pos;
+                let mut opens = 0;
+                while k < self.tokens.len() && matches!(self.tokens[k].typ, TokenType::LParen) {
+                    k += 1;
+                    opens += 1;
+                }
+                if let Some(TokenType::NegOnlyNumber(v, _)) = self.tokens.get(k).map(|t| t.typ.clone()) {
+                    let closed = (1..=opens).all(|j| matches!(self.tokens.get(k + j).map(|t| &t.typ), Some(TokenType::RParen)));
+                    if closed {
+                        self.tokens[k].typ = TokenType::Number(v);
+                    }
+                }
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) }
+            }
+            TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.nested(zero(), |p| p.parse_unary())), source_location: Some(op_loc.clone()) } }
             TokenType::Amp => {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }
@@ -1057,6 +1319,7 @@ impl RustDslParser {
 
     fn parse_postfix(&mut self) -> Expression {
         let mut expr = self.parse_primary();
+        let mut dt = DepthTracker::new();
         loop {
             if matches!(self.current().typ, TokenType::LParen) {
                 self.advance_clone();
@@ -1075,10 +1338,13 @@ impl RustDslParser {
                     if let Expression::MemberExpr { object, property } = &expr {
                         if property == "clone" {
                             expr = (**object).clone();
+                            dt = DepthTracker::new();
                             continue;
                         }
                     }
                 }
+                let arg_refs: Vec<&Expression> = args.iter().collect();
+                if !self.grow(&mut dt, &expr, &arg_refs) { break; }
                 expr = Expression::CallExpr { callee: Box::new(expr), args, asm_return_type: None };
             } else if matches!(self.current().typ, TokenType::Dot) {
                 self.advance_clone();
@@ -1090,23 +1356,27 @@ impl RustDslParser {
                     "unknown".to_string()
                 };
                 // self.field -> PropertyAccess
-                if let Expression::Identifier { ref name } = expr {
+                if let Expression::Identifier { ref name, .. } = expr {
                     if name == "self" {
-                        expr = Expression::PropertyAccess { property: prop };
+                        expr = Expression::PropertyAccess { property: prop, source_location: None };
+                        dt = DepthTracker::new();
                         continue;
                     }
                 }
+                if !self.grow(&mut dt, &expr, &[]) { break; }
                 expr = Expression::MemberExpr { object: Box::new(expr), property: prop };
             } else if matches!(self.current().typ, TokenType::ColonColon) {
                 self.advance_clone();
                 if let TokenType::Ident(name) = self.current().typ.clone() {
                     self.advance_clone();
-                    expr = Expression::Identifier { name: snake_to_camel(&name) };
+                    expr = Expression::Identifier { name: snake_to_camel(&name), source_location: None };
+                    dt = DepthTracker::new();
                 }
             } else if matches!(self.current().typ, TokenType::LBracket) {
                 self.advance_clone();
                 let index = self.parse_expression();
                 self.expect(&TokenType::RBracket);
+                if !self.grow(&mut dt, &expr, &[&index]) { break; }
                 expr = Expression::IndexAccess { object: Box::new(expr), index: Box::new(index) };
             } else {
                 break;
@@ -1123,15 +1393,24 @@ impl RustDslParser {
                     .unwrap_or_else(|_| BigInt::from(0));
                 Expression::BigIntLiteral { value: n }
             }
-            TokenType::HexString(val) => {
+            TokenType::NegOnlyNumber(val, text) => {
+                let t = self.current().clone();
+                self.errors.push(lex_error(&invalid_integer_literal("rs", &text), &self.file.clone(), t.line, t.col.saturating_sub(1)));
                 self.advance_clone();
-                Expression::ByteStringLiteral { value: val }
+                let n = <BigInt as Num>::from_str_radix(&val, 10)
+                    .unwrap_or_else(|_| BigInt::from(0));
+                Expression::BigIntLiteral { value: n }
+            }
+            TokenType::HexString(val) => {
+                let lit_loc = self.loc();
+                self.advance_clone();
+                Expression::ByteStringLiteral { value: val, source_location: Some(lit_loc) }
             }
             TokenType::True => { self.advance_clone(); Expression::BoolLiteral { value: true } }
             TokenType::False => { self.advance_clone(); Expression::BoolLiteral { value: false } }
             TokenType::Self_ => {
                 self.advance_clone();
-                Expression::Identifier { name: "self".to_string() }
+                Expression::Identifier { name: "self".to_string(), source_location: None }
             }
             TokenType::LParen => {
                 self.advance_clone();
@@ -1158,20 +1437,26 @@ impl RustDslParser {
                 Expression::ArrayLiteral { elements }
             }
             TokenType::Ident(name) => {
+                let ident_loc = self.loc();
                 self.advance_clone();
                 let mapped = map_rust_builtin(&name);
-                Expression::Identifier { name: mapped }
+                Expression::Identifier { name: mapped, source_location: Some(ident_loc) }
             }
             _ => {
                 let tok = self.current().clone();
                 self.advance_clone();
                 self.errors.push(Diagnostic::error(format!(
                     "unsupported token '{:?}' at {}:{} — not valid in Rúnar contract",
-                    tok.typ, tok.line, tok.col), None));
-                Expression::Identifier { name: "unknown".to_string() }
+                    tok.typ, tok.line, tok.col.saturating_sub(1)), None));
+                Expression::Identifier { name: "unknown".to_string(), source_location: None }
             }
         }
     }
+}
+
+/// Placeholder expression returned by a parse cut short by the F-213 limit.
+fn zero() -> Expression {
+    Expression::BigIntLiteral { value: BigInt::from(0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1471,7 @@ impl RustDslParser {
 fn literal_int_value(expr: &Expression) -> Option<BigInt> {
     match expr {
         Expression::BigIntLiteral { value } => Some(value.clone()),
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             literal_int_value(operand).map(|v| -v)
         }
         _ => None,
@@ -1286,6 +1571,7 @@ fn map_rust_builtin(name: &str) -> String {
         "extractOutputHash" => "extractOutputHash".to_string(),
         "extractPrevOutputScript" => "extractPrevOutputScript".to_string(),
         "currentBlockHeight" => "currentBlockHeight".to_string(),
+        "continuationAmount" => "continuationAmount".to_string(),
         "extractVersion" => "extractVersion".to_string(),
         "extractHashPrevouts" => "extractHashPrevouts".to_string(),
         "extractHashSequence" => "extractHashSequence".to_string(),
@@ -1310,10 +1596,31 @@ fn map_rust_builtin(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn parse_rust_dsl(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_rust_dsl_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_rust_dsl`], on the parse stack segment.
+fn parse_rust_dsl_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.rs").to_string();
-    let tokens = tokenize(source);
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    let tokens = tokenize(source, &file, &mut lex_errors);
     let parser = RustDslParser::new(tokens, file);
-    parser.parse()
+    let mut result = parser.parse();
+    lex_errors.append(&mut result.errors);
+    result.errors = lex_errors;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1796,34 @@ impl Counter {
     }
 
     #[test]
+    fn test_unsafe_contract_with_mutable_field_stays_unsafe() {
+        // F-204: `#[runar::unsafe_contract]` must not be silently downgraded
+        // to StatefulSmartContract by the structural mutability inference.
+        // The explicit attribute is authoritative (mirrors the TS reference
+        // parser's ordering, where the attribute override is applied last).
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::unsafe_contract]
+pub struct Counter {
+    count: bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        asm("51", 0, 1);
+    }
+}
+"#;
+
+        let result = parse_rust_dsl(source, Some("Counter.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.name, "Counter");
+        assert_eq!(contract.parent_class, "UnsafeSmartContract");
+    }
+
+    #[test]
     fn test_constructor_auto_generated() {
         let source = r#"
 use runar::prelude::*;
@@ -1542,7 +1877,7 @@ impl Test {
         // Should be assert(self.x === v)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
             if let Expression::CallExpr { callee, args, .. } = expression {
-                if let Expression::Identifier { name } = callee.as_ref() {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }
                 if let Expression::BinaryExpr { op, .. } = &args[0] {

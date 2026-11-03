@@ -1,5 +1,12 @@
 {
-    "error": "AssertionFailureError",
-    "methodName": "publish",
-    "bindingName": "t2"
+  "state": {
+    "count": "1n"
+  },
+  "dataOutputs": [
+    {
+      "satoshis": "0n",
+      "script": "deadbeef"
+    }
+  ],
+  "rawOutputs": []
 }

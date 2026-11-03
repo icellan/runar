@@ -704,8 +704,10 @@ satoshi moves:
 Everything that actually works is still allowed. A stateless contract carries no
 such pin. A fixed-size state layout carries none either — its check rides on the
 remainder, which the envelope does not touch. And a contract with a
-variable-width constructor argument carries a LOWER-bound pin, which the extra
-envelope bytes satisfy. Only the shape that would lock funds is rejected.
+variable-width constructor argument carries a deploy-time pin (artifact
+`codePartLenSlots`): the SDK writes the real code-part length into it when it
+deploys, envelope included, so the inscription is accepted. Only the shape that
+would lock funds is rejected.
 
 To inscribe a contract of the refused shape, give it a fixed-size state layout
 (e.g. a `Sha256` digest of the payload instead of the payload itself), or keep

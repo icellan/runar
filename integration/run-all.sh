@@ -24,6 +24,16 @@ if $START_NODE; then
   ./regtest.sh start
 fi
 
+# N-480: mirrors the CI integration job — start the in-repo BRC-100 test
+# wallet and point every tier's RUNAR_WALLET_ENDPOINT-gated wallet-client
+# test at it (Ruby's runs inside the Ruby suite below; the other six in the
+# wallet-client section at the end).
+echo ""
+echo "=== Starting mock BRC-100 wallet ==="
+./mock-wallet/mock-wallet.sh start
+trap './mock-wallet/mock-wallet.sh stop' EXIT
+export RUNAR_WALLET_ENDPOINT="http://127.0.0.1:${MOCK_WALLET_PORT:-18480}"
+
 echo ""
 echo "=== Go integration tests ==="
 if (cd go && go test -tags integration -v -timeout 1800s); then
@@ -43,8 +53,19 @@ else
 fi
 
 echo ""
+echo "=== TypeScript SDK regtest test (assembleMultiContractCall) ==="
+# Mirrors the CI integration step of the same name (N-474). Under
+# RUNAR_INTEGRATION_STRICT=1 an unreachable node fails instead of skipping.
+if (cd ../packages/runar-sdk && npx vitest run src/__tests__/multi-contract-call.regtest.test.ts); then
+  echo "--- TypeScript SDK regtest: PASSED ---"
+else
+  echo "--- TypeScript SDK regtest: FAILED ---"
+  FAILED=$((FAILED + 1))
+fi
+
+echo ""
 echo "=== Rust integration tests ==="
-if (cd rust && cargo test --release -- --ignored); then
+if (cd rust && cargo test --release -- --include-ignored); then
   echo "--- Rust: PASSED ---"
 else
   echo "--- Rust: FAILED ---"
@@ -136,6 +157,25 @@ else
     FAILED=$((FAILED + 1))
   fi
 fi
+
+echo ""
+echo "=== BRC-100 wallet-client tests (mock wallet) ==="
+# Same commands as the CI integration job's per-tier wallet-client steps.
+run_wallet_client() {
+  local tier="$1"; shift
+  if (cd .. && eval "$*"); then
+    echo "--- $tier wallet-client: PASSED ---"
+  else
+    echo "--- $tier wallet-client: FAILED ---"
+    FAILED=$((FAILED + 1))
+  fi
+}
+run_wallet_client TypeScript 'cd packages/runar-sdk && npx vitest run src/__tests__/wallet-client.spec.ts'
+run_wallet_client Go 'cd packages/runar-go && go test -run TestWalletClient_LiveEndpoint_RoundTrip -v'
+run_wallet_client Rust 'cd packages/runar-rs && cargo test --test wallet_client_integration -- --ignored'
+run_wallet_client Python 'cd packages/runar-py && python3 -m pytest tests/test_wallet_client_integration.py -v'
+run_wallet_client Zig 'cd packages/runar-zig && zig build test'
+run_wallet_client Java 'cd packages/runar-java && ./gradlew test --tests runar.lang.sdk.WalletClientIntegrationTest --no-daemon'
 
 if $STOP_NODE; then
   echo ""

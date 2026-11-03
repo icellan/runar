@@ -13,9 +13,9 @@ class ShiftOps(SmartContract):
         self.a = a
 
     @public
-    def test_shift(self):
-        """Apply left shift and right shift, then sanity-check the results."""
+    def test_shift(self, expected_left: Bigint, expected_right: Bigint):
+        """Apply left shift and right shift, then check the caller-supplied results."""
         left = self.a << 3
         right = self.a >> 2
-        assert_(left >= 0 or left < 0)
-        assert_(right >= 0 or right < 0)
+        assert_(left == expected_left)
+        assert_(right == expected_right)

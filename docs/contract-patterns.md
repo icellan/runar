@@ -316,7 +316,7 @@ A stateful auction where bidders can submit increasing bids, and the auctioneer 
 ```typescript
 import {
   StatefulSmartContract, assert, PubKey, Sig,
-  checkSig, extractLocktime, extractSequence
+  checkSig, extractLocktime, extractSequence, extractAmount, continuationAmount
 } from 'runar-lang';
 
 class Auction extends StatefulSmartContract {
@@ -340,6 +340,11 @@ class Auction extends StatefulSmartContract {
 
   public bid(bidder: PubKey, bidAmount: bigint) {
     assert(bidAmount > this.highestBid);
+    // The bid must be paid into the pot: the continuation carries the prior
+    // pot plus the new bid (see "Value of the state continuation" in the
+    // language reference). The compiler's own `>= input` floor alone would
+    // let a bid pay nothing.
+    assert(continuationAmount() >= extractAmount(this.txPreimage) + bidAmount);
     // No deadline check — see "Why bid has no deadline" below.
     this.highestBidder = bidder;
     this.highestBid = bidAmount;
@@ -357,7 +362,7 @@ class Auction extends StatefulSmartContract {
 
 **How it works:**
 
-- **`bid`**: Anyone can bid, for as long as the auction UTXO is unspent. The bid must exceed the current highest bid. State is updated with the new highest bidder and bid amount.
+- **`bid`**: Anyone can bid, for as long as the auction UTXO is unspent. The bid must exceed the current highest bid, and the bidder must pay it: the new UTXO holds the old one's value plus `bidAmount`. State is updated with the new highest bidder and bid amount. This simplified auction never refunds an outbid bidder, so the pot is the deposit plus every bid.
 - **`close`**: Only the auctioneer can close, and only once the chain has reached the deadline. No state is propagated -- the auction UTXO is consumed, and the auctioneer receives the funds.
 
 This pattern demonstrates combining multiple stateful fields, a one-directional

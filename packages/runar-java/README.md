@@ -592,7 +592,8 @@ PreparedCall prep = contract.prepareCall(
     List.of(),
     null,
     provider,
-    signer        // optional; provides the auto-PubKey value if any
+    signer        // funds + signs the funding inputs (required for stateful /
+                  // OP_PUSH_TX methods); also provides the auto-PubKey value
 );
 
 // Hand each sighash to the external signer.
@@ -1057,10 +1058,17 @@ API surface:
 
 ```java
 public static ContractSimulator stateless(SmartContract contract);
+public static ContractSimulator stateless(SmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateless(SmartContract contract, Path source);
 public static ContractSimulator stateful(StatefulSmartContract contract);
+public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
+public Object callWithSpend(String methodName, Preimage template, List<SimulatedSpend.Out> outputs, Object... args);
+public SigHashPreimage spendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
+public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);
 
 public List<Output> outputs();    // captured this.addOutput / addRawOutput / addDataOutput emissions
@@ -1074,16 +1082,40 @@ work in concurrent tests. Each captured `Output` exposes
 mutable property declaration order), and `rawScriptBytes` (non-null for
 RAW / DATA outputs).
 
-For methods that need a structured BIP-143 preimage, build one via
-[`Preimage.builder()`](src/main/java/runar/lang/runtime/Preimage.java):
+`callStateful` checks the preimage the way `checkPreimage` does on chain:
+it builds the spending transaction the call produces from the contract's
+compiled artifact (so the simulator must be created with the artifact or
+its source path) and throws `AssertionError` unless the preimage is that
+transaction's BIP-143 preimage. Choose the spender-side fields with
+[`Preimage.builder()`](src/main/java/runar/lang/runtime/Preimage.java) and
+let `preimageFor` fill in hashPrevouts, hashSequence, scriptCode and
+hashOutputs:
 
 ```java
-Preimage preimage = Preimage.builder()
+ContractSimulator sim = ContractSimulator.stateful(contract, Path.of("MyContract.runar.java"));
+Preimage template = Preimage.builder()
     .version(2L)
     .amount(BigInteger.valueOf(5000))
     .locktime(0L)
     .build();
+Preimage preimage = sim.preimageFor("methodThatReadsPreimage", template, arg0, arg1);
 sim.callStateful("methodThatReadsPreimage", preimage, arg0, arg1);
+```
+
+A stateless method that calls `checkPreimage(SigHashPreimage)` itself has
+no outputs of its own to commit to, so the test describes the spending
+transaction: `callWithSpend` takes the spender-side fields (a `Preimage`
+template) and the transaction's outputs, and inside the call
+`checkPreimage` holds only for that transaction's BIP-143 preimage, which
+`spendPreimage` builds. Called through plain `call`, with no transaction
+described, `checkPreimage` throws `IllegalStateException`; it never
+passes by default.
+
+```java
+ContractSimulator sim = ContractSimulator.stateless(vault, Path.of("CovenantVault.runar.java"));
+List<SimulatedSpend.Out> outputs = List.of(new SimulatedSpend.Out(1000, "76a914" + pkh + "88ac"));
+SigHashPreimage preimage = sim.spendPreimage("spend", template, outputs);
+sim.callWithSpend("spend", template, outputs, sig, preimage);
 ```
 
 #### `AnfInterpreter` — ANF-IR-based execution
@@ -1239,9 +1271,9 @@ WhatsOnChainProvider provider = new WhatsOnChainProvider("mainnet");   // or "te
 String hex = provider.getRawTransaction(txid);
 ```
 
-Endpoints used: `/address/{addr}/unspent`, `/tx/raw`,
-`/tx/hash/{txid}`, `/tx/{txid}/hex`. The unspent listing does not
-include the locking script — fetch via `getUtxo(...)` when needed.
+Endpoints used: `/address/{addr}/unspent`, `/tx/raw`, `/tx/{txid}/hex`.
+The unspent listing does not include the locking script, so `listUtxos` and
+`getUtxo(...)` read it from the hash-verified `/tx/{txid}/hex` (F-040, N-041).
 
 The network must be exactly `"mainnet"` or `"testnet"`. `null`, the empty
 string, and any typo throw `IllegalArgumentException` rather than defaulting,
@@ -1481,10 +1513,17 @@ Off-chain harness for `SmartContract` / `StatefulSmartContract`.
 
 ```java
 public static ContractSimulator stateless(SmartContract contract);
+public static ContractSimulator stateless(SmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateless(SmartContract contract, Path source);
 public static ContractSimulator stateful(StatefulSmartContract contract);
+public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
+public Object callWithSpend(String methodName, Preimage template, List<SimulatedSpend.Out> outputs, Object... args);
+public SigHashPreimage spendPreimage(String methodName, Preimage template, List<SimulatedSpend.Out> outputs);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
+public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);
 
 public SmartContract contract();

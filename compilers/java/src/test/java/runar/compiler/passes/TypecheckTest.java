@@ -6,6 +6,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import runar.compiler.builtins.BuiltinRegistry;
 import runar.compiler.frontend.JavaParser;
+import runar.compiler.frontend.ParserDispatch;
 import runar.compiler.ir.ast.ContractNode;
 
 class TypecheckTest {
@@ -128,6 +129,39 @@ class TypecheckTest {
         assertTrue(
             e.errors().stream().anyMatch(m -> m.contains("frobulate")),
             "expected unknown-fn error, got " + e.errors()
+        );
+    }
+
+    @Test
+    void rejectsLocalVariableCalledAsFunction() {
+        // F-208: Rúnar has no first-class functions. A bound local variable
+        // used as a callee used to fall into the "local variable" branch and
+        // return "<unknown>" with NO diagnostic, silently accepting the call.
+        String src = """
+            class Bad extends SmartContract {
+                @Readonly Bigint a;
+
+                Bad(Bigint a) {
+                    super(a);
+                    this.a = a;
+                }
+
+                @Public
+                void check(Bigint a) {
+                    Bigint f = a;
+                    Bigint r = f(a, a, a);
+                    assertThat(this.a.compareTo(BigInteger.ZERO) >= 0);
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "Bad.runar.java");
+        Typecheck.TypeCheckException e = assertThrows(
+            Typecheck.TypeCheckException.class,
+            () -> Typecheck.run(c)
+        );
+        assertTrue(
+            e.errors().stream().anyMatch(m -> m.contains("not callable")),
+            "expected 'not callable' error for calling local variable 'f', got " + e.errors()
         );
     }
 
@@ -305,6 +339,85 @@ class TypecheckTest {
             }
             """;
         ContractNode c = JavaParser.parse(src, "P2PKH.runar.java");
+        List<String> errs = Typecheck.collect(c);
+        assertTrue(errs.isEmpty(), "expected no errors, got " + errs);
+    }
+
+    // -----------------------------------------------------------------
+    // N-234: a property initializer of the wrong literal family compiled
+    // without complaint. Proves only the Java tier's
+    // checkPropertyInitializers; the 7-tier cross-compiler shape is
+    // conformance/negatives/N233-*.
+    // -----------------------------------------------------------------
+
+    @Test
+    void n234RejectsByteStringInitializerForBigintProperty() throws Exception {
+        String src = """
+            import { SmartContract, assert } from 'runar-lang';
+
+            class BadScalarInit extends SmartContract {
+              readonly x: bigint = 'ab';
+
+              constructor() {
+                super();
+              }
+
+              public check(): void {
+                assert(this.x === 1n);
+              }
+            }
+            """;
+        ContractNode c = ParserDispatch.parse(src, "BadScalarInit.runar.ts");
+        List<String> errs = Typecheck.collect(c);
+        assertTrue(
+            errs.stream().anyMatch(m -> m.contains("type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got " + errs
+        );
+    }
+
+    @Test
+    void n234RejectsToByteStringCallInitializerForBigintProperty() throws Exception {
+        String src = """
+            import { SmartContract, assert, toByteString } from 'runar-lang';
+
+            class BadScalarInit extends SmartContract {
+              readonly x: bigint = toByteString('ab');
+
+              constructor() {
+                super();
+              }
+
+              public check(): void {
+                assert(this.x === 1n);
+              }
+            }
+            """;
+        ContractNode c = ParserDispatch.parse(src, "BadScalarInit.runar.ts");
+        List<String> errs = Typecheck.collect(c);
+        assertTrue(
+            errs.stream().anyMatch(m -> m.contains("type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got " + errs
+        );
+    }
+
+    @Test
+    void n234StillAcceptsWellTypedScalarInitializer() throws Exception {
+        String src = """
+            import { SmartContract, assert } from 'runar-lang';
+
+            class GoodScalarInit extends SmartContract {
+              readonly x: bigint = 1n;
+
+              constructor() {
+                super();
+              }
+
+              public check(): void {
+                assert(this.x === 1n);
+              }
+            }
+            """;
+        ContractNode c = ParserDispatch.parse(src, "GoodScalarInit.runar.ts");
         List<String> errs = Typecheck.collect(c);
         assertTrue(errs.isEmpty(), "expected no errors, got " + errs);
     }

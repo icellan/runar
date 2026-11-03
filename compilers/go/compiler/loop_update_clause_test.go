@@ -117,13 +117,19 @@ class UpdateProbe extends StatefulSmartContract {
 // `.runar.ts` surface. Pre-fix this compiled to byte-identical output with the
 // `i++` loop — five iterations over 0,1,2,3,4 where the source says three over
 // 0,2,4.
+//
+// N-133: the refusal now happens in the parser, with the TS reference's own
+// diagnostic for an assignment operator in the for-update slot, exactly as
+// the other six tiers refuse it on this surface (previously the Go parser
+// desugared `+=` and let the validator refuse only non-unit steps, so `i += 1n`
+// compiled on this tier alone).
 func TestNonUnitStepIsRejectedNotCoerced_TS(t *testing.T) {
 	hex, diags, ok := compileHex(tsWithUpdate("i += 2n"), "UpdateProbe.runar.ts")
 	if ok {
 		t.Fatalf("`i += 2n` must not compile: it silently unrolled with step 1 (%d hex chars)", len(hex))
 	}
-	if !strings.Contains(diags, loopUpdateDiagnostic) {
-		t.Fatalf("rejection must carry the shared cross-tier diagnostic, got: %s", diags)
+	if !strings.Contains(diags, "Unsupported binary operator: '+='") {
+		t.Fatalf("rejection must carry the TS reference's diagnostic, got: %s", diags)
 	}
 }
 
@@ -281,5 +287,35 @@ class Countdown extends SmartContract {
 `
 	if _, diags, ok := compileHex(source, "Countdown.runar.ts"); !ok {
 		t.Fatalf("a countdown loop must still compile: %s", diags)
+	}
+}
+
+// N-116: an update that names the iterator (or is a literal) without
+// advancing it. The validator accepted these as the "no-op sentinel" the
+// while-shaped parsers synthesize, and extractLoopStep then inferred +1 from
+// the comparison direction — so a source loop that never terminates (i stays
+// 3 forever) unrolled to two laps over i = 3, 4. Proves the refusal with the
+// shared R-065 sentence on the Zig continue expression and the TS for-update
+// surface; does NOT cover while loops whose update lives in the body (those
+// keep a placeholder iterator and the condition rule refuses them).
+func TestN116NonAdvancingUpdateIsRejected(t *testing.T) {
+	zig := readExample(t, "examples/zig/bounded-loop/BoundedLoop.runar.zig")
+	zig = strings.Replace(zig, "var i: i64 = 0;", "var i: i64 = 3;", 1)
+	zig = strings.Replace(zig, "while (i < 5) : (i += 1)", "while (i < 5) : (i)", 1)
+	cases := []struct{ name, source, file string }{
+		{"zig-continue-reads-iterator", zig, "BoundedLoop.runar.zig"},
+		{"ts-update-reads-iterator", tsWithUpdate("i"), "UpdateProbe.runar.ts"},
+		{"ts-update-literal", tsWithUpdate("0n"), "UpdateProbe.runar.ts"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hex, diags, ok := compileHex(c.source, c.file)
+			if ok {
+				t.Fatalf("a non-advancing update must not compile; got %s", hex)
+			}
+			if !strings.Contains(diags, loopUpdateDiagnostic) {
+				t.Fatalf("rejection must carry the shared cross-tier diagnostic, got: %s", diags)
+			}
+		})
 	}
 }

@@ -66,6 +66,27 @@ class RabinPaddingBoundTest {
         assertTrue(accepted, "honest signature rejected: sig=" + sig + " padding=" + pad);
     }
 
+    /**
+     * N-380 (F-368 follow-up): the script asserts {@code sig < n}, so
+     * {@code sig + k*n} aborts on chain. Proves: the canonical sig and the
+     * second root {@code n - sig} verify; {@code sig + n} and {@code sig + 2n}
+     * are rejected. Does not prove the verdict equals the consensus
+     * interpreter's (conformance/negatives/f368 does that).
+     */
+    @Test
+    void rejectsNonCanonicalSigAtOrAboveModulus() {
+        byte[] msg = "attack at dawn".getBytes();
+        BigInteger[] sigAndPad = sign(msg);
+        BigInteger sig = sigAndPad[0];
+        ByteString pad = new ByteString(unsignedToLE(sigAndPad[1]));
+        ByteString m = new ByteString(msg);
+
+        assertTrue(MockCrypto.verifyRabinSig(m, sig, pad, N), "canonical sig rejected");
+        assertTrue(MockCrypto.verifyRabinSig(m, N.subtract(sig), pad, N), "second root n - sig rejected");
+        assertFalse(MockCrypto.verifyRabinSig(m, sig.add(N), pad, N), "sig + n accepted");
+        assertFalse(MockCrypto.verifyRabinSig(m, sig.add(N.shiftLeft(1)), pad, N), "sig + 2n accepted");
+    }
+
     // --- honest signer (test-only) -------------------------------------
 
     /** Returns {sig, padding} with padding < 65536 such that (sig^2 + padding) mod n == H(msg) mod n. */

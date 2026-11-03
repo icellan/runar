@@ -172,7 +172,7 @@ The Stack IR uses a discriminated union with exactly **16 variants**:
 | `TuckOp` | `'tuck'` | — | Copy top behind second |
 | `PlaceholderOp` | `'placeholder'` | `paramIndex: number, paramName: string` | Constructor parameter slot |
 | `PushCodeSepIndexOp` | `'push_codesep_index'` | — | Push the method's OP_CODESEPARATOR byte offset; the emitter back-patches the value once offsets exist |
-| `VerifyCodePartLenOp` | `'verify_code_part_len'` | `delta: number, exact: boolean` | Pin `SIZE(_codePart)` against the code part's own deployed byte length |
+| `VerifyCodePartLenOp` | `'verify_code_part_len'` | `delta: number, exact: boolean` | Pin `SIZE(_codePart)` (always `OP_NUMEQUAL`) against the code part's own deployed byte length; `exact: false` makes the length a deploy-time `codePartLenSlots` entry |
 | `RawBytesOp` | `'raw_bytes'` | `bytes: Uint8Array, in_arity: number, out_arity: number` | Opaque byte span emitted verbatim; a hard barrier to every windowed optimizer |
 
 > **Not optional.** The last three variants are not an extension set a minimal implementation may skip. `raw_bytes` is how the ~428-byte `checkPreimage` transaction-binding blob reaches the script, and it is present in **every** stateful contract; a validator that does not model it either rejects every stateful artifact or drops the bytes that bind the spend to its transaction. `verify_code_part_len` and `push_codesep_index` both carry values the emitter back-patches after byte offsets exist, so neither can be reconstructed from the Stack IR alone.
@@ -368,10 +368,7 @@ The Stack IR phase applies the following peephole optimizations. Rules are appli
 | `SWAP, SWAP` | (remove both) | 2 bytes |
 | `PUSH 1, OP_ADD` | `OP_1ADD` | 1+ bytes |
 | `PUSH 1, OP_SUB` | `OP_1SUB` | 1+ bytes |
-| `PUSH 0, OP_ADD` | (remove both) | 2+ bytes |
-| `PUSH 0, OP_SUB` | (remove both) | 2+ bytes |
 | `OP_NOT, OP_NOT` | (remove both) | 2 bytes |
-| `OP_NEGATE, OP_NEGATE` | (remove both) | 2 bytes |
 | `OP_EQUAL, OP_VERIFY` | `OP_EQUALVERIFY` | 1 byte |
 | `OP_CHECKSIG, OP_VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
 | `OP_NUMEQUAL, OP_VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
@@ -379,6 +376,8 @@ The Stack IR phase applies the following peephole optimizations. Rules are appli
 | `OP_DUP, OP_DROP` | (remove both) | 2 bytes |
 | `OVER, OVER` | `OP_2DUP` | 1 byte |
 | `DROP, DROP` | `OP_2DROP` | 1 byte |
+
+`PUSH 0, OP_ADD`, `PUSH 0, OP_SUB` and `OP_NEGATE, OP_NEGATE` are deliberately NOT eliminated: the opcode decodes its operand as a script number (rejecting a non-minimal encoding under strict rules) and pushes back the minimal re-encoding, so removing it is not a no-op on witness-supplied bytes (F-001).
 
 ---
 

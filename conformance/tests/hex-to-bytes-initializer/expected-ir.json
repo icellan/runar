@@ -1,0 +1,229 @@
+{
+  "contractName": "HexToBytesInitializer",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "pubKeyHash",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "pubKeyHash",
+          "type": "Addr"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "hash160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "p2pkhPrefix"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKeyHash"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "p2pkhSuffix"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "t7",
+              "t8"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "script"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t9",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "args": [
+              "t13",
+              "t14"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "assert",
+            "value": "t15"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "pubKey",
+          "type": "PubKey"
+        },
+        {
+          "name": "script",
+          "type": "ByteString"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": [
+    {
+      "initialValue": "1976a914",
+      "name": "p2pkhPrefix",
+      "readonly": true,
+      "type": "ByteString"
+    },
+    {
+      "initialValue": "88ac",
+      "name": "p2pkhSuffix",
+      "readonly": true,
+      "type": "ByteString"
+    },
+    {
+      "name": "pubKeyHash",
+      "readonly": true,
+      "type": "Addr"
+    }
+  ]
+}

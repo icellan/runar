@@ -45,6 +45,11 @@ contract TicTacToe is StatefulSmartContract {
     function join(PubKey opponentPK, Sig sig) public {
         require(this.status == 0);
         require(checkSig(sig, opponentPK));
+        // Player O must pay exactly the bet (N-027): the continuation holds the
+        // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        // payout methods pay out. The compiler's own `>= input` floor alone would
+        // let O join for free.
+        require(continuationAmount() == extractAmount(this.txPreimage) + this.betAmount);
         this.playerO = opponentPK;
         this.status = 1;
         this.turn = 1;

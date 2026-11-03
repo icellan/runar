@@ -83,12 +83,13 @@ impl ScriptVm {
         let params = SpendParams {
             locking_script: LockingScript::from_binary(locking),
             unlocking_script: UnlockingScript::from_binary(unlocking),
-            // Dummy transaction context — sufficient for non-CHECKSIG
-            // scripts. CHECKSIG-bearing scripts require a real spending
-            // transaction, which is out of scope for this off-chain probe.
+            // Synthetic spend context, identical to the TS ScriptVM's
+            // SYNTHETIC_SPEND_CONTEXT (and the Go VM's): a signature built for
+            // one tier verifies on the others. The source amount is part of
+            // the BIP-143 preimage, so it must be 100000, not 0.
             source_txid: "0".repeat(64),
             source_output_index: 0,
-            source_satoshis: 0,
+            source_satoshis: 100_000,
             transaction_version: 1,
             transaction_lock_time: 0,
             transaction_sequence: 0xffff_ffff,
@@ -185,5 +186,40 @@ mod tests {
         let res = vm.execute_hex("68").expect("valid hex");
         assert!(!res.success);
         assert!(res.error.is_some(), "malformed script should populate error");
+    }
+    // N-098 / F-124 cross-tier vector: a P2PKH spend signed by the TS
+    // ScriptVM's synthetic context (version 1, 100000 sats, null outpoint,
+    // sequence 0xffffffff, locktime 0; key 1, SIGHASH_ALL|FORKID). Proves the
+    // Rust VM's BIP-143 context uses the same source satoshis as TS and Go;
+    // does not prove the remaining preimage fields independently (they are
+    // covered only insofar as the signature verifies).
+    const TS_P2PKH_LOCKING: &str = "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac";
+    const TS_P2PKH_UNLOCKING: &str = "4730440220459bb2da0b81e7a5b8aba3116a4ef6e2df9695b3d795af3ae30b5a928c1443ca022044a077326ac6221fb76ee4629bd014d65357786e3577601846db5188721bf3db41210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        decode_hex(s).expect("valid hex")
+    }
+
+    #[test]
+    fn ts_signed_p2pkh_spend_succeeds() {
+        let vm = ScriptVm::new(VmOptions::default());
+        let res = vm.execute(&unhex(TS_P2PKH_UNLOCKING), &unhex(TS_P2PKH_LOCKING));
+        assert!(
+            res.success,
+            "TS-signed P2PKH spend must verify against the shared synthetic context, error: {:?}",
+            res.error
+        );
+    }
+
+    // A signature that is well-formed DER but not valid for the sighash must
+    // fail, so the success above is not vacuous.
+    #[test]
+    fn corrupted_signature_p2pkh_spend_fails() {
+        let mut unlocking = unhex(TS_P2PKH_UNLOCKING);
+        // Last S byte sits just before the 1-byte sighash type at offset 71.
+        unlocking[70] ^= 0x01;
+        let vm = ScriptVm::new(VmOptions::default());
+        let res = vm.execute(&unlocking, &unhex(TS_P2PKH_LOCKING));
+        assert!(!res.success, "a corrupted signature must not verify");
     }
 }

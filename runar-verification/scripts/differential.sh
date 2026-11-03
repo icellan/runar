@@ -147,8 +147,10 @@ echo "[differential] running Lean side..."
 # decoder past macOS's default 8 MB main-thread stack. Bump to the
 # hard limit (65520 KB on Linux/macOS by default) so the harness can
 # parse every fixture. CI Linux runners typically have an 8 MB default
-# too; the unlimited-or-65520 ceiling is standard.
-ulimit -s 65520 2>/dev/null || true
+# too; the unlimited-or-65520 ceiling is standard. bn254-pairing (≈ 9.4 MB
+# hex) overflows 65520 KB, so ask for 1 GB first where the hard limit
+# allows it (Linux runners), and fall back to 65520 KB (macOS).
+ulimit -s 1048576 2>/dev/null || ulimit -s 65520 2>/dev/null || true
 RUNAR_DIFFERENTIAL_OUT="$LEAN_REPORT" lake env ./.lake/build/bin/differential
 
 if [ ! -f "$LEAN_REPORT" ]; then
@@ -311,6 +313,10 @@ KNOWN_PYTHON_BITCOINLIB_MISMATCHES = {
     # python-bitcoinlib still enforces it and refuses to evaluate the script.
     "convergence-proof": "script too large",
     "ec-unit": "script too large",
+    # ~19.5 kB, over the same cap. It used to match only by coincidence (both
+    # sides "unsupported"); once N-376 dropped an identity ROT ROT ROT the
+    # Lean side reaches OP_SPLIT first and reports a typeError instead.
+    "post-quantum-wots": "script too large",
     # Arbitrary-precision script numbers. BSV removed the 4-byte CScriptNum
     # limit post-Genesis; python-bitcoinlib still enforces it and aborts in
     # CastToBigNum() the moment it meets one of this fixture's 9- and 16-byte
