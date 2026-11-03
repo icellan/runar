@@ -78,7 +78,10 @@ describe('testCommand', () => {
 
     consoleLogSpy.mockRestore();
     process.exitCode = prevExitCode;
-  }, 60_000);
+    // No per-test cap: this spawns a real vitest child (35 s on an idle CI
+    // runner, 70 s on a loaded one), so the root config's 300 s testTimeout
+    // governs, as for every other long test.
+  });
 
   // F-166: the user-supplied pattern used to be interpolated into a shell
   // string (`"<vitest>" run "<pattern>"`), so `$(...)`, backticks and a
