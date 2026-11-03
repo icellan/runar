@@ -966,6 +966,10 @@ pub fn emitArtifactStamped(
                 try w.writeAll(",\"type\":");
                 try writeJsonString(w, entry.type_str);
                 try w.print(",\"index\":{d}", .{entry.index});
+                if (entry.initial_value) |iv| {
+                    try w.writeAll(",\"initialValue\":");
+                    try emitConstValueJson(w, iv);
+                }
                 if (entry.fixed_array) |fa| {
                     try w.writeAll(",\"fixedArray\":{\"elementType\":");
                     try writeJsonString(w, fa.element_type);
@@ -1978,6 +1982,40 @@ test "emitArtifact — state field index is the property's position, as in TS" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\":[{\"name\":\"balance\",\"type\":\"bigint\",\"index\":1}]") != null);
 }
 
+test "emitArtifact — a state field carries its property's initialValue, as in TS" {
+    // TicTacToe: playerO and the cells have initializers and are not
+    // constructor params, so their index lies past the constructor args. The
+    // SDKs seed such a field from stateFields[].initialValue; without it they
+    // fell back to 0 (and a 0 PubKey is refused).
+    const allocator = std.testing.allocator;
+
+    var body = [_]types.StackOp{.{ .opcode = "OP_1ADD" }};
+    var stack_methods = [_]types.StackMethod{
+        .{ .name = "move", .ops = &body, .max_stack_depth = 1 },
+    };
+    var ctor_params = [_]types.ANFParam{
+        .{ .name = "playerX", .type_name = "PubKey" },
+    };
+    var anf_methods = [_]types.ANFMethod{
+        .{ .name = "constructor", .is_public = false, .params = &ctor_params, .bindings = &.{} },
+        .{ .name = "move", .is_public = true, .params = &.{}, .bindings = &.{} },
+    };
+    var properties = [_]types.ANFProperty{
+        .{ .name = "playerX", .type_name = "PubKey", .readonly = false },
+        .{ .name = "playerO", .type_name = "PubKey", .readonly = false, .initial_value = .{ .string = "02" ++ "00" ** 32 } },
+        .{ .name = "turn", .type_name = "bigint", .readonly = false, .initial_value = .{ .integer = 0 } },
+    };
+    const stack_program = types.StackProgram{ .methods = &stack_methods, .contract_name = "TicTacToe" };
+    const anf_program = types.ANFProgram{ .contract_name = "TicTacToe", .properties = &properties, .methods = &anf_methods };
+
+    const json = try emitArtifact(allocator, stack_program, anf_program);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"playerX\",\"type\":\"PubKey\",\"index\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"playerO\",\"type\":\"PubKey\",\"index\":1,\"initialValue\":\"02" ++ "00" ** 32 ++ "\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"turn\",\"type\":\"bigint\",\"index\":2,\"initialValue\":0}") != null);
+}
+
 test "writeJsonString — escaping" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2070,6 +2108,10 @@ const RegroupEntry = struct {
     chain: []const types.SyntheticArrayLevel,
     index: u32,
     fixed_array: ?RegroupFA,
+    /// A scalar field's property initializer (TS copies it onto the state
+    /// field; the SDKs seed such a field from it). Not carried through a
+    /// FixedArray regroup.
+    initial_value: ?types.ConstValue = null,
 };
 
 fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProperty) ![]RegroupEntry {
@@ -2085,6 +2127,7 @@ fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProp
             .chain = chain,
             .index = @intCast(prop_idx),
             .fixed_array = null,
+            .initial_value = if (chain.len == 0) p.initial_value else null,
         });
     }
 
