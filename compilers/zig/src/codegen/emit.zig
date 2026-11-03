@@ -1946,6 +1946,38 @@ test "emitArtifact — stateful contract with state fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"constructor\":{\"params\":[{\"name\":\"count\",\"type\":\"bigint\"}]}") != null);
 }
 
+test "emitArtifact — state field index is the property's position, as in TS" {
+    // The SDKs read stateFields[].index as the constructor-arg position
+    // (TS assembler: "property position = constructor arg index"). A readonly
+    // property ahead of a mutable one used to give the mutable field index 0,
+    // so every SDK seeded it from the readonly arg (the PubKey bytes).
+    const allocator = std.testing.allocator;
+
+    var body = [_]types.StackOp{.{ .opcode = "OP_1ADD" }};
+    var stack_methods = [_]types.StackMethod{
+        .{ .name = "deposit", .ops = &body, .max_stack_depth = 1 },
+    };
+    var ctor_params = [_]types.ANFParam{
+        .{ .name = "owner", .type_name = "PubKey" },
+        .{ .name = "balance", .type_name = "bigint" },
+    };
+    var anf_methods = [_]types.ANFMethod{
+        .{ .name = "constructor", .is_public = false, .params = &ctor_params, .bindings = &.{} },
+        .{ .name = "deposit", .is_public = true, .params = &.{}, .bindings = &.{} },
+    };
+    var properties = [_]types.ANFProperty{
+        .{ .name = "owner", .type_name = "PubKey", .readonly = true },
+        .{ .name = "balance", .type_name = "bigint", .readonly = false },
+    };
+    const stack_program = types.StackProgram{ .methods = &stack_methods, .contract_name = "FunctionPatterns" };
+    const anf_program = types.ANFProgram{ .contract_name = "FunctionPatterns", .properties = &properties, .methods = &anf_methods };
+
+    const json = try emitArtifact(allocator, stack_program, anf_program);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\":[{\"name\":\"balance\",\"type\":\"bigint\",\"index\":1}]") != null);
+}
+
 test "writeJsonString — escaping" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2042,18 +2074,18 @@ const RegroupEntry = struct {
 
 fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProperty) ![]RegroupEntry {
     var flat: std.ArrayListUnmanaged(RegroupEntry) = .empty;
-    var state_idx: u32 = 0;
-    for (props) |p| {
+    // `index` is the property's position (= its constructor-arg index), as in
+    // the TS assembler; the SDKs seed each state field from that arg.
+    for (props, 0..) |p, prop_idx| {
         if (p.readonly) continue;
         const chain: []const types.SyntheticArrayLevel = if (p.synthetic_array_chain) |c| c else &.{};
         try flat.append(allocator, .{
             .name = p.name,
             .type_str = p.type_name,
             .chain = chain,
-            .index = state_idx,
+            .index = @intCast(prop_idx),
             .fixed_array = null,
         });
-        state_idx += 1;
     }
 
     var current = try flat.toOwnedSlice(allocator);
