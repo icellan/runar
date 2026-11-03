@@ -26,9 +26,11 @@ function pushHex(hex: string): string {
 
 // Import ScriptVM dynamically from the testing package
 async function createVM() {
-  // A literal specifier: vite 8 resolves a variable one from the project
-  // root ('/runar-testing/...') instead of from this file.
-  const mod = await import('../../../runar-testing/src/vm/index.js');
+  // An absolute file URL: vite 8 resolves a relative variable specifier from
+  // the project root ('/runar-testing/...'), and a literal one would pull
+  // runar-testing into this package's tsc rootDir.
+  const vmPath = new URL('../../../runar-testing/src/vm/index.js', import.meta.url).href;
+  const mod = await import(vmPath);
   return new mod.ScriptVM({ maxOps: 10_000_000 }) as {
     executeHex(hex: string): {
       success: boolean;
