@@ -39,6 +39,7 @@ import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaff
 import { isByteReturningBuiltin, isByteStringFamilyType } from './03-typecheck.js';
 import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
 /** N-016: suffix of the binding name of a local that shadows a property. */
@@ -305,6 +306,11 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
     if (method.sighashType !== undefined && method.sighashType !== SIGHASH_DEFAULT) {
       methodCtx.sighashFlag = method.sighashType;
     }
+    // Ports #170: a non-default @bindingVariant selects the compact 'all'
+    // binding for every checkPreimage in this method (auto-injected or manual).
+    if (method.bindingVariant === 'all') {
+      methodCtx.bindingVariant = 'all';
+    }
 
     // Register the declared param NAMES so a bare identifier resolves to
     // `load_param` before falling through to `load_prop` (issue #130). Without
@@ -363,7 +369,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // `--ir` scaffolding check re-derives it from.
       const sighashMode = method.sighashType ?? SIGHASH_DEFAULT;
       const stateProps = contract.properties.filter(p => p.kind === 'property' && !p.readonly);
-      emitStatefulPrologue(methodCtx, sighashMode, stateProps.length > 0);
+      emitStatefulPrologue(methodCtx, sighashMode, stateProps.length > 0, methodCtx.bindingVariant);
 
       // Issue #109: preserve @embedAlways fields at the first user-statement
       // position (after the checkPreimage/deserialize preamble), mirroring
@@ -591,6 +597,12 @@ class LoweringContext {
    * ALL|FORKID, keeping the pinned binding blob unchanged.
    */
   sighashFlag: number | undefined;
+  /**
+   * Ports #170: the method's non-default `@bindingVariant` (`'all'`), so every
+   * `checkPreimage` in it, manual or auto-injected, emits the same
+   * construction. `undefined` = default `'lowS'`, keeping golden ANF unchanged.
+   */
+  bindingVariant: BindingVariant | undefined;
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
@@ -1053,6 +1065,9 @@ class LoweringContext {
     // blob's, OP_CHECKSIGVERIFY aborts, and the branch is unspendable.
     // Go's subContext already carried it; this matches it.
     sub.sighashFlag = this.sighashFlag;
+    // Same inheritance for `@bindingVariant` (ports #170): a nested manual
+    // checkPreimage must not fall back to lowS inside an 'all' method.
+    sub.bindingVariant = this.bindingVariant;
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
@@ -2400,6 +2415,7 @@ function lowerCallExpr(
         preimage: preimageRef,
         // Issue #123: honour the method's declared @sighash on manual calls.
         ...(ctx.sighashFlag !== undefined ? { sighashFlag: ctx.sighashFlag } : {}),
+        ...(ctx.bindingVariant !== undefined ? { bindingVariant: ctx.bindingVariant } : {}),
       });
     }
   }

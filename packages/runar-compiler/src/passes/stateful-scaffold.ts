@@ -24,6 +24,7 @@
  * bindings differ. The six native tiers carry the same check and diagnostics.
  */
 import type { ANFBinding, ANFMethod, ANFProgram, ANFValue } from '../ir/index.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { continuationShape } from './side-effect-summary.js';
 import type { ContinuationShape } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
@@ -44,6 +45,7 @@ export function emitStatefulPrologue<C extends ScaffoldContext<C>>(
   ctx: C,
   sighashMode: number,
   hasMutableState: boolean,
+  bindingVariant?: BindingVariant,
 ): void {
   const isDefaultSighash = sighashMode === SIGHASH_DEFAULT;
 
@@ -52,8 +54,10 @@ export function emitStatefulPrologue<C extends ScaffoldContext<C>>(
   const checkResult = ctx.emit({
     kind: 'check_preimage',
     preimage: preimageRef,
-    // Omit for the default so the ANF (and pinned binding blob) is unchanged.
+    // Omit each field for its default so the ANF (and pinned binding blob) is
+    // unchanged for a method that does not opt in.
     ...(isDefaultSighash ? {} : { sighashFlag: sighashMode }),
+    ...(bindingVariant === 'all' ? { bindingVariant } : {}),
   });
   ctx.emit({ kind: 'assert', value: checkResult });
 
@@ -299,6 +303,9 @@ function sameBinding(exp: ANFBinding, act: ANFBinding, map: Map<string, string>,
       ok = typeof e.value === typeof a.value && e.value === a.value;
       break;
     case 'check_preimage':
+      // bindingVariant is not compared: it is a per-method author choice the
+      // loader validates (lowS | all), not scaffolding, and either value keeps
+      // the binding sound (ports #170).
       ok = ref(e.preimage, a.preimage)
         && (e.sighashFlag ?? SIGHASH_DEFAULT) === (a.sighashFlag ?? SIGHASH_DEFAULT);
       break;

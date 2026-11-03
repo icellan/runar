@@ -11,9 +11,11 @@
  *
  * Two constructions live in this module:
  *
- * CURRENT — the Any-S construction (k=1, r=Gx, d=2²⁴⁸·Gx⁻¹ mod n ⇒ s=z+2²⁴⁸
- * mod n, low-S by (r,n−s) malleation), ~433 bytes; see the block comment above
- * `anySBindingBytes` for the derivation and each optimization.
+ * CURRENT — the Any-S construction (k=1, r=Gx, d=Gx⁻¹ mod n ⇒ s=z+1 mod n,
+ * low-S by (r,n−s) malleation), 422 bytes; see the block comment above
+ * `anySBindingBytes` for the derivation and each optimization. A method may opt
+ * into the 376-byte `@bindingVariant all` form (no mod-n, no low-S), which is
+ * only spendable when the spending tx has nVersion != 1.
  *
  * LEGACY — fixed nonce k=2, privkey d=1 ⇒ pubkey = G, ~760 bytes:
  *   z    = hash256(preimage)                     (the ECDSA message)
@@ -33,6 +35,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { ECTracker } from './ec-codegen.js';
 import { emitMethod } from './06-emit.js';
 
@@ -241,12 +244,13 @@ export function checkPreimageBindingBytesLegacy(sighashFlag: number = SIGHASH_FL
 //   1. k=1 instead of k=2  ⇒ k⁻¹ = 1, so s = z + r·d mod n needs NO OP_MUL and
 //      no 33-byte k⁻¹ push. r = Gx also has MSB 0x79 < 0x80, so its DER field
 //      needs no 0x00 sign pad (34 bytes vs 35).
-//   2. d = 2²⁴⁸·Gx⁻¹ mod n instead of d=1 ⇒ r·d ≡ 2²⁴⁸ (mod n), and the addend
-//      2²⁴⁸ is BUILT on-stack in 6 script bytes (OP_0 <0x1f> OP_NUM2BIN OP_1
-//      OP_CAT) instead of pushing a 33-byte constant. The verifying pubkey
-//      becomes P = d·G (ANYS_PUBKEY below; d is public — binding never relied
-//      on the key being secret, only on the sig being derived from the
-//      preimage on-chain).
+//   2. d = Gx⁻¹ mod n instead of d=1 ⇒ r·d ≡ 1 (mod n), so the addend is a
+//      single OP_1ADD (C=1, ports #170; original design brendan-elas, #167).
+//      The previous form used d = 2²⁴⁸·Gx⁻¹ and built 2²⁴⁸ on-stack in 6
+//      bytes (OP_0 <0x1f> OP_NUM2BIN OP_1 OP_CAT); C=1 is 6 bytes shorter
+//      (428 → 422). The verifying pubkey becomes P = d·G (ANYS_PUBKEY_C1_HEX
+//      below; d is public — binding never relied on the key being secret,
+//      only on the sig being derived from the preimage on-chain).
 //   3. Byte reversal as 31×(OP_1 OP_SPLIT) then 31×(OP_SWAP OP_CAT) — 4 bytes
 //      per element vs 7 in the legacy accumulator loop.
 //   4. mod n + low-S as a two-level branch (19 bytes, ≤1 OP_MOD, 0 OP_MUL)
@@ -259,12 +263,18 @@ export function checkPreimageBindingBytesLegacy(sighashFlag: number = SIGHASH_FL
 //      strip-zeros dance disappears. Splitting an exhausted (empty) remainder
 //      degrades to zero-length splits, so short s values need no branch.
 //
-// The tail is `01<flag> 7e 21<ANYS_PUBKEY> ad`, preserving the fixed-position
+// The tail is `01<flag> 7e 21<ANYS_PUBKEY_C1> ad`, preserving the fixed-position
 // sighash-flag patching every tier relies on.
 // ————————————————————————————————————————————————————————————————————————————
 
-// Compressed P = d·G for d = 2²⁴⁸·Gx⁻¹ mod n (verified off-chain).
-const ANYS_PUBKEY_HEX = '02b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0';
+// Compressed P = d·G for d = 2²⁴⁸·Gx⁻¹ mod n (C = 2²⁴⁸). No longer emitted: the
+// binding moved to the C=1 key below. Kept as the anchor of the BitcoinSX
+// `signCtx1Byte` family (C = 2²⁴⁸, top-byte add) the construction came from.
+export const ANYS_PUBKEY_HEX = '02b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0';
+// Compressed P = d·G for d = Gx⁻¹ mod n (C = 1): the sig (Gx, z+1), and its
+// low-S malleation (Gx, n−(z+1)), ECDSA-verify against this key for every z
+// except the degenerate z ≡ −1. Checked in binding-variant.test.ts.
+export const ANYS_PUBKEY_C1_HEX = '038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218';
 // Curve order n as a 33-byte little-endian script number (0x00 sign byte last).
 const N_LE_HEX = '414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff00';
 // DER: 0x02 0x20 || Gx (r-field, no sign pad) || 0x02 (opening tag of s-field).
@@ -275,12 +285,36 @@ const OP = {
   OP_NIP: 0x77, OP_OVER: 0x78, OP_SWAP: 0x7c, OP_TUCK: 0x7d, OP_CAT: 0x7e,
   OP_SPLIT: 0x7f, OP_NUM2BIN: 0x80, OP_BIN2NUM: 0x81, OP_SIZE: 0x82,
   OP_0NOTEQUAL: 0x92, OP_ADD: 0x93, OP_SUB: 0x94, OP_DIV: 0x96, OP_MOD: 0x97,
-  OP_PICK: 0x79, OP_2MUL: 0x8d, OP_MUL: 0x95,
+  OP_PICK: 0x79, OP_2MUL: 0x8d, OP_MUL: 0x95, OP_1ADD: 0x8b,
   OP_LESSTHAN: 0x9f, OP_DUP: 0x76, OP_HASH256: 0xaa, OP_CHECKSIGVERIFY: 0xad,
 } as const;
 
-/** Assemble the Any-S binding blob (fixed bytes; opcode-level, no emitter). */
-function anySBindingBytes(sighashFlag: number): Uint8Array {
+export type { BindingVariant } from '../ir/anf-ir.js';
+
+/**
+ * Assemble the Any-S binding blob (fixed bytes; opcode-level, no emitter).
+ *
+ * Both variants derive s ≡ z + 1 and verify against the C=1 key; they differ
+ * only in the fixup applied before DER encoding:
+ *
+ *  - `'lowS'` (default, 422 B): s = lowS((z + 1) mod n). Canonical s ≤ n/2, so
+ *    the sig passes the LOW_S and minimal-number rules that apply when the
+ *    spending tx has nVersion = 1 — the version every Rúnar SDK builds. A
+ *    genuine spend fails only at z = n − 1 (s = 0): probability 2⁻²⁵⁶.
+ *  - `'all'` (opt-in via `@bindingVariant all`, 376 B): s = z + 1 as-is, no
+ *    mod-n and no low-S. s is high about half the time and `00 cat` leaves a
+ *    non-minimal number about half the time, so the blob is REJECTED at
+ *    nVersion = 1. It is only spendable when the spending tx has nVersion > 1,
+ *    where @bsv/sdk relaxes those rules. The compiler cannot see the spend's
+ *    nVersion; the author owns that guarantee, and no Rúnar SDK builds such a
+ *    transaction. Otherwise a genuine spend fails only when z + 1 ≥ n:
+ *    probability (2²⁵⁶ − n + 1)/2²⁵⁶ ≈ 2⁻¹²⁸.
+ *
+ * Only the exact value `'all'` selects the compact form; anything else emits
+ * the default, so a malformed variant can never fail open to `all`.
+ */
+function anySBindingBytes(sighashFlag: number, variant: BindingVariant = 'lowS'): Uint8Array {
+  const compact = variant === 'all';
   const b: number[] = [];
   const op = (...codes: number[]) => b.push(...codes);
   const pushHex = (hex: string) => {
@@ -294,34 +328,43 @@ function anySBindingBytes(sighashFlag: number): Uint8Array {
   // reverse 32-byte digest: fan out, then cat back (top-down ⇒ reversed)
   for (let i = 0; i < 31; i++) op(OP.OP_1, OP.OP_SPLIT);
   for (let i = 0; i < 31; i++) op(OP.OP_SWAP, OP.OP_CAT);
-  // little-endian digest + 0x00 sign byte → z as a positive script number
-  pushHex('00'); op(OP.OP_CAT, OP.OP_BIN2NUM);
-  // s0 = z + 2²⁴⁸  (2²⁴⁸ built as 31 zero bytes ‖ 0x01, interpreted LE)
-  op(OP.OP_0); pushHex('1f'); op(OP.OP_NUM2BIN, OP.OP_1, OP.OP_CAT, OP.OP_ADD);
-  // s = s0 mod n, then low-S: s' = s + (s > n/2)·(n − 2s)  — BRANCHLESS, like
-  // the legacy construction: no OP_IF, so static analyzers (which enumerate
-  // execution paths, and must agree on them across tiers) see the same path
-  // structure as before. (s>n/2 ⇒ s' = n−s, the standard ECDSA malleation.)
-  pushHex(N_LE_HEX);
-  op(OP.OP_TUCK, OP.OP_MOD);                        // [n, s]
-  op(OP.OP_OVER, OP.OP_2, OP.OP_DIV);               // [n, s, n/2]
-  op(OP.OP_OVER, OP.OP_LESSTHAN);                   // [n, s, hi]
-  op(OP.OP_2, OP.OP_PICK, OP.OP_2, OP.OP_PICK);     // [n, s, hi, n, s]
-  op(OP.OP_2MUL, OP.OP_SUB);                        // [n, s, hi, n-2s]
-  op(OP.OP_MUL, OP.OP_ADD);                         // [n, s']
-  op(OP.OP_NIP);                                    // [s']
+  // little-endian digest + 0x00 sign byte → z as a positive script number.
+  if (!compact) {
+    // OP_BIN2NUM is load-bearing: the 0x00 is a redundant leading zero whenever
+    // the digest's top byte is < 0x80 (about half the time), and OP_1ADD
+    // refuses that non-minimal number at nVersion = 1.
+    pushHex('00'); op(OP.OP_CAT, OP.OP_BIN2NUM, OP.OP_1ADD); // s0 = z + 1
+    // s = s0 mod n, then low-S: s' = s + (s > n/2)·(n − 2s)  — BRANCHLESS, like
+    // the legacy construction: no OP_IF, so static analyzers (which enumerate
+    // execution paths, and must agree on them across tiers) see the same path
+    // structure as before. (s>n/2 ⇒ s' = n−s, the standard ECDSA malleation.)
+    pushHex(N_LE_HEX);
+    op(OP.OP_TUCK, OP.OP_MOD);                        // [n, s]
+    op(OP.OP_OVER, OP.OP_2, OP.OP_DIV);               // [n, s, n/2]
+    op(OP.OP_OVER, OP.OP_LESSTHAN);                   // [n, s, hi]
+    op(OP.OP_2, OP.OP_PICK, OP.OP_2, OP.OP_PICK);     // [n, s, hi, n, s]
+    op(OP.OP_2MUL, OP.OP_SUB);                        // [n, s, hi, n-2s]
+    op(OP.OP_MUL, OP.OP_ADD);                         // [n, s']
+    op(OP.OP_NIP);                                    // [s']
+  } else {
+    // 'all': s = z + 1, no BIN2NUM, no mod n, no low-S (nVersion != 1 only).
+    pushHex('00'); op(OP.OP_CAT, OP.OP_1ADD);
+  }
   // s (minimal LE script number) → big-endian DER magnitude: fan out one byte
   // while the remainder is a nonzero number (empty splits once exhausted).
-  for (let i = 0; i < 31; i++) op(OP.OP_DUP, OP.OP_0NOTEQUAL, OP.OP_SPLIT);
-  for (let i = 0; i < 31; i++) op(OP.OP_SWAP, OP.OP_CAT);
+  // low-S ⇒ s ≤ 32 bytes (31 fan-outs); 'all' can carry a 0x00 sign byte and
+  // reach 33 bytes (32 fan-outs).
+  const fan = compact ? 32 : 31;
+  for (let i = 0; i < fan; i++) op(OP.OP_DUP, OP.OP_0NOTEQUAL, OP.OP_SPLIT);
+  for (let i = 0; i < fan; i++) op(OP.OP_SWAP, OP.OP_CAT);
   // sig = 0x30 ‖ totLen ‖ 0x02 0x20 Gx ‖ 0x02 ‖ len(s) ‖ s ‖ flag
   op(OP.OP_SIZE, OP.OP_SWAP, OP.OP_CAT);          // len(s) ‖ s
   pushHex(R_DER_S_TAG_HEX); op(OP.OP_SWAP, OP.OP_CAT);
   op(OP.OP_SIZE, OP.OP_SWAP, OP.OP_CAT);          // totLen ‖ fields
   pushHex('30'); op(OP.OP_SWAP, OP.OP_CAT);
   pushHex((sighashFlag & 0xff).toString(16).padStart(2, '0')); op(OP.OP_CAT);
-  // verify against P = d·G; abort unless hash256(preimage) == real tx sighash
-  pushHex(ANYS_PUBKEY_HEX);
+  // verify against P = Gx⁻¹·G; abort unless hash256(preimage) == real tx sighash
+  pushHex(ANYS_PUBKEY_C1_HEX);
   op(OP.OP_CHECKSIGVERIFY);
   return new Uint8Array(b);
 }
@@ -345,24 +388,30 @@ function anySBindingBytes(sighashFlag: number): Uint8Array {
 export function emitCheckPreimageBinding(
   emit: (op: StackOp) => void,
   sighashFlag: number = SIGHASH_FLAG_DEFAULT,
+  variant: BindingVariant = 'lowS',
 ): void {
-  emit({ op: 'raw_bytes', bytes: anySBindingBytes(sighashFlag), in_arity: 1, out_arity: 1 });
+  emit({ op: 'raw_bytes', bytes: anySBindingBytes(sighashFlag, variant), in_arity: 1, out_arity: 1 });
 }
 
-export function checkPreimageBindingBytes(sighashFlag: number = SIGHASH_FLAG_DEFAULT): Uint8Array {
+export function checkPreimageBindingBytes(
+  sighashFlag: number = SIGHASH_FLAG_DEFAULT,
+  variant: BindingVariant = 'lowS',
+): Uint8Array {
   const ops: StackOp[] = [];
-  emitCheckPreimageBinding((op) => ops.push(op), sighashFlag);
+  emitCheckPreimageBinding((op) => ops.push(op), sighashFlag, variant);
   const { scriptHex } = emitMethod({ name: 'checkPreimageBinding', ops, maxStackDepth: 200 });
   const out = new Uint8Array(scriptHex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(scriptHex.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
-/** Hex of the canonical construction (the value the other 6 tiers must pin). */
-export const CHECK_PREIMAGE_BINDING_HEX: string = Array.from(
-  checkPreimageBindingBytes(),
-  (b) => b.toString(16).padStart(2, '0'),
-).join('');
+const bytesToHex = (u: Uint8Array): string => Array.from(u, (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** Hex of the default (lowS) construction — the value the other 6 tiers must pin. */
+export const CHECK_PREIMAGE_BINDING_HEX: string = bytesToHex(checkPreimageBindingBytes());
+
+/** Hex of the `@bindingVariant all` construction (nVersion != 1 only), pinned cross-tier. */
+export const CHECK_PREIMAGE_BINDING_ALL_HEX: string = bytesToHex(checkPreimageBindingBytes(SIGHASH_FLAG_DEFAULT, 'all'));
 
 /**
  * Emit the on-chain preimage binding as a single opaque raw_bytes op. Net stack
@@ -372,6 +421,7 @@ export const CHECK_PREIMAGE_BINDING_HEX: string = Array.from(
 export function emitCheckPreimageBindingRaw(
   emit: (op: StackOp) => void,
   sighashFlag: number = SIGHASH_FLAG_DEFAULT,
+  variant: BindingVariant = 'lowS',
 ): void {
-  emit({ op: 'raw_bytes', bytes: checkPreimageBindingBytes(sighashFlag), in_arity: 1, out_arity: 1 });
+  emit({ op: 'raw_bytes', bytes: checkPreimageBindingBytes(sighashFlag, variant), in_arity: 1, out_arity: 1 });
 }

@@ -129,8 +129,8 @@ export const SIGHASH_MULTIPLE_ERROR =
  * a method, `@embedAlways` -> a property). Such a directive was silently
  * ignored; it is now a compile error located at the marker's `@`.
  */
-export function lostDirectiveMessage(directive: '@sighash' | '@embedAlways'): string {
-  const target = directive === '@sighash' ? 'method' : 'property';
+export function lostDirectiveMessage(directive: '@sighash' | '@embedAlways' | '@bindingVariant'): string {
+  const target = directive === '@embedAlways' ? 'property' : 'method';
   return `${directive} directive is not attached to any ${target} and would be silently ignored; put the comment on its own line directly above the ${target} it annotates (a comment that shares a line with the preceding code belongs to that code)`;
 }
 

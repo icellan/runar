@@ -108,17 +108,16 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
   });
 
   // Ground contexts that deterministically hit the rare encoding edges of the
-  // Any-S construction (found by mirroring s = lowS((z + 2^248) mod n) off-chain
+  // Any-S construction (found by mirroring s = lowS((z + 1) mod n) off-chain
   // against this exact locking script — they stay valid while the blob's bytes
   // are stable, which the drift-guard test above already enforces):
-  //   lockTime 2    → s ≤ n/2 (no malleation)
-  //   lockTime 1    → s > n/2 (n−s malleation)
-  //   lockTime 234  → s is 31 bytes (one leading zero stripped from DER)
-  //   lockTime 8963 → s is 30 bytes (two leading zeros stripped, ~2⁻¹⁶ case)
-  // (F-055: re-derived for the version-1 CTX. The version-2 values were 1, 2,
-  // 32 and 275; a version change moves every sighash, so the old lockTimes no
-  // longer land on these edges.)
-  it.each([[2], [1], [234], [8963]])(
+  //   lockTime 1     → s ≤ n/2 (no malleation)
+  //   lockTime 2     → s > n/2 (n−s malleation)
+  //   lockTime 122   → s is 31 bytes (one leading zero stripped from DER)
+  //   lockTime 61496 → s is 30 bytes (two leading zeros stripped, ~2⁻¹⁶ case)
+  // (Re-derived for the C=1 blob, ports #170. The C=2²⁴⁸ blob's version-1
+  // values were 2, 1, 234 and 8963; new script bytes move every sighash.)
+  it.each([[1], [2], [122], [61496]])(
     'ACCEPTS the genuine preimage at DER/low-S edge context lockTime=%i',
     (lockTime) => {
       const ctx = { ...CTX, lockTime };
