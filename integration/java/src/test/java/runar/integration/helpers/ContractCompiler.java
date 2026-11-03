@@ -125,6 +125,19 @@ public final class ContractCompiler {
         return CACHE.computeIfAbsent(key, ContractCompiler::doCompile);
     }
 
+    /**
+     * Compiles an out-of-tree source (a test's inline contract) with the TS
+     * reference compiler. The second named exception: MerkleProofIntegrationTest
+     * calls {@code merkleRootSha256}, a sha256-Merkle builtin the Java compiler
+     * deliberately refuses (Go-only by project policy,
+     * {@code conformance/tests/merkle-proof/source.json} allowlists only
+     * {@code ["go"]}), so it cannot go through {@link #compileAbsolute}.
+     */
+    public static RunarArtifact compileAbsoluteWithTsReference(Path absPath) {
+        Path key = absPath.toAbsolutePath().normalize();
+        return CACHE.computeIfAbsent(key, ContractCompiler::doCompileWithTsReferenceCompiler);
+    }
+
     private static RunarArtifact doCompile(Path absPath) {
         Path root = projectRoot();
         String relPath = root.relativize(absPath).toString().replace(File.separatorChar, '/');

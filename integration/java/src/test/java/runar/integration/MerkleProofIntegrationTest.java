@@ -114,7 +114,8 @@ class MerkleProofIntegrationTest extends IntegrationBase {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        return ContractCompiler.compileAbsolute(tmp);
+        // Go-only builtin: the Java compiler refuses it by policy.
+        return ContractCompiler.compileAbsoluteWithTsReference(tmp);
     }
 
     @Test
