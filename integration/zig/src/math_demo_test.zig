@@ -448,7 +448,10 @@ test "MathDemo_RejectDivideByZero" {
     const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 5000 });
     defer allocator.free(deploy_txid);
 
-    // Call divideBy(0) — should be rejected on-chain (safediv fails on zero divisor)
+    // Call divideBy(0). This spend cannot reach the node: the SDK's ANF
+    // interpreter aborts on a zero divisor exactly as OP_DIV does on chain
+    // (F-134), and the SDK refuses to build a transaction whose method body
+    // it cannot evaluate (NEW-006) — the same as the Python, Go and Rust SDKs.
     const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "divideBy",
@@ -462,12 +465,10 @@ test "MathDemo_RejectDivideByZero" {
         allocator.free(call_txid);
         return error.TestExpectedError;
     } else |err| {
-        // A negative test must prove CONSENSUS rejected the spend, not merely
-        // that the call returned some error. `ContractError.CallFailed` is the
-        // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
-        // refusal — so assert the transaction actually reached the node.
-        try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+        // Assert that specific refusal (the interpreter's script-abort error),
+        // not the CallFailed catch-all, and that nothing was broadcast.
+        try std.testing.expectEqual(error.ScriptNumberError, err);
+        try std.testing.expectEqual(broadcasts_before, rpc_provider.broadcast_attempts);
         std.log.info("MathDemo correctly rejected divide by zero", .{});
     }
 }
