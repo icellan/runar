@@ -26,5 +26,10 @@ export default defineConfig({
       '**/.claude/**',
       '**/.worktrees/**',
     ],
+    // Many suites spawn a real CLI or compiler per test. Under vitest 5 on a
+    // 4-core CI runner (turbo runs several packages' suites at once) a 1 s
+    // spawn took 7 s and tripped the 5 s default; a hang still fails here.
+    testTimeout: 30_000,
+    hookTimeout: 60_000,
   },
 });
