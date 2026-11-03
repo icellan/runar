@@ -26,10 +26,12 @@ export default defineConfig({
       '**/.claude/**',
       '**/.worktrees/**',
     ],
-    // Many suites spawn a real CLI or compiler per test. Under vitest 5 on a
-    // 4-core CI runner (turbo runs several packages' suites at once) a 1 s
-    // spawn took 7 s and tripped the 5 s default; a hang still fails here.
-    testTimeout: 30_000,
-    hookTimeout: 60_000,
+    // vitest 2 never failed a long SYNCHRONOUS test on its timeout; vitest 5
+    // does. Many suites here are long and synchronous (full-corpus compiles,
+    // ScriptVM sweeps, coverage-matrix --check): the longest single test ran
+    // 127 s on CI under vitest 2, and spawn-per-test suites slow down further
+    // when turbo runs several packages at once. A real hang still fails.
+    testTimeout: 300_000,
+    hookTimeout: 300_000,
   },
 });
