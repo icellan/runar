@@ -240,7 +240,7 @@ and the vk root (slot 3) never change, so pinning them removes three of the
 five scalar multiplications from every spend; with the SP1 v6 fixture that is
 roughly a 30% smaller script and ~400,000 fewer executed ops. The field is
 read by both the `groth16-wa` subcommand and the stateful
-`AssertGroth16WitnessAssistedWithMSM` path (`--groth16-vk` /
+`AssertGroth16WitnessAssistedWithMSM` path (`--groth16-wa-vk` /
 `CompileOptions.Groth16WAVKey`).
 
 A pinned value is a statement about the circuit, not something the compiler

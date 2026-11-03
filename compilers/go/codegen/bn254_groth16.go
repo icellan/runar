@@ -1962,6 +1962,52 @@ func emitWAGroth16PublicInputRangeCheck(t *BN254Tracker) {
 	}
 }
 
+// HasPinnedPublicInputs reports whether any public-input slot is pinned.
+func (c Groth16Config) HasPinnedPublicInputs() bool {
+	for _, p := range c.PinnedPublicInputs {
+		if p != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// groth16MSMStart returns IC[0] + Σ_{pinned i} pinned_i · IC[i+1] in affine
+// coordinates, the accumulator's starting point for the on-chain MSM with
+// the pinned public-input terms folded in. Panics if the result is the point
+// at infinity (no affine form; it cannot happen for a real SP1 statement but
+// a contrived key could hit it).
+func groth16MSMStart(config Groth16Config) (*big.Int, *big.Int) {
+	var acc bn254.G1Affine
+	setG1 := func(dst *bn254.G1Affine, p [2]*big.Int) {
+		dst.X.SetBigInt(p[0])
+		dst.Y.SetBigInt(p[1])
+	}
+	setG1(&acc, config.IC[0])
+	var accJ bn254.G1Jac
+	accJ.FromAffine(&acc)
+	for i := 0; i < 5; i++ {
+		s := config.PinnedPublicInputs[i]
+		if s == nil || s.Sign() == 0 {
+			continue
+		}
+		var base bn254.G1Affine
+		setG1(&base, config.IC[i+1])
+		var term bn254.G1Jac
+		term.FromAffine(&base)
+		term.ScalarMultiplication(&term, s)
+		accJ.AddAssign(&term)
+	}
+	acc.FromJacobian(&accJ)
+	if acc.IsInfinity() {
+		panic("groth16MSMStart: folded accumulator is the point at infinity")
+	}
+	var x, y big.Int
+	acc.X.BigInt(&x)
+	acc.Y.BigInt(&y)
+	return &x, &y
+}
+
 // emitWAGroth16MSMBind recomputes the Groth16 prepared-inputs accumulator
 // on-chain and asserts it matches the prover-supplied _pi_x, _pi_y.
 //
@@ -1997,52 +2043,6 @@ func emitWAGroth16PublicInputRangeCheck(t *BN254Tracker) {
 // disagree. The 5 pub_i scalars and _pi_x / _pi_y are consumed; the G1
 // constants for IC points are also consumed (they are materialized via
 // pushBigInt inside the scalar-mul loop).
-// groth16MSMStart returns IC[0] + Σ_{pinned i} pinned_i · IC[i+1] in affine
-// coordinates, the accumulator's starting point for the on-chain MSM with
-// the pinned public-input terms folded in. Panics if the result is the point
-// at infinity (no affine form; it cannot happen for a real SP1 statement but
-// a contrived key could hit it).
-// HasPinnedPublicInputs reports whether any public-input slot is pinned.
-func (c Groth16Config) HasPinnedPublicInputs() bool {
-	for _, p := range c.PinnedPublicInputs {
-		if p != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func groth16MSMStart(config Groth16Config) (*big.Int, *big.Int) {
-	var acc bn254.G1Affine
-	setG1 := func(dst *bn254.G1Affine, p [2]*big.Int) {
-		dst.X.SetBigInt(p[0])
-		dst.Y.SetBigInt(p[1])
-	}
-	setG1(&acc, config.IC[0])
-	var accJ bn254.G1Jac
-	accJ.FromAffine(&acc)
-	for i := 0; i < 5; i++ {
-		s := config.PinnedPublicInputs[i]
-		if s == nil || s.Sign() == 0 {
-			continue
-		}
-		var base bn254.G1Affine
-		setG1(&base, config.IC[i+1])
-		var term bn254.G1Jac
-		term.FromAffine(&base)
-		term.ScalarMultiplication(&term, s)
-		accJ.AddAssign(&term)
-	}
-	acc.FromJacobian(&accJ)
-	if acc.IsInfinity() {
-		panic("groth16MSMStart: folded accumulator is the point at infinity")
-	}
-	var x, y big.Int
-	acc.X.BigInt(&x)
-	acc.Y.BigInt(&y)
-	return &x, &y
-}
-
 func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 	pfx := "_msm_"
 
