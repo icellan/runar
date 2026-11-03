@@ -928,6 +928,14 @@ public final class AnfLoader {
             } else if ("loop".equals(kind)) {
                 checkSighashFlags(v, "body", vp, method, isPublic, declared);
             } else if ("check_preimage".equals(kind)) {
+                // Ports #170: only the two constructions exist; anything else
+                // must not reach codegen, where it would emit the default blob.
+                Object variant = v.get("bindingVariant");
+                if (variant != null && !"lowS".equals(variant) && !"all".equals(variant)) {
+                    throw new RuntimeException("IR validation: method " + method + " binding "
+                        + binding.get("name") + " check_preimage has an invalid bindingVariant;"
+                        + " bindingVariant must be \"lowS\" or \"all\"");
+                }
                 long flag = SIGHASH_DEFAULT;
                 Object raw = v.get("sighashFlag");
                 if (raw != null) {
@@ -1122,7 +1130,9 @@ public final class AnfLoader {
             case "check_preimage" -> new CheckPreimage(
                 reqString(obj, "preimage", path),
                 obj.containsKey("sighashFlag") && obj.get("sighashFlag") != null
-                    ? asInt(obj.get("sighashFlag"), "check_preimage sighashFlag") : null
+                    ? asInt(obj.get("sighashFlag"), "check_preimage sighashFlag") : null,
+                // Ports #170: validated to lowS / all by checkSighashFlags.
+                obj.get("bindingVariant") instanceof String bv ? bv : null
             );
             case "deserialize_state" -> new DeserializeState(reqString(obj, "preimage", path));
             case "add_output" -> {

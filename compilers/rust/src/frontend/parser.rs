@@ -504,6 +504,7 @@ fn parse_constructor(
                 body,
                 visibility: Visibility::Public,
                 sighash_type: None,
+                binding_variant: None,
                 source_location: real_loc(cm, file, ctor.span().lo),
             };
         }
@@ -516,6 +517,7 @@ fn parse_constructor(
         body: Vec::new(),
         visibility: Visibility::Public,
         sighash_type: None,
+        binding_variant: None,
         source_location: default_loc(file),
     }
 }
@@ -617,6 +619,9 @@ fn parse_methods(
             // Issue #123: `/** @sighash <FLAGS> */` directive → per-method type.
             let sighash_type =
                 parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors, cm);
+            // `/** @bindingVariant <lowS|all> */` → per-method binding construction (ports #170).
+            let binding_variant =
+                parse_binding_variant_on_method(comments, method.span().lo, &name, &visibility, file, errors, cm);
 
             result.push(MethodNode {
                 name,
@@ -624,6 +629,7 @@ fn parse_methods(
                 body,
                 visibility,
                 sighash_type,
+                binding_variant,
                 source_location: real_loc(cm, file, method.span().lo),
             });
         }
@@ -723,7 +729,11 @@ fn report_lost_directives(
 
     let body = &source[body_start..body_end];
     let mut lost: Vec<(usize, &str)> = Vec::new();
-    for (marker, spans, bounded) in [("@sighash", &method_spans, false), ("@embedAlways", &prop_spans, true)] {
+    for (marker, spans, bounded) in [
+        ("@sighash", &method_spans, false),
+        ("@bindingVariant", &method_spans, false),
+        ("@embedAlways", &prop_spans, true),
+    ] {
         let mut from = 0;
         while let Some(k) = body[from..].find(marker) {
             let at = body_start + from + k;
@@ -820,6 +830,11 @@ fn unsupported_directive_error(source: &str, s: &NonTsSurface) -> Option<String>
             s.name, s.embed_spelling, s.doc
         ));
     }
+    // `@bindingVariant` (ports #170) has no native spelling on any non-TS
+    // surface: every occurrence of the marker is refused.
+    if source.contains(super::binding_variant_directive::BINDING_VARIANT_MARKER) {
+        return Some(super::binding_variant_directive::binding_variant_unsupported_message(s.name));
+    }
     None
 }
 
@@ -837,6 +852,39 @@ fn directive_guard_result(msg: String) -> ParseResult {
 /// Pushes an error for a malformed flag list or a directive on a non-public
 /// method (only public methods are spending entry points). Mirrors the TS
 /// reference `parseSighashOnMethod`.
+/// Detect + parse a `@bindingVariant` directive on a method, with the same
+/// fail-closed rules as `parse_sighash_on_method`. `None` when no directive is
+/// present. Mirrors the TS reference parseBindingVariantOnMethod.
+fn parse_binding_variant_on_method(
+    comments: &SingleThreadedComments,
+    pos: BytePos,
+    name: &str,
+    visibility: &Visibility,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+    cm: &SourceMap,
+) -> Option<String> {
+    let text = leading_comment_text(comments, pos)?;
+    let result = super::binding_variant_directive::extract_binding_variant_directive(&text)?;
+    if *visibility != Visibility::Public {
+        errors.push(Diagnostic::error(
+            format!(
+                "@bindingVariant directive on non-public method '{}' has no effect — only public methods are spending entry points",
+                name
+            ),
+            Some(real_loc(cm, file, pos)),
+        ));
+        return None;
+    }
+    match result {
+        Ok(v) => Some(v),
+        Err(msg) => {
+            errors.push(Diagnostic::error(format!("Method '{}': {}", name, msg), Some(real_loc(cm, file, pos))));
+            None
+        }
+    }
+}
+
 fn parse_sighash_on_method(
     comments: &SingleThreadedComments,
     pos: BytePos,

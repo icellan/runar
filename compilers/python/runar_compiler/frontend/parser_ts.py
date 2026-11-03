@@ -32,6 +32,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.sighash_directive import extract_sighash_directive, lost_directive_message
+from runar_compiler.frontend.binding_variant_directive import extract_binding_variant_directive
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,7 @@ _EMBED_ALWAYS_RE = re.compile(r"@embedAlways\b")
 # `/@sighash/` scan. N-039 (R85): no word boundary, so `@sighashSINGLE|FORKID`
 # / `@sighashType` reach the extractor and are refused as malformed.
 _SIGHASH_TOKEN_RE = re.compile(r"@sighash")
+_BINDING_VARIANT_TOKEN_RE = re.compile(r"@bindingVariant")
 
 
 class Token:
@@ -719,6 +721,7 @@ class _TsParser:
         lost: list[tuple[int, str]] = []
         for regex, directive, spans in (
             (_SIGHASH_TOKEN_RE, "@sighash", method_spans),
+            (_BINDING_VARIANT_TOKEN_RE, "@bindingVariant", method_spans),
             (_EMBED_ALWAYS_RE, "@embedAlways", prop_spans),
         ):
             for m in regex.finditer(source, start, end):
@@ -905,6 +908,8 @@ class _TsParser:
         # Issue #123: `/** @sighash <FLAGS> */` (or `// @sighash ...`) directive
         # in the method's leading trivia → per-method BIP-143 sighash type.
         sighash_type = self._parse_sighash_directive(leading, name, visibility, location)
+        # `/** @bindingVariant <lowS|all> */` → per-method binding construction (ports #170).
+        binding_variant = self._parse_binding_variant_directive(leading, name, visibility, location)
 
         return MethodNode(
             name=name,
@@ -912,8 +917,32 @@ class _TsParser:
             body=body,
             visibility=visibility,
             sighash_type=sighash_type,
+            binding_variant=binding_variant,
             source_location=location,
         )
+
+    def _parse_binding_variant_directive(
+        self, leading: str, name: str, visibility: str,
+        location: SourceLocation,
+    ) -> str | None:
+        """Detect + parse a ``@bindingVariant`` directive on a method, with the
+        same fail-closed rules as ``_parse_sighash_directive``. ``None`` when no
+        directive is present. Mirrors the TS parseBindingVariantOnMethod."""
+        result = extract_binding_variant_directive(leading)
+        if result is None:
+            return None
+        if visibility != "public":
+            self.errors.append(Diagnostic(
+                message=f"@bindingVariant directive on non-public method '{name}' has no effect "
+                        f"— only public methods are spending entry points",
+                severity=Severity.ERROR, loc=location))
+            return None
+        if result.error is not None:
+            self.errors.append(Diagnostic(
+                message=f"Method '{name}': {result.error}",
+                severity=Severity.ERROR, loc=location))
+            return None
+        return result.value
 
     def _parse_sighash_directive(
         self, leading: str, name: str, visibility: str,

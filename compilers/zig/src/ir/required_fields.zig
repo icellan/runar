@@ -255,6 +255,18 @@ fn checkSighashFlags(w: Walker, obj: Obj, key: []const u8, path: []const u8, met
         } else if (eq(u8, kind, "loop")) {
             try checkSighashFlags(w, v, "body", vp, method, is_public, declared);
         } else if (eq(u8, kind, "check_preimage")) {
+            // Ports #170: only the two constructions exist; anything else must
+            // not reach codegen, where it would emit the default blob.
+            const bv = v.get("bindingVariant") orelse .null;
+            const bv_ok = switch (bv) {
+                .null => true,
+                .string => |s| eq(u8, s, "lowS") or eq(u8, s, "all"),
+                else => false,
+            };
+            if (!bv_ok) {
+                setDiag("IR validation: method {s} binding {s} check_preimage has an invalid bindingVariant; bindingVariant must be \"lowS\" or \"all\"", .{ method, name });
+                return Error.IRFieldWrongType;
+            }
             var flag: i64 = SIGHASH_DEFAULT;
             const raw = v.get("sighashFlag") orelse .null;
             switch (raw) {

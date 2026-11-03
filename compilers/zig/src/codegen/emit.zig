@@ -1279,6 +1279,9 @@ fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
             if (cp.sighash_flag != 0) {
                 try w.print(",\"sighashFlag\":{d}", .{cp.sighash_flag});
             }
+            if (cp.binding_variant_all) {
+                try w.writeAll(",\"bindingVariant\":\"all\"");
+            }
             try w.writeByte('}');
         },
         .deserialize_state => |ds| {

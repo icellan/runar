@@ -8,6 +8,10 @@ if TYPE_CHECKING:
     from runar_compiler.frontend.ast_nodes import ContractNode
 
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.binding_variant_directive import (
+    BINDING_VARIANT_MARKER,
+    binding_variant_unsupported_message,
+)
 
 
 # Author-facing comment directives ``@sighash <FLAGS>`` (#123, per-method
@@ -66,6 +70,10 @@ def _unsupported_directive_error(
             f"@embedAlways directive (issue #109) is not supported as a comment by the {surface_name} "
             f"surface parser; write it as {embed_spelling} (see docs/formats/{doc}.md)"
         )
+    # `@bindingVariant` (ports #170) has no native spelling on any non-TS
+    # surface: every occurrence of the marker is refused.
+    if BINDING_VARIANT_MARKER in source:
+        return binding_variant_unsupported_message(surface_name)
     return None
 
 

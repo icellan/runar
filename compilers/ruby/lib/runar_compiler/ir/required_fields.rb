@@ -210,6 +210,14 @@ module RunarCompiler
           when "loop"
             check_sighash_flags(v, "body", vp, method, is_public, declared)
           when "check_preimage"
+            # Ports #170: only the two constructions exist; anything else must
+            # not reach codegen, where it would emit the default blob.
+            variant = v["bindingVariant"]
+            unless variant.nil? || %w[lowS all].include?(variant)
+              raise ArgumentError,
+                    "IR validation: method #{method} binding #{binding['name']} check_preimage has an " \
+                    "invalid bindingVariant; bindingVariant must be \"lowS\" or \"all\""
+            end
             flag = v["sighashFlag"]
             if flag.nil?
               flag = SIGHASH_DEFAULT

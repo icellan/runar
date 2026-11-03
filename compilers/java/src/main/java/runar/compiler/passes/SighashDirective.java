@@ -145,7 +145,7 @@ public final class SighashDirective {
      * ({@code @sighash} -> a method, {@code @embedAlways} -> a property).
      */
     public static String lostDirectiveMessage(String directive) {
-        String target = directive.equals("@sighash") ? "method" : "property";
+        String target = directive.equals("@embedAlways") ? "property" : "method";
         return directive + " directive is not attached to any " + target
             + " and would be silently ignored; put the comment on its own line directly above the "
             + target + " it annotates (a comment that shares a line with the preceding code belongs to that code)";

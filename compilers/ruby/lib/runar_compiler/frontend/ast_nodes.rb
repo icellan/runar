@@ -253,8 +253,16 @@ module RunarCompiler
     # +.runar.ts+ surface. Drives the auto-injected preimage-type assert, the
     # OP_PUSH_TX binding flag, the ABI +sigHashType+, and the SDK-side
     # preimage/signature construction.
-    MethodNode = Struct.new(:name, :params, :body, :visibility, :source_location, :sighash_type, keyword_init: true) do
-      def initialize(name: "", params: [], body: [], visibility: "public", source_location: SourceLocation.new, sighash_type: nil)
+    #
+    # +binding_variant+ (ports #170) is the Any-S OP_PUSH_TX binding
+    # construction from a +/** @bindingVariant <lowS|all> */+ directive on a
+    # public +.runar.ts+ method. +nil+ = the default lowS; +"all"+ selects the
+    # compact non-low-S blob, spendable only when the spending tx has
+    # nVersion != 1.
+    MethodNode = Struct.new(:name, :params, :body, :visibility, :source_location, :sighash_type, :binding_variant,
+                            keyword_init: true) do
+      def initialize(name: "", params: [], body: [], visibility: "public", source_location: SourceLocation.new,
+                     sighash_type: nil, binding_variant: nil)
         super
       end
     end

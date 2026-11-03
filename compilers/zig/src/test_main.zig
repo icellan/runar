@@ -22,6 +22,7 @@ test {
     _ = @import("frontend/input_limits.zig");
     _ = @import("frontend/input_limits_test.zig");
     _ = @import("frontend/sighash_directive.zig");
+    _ = @import("frontend/bindingvariant_directive.zig");
     _ = @import("codegen/opcodes.zig");
     _ = @import("codegen/emit.zig");
     _ = @import("passes/stack_lower.zig");
@@ -99,6 +100,7 @@ test {
     _ = @import("tests/zig_readonly_inference.zig");
     _ = @import("tests/embed_always.zig");
     _ = @import("tests/sighash_codegen.zig");
+    _ = @import("tests/binding_variant.zig");
     _ = @import("tests/sighash_validate_test.zig");
     _ = @import("tests/local_shadowing_property.zig");
     _ = @import("tests/param_reassignment.zig");

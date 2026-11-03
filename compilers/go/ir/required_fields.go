@@ -279,6 +279,13 @@ func irCheckSighashFlags(obj irObj, key, path, method string, isPublic bool, dec
 				return err
 			}
 		case "check_preimage":
+			// Ports #170: only the two constructions exist; anything else must
+			// not reach codegen, where it would silently emit the default blob.
+			if raw, ok := v["bindingVariant"]; ok && raw != nil && raw != "lowS" && raw != "all" {
+				return fmt.Errorf(
+					"IR validation: method %s binding %v check_preimage has an invalid bindingVariant; bindingVariant must be \"lowS\" or \"all\"",
+					method, binding["name"])
+			}
 			flag := float64(0x41)
 			if raw, ok := v["sighashFlag"]; ok && raw != nil {
 				n, isNum := raw.(float64)

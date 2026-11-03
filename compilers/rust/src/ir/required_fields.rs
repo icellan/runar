@@ -227,6 +227,18 @@ fn check_sighash_flags(
             }
             "loop" => check_sighash_flags(v, "body", &vp, method, is_public, declared)?,
             "check_preimage" => {
+                // Ports #170: only the two constructions exist; anything else
+                // must not reach codegen, where it would emit the default blob.
+                match v.get("bindingVariant") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(s)) if s == "lowS" || s == "all" => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "IR validation: method {} binding {} check_preimage has an invalid bindingVariant; bindingVariant must be \"lowS\" or \"all\"",
+                            method, name
+                        ))
+                    }
+                }
                 let mut flag = SIGHASH_DEFAULT;
                 match v.get("sighashFlag") {
                     None | Some(Value::Null) => {}

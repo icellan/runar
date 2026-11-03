@@ -895,6 +895,13 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
             // #123: optional non-default sighash flag (default 0 = ALL|FORKID).
             .sighash_flag = getOptionalI32(obj, "sighashFlag"),
+            // Ports #170: only "all" selects the compact blob; the
+            // required-fields check has already refused any other value but
+            // "lowS".
+            .binding_variant_all = if (obj.get("bindingVariant")) |bv| switch (bv) {
+                .string => |s| std.mem.eql(u8, s, "all"),
+                else => false,
+            } else false,
         } },
         .deserialize_state => .{ .deserialize_state = .{
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
@@ -1965,7 +1972,15 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
         },
         .check_preimage => |cp| {
             try writer.writeAll("{\n");
-            // Sorted keys: kind, preimage, sighashFlag (#123, only when non-default)
+            // Sorted keys: bindingVariant (ports #170, only when "all"), kind,
+            // preimage, sighashFlag (#123, only when non-default)
+            if (cp.binding_variant_all) {
+                try writeIndent(writer, depth + 1);
+                try writeJsonString(writer, "bindingVariant");
+                try writer.writeAll(": ");
+                try writeJsonString(writer, "all");
+                try writer.writeAll(",\n");
+            }
             try writeIndent(writer, depth + 1);
             try writeJsonString(writer, "kind");
             try writer.writeAll(": ");

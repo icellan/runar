@@ -2088,8 +2088,8 @@ impl LoweringContext {
             ANFValue::GetStateScript {} => {
                 self.lower_get_state_script(name);
             }
-            ANFValue::CheckPreimage { preimage, sighash_flag } => {
-                self.lower_check_preimage(name, preimage, *sighash_flag, binding_index, last_uses);
+            ANFValue::CheckPreimage { preimage, sighash_flag, binding_variant } => {
+                self.lower_check_preimage(name, preimage, *sighash_flag, binding_variant.as_deref(), binding_index, last_uses);
             }
             ANFValue::DeserializeState { preimage } => {
                 self.lower_deserialize_state(preimage, binding_index, last_uses);
@@ -4882,6 +4882,7 @@ impl LoweringContext {
         binding_name: &str,
         preimage: &str,
         sighash_flag: Option<i64>,
+        binding_variant: Option<&str>,
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
@@ -4917,7 +4918,7 @@ impl LoweringContext {
         // byte-identical to the pinned cross-tier constant; issue #123 lets a
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
-        self.emit_check_preimage_binding(sighash_flag);
+        self.emit_check_preimage_binding(sighash_flag, binding_variant);
 
         // R-010: the preimage is now proven to be THIS transaction's preimage,
         // so its scriptCode field is authentic. Pin the spender-supplied
@@ -4938,9 +4939,9 @@ impl LoweringContext {
     /// effect is 0 (preimage in → preimage out), declared as in=1/out=1 so the
     /// static analyzer keeps the depth consistent. The stack tracker is updated
     /// by the caller (`lower_check_preimage`), mirroring the Go reference.
-    fn emit_check_preimage_binding(&mut self, sighash_flag: Option<i64>) {
+    fn emit_check_preimage_binding(&mut self, sighash_flag: Option<i64>, binding_variant: Option<&str>) {
         self.emit_op(StackOp::RawBytes {
-            bytes: super::oppushtx::check_preimage_binding_bytes_with_flag(sighash_flag),
+            bytes: super::oppushtx::check_preimage_binding_bytes_with_flag(sighash_flag, binding_variant),
             in_arity: 1,
             out_arity: 1,
         });
