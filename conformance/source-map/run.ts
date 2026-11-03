@@ -74,9 +74,20 @@ import {
   loadKnownIssues,
   type KnownIssueEntry,
 } from './independent-oracle.js';
+import { findJavaJarPath } from '../runner/runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
+
+const JAVA_BIN = join(REPO_ROOT, 'compilers/java/build/install/runar-java/bin/runar-java');
+
+/** The Java tier: the installDist launcher, else `java -jar` on the built jar
+ *  (the CI conformance job downloads only the jar into build/libs). */
+function javaCommand(): { cmd: string; pre: string[] } | null {
+  if (existsSync(JAVA_BIN)) return { cmd: JAVA_BIN, pre: [] };
+  const jar = findJavaJarPath();
+  return jar === null ? null : { cmd: 'java', pre: ['-jar', jar] };
+}
 
 // GAP-002 brief originally listed `ec-demo` as the 5th fixture. Excluded
 // here because its compiled output expands EC primitives to ~750 KB of
@@ -242,14 +253,15 @@ const TIERS: Tier[] = [
   {
     name: 'java',
     ext: '.runar.java',
-    available: () => existsSync(join(REPO_ROOT, 'compilers/java/build/install/runar-java/bin/runar-java')),
+    available: () => javaCommand() !== null,
     run: (sourcePath, smOut) => {
-      const bin = join(REPO_ROOT, 'compilers/java/build/install/runar-java/bin/runar-java');
-      if (!existsSync(bin)) {
+      if (javaCommand() === null) {
         const build = run('gradle', ['installDist'], { cwd: join(REPO_ROOT, 'compilers/java') });
         if (build.code !== 0) return { ok: false, stderr: 'gradle installDist failed: ' + build.stderr };
       }
-      const r = run(bin, [
+      const java = javaCommand()!;
+      const r = run(java.cmd, [
+        ...java.pre,
         '--source', sourcePath,
         '--disable-constant-folding',
         '--hex',
@@ -401,8 +413,9 @@ function compileHex(tier: Tier, sourcePath: string): CompileHexResult {
       return { hex: r.stdout.trim(), err: r.code === 0 ? undefined : r.stderr };
     }
     case 'java': {
-      const bin = join(REPO_ROOT, 'compilers/java/build/install/runar-java/bin/runar-java');
-      const r = run(bin, ['--source', sourcePath, '--hex', '--disable-constant-folding']);
+      const java = javaCommand();
+      if (java === null) return { hex: '', err: 'no Java compiler (installDist launcher or jar)' };
+      const r = run(java.cmd, [...java.pre, '--source', sourcePath, '--hex', '--disable-constant-folding']);
       return { hex: r.stdout.trim(), err: r.code === 0 ? undefined : r.stderr };
     }
   }
