@@ -20,12 +20,16 @@ func OptimizeStackOps(ops []StackOp) []StackOp {
 		current[i] = optimizeNestedIf(op)
 	}
 
+	// Passes alternate between two buffers instead of allocating a fresh
+	// output each time: a multi-million-op program (bn254-pairing) otherwise
+	// allocates passes x output and keeps the GC heap growing.
+	var spare []StackOp
 	for iteration := 0; iteration < maxOptimizationIterations; iteration++ {
-		result, changed := applyOnePass(current)
+		result, changed := applyOnePassInto(spare, current)
 		if !changed {
 			break
 		}
-		current = result
+		current, spare = result, current
 	}
 
 	return current
@@ -65,7 +69,18 @@ func withHeadSourceLoc(head StackOp, replacement []StackOp) []StackOp {
 }
 
 func applyOnePass(ops []StackOp) ([]StackOp, bool) {
-	var result []StackOp
+	return applyOnePassInto(nil, ops)
+}
+
+// applyOnePassInto writes the pass's output into dst's backing array (which
+// must not alias ops), growing it only when it is too small.
+func applyOnePassInto(dst, ops []StackOp) ([]StackOp, bool) {
+	// Output is never much longer than the input; growing by append allocated
+	// ~5x the output per pass on multi-million-op programs.
+	result := dst[:0]
+	if cap(result) < len(ops) {
+		result = make([]StackOp, 0, len(ops))
+	}
 	changed := false
 	i := 0
 
