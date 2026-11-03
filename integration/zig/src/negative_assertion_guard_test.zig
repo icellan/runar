@@ -111,8 +111,9 @@ test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
 
     try std.testing.expectEqual(@as(usize, 0), absolute_sites);
     // Falsification anchor: if the assertions are simply deleted rather than
-    // converted, this reddens too.
-    try std.testing.expectEqual(@as(usize, 24), delta_sites);
+    // converted, this reddens too. 23: MathDemo_RejectDivideByZero now asserts
+    // the SDK's fail-closed refusal (no SDK path builds that spend).
+    try std.testing.expectEqual(@as(usize, 23), delta_sites);
 }
 
 // ---------------------------------------------------------------------------
