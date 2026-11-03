@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { checkAgainstReference, type SourceMap } from './independent-oracle.js';
+import { findZigBinary } from '../runner/runner.js';
 
 // N-368 (R156): the Zig tier's source map must leave compiler-synthesized
 // opcodes (stateful preamble: checkPreimage / OP_PUSH_TX, state continuation,
@@ -23,7 +24,8 @@ import { checkAgainstReference, type SourceMap } from './independent-oracle.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
-const ZIG_BIN = join(REPO_ROOT, 'compilers/zig/zig-out/bin/runar-zig');
+// Same lookup as the runner: CI downloads the built binary to the repo root.
+const ZIG_BIN = findZigBinary() ?? join(REPO_ROOT, 'compilers/zig/zig-out/bin/runar-zig');
 const TS_CLI = join(REPO_ROOT, 'packages/runar-cli/src/bin.ts');
 
 const FIXTURES: Array<{ name: string; ts: string; zig: string }> = [
@@ -49,7 +51,7 @@ function emit(cmd: string, args: string[], out: string, cwd: string): SourceMap 
 }
 
 describe('N-368: zig leaves compiler-synthesized opcodes unmapped, like the TS reference', () => {
-  expect(existsSync(ZIG_BIN), `build compilers/zig first (${ZIG_BIN})`).toBe(true);
+  expect(ZIG_BIN === 'runar-zig' || existsSync(ZIG_BIN), `build compilers/zig first (${ZIG_BIN})`).toBe(true);
   const dir = mkdtempSync(join(tmpdir(), 'n368-'));
   mkdirSync(dir, { recursive: true });
 
