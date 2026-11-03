@@ -42,7 +42,7 @@ module Runar
       #
       # 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
       # so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-      # also far above what the wire needs: the deepest of the 165 checked-in
+      # also far above what the wire needs: the deepest of the 199 checked-in
       # conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
       # tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
       # bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -409,7 +409,11 @@ module Runar
           return { ok: false, reason: 'bad-sig', data: parsed }
         end
         digest = Digest::SHA256.digest(envelope.payload)
-        return { ok: false, reason: 'bad-sig', data: parsed } unless Runar::ECDSA.ecdsa_verify(sig_bytes, pk_bytes, digest)
+        # F-138: plain ECDSA, no BIP-62 low-S rule — the TS reference (and
+        # every other tier) accepts a high-S envelope signature.
+        unless Runar::ECDSA.ecdsa_verify(sig_bytes, pk_bytes, digest, low_s: false, sighash_byte: false)
+          return { ok: false, reason: 'bad-sig', data: parsed }
+        end
 
         # 6. Allowlist.
         if expected_keys && !expected_keys.include?(envelope.pubkey)

@@ -55,4 +55,22 @@ RSpec.describe Runar::Analyzer::ScriptParser do
     expect(ops[0][:name]).to eq('PUSH_3')
     # No additional finding here; truncation is observed downstream.
   end
+
+  # N-176. Proves: a byte that survives JS-`\s` normalisation but is not a
+  # hex digit - a C0 separator (U+001C, kept by `analyze_script`'s
+  # normalize per F-272) or a plain non-hex letter pair ("zz") - raises,
+  # matching the TS reference's `hexVal` throw ("Invalid hex character"),
+  # instead of `to_i(16)` silently decoding it as byte 0x00 (the
+  # pre-existing leniency this closes). Also covers the odd-length case
+  # the same decode loop used to drop the trailing character on. Does not
+  # prove every non-hex byte or every odd length is handled identically -
+  # only these two representative shapes.
+  it 'refuses non-hex characters instead of silently decoding them as 0x00' do
+    expect { described_class.parse("76\u001ca90") }.to raise_error(ArgumentError, /Invalid hex character/)
+    expect { described_class.parse('zz') }.to raise_error(ArgumentError, /Invalid hex character/)
+  end
+
+  it 'refuses odd-length hex instead of silently dropping the trailing character' do
+    expect { described_class.parse('abc') }.to raise_error(ArgumentError, /odd length/)
+  end
 end

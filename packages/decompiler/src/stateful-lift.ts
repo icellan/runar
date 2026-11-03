@@ -233,7 +233,38 @@ function stripStatefulWrapping(
     return { ok: true, user: body.slice(cursor) };
   }
 
-  return { ok: true, user: body.slice(cursor, continuationStart) };
+  // F-024 (R14) value-conservation check. Auto-injected immediately before
+  // the default single-output continuation's change output:
+  //     load_param txPreimage
+  //     call extractAmount(txPreimage)
+  //     load_param _newAmount
+  //     bin_op >= (_newAmount, amount)
+  //     assert
+  // It is a standalone assert, so the continuation reachability walk above
+  // stops in front of it. The compiler re-injects it on recompile; strip
+  // exactly one copy, and only when it sits directly against the
+  // continuation (a user-written copy further up stays in the user body).
+  let userEnd = continuationStart;
+  if (userEnd - 5 >= cursor) {
+    const a0 = body[userEnd - 5]!;
+    const a1 = body[userEnd - 4]!;
+    const a2 = body[userEnd - 3]!;
+    const a3 = body[userEnd - 2]!;
+    const a4 = body[userEnd - 1]!;
+    if (
+      a0.value.kind === 'load_param' && a0.value.name === 'txPreimage' &&
+      a1.value.kind === 'call' && a1.value.func === 'extractAmount' &&
+      a1.value.args.length === 1 && a1.value.args[0] === a0.name &&
+      a2.value.kind === 'load_param' && a2.value.name === '_newAmount' &&
+      a3.value.kind === 'bin_op' && a3.value.op === '>=' &&
+      a3.value.left === a2.name && a3.value.right === a1.name &&
+      a4.value.kind === 'assert' && a4.value.value === a3.name
+    ) {
+      userEnd -= 5;
+    }
+  }
+
+  return { ok: true, user: body.slice(cursor, userEnd) };
 }
 
 /**
@@ -389,7 +420,12 @@ function refsOf(v: ANFValue): string[] {
     case 'method_call':
       return [v.object, ...v.args];
     case 'if':
-      return [v.cond];
+      // The branches read outer bindings too. The continuation's change
+      // gate (`if (_changeAmount !== 0) buildChangeOutput(_changePKH, ...)`)
+      // reads `_changePKH` ONLY inside its then-branch; returning just the
+      // condition left that load_param stranded in the user span, where it
+      // sat between the user body and the F-024 value check.
+      return [v.cond, ...v.then.flatMap(b => refsOf(b.value)), ...v.else.flatMap(b => refsOf(b.value))];
     case 'loop':
       return [];
     case 'assert':

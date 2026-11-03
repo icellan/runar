@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	bn254 "github.com/consensys/gnark-crypto/ecc/bn254"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fp"
 )
 
 // g1AffineToPoint encodes a gnark bn254.G1Affine as a Rúnar 64-byte Point
@@ -192,5 +193,168 @@ func TestBn254MultiPairing3Big_AcceptsValidInstance(t *testing.T) {
 	)
 	if !ok {
 		t.Fatal("Bn254MultiPairing3Big rejected a valid synthetic instance with precomputed α·-β")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-127: off-chain / on-chain input-validation parity
+//
+// The compiled bn254MultiPairing4 / bn254MultiPairing3 scripts validate every
+// input point before the Miller loop (compilers/go/codegen/
+// bn254_point_validation.go). Executing EmitBN254MultiPairing4 on the
+// cancelling configurations below gives (see the F-127 remediation log):
+//
+//	G1 = 64 zero bytes          -> rejected (y^2 == x^3 + 3 fails)
+//	G2 = (0, 0, 0, 0)           -> rejected (twist equation fails)
+//	G1 x or y coordinate + p    -> rejected (0 <= coord < p, R-141)
+//	G2 on twist, off subgroup   -> rejected (psi(P) == [6x^2]P fails)
+//	G2 coordinate +p or -p      -> ACCEPTED (arithmetic is mod p)
+//
+// Each negative is a forgery: under gnark's reference pairing, with the
+// coordinates reduced mod p and (0,0) read as infinity, the product is 1.
+// So a FALSE from the wrapper can only come from input validation.
+// ---------------------------------------------------------------------------
+
+type bigPair struct {
+	p Point
+	q [4]*big.Int
+}
+
+func mp4Big(pairs [4]bigPair) bool {
+	return Bn254MultiPairing4Big(
+		pairs[0].p, pairs[0].q[0], pairs[0].q[1], pairs[0].q[2], pairs[0].q[3],
+		pairs[1].p, pairs[1].q[0], pairs[1].q[1], pairs[1].q[2], pairs[1].q[3],
+		pairs[2].p, pairs[2].q[0], pairs[2].q[1], pairs[2].q[2], pairs[2].q[3],
+		pairs[3].p, pairs[3].q[0], pairs[3].q[1], pairs[3].q[2], pairs[3].q[3],
+	)
+}
+
+// assertGnarkForgery fails unless gnark-crypto, decoding the inputs the
+// lenient way (SetBigInt reduces mod p, (0,0) is infinity, no subgroup
+// check), says the product is 1. That is what makes each negative non-vacuous.
+func assertGnarkForgery(t *testing.T, pairs []bigPair) {
+	t.Helper()
+	var g1s []bn254.G1Affine
+	var g2s []bn254.G2Affine
+	for _, pr := range pairs {
+		b := []byte(pr.p)
+		var p bn254.G1Affine
+		p.X.SetBigInt(new(big.Int).SetBytes(b[:32]))
+		p.Y.SetBigInt(new(big.Int).SetBytes(b[32:]))
+		var q bn254.G2Affine
+		q.X.A0.SetBigInt(pr.q[0])
+		q.X.A1.SetBigInt(pr.q[1])
+		q.Y.A0.SetBigInt(pr.q[2])
+		q.Y.A1.SetBigInt(pr.q[3])
+		g1s = append(g1s, p)
+		g2s = append(g2s, q)
+	}
+	ok, err := bn254.PairingCheck(g1s, g2s)
+	if err != nil || !ok {
+		t.Fatalf("configuration is not a forgery under gnark (ok=%v err=%v); the negative would be vacuous", ok, err)
+	}
+}
+
+func f127Fixtures() (g, ng Point, q [4]*big.Int, fieldP *big.Int) {
+	_, _, g1Aff, g2Aff := bn254.Generators()
+	var neg bn254.G1Affine
+	neg.Neg(&g1Aff)
+	x0, x1, y0, y1 := g2AffineToRunarCoords(g2Aff)
+	return g1AffineToPoint(g1Aff), g1AffineToPoint(neg), [4]*big.Int{x0, x1, y0, y1}, fp.Modulus()
+}
+
+// TestBn254MultiPairing4Big_RejectsG1Identity is the F-127 repro: the 64-zero
+// Point used to pass gnark's IsOnCurve (gnark encodes infinity as (0,0)) and
+// drop out of the product, so this returned true. The script rejects it.
+func TestBn254MultiPairing4Big_RejectsG1Identity(t *testing.T) {
+	g, ng, q, _ := f127Fixtures()
+	zero := Point(make([]byte, 64))
+	pairs := [4]bigPair{{zero, q}, {g, q}, {ng, q}, {zero, q}}
+	assertGnarkForgery(t, pairs[:])
+	if mp4Big(pairs) {
+		t.Fatal("Bn254MultiPairing4Big accepted the G1 identity (64 zero bytes); the compiled script rejects it")
+	}
+}
+
+// TestBn254MultiPairing4Big_RejectsG2Identity: the all-zero G2 encoding is
+// gnark's infinity too. The script's twist-equation check rejects it.
+func TestBn254MultiPairing4Big_RejectsG2Identity(t *testing.T) {
+	g, ng, q, _ := f127Fixtures()
+	z := [4]*big.Int{big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0)}
+	pairs := [4]bigPair{{g, z}, {ng, z}, {g, q}, {ng, q}}
+	assertGnarkForgery(t, pairs[:])
+	if mp4Big(pairs) {
+		t.Fatal("Bn254MultiPairing4Big accepted the all-zero G2 identity; the compiled script rejects it")
+	}
+}
+
+// TestBn254MultiPairing4Big_RejectsNonCanonicalG1: (x+p, y) and (x, y+p)
+// alias the generator once reduced. The script requires 0 <= coord < p.
+func TestBn254MultiPairing4Big_RejectsNonCanonicalG1(t *testing.T) {
+	g, ng, q, fieldP := f127Fixtures()
+	for _, half := range []int{0, 1} {
+		b := []byte(g)
+		c := new(big.Int).SetBytes(b[half*32 : half*32+32])
+		c.Add(c, fieldP)
+		alias := make([]byte, 64)
+		copy(alias, b)
+		c.FillBytes(alias[half*32 : half*32+32])
+		pairs := [4]bigPair{{Point(alias), q}, {ng, q}, {g, q}, {ng, q}}
+		assertGnarkForgery(t, pairs[:])
+		if mp4Big(pairs) {
+			t.Fatalf("Bn254MultiPairing4Big accepted a non-canonical G1 coordinate (half %d = coord+p); the compiled script rejects it", half)
+		}
+	}
+}
+
+// TestBn254MultiPairing4Big_RejectsOffSubgroupG2: a point on the twist but in
+// the cofactor torsion (same MapToCurve2 seed the codegen tests use). The
+// script's subgroup check rejects it; IsOnCurve alone does not.
+func TestBn254MultiPairing4Big_RejectsOffSubgroupG2(t *testing.T) {
+	g, ng, q, _ := f127Fixtures()
+	var seed bn254.E2
+	seed.A0.SetUint64(1)
+	seed.A1.SetUint64(3)
+	aff := bn254.MapToCurve2(&seed)
+	if !aff.IsOnCurve() || aff.IsInSubGroup() {
+		t.Fatal("adversarial G2 seed (1,3) must be on the twist and outside the subgroup")
+	}
+	bx0, bx1, by0, by1 := g2AffineToRunarCoords(aff)
+	bad := [4]*big.Int{bx0, bx1, by0, by1}
+	pairs := [4]bigPair{{g, bad}, {ng, bad}, {g, q}, {ng, q}}
+	assertGnarkForgery(t, pairs[:])
+	if mp4Big(pairs) {
+		t.Fatal("Bn254MultiPairing4Big accepted an on-twist but off-subgroup G2 point; the compiled script rejects it")
+	}
+}
+
+// TestBn254MultiPairing4Big_AcceptsNonCanonicalG2: the other side of parity.
+// The script reduces G2 coordinates mod p and accepts x0+p and x0-p, so the
+// wrapper must too. Guards against over-tightening the G2 decoder.
+func TestBn254MultiPairing4Big_AcceptsNonCanonicalG2(t *testing.T) {
+	g, ng, q, fieldP := f127Fixtures()
+	for _, delta := range []*big.Int{fieldP, new(big.Int).Neg(fieldP)} {
+		alias := [4]*big.Int{new(big.Int).Add(q[0], delta), q[1], q[2], q[3]}
+		pairs := [4]bigPair{{g, alias}, {ng, alias}, {g, q}, {ng, q}}
+		if !mp4Big(pairs) {
+			t.Fatalf("Bn254MultiPairing4Big rejected G2 x0%+v·p; the compiled script accepts it", delta.Sign())
+		}
+	}
+}
+
+// TestBn254MultiPairing3Big_RejectsG1Identity: same decoder, other entry
+// point. With precomputed = 1 in Fp12, e(0,Q)·e(G,Q)·e(-G,Q) is 1 under
+// gnark's lenient decoding; the script rejects the identity.
+func TestBn254MultiPairing3Big_RejectsG1Identity(t *testing.T) {
+	g, ng, q, _ := f127Fixtures()
+	zero := Point(make([]byte, 64))
+	one, z := big.NewInt(1), big.NewInt(0)
+	if Bn254MultiPairing3Big(
+		zero, q[0], q[1], q[2], q[3],
+		g, q[0], q[1], q[2], q[3],
+		ng, q[0], q[1], q[2], q[3],
+		one, z, z, z, z, z, z, z, z, z, z, z,
+	) {
+		t.Fatal("Bn254MultiPairing3Big accepted the G1 identity (64 zero bytes); the compiled script rejects it")
 	}
 }

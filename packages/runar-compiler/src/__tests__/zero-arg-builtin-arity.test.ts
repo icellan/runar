@@ -47,13 +47,23 @@ function prog(
   };
 }
 
-/** `unlock(x) { <func>(...args) ; assert(x === target) }` over the --ir path. */
+/**
+ * `unlock(x) { <func>(...args) ; assert(x === target) }` over the --ir path.
+ *
+ * The wrapper assert must be the dedicated `{ kind: 'assert' }` ANF node (not
+ * a generic `{ kind: 'call', func: 'assert' }`) so N-071's terminal-assert
+ * structural check (index.ts's `endsWithTerminalAssert`, which only
+ * recognizes the dedicated node) accepts the method shape. Every probe here
+ * still throws on `t0`, the leading zero-arg call, during stack-lowering —
+ * well before the terminal `t3` is ever reached — so this has no effect on
+ * what's actually being tested.
+ */
 function withLeadingCall(func: string, args: string[]): ANFProgram {
   return prog([P('target', 'bigint')], [P('x', 'bigint')], [
     { name: 't0', value: { kind: 'call', func, args } } as unknown as ANFBinding,
     { name: 't1', value: { kind: 'load_prop', name: 'target' } },
     { name: 't2', value: { kind: 'bin_op', op: '===', left: 'x', right: 't1' } },
-    { name: 't3', value: { kind: 'call', func: 'assert', args: ['t2'] } } as unknown as ANFBinding,
+    { name: 't3', value: { kind: 'assert', value: 't2' } },
   ]);
 }
 
@@ -106,6 +116,17 @@ export class Probe extends SmartContract {
     });
   });
 
+  // Each probe below appends a `load_const true` + dedicated terminal
+  // `{ kind: 'assert' }` pair (t4/t5) AFTER the call under test (t3), so the
+  // method satisfies N-071's terminal-assert check without touching the
+  // tested call itself. The tested call (t3) stays a generic
+  // `{ kind: 'call' }` node and so is no longer the method's terminal
+  // binding — lowerCall's assert/exit branch emits OP_VERIFY unconditionally
+  // regardless of position, so this has no effect on t3's own bytes. Only the
+  // dedicated terminal (t5) gets the "leave truthy value on stack, no
+  // OP_VERIFY" treatment, contributing exactly one extra opcode (OP_TRUE,
+  // 0x51) at the very end — hence the trailing `51` on every expected hex
+  // below.
   describe('controls: correct-arity calls are byte-unchanged', () => {
     it('assert(cond) still emits the verify', () => {
       const { scriptHex, scriptAsm } = compileFromANF(
@@ -113,14 +134,16 @@ export class Probe extends SmartContract {
           { name: 't1', value: { kind: 'load_prop', name: 'target' } },
           { name: 't2', value: { kind: 'bin_op', op: '===', left: 'x', right: 't1' } },
           { name: 't3', value: { kind: 'call', func: 'assert', args: ['t2'] } } as unknown as ANFBinding,
+          { name: 't4', value: { kind: 'load_const', value: true } },
+          { name: 't5', value: { kind: 'assert', value: 't4' } },
         ]),
         { constructorArgs: { target: 5n }, disableConstantFolding: true },
       );
       // Peephole fuses OP_NUMEQUAL + OP_VERIFY into OP_NUMEQUALVERIFY (0x9d).
       // Before the guard landed, `assert()` compiled this same program to
       // `OP_5 OP_NUMEQUAL` (55 9c) — the verify silently gone.
-      expect(scriptAsm).toBe('OP_5 OP_NUMEQUALVERIFY');
-      expect(scriptHex).toBe('559d');
+      expect(scriptAsm).toBe('OP_5 OP_NUMEQUALVERIFY OP_TRUE');
+      expect(scriptHex).toBe('559d51');
     });
 
     it('exit(cond) still emits the verify', () => {
@@ -129,10 +152,12 @@ export class Probe extends SmartContract {
           { name: 't1', value: { kind: 'load_prop', name: 'target' } },
           { name: 't2', value: { kind: 'bin_op', op: '===', left: 'x', right: 't1' } },
           { name: 't3', value: { kind: 'call', func: 'exit', args: ['t2'] } } as unknown as ANFBinding,
+          { name: 't4', value: { kind: 'load_const', value: true } },
+          { name: 't5', value: { kind: 'assert', value: 't4' } },
         ]),
         { constructorArgs: { target: 5n }, disableConstantFolding: true },
       );
-      expect(scriptHex).toBe('559d');
+      expect(scriptHex).toBe('559d51');
     });
 
     it('pack(x) is byte-unchanged', () => {
@@ -142,10 +167,12 @@ export class Probe extends SmartContract {
           { name: 't1', value: { kind: 'load_prop', name: 'target' } },
           { name: 't2', value: { kind: 'bin_op', op: '===', left: 't0', right: 't1' } },
           { name: 't3', value: { kind: 'call', func: 'assert', args: ['t2'] } } as unknown as ANFBinding,
+          { name: 't4', value: { kind: 'load_const', value: true } },
+          { name: 't5', value: { kind: 'assert', value: 't4' } },
         ]),
         { constructorArgs: { target: '0102' }, disableConstantFolding: true },
       );
-      expect(scriptHex).toBe('0201029d');
+      expect(scriptHex).toBe('0201029d51');
     });
 
     it('toByteString(x) is byte-unchanged', () => {
@@ -155,10 +182,12 @@ export class Probe extends SmartContract {
           { name: 't1', value: { kind: 'load_prop', name: 'target' } },
           { name: 't2', value: { kind: 'bin_op', op: '===', left: 't0', right: 't1' } },
           { name: 't3', value: { kind: 'call', func: 'assert', args: ['t2'] } } as unknown as ANFBinding,
+          { name: 't4', value: { kind: 'load_const', value: true } },
+          { name: 't5', value: { kind: 'assert', value: 't4' } },
         ]),
         { constructorArgs: { target: '0102' }, disableConstantFolding: true },
       );
-      expect(scriptHex).toBe('0201029d');
+      expect(scriptHex).toBe('0201029d51');
     });
 
     it('a real source contract using assert / pack / toByteString is byte-unchanged', () => {

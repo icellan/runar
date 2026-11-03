@@ -3,6 +3,9 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { compileCheck, compileFromANF, loadANFFromJSON, compile } from '../index.js';
 
 const VALID_P2PKH = `
@@ -74,6 +77,96 @@ describe('compileCheck', () => {
     }
     expect(caught).not.toBeNull();
     expect(caught!.message).toContain('NamedFile.runar.ts');
+  });
+});
+
+// A valid FixedArray contract: single-element and runtime-indexed writes,
+// mirrors BASIC_ARRAY in 03b-expand-fixed-arrays.test.ts (kept inline here
+// per sibling-file convention — expand-fixed-arrays fixtures aren't exported).
+const VALID_FIXED_ARRAY = `
+class Boardy extends StatefulSmartContract {
+  board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+
+  constructor() {
+    super();
+  }
+
+  public setZero(v: bigint) {
+    this.board[0] = v;
+    assert(true);
+  }
+}
+`;
+
+// A FixedArray contract whose initializer length (2) doesn't match the
+// declared array length (3) — rejected by pass 3b (expandFixedArrays), not
+// by typecheck, so it only exercises the post-typecheck expansion diagnostics.
+const INVALID_FIXED_ARRAY_LENGTH = `
+class BadInit extends StatefulSmartContract {
+  board: FixedArray<bigint, 3> = [0n, 0n];
+
+  constructor() {
+    super();
+  }
+
+  public m() {
+    assert(true);
+  }
+}
+`;
+
+describe('compileCheck acceptance matches compile()', () => {
+  // This corpus exercises every stage compileCheck mirrors: a plain valid
+  // contract, a valid FixedArray contract (exercises pass 3b success), a
+  // FixedArray contract that fails pass 3b (expandFixedArrays) specifically,
+  // and a contract that fails pass 3 (typecheck). For each, compileCheck
+  // must throw iff compile() reports failure — proving compileCheck is a
+  // faithful preview of compile(), not that either one is "correct".
+  const corpus: Array<{ name: string; source: string; fileName: string; expected: 'accept' | 'reject' }> = [
+    { name: 'valid contract (no FixedArray)', source: VALID_P2PKH, fileName: 'P2PKH.runar.ts', expected: 'accept' },
+    { name: 'valid FixedArray contract', source: VALID_FIXED_ARRAY, fileName: 'Boardy.runar.ts', expected: 'accept' },
+    { name: 'FixedArray initializer length mismatch (pass 3b failure)', source: INVALID_FIXED_ARRAY_LENGTH, fileName: 'BadInit.runar.ts', expected: 'reject' },
+    { name: 'typecheck failure (unknown function, pass 3 failure)', source: INVALID_UNKNOWN_FUNCTION, fileName: 'Bad.runar.ts', expected: 'reject' },
+  ];
+
+  for (const { name, source, fileName, expected } of corpus) {
+    it(`compile() and compileCheck() agree: ${name}`, () => {
+      const compileResult = compile(source, { fileName });
+      expect(compileResult.success).toBe(expected === 'accept');
+
+      let compileCheckThrew = false;
+      try {
+        compileCheck(source, fileName);
+      } catch {
+        compileCheckThrew = true;
+      }
+      expect(compileCheckThrew).toBe(!compileResult.success);
+    });
+  }
+});
+
+describe('compileCheck JSDoc matches its real implementation', () => {
+  // compileCheck runs the same front end as compile(): parse, validate, one
+  // typecheck pass, then expandFixedArrays (which has its own diagnostics).
+  // Neither compileCheck nor compile() typechecks the expanded contract a
+  // second time. This test reads the JSDoc directly above `export function
+  // compileCheck` out of the source file and checks it doesn't promise a
+  // typecheck pass running again after expandFixedArrays.
+  it('does not claim a second typecheck pass after FixedArray expansion', () => {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const indexSource = readFileSync(join(__dirname, '../index.ts'), 'utf8');
+    const match = indexSource.match(/\/\*\*([\s\S]*?)\*\/\s*\nexport function compileCheck/);
+    expect(match).not.toBeNull();
+    const doc = match![1];
+
+    // Positive anchor: the doc must still describe the real one-typecheck
+    // pipeline, so this test can't pass vacuously if the pipeline line is
+    // ever deleted outright.
+    expect(doc).toMatch(/parse\s*→\s*validate\s*→\s*typecheck\s*→\s*expandFixedArrays/);
+
+    // Negative: no "→ typecheck" shortly after "expandFixedArrays" — that
+    // phrasing is what claimed a second typecheck pass at HEAD.
+    expect(doc).not.toMatch(/expandFixedArrays[\s\S]{0,40}?→\s*typecheck/i);
   });
 });
 

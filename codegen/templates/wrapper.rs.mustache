@@ -7,6 +7,7 @@ use num_bigint::BigInt;
 use runar::sdk::{
     RunarContract, RunarArtifact, SdkValue, Provider, Signer,
     TransactionData, DeployOptions, CallOptions, PreparedCall,
+    OutputSpec, Utxo, Inscription,
 };
 use runar::sdk::deployment::build_p2pkh_script_from_address;
 
@@ -37,6 +38,7 @@ pub struct {{contractName}}StatefulCallOptions {
     pub change_address: Option<String>,
     pub change_pub_key: Option<String>,
     pub new_state: Option<HashMap<String, SdkValue>>,
+    pub outputs: Option<Vec<OutputSpec>>,
 }
 
 impl {{contractName}}StatefulCallOptions {
@@ -46,6 +48,7 @@ impl {{contractName}}StatefulCallOptions {
             change_address: self.change_address.clone(),
             change_pub_key: self.change_pub_key.clone(),
             new_state: self.new_state.clone(),
+            outputs: self.outputs.clone(),
             ..Default::default()
         }
     }
@@ -92,6 +95,18 @@ impl {{contractName}}Contract {
         Ok(Self { inner })
     }
 
+    /// Reconnect to an existing contract from a known UTXO.
+    pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo) -> Result<Self, String> {
+        let inner = RunarContract::from_utxo(artifact, utxo)?;
+        Ok(Self { inner })
+    }
+
+    /// Attach a 1sat ordinals inscription to the contract.
+    pub fn attach_inscription(&mut self, insc: Inscription) -> Result<&mut Self, String> {
+        self.inner.with_inscription(insc)?;
+        Ok(self)
+    }
+
     /// Store a provider and signer for implicit use.
     pub fn connect(&mut self, provider: Box<dyn Provider>, signer: Box<dyn Signer>) {
         self.inner.connect(provider, signer);
@@ -122,6 +137,16 @@ impl {{contractName}}Contract {
         &mut self.inner
     }
 
+{{#stateFields}}
+    /// Decoded state field `{{originalName}}`, or `None` when it is absent or holds another shape.
+    pub fn {{name}}(&self) -> Option<{{type}}> {
+        match self.inner.state().get("{{originalName}}") {
+            {{readArms}}
+            _ => None,
+        }
+    }
+
+{{/stateFields}}
 {{#methods}}
     /// Call the {{originalName}} method.
     pub fn {{name}}(

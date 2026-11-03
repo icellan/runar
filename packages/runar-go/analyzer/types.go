@@ -113,6 +113,7 @@ const (
 	opEndIf              = 0x68
 	opVerify             = 0x69
 	opReturn             = 0x6a
+	op2Drop              = 0x6d
 	opDrop               = 0x75
 	opEqualVerify        = 0x88
 	opNumEqualVerify     = 0x9d

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"unicode"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,11 +33,21 @@ import (
 //     Point, P256Point, P384Point, SigHashPreimage, RabinSig, RabinPubKey,
 //     OpCodeType); FixedArray<T, N> with integer-literal N.
 func ParseJava(source []byte, fileName string) *ParseResult {
-	tokens := javaTokenize(string(source))
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseJavaSurface(source, fileName) })
+}
+
+func parseJavaSurface(source []byte, fileName string) *ParseResult {
+	tokens, lexErrors := javaTokenize(string(source), fileName)
 	p := &javaParser{
 		tokens:   tokens,
 		pos:      0,
 		fileName: fileName,
+		errors:   lexErrors,
 	}
 
 	contract := p.parse()
@@ -120,6 +129,11 @@ const (
 	javaTokMinusMinus // --
 	javaTokShl       // <<
 	javaTokShr       // >>
+	javaTokShlEq     // <<=
+	javaTokShrEq     // >>=
+	javaTokAmpEq     // &=
+	javaTokPipeEq    // |=
+	javaTokCaretEq   // ^=
 )
 
 type javaToken struct {
@@ -127,6 +141,10 @@ type javaToken struct {
 	value string
 	line  int
 	col   int
+	// F-026: a number token's text as written, and whether it is valid
+	// only as the direct operand of a unary minus (`2147483648`).
+	raw     string
+	negOnly bool
 }
 
 // ---------------------------------------------------------------------------
@@ -153,9 +171,10 @@ var javaKeywords = map[string]javaTokKind{
 	"null":       javaTokNull,
 }
 
-func javaTokenize(source string) []javaToken {
+func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 	chars := []rune(source)
 	var tokens []javaToken
+	var errs []Diagnostic
 	pos := 0
 	line := 1
 	// 0-based column, matching this tier's other format parsers
@@ -175,7 +194,9 @@ func javaTokenize(source string) []javaToken {
 			pos++
 			continue
 		}
-		if unicode.IsSpace(ch) {
+		// N-407: whitespace is exactly the TS reference's ' ', '\t', '\r'
+		// ('\n' above); a non-ASCII space such as U+00A0 is refused below.
+		if ch == ' ' || ch == '\t' || ch == '\r' {
 			col++
 			pos++
 			continue
@@ -210,8 +231,21 @@ func javaTokenize(source string) []javaToken {
 			continue
 		}
 
-		// Three-char operator: none we care about (>>> could be here but
-		// unsigned right-shift is not supported). Fall through to two-char.
+		// Three-char operators: <<= and >>= (N-134). `>>>` / `>>>=` are not
+		// supported and fall through to two-char tokens, as before.
+		if pos+2 < len(chars) {
+			three := string(chars[pos : pos+3])
+			if three == "<<=" || three == ">>=" {
+				kind := javaTokShlEq
+				if three == ">>=" {
+					kind = javaTokShrEq
+				}
+				tokens = append(tokens, javaToken{kind: kind, line: l, col: c})
+				pos += 3
+				col += 3
+				continue
+			}
+		}
 
 		// Two-char operators
 		if pos+1 < len(chars) {
@@ -241,6 +275,12 @@ func javaTokenize(source string) []javaToken {
 				kind = javaTokSlashEq
 			case "%=":
 				kind = javaTokPercentEq
+			case "&=":
+				kind = javaTokAmpEq
+			case "|=":
+				kind = javaTokPipeEq
+			case "^=":
+				kind = javaTokCaretEq
 			case "++":
 				kind = javaTokPlusPlus
 			case "--":
@@ -324,42 +364,31 @@ func javaTokenize(source string) []javaToken {
 			continue
 		}
 
-		// Numeric literal: integer (decimal or hex). No floats.
+		// Numeric literal (F-026): the whole glued [0-9A-Za-z_] run is one
+		// Java integer literal (JLS 3.10.1), with Java's value: hex / octal /
+		// binary int and long literals wrap to two's complement.
 		if ch >= '0' && ch <= '9' {
-			var val strings.Builder
-			if ch == '0' && pos+1 < len(chars) && (chars[pos+1] == 'x' || chars[pos+1] == 'X') {
-				val.WriteRune(chars[pos])
-				val.WriteRune(chars[pos+1])
-				pos += 2
-				col += 2
-				for pos < len(chars) && javaIsHexDigit(chars[pos]) {
-					val.WriteRune(chars[pos])
-					pos++
-					col++
-				}
+			end := scanNumberEndRunes(chars, pos)
+			text := string(chars[pos:end])
+			col += end - pos
+			pos = end
+			tok := javaToken{kind: javaTokNumber, value: "0", line: l, col: c, raw: text}
+			if lit := parseIntLiteral("java", text); lit != nil {
+				tok.value, tok.negOnly = lit.Value.String(), lit.NegOnly
 			} else {
-				for pos < len(chars) && (chars[pos] >= '0' && chars[pos] <= '9' || chars[pos] == '_') {
-					if chars[pos] != '_' {
-						val.WriteRune(chars[pos])
-					}
-					pos++
-					col++
-				}
+				errs = append(errs, lexDiag(invalidIntegerLiteralMsg("java", text), fileName, l, c))
 			}
-			// Optional L/l suffix (long literal)
-			if pos < len(chars) && (chars[pos] == 'L' || chars[pos] == 'l') {
-				pos++
-				col++
-			}
-			tokens = append(tokens, javaToken{kind: javaTokNumber, value: val.String(), line: l, col: c})
+			tokens = append(tokens, tok)
 			continue
 		}
 
 		// Identifier / keyword
-		if ch == '_' || ch == '$' || unicode.IsLetter(ch) {
+		// N-407: ASCII only, as the TS reference ([A-Za-z_$][A-Za-z0-9_$]*);
+		// a non-ASCII letter is refused below.
+		if ch == '_' || ch == '$' || isASCIILetter(ch) {
 			var val strings.Builder
 			for pos < len(chars) && (chars[pos] == '_' || chars[pos] == '$' ||
-				unicode.IsLetter(chars[pos]) || unicode.IsDigit(chars[pos])) {
+				isASCIILetter(chars[pos]) || (chars[pos] >= '0' && chars[pos] <= '9')) {
 				val.WriteRune(chars[pos])
 				pos++
 				col++
@@ -378,7 +407,13 @@ func javaTokenize(source string) []javaToken {
 			var val strings.Builder
 			pos++
 			col++
-			for pos < len(chars) && chars[pos] != '"' {
+			// F-011: a Java string literal cannot span lines; one that
+			// reaches a line break (escaped or not) or end of file is
+			// unterminated and must never run on into the following lines.
+			for pos < len(chars) && chars[pos] != '"' && chars[pos] != '\n' && chars[pos] != '\r' {
+				if chars[pos] == '\\' && (pos+1 >= len(chars) || chars[pos+1] == '\n' || chars[pos+1] == '\r') {
+					break
+				}
 				if chars[pos] == '\\' && pos+1 < len(chars) {
 					// Minimal escape handling: preserve common escapes literally.
 					esc := chars[pos+1]
@@ -413,18 +448,22 @@ func javaTokenize(source string) []javaToken {
 				val.WriteRune(chars[pos])
 				pos++
 			}
-			if pos < len(chars) {
+			if pos < len(chars) && chars[pos] == '"' {
 				pos++ // closing quote
 				col++
+			} else {
+				errs = append(errs, lexDiag(UnterminatedStringLiteralMsg, fileName, l, c))
 			}
 			tokens = append(tokens, javaToken{kind: javaTokString, value: val.String(), line: l, col: c})
 			continue
 		}
 
-		// Character literal: skip (not supported). Consume one char to avoid
-		// an infinite loop — the parser will surface an error if this is
-		// reached during real parsing.
+		// Character literal: not supported. F-011: it used to be skipped with
+		// no diagnostic, up to the next single quote wherever that was, which
+		// silently dropped the code in between. Refuse it as the TS
+		// reference does.
 		if ch == '\'' {
+			errs = append(errs, lexDiag(JavaCharLiteralMsg, fileName, l, c))
 			pos++
 			col++
 			for pos < len(chars) && chars[pos] != '\'' {
@@ -440,17 +479,20 @@ func javaTokenize(source string) []javaToken {
 				pos++
 				col++
 			}
-			// Emit an error-ish placeholder by skipping; no token produced.
+			// Refused above; no token produced.
 			continue
 		}
 
-		// Unknown char: skip
+		// N-020: an unrecognised character is refused, as the TS reference
+		// does, rather than skipped: skipping compiled `a.plus(§ b)` as
+		// `a.plus(b)`.
+		errs = append(errs, lexDiag(fmt.Sprintf("Unexpected character '%c'", ch), fileName, l, c))
 		pos++
 		col++
 	}
 
 	tokens = append(tokens, javaToken{kind: javaTokEOF, line: line, col: col})
-	return tokens
+	return tokens, errs
 }
 
 func javaIsHexDigit(ch rune) bool {
@@ -466,6 +508,9 @@ type javaParser struct {
 	pos      int
 	fileName string
 	errors   []Diagnostic
+
+	// nest is F-213 measure (A): parse nesting.
+	nest nestingCounter
 }
 
 func (p *javaParser) current() javaToken {
@@ -601,7 +646,7 @@ func (p *javaParser) parseClass() *ContractNode {
 	case "UnsafeSmartContract":
 		parentClass = "UnsafeSmartContract"
 	default:
-		p.addError(fmt.Sprintf("contract class %s must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got %s", className, parentName))
+		p.addError(fmt.Sprintf("unknown parent class: '%s', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", parentName))
 		return nil
 	}
 
@@ -648,13 +693,136 @@ func (p *javaParser) parseClass() *ContractNode {
 		constructor = &ctor
 	}
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        className,
 		ParentClass: parentClass,
 		Properties:  properties,
 		Constructor: *constructor,
 		Methods:     methods,
 		SourceFile:  p.fileName,
+	}
+	p.checkBarePropertyAssignments(contract)
+	return contract
+}
+
+// checkBarePropertyAssignments is N-023 (R49). In Java a bare name inside a
+// method that no local or parameter shadows IS the field, so `count = ...`,
+// `count += ...`, `count++` and `--count` write contract state. Lowering them
+// as a local rebind dropped the state write silently, so the bare form is
+// refused (mirrors the TS reference's checkBarePropertyAssignments). Shadowing
+// follows Java block scope: parameters, a local from its declaration to the
+// end of its block, a for-loop variable inside the loop. Bare reads are not
+// touched.
+func (p *javaParser) checkBarePropertyAssignments(c *ContractNode) {
+	props := map[string]bool{}
+	for _, pr := range c.Properties {
+		props[pr.Name] = true
+	}
+	if len(props) == 0 {
+		return
+	}
+	type scope []map[string]bool
+	shadowed := func(sc scope, name string) bool {
+		for _, s := range sc {
+			if s[name] {
+				return true
+			}
+		}
+		return false
+	}
+	report := func(name string, loc SourceLocation) {
+		l := loc
+		p.errors = append(p.errors, Diagnostic{Message: BareJavaPropertyAssignmentMsg(name), Severity: SeverityError, Loc: &l})
+	}
+	checkTarget := func(e Expression, sc scope, loc SourceLocation) {
+		if id, ok := e.(Identifier); ok && props[id.Name] && !shadowed(sc, id.Name) {
+			report(id.Name, loc)
+		}
+	}
+	var walkExpr func(e Expression, sc scope, loc SourceLocation)
+	walkExpr = func(e Expression, sc scope, loc SourceLocation) {
+		switch x := e.(type) {
+		case IncrementExpr:
+			checkTarget(x.Operand, sc, loc)
+			walkExpr(x.Operand, sc, loc)
+		case DecrementExpr:
+			checkTarget(x.Operand, sc, loc)
+			walkExpr(x.Operand, sc, loc)
+		case BinaryExpr:
+			walkExpr(x.Left, sc, loc)
+			walkExpr(x.Right, sc, loc)
+		case UnaryExpr:
+			walkExpr(x.Operand, sc, loc)
+		case CallExpr:
+			walkExpr(x.Callee, sc, loc)
+			for _, a := range x.Args {
+				walkExpr(a, sc, loc)
+			}
+		case MemberExpr:
+			walkExpr(x.Object, sc, loc)
+		case TernaryExpr:
+			walkExpr(x.Condition, sc, loc)
+			walkExpr(x.Consequent, sc, loc)
+			walkExpr(x.Alternate, sc, loc)
+		case IndexAccessExpr:
+			walkExpr(x.Object, sc, loc)
+			walkExpr(x.Index, sc, loc)
+		case ArrayLiteralExpr:
+			for _, el := range x.Elements {
+				walkExpr(el, sc, loc)
+			}
+		}
+	}
+	var walkBlock func(body []Statement, outer scope)
+	var walkStmt func(s Statement, sc scope)
+	walkStmt = func(s Statement, sc scope) {
+		switch x := s.(type) {
+		case VariableDeclStmt:
+			if x.Init != nil {
+				walkExpr(x.Init, sc, x.SourceLocation)
+			}
+			sc[len(sc)-1][x.Name] = true
+		case AssignmentStmt:
+			checkTarget(x.Target, sc, x.SourceLocation)
+			walkExpr(x.Target, sc, x.SourceLocation)
+			walkExpr(x.Value, sc, x.SourceLocation)
+		case IfStmt:
+			walkExpr(x.Condition, sc, x.SourceLocation)
+			walkBlock(x.Then, sc)
+			if x.Else != nil {
+				walkBlock(x.Else, sc)
+			}
+		case ForStmt:
+			loop := append(append(scope{}, sc...), map[string]bool{})
+			walkStmt(x.Init, loop)
+			if x.Condition != nil {
+				walkExpr(x.Condition, loop, x.SourceLocation)
+			}
+			if x.Update != nil {
+				walkStmt(x.Update, loop)
+			}
+			walkBlock(x.Body, loop)
+		case ReturnStmt:
+			if x.Value != nil {
+				walkExpr(x.Value, sc, x.SourceLocation)
+			}
+		case ExpressionStmt:
+			walkExpr(x.Expr, sc, x.SourceLocation)
+		}
+	}
+	walkBlock = func(body []Statement, outer scope) {
+		sc := append(append(scope{}, outer...), map[string]bool{})
+		for _, s := range body {
+			walkStmt(s, sc)
+		}
+	}
+	methods := append([]MethodNode{c.Constructor}, c.Methods...)
+	for _, m := range methods {
+		params := map[string]bool{}
+		for _, pr := range m.Params {
+			params[pr.Name] = true
+		}
+		walkBlock(m.Body, scope{params})
 	}
 }
 
@@ -737,20 +905,79 @@ func (p *javaParser) readAnnotationName() string {
 // Class-member parsing
 // ---------------------------------------------------------------------------
 
+// javaKnownMemberAnnotations are the annotation names Rúnar recognizes at
+// member position, matching the TS reference (01-parse-java.ts,
+// parseMember). F-205: anything else is a loud "unsupported annotation"
+// diagnostic rather than a silent visibility downgrade.
+var javaKnownMemberAnnotations = map[string]bool{
+	"Readonly": true, "Public": true, "Stateful": true,
+	"Override": true, "SuppressWarnings": true,
+	// N-093: the native spellings of the `@embedAlways` / `@sighash`
+	// directives.
+	"EmbedAlways": true, "Sighash": true,
+}
+
+// javaAnnotationArgs (N-093) returns the `(` ... `)` tokens of the annotation
+// spanning tokens[start:end] (empty when it has no argument list).
+func (p *javaParser) javaAnnotationArgs(start, end int) []javaToken {
+	i := start + 1 // past `@`
+	for i < end && (p.tokens[i].kind == javaTokIdent || p.tokens[i].kind == javaTokDot) {
+		i++
+	}
+	return p.tokens[i:end]
+}
+
 // parseClassMember returns *PropertyNode or *MethodNode (or nil on an error
 // that was already reported).
 func (p *javaParser) parseClassMember(className string) interface{} {
 	// Collect annotations
 	annotations := map[string]bool{}
+	// N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+	// the `@embedAlways` / `@sighash` directives.
+	var embedAlwaysLoc, sighashLoc *SourceLocation
+	var sighashSpecs []*string
 	for p.current().kind == javaTokAt {
+		atLoc := p.loc()
+		start := p.pos
 		name := p.readAnnotationName()
+		switch name {
+		case "EmbedAlways":
+			l := atLoc
+			embedAlwaysLoc = &l
+		case "Sighash":
+			if sighashLoc == nil {
+				l := atLoc
+				sighashLoc = &l
+			}
+			args := p.javaAnnotationArgs(start, p.pos)
+			if len(args) == 3 && args[1].kind == javaTokString {
+				sighashSpecs = append(sighashSpecs, nativeSighashSpec(args[1].value))
+			} else {
+				sighashSpecs = append(sighashSpecs, nil)
+			}
+		}
 		if name != "" {
 			annotations[name] = true
+			if !javaKnownMemberAnnotations[name] {
+				p.errors = append(p.errors, Diagnostic{
+					Message:  fmt.Sprintf("unsupported annotation @%s", name),
+					Severity: SeverityError,
+					Loc:      &atLoc,
+				})
+			}
 		}
 	}
 
 	// Collect modifiers (public/private/protected/static/final/etc)
-	for p.current().kind == javaTokIdent {
+	isStatic := false
+	for p.current().kind == javaTokIdent || p.current().kind == javaTokStatic {
+		if p.current().kind == javaTokStatic {
+			// N-050: `static` lexes as its own token (for `import static`), so
+			// it used to stop this loop and surface as an unrelated parse error.
+			isStatic = true
+			p.advance()
+			continue
+		}
 		v := p.current().value
 		if v == "public" || v == "private" || v == "protected" ||
 			v == "final" || v == "static" || v == "abstract" {
@@ -769,6 +996,13 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 	if p.current().kind == javaTokIdent && p.current().value == className &&
 		p.peekAt(1).kind == javaTokLParen {
 		method := p.parseConstructor(className)
+		// N-093: the constructor is neither a spending entry point nor a field.
+		if sighashLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: sighashLoc})
+		}
+		if embedAlwaysLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: embedAlwaysLoc})
+		}
 		return method
 	}
 
@@ -793,8 +1027,24 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 
 	// Method: `name(...)`
 	if p.current().kind == javaTokLParen {
+		// N-050: a static method is not a contract method.
+		if isStatic {
+			p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+		}
 		method := p.parseMethod(name, typ, annotations, loc)
+		if embedAlwaysLoc != nil {
+			p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@embedAlways"), Severity: SeverityError, Loc: embedAlwaysLoc})
+		}
+		sighashType, sighashErr := resolveNativeSighash(name, annotations["Public"], sighashSpecs)
+		if sighashErr != "" {
+			errLoc := loc
+			p.errors = append(p.errors, Diagnostic{Message: sighashErr, Severity: SeverityError, Loc: &errLoc})
+		}
+		method.SighashType = sighashType
 		return method
+	}
+	if sighashLoc != nil {
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg("@sighash"), Severity: SeverityError, Loc: sighashLoc})
 	}
 
 	// Field: `= init;` or `;`
@@ -810,6 +1060,7 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 		Type:           typ,
 		Readonly:       readonly,
 		Initializer:    init,
+		EmbedAlways:    embedAlwaysLoc != nil,
 		SourceLocation: loc,
 	}
 }
@@ -868,7 +1119,10 @@ func (p *javaParser) parseMethod(name string, returnType TypeNode, annotations m
 
 	// Return type is not encoded in MethodNode; we accept void for public
 	// methods but do not enforce it here. The typechecker handles rules.
-	_ = returnType
+	// N-331: an unknown name is refused here, where it is spelled.
+	if d := UnknownReturnTypeDiagnostic(returnType, name, loc, visibility == "public"); d != nil {
+		p.errors = append(p.errors, *d)
+	}
 
 	return &MethodNode{
 		Name:           name,
@@ -1004,7 +1258,7 @@ func (p *javaParser) parseType() TypeNode {
 				generic = append(generic, CustomType{Name: "<int:" + numTok.value + ">"})
 				continue
 			}
-			generic = append(generic, p.parseType())
+			generic = append(generic, nested(&p.nest, p.loc(), p.parseType))
 		}
 		p.expect(javaTokGt)
 	}
@@ -1106,6 +1360,10 @@ func (p *javaParser) parseBlock() []Statement {
 }
 
 func (p *javaParser) parseStatement() Statement {
+	return nestedStatement(&p.nest, p.loc(), p.parseStatementInner)
+}
+
+func (p *javaParser) parseStatementInner() Statement {
 	loc := p.loc()
 
 	// Bare { ... } — a nested block. We don't model nested blocks as a
@@ -1157,23 +1415,12 @@ func (p *javaParser) parseStatement() Statement {
 		value := p.parseExpression()
 		p.match(javaTokSemi)
 		return AssignmentStmt{Target: expr, Value: value, SourceLocation: loc}
-	case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq:
+	case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq,
+		javaTokAmpEq, javaTokPipeEq, javaTokCaretEq, javaTokShlEq, javaTokShrEq:
 		opTok := p.advance()
 		rhs := p.parseExpression()
 		p.match(javaTokSemi)
-		op := ""
-		switch opTok.kind {
-		case javaTokPlusEq:
-			op = "+"
-		case javaTokMinusEq:
-			op = "-"
-		case javaTokStarEq:
-			op = "*"
-		case javaTokSlashEq:
-			op = "/"
-		case javaTokPercentEq:
-			op = "%"
-		}
+		op := javaCompoundOps[opTok.kind]
 		return AssignmentStmt{
 			Target:         expr,
 			Value:          BinaryExpr{Op: op, Left: expr, Right: rhs},
@@ -1183,6 +1430,15 @@ func (p *javaParser) parseStatement() Statement {
 
 	p.match(javaTokSemi)
 	return ExpressionStmt{Expr: expr, SourceLocation: loc}
+}
+
+// javaCompoundOps maps each compound assignment token to its binary operator:
+// exactly TS's ten (01-parse-java.ts finishExpressionStatement). `t op= e`
+// lowers to `t = t op e`.
+var javaCompoundOps = map[javaTokKind]string{
+	javaTokPlusEq: "+", javaTokMinusEq: "-", javaTokStarEq: "*", javaTokSlashEq: "/",
+	javaTokPercentEq: "%", javaTokAmpEq: "&", javaTokPipeEq: "|", javaTokCaretEq: "^",
+	javaTokShlEq: "<<", javaTokShrEq: ">>",
 }
 
 // isVariableDeclStart looks ahead to distinguish a typed local declaration
@@ -1357,22 +1613,11 @@ func (p *javaParser) parseFor(loc SourceLocation) Statement {
 			p.advance()
 			value := p.parseExpression()
 			update = AssignmentStmt{Target: updateExpr, Value: value, SourceLocation: updateLoc}
-		case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq:
+		case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq,
+			javaTokAmpEq, javaTokPipeEq, javaTokCaretEq, javaTokShlEq, javaTokShrEq:
 			opTok := p.advance()
 			rhs := p.parseExpression()
-			op := ""
-			switch opTok.kind {
-			case javaTokPlusEq:
-				op = "+"
-			case javaTokMinusEq:
-				op = "-"
-			case javaTokStarEq:
-				op = "*"
-			case javaTokSlashEq:
-				op = "/"
-			case javaTokPercentEq:
-				op = "%"
-			}
+			op := javaCompoundOps[opTok.kind]
 			update = AssignmentStmt{
 				Target:         updateExpr,
 				Value:          BinaryExpr{Op: op, Left: updateExpr, Right: rhs},
@@ -1419,7 +1664,7 @@ func (p *javaParser) parseReturn(loc SourceLocation) Statement {
 // ---------------------------------------------------------------------------
 
 func (p *javaParser) parseExpression() Expression {
-	return p.parseTernary()
+	return nested(&p.nest, p.loc(), p.parseTernary)
 }
 
 func (p *javaParser) parseTernary() Expression {
@@ -1435,51 +1680,57 @@ func (p *javaParser) parseTernary() Expression {
 }
 
 func (p *javaParser) parseOr() Expression {
+	start := p.loc()
 	left := p.parseAnd()
 	for p.current().kind == javaTokPipePipe {
 		p.advance()
-		left = BinaryExpr{Op: "||", Left: left, Right: p.parseAnd()}
+		left = BinaryExpr{Op: "||", Left: left, Right: p.parseAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseAnd() Expression {
+	start := p.loc()
 	left := p.parseBitOr()
 	for p.current().kind == javaTokAmpAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&&", Left: left, Right: p.parseBitOr()}
+		left = BinaryExpr{Op: "&&", Left: left, Right: p.parseBitOr(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitOr() Expression {
+	start := p.loc()
 	left := p.parseBitXor()
 	for p.current().kind == javaTokPipe {
 		p.advance()
-		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor()}
+		left = BinaryExpr{Op: "|", Left: left, Right: p.parseBitXor(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitXor() Expression {
+	start := p.loc()
 	left := p.parseBitAnd()
 	for p.current().kind == javaTokCaret {
 		p.advance()
-		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd()}
+		left = BinaryExpr{Op: "^", Left: left, Right: p.parseBitAnd(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseBitAnd() Expression {
+	start := p.loc()
 	left := p.parseEquality()
 	for p.current().kind == javaTokAmp {
 		p.advance()
-		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality()}
+		left = BinaryExpr{Op: "&", Left: left, Right: p.parseEquality(), SourceLocation: start}
 	}
 	return left
 }
 
 func (p *javaParser) parseEquality() Expression {
+	start := p.loc()
 	left := p.parseComparison()
 	for {
 		var op string
@@ -1492,11 +1743,12 @@ func (p *javaParser) parseEquality() Expression {
 			return left
 		}
 		p.advance()
-		left = foldJavaCompareToZero(op, left, p.parseComparison())
+		left = foldJavaCompareToZero(op, left, p.parseComparison(), start)
 	}
 }
 
 func (p *javaParser) parseComparison() Expression {
+	start := p.loc()
 	left := p.parseShift()
 	for {
 		var op string
@@ -1513,11 +1765,12 @@ func (p *javaParser) parseComparison() Expression {
 			return left
 		}
 		p.advance()
-		left = foldJavaCompareToZero(op, left, p.parseShift())
+		left = foldJavaCompareToZero(op, left, p.parseShift(), start)
 	}
 }
 
 func (p *javaParser) parseShift() Expression {
+	start := p.loc()
 	left := p.parseAddSub()
 	for {
 		var op string
@@ -1530,11 +1783,12 @@ func (p *javaParser) parseShift() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseAddSub(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseAddSub() Expression {
+	start := p.loc()
 	left := p.parseMulDiv()
 	for {
 		var op string
@@ -1547,11 +1801,12 @@ func (p *javaParser) parseAddSub() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseMulDiv(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseMulDiv() Expression {
+	start := p.loc()
 	left := p.parseUnary()
 	for {
 		var op string
@@ -1566,31 +1821,37 @@ func (p *javaParser) parseMulDiv() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary()}
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseUnary(), SourceLocation: start}
 	}
 }
 
 func (p *javaParser) parseUnary() Expression {
+	opLoc := p.loc()
 	switch p.current().kind {
 	case javaTokBang:
 		p.advance()
-		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "!", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokMinus:
 		p.advance()
-		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
+		// F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+		// legal only as the direct operand of this minus.
+		if p.pos < len(p.tokens) && p.tokens[p.pos].kind == javaTokNumber {
+			p.tokens[p.pos].negOnly = false
+		}
+		return UnaryExpr{Op: "-", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokPlus:
 		// +x == x
 		p.advance()
-		return p.parseUnary()
+		return nested(&p.nest, p.loc(), p.parseUnary)
 	case javaTokTilde:
 		p.advance()
-		return UnaryExpr{Op: "~", Operand: p.parseUnary()}
+		return UnaryExpr{Op: "~", Operand: nested(&p.nest, p.loc(), p.parseUnary), SourceLocation: opLoc}
 	case javaTokPlusPlus:
 		p.advance()
-		return IncrementExpr{Operand: p.parseUnary(), Prefix: true}
+		return IncrementExpr{Operand: nested(&p.nest, p.loc(), p.parseUnary), Prefix: true}
 	case javaTokMinusMinus:
 		p.advance()
-		return DecrementExpr{Operand: p.parseUnary(), Prefix: true}
+		return DecrementExpr{Operand: nested(&p.nest, p.loc(), p.parseUnary), Prefix: true}
 	}
 	return p.parsePostfix()
 }
@@ -1663,7 +1924,7 @@ func (p *javaParser) parsePostfix() Expression {
 func (p *javaParser) recogniseLiteralCall(callee Expression, args []Expression) Expression {
 	if me, ok := callee.(MemberExpr); ok && me.Property == "fromHex" && len(args) == 1 {
 		if bs, ok := args[0].(ByteStringLiteral); ok {
-			return ByteStringLiteral{Value: bs.Value}
+			return ByteStringLiteral{Value: bs.Value, SourceLocation: bs.SourceLocation}
 		}
 	}
 	// BigInteger.valueOf(<intlit>) / Bigint.of(<intlit>) → BigIntLiteral.
@@ -1813,21 +2074,21 @@ func isJavaBigintOfCallee(me MemberExpr) bool {
 // to a single BinaryExpr so the canonical Rúnar AST matches the IR produced by
 // `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
 // unknown call (which the typechecker rejects loudly).
-func foldJavaCompareToZero(op string, left, right Expression) Expression {
+func foldJavaCompareToZero(op string, left, right Expression, start SourceLocation) Expression {
 	if !isJavaComparisonOp(op) {
-		return BinaryExpr{Op: op, Left: left, Right: right}
+		return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: start}
 	}
 	if a, b, ok := compareToReceiverArg(left); ok {
 		if lit, ok := right.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
-			return BinaryExpr{Op: op, Left: a, Right: b}
+			return BinaryExpr{Op: op, Left: a, Right: b, SourceLocation: start}
 		}
 	}
 	if a, b, ok := compareToReceiverArg(right); ok {
 		if lit, ok := left.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
-			return BinaryExpr{Op: op, Left: b, Right: a}
+			return BinaryExpr{Op: op, Left: b, Right: a, SourceLocation: start}
 		}
 	}
-	return BinaryExpr{Op: op, Left: left, Right: right}
+	return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: start}
 }
 
 func compareToReceiverArg(e Expression) (Expression, Expression, bool) {
@@ -1857,6 +2118,9 @@ func (p *javaParser) parsePrimary() Expression {
 	t := p.current()
 	switch t.kind {
 	case javaTokNumber:
+		if t.negOnly {
+			p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("java", t.raw), p.fileName, t.line, t.col))
+		}
 		p.advance()
 		bi := new(big.Int)
 		if _, ok := bi.SetString(t.value, 0); !ok {
@@ -1872,7 +2136,7 @@ func (p *javaParser) parsePrimary() Expression {
 
 	case javaTokString:
 		p.advance()
-		return ByteStringLiteral{Value: t.value}
+		return ByteStringLiteral{Value: t.value, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}}
 
 	case javaTokTrue:
 		p.advance()
@@ -1908,7 +2172,7 @@ func (p *javaParser) parsePrimary() Expression {
 		// identifier; postfix resolves `.ZERO` to a MemberExpr which we
 		// then re-interpret below.
 		name := t.value
-		expr := Expression(Identifier{Name: name})
+		expr := Expression(Identifier{Name: name, SourceLocation: SourceLocation{File: p.fileName, Line: t.line, Column: t.col}})
 		// Peek for BigInteger.{ZERO,ONE,TWO,TEN} or Bigint.{ZERO,ONE,TWO,TEN}.
 		// The Bigint wrapper re-exports BigInteger's constants so both
 		// spellings are accepted (matches JavaParser.convertExpression).

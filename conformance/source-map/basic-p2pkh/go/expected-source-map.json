@@ -19,6 +19,12 @@
       "column": 1
     },
     {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/go/p2pkh/P2PKH.runar.go",
+      "line": 40,
+      "column": 1
+    },
+    {
       "opcodeIndex": 4,
       "sourceFile": "examples/go/p2pkh/P2PKH.runar.go",
       "line": 42,

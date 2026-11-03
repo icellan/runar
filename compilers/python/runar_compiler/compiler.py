@@ -6,6 +6,7 @@ a Runar artifact. Direct port of ``compilers/go/compiler.go``.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field
@@ -14,6 +15,9 @@ from typing import Any
 
 from runar_compiler.ir.types import ANFProgram, bigint_json_value
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT as _SIGHASH_DEFAULT
+# F-213: every source entry point runs with recursion headroom for a
+# MAX_SOURCE_NESTING-deep program (see input_limits.COMPILE_RECURSION_LIMIT).
+from runar_compiler.frontend.input_limits import recursion_headroom
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +107,8 @@ class Artifact:
     state_fields: list[StateField] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     code_sep_index_slots: list[dict] = field(default_factory=list)
+    # N-051 -- deploy-time verify_code_part_len length fields (see emit.py).
+    code_part_len_slots: list[dict] = field(default_factory=list)
     code_separator_index: int | None = None
     code_separator_indices: list[int] | None = None
     build_timestamp: str = ""
@@ -178,6 +184,29 @@ def _type_check(contract: Any) -> Any:
     return type_check(contract)
 
 
+def _type_errors_ahead_of_loop_start(valid_result: Any, contract: Any) -> Any:
+    """N-422: let the type checker speak before a loop-START refusal.
+
+    The reference raises "Cannot determine loop start" from ANF lowering, i.e.
+    after type checking, so a program that is both a type error and a
+    non-literal-start loop (the loop variable is out of scope after the loop,
+    so ``let acc = seed; while (acc < 5) {..}; assert_eq!(acc, ..)`` is an
+    ``Undefined variable 'acc'``) reports the type error. This tier raises the
+    loop-start sentence from validation, so when that is the ONLY validation
+    complaint, return the type-check result if it has errors (else ``None``
+    and the caller reports the validation errors as before). The program is
+    refused either way; only which sentence is printed changes.
+    """
+    from runar_compiler.frontend.validator import LOOP_START_DIAGNOSTIC
+
+    if not valid_result.errors:
+        return None
+    if any(e.message != LOOP_START_DIAGNOSTIC for e in valid_result.errors):
+        return None
+    tc_result = _type_check(contract)
+    return tc_result if tc_result.errors else None
+
+
 def _lower_to_anf(contract: Any) -> ANFProgram:
     """Lower a ContractNode to ANF IR."""
     from runar_compiler.frontend.anf_lower import lower_to_anf
@@ -201,8 +230,8 @@ def _expand_fixed_arrays(contract: Any) -> Any:
 
 def _fold_constants(program: ANFProgram) -> ANFProgram:
     """Constant folding: evaluate compile-time-known expressions (Pass 4.25)."""
-    from runar_compiler.frontend.constant_fold import fold_constants
-    return fold_constants(program)
+    from runar_compiler.frontend.constant_fold import fold_constants_and_prune
+    return fold_constants_and_prune(program)
 
 
 def _optimize_ec(program: ANFProgram) -> ANFProgram:
@@ -281,6 +310,13 @@ def _apply_constructor_args(program: ANFProgram, args: dict[str, object] | None)
         return
 
     shape_errors = _validate_constructor_args_shape(program, args)
+    if not isinstance(args, (list, tuple)):
+        # (d) Value kind / width check (F-101), in property declaration order.
+        for prop in program.properties:
+            if prop.name in args:
+                msg = _constructor_arg_type_error(prop.name, prop.type, args[prop.name])
+                if msg is not None:
+                    shape_errors.append(msg)
     if shape_errors:
         raise CompilationError("constructorArgs errors:\n  " + "\n  ".join(shape_errors))
 
@@ -328,6 +364,59 @@ def _validate_constructor_args_shape(program: ANFProgram, args: object) -> list[
             )
 
     return errors
+
+
+def _constructor_arg_type_error(name: str, typ: str, value: object) -> str | None:
+    """F-101: the diagnostic for a ``constructorArgs`` value that does not
+    match its property's declared type, or ``None`` when it matches. Stack
+    lowering pushes whatever it is handed -- ``True`` as OP_1, ``42`` as a
+    1-byte number, a 6-byte hex string as a 6-byte push -- so without this a
+    wrong-typed value where a 20-byte hash belongs compiles cleanly into an
+    unspendable script. Message text is shared verbatim with the TypeScript
+    reference (``constructorArgTypeError`` in packages/runar-compiler/src/index.ts).
+    """
+    from runar_compiler.frontend.typecheck import is_bigint_family, is_byte_family
+    from runar_compiler.codegen.stack import fixed_width_state_bytes
+
+    is_bool = isinstance(value, bool)
+    is_int = isinstance(value, int) and not is_bool
+    hex_len: int | None = None
+    if isinstance(value, str) and len(value) % 2 == 0 and all(
+        c in "0123456789abcdefABCDEF" for c in value
+    ):
+        hex_len = len(value) // 2
+
+    if is_bigint_family(typ):
+        expected, ok = "an integer", is_int
+    elif typ == "boolean":
+        expected, ok = "a boolean", is_bool
+    elif is_byte_family(typ):
+        width = fixed_width_state_bytes(typ)
+        if width > 0:
+            expected, ok = f"exactly {width} bytes of hex", hex_len == width
+        else:
+            expected, ok = "a hex string", hex_len is not None
+    else:
+        return (
+            f"constructorArgs value for property '{name}' ({typ}) cannot be baked: "
+            f"unsupported property type."
+        )
+    if ok:
+        return None
+    if is_bool:
+        got = "a boolean"
+    elif is_int:
+        got = "an integer"
+    elif hex_len is not None:
+        got = f"{hex_len} bytes of hex"
+    elif isinstance(value, str):
+        got = "a non-hex string"
+    else:
+        got = "an unsupported value"
+    return (
+        f"constructorArgs value for property '{name}' ({typ}) must be {expected}, "
+        f"got {got}. Baking it would silently put the wrong value in the locking script."
+    )
 
 
 def _find_unbaked_referenced_readonly(program: ANFProgram) -> list[str]:
@@ -394,6 +483,16 @@ def _collect_load_prop_refs(bindings: list[Any], out: set[str]) -> None:
             _collect_load_prop_refs(v.body or [], out)
 
 
+def _ir_continues(program: ANFProgram, method: Any) -> bool:
+    """N-038: whether a public stateful method produces a continuation, read
+    off its IR (the same shape the --ir scaffolding check derives). Only
+    consulted for a method that lacks ``_changePKH`` -- a SIGHASH_SINGLE
+    continuation takes no change params."""
+    from runar_compiler.ir.stateful_scaffold import _shape
+
+    return _shape(program, method)[0]
+
+
 def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -> None:
     """Issue #109: emit a warning for each un-annotated, unreferenced readonly
     field that DCE eliminated (no initializer, no method reference). The
@@ -423,8 +522,8 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
                 Diagnostic(
                     message=(
                         f"readonly field '{prop.name}' is not referenced in any "
-                        f"method body and was eliminated by DCE; annotate it "
-                        f"/** @embedAlways */ to preserve it in the on-chain script"
+                        f"method body and may be eliminated by DCE; mark it "
+                        f"with the embedAlways directive to preserve it in the on-chain script"
                     ),
                     severity=Severity.WARNING,
                     loc=prop.source_location,
@@ -439,20 +538,44 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
 # wasteful push+drop sequences — diverging from both the fold-OFF goldens and
 # the Zig tier, whose compileFromIR never folds IR input. So the IR entry points
 # force folding off regardless of the flag; the peephole optimizer still folds.
-def compile_from_ir(ir_path: str, disable_constant_folding: bool = False) -> Artifact:
+def compile_from_ir(
+    ir_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
     """Read an ANF IR JSON file and compile it to a Runar artifact."""
     program = _load_ir(ir_path)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program, disable_constant_folding=True, constructor_args=constructor_args)
 
 
-def compile_from_ir_bytes(data: bytes, disable_constant_folding: bool = False) -> Artifact:
+def compile_from_ir_bytes(
+    data: bytes,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
     """Compile from raw ANF IR JSON bytes."""
     program = _load_ir_from_bytes(data)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program, disable_constant_folding=True, constructor_args=constructor_args)
 
 
-def compile_from_program(program: ANFProgram, disable_constant_folding: bool = False) -> Artifact:
-    """Compile a parsed ANF program to a Runar artifact."""
+def compile_from_program(
+    program: ANFProgram,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> Artifact:
+    """Compile a parsed ANF program to a Runar artifact.
+
+    N-095: ``constructor_args`` is validated and baked exactly as the source
+    pipeline does (and as TS ``compileFromANF`` / Rust F-103 do), before
+    folding and the EC optimizer. The caller's program is not mutated.
+    """
+    if constructor_args:
+        program = copy.copy(program)
+        program.properties = [copy.copy(p) for p in program.properties]
+        _apply_constructor_args(program, constructor_args)
+
     # Pass 4.25: Constant folding (on by default)
     if not disable_constant_folding:
         program = _fold_constants(program)
@@ -482,6 +605,7 @@ def compile_from_program(program: ANFProgram, disable_constant_folding: bool = F
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
         raw_script_spans=emit_result.raw_script_spans,
+        code_part_len_slots=emit_result.code_part_len_slots,
     )
 
 
@@ -507,6 +631,7 @@ def compile_from_source(
     return artifact
 
 
+@recursion_headroom()
 def compile_from_source_collecting_warnings(
     source_path: str,
     disable_constant_folding: bool = False,
@@ -530,6 +655,9 @@ def compile_from_source_collecting_warnings(
 
     # Pass 2: Validate
     valid_result = _validate(parse_result.contract)
+    early_tc = _type_errors_ahead_of_loop_start(valid_result, parse_result.contract)
+    if early_tc is not None:
+        raise CompilationError("type check errors:\n  " + "\n  ".join(early_tc.error_strings()))
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
     warnings = valid_result.warning_strings()
@@ -579,7 +707,7 @@ def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list
     return [
         (
             f"readonly field '{prop.name}' is not referenced in any method body "
-            f"and was eliminated by DCE; annotate it /** @embedAlways */ to "
+            f"and may be eliminated by DCE; mark it with the embedAlways directive to "
             f"preserve it in the on-chain script"
         )
         for prop in contract.properties
@@ -590,12 +718,36 @@ def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list
     ]
 
 
+@recursion_headroom()
 def compile_source_to_ir(
     source_path: str,
     disable_constant_folding: bool = False,
     constructor_args: dict[str, object] | None = None,
 ) -> ANFProgram:
     """Run passes 1-4 on a source file and return the ANF program."""
+    program, _ = compile_source_to_ir_collecting_warnings(
+        source_path,
+        disable_constant_folding=disable_constant_folding,
+        constructor_args=constructor_args,
+    )
+    return program
+
+
+def compile_source_to_ir_collecting_warnings(
+    source_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> tuple[ANFProgram, list[str]]:
+    """``compile_source_to_ir`` plus the warnings it would discard.
+
+    The same set ``compile_from_source_collecting_warnings`` reports: the
+    validator's warnings and the issue-#109 DCE notice, computed from the
+    same (expanded contract, lowered program) pair.
+
+    F-220: ``__main__``'s ``--emit-ir`` used ``compile_source_to_ir``, so
+    every warning (the H2 locktime-bypass advisory among them) was dropped
+    on that path.
+    """
     source = _read_file(source_path)
 
     parse_result = _parse_source(source, source_path)
@@ -605,8 +757,12 @@ def compile_source_to_ir(
         raise CompilationError(f"no contract found in {source_path}")
 
     valid_result = _validate(parse_result.contract)
+    early_tc = _type_errors_ahead_of_loop_start(valid_result, parse_result.contract)
+    if early_tc is not None:
+        raise CompilationError("type check errors:\n  " + "\n  ".join(early_tc.error_strings()))
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
+    warnings = valid_result.warning_strings()
 
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors:
@@ -622,6 +778,7 @@ def compile_source_to_ir(
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
+    lowered = program
 
     # Pass 4.25: Constant folding (on by default)
     if not disable_constant_folding:
@@ -630,7 +787,11 @@ def compile_source_to_ir(
     # Pass 4.5: EC optimization (delegates internally to frontend/dce.py).
     program = _optimize_ec(program)
 
-    return program
+    # compile_from_source_collecting_warnings passes the lowered program
+    # object (after its folding/EC passes ran) to the DCE check; so does this.
+    warnings = list(warnings) + _dropped_readonly_field_warnings(expanded_contract, lowered)
+
+    return program, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +933,7 @@ def _assemble_artifact(
     include_ir: bool = False,
     include_source_map: bool = True,
     raw_script_spans: list | None = None,
+    code_part_len_slots: list[dict] | None = None,
 ) -> Artifact:
     """Build the final output artifact from the compilation products."""
     # Build ABI
@@ -821,19 +983,46 @@ def _assemble_artifact(
             }
         state_fields.append(sf)
 
-    is_stateful = len(state_fields) > 0
+    # F-192: parent_class is the authoritative stateful signal (see
+    # ir/types.py ANFProgram.parent_class) -- a StatefulSmartContract with
+    # zero mutable fields still needs is_terminal / the ANF snapshot even
+    # though state_fields is empty. len(state_fields) > 0 was a proxy that
+    # happened to agree with parent_class whenever a contract had mutable
+    # state, but silently disagreed for an all-readonly StatefulSmartContract.
+    # Fall back to the old proxy only when parent_class is unset (IR loaded
+    # without the F-038 field, e.g. pre-parentClass --ir input), mirroring
+    # the N-087 fail-closed inference in ir/loader.py's
+    # _effective_parent_class -- a mutable property there requires
+    # parent_class to already be "StatefulSmartContract", so this fallback
+    # never disagrees with that inference for IR that passed validation.
+    is_stateful = (
+        program.parent_class == "StatefulSmartContract"
+        if program.parent_class
+        else len(state_fields) > 0
+    )
 
     # Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
     methods: list[ABIMethod] = []
     for method in program.methods:
         if method.name == "constructor":
             continue
-        params = [ABIParam(name=p.name, type=p.type) for p in method.params]
-        # For stateful contracts, mark public methods without _changePKH as terminal
+        # N-360: a reassigned property-named public param is bound in the ANF
+        # under its ``<name>@local`` slot; the ABI keeps the source name the
+        # caller passes.
+        params = [
+            ABIParam(
+                name=p.name[: -len("@local")] if method.is_public and p.name.endswith("@local") else p.name,
+                type=p.type,
+            )
+            for p in method.params
+        ]
+        # For stateful contracts, mark public methods without a continuation as
+        # terminal. N-038: a SIGHASH_SINGLE method continues without
+        # _changePKH, so its continuation is read off the IR instead.
         is_terminal: bool | None = None
         if is_stateful and method.is_public:
             has_change = any(p.name == "_changePKH" for p in method.params)
-            if not has_change:
+            if not has_change and not _ir_continues(program, method):
                 is_terminal = True
         # Propagate the authoritative _codePart decision from stack-lowering
         # into the ABI so the SDK supplies _codePart for terminal var-length
@@ -892,6 +1081,7 @@ def _assemble_artifact(
         state_fields=state_fields,
         constructor_slots=constructor_slots,
         code_sep_index_slots=code_sep_index_slots or [],
+        code_part_len_slots=code_part_len_slots or [],
         code_separator_index=cs_index,
         code_separator_indices=cs_indices,
         build_timestamp=_build_timestamp(),
@@ -998,6 +1188,10 @@ def artifact_to_json(artifact: Artifact) -> str:
         ]
     if artifact.code_sep_index_slots:
         d["codeSepIndexSlots"] = artifact.code_sep_index_slots
+    if artifact.code_part_len_slots:
+        d["codePartLenSlots"] = [
+            {"byteOffset": s["byteOffset"]} for s in artifact.code_part_len_slots
+        ]
     if artifact.code_separator_index is not None:
         d["codeSeparatorIndex"] = artifact.code_separator_index
     if artifact.code_separator_indices is not None:
@@ -1021,6 +1215,11 @@ def artifact_to_json(artifact: Artifact) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def source_loc_to_wire(loc: Any) -> dict[str, Any]:
+    """N-498: ANF `sourceLoc` wire shape ({file, line, column}, 0-based column)."""
+    return {"file": loc.file, "line": loc.line, "column": loc.column}
+
 
 def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
     """Serialize an ANFProgram to a JSON-compatible dict (camelCase keys)."""
@@ -1101,7 +1300,10 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         return d
 
     def _ser_binding(b: Any) -> dict[str, Any]:
-        return {"name": b.name, "value": _ser_value(b.value)}
+        d = {"name": b.name, "value": _ser_value(b.value)}
+        if b.source_loc is not None:
+            d["sourceLoc"] = source_loc_to_wire(b.source_loc)
+        return d
 
     return {
         "contractName": program.contract_name,
@@ -1111,6 +1313,9 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
                 "type": p.type,
                 "readonly": p.readonly,
                 **({"initialValue": p.initial_value} if p.initial_value is not None else {}),
+                # N-095 / F-038: same wire key, same omit-when-empty rule as --emit-ir.
+                **({"syntheticArrayChain": [dict(c) for c in p.synthetic_array_chain]}
+                   if p.synthetic_array_chain else {}),
             }
             for p in program.properties
         ],
@@ -1127,6 +1332,8 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
             }
             for m in program.methods
         ],
+        # F-038: wire data (anf-ir.schema.json), emitted as --emit-ir does.
+        **({"parentClass": program.parent_class} if program.parent_class else {}),
     }
 
 
@@ -1183,8 +1390,12 @@ class CompilationError(Exception):
 
 
 def _read_file(path: str) -> str:
-    """Read a file as text."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Read a file as text, without newline translation (N-440).
+
+    A lone CR must reach the tokenizers as CR: a .runar.go backtick raw
+    literal discards it (Go spec), where universal newlines made it an LF.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as f:
         return f.read()
 
 
@@ -1282,6 +1493,7 @@ def compile_from_source_str_with_result(
     )
 
 
+@recursion_headroom()
 def _compile_from_source_str_with_result(
     source: str,
     file_name: str,
@@ -1324,6 +1536,11 @@ def _compile_from_source_str_with_result(
     # Pass 2: Validate
     try:
         valid_result = _validate(result.contract)
+        if not validate_only:
+            early_tc = _type_errors_ahead_of_loop_start(valid_result, result.contract)
+            if early_tc is not None:
+                result.diagnostics.extend(early_tc.errors)
+                return result
         result.diagnostics.extend(valid_result.errors)
         result.diagnostics.extend(valid_result.warnings)
     except Exception as e:
@@ -1447,6 +1664,7 @@ def _compile_from_source_str_with_result(
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
         raw_script_spans=emit_result.raw_script_spans,
+        code_part_len_slots=emit_result.code_part_len_slots,
     )
     result.artifact = artifact
     result.script_hex = emit_result.script_hex

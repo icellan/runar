@@ -2,7 +2,8 @@
 
 # Runar DSL for declaring typed properties and method metadata.
 #
-# Provides three class methods: `prop`, `runar_public`, and `params`.
+# Provides four class methods: `prop`, `runar_public`, `params`, and
+# `runar_sighash`.
 # See DESIGN.md for the rationale behind this approach.
 
 module Runar
@@ -21,7 +22,13 @@ module Runar
       #                       excluded from the auto-generated constructor.
       #                       The default is set before the developer-written
       #                       initialize runs.
-      def prop(name, type, readonly: false, default: :__no_default__)
+      #   embed_always: true -- the native spelling of the compiler's
+      #                       `@embedAlways` directive (N-093): keeps the
+      #                       readonly property in the locking script even
+      #                       when no method reads it. Recorded in the
+      #                       property metadata (only when true); it has no
+      #                       runtime effect.
+      def prop(name, type, readonly: false, default: :__no_default__, embed_always: false)
         @_runar_properties ||= []
         is_readonly = readonly || (self < Runar::SmartContract && !(self < Runar::StatefulSmartContract))
         if is_readonly
@@ -36,7 +43,9 @@ module Runar
           @_runar_defaults[name]  = default
         end
 
-        @_runar_properties << { name: name, type: type, readonly: is_readonly, default: has_default ? default : nil }
+        entry = { name: name, type: type, readonly: is_readonly, default: has_default ? default : nil }
+        entry[:embed_always] = true if embed_always
+        @_runar_properties << entry
       end
 
       # Returns the hash of { property_name => default_value } for this class
@@ -52,6 +61,14 @@ module Runar
 
       def params(**param_types)
         @_runar_next_param_types = param_types
+      end
+
+      # `runar_sighash 'SINGLE|FORKID'` -- the native spelling of the
+      # compiler's `@sighash` directive (N-093): declares the BIP-143 sighash
+      # mode of the next public method. The compiler reads it from the source;
+      # at runtime it is a no-op.
+      def runar_sighash(_flags)
+        nil
       end
 
       # Hook: when a method is defined, attach pending visibility/param metadata.

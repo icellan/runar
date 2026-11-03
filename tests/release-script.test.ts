@@ -316,6 +316,15 @@ describe('scripts/release.sh — the conformance gate refuses a vacuous pass', (
     expect(r.status, `a 0/0 board was accepted:\n${r.out}`).not.toBe(0);
   });
 
+  it('F-049: parses the vacuous-count Summary and rejects vacuous rows as not passed', () => {
+    const green = logWith('vac-green.log', 'Summary: 74 passed, 0 failed, 0 skipped, 0 vacuous (74 total)\n');
+    expect(lib('assert_conformance_summary', green, '74').status).toBe(0);
+    const vac = logWith('vac.log', 'Summary: 70 passed, 0 failed, 0 skipped, 4 vacuous (74 total)\n');
+    const r = lib('assert_conformance_summary', vac, '74');
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/only 70 of 74/);
+  });
+
   it('rejects a board with failures', () => {
     const log = logWith('red.log', 'Summary: 73 passed, 1 failed, 0 skipped (74 total)\n');
     const r = lib('assert_conformance_summary', log, '74');

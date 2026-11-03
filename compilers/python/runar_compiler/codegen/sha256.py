@@ -64,6 +64,15 @@ K = [
 ]
 
 
+def _clone_op(op: "StackOp") -> "StackOp":
+    """Shallow copy of a cached StackOp (F-193): ``emit_op`` stamps ``source_loc``
+    on the op it is handed, so a cached op must never be handed out directly or
+    the first call site's location sticks to it for the life of the process."""
+    clone = type(op).__new__(type(op))
+    clone.__dict__.update(op.__dict__)
+    return clone
+
+
 def _u32_to_le(n: int) -> bytes:
     """Encode a uint32 as 4-byte little-endian."""
     return bytes([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff])
@@ -85,8 +94,9 @@ class _Emitter:
         self.ops.append(sop)
 
     def e_raw(self, sop: "StackOp") -> None:
-        """Push a raw op without depth tracking (for splicing pre-generated ops)."""
-        self.ops.append(sop)
+        """Push a raw op without depth tracking (for splicing pre-generated ops).
+        The op is copied: spliced ops come from the shared compress cache (F-193)."""
+        self.ops.append(_clone_op(sop))
 
     def oc(self, code: str) -> None:
         self._e(_make_stack_op(op="opcode", code=code))
@@ -376,14 +386,32 @@ def _emit_round(em: _Emitter, t: int) -> None:
     em.swap(); em.roll(4); em.roll(4); em.roll(4); em.roll(3)
 
 
-def _generate_compress_ops() -> "list[StackOp]":
+def _generate_compress_ops(guard_operands: bool) -> "list[StackOp]":
     """Generate SHA-256 compression ops.
     Assumes top of stack is [..., state(32 BE), block(64 BE)].
-    After: [..., newState(32 BE)]. Net depth: -1."""
+    After: [..., newState(32 BE)]. Net depth: -1.
+
+    ``guard_operands`` (F-114): abort unless the block is exactly 64 bytes and
+    the state exactly 32 bytes. Without it a mis-sized operand (a 5-byte or
+    short last word) is truncated / zero-extended by the 32-bit word arithmetic
+    and yields the same digest as a different 64-byte block. sha256Finalize
+    builds its blocks itself and checks its state once at entry, so its
+    compressions run unguarded."""
     em = _Emitter(2)  # pretend state+block are the only items
+
+    if guard_operands:
+        # [state, block] -> abort unless len(block) == 64
+        em.oc("OP_SIZE"); em.depth += 1
+        em.push_i(64)
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2
 
     # Phase 1: Save init state to alt, unpack block into 16 LE words
     em.swap()
+    if guard_operands:
+        # [block, state] -> abort unless len(state) == 32
+        em.oc("OP_SIZE"); em.depth += 1
+        em.push_i(32)
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2
     em.dup(); em.to_alt()
     em.to_alt()
     em.assert_depth(1, "compress: after state save")
@@ -450,13 +478,21 @@ def _generate_compress_ops() -> "list[StackOp]":
 
 # Cache the ops since they're identical every time
 _compress_ops_cache: "list[StackOp] | None" = None
+_guarded_compress_ops_cache: "list[StackOp] | None" = None
 
 
 def _get_compress_ops() -> "list[StackOp]":
     global _compress_ops_cache
     if _compress_ops_cache is None:
-        _compress_ops_cache = _generate_compress_ops()
+        _compress_ops_cache = _generate_compress_ops(False)
     return _compress_ops_cache
+
+
+def _get_guarded_compress_ops() -> "list[StackOp]":
+    global _guarded_compress_ops_cache
+    if _guarded_compress_ops_cache is None:
+        _guarded_compress_ops_cache = _generate_compress_ops(True)
+    return _guarded_compress_ops_cache
 
 
 # =========================================================================
@@ -466,9 +502,10 @@ def _get_compress_ops() -> "list[StackOp]":
 def emit_sha256_compress(emit: Callable[["StackOp"], None]) -> None:
     """Emit SHA-256 compression in Bitcoin Script.
     Stack on entry: [..., state(32 BE), block(64 BE)]
-    Stack on exit:  [..., newState(32 BE)]"""
-    for op in _get_compress_ops():
-        emit(op)
+    Stack on exit:  [..., newState(32 BE)]
+    Aborts unless the state is 32 bytes and the block 64 bytes (F-114)."""
+    for op in _get_guarded_compress_ops():
+        emit(_clone_op(op))
 
 
 def emit_sha256_finalize(emit: Callable[["StackOp"], None]) -> None:
@@ -494,6 +531,14 @@ def emit_sha256_finalize(emit: Callable[["StackOp"], None]) -> None:
     em.bin_op("OP_CAT")           # [bitLenBE(8)]
     em.to_alt()                    # save bitLenBE to alt
     em.assert_depth(2, "finalize: after bitLen conversion")
+
+    # F-114: abort unless len(state) == 32 (remaining is variable-length; a
+    # remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+    em.swap()                      # [remaining, state]
+    em.oc("OP_SIZE"); em.depth += 1
+    em.push_i(32)
+    em.oc("OP_EQUALVERIFY"); em.depth -= 2
+    em.swap()                      # [state, remaining]
 
     # ---- Step 2: Pad remaining ----
     em.push_b(bytes([0x80]))

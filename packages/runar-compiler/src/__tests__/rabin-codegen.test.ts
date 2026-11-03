@@ -35,30 +35,49 @@ const ORACLE_GOLDEN = join(
   'expected-script.hex',
 );
 
-// The fixed Rabin verification opcode sequence (post BUG-010 + BUG-011,
-// 18 ops total): (sig^2 + padding) mod pubKey == SHA256(msg) numerically,
-// AND 0 <= padding < 65536.
-// `null` at position 3 marks a push of RABIN_PADDING_LIMIT (65536); the
-// 'BYTES:00' entry marks a raw single-zero-byte push (the digest's explicit
-// non-negative sign byte — BUG-011 encoding normalization).
+// The fixed Rabin verification opcode sequence (post BUG-010 + BUG-011 +
+// F-047 + F-144 + F-368, 34 ops total): (sig^2 + padding) mod pubKey ==
+// SHA256(msg) mod pubKey numerically, AND 0 <= padding < 65536, AND
+// sig < pubKey, with pubKey, padding and sig each read as an unsigned
+// little-endian integer.
+// `null` at position 9 marks a push of RABIN_PADDING_LIMIT (65536); 'INT:3'
+// marks the F-368 pick-depth push of 3n; each
+// 'BYTES:00' entry marks a raw single-zero-byte push (an explicit
+// non-negative sign byte — F-144 operand normalization, BUG-011 digest).
 const RABIN_OPCODES: (string | null)[] = [
+  'BYTES:00', // F-144: pubKey as unsigned
+  'OP_CAT',
+  'OP_BIN2NUM',
   'OP_SWAP',
+  'BYTES:00', // F-144: padding as unsigned
+  'OP_CAT',
+  'OP_BIN2NUM',
   'OP_DUP',
   'OP_0',
   null, // push 65536 (BUG-010 padding limit)
   'OP_WITHIN',
   'OP_VERIFY',
   'OP_ROT',
+  'BYTES:00', // F-144: sig as unsigned
+  'OP_CAT',
+  'OP_BIN2NUM',
+  'OP_DUP', // F-368: sig < pubKey gate
+  'INT:3',
+  'OP_PICK',
+  'OP_LESSTHAN',
+  'OP_VERIFY',
   'OP_DUP',
   'OP_MUL',
   'OP_ADD',
-  'OP_SWAP',
+  'OP_OVER', // F-047: keep pubKey for the digest reduction
   'OP_MOD',
-  'OP_SWAP',
+  'OP_ROT',
   'OP_SHA256',
   'BYTES:00', // push 0x00 (BUG-011 sign byte for the raw digest)
   'OP_CAT',
   'OP_BIN2NUM',
+  'OP_ROT', // F-047: bring pubKey up
+  'OP_MOD', // F-047: SHA256(msg) mod pubKey
   'OP_NUMEQUAL',
 ];
 
@@ -67,10 +86,10 @@ describe('rabin-codegen module extraction (GAP-M1)', () => {
     expect(typeof emitVerifyRabinSig).toBe('function');
   });
 
-  it('emits exactly the 18-op Rabin verification sequence (BUG-010 + BUG-011)', () => {
+  it('emits exactly the 34-op Rabin verification sequence (BUG-010 + BUG-011 + F-047 + F-144 + F-368)', () => {
     const ops: StackOp[] = [];
     emitVerifyRabinSig((op) => ops.push(op));
-    expect(ops).toHaveLength(18);
+    expect(ops).toHaveLength(34);
     for (let i = 0; i < ops.length; i++) {
       const expected = RABIN_OPCODES[i];
       const op = ops[i]!;
@@ -79,6 +98,9 @@ describe('rabin-codegen module extraction (GAP-M1)', () => {
         expect((op as Extract<StackOp, { op: 'push' }>).value).toBe(
           RABIN_PADDING_LIMIT,
         );
+      } else if (expected === 'INT:3') {
+        expect(op.op).toBe('push');
+        expect((op as Extract<StackOp, { op: 'push' }>).value).toBe(3n);
       } else if (expected === 'BYTES:00') {
         expect(op.op).toBe('push');
         const value = (op as Extract<StackOp, { op: 'push' }>).value;

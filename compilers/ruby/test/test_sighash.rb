@@ -141,6 +141,101 @@ class TestSighash < Minitest::Test
     assert_nil method_by_name(src, 'bump').sighash_type
   end
 
+  # F-282: a `@sighash` comment on the SAME line as the method declaration it
+  # leads (a very common one-line style) was silently dropped. The tokenizer
+  # recorded each directive comment's line only; `gather_member_directives`
+  # required `d[:line] < member_line` (strictly BEFORE the member's own line),
+  # so a directive sharing the member's line never matched, and the method
+  # silently fell back to the ALL|FORKID default — confirmed to diverge from
+  # the TS reference (ts-morph attaches this exact comment as the method's
+  # leading trivia; verified directly against ts-morph). This does not touch
+  # the already-correct "comment trails the PRECEDING member on its own line"
+  # or "comment trails THIS member's own closing brace" cases, which the
+  # existing tests above/below already cover.
+  def test_sighash_on_same_line_as_method_is_not_dropped
+    src = <<~TS
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @sighash SINGLE|FORKID */ public bump(): void { this.n = this.n + 1n; }
+      }
+    TS
+    assert_equal 0x43, method_by_name(src, 'bump').sighash_type
+  end
+
+  # N-199 (user decision R75): a `@sighash` / `@embedAlways` marker inside the
+  # contract class body that is not in the leading comments of the member kind
+  # that reads it (method / property) is refused with the shared message,
+  # located at the marker's `@` (1-based line, 0-based column).
+  #
+  # Proves: the Ruby TS-surface parser refuses each lost-directive shape the TS
+  # reference refuses (sighash-parse.test.ts, "N-199") with the same text and
+  # location, and still accepts attached directives and prose outside the class.
+  # Does not prove: cross-tier agreement (conformance/negatives/
+  # n199-lost-directive-parity.test.ts does) or non-ASCII column units.
+  N199_LOST_SIGHASH = '@sighash directive is not attached to any method and would be silently ignored; ' \
+                      'put the comment on its own line directly above the method it annotates ' \
+                      '(a comment that shares a line with the preceding code belongs to that code)'
+  N199_LOST_EMBED = '@embedAlways directive is not attached to any property and would be silently ignored; ' \
+                    'put the comment on its own line directly above the property it annotates ' \
+                    '(a comment that shares a line with the preceding code belongs to that code)'
+  N199_BUMP = '  public bump(): void { this.addOutput(1000n, this.n); }'
+
+  def n199_stateful(body)
+    "import { StatefulSmartContract } from 'runar-lang';\nexport class C extends StatefulSmartContract {\n" \
+      "  n: bigint;\n  constructor(n: bigint) { super(n); this.n = n; }\n#{body}\n}\n"
+  end
+
+  def n199_cases
+    sl = "import { SmartContract, assert } from 'runar-lang';\nexport class C extends SmartContract {\n"
+    [
+      ['line comment sharing a line with the preceding method',
+       n199_stateful("  private foo(): void {} // @sighash SINGLE|FORKID\n#{N199_BUMP}"), '@sighash'],
+      ['JSDoc sharing a line with the preceding method',
+       n199_stateful("  private foo(): void {} /** @sighash SINGLE|FORKID */\n#{N199_BUMP}"), '@sighash'],
+      ['end of class body', n199_stateful("#{N199_BUMP}\n  /** @sighash SINGLE|FORKID */"), '@sighash'],
+      ['inside a method body',
+       n199_stateful("  public bump(): void {\n    // @sighash SINGLE|FORKID\n    this.addOutput(1000n, this.n);\n  }"),
+       '@sighash'],
+      ['on a property',
+       n199_stateful("  /** @sighash SINGLE|FORKID */\n  readonly k: bigint = 1n;\n#{N199_BUMP}"), '@sighash'],
+      ['above the constructor',
+       "import { StatefulSmartContract } from 'runar-lang';\nexport class C extends StatefulSmartContract {\n" \
+       "  n: bigint;\n  /** @sighash SINGLE|FORKID */\n  constructor(n: bigint) { super(n); this.n = n; }\n#{N199_BUMP}\n}\n",
+       '@sighash'],
+      ['@embedAlways sharing a line with the preceding property',
+       "#{sl}  readonly a: bigint; // @embedAlways\n  readonly tag: bigint;\n" \
+       "  constructor(a: bigint, tag: bigint) { super(a, tag); this.a = a; this.tag = tag; }\n" \
+       "  public go(x: bigint): void { assert(x == this.a); }\n}\n", '@embedAlways'],
+      ['@embedAlways on a method',
+       "#{sl}  readonly a: bigint;\n  constructor(a: bigint) { super(a); this.a = a; }\n" \
+       "  /** @embedAlways */\n  public go(x: bigint): void { assert(x == this.a); }\n}\n", '@embedAlways']
+    ]
+  end
+
+  def test_n199_lost_directive_refused
+    n199_cases.each do |name, src, marker|
+      r = parse(src)
+      idx = src.index(marker)
+      want_line = src[0...idx].count("\n") + 1
+      want_col = idx - ((src[0...idx].rindex("\n") || -1) + 1)
+      want_msg = marker == '@sighash' ? N199_LOST_SIGHASH : N199_LOST_EMBED
+      assert_equal 1, r.errors.length, "#{name}: #{r.errors.map(&:format_message)}"
+      e = r.errors[0]
+      assert_equal [want_msg, want_line, want_col], [e.message, e.loc&.line, e.loc&.column], name
+    end
+  end
+
+  def test_n199_control_attached_directives_and_outside_prose
+    src = "import { StatefulSmartContract } from 'runar-lang';\n" \
+          "// File header prose: this contract uses @sighash SINGLE|FORKID and @embedAlways.\n" \
+          "/** Class doc: `@sighash` lives on bump, `@embedAlways` on tag. */\n" \
+          "export class C extends StatefulSmartContract {\n  n: bigint;\n  /** @embedAlways */\n  readonly tag: bigint;\n" \
+          "  constructor(n: bigint, tag: bigint) { super(n, tag); this.n = n; this.tag = tag; }\n" \
+          "  private foo(): void {}\n  // @sighash SINGLE|FORKID\n#{N199_BUMP}\n}\n"
+    assert_equal 0x43, method_by_name(src, 'bump').sighash_type
+  end
+
   def test_accepts_line_comment
     src = <<~TS
       class C extends StatefulSmartContract {
@@ -250,7 +345,22 @@ class TestSighash < Minitest::Test
     json = RunarCompiler.artifact_to_json(single)
     # The expected sighash const 0x43 = 67, and the check_preimage carries the flag.
     assert_includes json, '"sighashFlag": 67'
-    assert_includes json, '67'
+    # F-263: the runtime preimage-type assert must compare extractSigHashType
+    # against the DECLARED mode. A bare `assert_includes json, '67'` was entailed
+    # by the line above (and by abi.sigHashType), so it could not catch the
+    # expected-const being lowered as the 0x41 default. This proves the
+    # `extractSigHashType(pre) === <const>` operand is 67; it does not prove the
+    # emitted script bytes or on-chain behaviour (see the codegen tests above).
+    bump = JSON.parse(json)['anf']['methods'].find { |m| m['name'] == 'bump' }
+    by_name = bump['body'].to_h { |b| [b['name'], b['value']] }
+    cmp = bump['body'].map { |b| b['value'] }.find do |v|
+      v['kind'] == 'bin_op' && v['op'] == '===' &&
+        by_name[v['left']]&.values_at('kind', 'func') == %w[call extractSigHashType]
+    end
+    refute_nil cmp, 'no extractSigHashType(...) === <const> preimage-type assert in bump'
+    expected = by_name[cmp['right']]
+    assert_equal 'load_const', expected['kind']
+    assert_equal 67, expected['value']
   end
 
   # The sighash_flag must survive the default-ON constant-fold pass (the Python

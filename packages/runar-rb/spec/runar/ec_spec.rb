@@ -40,6 +40,23 @@ RSpec.describe Runar::EC do
       bad_point = ec_make_point(1, 2)
       expect(ec_on_curve(bad_point)).to be false
     end
+
+    it 'rejects a non-canonical x (CL-BUG-161 / F-243): x = p + 1 is the same curve point as x = 1, byte-for-byte different and >= p' do
+      # x0 = 1 is a genuine secp256k1 curve point (y0 below). The compiled
+      # ecOnCurve script requires x < p AND y < p before the curve-equation
+      # check (GAP-301 range gate), so a coordinate written as x0 + p must be
+      # rejected even though the field arithmetic silently reduces it mod p
+      # to the same y^2 == x^3 + 7 result. Verified against the real compiled
+      # script via @bsv/sdk's Spend in
+      # packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+      # ("the predicate stays TOTAL: onCurve(alias) is false").
+      y0 = 0x4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee
+      noncanonical_x = EC_P + 1
+      # N-183: ec_make_point now refuses x >= p, as the script does, so the
+      # alias is written out as raw hex (it is still a 64-byte Point).
+      alias_point = format('%064x', noncanonical_x) + format('%064x', y0)
+      expect(ec_on_curve(alias_point)).to be false
+    end
   end
 
   describe 'ec_negate' do

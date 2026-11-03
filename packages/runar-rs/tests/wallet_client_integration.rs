@@ -2,8 +2,9 @@
 //!
 //! Mirrors `integration/ruby/spec/wallet_client_spec.rb`. Environment-gated:
 //! runs only when `RUNAR_WALLET_ENDPOINT` is set to the base URL of a
-//! BRC-100 JSON-over-HTTP wallet endpoint. When unset, the test exits
-//! cleanly so local + CI runs stay green without any wallet setup.
+//! BRC-100 JSON-over-HTTP wallet endpoint. The test is `#[ignore]`d, so a
+//! plain `cargo test` skips it; when it is selected with `--ignored` and the
+//! variable is unset, it FAILS (fail closed) rather than passing silently.
 //!
 //! Optional env:
 //!   RUNAR_WALLET_ENDPOINT — base URL, required to actually run
@@ -45,16 +46,16 @@ fn post(base: &str, method: &str, body: Value, auth: Option<&str>) -> Result<Val
 #[test]
 #[ignore = "RUNAR_WALLET_ENDPOINT not set — set it to a BRC-100 wallet URL and run with `cargo test -- --ignored` to enable."]
 fn wallet_client_live_round_trip() {
+    // Fail closed: this test is #[ignore]d, so reaching here means someone
+    // explicitly selected it (`--ignored`). Passing without a wallet would
+    // certify a round-trip that never happened (N-483).
     let Some(base) = endpoint() else {
-        // Defense-in-depth: even when invoked under `--ignored`, refuse
-        // to run if the endpoint is missing. The #[ignore] attribute is
-        // the audit-visible skip surface; this branch is only reachable
-        // when CI sets RUNAR_WALLET_ENDPOINT *and* the user explicitly
-        // requested ignored tests but cleared the var between flags.
-        eprintln!(
-            "RUNAR_WALLET_ENDPOINT not set — skipping live BRC-100 wallet round-trip."
+        panic!(
+            "RUNAR_WALLET_ENDPOINT not set — the live BRC-100 wallet round-trip \
+             was explicitly selected (--ignored) but has no wallet to talk to. \
+             Start one (integration/mock-wallet/mock-wallet.sh start) and set \
+             RUNAR_WALLET_ENDPOINT=http://127.0.0.1:18480."
         );
-        return;
     };
 
     let auth = std::env::var("RUNAR_WALLET_AUTH").ok();

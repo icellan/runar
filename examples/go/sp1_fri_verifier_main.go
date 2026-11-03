@@ -3,6 +3,10 @@
 // SP1 FRI verifier — end-to-end deploy and spend example against a BSV regtest
 // node.
 //
+// F-007: NOT RUNNABLE IN V1. The SP1 FRI verifier is not implemented for v1 and
+// the compiler refuses verifySP1FRI, so step 1 below fails with that refusal.
+// Kept as the reference flow for the post-v1 verifier (docs/sp1-fri-verifier.md).
+//
 // Companion to `examples/go/sp1_verifier_main.go` (the SP1 Groth16 example);
 // this program does the same thing for the SP1 FRI/STARK PoC contract:
 //

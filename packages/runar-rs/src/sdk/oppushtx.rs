@@ -9,6 +9,7 @@
 
 use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use sha2::{Sha256, Digest};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// SIGHASH_ALL | SIGHASH_FORKID — the default BSV sighash type.
 const SIGHASH_ALL_FORKID: u32 = 0x41;
@@ -63,10 +64,84 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
     code_separator_index: i64,
     sig_hash_type: u32,
 ) -> Result<(String, String), String> {
+    let preimage = op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )?;
+
+    // Double-SHA256 for the sighash
+    let sighash = sha256d(&preimage);
+
+    // Sign with k=1 private key
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let signing_key = SigningKey::from_slice(&key_bytes)
+        .map_err(|e| format!("compute_op_push_tx: create k=1 key: {}", e))?;
+
+    let (sig, _) = signing_key
+        .sign_prehash(&sighash)
+        .map_err(|e| format!("compute_op_push_tx: sign: {}", e))?;
+    OP_PUSH_TX_SIGN_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Normalize to low-S
+    let normalized = sig.normalize_s();
+
+    // DER encode + append sighash byte
+    let der = normalized.to_der();
+    let mut result = der.as_bytes().to_vec();
+    result.push((sig_hash_type & 0xff) as u8);
+
+    let sig_hex = bytes_to_hex(&result);
+    let preimage_hex = bytes_to_hex(&preimage);
+
+    Ok((sig_hex, preimage_hex))
+}
+
+/// Number of k=1 OP_PUSH_TX ECDSA signatures computed by this process (N-253).
+/// A test observability hook: it lets a test assert that a code path which
+/// only needs the preimage does not sign.
+#[doc(hidden)]
+pub static OP_PUSH_TX_SIGN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// N-253: the BIP-143 preimage hex [`compute_op_push_tx_with_code_sep_sighash`]
+/// returns, WITHOUT the k=1 ECDSA signature -- same arguments, same validation,
+/// same bytes. Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from
+/// the preimage and the unlocking script has no slot for one, so the stateful
+/// `prepare_call` path uses this instead of signing and discarding a signature.
+pub fn compute_op_push_tx_preimage_with_code_sep_sighash(
+    tx_hex: &str,
+    input_index: usize,
+    subscript: &str,
+    satoshis: i64,
+    code_separator_index: i64,
+    sig_hash_type: u32,
+) -> Result<String, String> {
+    let preimage = op_push_tx_preimage_bytes(
+        tx_hex, input_index, subscript, satoshis, code_separator_index, sig_hash_type,
+    )?;
+    Ok(bytes_to_hex(&preimage))
+}
+
+fn op_push_tx_preimage_bytes(
+    tx_hex: &str,
+    input_index: usize,
+    subscript: &str,
+    satoshis: i64,
+    code_separator_index: i64,
+    sig_hash_type: u32,
+) -> Result<Vec<u8>, String> {
     // R-178: an out-of-range code_separator_index used to leave the subscript
     // UNTRIMMED and sign it anyway — a wrong scriptCode, with no error, from a
     // fund-moving primitive. Reject it instead: there is no correct signature
     // for a separator offset that is not in the script.
+    // N-041: the subscript is the locking script of the UTXO being spent (e.g.
+    // a provider's contract UTXO). An empty one can never match the script the
+    // node executes, so refuse it.
+    if subscript.is_empty() {
+        return Err(format!(
+            "compute_op_push_tx: refusing to build a preimage for input {} with an empty subscript (scriptCode)",
+            input_index
+        ));
+    }
     let mut effective_subscript = subscript.to_string();
     if code_separator_index >= 0 {
         let trim_pos = ((code_separator_index as usize) + 1) * 2;
@@ -79,6 +154,19 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
             ));
         }
         effective_subscript = subscript[trim_pos..].to_string();
+
+        // N-155: a code_separator_index pointing at the LAST byte of the
+        // subscript passes the "past the end" check above (trim_pos == len,
+        // not >) but trims effective_subscript down to the empty string --
+        // the same unsignable condition the empty-subscript check above
+        // exists to catch, just reached a different way. Refuse it too, with
+        // the same message.
+        if effective_subscript.is_empty() {
+            return Err(format!(
+                "compute_op_push_tx: refusing to build a preimage for input {} with an empty subscript (scriptCode)",
+                input_index
+            ));
+        }
     }
 
     let tx_bytes = hex_to_bytes(tx_hex)?;
@@ -96,39 +184,14 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
 
     // Compute BIP-143 preimage (raw bytes, not hashed)
     let preimage = bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, sig_hash_type);
-
-    // Double-SHA256 for the sighash
-    let sighash = sha256d(&preimage);
-
-    // Sign with k=1 private key
-    let mut key_bytes = [0u8; 32];
-    key_bytes[31] = 1;
-    let signing_key = SigningKey::from_slice(&key_bytes)
-        .map_err(|e| format!("compute_op_push_tx: create k=1 key: {}", e))?;
-
-    let (sig, _) = signing_key
-        .sign_prehash(&sighash)
-        .map_err(|e| format!("compute_op_push_tx: sign: {}", e))?;
-
-    // Normalize to low-S
-    let normalized = sig.normalize_s().unwrap_or(sig);
-
-    // DER encode + append sighash byte
-    let der = normalized.to_der();
-    let mut result = der.as_bytes().to_vec();
-    result.push((sig_hash_type & 0xff) as u8);
-
-    let sig_hex = bytes_to_hex(&result);
-    let preimage_hex = bytes_to_hex(&preimage);
-
-    Ok((sig_hex, preimage_hex))
+    Ok(preimage)
 }
 
 // ---------------------------------------------------------------------------
 // BIP-143 preimage computation (returns raw bytes, not hashed)
 // ---------------------------------------------------------------------------
 
-fn sha256d(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256d(data: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(data);
     let second = Sha256::digest(first);
     let mut out = [0u8; 32];
@@ -136,7 +199,11 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn bip143_preimage(
+/// The SDK's one BIP-143 preimage builder. F-137: `LocalSigner` and
+/// `WalletSigner` used to carry their own copies that skipped the issue-#123
+/// per-flag zeroing below and signed the wrong digest for every flag other than
+/// ALL|FORKID; they now call this.
+pub(crate) fn bip143_preimage(
     tx: &ParsedTx,
     input_index: usize,
     subscript: &[u8],
@@ -221,28 +288,28 @@ fn bip143_preimage(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal raw transaction parser (duplicated from signer.rs for module independence)
+// Minimal raw transaction parser (shared with signer.rs / wallet.rs, F-137)
 // ---------------------------------------------------------------------------
 
-struct ParsedInput {
+pub(crate) struct ParsedInput {
     prev_txid_bytes: [u8; 32],
     prev_output_index: u32,
     sequence: u32,
 }
 
-struct ParsedOutput {
+pub(crate) struct ParsedOutput {
     satoshis: u64,
     script: Vec<u8>,
 }
 
-struct ParsedTx {
+pub(crate) struct ParsedTx {
     version: u32,
-    inputs: Vec<ParsedInput>,
+    pub(crate) inputs: Vec<ParsedInput>,
     outputs: Vec<ParsedOutput>,
     locktime: u32,
 }
 
-fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
+pub(crate) fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
     let mut offset = 0;
 
     let read = |offset: &mut usize, n: usize| -> Result<&[u8], String> {
@@ -579,5 +646,35 @@ mod tests {
         let (sig_with_sep, _) = compute_op_push_tx_with_code_sep(&tx_hex, 0, "ab51", 1000, 0).unwrap();
         let (sig_plain, _) = compute_op_push_tx(&tx_hex, 0, "51", 1000).unwrap();
         assert_eq!(sig_with_sep, sig_plain, "trimmed subscript must produce same signature as plain subscript");
+    }
+
+    /// N-041: an empty subscript can never match the script the node
+    /// executes, so building a preimage over it is refused. N-155 covers the
+    /// companion case below: a non-empty subscript whose separator is its
+    /// last byte, which trims down to the same empty condition.
+    #[test]
+    fn n041_empty_subscript_is_refused() {
+        let tx_hex = minimal_tx_hex();
+        let err = compute_op_push_tx(&tx_hex, 0, "", 1000).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
+        assert!(compute_op_push_tx_with_code_sep(&tx_hex, 0, "51ab51", 1000, 1).is_ok());
+    }
+
+    /// N-155: code_separator_index pointing at the LAST byte of the subscript
+    /// passes the R-178 "past the end" check (trim_pos == len, not >) but
+    /// trims effective_subscript down to the empty string -- the same
+    /// unsignable condition as an empty subscript, reached via the separator
+    /// offset instead. Proves: compute_op_push_tx_with_code_sep refuses this
+    /// case. Does not prove anything about ExternalSigner::sign (it already
+    /// rejects any empty string it is handed -- see signer.rs's
+    /// n041_external_signer_refuses_empty_subscript) or about callers
+    /// upstream that compute the code_separator_index they pass in.
+    #[test]
+    fn n155_code_separator_on_last_byte_is_refused() {
+        let tx_hex = minimal_tx_hex();
+        // "51" is one byte (OP_1); code_separator_index 0 is its last (and
+        // only) byte, so the trimmed scriptCode is empty.
+        let err = compute_op_push_tx_with_code_sep(&tx_hex, 0, "51", 1000, 0).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
     }
 }

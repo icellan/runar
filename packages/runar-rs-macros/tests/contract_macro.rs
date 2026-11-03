@@ -83,6 +83,60 @@ fn add_output_intrinsics_exist_on_the_generated_struct() {
     assert_eq!(c.count, 1);
 }
 
+// F-057: `add_output` must RECORD its arguments. It used to discard them, so a
+// `#[path]` test could not see what a contract's outputs carried — and token-ft
+// / token-nft tested a hand-copied contract instead of the real one. Proves the
+// recorded satoshis and mutable fields round-trip in call order and that
+// `take_outputs` drains; does not prove anything about emitted Bitcoin Script.
+#[test]
+fn add_output_records_satoshis_and_mutable_fields() {
+    let mut c = RecordsOutputs { owner: vec![1], count: 4 };
+    c.bump();
+    c.bump();
+    let got = RecordsOutputs::take_outputs();
+    assert_eq!(
+        got,
+        vec![
+            RecordsOutputsOutput { satoshis: 0, count: 5 },
+            RecordsOutputsOutput { satoshis: 0, count: 6 },
+        ]
+    );
+    assert!(RecordsOutputs::take_outputs().is_empty(), "take_outputs drains the log");
+}
+
+// N-122: `add_raw_output` / `add_data_output` used to discard their arguments
+// entirely — the generated methods existed (so `#[path]` tests compiled) but
+// a test could assert nothing about what a contract actually emitted. This
+// pins that they now RECORD, the same way F-057 made `add_output` record:
+// one typed struct + thread-local log + `take_*` drain per intrinsic. Does
+// not prove anything about emitted Bitcoin Script.
+#[test]
+fn add_raw_output_and_add_data_output_record_their_arguments() {
+    let mut c = RecordsOutputs { owner: vec![1], count: 0 };
+    c.bump();
+    c.bump();
+
+    let raw = RecordsOutputs::take_raw_outputs();
+    assert_eq!(
+        raw,
+        vec![
+            RecordsOutputsRawOutput { satoshis: 1000, script: vec![0x51] },
+            RecordsOutputsRawOutput { satoshis: 1000, script: vec![0x51] },
+        ]
+    );
+    assert!(RecordsOutputs::take_raw_outputs().is_empty(), "take_raw_outputs drains the log");
+
+    let data = RecordsOutputs::take_data_outputs();
+    assert_eq!(
+        data,
+        vec![
+            RecordsOutputsDataOutput { satoshis: 0, data: vec![1, 2, 3] },
+            RecordsOutputsDataOutput { satoshis: 0, data: vec![1, 2, 3] },
+        ]
+    );
+    assert!(RecordsOutputs::take_data_outputs().is_empty(), "take_data_outputs drains the log");
+}
+
 // The compiler injects `tx_preimage` for checkPreimage. Native Rust still
 // declares it on the struct, but it is not a mutable state slot — parsers
 // omit it, and `add_output` must too, or token-ft's
@@ -112,4 +166,51 @@ fn add_output_omits_implicit_preimage() {
     c.bump();
     assert_eq!(c.balance, 7);
     assert_eq!(c.tx_preimage_backup, vec![0xbb]);
+}
+
+// N-093: `#[embed_always]` (the native spelling of `@embedAlways`) is stripped
+// like `#[readonly]`, in either order, and does NOT make a field readonly: a
+// field with only `#[embed_always]` stays a mutable state slot, so
+// `add_output` takes it positionally. `#[sighash(...)]` (the native spelling
+// of `@sighash`) is a pass-through on a plain `impl` method. Proves the
+// annotated contract compiles and behaves as plain Rust; does not prove
+// anything about the Rúnar frontend's reading of the flags (the compiler's
+// n093_native_directives test does that).
+#[stateful_contract]
+pub struct StripsEmbedAlways {
+    #[readonly]
+    #[embed_always]
+    pub tag: Vec<u8>,
+    #[embed_always]
+    #[readonly]
+    pub other_tag: Vec<u8>,
+    #[embed_always]
+    pub count: i64,
+}
+
+impl StripsEmbedAlways {
+    #[sighash(SINGLE | FORKID)]
+    pub fn bump(&mut self) {
+        self.count += 1;
+        self.add_output(0, self.count);
+    }
+
+    #[runar_lang_macros::sighash(ALL | ANYONECANPAY | FORKID)]
+    pub fn tag_len(&self) -> usize {
+        self.tag.len() + self.other_tag.len()
+    }
+}
+
+use runar_lang_macros::sighash;
+
+#[test]
+fn n093_embed_always_stripped_and_sighash_passes_through() {
+    let mut c = StripsEmbedAlways { tag: vec![1, 2], other_tag: vec![3], count: 0 };
+    c.bump();
+    assert_eq!(c.count, 1);
+    assert_eq!(c.tag_len(), 3);
+    assert_eq!(
+        StripsEmbedAlways::take_outputs(),
+        vec![StripsEmbedAlwaysOutput { satoshis: 0, count: 1 }]
+    );
 }

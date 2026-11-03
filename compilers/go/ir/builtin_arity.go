@@ -65,6 +65,7 @@ var BuiltinArity = map[string][]int{
 	"checkSig":                            {2},
 	"clamp":                               {3},
 	"currentBlockHeight":                  {0},
+	"continuationAmount":                  {0},
 	"divmod":                              {2},
 	"ecAdd":                               {2},
 	"ecEncodeCompressed":                  {1},

@@ -135,7 +135,7 @@ public final class SlhDsa {
         "SHA2_192s", slhMk(24, 63, 7, 14, 17),
         "SHA2_192f", slhMk(24, 66, 22, 8, 33),
         "SHA2_256s", slhMk(32, 64, 8, 14, 22),
-        "SHA2_256f", slhMk(32, 68, 17, 8, 35)
+        "SHA2_256f", slhMk(32, 68, 17, 9, 35)
     );
 
     // ADRS type constants
@@ -1156,7 +1156,22 @@ public final class SlhDsa {
             e.accept(new OpcodeOp("OP_NUM2BIN"));
             for (StackOp r : emitReverseN(8)) e.accept(r);
         };
-        t.rawBlock(List.of("_ti8"), "treeAddr8", treeAddr);
+        // F-034: SHA2_256f's tree index has h - h' = 64 bits, so for about half
+        // of all signatures it is >= 2^63 and its minimal script-number
+        // encoding needs a 9th (sign) byte: `8 OP_NUM2BIN` fails. Encode in 9
+        // bytes and drop the trailing (little-endian) 0x00 sign byte. Only the
+        // first conversion needs it: per-layer indices are shifted right by h'.
+        Consumer<Consumer<StackOp>> treeAddrFirst = hF - hpF >= 64
+            ? e -> {
+                e.accept(pushInt(9));
+                e.accept(new OpcodeOp("OP_NUM2BIN"));
+                e.accept(pushInt(8));
+                e.accept(new OpcodeOp("OP_SPLIT"));
+                e.accept(new DropOp());
+                for (StackOp r : emitReverseN(8)) e.accept(r);
+            }
+            : treeAddr;
+        t.rawBlock(List.of("_ti8"), "treeAddr8", treeAddrFirst);
 
         t.copyToTop("leafIdx", "_li4");
         Consumer<Consumer<StackOp>> keypairAddr = e -> {

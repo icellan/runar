@@ -75,7 +75,7 @@ func n074Magnitudes(t *testing.T) []struct {
 func n074Extract(t *testing.T, typeName string, v *big.Int) *big.Int {
 	t.Helper()
 	scriptHex := encodeArg(v) + "ac"
-	args := ExtractConstructorArgs(n074Artifact(typeName), scriptHex)
+	args := mustExtractConstructorArgs(t, n074Artifact(typeName), scriptHex)
 	switch got := args["value"].(type) {
 	case *big.Int:
 		return got
@@ -135,7 +135,7 @@ func TestN074_ControlSmallValuesUnchanged(t *testing.T) {
 		if got := encodeArg(c.v); got != c.want {
 			t.Errorf("encodeArg(%d) = %s, want %s", c.v, got, c.want)
 		}
-		args := ExtractConstructorArgs(n074Artifact("bigint"), c.want+"ac")
+		args := mustExtractConstructorArgs(t, n074Artifact("bigint"), c.want+"ac")
 		got, ok := args["value"].(int64)
 		if !ok {
 			t.Fatalf("%d: extracted as %T (%v), want int64", c.v, args["value"], args["value"])

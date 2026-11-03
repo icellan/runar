@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
+import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { compile } from '../index.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
@@ -22,28 +23,36 @@ interface ExampleContract {
   source: string;
 }
 
-function findExampleContracts(): ExampleContract[] {
+function findExampleContracts(baseDir: string = EXAMPLES_DIR): ExampleContract[] {
   const contracts: ExampleContract[] = [];
 
+  let dirs;
   try {
-    const dirs = readdirSync(EXAMPLES_DIR, { withFileTypes: true });
-    for (const dir of dirs) {
-      if (!dir.isDirectory()) continue;
-      const dirPath = join(EXAMPLES_DIR, dir.name);
-      const files = readdirSync(dirPath);
-      for (const file of files) {
-        if (file.endsWith('.runar.ts')) {
-          const source = readFileSync(join(dirPath, file), 'utf-8');
-          contracts.push({
-            name: file.replace('.runar.ts', ''),
-            fileName: file,
-            source,
-          });
-        }
+    dirs = readdirSync(baseDir, { withFileTypes: true });
+  } catch (err) {
+    // examples directory may not exist — that's the only failure this scan
+    // tolerates. Anything else (e.g. a subdirectory read failing mid-scan)
+    // must propagate instead of silently dropping contracts.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return contracts;
+    }
+    throw err;
+  }
+
+  for (const dir of dirs) {
+    if (!dir.isDirectory()) continue;
+    const dirPath = join(baseDir, dir.name);
+    const files = readdirSync(dirPath);
+    for (const file of files) {
+      if (file.endsWith('.runar.ts')) {
+        const source = readFileSync(join(dirPath, file), 'utf-8');
+        contracts.push({
+          name: file.replace('.runar.ts', ''),
+          fileName: file,
+          source,
+        });
       }
     }
-  } catch {
-    // examples directory may not exist
   }
 
   return contracts;
@@ -73,10 +82,9 @@ function compileExample(example: ExampleContract): ReturnType<typeof compile> {
  * The four per-example tests below used to open with
  * `if (!r.success || !r.anf || !r.contract) return;`. Every shipped example
  * compiles today, so the bail never fired — but a single compiler regression
- * would have turned 4 x N tests green-and-empty in one shot, and the
- * `compiles through the TS compiler` sibling deliberately TOLERATES failure
- * (it only asserts that a failed compile carries diagnostics), so nothing
- * else in this file would have gone red either.
+ * would have turned 4 x N tests green-and-empty in one shot. The
+ * `compiles through the TS compiler` test also asserts through this helper,
+ * so a broken example fails every per-example test.
  */
 function requireCompiled(result: ReturnType<typeof compile>, fileName: string) {
   const errors = result.diagnostics
@@ -93,6 +101,47 @@ function requireCompiled(result: ReturnType<typeof compile>, fileName: string) {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('findExampleContracts', () => {
+  // N-126: the scan used to wrap the ENTIRE directory walk (outer
+  // readdirSync, inner readdirSync, and readFileSync) in one try/catch meant
+  // only to tolerate a missing EXAMPLES_DIR. Any OTHER failure while
+  // scanning a subdirectory (e.g. an unreadable entry) was caught by that
+  // same catch-all and silently swallowed: the function returned whatever
+  // contracts it had collected so far, with no sign anything had gone
+  // wrong.
+  //
+  // This test proves: a non-ENOENT failure encountered mid-scan now
+  // propagates (fails closed) instead of being swallowed into a quietly
+  // incomplete result.
+  // This test does NOT prove: that every possible fs error code is
+  // correctly classified, or that the fix covers filesystems where
+  // directory-as-file reads fail with something other than EISDIR.
+  it('fails closed when a subdirectory read fails mid-scan, instead of silently dropping it', () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), 'runar-examples-test-'));
+    try {
+      const subDir = join(tmpBase, 'broken-example');
+      mkdirSync(subDir);
+      // A directory named like a contract file: `file.endsWith('.runar.ts')`
+      // matches it, so the scan attempts `readFileSync` on a directory,
+      // which throws EISDIR. This reproduces "a subdirectory whose read
+      // fails mid-scan" deterministically, without relying on chmod/EACCES
+      // (which no-ops when the test runs as root).
+      mkdirSync(join(subDir, 'Broken.runar.ts'));
+
+      expect(() => findExampleContracts(tmpBase)).toThrow(/EISDIR/);
+    } finally {
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  // The ENOENT case is the one the original comment ("examples directory may
+  // not exist") actually named, and the fix must keep tolerating it.
+  it('still returns an empty list when the base directory does not exist', () => {
+    const missing = join(tmpdir(), `runar-examples-test-missing-${Date.now()}`);
+    expect(findExampleContracts(missing)).toEqual([]);
+  });
+});
+
 describe('Example contracts: end-to-end compilation', () => {
   it('found at least one example contract', () => {
     expect(examples.length).toBeGreaterThan(0);
@@ -108,20 +157,13 @@ describe('Example contracts: end-to-end compilation', () => {
         expect(result.diagnostics).toBeDefined();
         expect(Array.isArray(result.diagnostics)).toBe(true);
 
-        if (result.success) {
-          // When successful, contract and ANF must be present
-          expect(result.contract).not.toBeNull();
-          expect(result.anf).not.toBeNull();
-        } else {
-          // When it fails, diagnostics should explain why
-          const errors = result.diagnostics.filter(d => d.severity === 'error');
-          expect(errors.length).toBeGreaterThan(0);
-          // Each error should have a message
-          for (const err of errors) {
-            expect(err.message).toBeDefined();
-            expect(typeof err.message).toBe('string');
-          }
-        }
+        // Every shipped example is expected to compile. This test used to
+        // accept `success === false` as long as diagnostics were present, so
+        // an example that stopped compiling stayed green here (F-161). It now
+        // fails with the diagnostics. It proves the full frontend (parse,
+        // validate, typecheck, ANF) accepts each example; it does not prove
+        // the emitted script is correct or spendable.
+        requireCompiled(result, example.fileName);
       });
 
       it('produces a valid artifact structure', () => {

@@ -1,0 +1,69 @@
+{
+  "fixture": "compiler-directives",
+  "kind": "stateless-signed",
+  "note": "N-093. Directives: deployTag carries @embedAlways (kept in the script though no method reads it) and spendSingle carries @sighash SINGLE|FORKID. Both methods are P2PKH-shaped: hash160(pubKey) == committed pkh + real ECDSA checkSig over the real BIP-143 sighash. The embedded deployTag push sits before the method dispatch and is dropped at method end, so it must not disturb either path. Expected verdicts are derived by hand from the source.",
+  "constructorArgs": {
+    "pubKeyHash": {
+      "$pkh": "alice"
+    },
+    "deployTag": "c0ffee01"
+  },
+  "spends": [
+    {
+      "method": "spendAll",
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        }
+      ],
+      "expect": "accept",
+      "note": "correct key on the default-mode method"
+    },
+    {
+      "method": "spendAll",
+      "args": [
+        {
+          "$sig": "bob"
+        },
+        {
+          "$pubkey": "bob"
+        }
+      ],
+      "expect": "reject",
+      "note": "wrong committed key: hash160(bob) != alice pkh"
+    },
+    {
+      "method": "spendSingle",
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        }
+      ],
+      "expect": "accept",
+      "note": "correct key on the @sighash method"
+    },
+    {
+      "method": "spendSingle",
+      "args": [
+        {
+          "$sig": "bob"
+        },
+        {
+          "$pubkey": "bob"
+        }
+      ],
+      "expect": "reject",
+      "note": "wrong committed key on the @sighash method"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "12a73420cdb51167df0e1119d14dedf245f433ec9bf5e2dc1e301f652116d997",
+    "expected-ir.json": "e02b30a76538be1a48c4882e6897c3dfa810a0ccde6ad9fd22dcff3923cb7af2"
+  }
+}

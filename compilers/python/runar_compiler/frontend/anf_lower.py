@@ -43,7 +43,11 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
-from runar_compiler.frontend.validator import is_to_byte_string_literal
+from runar_compiler.frontend.validator import (
+    is_to_byte_string_literal,
+    loop_output_intrinsic_msg,
+    ternary_output_intrinsic_msg,
+)
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -62,7 +66,7 @@ from runar_compiler.frontend.side_effect_summary import (
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
 from runar_compiler.ir.loader import MAX_LOOP_COUNT
-from runar_compiler.frontend.typecheck import _BYTESTRING_SUBTYPES
+from runar_compiler.frontend.typecheck import BUILTIN_FUNCTIONS, _BYTESTRING_SUBTYPES
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +88,8 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
     # where different properties get updated in different branches.
     for method in methods:
         method.body = _lift_branch_update_props(method.body)
+        if method.is_public:
+            _drop_terminal_if_results(method.body)
 
     return ANFProgram(
         contract_name=contract.name,
@@ -110,73 +116,20 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
 # OP_ADD.
 _BYTE_TYPES = _BYTESTRING_SUBTYPES
 
-# Preimage field extractors that return BYTES (ByteString / Sha256).
-#
-# N-054: this list is a transcription of the return_type the type checker
-# already records for these builtins in typecheck.py, and the stack lowerer
-# agrees with it byte for byte: _lower_extractor ends the split sequence with
-# OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
-# none of the ones that are.
-#
-# So an extractor listed here leaves a byte string on the stack and must be
-# compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-# leaves a minimally-encoded script NUMBER and must be compared with
-# OP_NUMEQUAL and added with OP_ADD.
-#
-# Getting it backwards is a correctness defect in both directions. OP_EQUAL on
-# a number is over-strict -- it rejects a witness that encodes the same value
-# with different bytes (0400 for 4), i.e. it refuses a valid spend. OP_NUMEQUAL
-# on a hash or a scriptCode is under-strict -- trailing high-order zero bytes
-# and negative zero compare equal to values they are not byte-equal to, i.e. a
-# covenant bypass.
-#
-# This replaces a name[:7] == "extract" prefix test that swept the six numeric
-# extractors in with the byte ones.
-_BYTE_RETURNING_EXTRACTORS: frozenset[str] = frozenset({
-    "extractHashPrevouts",
-    "extractHashSequence",
-    "extractOutpoint",
-    "extractScriptCode",
-    "extractOutputHash",
-    "extractOutputs",
-    "extractPrevOutputScript",
-})
 
-_BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
-    "sha256",
-    "ripemd160",
-    "hash160",
-    "hash256",
-    "cat",
-    "substr",
-    "num2bin",
-    "reverseBytes",
-    "left",
-    "right",
-    "int2str",
-    "toByteString",
-    "pack",
-    "ecAdd",
-    "ecMul",
-    "ecMulGen",
-    "ecNegate",
-    "ecMakePoint",
-    "ecEncodeCompressed",
-    "blake3Compress",
-    "blake3Hash",
-    # P-256 point-returning functions
-    "p256Add",
-    "p256Mul",
-    "p256MulGen",
-    "p256Negate",
-    "p256EncodeCompressed",
-    # P-384 point-returning functions
-    "p384Add",
-    "p384Mul",
-    "p384MulGen",
-    "p384Negate",
-    "p384EncodeCompressed",
-})
+def _is_byte_returning_builtin(name: str) -> bool:
+    """Does the builtin *name* return a ByteString-family value?
+
+    N-347: read off the return_type column of typecheck's BUILTIN_FUNCTIONS,
+    not a second hand-written list. Two such lists lived here and drifted:
+    N-054 (a name-prefix test swept the six numeric extractors in) and
+    N-345 / N-347 (byte-returning builtins left out -- merkleRootSha256,
+    merkleRootHash256, bn254G1Add, bn254G1Negate, bn254G1ScalarMul -- so
+    ``===`` on two of their results compiled to OP_NUMEQUAL). Do not
+    reintroduce one.
+    """
+    sig = BUILTIN_FUNCTIONS.get(name)
+    return sig is not None and sig.return_type in _BYTE_TYPES
 
 
 def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
@@ -188,13 +141,18 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
         return True
 
     if isinstance(expr, Identifier):
+        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+        # binding, never by the parameter or property it shadows.
+        renamed = ctx._scope_renames.get(expr.name)
+        if renamed is not None:
+            return renamed in ctx._local_byte_vars
         t = ctx.get_param_type(expr.name)
         if t is not None and t in _BYTE_TYPES:
             return True
         t = ctx.get_property_type(expr.name)
         if t is not None and t in _BYTE_TYPES:
             return True
-        if expr.name in ctx._local_byte_vars:
+        if ctx.local_name(expr.name) in ctx._local_byte_vars:
             return True
         return False
 
@@ -216,9 +174,7 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
             # Expression-form asm<ByteString>({...}) yields a byte value.
             if expr.callee.name == "asm":
                 return expr.asm_return_type == "ByteString"
-            if expr.callee.name in _BYTE_RETURNING_FUNCTIONS:
-                return True
-            if expr.callee.name in _BYTE_RETURNING_EXTRACTORS:
+            if _is_byte_returning_builtin(expr.callee.name):
                 return True
         return False
 
@@ -435,6 +391,16 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
         # the property_access / member paths, which prefer a real property.
         for p in method.params:
             method_ctx.add_param(p.name)
+            # N-016: a private helper's parameter is not part of any ABI, so one
+            # that shadows a property is bound under the collision-proof local
+            # name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+            # the body REASSIGNS is renamed too -- its rebinding is merged out of
+            # an if by name, where a property result of the same name would
+            # capture it. The ABI keeps the source name either way.
+            if method_ctx.is_property(p.name) and (
+                method.visibility == "private" or _statements_reassign(method.body, p.name)
+            ):
+                method_ctx._renamed_private_params[p.name] = method_ctx.local_name(p.name)
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
             # Continuation requirements come from the side-effect
@@ -443,8 +409,11 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # state or emits an output must therefore inject the same
             # continuation params as if the public body did so directly.
             eff = side_effects.get(method.name, MethodEffects())
-            shape = continuation_shape_for(eff)
-            needs_change_output = shape.needs_change
+            # N-038: under a SINGLE base the change output is not committed,
+            # so the method takes no _changePKH / _changeAmount.
+            shape = continuation_shape_for(eff, method.sighash_type)
+            needs_continuation = shape.needs_change
+            needs_change_output = shape.includes_change
             needs_new_amount = shape.needs_new_amount
 
             # Register implicit parameters
@@ -527,7 +496,26 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # for param injection. Both must agree or the deployed
             # locking script will not match the auto-injected parameter
             # list.
-            if needs_change_output:
+            if needs_continuation:
+                # F-024 (R14): the default single-output continuation carries
+                # the spender-chosen ``_newAmount`` into the new state UTXO.
+                # Without this check a spender sets ``_newAmount = 1`` and pays
+                # the rest of the input value to their own change output -- the
+                # committed outputs then match the covenant's hash exactly.
+                # Value may grow (a deposit) but never shrink below the input
+                # amount. addOutput/addRawOutput methods size their outputs
+                # explicitly and terminal methods have no continuation.
+                # Mirrors 04-anf-lower.ts binding for binding.
+                if not add_output_refs:
+                    amount_preimage_ref = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                    input_amount_ref = method_ctx.emit(_make_call("extractAmount", [amount_preimage_ref]))
+                    new_amount_check_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
+                    amount_ok_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op=">=",
+                        left=new_amount_check_ref, right=input_amount_ref,
+                    ))
+                    method_ctx.emit(_make_assert(amount_ok_ref))
+
                 # Build the P2PKH change output for hashOutputs verification.
                 #
                 # Issue #116: the SDK's build_call_transaction OMITS the change
@@ -539,25 +527,34 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                 # with empty is a no-op) when zero, reproducing the omission.
                 # For any change > 0 the hashed bytes are unchanged; only the
                 # emitted script gains the guard.
-                change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
-                change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
-                zero_ref = method_ctx.emit(_make_load_const_int(0))
-                change_non_zero_ref = method_ctx.emit(ANFValue(
-                    kind="bin_op", op="!==",
-                    left=change_amount_ref, right=zero_ref,
-                ))
-                change_then_ctx = method_ctx.sub_context()
-                change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
-                method_ctx.sync_counter(change_then_ctx)
-                change_else_ctx = method_ctx.sub_context()
-                change_else_ctx.emit(_make_load_const_string(""))
-                method_ctx.sync_counter(change_else_ctx)
-                change_output_ref = method_ctx.emit(ANFValue(
-                    kind="if",
-                    cond=change_non_zero_ref,
-                    then=change_then_ctx.bindings,
-                    else_=change_else_ctx.bindings,
-                ))
+                # N-038: under a SIGHASH_SINGLE base no change segment exists
+                # (hashOutputs = hash256(output[inputIndex])).
+                change_output_ref = None
+                if needs_change_output:
+                    change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
+                    change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
+                    zero_ref = method_ctx.emit(_make_load_const_int(0))
+                    change_non_zero_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op="!==",
+                        left=change_amount_ref, right=zero_ref,
+                    ))
+                    change_then_ctx = method_ctx.sub_context()
+                    change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
+                    method_ctx.sync_counter(change_then_ctx)
+                    change_else_ctx = method_ctx.sub_context()
+                    change_else_ctx.emit(_make_load_const_string(""))
+                    method_ctx.sync_counter(change_else_ctx)
+                    change_output_ref = method_ctx.emit(ANFValue(
+                        kind="if",
+                        cond=change_non_zero_ref,
+                        then=change_then_ctx.bindings,
+                        else_=change_else_ctx.bindings,
+                    ))
+
+                def cat_change(acc):
+                    if change_output_ref is None:
+                        return acc
+                    return method_ctx.emit(_make_call("cat", [acc, change_output_ref]))
 
                 if add_output_refs:
                     # Multi-output continuation: concat all state outputs, then
@@ -567,7 +564,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
                     for data_ref in add_data_output_refs:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
-                    accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+                    accumulated = cat_change(accumulated)
                     hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref2]))
@@ -588,7 +585,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     accumulated = contract_output_ref
                     for data_ref in add_data_output_refs:
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
-                    all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+                    all_outputs = cat_change(accumulated)
                     hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
                     preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
@@ -601,6 +598,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
 
             # Build augmented params list for ABI
             augmented_params = _lower_params(method.params)
+            for ap in augmented_params:
+                ap.name = method_ctx.param_slot(ap.name)
             if needs_change_output:
                 augmented_params += [
                     ANFParam(name="_changePKH", type="Ripemd160"),
@@ -640,6 +639,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # their auto-injected witness params so a public method that
             # inlines this private picks them up via the shared method_scope.
             augmented = _lower_params(method.params)
+            for ap in augmented:
+                ap.name = method_ctx.param_slot(ap.name)
             augmented += list(method_ctx.method_scope.auto_injected_params)
             result.append(ANFMethod(
                 name=method.name,
@@ -650,6 +651,16 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             ))
 
     return result
+
+
+# N-016: suffix of the binding name of a local that shadows a property.
+SHADOW_LOCAL_SUFFIX = "@local"
+
+
+def _source_local_name(binding_name: str) -> str:
+    """N-016 / N-046: the source spelling of a local's binding name (undoes
+    ``local_name`` and ``declare_local``: everything before the first ``@``)."""
+    return binding_name.split("@", 1)[0]
 
 
 def _lower_params(params: list) -> list[ANFParam]:
@@ -700,6 +711,14 @@ class _MethodScope:
         self.auto_injected_params: list[ANFParam] = []
         # Set of names already recorded (dedup).
         self.auto_injected_set: set[str] = set()
+        # N-046 / N-047: the last ``<name>@<n>`` suffix handed out.
+        self.shadow_seq: int = 0
+
+    def next_shadow_name(self, name: str) -> str:
+        """N-046 / N-047: a method-unique ``<name>@<n>`` binding name, shared
+        by every sub-context and inlined helper body of the method."""
+        self.shadow_seq += 1
+        return f"{name}@{self.shadow_seq}"
 
     def record_auto_injected_param(self, name: str, typ: str) -> None:
         """Idempotent: second call with the same name is a no-op."""
@@ -707,6 +726,31 @@ class _MethodScope:
             return
         self.auto_injected_set.add(name)
         self.auto_injected_params.append(ANFParam(name=name, type=typ))
+
+
+_OUTPUT_KIND_TO_INTRINSIC = {
+    "add_output": "addOutput",
+    "add_raw_output": "addRawOutput",
+    "add_data_output": "addDataOutput",
+}
+
+
+def _first_output_intrinsic(bindings: list[ANFBinding] | None) -> str:
+    """Name the source intrinsic of the first output node in ``bindings``,
+    searching nested if/loop bodies, for the N-006 refusal."""
+    for b in bindings or []:
+        v = b.value
+        if v.kind in _OUTPUT_KIND_TO_INTRINSIC:
+            return _OUTPUT_KIND_TO_INTRINSIC[v.kind]
+        if v.kind == "if":
+            name = _first_output_intrinsic(v.then) or _first_output_intrinsic(v.else_)
+        elif v.kind == "loop":
+            name = _first_output_intrinsic(v.body)
+        else:
+            name = ""
+        if name:
+            return name
+    return ""
 
 
 class _LowerCtx:
@@ -735,6 +779,13 @@ class _LowerCtx:
         # arm, a loop body, or an inlined helper's block -- and False only in
         # the context a method's own body is lowered into.
         self.nested: bool = False
+        # N-202: the product of the counts of every for-loop enclosing the
+        # block this context lowers (1 at method top level). Copied unchanged
+        # into if / ternary arms; a loop body gets ``enclosing * count``. The
+        # per-loop MAX_LOOP_COUNT check bounds one loop; this bounds the
+        # unrolled work along a nesting path, the rule the --ir loader applies
+        # (F-283).
+        self.enclosing_loop_count: int = 1
         # Method-scoped parameter type table. Populated once per
         # method/constructor (and for auto-injected continuation params)
         # before its body is lowered. Mirrors the TS reference's
@@ -747,6 +798,18 @@ class _LowerCtx:
         self._add_output_refs: list[str] = []
         self._add_data_output_refs: list[str] = []
         self._local_aliases: dict[str, str] = {}
+        # N-016: private-helper params renamed because they shadow a property,
+        # and loop variables in scope whose name is a property's.
+        self._renamed_private_params: dict[str, str] = {}
+        self._shadowing_loop_vars: set[str] = set()
+        # N-046 / N-047: source name -> binding name of a declaration that
+        # reused a name already bound in an enclosing scope (an outer local, a
+        # parameter, a loop variable, or, inside an inlined helper, a caller
+        # local). Copied by value into sub-contexts, so the rename ends with the
+        # declaring block.
+        self._scope_renames: dict[str, str] = {}
+        # N-046: source names of the loop variables in scope.
+        self._loop_vars: set[str] = set()
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
         # Param substitution stack used when inlining a private method's
@@ -816,7 +879,15 @@ class _LowerCtx:
         eff = self._side_effects.get(name)
         if eff is None:
             return False
-        return eff.has_state_output or eff.has_data_output
+        # N-070: a helper that calls requireOutputP2PKH is inlined too, so
+        # the _serialisedOutputs witness lands on the public method. N-315:
+        # the same for extractPrevOutputScript and _prevOutScript_<i>.
+        return (
+            eff.has_state_output
+            or eff.has_data_output
+            or eff.calls_require_output_p2pkh
+            or eff.calls_extract_prev_output_script
+        )
 
     def get_private_method(self, name: str) -> MethodNode | None:
         for m in self._contract.methods:
@@ -915,6 +986,88 @@ class _LowerCtx:
     def is_property(self, name: str) -> bool:
         return any(p.name == name for p in self._contract.properties)
 
+    def local_name(self, name: str) -> str:
+        """N-016: the ANF binding name for a source-level local (or loop
+        variable, or private-helper parameter) called ``name``.
+
+        Binding names and property names share one namespace downstream --
+        stack lowering resolves ``load_prop`` / ``update_prop`` / the state
+        continuation / an ``if``'s ``results`` by name -- so a local bound as
+        ``x`` next to a property ``x`` made ``this.x`` read the local. A
+        property-named local is bound under ``<name>@local`` (``@`` is in no
+        surface's identifiers, so it cannot collide with a property, another
+        local or a temp); every other name is unchanged, keeping non-shadowing
+        ANF byte-identical.
+        """
+        renamed = self._scope_renames.get(name)
+        if renamed is not None:
+            return renamed
+        return name + SHADOW_LOCAL_SUFFIX if self.is_property(name) else name
+
+    def declare_local(self, name: str) -> str:
+        """N-046 / N-047: the binding name of a block-scoped declaration of
+        ``name``. A declaration that reuses a name already bound in an
+        enclosing scope (an outer local, a parameter, a loop variable, an
+        inlined helper's parameter) is bound under the fresh ``<name>@<n>`` and
+        recorded in this scope, so it can never be mistaken for a reassignment
+        of the outer binding (if-arm reconciliation matches arm bindings to
+        outer locals BY NAME). A declaration that collides with nothing keeps
+        ``local_name(name)``, which keeps non-shadowing ANF byte-identical."""
+        in_scope = (
+            name in self._scope_renames
+            or self.is_local(self.local_name(name))
+            or self.is_param(name)
+            or self.get_param_alias(name) is not None
+            or name in self._loop_vars
+        )
+        if not in_scope:
+            return self.local_name(name)
+        fresh = self.method_scope.next_shadow_name(name)
+        self._scope_renames[name] = fresh
+        return fresh
+
+    def enter_inlined_scope(self) -> tuple:
+        """N-047: an inlined private helper's body is its own lexical scope:
+        none of the caller's renames apply inside it, and none of its locals
+        outlive it. Returns the state ``leave_inlined_scope`` restores."""
+        saved = (
+            self._scope_renames,
+            set(self._local_names),
+            set(self._local_byte_vars),
+            dict(self._local_aliases),
+            set(self._loop_vars),
+        )
+        self._scope_renames = {}
+        return saved
+
+    def leave_inlined_scope(self, saved: tuple) -> None:
+        (
+            self._scope_renames,
+            self._local_names,
+            self._local_byte_vars,
+            self._local_aliases,
+            self._loop_vars,
+        ) = saved
+
+    def local_target(self, name: str) -> str:
+        """N-016: the binding a write to the bare identifier ``name`` rebinds --
+        the local's (possibly renamed) binding when a local of that name is in
+        scope, otherwise the name itself, exactly as before."""
+        local = self.local_name(name)
+        if self.is_local(local):
+            return local
+        # N-360: a renamed parameter is read from its slot, so it is rebound there.
+        return self.param_slot(name) if self.is_param(name) else name
+
+    def is_param_slot(self, name: str) -> bool:
+        """N-360: whether ``name`` is the ``load_param`` slot of one of this
+        method's parameters."""
+        return any(self.param_slot(p) == name for p in self._param_names)
+
+    def param_slot(self, name: str) -> str:
+        """N-016: the ``load_param`` name a source parameter resolves to."""
+        return self._renamed_private_params.get(name, name)
+
     def _is_private_method(self, name: str) -> bool:
         """Whether ``name`` is a private (non-public) method on the contract.
         Used to route bare-identifier calls through the method_call inlining
@@ -957,10 +1110,18 @@ class _LowerCtx:
         # too, but a commitment emitted INSIDE this block must not be visible
         # to the parent or to a sibling arm.
         sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check
+        # N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = self.enclosing_loop_count
         # Share the method-scoped param-type table by reference so if/else
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
         sub._local_aliases = dict(self._local_aliases)
+        sub._renamed_private_params = dict(self._renamed_private_params)
+        sub._shadowing_loop_vars = set(self._shadowing_loop_vars)
+        # N-046: the block inherits the enclosing renames and loop variables by
+        # value, so a rename made inside it ends with it.
+        sub._scope_renames = dict(self._scope_renames)
+        sub._loop_vars = set(self._loop_vars)
         sub._local_byte_vars = set(self._local_byte_vars)
         # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1012,6 +1173,7 @@ class _LowerCtx:
                     condition=stmt.condition,
                     then=stmt.then,
                     else_=remaining,
+                    source_location=stmt.source_location,
                 )
                 self.lower_statement(modified_if, reads_after_block)
                 return
@@ -1060,10 +1222,16 @@ class _LowerCtx:
 
     def _lower_variable_decl(self, stmt: VariableDeclStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.init)
-        self.add_local(stmt.name)
-        if _is_byte_typed_expr(stmt.init, self):
-            self._local_byte_vars.add(stmt.name)
-        self.emit_named(stmt.name, _make_load_const_string("@ref:" + value_ref))
+        # Byte-typedness of the initialiser is judged before the new name is in
+        # scope (the initialiser reads the OUTER binding of a shadowed name).
+        is_bytes = _is_byte_typed_expr(stmt.init, self)
+        # N-046 / N-047: a declaration reusing an enclosing binding's name is
+        # alpha-renamed (see ``declare_local``).
+        binding_name = self.declare_local(stmt.name)
+        self.add_local(binding_name)
+        if is_bytes:
+            self._local_byte_vars.add(binding_name)
+        self.emit_named(binding_name, _make_load_const_string("@ref:" + value_ref))
 
     def _lower_assignment(self, stmt: AssignmentStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.value)
@@ -1075,7 +1243,7 @@ class _LowerCtx:
 
         # local = expr -> re-bind
         if isinstance(stmt.target, Identifier):
-            self.emit_named(stmt.target.name, _make_load_const_string("@ref:" + value_ref))
+            self.emit_named(self.local_target(stmt.target.name), _make_load_const_string("@ref:" + value_ref))
             return
 
         # For other targets, lower the target expression
@@ -1289,7 +1457,8 @@ class _LowerCtx:
         def last_rebind_order(branch) -> list[str]:
             last_index: dict[str, int] = {}
             for i, b in enumerate(branch.bindings):
-                if self.is_local(b.name):
+                # N-360: a reassigned parameter merges like a local (by its slot name).
+                if self.is_local(b.name) or self.is_param_slot(b.name):
                     last_index[b.name] = i
             return [n for n, _ in sorted(last_index.items(), key=lambda kv: kv[1])]
 
@@ -1307,6 +1476,17 @@ class _LowerCtx:
         # be statically determinable (issue #121).
         start, step, count = _extract_loop_shape(stmt)
 
+        # N-202: bound the PRODUCT along the nesting path, not just this loop.
+        total_loop_count = self.enclosing_loop_count * count
+        if total_loop_count > MAX_LOOP_COUNT:
+            raise ValueError(
+                f"{_at(stmt.source_location)}"
+                f"For loop unrolls to {count} iterations nested inside an "
+                f"enclosing loop of total count {self.enclosing_loop_count}, "
+                f"producing {total_loop_count} total iterations, exceeding the "
+                f"maximum loop count of {MAX_LOOP_COUNT}."
+            )
+
         # Lower body into sub-context. The body repeats, so every read anywhere
         # in it is a read that happens after any given statement inside it.
         body_reads = set(reads_after)
@@ -1314,14 +1494,34 @@ class _LowerCtx:
             _collect_statement_reads(s, body_reads)
 
         body_ctx = self.sub_context()
+        body_ctx.enclosing_loop_count = total_loop_count
+        if stmt.init and self.is_property(stmt.init.name):
+            body_ctx._shadowing_loop_vars.add(stmt.init.name)
+        # N-046: a loop variable reusing an enclosing binding's name is
+        # alpha-renamed in the body's scope (see ``declare_local``).
+        iter_var = ""
+        if stmt.init:
+            iter_var = body_ctx.declare_local(stmt.init.name)
+            body_ctx._loop_vars.add(stmt.init.name)
         body_ctx.lower_statements(stmt.body, frozenset(body_reads))
         self.sync_counter(body_ctx)
+
+        # N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+        # intrinsic in the body registered its ref on body_ctx, which is
+        # dropped here, so the continuation hash would not commit to that
+        # output. Merging the refs cannot work (one body name denotes N
+        # unrolled slots), so refuse. ``lower_to_anf`` is public, so this
+        # cannot rely on the validator having run.
+        if body_ctx.get_add_output_refs() or body_ctx.get_add_data_output_refs():
+            raise ValueError(loop_output_intrinsic_msg(
+                _first_output_intrinsic(body_ctx.bindings) or "addOutput"
+            ))
 
         self.emit(ANFValue(
             kind="loop",
             count=count,
             body=body_ctx.bindings,
-            iter_var=stmt.init.name if stmt.init else "",
+            iter_var=iter_var,
             start=start,
             step=step,
         ))
@@ -1467,6 +1667,16 @@ class _LowerCtx:
         if name == "this":
             return self.emit(_make_load_const_string("@this"))
 
+        # N-046 / N-047: a declaration that shadowed an enclosing binding is
+        # the innermost binding of its name, ahead of params and param aliases.
+        # A renamed loop variable is not a local; it is read with load_param
+        # like every loop variable.
+        renamed = self._scope_renames.get(name)
+        if renamed is not None:
+            if self.is_local(renamed):
+                return self.get_local_alias(renamed) or renamed
+            return self.emit(ANFValue(kind="load_param", name=renamed))
+
         # Param alias takes precedence over normal param lookup. Set
         # when a private method's body is being inlined into this
         # context — the private's param names map to the caller's arg
@@ -1477,15 +1687,21 @@ class _LowerCtx:
 
         # Check if it's a registered parameter (e.g. txPreimage)
         if self.is_param(name):
-            return self.emit(ANFValue(kind="load_param", name=name))
+            return self.emit(ANFValue(kind="load_param", name=self.param_slot(name)))
 
         # Check if it's a local variable -- reference it directly
         # (or use its alias if reassigned by an if-statement)
-        if self.is_local(name):
-            alias = self.get_local_alias(name)
+        local = self.local_name(name)
+        if self.is_local(local):
+            alias = self.get_local_alias(local)
             if alias:
                 return alias
-            return name
+            return local
+
+        # N-016: a loop variable named like a property is the loop variable,
+        # not the property (it used to fall through to load_prop below).
+        if name in self._shadowing_loop_vars:
+            return self.emit(ANFValue(kind="load_param", name=local))
 
         # Check if it's a contract property
         if self.is_property(name):
@@ -1700,6 +1916,16 @@ class _LowerCtx:
             ))
             return self.emit(_make_assert(out_eq_ref))
 
+        # continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+        # auto-injected ``_newAmount`` witness. It exists only in a public
+        # StatefulSmartContract method that continues through the default
+        # single-output continuation; anywhere else (private helpers, terminal
+        # methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+        if isinstance(callee, Identifier) and callee.name == "continuationAmount":
+            if not self.is_param("_newAmount"):
+                raise ValueError(CONTINUATION_AMOUNT_UNAVAILABLE)
+            return self.emit(ANFValue(kind="load_param", name="_newAmount"))
+
         # currentBlockHeight() -> bigint. Pure source-level desugar to
         # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
         # methods (typecheck enforces). No new ANF kind or stack codegen needed.
@@ -1741,14 +1967,32 @@ class _LowerCtx:
             self.add_data_output_ref(ref)
             return ref
 
-        # this.addOutput(satoshis, val1, val2, ...) via MemberExpr
+        # this.addOutput(satoshis, val1, val2, ...) via MemberExpr. N-257: an
+        # explicit-receiver `this.addOutput(...)` / `self.add_output(...)`
+        # call reaches THIS branch in every surface parser that does not
+        # specially normalise addOutput to a bare property access --
+        # parser_ts.py's `_parse_postfix` and parser_ruby.py's
+        # `_parse_postfix_from` both build a MemberExpr callee for every
+        # `this.x(...)`/`self.x(...)` call. (Only parser_zig.py normalises
+        # addOutput/addRawOutput/addDataOutput/getStateScript to
+        # PropertyAccessExpr outright, and parser_ruby.py's
+        # `_rewrite_bare_method_calls` does the same for a BARE
+        # `add_output(...)` call with no receiver.) This branch must unwrap a
+        # trailing array-literal value list the same way the
+        # PropertyAccessExpr branch above does (and the same way TS's
+        # 04-anf-lower.ts applies `normalizedAddOutputArgs` to BOTH its
+        # property_access and member_expr addOutput branches) -- otherwise
+        # the array literal lowers as a metadata-only `array_literal` ANF
+        # binding that never reaches the stack, and `_lower_add_output`'s
+        # `bring_to_top` crashes with "value '<ref>' not found on stack".
         if isinstance(callee, MemberExpr):
             if (
                 isinstance(callee.object, Identifier)
                 and callee.object.name == "this"
                 and callee.property == "addOutput"
             ):
-                arg_refs = self._lower_args(e.args)
+                flat_args = _flatten_add_output_args(e.args)
+                arg_refs = self._lower_args(flat_args)
                 satoshis = arg_refs[0]
                 state_values = arg_refs[1:]
                 ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
@@ -1902,15 +2146,36 @@ class _LowerCtx:
                 method=method_name, args=arg_refs,
             ))
 
+        # N-362: a parameter the body reassigns is not aliased -- a write cannot
+        # rebind an alias, so the helper read the caller's argument after it and
+        # the write landed on the caller's same-named variable. It is bound as a
+        # local of the helper below.
         aliased: list[str] = []
+        reassigned: list[int] = []
         for i, param in enumerate(method.params):
             if i >= len(arg_refs):
                 break
+            if _statements_reassign(method.body, param.name):
+                reassigned.append(i)
+                continue
             self.push_param_alias(param.name, arg_refs[i])
             aliased.append(param.name)
 
+        # N-047: the helper body is its own lexical scope. Its locals are
+        # declared against the caller's (a collision is alpha-renamed by
+        # ``declare_local``) and go out of scope when it returns.
+        caller_scope = self.enter_inlined_scope()
+        # N-362: ``let <param> = <arg>`` for each reassigned parameter (spec 6.3).
+        for i in reassigned:
+            param = method.params[i]
+            binding_name = self.declare_local(param.name)
+            self.add_local(binding_name)
+            if _type_node_to_string(param.type) in _BYTE_TYPES:
+                self._local_byte_vars.add(binding_name)
+            self.emit_named(binding_name, _make_load_const_string("@ref:" + arg_refs[i]))
         start_index = len(self.bindings)
         self.lower_statements(method.body)
+        self.leave_inlined_scope(caller_scope)
         end_index = len(self.bindings)
 
         for name in reversed(aliased):
@@ -1978,6 +2243,16 @@ class _LowerCtx:
         else_ctx._lower_ternary_arm(e.alternate)
         self.sync_counter(else_ctx)
 
+        # N-049 backstop: an output intrinsic in an arm registered its ref on
+        # the arm's sub-context, which is dropped here, so the continuation
+        # hash would not commit to that output. ``lower_to_anf`` is public, so
+        # this cannot rely on the validator having run.
+        for arm_ctx in (then_ctx, else_ctx):
+            if arm_ctx.get_add_output_refs() or arm_ctx.get_add_data_output_refs():
+                raise ValueError(ternary_output_intrinsic_msg(
+                    _first_output_intrinsic(arm_ctx.bindings) or "addOutput"
+                ))
+
         return self.emit(ANFValue(
             kind="if",
             cond=cond_ref,
@@ -1992,7 +2267,7 @@ class _LowerCtx:
 
         # If the operand is a named variable, update it
         if isinstance(e.operand, Identifier):
-            self.emit_named(e.operand.name, _make_load_const_string("@ref:" + result))
+            self.emit_named(self.local_target(e.operand.name), _make_load_const_string("@ref:" + result))
         if isinstance(e.operand, PropertyAccessExpr):
             self.emit(_make_update_prop(e.operand.property, result))
 
@@ -2007,7 +2282,7 @@ class _LowerCtx:
 
         # If the operand is a named variable, update it
         if isinstance(e.operand, Identifier):
-            self.emit_named(e.operand.name, _make_load_const_string("@ref:" + result))
+            self.emit_named(self.local_target(e.operand.name), _make_load_const_string("@ref:" + result))
         if isinstance(e.operand, PropertyAccessExpr):
             self.emit(_make_update_prop(e.operand.property, result))
 
@@ -2183,6 +2458,74 @@ def _collect_statement_reads(stmt: Statement, out: set[str]) -> None:
         _collect_expression_reads(stmt.expr, out)
 
 
+def _statements_reassign(stmts: list[Statement] | None, name: str) -> bool:
+    """N-360: whether any statement writes the bare identifier ``name`` -- an
+    assignment to it, or a ``++`` / ``--`` of it -- anywhere, nested blocks
+    included."""
+    return any(_statement_reassigns(s, name) for s in stmts or [])
+
+
+def _statement_reassigns(stmt: Statement | None, name: str) -> bool:
+    if stmt is None:
+        return False
+    if isinstance(stmt, VariableDeclStmt):
+        return _expression_reassigns(stmt.init, name)
+    if isinstance(stmt, AssignmentStmt):
+        return (
+            (isinstance(stmt.target, Identifier) and stmt.target.name == name)
+            or _expression_reassigns(stmt.target, name)
+            or _expression_reassigns(stmt.value, name)
+        )
+    if isinstance(stmt, IfStmt):
+        return (
+            _expression_reassigns(stmt.condition, name)
+            or _statements_reassign(stmt.then, name)
+            or _statements_reassign(stmt.else_, name)
+        )
+    if isinstance(stmt, ForStmt):
+        return (
+            _statement_reassigns(stmt.init, name)
+            or _expression_reassigns(stmt.condition, name)
+            or _statement_reassigns(stmt.update, name)
+            or _statements_reassign(stmt.body, name)
+        )
+    if isinstance(stmt, ReturnStmt):
+        return _expression_reassigns(stmt.value, name)
+    if isinstance(stmt, ExpressionStmt):
+        return _expression_reassigns(stmt.expr, name)
+    return False
+
+
+def _expression_reassigns(expr: Expression | None, name: str) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, BinaryExpr):
+        return _expression_reassigns(expr.left, name) or _expression_reassigns(expr.right, name)
+    if isinstance(expr, UnaryExpr):
+        return _expression_reassigns(expr.operand, name)
+    if isinstance(expr, CallExpr):
+        return _expression_reassigns(expr.callee, name) or any(
+            _expression_reassigns(a, name) for a in expr.args
+        )
+    if isinstance(expr, MemberExpr):
+        return _expression_reassigns(expr.object, name)
+    if isinstance(expr, TernaryExpr):
+        return (
+            _expression_reassigns(expr.condition, name)
+            or _expression_reassigns(expr.consequent, name)
+            or _expression_reassigns(expr.alternate, name)
+        )
+    if isinstance(expr, IndexAccessExpr):
+        return _expression_reassigns(expr.object, name) or _expression_reassigns(expr.index, name)
+    if isinstance(expr, (IncrementExpr, DecrementExpr)):
+        return (
+            isinstance(expr.operand, Identifier) and expr.operand.name == name
+        ) or _expression_reassigns(expr.operand, name)
+    if isinstance(expr, ArrayLiteralExpr):
+        return any(_expression_reassigns(e, name) for e in expr.elements)
+    return False
+
+
 def _collect_expression_reads(expr: Expression | None, out: set[str]) -> None:
     """Collect every identifier an expression reads."""
     if expr is None:
@@ -2284,7 +2627,7 @@ def _branch_output_rejection_reason(
 
     # 4. INV-B: a rebound local that survives the ``if`` is protected from being
     #    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
-    live_merged = [name for name in merged_locals if name in reads_after]
+    live_merged = [name for name in merged_locals if _source_local_name(name) in reads_after]
     if live_merged:
         return f"reassigns local variables read after it ({', '.join(live_merged)})"
 
@@ -2307,6 +2650,13 @@ def _collect_updated_props(bindings: list[ANFBinding], out: list[str]) -> None:
         elif value.kind == "loop":
             _collect_updated_props(value.body or [], out)
 
+
+# F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+CONTINUATION_AMOUNT_UNAVAILABLE = (
+    "continuationAmount() is only available in a public StatefulSmartContract method whose state "
+    "continues through the default single-output continuation (it mutates state or emits a data "
+    "output, and does not call addOutput/addRawOutput)"
+)
 
 def _make_assert(value_ref: str) -> ANFValue:
     raw = value_ref
@@ -2680,6 +3030,8 @@ class _UpdateBranch:
     prop_name: str
     value_bindings: list[ANFBinding]
     value_ref: str
+    # N-350: location of the branch's original update_prop statement.
+    update_loc: SourceLocation | None = None
 
 
 def _max_temp_index(bindings: list[ANFBinding]) -> int:
@@ -2717,8 +3069,9 @@ def _all_bindings_side_effect_free(bindings: list[ANFBinding]) -> bool:
 
 def _extract_branch_update(
     bindings: list[ANFBinding],
-) -> tuple[str, list[ANFBinding], str] | None:
-    """If *bindings* ends with ``update_prop``, return (prop_name, value_bindings, value_ref)."""
+) -> tuple[str, list[ANFBinding], str, SourceLocation | None] | None:
+    """If *bindings* ends with ``update_prop``, return
+    (prop_name, value_bindings, value_ref, update_loc)."""
     if not bindings:
         return None
     last = bindings[-1]
@@ -2727,7 +3080,7 @@ def _extract_branch_update(
     value_bindings = bindings[:-1]
     if not _all_bindings_side_effect_free(value_bindings):
         return None
-    return last.value.name or "", value_bindings, last.value.value_ref or ""
+    return last.value.name or "", value_bindings, last.value.value_ref or "", last.source_loc
 
 
 def _is_assert_false_else(bindings: list[ANFBinding]) -> bool:
@@ -2777,7 +3130,7 @@ def _collect_update_branches(
     then_update = _extract_branch_update(then_bindings)
     if then_update is None:
         return None
-    prop_name, val_bindings, val_ref = then_update
+    prop_name, val_bindings, val_ref, update_loc = then_update
 
     branches: list[_UpdateBranch] = [
         _UpdateBranch(
@@ -2786,6 +3139,7 @@ def _collect_update_branches(
             prop_name=prop_name,
             value_bindings=val_bindings,
             value_ref=val_ref,
+            update_loc=update_loc,
         )
     ]
 
@@ -2817,7 +3171,7 @@ def _collect_update_branches(
     # Otherwise, else branch should end with update_prop (final else)
     else_update = _extract_branch_update(else_bindings)
     if else_update is not None:
-        e_prop_name, e_val_bindings, e_val_ref = else_update
+        e_prop_name, e_val_bindings, e_val_ref, e_update_loc = else_update
         branches.append(
             _UpdateBranch(
                 cond_setup_bindings=[],
@@ -2825,6 +3179,7 @@ def _collect_update_branches(
                 prop_name=e_prop_name,
                 value_bindings=e_val_bindings,
                 value_ref=e_val_ref,
+                update_loc=e_update_loc,
             )
         )
         return branches
@@ -2898,6 +3253,52 @@ def _remap_value_refs(value: ANFValue, name_map: dict[str, str]) -> ANFValue:
     return new_v
 
 
+def _drop_terminal_if_results(bindings: list[ANFBinding]) -> None:
+    """N-261: mirrors the TS reference's ``dropTerminalIfResults``.
+
+    A TERMINAL ``if`` (the last binding of a public method body, or
+    recursively of an arm of a terminal ``if`` -- the rule stack lowering uses
+    for ``terminal_assert``) carries no results. Its arms' final asserts are
+    the script's verdict, so nothing reads a merged local afterwards, but the
+    ``_append_branch_results`` block sat AFTER the assert and every tier
+    refused the legal
+    ``let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }``.
+    Strips exactly that block (N ``__merge$i`` copies then N rebinds of LOCAL
+    results) and the results list; any other shape is left alone. In place.
+    """
+    if not bindings:
+        return
+    node = bindings[-1].value
+    if node.kind != "if":
+        return
+    then_arm = node.then if node.then is not None else []
+    else_arm = node.else_ if node.else_ is not None else []
+    results = node.results or []
+    n = len(results)
+    if n > 0:
+        def const_ref(v: ANFValue, want: str) -> bool:
+            return v.kind == "load_const" and isinstance(v.raw_value, str) and v.raw_value == want
+
+        def is_block(arm: list[ANFBinding]) -> bool:
+            if len(arm) < 2 * n:
+                return False
+            block = arm[len(arm) - 2 * n:]
+            for i, name in enumerate(results):
+                temp = f"{MERGED_LOCAL_TEMP_PREFIX}{i}"
+                if (block[i].name != temp or not const_ref(block[i].value, f"@ref:{name}")
+                        or block[n + i].name != name
+                        or not const_ref(block[n + i].value, f"@ref:{temp}")):
+                    return False
+            return True
+
+        if is_block(then_arm) and is_block(else_arm):
+            del then_arm[len(then_arm) - 2 * n:]
+            del else_arm[len(else_arm) - 2 * n:]
+            node.results = None
+    _drop_terminal_if_results(then_arm)
+    _drop_terminal_if_results(else_arm)
+
+
 def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
     """Transform if-bindings whose branches all end with ``update_prop`` into
     flat conditional assignments."""
@@ -2918,6 +3319,10 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
             continue
 
         if_val = binding.value
+        # N-350: the rewrite replaces this located `if`; keep its location on
+        # the shared condition temporaries, and each branch's own update
+        # statement location on that branch's synthesized bindings (Java F-188).
+        if_loc = binding.source_loc
         branches = _collect_update_branches(
             if_val.cond or "",
             _strip_declared_results(if_val.then or [], if_val.results),
@@ -2941,6 +3346,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 result.append(ANFBinding(
                     name=new_name,
                     value=_remap_value_refs(csb.value, name_map),
+                    source_loc=csb.source_loc or if_loc,
                 ))
             if branch.cond_ref is not None:
                 cond_refs.append(name_map.get(branch.cond_ref, branch.cond_ref))
@@ -2972,6 +3378,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         op="!",
                         operand=cond_refs[j],
                     ),
+                    source_loc=if_loc,
                 ))
                 negated_conds.append(neg_name)
 
@@ -2988,6 +3395,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=and_ref,
                         right=negated_conds[j],
                     ),
+                    source_loc=if_loc,
                 ))
                 and_ref = and_name
 
@@ -3002,6 +3410,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=and_ref,
                         right=cond_refs[i],
                     ),
+                    source_loc=if_loc,
                 ))
                 effective_conds.append(final_name)
             else:
@@ -3044,20 +3453,25 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         left=or_ref,
                         right=cond_refs[i],
                     ),
+                    source_loc=if_loc,
                 ))
                 or_ref = or_name
             result.append(ANFBinding(
                 name=fresh(),
                 value=_make_assert(or_ref),
+                source_loc=if_loc,
             ))
 
         # 3. For each branch, emit: load_old, conditional if-expression, update_prop
         for i, branch in enumerate(branches):
+            branch_loc = branch.update_loc or if_loc
+
             # Load old property value
             old_prop_ref = fresh()
             result.append(ANFBinding(
                 name=old_prop_ref,
                 value=ANFValue(kind="load_prop", name=branch.prop_name),
+                source_loc=branch_loc,
             ))
 
             # Remap value bindings for the then-branch
@@ -3069,6 +3483,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 then_bindings.append(ANFBinding(
                     name=new_name,
                     value=_remap_value_refs(vb.value, branch_map),
+                    source_loc=vb.source_loc or branch_loc,
                 ))
 
             # An arm's VALUE is its LAST binding. value_bindings is everything
@@ -3096,6 +3511,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         raw_value=value_ref_str,
                         const_string=value_ref_str,
                     ),
+                    source_loc=branch_loc,
                 ))
 
             # Else branch: keep old property value
@@ -3109,6 +3525,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                         raw_value=ref_str,
                         const_string=ref_str,
                     ),
+                    source_loc=branch_loc,
                 ),
             ]
 
@@ -3122,6 +3539,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     then=then_bindings,
                     else_=else_bindings,
                 ),
+                source_loc=branch_loc,
             ))
 
             # Emit update_prop pointing at the if-expression
@@ -3134,6 +3552,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     raw_value=cond_if_ref,
                     value_ref=cond_if_ref,
                 ),
+                source_loc=branch_loc,
             ))
 
     return result

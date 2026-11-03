@@ -1,10 +1,10 @@
 use runar::prelude::*;
 
 #[runar::contract]
-struct Stateful {
-    count: Int,
+pub struct Stateful {
+    pub count: Int,
     #[readonly]
-    max_count: Int,
+    pub max_count: Int,
 }
 
 impl Stateful {

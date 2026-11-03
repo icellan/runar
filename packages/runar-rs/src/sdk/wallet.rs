@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::types::{RunarArtifact, TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
 use super::signer::Signer;
+use super::oppushtx;
 use super::script_utils::build_p2pkh_script;
 use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 use super::unsound_primitives::assert_unsound_primitives_acknowledged;
@@ -182,6 +183,11 @@ pub struct WalletProvider<W: WalletClient> {
     /// Optional injected broadcaster (issue #107). When set, `broadcast()`
     /// delegates here instead of the hardcoded ARC URL path.
     broadcaster: Option<Box<dyn Broadcaster>>,
+    /// N-040: bounds the ARC `/v1/tx` broadcast request. Without it, a hung
+    /// ARC deployment (accepts the connection, never responds) blocks
+    /// `broadcast()` forever — ureq's default has no read timeout. Default:
+    /// 30s; override with `with_arc_timeout`.
+    arc_timeout: std::time::Duration,
 }
 
 impl<W: WalletClient> WalletProvider<W> {
@@ -223,7 +229,14 @@ impl<W: WalletClient> WalletProvider<W> {
             tx_cache: HashMap::new(),
             cached_pub_key: None,
             broadcaster: None,
+            arc_timeout: std::time::Duration::from_secs(30),
         }
+    }
+
+    /// Override the ARC broadcast request timeout (N-040). Default: 30s.
+    pub fn with_arc_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.arc_timeout = timeout;
+        self
     }
 
     /// Inject a shared broadcaster (issue #107).
@@ -358,6 +371,8 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
             ));
         }
         let raw_hex = tx.to_hex().map_err(|e| format!("WalletProvider broadcast: to_hex failed: {}", e))?;
+        let raw_bytes = hex_to_bytes(&raw_hex)?;
+        let txid = compute_txid(&raw_bytes);
 
         // Issue #107: when a broadcaster is injected, delegate to it so the SDK
         // and the calling layer share one broadcaster instance/config (avoids
@@ -366,29 +381,34 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
         // the immutable borrow of `self.broadcaster` before we mutate tx_cache.
         let injected = self.broadcaster.as_ref().map(|b| b.broadcast(tx));
         if let Some(result) = injected {
-            let txid = result?;
-            self.tx_cache.insert(txid.clone(), raw_hex);
-            return Ok(txid);
+            let reported_txid = result?;
+            // N-040: same rule as F-042's check_arc_accepted — an injected
+            // broadcaster answering with a different transaction's txid must
+            // not be treated as having broadcast THIS transaction.
+            if reported_txid.to_ascii_lowercase() != txid {
+                return Err(format!(
+                    "WalletProvider broadcast: injected broadcaster reported txid {} but the transaction sent has txid {}",
+                    reported_txid, txid
+                ));
+            }
+            self.tx_cache.insert(reported_txid.clone(), raw_hex);
+            return Ok(reported_txid);
         }
-
-        let raw_bytes = hex_to_bytes(&raw_hex)?;
-        let txid = compute_txid(&raw_bytes);
 
         // POST to ARC as application/octet-stream
         let arc_endpoint = format!("{}/v1/tx", self.arc_url);
         match ureq::post(&arc_endpoint)
+            .timeout(self.arc_timeout)
             .set("Content-Type", "application/octet-stream")
             .send_bytes(&raw_bytes)
         {
-            // 2xx: ARC accepted the transaction.
+            // 2xx: ARC answered; the body still has to say it ACCEPTED this tx
+            // (F-042).
             Ok(resp) => {
-                let body = resp.into_string().unwrap_or_default();
-                if let Ok(json) = serde_json::from_str::<Value>(&body) {
-                    if let Some(arc_txid) = json.get("txid").and_then(|v| v.as_str()) {
-                        self.tx_cache.insert(arc_txid.to_string(), raw_hex);
-                        return Ok(arc_txid.to_string());
-                    }
-                }
+                let body = resp.into_string().map_err(|e| {
+                    format!("WalletProvider broadcast: reading ARC response from {}: {}", arc_endpoint, e)
+                })?;
+                let txid = check_arc_accepted(&body, &txid)?;
                 self.tx_cache.insert(txid.clone(), raw_hex);
                 Ok(txid)
             }
@@ -567,8 +587,11 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
         let sha_hash = Sha256::digest(&pub_key_bytes);
         let pkh = Ripemd160::digest(sha_hash);
 
-        // Return as 40-char hex (raw pubkey hash)
-        Ok(bytes_to_hex(&pkh))
+        // Signer contract: Base58Check P2PKH address, mainnet (0x00) like
+        // LocalSigner (F-146; was the raw 40-hex hash160).
+        let mut payload = vec![0x00u8];
+        payload.extend_from_slice(&pkh);
+        Ok(bs58::encode(&payload).with_check().into_string())
     }
 
     fn sign(
@@ -581,9 +604,19 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
     ) -> Result<String, String> {
         let flag = sig_hash_type.unwrap_or(SIGHASH_ALL_FORKID);
 
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.is_empty() {
+            return Err(format!(
+                "WalletSigner: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
+
         // 1. Compute BIP-143 sighash from the transaction context
         let tx_bytes = hex_to_bytes(tx_hex)?;
-        let tx = parse_raw_tx(&tx_bytes)?;
+        // F-137: parse + build with the SDK's one BIP-143 builder (oppushtx.rs).
+        let tx = oppushtx::parse_raw_tx(&tx_bytes).map_err(|e| format!("WalletSigner: {}", e))?;
 
         if input_index >= tx.inputs.len() {
             return Err(format!(
@@ -594,7 +627,7 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
         }
 
         let subscript_bytes = hex_to_bytes(subscript)?;
-        let sighash = bip143_sighash(&tx, input_index, &subscript_bytes, satoshis as u64, flag);
+        let sighash = sha256d(&oppushtx::bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, flag));
 
         // 2. Send to wallet for signing
         let pid = (self.protocol_id.0, self.protocol_id.1.as_str());
@@ -698,7 +731,7 @@ pub fn deploy_with_wallet<W: WalletClient>(
 }
 
 // ---------------------------------------------------------------------------
-// BIP-143 sighash computation (local copy for module independence)
+// Sighash constant + sha256d (the BIP-143 builder itself lives in oppushtx.rs, F-137)
 // ---------------------------------------------------------------------------
 
 const SIGHASH_ALL_FORKID: u32 = 0x41;
@@ -709,52 +742,6 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&second);
     out
-}
-
-fn bip143_sighash(
-    tx: &ParsedTx,
-    input_index: usize,
-    subscript: &[u8],
-    satoshis: u64,
-    sig_hash_type: u32,
-) -> [u8; 32] {
-    let mut prevouts_data = Vec::new();
-    for inp in &tx.inputs {
-        prevouts_data.extend_from_slice(&inp.prev_txid_bytes);
-        prevouts_data.extend_from_slice(&inp.prev_output_index.to_le_bytes());
-    }
-    let hash_prevouts = sha256d(&prevouts_data);
-
-    let mut sequence_data = Vec::new();
-    for inp in &tx.inputs {
-        sequence_data.extend_from_slice(&inp.sequence.to_le_bytes());
-    }
-    let hash_sequence = sha256d(&sequence_data);
-
-    let mut outputs_data = Vec::new();
-    for out in &tx.outputs {
-        outputs_data.extend_from_slice(&out.satoshis.to_le_bytes());
-        write_var_int(&mut outputs_data, out.script.len() as u64);
-        outputs_data.extend_from_slice(&out.script);
-    }
-    let hash_outputs = sha256d(&outputs_data);
-
-    let input = &tx.inputs[input_index];
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&tx.version.to_le_bytes());
-    preimage.extend_from_slice(&hash_prevouts);
-    preimage.extend_from_slice(&hash_sequence);
-    preimage.extend_from_slice(&input.prev_txid_bytes);
-    preimage.extend_from_slice(&input.prev_output_index.to_le_bytes());
-    write_var_int(&mut preimage, subscript.len() as u64);
-    preimage.extend_from_slice(subscript);
-    preimage.extend_from_slice(&satoshis.to_le_bytes());
-    preimage.extend_from_slice(&input.sequence.to_le_bytes());
-    preimage.extend_from_slice(&hash_outputs);
-    preimage.extend_from_slice(&tx.locktime.to_le_bytes());
-    preimage.extend_from_slice(&sig_hash_type.to_le_bytes());
-
-    sha256d(&preimage)
 }
 
 // ---------------------------------------------------------------------------
@@ -864,21 +851,6 @@ fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
     })
 }
 
-fn write_var_int(buf: &mut Vec<u8>, n: u64) {
-    if n < 0xfd {
-        buf.push(n as u8);
-    } else if n <= 0xffff {
-        buf.push(0xfd);
-        buf.extend_from_slice(&(n as u16).to_le_bytes());
-    } else if n <= 0xffff_ffff {
-        buf.push(0xfe);
-        buf.extend_from_slice(&(n as u32).to_le_bytes());
-    } else {
-        buf.push(0xff);
-        buf.extend_from_slice(&n.to_le_bytes());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Hex helpers
 // ---------------------------------------------------------------------------
@@ -901,6 +873,55 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// Compute the txid (double SHA-256 of raw tx, reversed) from raw tx bytes.
+/// ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+/// accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+/// containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+const ARC_REJECTED_TX_STATUSES: [&str; 5] = [
+    "DOUBLE_SPEND_ATTEMPTED", "REJECTED", "INVALID", "MALFORMED", "MINED_IN_STALE_BLOCK",
+];
+
+/// Validate a 2xx ARC `/v1/tx` body (F-042). Returns ARC's txid only when ARC
+/// accepted the transaction and that txid is `local_txid`.
+fn check_arc_accepted(body: &str, local_txid: &str) -> Result<String, String> {
+    let json: Value = serde_json::from_str(body)
+        .ok()
+        .filter(|v: &Value| v.is_object())
+        .ok_or_else(|| format!("WalletProvider broadcast: ARC returned a non-JSON body: {}", body))?;
+    let text = |k: &str| json.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if let Some(code) = json.get("status").and_then(|v| v.as_f64()) {
+        if !(200.0..=299.0).contains(&code) {
+            return Err(format!(
+                "WalletProvider broadcast: ARC broadcast failed (status {}): {}",
+                code,
+                format!("{} {}", text("title"), text("detail")).trim()
+            ));
+        }
+    }
+    let tx_status = text("txStatus");
+    let extra_info = text("extraInfo");
+    let st = tx_status.to_ascii_uppercase();
+    if ARC_REJECTED_TX_STATUSES.contains(&st.as_str())
+        || st.contains("ORPHAN")
+        || extra_info.to_ascii_uppercase().contains("ORPHAN")
+    {
+        return Err(format!(
+            "WalletProvider broadcast: ARC did not accept the transaction (txStatus {}): {}",
+            tx_status, extra_info
+        ));
+    }
+    let arc_txid = text("txid");
+    if arc_txid.is_empty() {
+        return Err(format!("WalletProvider broadcast: ARC response carries no txid: {}", body));
+    }
+    if arc_txid.to_ascii_lowercase() != local_txid {
+        return Err(format!(
+            "WalletProvider broadcast: ARC reported txid {} but the transaction sent has txid {}",
+            arc_txid, local_txid
+        ));
+    }
+    Ok(local_txid.to_string())
+}
+
 fn compute_txid(raw_bytes: &[u8]) -> String {
     let hash = sha256d(raw_bytes);
     // txid is displayed in reversed byte order
@@ -1025,9 +1046,34 @@ mod tests {
         let wallet = MockWalletClient::new();
         let signer = WalletSigner::new(wallet, (2, "test".to_string()), "1".to_string());
         let addr = signer.get_address().unwrap();
-        // Address is a 40-char hex pubkey hash
-        assert_eq!(addr.len(), 40);
-        assert!(addr.chars().all(|c| c.is_ascii_hexdigit()));
+        // F-146: Signer::get_address is the Base58Check P2PKH address, the same
+        // mainnet address LocalSigner gives for the same key (the mock's key is
+        // G = private key 1). It used to be the raw 40-hex hash160, which an
+        // address-keyed provider never matches. Proves equality with LocalSigner
+        // and the hash160 round-trip; does not prove a live provider lookup.
+        let local = super::super::signer::LocalSigner::new(&format!("{}01", "00".repeat(31))).unwrap();
+        assert_eq!(addr, local.get_address().unwrap());
+        assert_eq!(addr, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH");
+        assert_eq!(
+            build_p2pkh_script(&addr),
+            "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
+        );
+    }
+
+    // F-040: WalletSigner computes the BIP-143 digest locally, so an empty
+    // subscript must be refused before the wallet is asked to sign.
+    #[test]
+    fn f040_wallet_signer_refuses_empty_subscript() {
+        let wallet = MockWalletClient::new();
+        let signer = WalletSigner::new(wallet, (2, "test".to_string()), "1".to_string());
+        let tx_hex = format!(
+            "0100000001{}0000000000ffffffff015000000000000000015100000000",
+            "00".repeat(32)
+        );
+        let err = signer
+            .sign(&tx_hex, 0, "", 1000, None)
+            .expect_err("WalletSigner.sign with an empty subscript must fail");
+        assert!(err.contains("empty subscript"), "error: {}", err);
     }
 
     #[test]
@@ -1304,6 +1350,38 @@ mod tests {
         assert_eq!(utxos[0].output_index, 0);
     }
 
+    // N-043: an output with an empty / absent locking script is dropped
+    // (fail-closed, the TS reference policy).
+    // PROVES: only the output carrying the signer's P2PKH script is returned.
+    // DOES NOT PROVE: behaviour against a real BRC-100 wallet.
+    #[test]
+    fn wallet_provider_get_utxos_drops_empty_locking_script() {
+        let wallet = MockWalletClient::new();
+        let pub_key = wallet.public_key.clone();
+        let expected_script = build_p2pkh_script(&pub_key);
+        wallet.add_output(&format!("{}.0", "aa".repeat(32)), 50_000, &expected_script);
+        wallet.add_output(&format!("{}.1", "bb".repeat(32)), 30_000, "");
+        wallet.outputs.borrow_mut().push(WalletOutput {
+            outpoint: format!("{}.2", "cc".repeat(32)),
+            satoshis: 20_000,
+            locking_script: None,
+            spendable: true,
+        });
+
+        let mut provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None, None, None, None, None,
+        );
+        provider.get_derived_pub_key().unwrap();
+
+        let utxos = provider.get_utxos("ignored").unwrap();
+        assert_eq!(utxos.len(), 1);
+        assert_eq!(utxos[0].satoshis, 50_000);
+    }
+
     #[test]
     fn wallet_provider_ensure_funding_creates_action_when_insufficient() {
         let wallet = MockWalletClient::new();
@@ -1395,6 +1473,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1589,6 +1668,55 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    /// N-040: a mock ARC that accepts the TCP connection, fully drains the
+    /// client's request, then never writes a response — simulating a hung
+    /// ARC deployment. Returns its base URL. The server thread sleeps for a
+    /// few seconds (long enough to outlast any short client-side timeout
+    /// under test) and is never joined; the client is expected to time out
+    /// and move on well before that.
+    fn spawn_hanging_mock_arc() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 1024];
+                let mut header_end: Option<usize> = None;
+                let mut content_length: usize = 0;
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let headers = String::from_utf8_lossy(&buf[..pos]);
+                                    for line in headers.lines() {
+                                        let lower = line.to_ascii_lowercase();
+                                        if let Some(v) = lower.strip_prefix("content-length:") {
+                                            content_length = v.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(he) = header_end {
+                                if buf.len() >= he + content_length {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Request fully drained; now just hold the connection open
+                // without responding, like a hung ARC deployment.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
+        format!("http://{}", addr)
+    }
+
     /// Bind an ephemeral port then drop the listener so any connect is refused
     /// — a deterministic, offline "ARC unreachable" URL.
     fn dead_arc_url() -> String {
@@ -1627,7 +1755,9 @@ mod tests {
     #[test]
     fn r1_broadcast_returns_arc_txid_on_2xx() {
         // Locks the happy path: a 2xx with a txid body still returns Ok(txid).
-        let arc_txid = "aa".repeat(32);
+        // F-042: the body must echo THIS transaction's txid (a foreign one is
+        // now refused — see f042_broadcast_err_on_200_foreign_txid).
+        let arc_txid = f042_local_txid();
         // body is 'static: use a leaked string so the closure can capture it.
         let body: &'static str = Box::leak(format!("{{\"txid\":\"{}\"}}", arc_txid).into_boxed_str());
         let mut provider = provider_with_arc(spawn_mock_arc("200 OK", body));
@@ -1668,6 +1798,110 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // F-042 — the ARC path must fail closed on every non-acceptance
+    // -----------------------------------------------------------------------
+    //
+    // Before F-042, a 2xx returned whatever txid the body carried (or the local
+    // txid when it carried none) without reading ARC's txStatus, so a 200 whose
+    // txStatus was REJECTED / DOUBLE_SPEND_ATTEMPTED / SEEN_IN_ORPHAN_MEMPOOL, or
+    // which carried an ARC error `status`, was reported as broadcast and cached.
+    //
+    // PROVES: against a one-shot local HTTP server standing in for ARC,
+    // broadcast returns Err on a 500, a 4xx with an ARC error body, each
+    // rejecting txStatus, a 200 with an error `status` field, a 200 with no
+    // txid, a 200 whose txid is another transaction's, a connection dropped
+    // without a response, and a refused connection — and caches nothing then.
+    // DOES NOT PROVE: behaviour against the live ARC service; the complete set of
+    // txStatus values a deployment may emit (the list mirrors @bsv/sdk's ARC
+    // broadcaster); or a true read timeout (the ureq call sets none, so a hung
+    // ARC blocks rather than fails open).
+
+    fn f042_local_txid() -> String {
+        compute_txid(&hex_to_bytes(&minimal_raw_tx_hex()).unwrap())
+    }
+
+    fn f042_expect_rejected(arc_url: String, want: &[&str]) {
+        let mut provider = provider_with_arc(arc_url);
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        let result = provider.broadcast(&tx);
+        let msg = match result {
+            Ok(txid) => panic!("F-042: broadcast must fail, returned txid {}", txid),
+            Err(e) => e,
+        };
+        for w in want {
+            assert!(msg.contains(w), "F-042: error {:?} does not mention {:?}", msg, w);
+        }
+        assert!(
+            provider.tx_cache.is_empty(),
+            "F-042: a transaction ARC did not accept must not be cached as broadcast"
+        );
+    }
+
+    fn f042_leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_http_500() {
+        f042_expect_rejected(spawn_mock_arc("500 Internal Server Error", "{\"detail\":\"boom\"}"), &["500", "boom"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_4xx_error_body() {
+        let body = "{\"type\":\"https://bitcoin-sv.github.io/arc/#/errors?id=_461\",\"title\":\"Malformed transaction\",\"status\":461,\"detail\":\"Transaction is malformed\"}";
+        f042_expect_rejected(spawn_mock_arc("461 Malformed", body), &["461", "Malformed"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_rejected_tx_status() {
+        for st in ["REJECTED", "DOUBLE_SPEND_ATTEMPTED", "SEEN_IN_ORPHAN_MEMPOOL"] {
+            let body = f042_leak(format!(
+                "{{\"txid\":\"{}\",\"txStatus\":\"{}\",\"extraInfo\":\"nope\",\"status\":200}}",
+                f042_local_txid(), st
+            ));
+            f042_expect_rejected(spawn_mock_arc("200 OK", body), &[st]);
+        }
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_error_status_field() {
+        let body = f042_leak(format!(
+            "{{\"txid\":\"{}\",\"status\":465,\"title\":\"Fee too low\",\"detail\":\"fee too low\"}}",
+            f042_local_txid()
+        ));
+        f042_expect_rejected(spawn_mock_arc("200 OK", body), &["465", "Fee too low"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_without_txid() {
+        f042_expect_rejected(spawn_mock_arc("200 OK", "{\"txStatus\":\"SEEN_ON_NETWORK\"}"), &["txid"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_foreign_txid() {
+        let foreign = "cc".repeat(32);
+        let body = f042_leak(format!("{{\"txid\":\"{}\",\"txStatus\":\"SEEN_ON_NETWORK\"}}", foreign));
+        f042_expect_rejected(spawn_mock_arc("200 OK", body), &[&foreign, &f042_local_txid()]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_connection_dropped_without_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+        f042_expect_rejected(format!("http://{}", addr), &["network error"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_connection_refused() {
+        f042_expect_rejected(dead_arc_url(), &["network error"]);
+    }
+
+    // -----------------------------------------------------------------------
     // #107 — WalletProvider injected broadcaster (Shape B: additive, non-breaking)
     // -----------------------------------------------------------------------
 
@@ -1691,8 +1925,16 @@ mod tests {
         // ARC url is dead: if broadcast fell through to the hardcoded path it
         // would Err. Instead it must delegate to the injected broadcaster and
         // return that broadcaster's txid.
+        //
+        // N-040: the txid the MockBroadcaster reports must be THIS
+        // transaction's actual txid — f042_local_txid() computes it from
+        // minimal_raw_tx_hex() the same way broadcast() does internally. It
+        // used to be an arbitrary "bb"*32 value, which passed only because
+        // broadcast() never checked the injected broadcaster's txid against
+        // the transaction it was actually given (see
+        // n040_injected_broadcaster_rejects_foreign_txid for that check).
         let calls = Rc::new(RefCell::new(0u32));
-        let expected = "bb".repeat(32);
+        let expected = f042_local_txid();
         let broadcaster = Box::new(MockBroadcaster {
             txid: expected.clone(),
             calls: Rc::clone(&calls),
@@ -1716,6 +1958,66 @@ mod tests {
             provider.get_raw_transaction(&expected).unwrap(),
             minimal_raw_tx_hex(),
             "#107: delegated broadcast must still cache the raw tx by txid"
+        );
+    }
+
+    #[test]
+    fn n040_broadcast_times_out_against_a_hung_arc() {
+        // N-040: ureq's default Agent has no read timeout ("requests may
+        // block forever on reads by default" — ureq 2.12.1 docs). Against a
+        // real local server that accepts the connection and never responds,
+        // broadcast() must still return (as an Err) well within a short
+        // bound, proving `with_arc_timeout` is actually wired into the
+        // request rather than relying on ureq's absent default.
+        let mut provider = provider_with_arc(spawn_hanging_mock_arc())
+            .with_arc_timeout(std::time::Duration::from_millis(200));
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = provider.broadcast(&tx);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "N-040: broadcast against a hung ARC must fail (closed), got {:?}",
+            result
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "N-040: broadcast took {:?}, expected it to time out near the configured 200ms",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn n040_injected_broadcaster_rejects_foreign_txid() {
+        // N-040: an injected broadcaster that reports a txid other than the
+        // transaction actually passed to it must not be treated as having
+        // broadcast that transaction — same rule as F-042's
+        // check_arc_accepted for the hardcoded ARC path.
+        let foreign = "bb".repeat(32);
+        let calls = Rc::new(RefCell::new(0u32));
+        let broadcaster = Box::new(MockBroadcaster {
+            txid: foreign.clone(),
+            calls: Rc::clone(&calls),
+        });
+
+        let mut provider = provider_with_arc(dead_arc_url()).with_broadcaster(broadcaster);
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        let result = provider.broadcast(&tx);
+
+        assert!(
+            result.is_err(),
+            "N-040: a foreign txid from the injected broadcaster must be rejected, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err();
+        let local = f042_local_txid();
+        assert!(msg.contains(&foreign), "error {:?} does not mention the foreign txid {:?}", msg, foreign);
+        assert!(msg.contains(&local), "error {:?} does not mention the local txid {:?}", msg, local);
+        assert!(
+            provider.get_raw_transaction(&foreign).is_err(),
+            "N-040: a rejected broadcast must not cache the raw tx under the foreign txid"
         );
     }
 
@@ -1744,7 +2046,9 @@ mod tests {
         // No broadcaster injected → the hardcoded ARC path still runs. Against a
         // live mock ARC returning a known txid, broadcast returns THAT txid —
         // proving the default (existing) behavior is unchanged.
-        let arc_txid = "cc".repeat(32);
+        // F-042: the mock ARC echoes THIS transaction's txid (a foreign one is
+        // now refused — see f042_broadcast_err_on_200_foreign_txid).
+        let arc_txid = f042_local_txid();
         let body: &'static str =
             Box::leak(format!("{{\"txid\":\"{}\"}}", arc_txid).into_boxed_str());
         let mut provider = provider_with_arc(spawn_mock_arc("200 OK", body));

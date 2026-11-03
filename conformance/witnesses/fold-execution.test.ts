@@ -21,10 +21,19 @@
 import { describe, it, expect } from 'vitest';
 import { runDifferentialExecution, runFoldEquivalence } from '../../packages/runar-testing/src/index.js';
 
-// `(2n + 3n)` is an all-constant subexpression the fold pass collapses to 5n.
-// `this.base` is a constructor arg (NOT constant), so `this.base + 5n` stays a
-// runtime OP_ADD — only the inner `2n + 3n` routes through evalBinOp('+').
-// base = 10 => verify accepts x === 15, rejects otherwise.
+// `(-(2n) + -(3n))` is an all-constant subexpression the fold pass collapses
+// to -5n. `this.base` is a constructor arg (NOT constant), so `this.base + -5n`
+// stays a runtime OP_ADD — only the inner `-(2n) + -(3n)` routes through
+// evalBinOp('+').
+// base = 10 => verify accepts x === 5, rejects otherwise.
+//
+// Why negated operands (N-443): the fold-OFF peephole already folds adjacent
+// `PUSH PUSH OP_ADD` (and a `2n + 3n` pair), so `x === this.base + (2n + 3n)`
+// compiled to the same bytes (0055939c) fold-ON and fold-OFF once N-138 pruned
+// the folder's orphaned operand pushes, and the "folding changes the bytes"
+// premise was lost. The peephole has no rule for OP_NEGATE, so fold-OFF keeps
+// `52 8f 53 8f 93` (00528f538f93939c) while fold-ON collapses it to a single
+// push of -5 (000185939c).
 const SRC = `
 import { SmartContract, assert } from 'runar-lang';
 
@@ -32,7 +41,7 @@ export class FoldExec extends SmartContract {
   readonly base: bigint;
   constructor(base: bigint) { super(base); this.base = base; }
   public verify(x: bigint): void {
-    assert(x === this.base + (2n + 3n));
+    assert(x === this.base + (-(2n) + -(3n)));
   }
 }
 `;
@@ -45,7 +54,7 @@ describe('constant-fold execution coverage (TS-GAP-006)', () => {
       source: SRC,
       fileName: FILE,
       method: 'verify',
-      args: [15n],
+      args: [5n],
       constructorArgs: CTOR,
     });
     expect(
@@ -58,7 +67,7 @@ describe('constant-fold execution coverage (TS-GAP-006)', () => {
       source: SRC,
       fileName: FILE,
       method: 'verify',
-      args: [16n],
+      args: [6n],
       constructorArgs: CTOR,
     });
     expect(reject.agrees).toBe(true);
@@ -71,10 +80,10 @@ describe('constant-fold execution coverage (TS-GAP-006)', () => {
       fileName: FILE,
       method: 'verify',
       constructorArgs: CTOR,
-      witnesses: [[15n], [16n]],
+      witnesses: [[5n], [6n], [15n]],
     });
     expect(r.equivalent, JSON.stringify(r.divergences)).toBe(true);
-    // Folding actually collapsed `2n + 3n` -> `5n`, so the two compilations differ.
+    // Folding actually collapsed `-(2n) + -(3n)` -> `-5n`, so the two compilations differ.
     expect(r.bytesDiffer).toBe(true);
   });
 });

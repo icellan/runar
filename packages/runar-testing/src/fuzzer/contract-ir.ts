@@ -104,6 +104,10 @@ export type Stmt =
   | IfStmt
   | ForStmt
   | AddOutputStmt
+  | AddRawOutputStmt
+  | AddDataOutputStmt
+  | MethodCallStmt
+  | RawScriptStmt
   | ExprStmt;
 
 export interface VarDeclStmt {
@@ -168,6 +172,54 @@ export interface AddOutputStmt {
   values: Expr[];
 }
 
+/**
+ * `this.addRawOutput(satoshis, script)` — an output with caller-chosen script
+ * bytes (NOT committed to by the continuation hash). `script` is a `var_ref`
+ * to a `ByteString` parameter of the enclosing method (N-400). StatefulSmartContract only.
+ */
+export interface AddRawOutputStmt {
+  kind: 'add_raw_output';
+  satoshis: bigint;
+  script: Expr;
+}
+
+/**
+ * `this.addDataOutput(satoshis, script)` — like `addRawOutput`, but the bytes
+ * ARE committed to by the continuation hash. `script` is a `var_ref` to a
+ * `ByteString` parameter of the enclosing method (N-400). StatefulSmartContract only.
+ */
+export interface AddDataOutputStmt {
+  kind: 'add_data_output';
+  satoshis: bigint;
+  script: Expr;
+}
+
+/**
+ * A call to a PRIVATE method of the same contract, as a statement
+ * (`this.helper0(a)`). The callee is `visibility: 'private'` and returns
+ * nothing; renderers that mark private methods by NAME (Python, Ruby) add the
+ * underscore prefix themselves, so `name` is the plain IR name (N-400).
+ */
+export interface MethodCallStmt {
+  kind: 'method_call';
+  name: string;
+  args: Expr[];
+}
+
+/**
+ * The `asm({ body, in_arity, out_arity })` escape hatch, which lowers to a
+ * `raw_script` ANF node. Only legal in a contract whose `parentClass` is
+ * `UnsafeSmartContract`, and when it is the LAST statement of a public method
+ * its `outArity` must be 1 (N-400).
+ */
+export interface RawScriptStmt {
+  kind: 'raw_script';
+  /** Hex of the opcode bytes spliced verbatim. */
+  body: string;
+  inArity: bigint;
+  outArity: bigint;
+}
+
 export interface ExprStmt {
   kind: 'expr';
   expr: Expr;
@@ -199,7 +251,7 @@ export interface GeneratedMethod {
 
 export interface GeneratedContract {
   name: string; // PascalCase
-  parentClass: 'SmartContract' | 'StatefulSmartContract';
+  parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
   properties: GeneratedProperty[];
   methods: GeneratedMethod[];
 }
@@ -266,6 +318,17 @@ export function collectUsedFunctions(contract: GeneratedContract): Set<string> {
         // `addOutput` itself is an intrinsic on the base class, not an
         // importable builtin — only its operands can pull in imports.
         stmt.values.forEach(walkExpr);
+        break;
+      case 'add_raw_output':
+      case 'add_data_output':
+        walkExpr(stmt.script);
+        break;
+      case 'method_call':
+        stmt.args.forEach(walkExpr);
+        break;
+      case 'raw_script':
+        // `asm` is a builtin renderers must import (TS / Python / Java).
+        fns.add('asm');
         break;
       case 'expr':
         walkExpr(stmt.expr);

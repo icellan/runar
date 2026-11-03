@@ -4,6 +4,7 @@
 
 import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
 import { hasLoneSurrogate } from './lone-surrogate.js';
+import { isStrictDerSignature } from './der.js';
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 import { canonicalJsonStringify, InputLimits } from 'runar-ir-schema';
 
@@ -50,6 +51,13 @@ export interface SignEnvelopeOpts {
   signer: EnvelopeSigner;
   /** TTL in milliseconds. Default 30_000. */
   ttlMs?: number;
+  /**
+   * Timestamp (ms since epoch) embedded as `nonce`. Default `Date.now()`.
+   * Mirrors the other six tiers' injectable sign-time clock (Go `NowMs`,
+   * Python `now_ms`, …), exposed for deterministic testing and for replaying
+   * the frozen cross-tier fixtures in conformance/sdk-envelope/. F-359.
+   */
+  nowMs?: number;
 }
 
 /**
@@ -59,7 +67,7 @@ export interface SignEnvelopeOpts {
  */
 export async function signEnvelope(opts: SignEnvelopeOpts): Promise<SignedEnvelope> {
   const ttlMs = opts.ttlMs ?? 30_000;
-  const nonce = Date.now();
+  const nonce = opts.nowMs ?? Date.now();
   const expiresAt = nonce + ttlMs;
   const payload = canonicalJson({ ...opts.data, nonce, expiresAt });
   const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
@@ -87,7 +95,7 @@ export async function signEnvelope(opts: SignEnvelopeOpts): Promise<SignedEnvelo
  *
  * 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
  * so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
- * also far above what the wire needs: the deepest of the 165 checked-in
+ * also far above what the wire needs: the deepest of the 199 checked-in
  * conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
  * tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
  * bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -147,6 +155,14 @@ export interface VerifyEnvelopeOpts {
   expectedKeys?: string[];
   /** Allowed wall-clock skew in ms when checking `expiresAt`. Default 5_000. */
   clockSkewMs?: number;
+  /**
+   * Wall-clock override (ms since epoch) used for the expiry check. Default
+   * `Date.now()`. Mirrors the other six tiers' injectable verify-time clock
+   * (Go `NowMs`, Python `now_ms`, …), exposed for deterministic testing and
+   * for replaying the frozen cross-tier fixtures in conformance/sdk-envelope/.
+   * F-359.
+   */
+  nowMs?: number;
 }
 
 export interface VerifyEnvelopeResult {
@@ -165,6 +181,7 @@ export interface VerifyEnvelopeResult {
 export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   const env = opts.envelope;
   const clockSkewMs = opts.clockSkewMs ?? 5_000;
+  const nowMs = opts.nowMs ?? Date.now();
 
   // 0. DoS-bound size guard. Reject envelopes whose string fields exceed
   //    `InputLimits` BEFORE running JSON.parse, hashing, or ECDSA verify
@@ -216,7 +233,7 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   }
 
   // 2. Expiry.
-  if (env.expiresAt < Date.now() - clockSkewMs) {
+  if (env.expiresAt < nowMs - clockSkewMs) {
     return { ok: false, reason: 'expired' };
   }
 
@@ -260,9 +277,12 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
     const digest = Hash.sha256(Utils.toArray(env.payload, 'utf8'));
     const sigBytes = Utils.toArray(env.sig, 'hex');
     const pkBytes = Utils.toArray(env.pubkey, 'hex');
-    const sig = Signature.fromDER(sigBytes);
-    const pubKey = PublicKey.fromDER(pkBytes);
-    sigValid = ecdsaVerifyRaw(new BigNumber(digest), sig, pubKey);
+    // F-242: one signature, one byte string — strict DER before parsing.
+    if (isStrictDerSignature(sigBytes)) {
+      const sig = Signature.fromDER(sigBytes);
+      const pubKey = PublicKey.fromDER(pkBytes);
+      sigValid = ecdsaVerifyRaw(new BigNumber(digest), sig, pubKey);
+    }
   } catch {
     sigValid = false;
   }

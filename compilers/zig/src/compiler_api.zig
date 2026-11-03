@@ -39,19 +39,45 @@ pub const CompileError = anf_lower.LowerError || error{
     EmitFailed,
     // BUG-008 follow-up: typed DoS-bound rejection of oversized source.
     SourceSizeExceeded,
+    // F-230 (CX-BUG-128): a file extension no surface parser claims. Distinct
+    // from `ParseFailed` (which means a recognized surface's parser rejected
+    // the bytes) because this means NO parser ran at all — the caller's
+    // answer should not read as "this is invalid Rúnar", it should read as
+    // "this file is not one of the nine surfaces". Matches `main.zig`'s own
+    // `error.UnsupportedFormat` for the identical `.unknown` case, so the CLI
+    // and the library report the same error for the same refusal.
+    UnsupportedFormat,
 };
 
 pub const CompileResult = struct {
     script_hex: []const u8,
     artifact_json: ?[]const u8,
 
+    /// F-231 (CX-BUG-129): the warning-severity diagnostics `runPipeline`
+    /// collected along the way — validator warnings (e.g. the V26 "no mutable
+    /// properties" notice) and the issue-#109 readonly-DCE warnings. The CLI
+    /// prints these to stderr via `printDiagnostics`; before this field, a
+    /// library caller of `compileSource`/`compileSourceWithOptions` had no way
+    /// to recover them at all. Additive: existing callers that only read
+    /// `script_hex` / `artifact_json` are unaffected. Empty, never null — the
+    /// success path this struct is returned from never fails the compile, but
+    /// it can still carry zero warnings.
+    warnings: []const []const u8,
+
     pub fn deinit(self: CompileResult, allocator: std.mem.Allocator) void {
         allocator.free(self.script_hex);
         if (self.artifact_json) |json| allocator.free(json);
+        for (self.warnings) |line| allocator.free(line);
+        allocator.free(self.warnings);
     }
 };
 
 const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, unknown };
+
+/// F-230: comptime-known text for `parseSource`'s `.unknown` branch, used
+/// when the per-call `allocPrint`/`dupe` of the file-name-carrying message
+/// fails under memory pressure. See the `.unknown` arm below.
+const UNSUPPORTED_FORMAT_FALLBACK = "unsupported format for this file";
 
 fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
@@ -81,28 +107,88 @@ pub fn validateForFile(
         validate_pass.validate(work, contract);
 }
 
+/// The shared `@sighash` refusal (N-244) for a non-TS surface, as a static
+/// one-element error list.
+fn sighashGuardErrors(format: FileFormat) []const []const u8 {
+    return switch (format) {
+        .runar_sol => &.{comptime input_limits.sighashDirectiveError("Solidity")},
+        .runar_move => &.{comptime input_limits.sighashDirectiveError("Move")},
+        .runar_py => &.{comptime input_limits.sighashDirectiveError("Python")},
+        .runar_go => &.{comptime input_limits.sighashDirectiveError("Go DSL")},
+        .runar_rs => &.{comptime input_limits.sighashDirectiveError("Rust")},
+        .runar_rb => &.{comptime input_limits.sighashDirectiveError("Ruby")},
+        .runar_zig => &.{comptime input_limits.sighashDirectiveError("Zig")},
+        .runar_java => &.{comptime input_limits.sighashDirectiveError("Java")},
+        .runar_ts, .unknown => unreachable,
+    };
+}
+
+/// The shared `@embedAlways` refusal (N-268, mirroring N-244) for a non-TS
+/// surface, as a static one-element error list.
+fn embedAlwaysGuardErrors(format: FileFormat) []const []const u8 {
+    return switch (format) {
+        .runar_sol => &.{comptime input_limits.embedAlwaysDirectiveError("Solidity")},
+        .runar_move => &.{comptime input_limits.embedAlwaysDirectiveError("Move")},
+        .runar_py => &.{comptime input_limits.embedAlwaysDirectiveError("Python")},
+        .runar_go => &.{comptime input_limits.embedAlwaysDirectiveError("Go DSL")},
+        .runar_rs => &.{comptime input_limits.embedAlwaysDirectiveError("Rust")},
+        .runar_rb => &.{comptime input_limits.embedAlwaysDirectiveError("Ruby")},
+        .runar_zig => &.{comptime input_limits.embedAlwaysDirectiveError("Zig")},
+        .runar_java => &.{comptime input_limits.embedAlwaysDirectiveError("Java")},
+        .runar_ts, .unknown => unreachable,
+    };
+}
+
 /// Parse `source` by the format its `file_name` extension names, behind the
-/// two guards that apply to EVERY frontend entry: the caller's size check (see
-/// `runPipeline`'s pass 0) and the fail-closed directive guard below.
+/// two guards that apply to EVERY frontend entry: the size guard immediately
+/// below (N-136 — previously only `runPipeline`'s pass 0 enforced this, so a
+/// caller that reached `parseSource` directly, as `frontend_api.zig`
+/// re-exports it for, skipped the cap entirely) and the fail-closed directive
+/// guard below that.
 ///
 /// `pub` since R-093: the Zig SDK's `compileCheckSource` called `parseZig`
 /// directly and so ran neither guard, which made the SDK's "is this valid
 /// Runar?" answer disagree with the compiler's on the same input. There is one
 /// guarded parse entry now, and both callers use it.
 pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
+    // DoS-bound size guard, enforced here directly rather than relying on
+    // every caller (e.g. runPipeline's Pass 0) to check first. N-136.
+    if (input_limits.sourceSizeGuardErrors(work, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
+
     const format = detectFormat(file_name);
 
-    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
-    // directives are honoured ONLY on the `.runar.ts` surface (which implements
-    // them). The other eight surface parsers ignore comments, so they must
-    // reject a directive rather than silently drop it and change signing / DCE
-    // semantics. `.runar.ts` is exempt — its parser honours the directives.
+    // F-230 (CX-BUG-128): an unrecognized extension is refused BEFORE the
+    // directive guard below (and before any parser runs) — it is the more
+    // fundamental refusal: no surface claims this file at all, so there is
+    // nothing to apply a surface-specific directive rule to. This ordering
+    // also matters for callers: `compile_check.zig`'s `compileCheckSource`
+    // calls `parseSource` directly (not through `runPipeline`), so if this
+    // check ran after the directive guard, a `foo.txt` carrying `@sighash`
+    // would report a `@sighash` diagnostic from one entry point while
+    // `runPipeline`'s own `.unknown` mapping (below) reported
+    // `UnsupportedFormat` from another — the same shape of divergence this
+    // item exists to close, just one guard later.
+    if (format == .unknown) {
+        const msg = std.fmt.allocPrint(work, "unsupported format for {s}", .{file_name}) catch UNSUPPORTED_FORMAT_FALLBACK;
+        const errs: []const []const u8 = work.dupe([]const u8, &.{msg}) catch &.{UNSUPPORTED_FORMAT_FALLBACK};
+        return .{ .contract = null, .errors = errs };
+    }
+
+    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) COMMENT
+    // directives are read only on the `.runar.ts` surface. The other eight
+    // surfaces spell both directives natively (N-093) and their parsers ignore
+    // comments, so they must reject a comment directive rather than silently
+    // drop it and change signing / DCE semantics; the message names the
+    // native spelling. `.runar.ts` is exempt — its parser honours the comments.
     if (format != .runar_ts) {
-        if (input_limits.containsDirectiveToken(source, "@sighash")) {
-            return .{ .contract = null, .errors = &.{input_limits.SIGHASH_DIRECTIVE_ERROR} };
+        // N-244: any occurrence of `@sighash`, glued or not (N-039's rule).
+        if (std.mem.indexOf(u8, source, "@sighash") != null) {
+            return .{ .contract = null, .errors = sighashGuardErrors(format) };
         }
         if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
-            return .{ .contract = null, .errors = &.{input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR} };
+            return .{ .contract = null, .errors = embedAlwaysGuardErrors(format) };
         }
     }
 
@@ -143,11 +229,14 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
             const r = parse_java.parseJava(work, source, file_name);
             break :blk .{ .contract = r.contract, .errors = r.errors };
         },
-        .unknown => blk: {
-            // Fall back to Zig parser for unknown extensions
-            const r = parse_zig.parseZig(work, source, file_name);
-            break :blk .{ .contract = r.contract, .errors = r.errors };
-        },
+        // F-230 (CX-BUG-128): `.unknown` is handled above, before the
+        // directive guard, and always returns from this function. It used to
+        // fall back to the Zig-format parser here instead, so a file like
+        // `contract.txt` was silently compiled as `.runar.zig` source
+        // through the library while the CLI's `compile` subcommand rejected
+        // the identical bytes outright — the same input accepted by one
+        // public entry point and refused by the other.
+        .unknown => unreachable,
     };
 }
 
@@ -188,6 +277,15 @@ pub const Diagnostics = struct {
 
     fn addError(self: *Diagnostics, allocator: std.mem.Allocator, prefix: []const u8, message: []const u8) void {
         add(&self.errors, allocator, prefix, message);
+    }
+
+    /// N-463: a type error prints `file:line:col: ` when the checker located
+    /// it (at the offending expression, as the TS reference does).
+    fn addTypeErrors(self: *Diagnostics, allocator: std.mem.Allocator, tc: typecheck_pass.TypeCheckResult) void {
+        for (tc.errors, 0..) |message, i| {
+            const loc: ?types.SourceLocation = if (tc.error_locations.len == tc.errors.len) tc.error_locations[i] else null;
+            self.addLocatedError(allocator, "  type error: ", .{ .message = message, .location = loc });
+        }
     }
 
     fn addWarning(self: *Diagnostics, allocator: std.mem.Allocator, message: []const u8) void {
@@ -258,11 +356,38 @@ pub fn runPipeline(
     // also carries the fail-closed `@sighash` / `@embedAlways` directive guard.
     const parse_result = parseSource(work, source, file_name);
     for (parse_result.errors) |message| diag.addError(work, "  parse error: ", message);
+    // F-230: an unrecognized extension is a distinct refusal class from a
+    // recognized surface's parser rejecting the bytes — `UnsupportedFormat`,
+    // matching the CLI's `error.UnsupportedFormat` for the same `.unknown`
+    // case, rather than `ParseFailed` (which would tell a caller the source
+    // itself was invalid Rúnar, which was never evaluated).
+    if (detectFormat(file_name) == .unknown) return error.UnsupportedFormat;
     if (parse_result.errors.len > 0) return error.ParseFailed;
     const contract = parse_result.contract orelse return error.ParseFailed;
 
     // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
     const val_result = validateForFile(work, contract, file_name) catch return error.ValidationFailed;
+    // N-422: the reference raises the loop-START refusal from ANF lowering, i.e.
+    // AFTER type checking, so a program that is both (`let acc = seed; while
+    // (acc < 5) {..}; assert_eq!(acc, ..)`: the loop variable is out of scope
+    // after the loop) reports the type error, not the loop-start sentence. This
+    // tier raises it from validation (its parsers drop the start expression),
+    // so when that is the ONLY validation complaint let the type checker speak
+    // first. Acceptance is unchanged: the program is refused either way.
+    // `--parse-only` stops at validation, as before.
+    if (val_result.errors.len > 0 and opts.stop_after != .validate) {
+        var only_loop_start = true;
+        for (val_result.errors) |d| {
+            if (!std.mem.eql(u8, d.message, validate_pass.loop_start_diagnostic)) only_loop_start = false;
+        }
+        if (only_loop_start) {
+            const early_tc = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
+            if (early_tc.errors.len > 0) {
+                diag.addTypeErrors(work, early_tc);
+                return error.TypeCheckFailed;
+            }
+        }
+    }
     for (val_result.errors) |d| diag.addLocatedError(work, "  validation error: ", d);
     if (val_result.errors.len > 0) return error.ValidationFailed;
     for (val_result.warnings) |d| diag.addWarning(work, d.message);
@@ -271,7 +396,7 @@ pub fn runPipeline(
 
     // Pass 3: Typecheck
     const tc_result = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
-    for (tc_result.errors) |message| diag.addError(work, "  type error: ", message);
+    diag.addTypeErrors(work, tc_result);
     if (tc_result.errors.len > 0) return error.TypeCheckFailed;
 
     // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch
@@ -290,7 +415,7 @@ pub fn runPipeline(
 
     // Pass 4.25: Constant Fold
     if (!opts.disable_constant_folding) {
-        program = constant_fold.foldConstants(work, program) catch |err| {
+        program = constant_fold.foldConstantsAndPrune(work, program) catch |err| {
             diag.addError(work, "  constant folding error: ", @errorName(err));
             return error.ANFLowerFailed;
         };
@@ -408,10 +533,27 @@ pub fn compileSourceWithOptions(
     const script_hex = allocator.dupe(u8, script_hex_work) catch return error.OutOfMemory;
     errdefer allocator.free(script_hex);
     const artifact_json = allocator.dupe(u8, artifact_json_work) catch return error.OutOfMemory;
+    errdefer allocator.free(artifact_json);
+
+    // F-231: hand the collected warnings back on the caller's allocator too —
+    // `diag.warnings.items` lives in the compile arena this function tears
+    // down on return, so each line (and the backing slice) must be copied,
+    // the same way `script_hex` and `artifact_json` already are.
+    const warnings = allocator.alloc([]const u8, diag.warnings.items.len) catch return error.OutOfMemory;
+    var copied: usize = 0;
+    errdefer {
+        for (warnings[0..copied]) |line| allocator.free(line);
+        allocator.free(warnings);
+    }
+    for (diag.warnings.items, 0..) |line, i| {
+        warnings[i] = allocator.dupe(u8, line) catch return error.OutOfMemory;
+        copied = i + 1;
+    }
 
     return .{
         .script_hex = script_hex,
         .artifact_json = artifact_json,
+        .warnings = warnings,
     };
 }
 
@@ -423,6 +565,8 @@ pub fn compileSourceToHex(
 ) CompileError![]const u8 {
     const result = try compileSource(allocator, source, file_name);
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 
@@ -697,10 +841,10 @@ test "verifyRabinSig end-to-end source compiles and emits Rabin opcode sequence"
 test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     // Stronger pin: assert the EXACT Rabin opcode subsequence appears
     // contiguously in the emitted hex. The expected substring is the
-    // byte concatenation of (post BUG-010 + BUG-011, 18 opcodes):
+    // byte concatenation of (post BUG-010 + BUG-011 + F-047, 20 opcodes):
     //   SWAP=7c DUP=76 OP_0=00 PUSH3(65536)=03000001 WITHIN=a5 VERIFY=69
-    //   ROT=7b DUP=76 MUL=95 ADD=93 SWAP=7c MOD=97 SWAP=7c SHA256=a8
-    //   PUSH1(00)=0100 CAT=7e BIN2NUM=81 NUMEQUAL=9c
+    //   ROT=7b DUP=76 MUL=95 ADD=93 OVER=78 MOD=97 ROT=7b SHA256=a8
+    //   PUSH1(00)=0100 CAT=7e BIN2NUM=81 ROT=7b MOD=97 NUMEQUAL=9c
     // The leading 5-opcode prefix (DUP OP_0 PUSH3 65536 WITHIN VERIFY) is
     // the BUG-010 padding range check (0 <= padding < 65536).
     const source =
@@ -729,7 +873,7 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     const hex = try compileSourceToHex(std.testing.allocator, source, "RabinOnly.runar.zig");
     defer std.testing.allocator.free(hex);
 
-    // Contiguous Rabin opcode subsequence (15 ops post-BUG-010; the PUSH 65536
+    // Contiguous Rabin opcode subsequence (34 ops post-F-368; the PUSH 65536
     // contributes 1 length byte + 3 data bytes = 4 hex octets in the middle).
     // Bytes:
     //   7c          OP_SWAP
@@ -739,12 +883,17 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     //   7b          OP_ROT
     //   76 95 93 7c 97 7c a8 87           original tail
     // BUG-011 tail: OP_SHA256=a8 PUSH1(00)=0100 OP_CAT=7e OP_BIN2NUM=81
-    // OP_NUMEQUAL=9c. Verified against the compiler's actual output for THIS
+    // then F-047's digest reduction OP_ROT=7b OP_MOD=97, then OP_NUMEQUAL=9c.
+    // F-144 operand-sign normalization PUSH1(00)=0100 OP_CAT=7e OP_BIN2NUM=81
+    // before OP_SWAP (pubKey), after OP_SWAP (padding) and after the first
+    // OP_ROT (sig). F-368's sig < pubKey gate OP_DUP=76 OP_3=53 OP_PICK=79
+    // OP_LESSTHAN=9f OP_VERIFY=69 follows the sig normalization. Verified
+    // against the compiler's actual output for THIS
     // contract, not inferred: although `unlock` wraps the call in runar.assert,
     // the peephole does NOT fuse to OP_NUMEQUALVERIFY here (the oracle-price
     // fixture does fuse, so the fused form is context-dependent and must not be
     // assumed).
-    const rabin_subseq = "7c7600" ++ "03000001" ++ "a5697b" ++ "769593" ++ "7c977c" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "9c";
+    const rabin_subseq = "01007e81" ++ "7c" ++ "01007e81" ++ "7600" ++ "03000001" ++ "a5697b" ++ "01007e81" ++ "7653799f69" ++ "769593" ++ "78977b" ++ "a8" ++ "0100" ++ "7e" ++ "81" ++ "7b97" ++ "9c";
     const found = std.mem.indexOf(u8, hex, rabin_subseq);
     if (found == null) {
         std.debug.print(
@@ -755,12 +904,13 @@ test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
     try std.testing.expect(found != null);
 }
 
-test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
+test "verifyRabinSig appendVerifyRabinSig emits exactly 34 opcodes" {
     // Direct emitter pin: the appendVerifyRabinSig builder helper must
-    // emit exactly 18 instructions (matching the cross-tier reference,
-    // post BUG-010 + BUG-011: 10 original + 5 padding-range-check ops
-    // + 4 digest-encoding-normalization ops, minus the OP_EQUAL that
-    // OP_NUMEQUAL replaced).
+    // emit exactly 34 instructions (matching the cross-tier reference,
+    // post BUG-010 + BUG-011 + F-047 + F-144 + F-368: 10 original + 5 padding-range-check
+    // ops + 4 digest-encoding-normalization ops, minus the OP_EQUAL that
+    // OP_NUMEQUAL replaced, + 2 digest-reduction ops + 3x3 operand-sign ops
+    // + 5 sig < pubKey ops).
     const crypto_emitters = @import("passes/helpers/crypto_emitters.zig");
     const registry = @import("passes/helpers/crypto_builtins.zig");
 
@@ -768,28 +918,44 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
     defer list.deinit(std.testing.allocator);
 
     try crypto_emitters.appendBuiltinInstructions(&list, std.testing.allocator, registry.CryptoBuiltin.verify_rabin_sig);
-    try std.testing.expectEqual(@as(usize, 18), list.items.len);
+    try std.testing.expectEqual(@as(usize, 34), list.items.len);
 
-    // Pin the exact opcode order (the cross-compiler reference). Position 3
+    // Pin the exact opcode order (the cross-compiler reference). Position 9
     // is a push of the BUG-010 padding limit (65536) — checked separately.
     const expected_opcodes = [_]?[]const u8{
+        null, // index 0: push_data(0x00) — F-144 pubKey sign byte
+        "OP_CAT",
+        "OP_BIN2NUM",
         "OP_SWAP",
+        null, // index 4: push_data(0x00) — F-144 padding sign byte
+        "OP_CAT",
+        "OP_BIN2NUM",
         "OP_DUP",
         "OP_0",
         null, // push_int(65536)
         "OP_WITHIN",
         "OP_VERIFY",
         "OP_ROT",
+        null, // index 13: push_data(0x00) — F-144 sig sign byte
+        "OP_CAT",
+        "OP_BIN2NUM",
+        "OP_DUP", // F-368: sig < pubKey
+        null, // index 17: push_int(3) — F-368 pick depth
+        "OP_PICK",
+        "OP_LESSTHAN",
+        "OP_VERIFY",
         "OP_DUP",
         "OP_MUL",
         "OP_ADD",
-        "OP_SWAP",
+        "OP_OVER", // F-047: keep pubKey for the digest reduction
         "OP_MOD",
-        "OP_SWAP",
+        "OP_ROT",
         "OP_SHA256",
-        null, // index 14: push_data(0x00) — BUG-011 digest sign byte
+        null, // index 28: push_data(0x00) — BUG-011 digest sign byte
         "OP_CAT",
         "OP_BIN2NUM",
+        "OP_ROT", // F-047
+        "OP_MOD", // F-047: SHA256(msg) mod pubKey
         "OP_NUMEQUAL",
     };
     for (expected_opcodes, 0..) |maybe_name, i| {
@@ -798,13 +964,18 @@ test "verifyRabinSig appendVerifyRabinSig emits exactly 18 opcodes" {
                 .op_name => |op| try std.testing.expectEqualStrings(name, op),
                 else => return error.UnexpectedInstructionKind,
             }
-        } else if (i == 3) {
+        } else if (i == 9) {
             switch (list.items[i]) {
                 .push_int => |v| try std.testing.expectEqual(@as(i64, 65536), v),
                 else => return error.UnexpectedInstructionKind,
             }
+        } else if (i == 17) {
+            switch (list.items[i]) {
+                .push_int => |v| try std.testing.expectEqual(@as(i64, 3), v),
+                else => return error.UnexpectedInstructionKind,
+            }
         } else {
-            // BUG-011 digest sign byte (index 14).
+            // F-144 operand sign bytes (0, 4, 13), BUG-011 digest sign byte (28).
             switch (list.items[i]) {
                 .push_data => |b| try std.testing.expectEqualSlices(u8, &.{0x00}, b),
                 else => return error.UnexpectedInstructionKind,

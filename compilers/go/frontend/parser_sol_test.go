@@ -14,7 +14,6 @@ func TestParseSolidity_P2PKH(t *testing.T) {
 // SPDX-License-Identifier: MIT
 pragma runar ^1.0.0;
 
-import "runar-lang";
 
 contract P2PKH is SmartContract {
     Addr immutable pubKeyHash;
@@ -59,7 +58,6 @@ contract P2PKH is SmartContract {
 func TestParseSolidity_MethodsAndParams(t *testing.T) {
 	source := `
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract Adder is SmartContract {
     int immutable target;
@@ -105,7 +103,6 @@ contract Adder is SmartContract {
 func TestParseSolidity_StatefulContract(t *testing.T) {
 	source := `
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract Counter is StatefulSmartContract {
     int count;
@@ -159,7 +156,6 @@ contract {
 func TestParseSolidity_MultipleProperties(t *testing.T) {
 	source := `
 pragma runar ^1.0.0;
-import "runar-lang";
 
 contract TwoProps is SmartContract {
     Addr immutable addr;

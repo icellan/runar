@@ -314,6 +314,51 @@ class TestJavaRejections:
 
 
 # ---------------------------------------------------------------------------
+# F-205 — annotation names: qualified `@pkg.Public` must be read, and an
+# unrecognized annotation must be a loud diagnostic (never a silent
+# visibility downgrade), matching the TS reference
+# (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+# ---------------------------------------------------------------------------
+
+
+class TestJavaAnnotationNames:
+    def test_qualified_public_annotation_is_recognized(self):
+        # Claim (1): a qualified annotation name must be read, not just its
+        # bare final segment rejected with an unrelated "expected type, got
+        # '.'" parse error.
+        src = """
+        import runar.lang.SmartContract;
+        class C extends SmartContract {
+            C() { super(); }
+            @runar.lang.annotations.Public
+            void check() { assert(true); }
+        }
+        """
+        result = parse_source(src, "C.runar.java")
+        assert result.errors == [], result.error_strings()
+        c = result.contract
+        assert c is not None
+        assert len(c.methods) == 1
+        assert c.methods[0].visibility == "public"
+
+    def test_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade(self):
+        # Claim (2): a misspelled annotation (@Publlic) must be refused with
+        # a diagnostic, exactly as the TS reference refuses it
+        # ("unsupported annotation @Publlic"). Before the fix this parsed
+        # with zero errors and the method silently stayed private.
+        src = """
+        import runar.lang.SmartContract;
+        class C extends SmartContract {
+            C() { super(); }
+            @Publlic
+            void check() { assert(true); }
+        }
+        """
+        result = parse_source(src, "C.runar.java")
+        assert [e.message for e in result.errors] == ["unsupported annotation @Publlic"]
+
+
+# ---------------------------------------------------------------------------
 # Literal / call promotion cases.
 # ---------------------------------------------------------------------------
 
@@ -610,3 +655,165 @@ class TestTypeMapping:
         assert prop.type == PrimitiveType(name="boolean")
         assert isinstance(prop.initializer, BoolLiteral)
         assert prop.initializer.value is True
+
+
+# ---------------------------------------------------------------------------
+# N-023 (R49): a bare assignment to a property name is refused
+# ---------------------------------------------------------------------------
+#
+# On the .runar.java surface a bare name that no local or parameter shadows IS
+# the field, so `count = ...` writes state in Java. The parser used to lower it
+# as a local rebind: a stateful contract compiled with no update_prop and its
+# state never changed. Every tier refuses the bare form with the TS reference's
+# diagnostic.
+#
+# Proves: the Python Java parser refuses each assignment spelling (=, op=,
+# ++/--, statement or nested, any method incl. the constructor) on an
+# unshadowed property, and accepts this.x writes plus local / parameter /
+# for-variable shadowing, honouring Java block scope.
+# Does not prove: other tiers (conformance/negatives N166 covers them), or
+# anything about bare reads, which R49 leaves alone.
+
+_BARE_MSG = "bare assignment to property 'count' is not allowed; write `this.count = ...`"
+_BARE_CTOR = "super(count);\n        this.count = count;"
+
+
+def _bare_counter(body: str, params: str = "", ctor_param: str = "count", ctor_body: str = _BARE_CTOR) -> str:
+    return f"""
+package p;
+import runar.lang.StatefulSmartContract;
+import runar.lang.annotations.Public;
+import runar.lang.types.Bigint;
+import static runar.lang.Builtins.assertThat;
+
+class BareCounter extends StatefulSmartContract {{
+    Bigint count;
+
+    BareCounter(Bigint {ctor_param}) {{
+        {ctor_body}
+    }}
+
+    @Public
+    void increment({params}) {{
+        {body}
+    }}
+}}
+"""
+
+
+def _bare_errors(src: str) -> list[str]:
+    r = parse_source(src, "BareCounter.runar.java")
+    return [e.message for e in r.errors if e.severity == "error"]
+
+
+@pytest.mark.parametrize("body", [
+    "count = count.plus(Bigint.ONE);",
+    "count += Bigint.ONE;",
+    "count++;",
+    "--count;",
+    "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }",
+    "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }",
+    "assertThat((count++).gt(Bigint.ZERO));",
+    "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;",
+    "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;",
+], ids=["plain", "compound", "postfix-inc", "prefix-dec", "if-arm", "for-update", "nested",
+        "after-if-scoped-local", "before-shadowing-local"])
+def test_n023_refuses_bare_property_assignment(body: str) -> None:
+    assert _BARE_MSG in _bare_errors(_bare_counter(body))
+
+
+def test_n023_refuses_bare_property_assignment_in_constructor() -> None:
+    src = _bare_counter("this.count = this.count.plus(Bigint.ONE);", ctor_param="c",
+                        ctor_body="super(c);\n        count = c;")
+    assert _BARE_MSG in _bare_errors(src)
+
+
+@pytest.mark.parametrize("body,params", [
+    ("this.count = this.count.plus(Bigint.ONE);", ""),
+    ("Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""),
+    ("count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"),
+    ("for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n"
+     "        this.count = this.count.plus(Bigint.ONE);", ""),
+    ("this.count = count.plus(Bigint.ONE);", ""),
+], ids=["this-form", "local-shadow", "param-shadow", "for-var-shadow", "bare-read"])
+def test_n023_accepts_shadowed_or_explicit_assignment(body: str, params: str) -> None:
+    assert _bare_errors(_bare_counter(body, params)) == []
+
+
+# ---------------------------------------------------------------------------
+# N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>) lower
+# `t op= e` to `t = t op e`, as a statement and in a for-header update slot
+# (where the loop rule, not the parser, refuses a non-unit step). Before N-134
+# Python refused `<<= >>= &= |= ^=` ("unexpected token '='") and `*= /= %=`
+# in a for update. Proves the parsed shape for all ten on a local, a bigint
+# property and a ByteString property, and in a for update. Does not prove
+# byte parity with the other tiers (conformance/negatives/
+# java-compound-assign-parity.test.ts pins that).
+# ---------------------------------------------------------------------------
+
+_N134_OPS = [("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%"),
+             ("<<=", "<<"), (">>=", ">>"), ("&=", "&"), ("|=", "|"), ("^=", "^")]
+
+
+def _n134_name(e) -> str:
+    if isinstance(e, Identifier):
+        return e.name
+    assert isinstance(e, PropertyAccessExpr), e
+    return e.property
+
+
+def _n134_assert_compound(stmt, target: str, op: str) -> None:
+    assert isinstance(stmt, AssignmentStmt), stmt
+    assert _n134_name(stmt.target) == target
+    assert isinstance(stmt.value, BinaryExpr) and stmt.value.op == op, stmt.value
+    assert _n134_name(stmt.value.left) == target
+
+
+def test_n134_compound_assignment_all_ten_operators() -> None:
+    lines = ["Bigint t = d;"]
+    want = []
+    for tok, op in _N134_OPS:
+        lines += [f"t {tok} 3;", f"this.count {tok} t;"]
+        want += [("t", op), ("count", op)]
+    for tok, op in _N134_OPS[7:]:
+        lines.append(f"this.tag {tok} m;")
+        want.append(("tag", op))
+    body = "\n        ".join(lines)
+    src = f"""package p;
+import runar.lang.StatefulSmartContract;
+import runar.lang.annotations.Public;
+import runar.lang.types.Bigint;
+import runar.lang.types.ByteString;
+
+class C extends StatefulSmartContract {{
+    Bigint count;
+    ByteString tag;
+
+    C(Bigint count, ByteString tag) {{
+        super(count, tag);
+        this.count = count;
+        this.tag = tag;
+    }}
+
+    @Public
+    void step(Bigint d, ByteString m) {{
+        {body}
+    }}
+}}
+"""
+    r = parse_source(src, "C.runar.java")
+    assert [e.message for e in r.errors] == []
+    stmts = r.contract.methods[0].body
+    assert len(stmts) == len(want) + 1
+    for stmt, (target, op) in zip(stmts[1:], want):
+        _n134_assert_compound(stmt, target, op)
+
+
+@pytest.mark.parametrize("tok,op", _N134_OPS, ids=[t for t, _ in _N134_OPS])
+def test_n134_compound_assignment_in_for_update(tok: str, op: str) -> None:
+    src = _bare_counter(f"for (Bigint i = Bigint.ZERO; i < 2; i {tok} 2) {{ assertThat(true); }}")
+    r = parse_source(src, "BareCounter.runar.java")
+    assert [e.message for e in r.errors] == []
+    f = r.contract.methods[0].body[0]
+    assert isinstance(f, ForStmt), f
+    _n134_assert_compound(f.update, "i", op)

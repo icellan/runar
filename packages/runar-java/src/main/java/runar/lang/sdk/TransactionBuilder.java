@@ -311,9 +311,9 @@ public final class TransactionBuilder {
         List<UTXO> sortedFunding = new ArrayList<>(additionalUtxos);
         sortedFunding.sort((a, b) -> Long.compare(b.satoshis(), a.satoshis()));
 
-        // Every contract input contributes value, not just the primary one —
-        // that is what lets a merge fund its own continuation without extra
-        // P2PKH funding.
+        // Every contract input contributes value, not just the primary one, so
+        // a merge is not over-funded. It does NOT let a merge skip funding:
+        // see the selection loop below (N-292).
         long contractIn = currentUtxo.satoshis();
         for (ContractInput ci : extraContractInputs) contractIn += ci.utxo().satoshis();
         long contractOutSats = newLockingScriptHex == null
@@ -352,7 +352,13 @@ public final class TransactionBuilder {
                 contractOutputLens, /*withChange*/ true, rate
             );
             change = contractIn + totalFunding - contractOutSats - dataOutSats - fee;
-            if (change >= 0 || i >= sortedFunding.size()) break;
+            // N-292 (TS parity): TS's selectUtxos takes the largest candidate
+            // BEFORE testing coverage, so whenever funding UTXOs exist at least
+            // one is spent and the fee comes from it — never from surplus
+            // contract-input value (a merge whose second contract input covers
+            // the fee would otherwise build a different tx than every other
+            // tier). With no candidates (issue #116 exact-cover) nothing changes.
+            if ((change >= 0 && !selected.isEmpty()) || i >= sortedFunding.size()) break;
             UTXO next = sortedFunding.get(i++);
             selected.add(next);
             totalFunding += next.satoshis();
@@ -495,7 +501,13 @@ public final class TransactionBuilder {
                 contractOutputLens, /*withChange*/ true, rate
             );
             change = contractIn + totalFunding - contractOutSats - dataOutSats - fee;
-            if (change >= 0 || i >= sortedFunding.size()) break;
+            // N-292 (TS parity): TS's selectUtxos takes the largest candidate
+            // BEFORE testing coverage, so whenever funding UTXOs exist at least
+            // one is spent and the fee comes from it — never from surplus
+            // contract-input value (a merge whose second contract input covers
+            // the fee would otherwise build a different tx than every other
+            // tier). With no candidates (issue #116 exact-cover) nothing changes.
+            if ((change >= 0 && !selected.isEmpty()) || i >= sortedFunding.size()) break;
             UTXO next = sortedFunding.get(i++);
             selected.add(next);
             totalFunding += next.satoshis();

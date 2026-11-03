@@ -12,6 +12,8 @@ const std = @import("std");
 const types = @import("../ir/types.zig");
 const opcodes = @import("opcodes.zig");
 const stack_lower = @import("../passes/stack_lower.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
+const stateful_scaffold = @import("../ir/stateful_scaffold.zig");
 const Opcode = opcodes.Opcode;
 
 // ============================================================================
@@ -57,6 +59,9 @@ pub const EmitContext = struct {
     opcode_index: u32 = 0,
     /// R-095 — verify_code_part_len length fields awaiting back-patch.
     code_part_len_fixups: std.ArrayListUnmanaged(CodePartLenFixup) = .empty,
+    /// N-051 — verify_code_part_len length fields whose value is only known at
+    /// deploy time; the SDK overwrites each with the deployed code-part length.
+    code_part_len_slots: std.ArrayListUnmanaged(types.CodePartLenSlot) = .empty,
     /// Allocator for all dynamic allocation.
     allocator: std.mem.Allocator,
 
@@ -66,6 +71,7 @@ pub const EmitContext = struct {
 
     pub fn deinit(self: *EmitContext) void {
         self.code_part_len_fixups.deinit(self.allocator);
+        self.code_part_len_slots.deinit(self.allocator);
         self.script_bytes.deinit(self.allocator);
         for (self.owned_asm_parts.items) |part| {
             self.allocator.free(part);
@@ -99,7 +105,9 @@ pub const EmitContext = struct {
                 .line = loc.line,
                 .column = if (loc.column > 0) loc.column - 1 else 0,
             });
-            self.pending_source_loc = null;
+            // N-467: NOT consumed here, as in TS (06-emit.ts): every opcode an
+            // instruction emits is mapped; emitMethodBody clears the location
+            // after each instruction.
         }
     }
 
@@ -148,9 +156,13 @@ pub const EmitContext = struct {
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
 
+        // N-152: data pushes are shown as `<hex>` of the VALUE bytes, exactly
+        // as the TS emitter spells them (spec/artifact-format.md section 3.6).
         const hex = try opcodes.bytesToHex(self.allocator, data);
-        try self.owned_asm_parts.append(self.allocator, hex);
-        try self.asm_parts.append(self.allocator, hex);
+        defer self.allocator.free(hex);
+        const shown = try std.fmt.allocPrint(self.allocator, "<{s}>", .{hex});
+        try self.owned_asm_parts.append(self.allocator, shown);
+        try self.asm_parts.append(self.allocator, shown);
     }
 
     /// Emit a script number with proper encoding and ASM representation.
@@ -172,10 +184,10 @@ pub const EmitContext = struct {
         } else if (n == -1) {
             try self.asm_parts.append(self.allocator, "OP_1NEGATE");
         } else {
-            // Show the decimal value
-            const num_str = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
-            try self.owned_asm_parts.append(self.allocator, num_str);
-            try self.asm_parts.append(self.allocator, num_str);
+            // N-152: `<hex>` of the script-number VALUE bytes (the push header
+            // is the first written byte), as the TS emitter spells it. This
+            // used to be the decimal value, which no other tier prints.
+            try self.appendValueAsm(start);
         }
     }
 
@@ -196,11 +208,23 @@ pub const EmitContext = struct {
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
 
-        // ASM: just show the decimal representation verbatim (the value is
-        // oversize by construction; small-int OP_N is unreachable here).
-        const num_str = try self.allocator.dupe(u8, decimal);
-        try self.owned_asm_parts.append(self.allocator, num_str);
-        try self.asm_parts.append(self.allocator, num_str);
+        // ASM: `<hex>` of the script-number VALUE bytes, like every other push
+        // (the value is oversize by construction; small-int OP_N is unreachable
+        // here).
+        try self.appendValueAsm(start);
+    }
+
+    /// N-152: append the `<hex>` asm for the push that was just written at
+    /// `script_bytes[start..]`: the value bytes without the 1-byte push header
+    /// (script numbers are always <= 75 bytes here).
+    fn appendValueAsm(self: *EmitContext, start: usize) !void {
+        const written = self.script_bytes.items[start..];
+        const value = if (written.len >= 2) written[1..] else written;
+        const hex = try opcodes.bytesToHex(self.allocator, value);
+        defer self.allocator.free(hex);
+        const shown = try std.fmt.allocPrint(self.allocator, "<{s}>", .{hex});
+        try self.owned_asm_parts.append(self.allocator, shown);
+        try self.asm_parts.append(self.allocator, shown);
     }
 
     /// Emit a push bool: true -> OP_TRUE (OP_1), false -> OP_FALSE (OP_0).
@@ -211,6 +235,9 @@ pub const EmitContext = struct {
         } else {
             try self.emitOpcode(.op_0);
         }
+        // N-152: same bytes, but the asm column spells a bool push as the TS
+        // emitter does (OP_TRUE / OP_FALSE), not as the opcode it lowers to.
+        self.asm_parts.items[self.asm_parts.items.len - 1] = if (b) "OP_TRUE" else "OP_FALSE";
     }
 
     /// Record a constructor slot at the current byte offset.
@@ -402,26 +429,41 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
             // R-095: pin SIZE(_codePart) against the code part's own deployed
             // byte length.
             //
-            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
             //
             // LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
             // Script number push: the value being patched IS the length of the
             // script that contains it, so a width that varied with the value
             // would be self-referential. OP_BIN2NUM normalises it back to a
             // minimal Script number so the comparison is numeric.
+            //
+            // N-051 — the comparison is ALWAYS an equality. It used to degrade
+            // to OP_GREATERTHANOREQUAL when a variable-width readonly arg made
+            // the deployed length unknown here, and a lower bound lets a
+            // spender claim a TRUNCATED `_codePart` that ends at any 0x6a byte
+            // inside the baked value, planting attacker-chosen code in the
+            // continuation. When the length is not exact at compile time the
+            // field is recorded as a `codePartLenSlots` entry and the SDK
+            // writes the real deployed code-part length into it at deploy
+            // time. The template keeps the compile-time lower bound, so an SDK
+            // that does not patch produces a contract whose honest spends fail
+            // (funds stuck), never one that accepts a truncated code part.
             try ctx.emitOpcode(.op_dup);
             // +1 skips the single-byte push header the 4-byte data push carries.
             const value_byte_offset: usize = @as(usize, ctx.byte_offset) + 1;
             const asm_index = ctx.asm_parts.items.len;
             try ctx.emitPushData(&[_]u8{ 0, 0, 0, 0 });
             try ctx.emitOpcode(.op_bin2num);
-            try ctx.emitOpcode(if (pin.exact) .op_numequal else .op_greaterthanorequal);
+            try ctx.emitOpcode(.op_numequal);
             try ctx.emitOpcode(.op_verify);
             try ctx.code_part_len_fixups.append(ctx.allocator, .{
                 .value_byte_offset = value_byte_offset,
                 .asm_index = asm_index,
                 .delta = pin.delta,
             });
+            if (!pin.exact) {
+                try ctx.code_part_len_slots.append(ctx.allocator, .{ .byte_offset = value_byte_offset });
+            }
         },
         .placeholder => |ph| {
             try ctx.recordConstructorSlot(ph.param_index);
@@ -476,7 +518,18 @@ fn emitMethodBody(ctx: *EmitContext, method: types.StackMethod) !void {
                 }
             }
             try emitStackInstruction(ctx, inst);
+            // N-467: TS emitOps clears the location after every leaf op and
+            // after OP_ENDIF, but not after the OP_IF / OP_ELSE of an if-op, so
+            // an arm's first op without a location of its own inherits the
+            // if's. Stack lowering leaves the arm ops of an if-op and its
+            // OP_ELSE / OP_ENDIF without a location, as TS does.
+            switch (inst) {
+                .op => |o| if (o == .op_if or o == .op_else) continue,
+                else => {},
+            }
+            ctx.pending_source_loc = null;
         }
+        ctx.pending_source_loc = null;
         return;
     }
 
@@ -495,18 +548,6 @@ fn emitMethodBodyWithLoc(ctx: *EmitContext, method: types.StackMethod, loc: ?typ
 // ============================================================================
 // Multi-Method Dispatch Table
 // ============================================================================
-
-/// Find the first non-null source_loc from a method's ANF bindings.
-fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []const u8) ?types.SourceLocation {
-    for (anf_methods) |m| {
-        if (std.mem.eql(u8, m.name, method_name)) {
-            for (m.body) |binding| {
-                if (binding.source_loc) |loc| return loc;
-            }
-        }
-    }
-    return null;
-}
 
 /// R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness gets
 /// ONE OP_CODESEPARATOR, and it goes at offset 1 of the locking script, behind a
@@ -564,12 +605,16 @@ fn emitCodeSeparatorPrologue(ctx: *EmitContext, methods: []const types.StackMeth
 ///     OP_ENDIF
 ///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
+    // N-368: the method-entry opcodes are compiler-synthesized glue; like the
+    // TS reference (06-emit.ts maps only ops that carry their own sourceLoc),
+    // they stay unmapped. Per-instruction locs from stack lowering are the only
+    // source of mappings, so the ANF methods are not consulted here.
+    _ = anf_methods;
     if (methods.len == 0) return;
 
     try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
-        ctx.pending_source_loc = findMethodSourceLoc(anf_methods, methods[0].name);
         try emitMethodBody(ctx, methods[0]);
         return;
     }
@@ -586,7 +631,6 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
             try ctx.emitScriptNumber(@intCast(i));
             try ctx.emitOpcode(.op_numequalverify);
         }
-        ctx.pending_source_loc = findMethodSourceLoc(anf_methods, method.name);
         try emitMethodBody(ctx, method);
         if (!is_last) {
             try ctx.emitOpcode(.op_else);
@@ -669,12 +713,49 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// Length of an RFC 3339 UTC second-resolution timestamp, `2023-11-14T22:13:20Z`.
+pub const BUILD_TIMESTAMP_LEN = 20;
+
+/// N-152: format `secs` (Unix seconds) as the artifact's `buildTimestamp`, the
+/// same spelling the Go tier writes (`time.RFC3339` in UTC).
+pub fn formatBuildTimestamp(buf: *[BUILD_TIMESTAMP_LEN]u8, secs: u64) []const u8 {
+    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const year_day = es.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        @intFromEnum(month_day.month),
+        @as(u32, month_day.day_index) + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
 /// Produce the full artifact JSON from a StackProgram and ANFProgram.
 /// Returns a JSON string. Caller owns the returned memory.
+///
+/// The artifact carries no `buildTimestamp`: this entry point has no clock.
+/// The CLI stamps through `emitArtifactStamped`.
 pub fn emitArtifact(
     allocator: std.mem.Allocator,
     stack_program: types.StackProgram,
     anf_program: types.ANFProgram,
+) ![]const u8 {
+    return emitArtifactStamped(allocator, stack_program, anf_program, null, true);
+}
+
+/// As `emitArtifact`, writing `build_timestamp` (an ISO 8601 string) into the
+/// artifact's `buildTimestamp` field when it is non-null (N-152). The
+/// `sourceMap` key is omitted when `include_source_map` is false (N-445,
+/// the CLI's `--no-source-map`).
+pub fn emitArtifactStamped(
+    allocator: std.mem.Allocator,
+    stack_program: types.StackProgram,
+    anf_program: types.ANFProgram,
+    build_timestamp: ?[]const u8,
+    include_source_map: bool,
 ) ![]const u8 {
     // Emit script with dispatch table
     var ctx = EmitContext.init(allocator);
@@ -710,12 +791,26 @@ pub fn emitArtifact(
 
     // parentClass — authoritative stateful signal for the issue-#42/#44
     // terminal sighash subscript trim (a StatefulSmartContract with zero
-    // mutable fields still needs the trim). Sourced from the ANF program; it
-    // is deliberately NOT part of the emitted ANF IR JSON, so cross-tier
-    // conformance parity is unaffected.
-    try w.writeAll("\"parentClass\":");
-    try writeJsonString(w, anf_program.parent_class.toTsString());
-    try w.writeByte(',');
+    // mutable fields still needs the trim). Sourced from the ANF program, which
+    // carries it on the wire (F-038); omitted when an IR input does not.
+    if (anf_program.parent_class) |pc| {
+        try w.writeAll("\"parentClass\":");
+        try writeJsonString(w, pc.toTsString());
+        try w.writeByte(',');
+    }
+
+    // N-139: statefulness follows parentClass (the TS reference rule for
+    // isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    // keeps both. An IR input without parentClass falls back to "has a
+    // mutable property" (the loader requires parentClass for any of those).
+    const is_stateful = if (anf_program.parent_class) |pc|
+        pc == .stateful_smart_contract
+    else blk: {
+        for (anf_program.properties) |prop| {
+            if (!prop.readonly) break :blk true;
+        }
+        break :blk false;
+    };
 
     // abi
     try w.writeAll("\"abi\":{");
@@ -755,13 +850,37 @@ pub fn emitArtifact(
             for (method.params, 0..) |param, j| {
                 if (j > 0) try w.writeByte(',');
                 try w.writeAll("{\"name\":");
-                try writeJsonString(w, param.name);
+                // N-360: a reassigned property-named public param is bound in
+                // the ANF under its `<name>@local` slot; the ABI keeps the
+                // source name the caller passes.
+                const abi_name = if (method.is_public and std.mem.endsWith(u8, param.name, "@local"))
+                    param.name[0 .. param.name.len - "@local".len]
+                else
+                    param.name;
+                try writeJsonString(w, abi_name);
                 try w.writeAll(",\"type\":");
                 try writeJsonString(w, param.type_name);
                 try w.writeByte('}');
             }
             try w.writeAll("],\"isPublic\":");
             try w.writeAll(if (method.is_public) "true" else "false");
+            // Stateful public methods without a _changePKH param are terminal
+            // (they build no state continuation output) — except under a
+            // SIGHASH_SINGLE base, where a continuing method takes no change
+            // params either (N-038), so the continuation is read off the body.
+            if (is_stateful and method.is_public) {
+                var has_change = false;
+                for (method.params) |param| {
+                    if (std.mem.eql(u8, param.name, "_changePKH")) {
+                        has_change = true;
+                        break;
+                    }
+                }
+                if (!has_change and !stateful_scaffold.includesChange(true, method.sighash_type)) {
+                    has_change = stateful_scaffold.hasContinuation(allocator, anf_program.methods, stack_lower.methodBindings(method)) catch return error.OutOfMemory;
+                }
+                if (!has_change) try w.writeAll(",\"isTerminal\":true");
+            }
             // usesCodePart: unlocking script is prefixed with _codePart (#100).
             if (stack_lower.methodUsesCodePartFull(stack_lower.methodBindings(method), anf_program.properties, anf_program.methods)) {
                 try w.writeAll(",\"usesCodePart\":true");
@@ -772,7 +891,7 @@ pub fn emitArtifact(
             // byte-identical.
             if (method.is_public) {
                 if (method.sighash_type) |st| {
-                    try w.print(",\"sigHashType\":{d}", .{st});
+                    if (st != sighash_directive.SIGHASH_DEFAULT) try w.print(",\"sigHashType\":{d}", .{st});
                 }
             }
             try w.writeByte('}');
@@ -783,70 +902,97 @@ pub fn emitArtifact(
     // script
     try w.writeAll("\"script\":");
     try writeJsonString(w, script_hex);
-    try w.writeByte(',');
 
     // asm
-    try w.writeAll("\"asm\":");
+    try w.writeAll(",\"asm\":");
     try writeJsonString(w, asm_text);
-    try w.writeByte(',');
 
-    // constructorSlots
-    try w.writeAll("\"constructorSlots\":[");
-    for (ctx.constructor_slots.items, 0..) |slot, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{{\"paramIndex\":{d},\"byteOffset\":{d}}}", .{ slot.param_index, slot.byte_offset });
+    // buildTimestamp — N-152: required by the artifact schema; the caller owns
+    // the clock (and SOURCE_DATE_EPOCH), this writer only places the value.
+    if (build_timestamp) |ts| {
+        try w.writeAll(",\"buildTimestamp\":");
+        try writeJsonString(w, ts);
     }
-    try w.writeAll("],");
+
+    // constructorSlots — N-147: omitted when empty, matching the TS
+    // assembler (`if (options?.constructorSlots && options.constructorSlots.length > 0)`).
+    // Used to always write `"constructorSlots":[]` for contracts with no
+    // constructor-arg placeholders (e.g. a zero-arg stateful contract).
+    if (ctx.constructor_slots.items.len > 0) {
+        try w.writeAll(",\"constructorSlots\":[");
+        for (ctx.constructor_slots.items, 0..) |slot, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"paramIndex\":{d},\"byteOffset\":{d}}}", .{ slot.param_index, slot.byte_offset });
+        }
+        try w.writeAll("]");
+    }
 
     // codeSepIndexSlots — OP_0 placeholders for codeSeparatorIndex values
     if (ctx.code_sep_index_slots.items.len > 0) {
-        try w.writeAll("\"codeSepIndexSlots\":[");
+        try w.writeAll(",\"codeSepIndexSlots\":[");
         for (ctx.code_sep_index_slots.items, 0..) |slot, i| {
             if (i > 0) try w.writeByte(',');
             try w.print("{{\"byteOffset\":{d},\"codeSepIndex\":{d}}}", .{ slot.byte_offset, slot.code_sep_index });
         }
-        try w.writeAll("],");
+        try w.writeAll("]");
+    }
+
+    // codePartLenSlots — N-051 deploy-time `verify_code_part_len` length
+    // fields (omitted when every pin is exact at compile time).
+    if (ctx.code_part_len_slots.items.len > 0) {
+        try w.writeAll(",\"codePartLenSlots\":[");
+        for (ctx.code_part_len_slots.items, 0..) |slot, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"byteOffset\":{d}}}", .{slot.byte_offset});
+        }
+        try w.writeAll("]");
     }
 
     // stateFields — mutable (non-readonly) properties, with synthetic
     // FixedArray runs re-grouped into a single logical entry via the
-    // iterative marker-driven regrouper (mirrors the TS assembler).
-    try w.writeAll("\"stateFields\":[");
+    // iterative marker-driven regrouper (mirrors the TS assembler). N-147:
+    // omitted entirely when there are no mutable properties, matching TS
+    // (`if (stateFields.length > 0) artifact.stateFields = stateFields;`) —
+    // used to always write `"stateFields":[]` for stateless contracts.
     {
         const regrouped = try regroupStateFields(allocator, anf_program.properties);
         defer freeRegroupedEntries(allocator, regrouped);
-        for (regrouped, 0..) |entry, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.writeAll("{\"name\":");
-            try writeJsonString(w, entry.name);
-            try w.writeAll(",\"type\":");
-            try writeJsonString(w, entry.type_str);
-            try w.print(",\"index\":{d}", .{entry.index});
-            if (entry.fixed_array) |fa| {
-                try w.writeAll(",\"fixedArray\":{\"elementType\":");
-                try writeJsonString(w, fa.element_type);
-                try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
-                for (fa.synthetic_names, 0..) |sn, j| {
-                    if (j > 0) try w.writeByte(',');
-                    try writeJsonString(w, sn);
+        if (regrouped.len > 0) {
+            try w.writeAll(",\"stateFields\":[");
+            for (regrouped, 0..) |entry, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, entry.name);
+                try w.writeAll(",\"type\":");
+                try writeJsonString(w, entry.type_str);
+                try w.print(",\"index\":{d}", .{entry.index});
+                if (entry.initial_value) |iv| {
+                    try w.writeAll(",\"initialValue\":");
+                    try emitConstValueJson(w, iv);
                 }
-                try w.writeAll("]}");
+                if (entry.fixed_array) |fa| {
+                    try w.writeAll(",\"fixedArray\":{\"elementType\":");
+                    try writeJsonString(w, fa.element_type);
+                    try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
+                    for (fa.synthetic_names, 0..) |sn, j| {
+                        if (j > 0) try w.writeByte(',');
+                        try writeJsonString(w, sn);
+                    }
+                    try w.writeAll("]}");
+                }
+                try w.writeByte('}');
             }
-            try w.writeByte('}');
+            try w.writeAll("]");
         }
     }
-    try w.writeAll("],");
 
-    // codeSeparatorIndex — byte offset of the first OP_CODESEPARATOR
-    try w.writeAll("\"codeSeparatorIndex\":");
+    // codeSeparatorIndex / codeSeparatorIndices — byte offset(s) of
+    // OP_CODESEPARATOR. N-147: omitted together when no OP_CODESEPARATOR was
+    // emitted, matching TS (`codeSeparatorIndex` stays `undefined` unless
+    // `OP_CODESEPARATOR` was emitted) — used to default `codeSeparatorIndex`
+    // to 0 for stateless contracts instead of omitting the key.
     if (ctx.code_separator_indices.items.len > 0) {
-        try w.print("{d}", .{ctx.code_separator_indices.items[0]});
-    } else {
-        try w.writeAll("0");
-    }
-
-    // codeSeparatorIndices — per-method byte offsets
-    if (ctx.code_separator_indices.items.len > 0) {
+        try w.print(",\"codeSeparatorIndex\":{d}", .{ctx.code_separator_indices.items[0]});
         try w.writeAll(",\"codeSeparatorIndices\":[");
         for (ctx.code_separator_indices.items, 0..) |idx, i| {
             if (i > 0) try w.writeByte(',');
@@ -855,10 +1001,21 @@ pub fn emitArtifact(
         try w.writeAll("]");
     }
 
+    // rawScriptSpans — N-151: asm() raw-bytes spans for the analyzer,
+    // omitted when empty (matches the TS assembler).
+    if (ctx.raw_script_spans.items.len > 0) {
+        try w.writeAll(",\"rawScriptSpans\":[");
+        for (ctx.raw_script_spans.items, 0..) |span, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"offset\":{d},\"length\":{d},\"inArity\":{d},\"outArity\":{d}}}", .{ span.offset, span.length, span.in_arity, span.out_arity });
+        }
+        try w.writeAll("]");
+    }
+
     // sourceMap — opcode-to-source-location mappings.
     // Wrapped in {"mappings":[...]} to match the canonical schema declared
     // in packages/runar-ir-schema/src/schemas/artifact.schema.json#SourceMap.
-    if (ctx.source_map.items.len > 0) {
+    if (include_source_map and ctx.source_map.items.len > 0) {
         try w.writeAll(",\"sourceMap\":{\"mappings\":[");
         for (ctx.source_map.items, 0..) |mapping, i| {
             if (i > 0) try w.writeByte(',');
@@ -875,9 +1032,11 @@ pub fn emitArtifact(
         try w.writeAll("]}");
     }
 
-    // anf — full ANF IR for SDK auto-state computation
-    try w.writeAll(",\"anf\":");
-    try emitANFProgramJson(w, anf_program);
+    // anf — full ANF IR for SDK auto-state computation (stateful only)
+    if (is_stateful) {
+        try w.writeAll(",\"anf\":");
+        try emitANFProgramJson(w, anf_program);
+    }
 
     try w.writeByte('}');
 
@@ -974,7 +1133,9 @@ fn emitANFBindingJson(w: anytype, binding: types.ANFBinding) error{OutOfMemory}!
     if (binding.source_loc) |loc| {
         try w.writeAll(",\"sourceLoc\":{\"file\":");
         try writeJsonString(w, loc.file);
-        try w.print(",\"line\":{d},\"column\":{d}}}", .{ loc.line, loc.column });
+        // N-475: SourceLocation.column is the parser's 1-based column; the
+        // artifact (like the source map, see recordSourceMapping) is 0-based.
+        try w.print(",\"line\":{d},\"column\":{d}}}", .{ loc.line, if (loc.column > 0) loc.column - 1 else 0 });
     }
     try w.writeByte('}');
 }
@@ -1207,7 +1368,7 @@ test "emitStackInstruction — push_int large" {
     try emitStackInstruction(&ctx, .{ .push_int = 1000 });
     // 1000 = 0x03E8 LE -> e8 03, push: 02 e8 03
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xe8, 0x03 }, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("1000", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("<e803>", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_big_int_decimal secp256k1 group order" {
@@ -1277,7 +1438,7 @@ test "emitStackInstruction — push_bool true" {
 
     try emitStackInstruction(&ctx, .{ .push_bool = true });
     try std.testing.expectEqualSlices(u8, &.{0x51}, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("OP_1", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("OP_TRUE", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_bool false" {
@@ -1287,7 +1448,7 @@ test "emitStackInstruction — push_bool false" {
 
     try emitStackInstruction(&ctx, .{ .push_bool = false });
     try std.testing.expectEqualSlices(u8, &.{0x00}, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("OP_0", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("OP_FALSE", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_data" {
@@ -1297,7 +1458,7 @@ test "emitStackInstruction — push_data" {
 
     try emitStackInstruction(&ctx, .{ .push_data = &.{ 0xaa, 0xbb, 0xcc } });
     try std.testing.expectEqualSlices(u8, &.{ 0x03, 0xaa, 0xbb, 0xcc }, ctx.script_bytes.items);
-    try std.testing.expectEqualStrings("aabbcc", ctx.asm_parts.items[0]);
+    try std.testing.expectEqualStrings("<aabbcc>", ctx.asm_parts.items[0]);
 }
 
 test "emitStackInstruction — push_data uses OP_N for single-byte 1 through 16" {
@@ -1716,8 +1877,17 @@ test "emitArtifact — simple contract" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Ripemd160\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"methods\":[{\"name\":\"unlock\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"isPublic\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"codeSeparatorIndex\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\":[]") != null);
+
+    // N-147: this fixture is stateless (no mutable properties), emits no
+    // OP_CODESEPARATOR, and its hand-built `body` records no constructor-slot
+    // placeholder — so, matching the TS assembler's omit-when-empty rule
+    // (`packages/runar-compiler/src/artifact/assembler.ts`), `stateFields`,
+    // `codeSeparatorIndex`, and `constructorSlots` must be ABSENT from the
+    // artifact entirely, not present with an empty array / default 0. Zig
+    // used to always emit all three.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"codeSeparatorIndex\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"constructorSlots\"") == null);
 
     // Single-method contract: no dispatch table, just the body opcodes
     // 76 a9 88 ac = OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG
@@ -1778,6 +1948,72 @@ test "emitArtifact — stateful contract with state fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"contractName\":\"Counter\"") != null);
     // Constructor params come from the ANF constructor method
     try std.testing.expect(std.mem.indexOf(u8, json, "\"constructor\":{\"params\":[{\"name\":\"count\",\"type\":\"bigint\"}]}") != null);
+}
+
+test "emitArtifact — state field index is the property's position, as in TS" {
+    // The SDKs read stateFields[].index as the constructor-arg position
+    // (TS assembler: "property position = constructor arg index"). A readonly
+    // property ahead of a mutable one used to give the mutable field index 0,
+    // so every SDK seeded it from the readonly arg (the PubKey bytes).
+    const allocator = std.testing.allocator;
+
+    var body = [_]types.StackOp{.{ .opcode = "OP_1ADD" }};
+    var stack_methods = [_]types.StackMethod{
+        .{ .name = "deposit", .ops = &body, .max_stack_depth = 1 },
+    };
+    var ctor_params = [_]types.ANFParam{
+        .{ .name = "owner", .type_name = "PubKey" },
+        .{ .name = "balance", .type_name = "bigint" },
+    };
+    var anf_methods = [_]types.ANFMethod{
+        .{ .name = "constructor", .is_public = false, .params = &ctor_params, .bindings = &.{} },
+        .{ .name = "deposit", .is_public = true, .params = &.{}, .bindings = &.{} },
+    };
+    var properties = [_]types.ANFProperty{
+        .{ .name = "owner", .type_name = "PubKey", .readonly = true },
+        .{ .name = "balance", .type_name = "bigint", .readonly = false },
+    };
+    const stack_program = types.StackProgram{ .methods = &stack_methods, .contract_name = "FunctionPatterns" };
+    const anf_program = types.ANFProgram{ .contract_name = "FunctionPatterns", .properties = &properties, .methods = &anf_methods };
+
+    const json = try emitArtifact(allocator, stack_program, anf_program);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stateFields\":[{\"name\":\"balance\",\"type\":\"bigint\",\"index\":1}]") != null);
+}
+
+test "emitArtifact — a state field carries its property's initialValue, as in TS" {
+    // TicTacToe: playerO and the cells have initializers and are not
+    // constructor params, so their index lies past the constructor args. The
+    // SDKs seed such a field from stateFields[].initialValue; without it they
+    // fell back to 0 (and a 0 PubKey is refused).
+    const allocator = std.testing.allocator;
+
+    var body = [_]types.StackOp{.{ .opcode = "OP_1ADD" }};
+    var stack_methods = [_]types.StackMethod{
+        .{ .name = "move", .ops = &body, .max_stack_depth = 1 },
+    };
+    var ctor_params = [_]types.ANFParam{
+        .{ .name = "playerX", .type_name = "PubKey" },
+    };
+    var anf_methods = [_]types.ANFMethod{
+        .{ .name = "constructor", .is_public = false, .params = &ctor_params, .bindings = &.{} },
+        .{ .name = "move", .is_public = true, .params = &.{}, .bindings = &.{} },
+    };
+    var properties = [_]types.ANFProperty{
+        .{ .name = "playerX", .type_name = "PubKey", .readonly = false },
+        .{ .name = "playerO", .type_name = "PubKey", .readonly = false, .initial_value = .{ .string = "02" ++ "00" ** 32 } },
+        .{ .name = "turn", .type_name = "bigint", .readonly = false, .initial_value = .{ .integer = 0 } },
+    };
+    const stack_program = types.StackProgram{ .methods = &stack_methods, .contract_name = "TicTacToe" };
+    const anf_program = types.ANFProgram{ .contract_name = "TicTacToe", .properties = &properties, .methods = &anf_methods };
+
+    const json = try emitArtifact(allocator, stack_program, anf_program);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"playerX\",\"type\":\"PubKey\",\"index\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"playerO\",\"type\":\"PubKey\",\"index\":1,\"initialValue\":\"02" ++ "00" ** 32 ++ "\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"turn\",\"type\":\"bigint\",\"index\":2,\"initialValue\":0}") != null);
 }
 
 test "writeJsonString — escaping" {
@@ -1872,22 +2108,27 @@ const RegroupEntry = struct {
     chain: []const types.SyntheticArrayLevel,
     index: u32,
     fixed_array: ?RegroupFA,
+    /// A scalar field's property initializer (TS copies it onto the state
+    /// field; the SDKs seed such a field from it). Not carried through a
+    /// FixedArray regroup.
+    initial_value: ?types.ConstValue = null,
 };
 
 fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProperty) ![]RegroupEntry {
     var flat: std.ArrayListUnmanaged(RegroupEntry) = .empty;
-    var state_idx: u32 = 0;
-    for (props) |p| {
+    // `index` is the property's position (= its constructor-arg index), as in
+    // the TS assembler; the SDKs seed each state field from that arg.
+    for (props, 0..) |p, prop_idx| {
         if (p.readonly) continue;
         const chain: []const types.SyntheticArrayLevel = if (p.synthetic_array_chain) |c| c else &.{};
         try flat.append(allocator, .{
             .name = p.name,
             .type_str = p.type_name,
             .chain = chain,
-            .index = state_idx,
+            .index = @intCast(prop_idx),
             .fixed_array = null,
+            .initial_value = if (chain.len == 0) p.initial_value else null,
         });
-        state_idx += 1;
     }
 
     var current = try flat.toOwnedSlice(allocator);
@@ -2054,4 +2295,12 @@ test "emit raw_script round-trip writes bytes verbatim and records a span" {
     try std.testing.expectEqual(@as(u32, raw_hex.len / 2), span.length);
     try std.testing.expectEqual(@as(i32, 0), span.in_arity);
     try std.testing.expectEqual(@as(i32, 1), span.out_arity);
+}
+
+test "formatBuildTimestamp - matches Go time.RFC3339 in UTC" {
+    var buf: [BUILD_TIMESTAMP_LEN]u8 = undefined;
+    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", formatBuildTimestamp(&buf, 1700000000));
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", formatBuildTimestamp(&buf, 0));
+    // Leap day, last second of a day.
+    try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", formatBuildTimestamp(&buf, 1709251199));
 }

@@ -272,3 +272,14 @@ describe.skipIf(!nodeUp)('assembleMultiContractCall — regtest integration', ()
 if (!nodeUp) {
   console.warn(`[multi-contract regtest] node not reachable at ${RPC_URL} — suite skipped`);
 }
+
+// N-474: CI's integration job starts a regtest node and runs this file with
+// RUNAR_INTEGRATION_STRICT=1. There, an unreachable node is a failure, not a
+// skip — otherwise a node that failed to start turns the step back into the
+// green two-skip run every other job already produces. Outside strict mode
+// this asserts nothing (and is not a skip either).
+it('a regtest node answers when RUNAR_INTEGRATION_STRICT=1', () => {
+  if (process.env.RUNAR_INTEGRATION_STRICT === '1') {
+    expect(nodeUp, `RUNAR_INTEGRATION_STRICT=1 but no regtest node answered at ${RPC_URL}`).toBe(true);
+  }
+});

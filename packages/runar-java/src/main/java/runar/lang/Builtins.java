@@ -444,10 +444,14 @@ public final class Builtins {
      * by tests, and the opaque-bytes {@code SigHashPreimage} that
      * contract source declares. This overload lets contracts written
      * against {@link SigHashPreimage} compile under the simulator.
+     *
+     * <p>N-099: the bytes must be the BIP-143 preimage of the spending
+     * transaction the simulator call describes; see
+     * {@link Preimage#checkPreimage(byte[])}.
      */
     public static boolean checkPreimage(SigHashPreimage preimage) {
         if (!SimulatorContext.isActive()) throw notInSimulator("checkPreimage");
-        return true;
+        return Preimage.checkPreimage(preimage == null ? null : preimage.toByteArray());
     }
 
     // ===================================================================
@@ -484,21 +488,35 @@ public final class Builtins {
     public static BigInteger extractSequence(Preimage p) { return Preimage.extractSequence(p); }
 
     public static ByteString extractOutputHash(SigHashPreimage p) {
-        // Mirror packages/runar-lang/src/runtime/preimage.ts: when the
-        // caller passes a SigHashPreimage whose first 32 bytes hold a
-        // synthetic outputs-hash (the standard test pattern — set the
-        // preimage to {@code hash256(expectedOutputs)}), echo those
-        // bytes directly so the contract assertion
-        // {@code hash256(outputs) === extractOutputHash(preimage)}
-        // round-trips under stateless calls. For stateful contracts the
-        // simulator threads a real {@link Preimage} via
+        // N-099: a non-empty SigHashPreimage is read as the compiled code
+        // reads it (OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP):
+        // hashOutputs, the 32 bytes before the trailing nLockTime and sighash
+        // type. It used to echo the first 32 bytes, so a 32-byte
+        // hash256(outputs) could pose as a preimage. For stateful contracts
+        // the simulator threads a real {@link Preimage} via
         // {@link SimulatorContext} — fall back to that when the
-        // SigHashPreimage parameter is empty.
-        if (p != null && p.length() >= 32) {
+        // SigHashPreimage parameter is empty (the this.txPreimage field).
+        if (p != null && p.length() > 0) {
             byte[] raw = p.toByteArray();
-            return new ByteString(java.util.Arrays.copyOfRange(raw, 0, 32));
+            if (raw.length < 40) {
+                throw new IllegalArgumentException("extractOutputHash: " + raw.length
+                    + " bytes are too short to be a sighash preimage");
+            }
+            return new ByteString(java.util.Arrays.copyOfRange(raw, raw.length - 40, raw.length - 8));
         }
-        return Preimage.extractOutputHash(resolvePreimage(p));
+        // N-245: no explicit preimage bytes were supplied, so this reads
+        // this.txPreimage — which only has a value when the active
+        // ContractSimulator call threaded a real spending-transaction
+        // preimage. Answering ZERO_32 here let an assertion comparing
+        // against an all-zero hashOutputs pass with nothing to back it;
+        // refuse instead, matching checkPreimage's fail-closed behaviour.
+        Preimage active = resolvePreimage(p);
+        if (active == null) {
+            throw new IllegalStateException("extractOutputHash has no spending transaction to read "
+                + "hashOutputs from: call a stateless method through ContractSimulator.callWithSpend "
+                + "(simulator built with an artifact), or a stateful one through callStateful");
+        }
+        return Preimage.extractOutputHash(active);
     }
     public static ByteString extractOutputHash(Preimage p) { return Preimage.extractOutputHash(p); }
 
@@ -580,6 +598,17 @@ public final class Builtins {
      */
     public static BigInteger currentBlockHeight() {
         return BigInteger.ZERO;
+    }
+
+    /**
+     * Read-only view of the satoshis the call puts in the next state UTXO
+     * (F-024 / R14). On-chain the compiler lowers it to the injected
+     * {@code _newAmount} witness, already bound to
+     * {@code >= extractAmount(txPreimage)}. Returns 10000 off-chain — the mock
+     * input amount, i.e. an honest continuation.
+     */
+    public static BigInteger continuationAmount() {
+        return BigInteger.valueOf(10000);
     }
 
     // ===================================================================

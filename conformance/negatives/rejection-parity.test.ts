@@ -10,6 +10,7 @@ import {
   missingTierIds,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * Cross-tier REJECTION parity.
@@ -126,7 +127,7 @@ const POSITIVE_CONTROL = join(DIR, 'positive-control.runar.ts');
  * which is how a one-tier acceptance survived on `.sol` unnoticed.
  */
 const fixtures = readdirSync(DIR)
-  .filter((f) => /^N\d{2}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
+  .filter((f) => /^N\d{2,}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
   .sort();
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -161,7 +162,7 @@ describe('cross-tier rejection parity', () => {
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(
         missing,
         `CI=true but these tiers have no toolchain: ${missing.join(', ')}. ` +

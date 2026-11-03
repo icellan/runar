@@ -9,6 +9,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "input_limits"
 require_relative "sighash_directive"
 require_relative "../codegen/emit"
 
@@ -67,7 +68,7 @@ module RunarCompiler
       TOK_ARROW        = 45  # =>
 
       # A single token produced by the tokenizer.
-      Token = Struct.new(:kind, :value, :line, :col, keyword_init: true)
+      Token = Struct.new(:kind, :value, :line, :col, :offset, keyword_init: true)
     end
 
     # -----------------------------------------------------------------------
@@ -181,10 +182,11 @@ module RunarCompiler
       }.freeze
 
       # Matches the author-facing comment directives (issue #109 @embedAlways,
-      # issue #123 @sighash). Word-boundary anchored to mirror the TS reference
-      # compiler's +/@embedAlways\b/+ / +/@sighash\b/+ scans so an identifier
-      # like +sighashType+ inside a comment does not register a directive.
-      DIRECTIVE_RE = /@(?:embedAlways|sighash)\b/
+      # issue #123 @sighash), mirroring the TS reference compiler's
+      # +/@embedAlways\b/+ / +/@sighash/+ scans. N-039 (R85): +@sighash+ has no
+      # word boundary, so +@sighashSINGLE|FORKID+ / +@sighashType+ are recorded
+      # and refused as malformed rather than ignored as prose.
+      DIRECTIVE_RE = /@embedAlways\b|@sighash/
 
       # Tokenize a source string into an array of Token structs.
       #
@@ -197,9 +199,10 @@ module RunarCompiler
       #
       # @param source [String]
       # @return [Array(Array<Token>, Array<Hash>)] tokens and directive records
-      def self.tokenize(source)
+      def self.tokenize(source, lex = [], file_name = "")
       tokens = []
       directives = []
+      optional_chain_seen = false # N-121
       line = 1
       col = 0
       i = 0
@@ -236,11 +239,12 @@ module RunarCompiler
         if ch == "/" && i + 1 < n && source[i + 1] == "/"
           c_start = i
           c_line = line
+          c_col = col
           while i < n && source[i] != "\n" && source[i] != "\r"
             i += 1
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext, start: c_start, stop: i } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
@@ -248,6 +252,7 @@ module RunarCompiler
         if ch == "/" && i + 1 < n && source[i + 1] == "*"
           c_start = i
           c_line = line
+          c_col = col
           i += 2
           col += 2
           found_end = false
@@ -271,14 +276,16 @@ module RunarCompiler
             i += 1 if i < n
           end
           ctext = source[c_start...i]
-          directives << { line: c_line, text: ctext } if ctext&.match?(DIRECTIVE_RE)
+          directives << { line: c_line, col: c_col, text: ctext, start: c_start, stop: i } if ctext&.match?(DIRECTIVE_RE)
           next
         end
 
         start_col = col
+        start_off = i
 
         # Template string literals (backticks)
         if ch == "`"
+          tick_line = line
           i += 1
           col += 1
           start = i
@@ -298,9 +305,13 @@ module RunarCompiler
             end
           end
           val = source[start...i]
+          # F-011: a template literal may span lines; only end of file
+          # leaves it unterminated.
           if i < n
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, tick_line, start_col)
           end
           tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
           next
@@ -312,7 +323,9 @@ module RunarCompiler
           i += 1
           col += 1
           start = i
-          while i < n && source[i] != quote
+          # F-011: a literal that reaches an unescaped line break or end of
+          # file is unterminated (a backslash before the break continues it).
+          while i < n && source[i] != quote && source[i] != "\n" && source[i] != "\r"
             if source[i] == "\\"
               i += 1
               col += 1
@@ -323,51 +336,23 @@ module RunarCompiler
             end
           end
           val = source[start...i]
-          if i < n
+          if i < n && source[i] == quote
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
           tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
           next
         end
 
-        # Numbers (including BigInt suffix 'n')
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one TypeScript
+        # integer literal, BigInt suffix `n` included.
         if ch >= "0" && ch <= "9"
-          start = i
-          if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-            i += 2
-            col += 2
-            while i < n && hex_digit?(source[i])
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "o" || source[i + 1] == "O")
-            i += 2
-            col += 2
-            while i < n && source[i] >= "0" && source[i] <= "7"
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "b" || source[i + 1] == "B")
-            i += 2
-            col += 2
-            while i < n && (source[i] == "0" || source[i] == "1")
-              i += 1
-              col += 1
-            end
-          else
-            while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-              i += 1
-              col += 1
-            end
-          end
-          num_str = source[start...i].delete("_")
-          # Strip trailing BigInt suffix 'n'
-          if i < n && source[i] == "n"
-            i += 1
-            col += 1
-          end
-          tokens << Token.new(kind: TOK_NUMBER, value: num_str, line: line, col: start_col)
+          stop, num_str, = IntLiteral.lex_number("ts", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
+          tokens << Token.new(kind: TOK_NUMBER, value: num_str, line: line, col: start_col, offset: start_off)
           next
         end
 
@@ -381,6 +366,14 @@ module RunarCompiler
           word = source[start...i]
           tokens << Token.new(kind: TOK_IDENT, value: word, line: line, col: start_col)
           next
+        end
+
+        # N-121: `?.` not followed by a decimal digit is optional chaining,
+        # which is disallowed. Report the first one; `?` is still lexed below.
+        if ch == "?" && !optional_chain_seen && source[i + 1] == "." &&
+           !("0".."9").cover?(source[i + 2].to_s)
+          optional_chain_seen = true
+          lex << Frontend.lex_error(OPTIONAL_CHAINING, file_name, line, start_col)
         end
 
         # Three-character operators
@@ -410,13 +403,15 @@ module RunarCompiler
         # Single-character operators
         one_kind = ONE_CHAR_OPS[ch]
         unless one_kind.nil?
-          tokens << Token.new(kind: one_kind, value: ch, line: line, col: start_col)
+          tokens << Token.new(kind: one_kind, value: ch, line: line, col: start_col, offset: start_off)
           i += 1
           col += 1
           next
         end
 
-        # Skip unknown characters
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
         i += 1
         col += 1
       end
@@ -431,6 +426,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class TsParser
+      include InputLimits::NestingCounter
+
       include TsTokens
       # Re-define token constants directly on the class so that Ruby's lexical
       # constant lookup finds them here instead of identically-named constants
@@ -443,18 +440,19 @@ module RunarCompiler
         @tokens = []
         @pos = 0
         @errors = []
-        # Directive records ({line:, text:}) collected by the tokenizer for
-        # every @embedAlways / @sighash comment. Attached to the member each
-        # immediately precedes (see gather_member_directives). Set by parse_ts.
+        # Directive records ({line:, col:, text:}) collected by the tokenizer
+        # for every @embedAlways / @sighash comment. Attached to the member
+        # each immediately precedes (see gather_member_directives). Set by
+        # parse_ts.
         @directives = []
-        # Start line of the most recently parsed member (or the class body's
-        # opening brace). A directive attaches to a member only when it sits in
-        # the source gap AFTER the previous member and BEFORE this one, so a
-        # directive is claimed by exactly the member it immediately precedes.
-        @last_member_line = 0
+        # N-199: source text and the directive records claimed by methods
+        # (non-constructor) and by properties, for report_lost_directives.
+        @source = ""
+        @method_directives = []
+        @property_directives = []
       end
 
-      attr_accessor :tokens, :pos, :errors, :directives
+      attr_accessor :tokens, :pos, :errors, :directives, :source
 
       # -- Error helpers ----------------------------------------------------
 
@@ -528,9 +526,14 @@ module RunarCompiler
 
       # -- Top-level parsing ------------------------------------------------
 
+      VALID_BASE_CLASSES = %w[SmartContract StatefulSmartContract UnsafeSmartContract].freeze
+
       def parse_contract
-        # Skip import statements, export keywords, and other top-level noise
-        # until we find a class declaration.
+        # N-011: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+        # class; only one whose `extends` names a valid base is the contract.
+        # Other classes are ignored wherever they sit. Each valid class after
+        # the first is an error, and the LAST valid class is the one parsed.
+        valid = [] # token index of each valid `class` keyword
         until check(TOK_EOF)
           # Skip import statements
           if check_ident("import")
@@ -538,34 +541,56 @@ module RunarCompiler
             next
           end
 
-          # export class ...
+          decl_loc = loc
+          # export class ... / export default class ...
           if check_ident("export")
             advance
-            if check_ident("class")
-              return parse_class
+            advance if check_ident("default")
+            unless check_ident("class")
+              # Other export statements -- skip to next semicolon or brace
+              skip_statement
+              next
             end
-            # export default class, etc.
-            if check_ident("default")
-              advance
-              if check_ident("class")
-                return parse_class
-              end
-            end
-            # Other export statements -- skip to next semicolon or brace
-            skip_statement
-            next
           end
 
-          # class ...
           if check_ident("class")
-            return parse_class
+            class_pos = @pos
+            advance
+            match(TOK_IDENT) # class name
+            base = nil
+            base = peek.value if match_ident("extends") && check(TOK_IDENT)
+            # Skip the rest of the header and the balanced class body.
+            skip_statement
+            if VALID_BASE_CLASSES.include?(base)
+              # The TS reference locates a declaration at its first token
+              # (`export` included).
+              unless valid.empty?
+                @errors << Diagnostic.new(
+                  message: "Only one SmartContract subclass is allowed per file",
+                  severity: Severity::ERROR,
+                  loc: decl_loc
+                )
+              end
+              valid << class_pos
+            end
+            next
           end
 
           # Skip anything else at top level
           skip_statement
         end
 
-        raise "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+        if valid.empty?
+          @errors << Diagnostic.new(
+            message: "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found",
+            severity: Severity::ERROR,
+            loc: SourceLocation.new(file: @file_name, line: 1, column: 0)
+          )
+          return nil
+        end
+
+        @pos = valid.last
+        parse_class
       end
 
       # -- Skip helpers -----------------------------------------------------
@@ -624,15 +649,11 @@ module RunarCompiler
           parent_class = parent_tok.value
         end
 
-        unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          raise "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+        unless VALID_BASE_CLASSES.include?(parent_class)
+          raise "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
         end
 
         lbrace = expect(TOK_LBRACE)
-        # Anchor directive attribution at the class body's opening brace so a
-        # stray directive comment ABOVE the class does not attach to the first
-        # member.
-        @last_member_line = lbrace.line
 
         properties = []
         constructor = nil
@@ -659,7 +680,10 @@ module RunarCompiler
           end
         end
 
-        expect(TOK_RBRACE)
+        rbrace = expect(TOK_RBRACE)
+
+        # N-199 (R75): a directive in the class body that no member reads.
+        report_lost_directives(lbrace, rbrace)
 
         if constructor.nil?
           add_error("contract must have a constructor")
@@ -689,16 +713,36 @@ module RunarCompiler
 
         # Claim any @embedAlways / @sighash directive comments sitting in the
         # source gap immediately before this member (issue #109 / #123).
-        member_directives = gather_member_directives(location.line)
+        # F-282: the lower bound is the PREVIOUS token's own line (not the
+        # previous member's start line), and the upper bound is
+        # position-aware (column-checked on the member's own line), so a
+        # directive sharing a line with the preceding token is correctly
+        # excluded (ts-morph's leading-trivia scan never collects it either —
+        # it is that preceding token's trailing trivia), while a directive
+        # sharing a NEW line with this member's own declaration is still
+        # claimed, and a comment trailing THIS member's own closing brace on
+        # that same line is excluded rather than wrongly claimed.
+        prev_token_line = @pos > 0 ? @tokens[@pos - 1].line : 0
+        member_directives = gather_member_directives(prev_token_line, location.line, location.column)
         embed_always = member_directives.any? { |d| d[:text].match?(/@embedAlways\b/) }
-        sighash_text = member_directives.map { |d| d[:text] }.find { |t| t.match?(/@sighash\b/) }
+        # Every directive comment is kept (not just the first) so a second
+        # `@sighash` on the same member is seen and refused (F-039).
+        sighash_texts = member_directives.map { |d| d[:text] }.select { |t| t.match?(/@sighash/) }
+        sighash_text = sighash_texts.empty? ? nil : sighash_texts.join("\n")
 
         # Collect modifiers: public, private, readonly
         visibility = "private"
         is_readonly = false
+        is_static = false
 
         loop do
-          if check_ident("public")
+          if !is_static && check_ident("static") && @pos + 1 < @tokens.length &&
+             @tokens[@pos + 1].kind == TOK_IDENT
+            # N-050: `static` used to be read as the member NAME, which
+            # skipped the member and refused the contract by accident.
+            is_static = true
+            advance
+          elsif check_ident("public")
             visibility = "public"
             advance
           elsif check_ident("private")
@@ -733,7 +777,19 @@ module RunarCompiler
 
         # Method: name(...)
         if check(TOK_LPAREN)
+          if is_static
+            # N-050: a static method is not a contract method.
+            @errors << Diagnostic.new(message: Frontend.static_method_message(member_name),
+                                      severity: Severity::ERROR, loc: location)
+          end
+          @method_directives.concat(member_directives)
           return parse_method(member_name, visibility, location, sighash_text)
+        end
+
+        if is_static
+          # Not a method: keep the pre-N-050 handling of a static member.
+          skip_to_next_member
+          return nil
         end
 
         # Property: name: Type (possibly with ; at end)
@@ -750,6 +806,7 @@ module RunarCompiler
 
           skip_semicolons
 
+          @property_directives.concat(member_directives)
           return PropertyNode.new(
             name: member_name,
             type: type_node,
@@ -764,6 +821,7 @@ module RunarCompiler
         if check(TOK_SEMICOLON)
           advance
           add_error("property '#{member_name}' must have an explicit type annotation")
+          @property_directives.concat(member_directives)
           return PropertyNode.new(
             name: member_name,
             type: CustomType.new(name: "unknown"),
@@ -778,16 +836,57 @@ module RunarCompiler
         nil
       end
 
-      # Return the directive records that attach to a member starting at
-      # +member_line+: those recorded AFTER the previous member (or the class
-      # brace) and BEFORE this member, i.e. the ones this member immediately
-      # follows. Advances +@last_member_line+ so each directive is claimed once.
-      def gather_member_directives(member_line)
-        claimed = @directives.select do |d|
-          d[:line] > @last_member_line && d[:line] < member_line
+      # N-199 (user decision R75): refuse a `@sighash` / `@embedAlways` marker
+      # inside the contract class braces that is not in a comment claimed as
+      # leading trivia by a member of the kind that reads it (`@sighash` by a
+      # method, `@embedAlways` by a property). A comment sharing a line with the
+      # preceding token is never claimed (F-282), so such a directive used to
+      # be dropped silently. The raw body text is scanned with the same marker
+      # rules as the non-TS guard; text outside the class braces is prose.
+      # Located at the marker's `@` (1-based line, 0-based column, as TS's
+      # locFromPos). Mirrors reportLostDirectives in the TS reference.
+      def report_lost_directives(lbrace, rbrace)
+        return if lbrace.offset.nil? || rbrace.offset.nil? || rbrace.offset <= lbrace.offset
+
+        body_start = lbrace.offset + 1
+        body = @source[body_start...rbrace.offset]
+        lost = []
+        [[/@sighash/, "@sighash", @method_directives],
+         [/@embedAlways\b/, "@embedAlways", @property_directives]].each do |re, directive, claimed|
+          body.scan(re) do
+            pos = body_start + Regexp.last_match.begin(0)
+            next if claimed.any? { |d| d[:start] <= pos && pos < d[:stop] }
+
+            lost << [pos, directive]
+          end
         end
-        @last_member_line = member_line
-        claimed
+        lost.sort_by(&:first).each do |pos, directive|
+          before = @source[0...pos]
+          line = before.count("\n") + 1
+          col = pos - ((before.rindex(/[\n\r]/) || -1) + 1)
+          @errors << Diagnostic.new(message: SighashDirective.lost_directive_message(directive),
+                                    severity: Severity::ERROR,
+                                    loc: SourceLocation.new(file: @file_name, line: line, column: col))
+        end
+      end
+
+      # Return the directive records that attach to the member whose first
+      # token starts at +(member_line, member_col)+: those strictly after the
+      # PREVIOUS token's own line (+after_line+ — a directive sharing that
+      # token's line is its trailing trivia, never claimed) and strictly
+      # before this member's own first token (on an earlier line, or on
+      # +member_line+ at a column before +member_col+ — a directive on the
+      # member's own line but AFTER its first token is instead that member's
+      # own trailing trivia). Mirrors ts-morph's position-aware leading-trivia
+      # scan (F-282); each member computes its own window from real token
+      # positions, so adjacent members' windows cannot overlap and no claimed-
+      # once cursor is needed.
+      def gather_member_directives(after_line, member_line, member_col)
+        @directives.select do |d|
+          after_prev_token = d[:line] > after_line
+          before_member = d[:line] < member_line || (d[:line] == member_line && d[:col] < member_col)
+          after_prev_token && before_member
+        end
       end
 
       def skip_to_next_member
@@ -839,10 +938,11 @@ module RunarCompiler
       def parse_method(name, visibility, location, sighash_text = nil)
         params = parse_params
 
-        # Skip optional return type annotation
+        # Optional return type annotation. The AST keeps none; N-331 refuses an
+        # unknown name.
         if check(TOK_COLON)
           advance
-          parse_type
+          Frontend.reject_unknown_return_type(@errors, parse_type, name, location, visibility == "public")
         end
 
         body = parse_block
@@ -850,7 +950,7 @@ module RunarCompiler
         # Issue #123: `/** @sighash <FLAGS> */` directive -> per-method sighash
         # type. Only public methods are spending entry points, so a directive on
         # a private helper is meaningless (error). Malformed flag lists error too.
-        sighash_type = parse_sighash_on_method(name, visibility, sighash_text)
+        sighash_type = parse_sighash_on_method(name, visibility, sighash_text, location)
 
         MethodNode.new(
           name: name,
@@ -865,20 +965,25 @@ module RunarCompiler
       # Resolve a method's `@sighash` directive text to a numeric sighash type,
       # or nil when there is no directive. Pushes a parse error for a directive
       # on a non-public method or for a malformed flag list.
-      def parse_sighash_on_method(name, visibility, sighash_text)
+      def parse_sighash_on_method(name, visibility, sighash_text, location)
         return nil if sighash_text.nil?
 
+        # N-039 (R88a): located at the method declaration, like the TS reference.
         if visibility != "public"
-          add_error("@sighash directive on non-public method '#{name}' has no effect — " \
-                    "only public methods are spending entry points")
+          @errors << Diagnostic.new(message: "@sighash directive on non-public method '#{name}' has no effect — " \
+                                             "only public methods are spending entry points",
+                                    severity: Severity::ERROR, loc: location)
           return nil
         end
 
+        # Non-nil: the caller only passes text carrying a marker. A malformed or
+        # duplicated directive comes back as an error, never as "no directive".
         result = SighashDirective.extract_sighash_directive(sighash_text)
-        return nil if result.nil?
+        result = { error: SighashDirective::SIGHASH_MALFORMED_ERROR } if result.nil?
 
         if result.key?(:error)
-          add_error("Method '#{name}': #{result[:error]}")
+          @errors << Diagnostic.new(message: "Method '#{name}': #{result[:error]}",
+                                    severity: Severity::ERROR, loc: location)
           return nil
         end
         result[:value]
@@ -938,9 +1043,22 @@ module RunarCompiler
         # FixedArray<T, N>
         if name == "FixedArray"
           if match(TOK_LT)
-            elem_type = parse_type
+            elem_type = nested { parse_type }
             expect(TOK_COMMA)
             size_tok = expect(TOK_NUMBER)
+            # N-120: the TS reference reads the size with parseInt(text, 10),
+            # which refuses a 0x/0o/0b spelling.
+            raw = if size_tok.kind == TOK_NUMBER && size_tok.offset
+                    @source[size_tok.offset...IntLiteral.scan_number_end(@source, size_tok.offset)]
+                  else
+                    ""
+                  end
+            # N-307: so is a bigint suffix (`2n`) or a separator (`1_0`).
+            if raw.match?(/\A0[xXoObB]/) || raw.include?("_") || raw.end_with?("n")
+              add_error("line #{size_tok.line}: FixedArray size must be a positive integer literal, got '#{raw}'")
+              expect(TOK_GT)
+              return CustomType.new(name: name)
+            end
             size = begin
               Integer(size_tok.value, 0)
             rescue ArgumentError
@@ -1003,9 +1121,8 @@ module RunarCompiler
         stmts = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
-          skip_semicolons
-          break if check(TOK_RBRACE) || check(TOK_EOF)
-
+          # F-064: a stray `;` is an EmptyStatement, refused by
+          # parse_statement -- no longer swallowed here.
           stmt = parse_statement
           stmts << stmt unless stmt.nil?
         end
@@ -1016,12 +1133,46 @@ module RunarCompiler
 
       # -- Statement parsing ------------------------------------------------
 
+      # F-064: statement keywords the TS reference refuses, mapped to the
+      # ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+      UNSUPPORTED_STATEMENT_KEYWORDS = {
+        "while" => "WhileStatement",
+        "do" => "DoStatement",
+        "switch" => "SwitchStatement",
+        "try" => "TryStatement",
+        "throw" => "ThrowStatement",
+        "debugger" => "DebuggerStatement",
+        "with" => "WithStatement",
+        "class" => "ClassDeclaration",
+        "function" => "FunctionDeclaration",
+        "break" => "BreakStatement",
+        "continue" => "ContinueStatement",
+      }.freeze
+
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
         tok = peek
 
-        # Variable declarations: const, let
-        if tok.kind == TOK_IDENT && (tok.value == "const" || tok.value == "let")
+        # F-064: refuse every statement kind outside spec/grammar.md §9 with
+        # the TS reference's diagnostic instead of falling through to the
+        # expression parser (or silently skipping a `;`).
+        unsupported = unsupported_statement_kind
+        unless unsupported.nil?
+          @errors << Diagnostic.new(
+            message: "Unsupported statement kind: #{unsupported}",
+            severity: Severity::ERROR,
+            loc: location
+          )
+          skip_unsupported_statement
+          return nil
+        end
+
+        # Variable declarations: const, let, var (N-054: `var` is a mutable `let`)
+        if tok.kind == TOK_IDENT && (tok.value == "const" || tok.value == "let" || tok.value == "var")
           return parse_variable_decl(location)
         end
 
@@ -1044,9 +1195,55 @@ module RunarCompiler
         parse_expression_statement(location)
       end
 
+      # The ts.SyntaxKind name of an unsupported statement starting here.
+      def unsupported_statement_kind
+        tok = peek
+        return "EmptyStatement" if tok.kind == TOK_SEMICOLON
+        return "Block" if tok.kind == TOK_LBRACE
+        return nil unless tok.kind == TOK_IDENT
+        return UNSUPPORTED_STATEMENT_KEYWORDS[tok.value] if UNSUPPORTED_STATEMENT_KEYWORDS.key?(tok.value)
+        return "LabeledStatement" if peek_next_kind == TOK_COLON
+
+        if tok.value == "for"
+          # for (const|let <name> in|of ...)
+          ahead = @tokens[(@pos + 1), 4] || []
+          if ahead.length == 4 && ahead[0].kind == TOK_LPAREN &&
+             ahead[1].kind == TOK_IDENT && %w[const let var].include?(ahead[1].value) &&
+             ahead[2].kind == TOK_IDENT &&
+             ahead[3].kind == TOK_IDENT && %w[in of].include?(ahead[3].value)
+            return ahead[3].value == "in" ? "ForInStatement" : "ForOfStatement"
+          end
+        end
+        nil
+      end
+
+      # Consume a refused statement: tokens up to a `;` or a closing brace at
+      # nesting depth 0, stopping before a `}` that closes the enclosing block.
+      def skip_unsupported_statement
+        depth = 0
+        until check(TOK_EOF)
+          tok = peek
+          if [TOK_LBRACE, TOK_LPAREN, TOK_LBRACKET].include?(tok.kind)
+            depth += 1
+          elsif [TOK_RBRACE, TOK_RPAREN, TOK_RBRACKET].include?(tok.kind)
+            return if depth.zero?
+
+            depth -= 1
+            advance
+            return if depth.zero? && tok.kind == TOK_RBRACE
+
+            next
+          elsif tok.kind == TOK_SEMICOLON && depth.zero?
+            advance
+            return
+          end
+          advance
+        end
+      end
+
       def parse_variable_decl(location)
-        keyword = advance # const or let
-        is_mutable = keyword.value == "let"
+        keyword = advance # const, let or var
+        is_mutable = keyword.value != "const" # N-054: `var` is a mutable `let`
 
         name_tok = expect(TOK_IDENT)
         var_name = name_tok.value
@@ -1063,7 +1260,7 @@ module RunarCompiler
 
         init = BigIntLiteral.new(value: 0) if init.nil?
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
 
         VariableDeclStmt.new(
           name: var_name,
@@ -1087,7 +1284,7 @@ module RunarCompiler
           if check_ident("if")
             # else if ...
             elif_loc = loc
-            elif_stmt = parse_if(elif_loc)
+            elif_stmt = nested { parse_if(elif_loc) }
             else_block = [elif_stmt]
           else
             else_block = parse_block_or_statement
@@ -1119,7 +1316,7 @@ module RunarCompiler
 
         # Initializer: let i: bigint = 0n  or  let i = 0n
         init_loc = loc
-        if check_ident("let") || check_ident("const")
+        if check_ident("let") || check_ident("const") || check_ident("var")
           init_stmt = parse_variable_decl(init_loc)
           unless init_stmt.is_a?(VariableDeclStmt)
             init_stmt = VariableDeclStmt.new(
@@ -1130,7 +1327,15 @@ module RunarCompiler
             )
           end
         else
-          # Expression initializer -- not standard for Runar for-loops
+          # N-306: the TS reference's parseForStatement refuses a
+          # non-declaration for-initializer with this diagnostic. This
+          # branch used to silently substitute a synthetic `_i = 0` for the
+          # real initializer expression, discarding it with no error.
+          @errors << Diagnostic.new(
+            message: "For loop must have a variable declaration initializer",
+            severity: Severity::ERROR,
+            loc: location
+          )
           init_stmt = VariableDeclStmt.new(
             name: "_i",
             mutable: true,
@@ -1141,14 +1346,21 @@ module RunarCompiler
           while !check(TOK_SEMICOLON) && !check(TOK_EOF)
             advance
           end
+          # N-135: only this branch stops ON the `;`; the variable_decl
+          # above already consumed its own, so matching again there
+          # swallowed an empty condition slot's `;`.
+          match(TOK_SEMICOLON)
         end
-
-        # The variable_decl already consumed the semicolon if it was there,
-        # but we need to make sure we're past it.
-        match(TOK_SEMICOLON)
 
         # Condition
         if check(TOK_SEMICOLON)
+          # N-135: the TS reference refuses an empty condition slot; the
+          # placeholder below only keeps the AST well-formed.
+          @errors << Diagnostic.new(
+            message: "For loop must have a condition",
+            severity: Severity::ERROR,
+            loc: location
+          )
           condition = BoolLiteral.new(value: false)
         else
           condition = parse_expression
@@ -1158,6 +1370,13 @@ module RunarCompiler
         # Update
         update_loc = loc
         if check(TOK_RPAREN)
+          # N-132: the TS reference refuses an empty update slot; the
+          # placeholder below only keeps the AST well-formed.
+          @errors << Diagnostic.new(
+            message: "For loop must have an update expression",
+            severity: Severity::ERROR,
+            loc: location
+          )
           update = ExpressionStmt.new(
             expr: BigIntLiteral.new(value: 0),
             source_location: update_loc
@@ -1188,7 +1407,7 @@ module RunarCompiler
           value = parse_expression
         end
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
         ReturnStmt.new(value: value, source_location: location)
       end
 
@@ -1198,7 +1417,7 @@ module RunarCompiler
         # Check for assignment: expr = value
         if match(TOK_ASSIGN)
           value = parse_expression
-          skip_semicolons
+          match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
           return AssignmentStmt.new(target: expr, value: value, source_location: location)
         end
 
@@ -1213,13 +1432,13 @@ module RunarCompiler
         compound_ops.each do |kind, bin_op|
           if match(kind)
             right = parse_expression
-            skip_semicolons
+            match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
             value = BinaryExpr.new(op: bin_op, left: expr, right: right)
             return AssignmentStmt.new(target: expr, value: value, source_location: location)
           end
         end
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
         ExpressionStmt.new(expr: expr, source_location: location)
       end
 
@@ -1241,15 +1460,15 @@ module RunarCompiler
       #   primary
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
         expr = parse_or
         if match(TOK_QUESTION)
-          consequent = parse_ternary
+          consequent = nested { parse_ternary }
           expect(TOK_COLON)
-          alternate = parse_ternary
+          alternate = nested { parse_ternary }
           return TernaryExpr.new(
             condition: expr,
             consequent: consequent,
@@ -1260,65 +1479,71 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match(TOK_PIPEPIPE)
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bitwise_or
         while match(TOK_AMPAMP)
           right = parse_bitwise_or
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_or
+        start = loc
         left = parse_bitwise_xor
         while match(TOK_PIPE)
           right = parse_bitwise_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_xor
+        start = loc
         left = parse_bitwise_and
         while match(TOK_CARET)
           right = parse_bitwise_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bitwise_and
+        start = loc
         left = parse_equality
         while match(TOK_AMP)
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           if match(TOK_EQEQEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif match(TOK_NOTEQEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           elsif match(TOK_EQEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "===", left: left, right: right)
+            left = BinaryExpr.new(op: "===", left: left, right: right, source_location: start)
           elsif match(TOK_NOTEQ)
             right = parse_comparison
-            left = BinaryExpr.new(op: "!==", left: left, right: right)
+            left = BinaryExpr.new(op: "!==", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1327,20 +1552,21 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           if match(TOK_LT)
             right = parse_shift
-            left = BinaryExpr.new(op: "<", left: left, right: right)
+            left = BinaryExpr.new(op: "<", left: left, right: right, source_location: start)
           elsif match(TOK_LTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: "<=", left: left, right: right)
+            left = BinaryExpr.new(op: "<=", left: left, right: right, source_location: start)
           elsif match(TOK_GT)
             right = parse_shift
-            left = BinaryExpr.new(op: ">", left: left, right: right)
+            left = BinaryExpr.new(op: ">", left: left, right: right, source_location: start)
           elsif match(TOK_GTEQ)
             right = parse_shift
-            left = BinaryExpr.new(op: ">=", left: left, right: right)
+            left = BinaryExpr.new(op: ">=", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1349,14 +1575,15 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match(TOK_LSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: "<<", left: left, right: right)
+            left = BinaryExpr.new(op: "<<", left: left, right: right, source_location: start)
           elsif match(TOK_RSHIFT)
             right = parse_additive
-            left = BinaryExpr.new(op: ">>", left: left, right: right)
+            left = BinaryExpr.new(op: ">>", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1365,14 +1592,15 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match(TOK_PLUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "+", left: left, right: right)
+            left = BinaryExpr.new(op: "+", left: left, right: right, source_location: start)
           elsif match(TOK_MINUS)
             right = parse_multiplicative
-            left = BinaryExpr.new(op: "-", left: left, right: right)
+            left = BinaryExpr.new(op: "-", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1381,17 +1609,18 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match(TOK_STAR)
             right = parse_unary
-            left = BinaryExpr.new(op: "*", left: left, right: right)
+            left = BinaryExpr.new(op: "*", left: left, right: right, source_location: start)
           elsif match(TOK_SLASH)
             right = parse_unary
-            left = BinaryExpr.new(op: "/", left: left, right: right)
+            left = BinaryExpr.new(op: "/", left: left, right: right, source_location: start)
           elsif match(TOK_PERCENT)
             right = parse_unary
-            left = BinaryExpr.new(op: "%", left: left, right: right)
+            left = BinaryExpr.new(op: "%", left: left, right: right, source_location: start)
           else
             break
           end
@@ -1400,25 +1629,26 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match(TOK_BANG)
-          operand = parse_unary
-          return UnaryExpr.new(op: "!", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "!", operand: operand, source_location: op_loc)
         end
         if match(TOK_MINUS)
-          operand = parse_unary
-          return UnaryExpr.new(op: "-", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "-", operand: operand, source_location: op_loc)
         end
         if match(TOK_TILDE)
-          operand = parse_unary
-          return UnaryExpr.new(op: "~", operand: operand)
+          operand = nested { parse_unary }
+          return UnaryExpr.new(op: "~", operand: operand, source_location: op_loc)
         end
         # Prefix ++ and --
         if match(TOK_PLUSPLUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return IncrementExpr.new(operand: operand, prefix: true)
         end
         if match(TOK_MINUSMINUS)
-          operand = parse_unary
+          operand = nested { parse_unary }
           return DecrementExpr.new(operand: operand, prefix: true)
         end
         parse_postfix
@@ -1438,7 +1668,7 @@ module RunarCompiler
               if expr.is_a?(Identifier) && expr.name == "this"
                 expr = CallExpr.new(
                   callee: MemberExpr.new(
-                    object: Identifier.new(name: "this"),
+                    object: Identifier.new(name: "this", source_location: expr.source_location),
                     property: prop_name
                   ),
                   args: args
@@ -1451,7 +1681,7 @@ module RunarCompiler
               end
             else
               if expr.is_a?(Identifier) && expr.name == "this"
-                expr = PropertyAccessExpr.new(property: prop_name)
+                expr = PropertyAccessExpr.new(property: prop_name, source_location: expr.source_location)
               else
                 expr = MemberExpr.new(object: expr, property: prop_name)
               end
@@ -1779,19 +2009,21 @@ module RunarCompiler
 
         # String literal
         if tok.kind == TOK_STRING
+          lit_loc = loc
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: lit_loc)
         end
 
         # Identifier, keyword, or call
         if tok.kind == TOK_IDENT
+          ident_loc = loc
           advance
           name = tok.value
 
           return BoolLiteral.new(value: true) if name == "true"
           return BoolLiteral.new(value: false) if name == "false"
-          return Identifier.new(name: "this") if name == "this"
-          return Identifier.new(name: "super") if name == "super"
+          return Identifier.new(name: "this", source_location: ident_loc) if name == "this"
+          return Identifier.new(name: "super", source_location: ident_loc) if name == "super"
 
           # asm({ body, in_arity?, out_arity? }) compiler intrinsic --
           # normalise the object-literal argument into a CallExpr with three
@@ -1806,10 +2038,10 @@ module RunarCompiler
           # Function call: name(...)
           if check(TOK_LPAREN)
             args = parse_call_args
-            return CallExpr.new(callee: Identifier.new(name: name), args: args)
+            return CallExpr.new(callee: Identifier.new(name: name, source_location: ident_loc), args: args)
           end
 
-          return Identifier.new(name: name)
+          return Identifier.new(name: name, source_location: ident_loc)
         end
 
         # Parenthesized expression
@@ -1876,14 +2108,28 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_ts(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_ts_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_ts_tokens(source, file_name, lex)
       p = TsParser.new(file_name)
-      toks, directives = TsTokens.tokenize(source)
+      toks, directives = TsTokens.tokenize(source, lex, file_name)
       p.tokens = toks
       p.directives = directives
+      p.source = source
       p.pos = 0
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

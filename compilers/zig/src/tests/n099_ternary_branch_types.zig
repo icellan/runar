@@ -148,6 +148,10 @@ test "N-099: legal ternary arms still compile" {
         const result = try compiler_api.compileSource(a, src, "C.runar.ts");
         if (result.artifact_json) |j| a.free(j);
         defer a.free(result.script_hex);
+        defer {
+            for (result.warnings) |line| a.free(line);
+            a.free(result.warnings);
+        }
         try std.testing.expect(result.script_hex.len > 0);
     }
 }

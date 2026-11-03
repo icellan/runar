@@ -17,7 +17,20 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.input_limits import NestingCounter, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    PY_BYTES_NON_ASCII,
+    PY_STATEMENT_LINE_BREAK,
+    UNTERMINATED_STRING_LITERAL,
+    invalid_escape_sequence_message,
+    lex_error,
+    with_lex_errors,
+)
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, reject_unknown_return_type, static_method_message, unexpected_class_body_token_message, unexpected_token_after_class_message, unsupported_statement_message
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +85,35 @@ TOK_INDENT = 44
 TOK_DEDENT = 45
 TOK_NEWLINE = 46
 
+# N-053: the non-name tokens that can begin an expression (mirrors the TS
+# reference's PY_EXPRESSION_START), and the keywords the TS reference lexes as
+# their own tokens that begin neither a statement form nor an expression.
+_PY_EXPR_START_KINDS = frozenset({
+    TOK_NUMBER, TOK_STRING, TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG,
+})
+_PY_NON_EXPR_KEYWORDS = frozenset({
+    "class", "def", "elif", "else", "in", "range", "from", "import",
+})
+
+
+def _py_token_text(tok) -> str:
+    """A token's source text, for a diagnostic (N-053)."""
+    names = {TOK_INDENT: "INDENT", TOK_DEDENT: "DEDENT", TOK_NEWLINE: "NEWLINE",
+             TOK_EOF: "eof", TOK_AMPAMP: "and", TOK_PIPEPIPE: "or"}
+    return names.get(tok.kind, tok.value)
+
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "is_bytes")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, is_bytes: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # N-093: a ``b"..."`` literal (TS lexes it as a distinct ``hexstring``
+        # token), so ``@public(sighash=b"...")`` is refused as malformed.
+        self.is_bytes = is_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +180,7 @@ _SPECIAL_NAMES: dict[str, str] = {
     "extract_prev_output_script": "extractPrevOutputScript",
     "require_output_p2pkh":       "requireOutputP2PKH",
     "current_block_height":       "currentBlockHeight",
+    "continuation_amount":        "continuationAmount",
     "mul_div": "mulDiv",
     "percent_of": "percentOf",
     "reverse_bytes": "reverseBytes",
@@ -209,23 +243,92 @@ def py_convert_name(name: str) -> str:
 # Byte string helpers
 # ---------------------------------------------------------------------------
 
-def _py_byte_string_to_hex(s: str) -> str:
-    """Convert Python byte string content like \\xde\\xad to hex 'dead'."""
-    result: list[str] = []
+# F-203: the single-character escapes CPython defines for bytes and str.
+_PY_SIMPLE_ESCAPES = {
+    "\\": 0x5C, "'": 0x27, '"': 0x22, "a": 0x07, "b": 0x08,
+    "f": 0x0C, "n": 0x0A, "r": 0x0D, "t": 0x09, "v": 0x0B,
+}
+_OCTAL = "01234567"
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _decode_py_literal(body: str, is_bytes: bool) -> tuple[str, str, str | None]:
+    """F-203: decode the body of a .runar.py quoted literal the way CPython
+    decodes a bytes (``is_bytes``) or str literal -- the TS reference's
+    decodePyLiteral, implemented explicitly (no codecs).
+
+    Returns ``(text, hex, error)``: the decoded text, its bytes as hex
+    (meaningful for bytes only; ``\\xHH`` keeps its digits verbatim) and the
+    first refusal or None. A trailing lone backslash only arises for an
+    unterminated literal, which the tokenizer already refuses; it is dropped.
+    """
+    text: list[str] = []
+    hexs: list[str] = []
+
+    def push(v: int) -> None:
+        text.append(chr(v))
+        hexs.append(f"{v:02x}")
+
     i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s):
-            if s[i + 1] == "x" and i + 3 < len(s):
-                result.append(s[i + 2 : i + 4])
-                i += 4
-                continue
-            elif s[i + 1] == "0":
-                result.append("00")
-                i += 2
-                continue
-        result.append(f"{ord(s[i]):02x}")
+    n = len(body)
+    while i < n:
+        c = body[i]
+        if is_bytes and ord(c) >= 0x80:
+            return "".join(text), "".join(hexs), PY_BYTES_NON_ASCII
+        if c != "\\":
+            text.append(c)
+            if is_bytes:
+                hexs.append(f"{ord(c):02x}")
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        e = body[i + 1]
+        if e in _PY_SIMPLE_ESCAPES:
+            push(_PY_SIMPLE_ESCAPES[e])
+            i += 2
+            continue
+        if e in _OCTAL:
+            j = i + 1
+            while j < n and j < i + 4 and body[j] in _OCTAL:
+                j += 1
+            v = int(body[i + 1 : j], 8)
+            if v > 0xFF:
+                return "".join(text), "".join(hexs), invalid_escape_sequence_message(body[i:j])
+            push(v)
+            i = j
+            continue
+        if e == "x":
+            if not (i + 3 < n and body[i + 2] in _HEX and body[i + 3] in _HEX):
+                return "".join(text), "".join(hexs), invalid_escape_sequence_message("\\x")
+            text.append(chr(int(body[i + 2 : i + 4], 16)))
+            hexs.append(body[i + 2 : i + 4])
+            i += 4
+            continue
+        if is_bytes and ord(e) >= 0x80:
+            return "".join(text), "".join(hexs), PY_BYTES_NON_ASCII
+        # Anything else -- including str's \\N{..}, \\u and \\U, which the
+        # surface does not support -- is refused.
+        return "".join(text), "".join(hexs), invalid_escape_sequence_message("\\" + e)
+    return "".join(text), "".join(hexs), None
+
+
+def _scan_py_quoted(source: str, i: int, quote: str) -> int:
+    """F-011/F-203: scan a single-line quoted literal from just after its
+    opening quote. A backslash always takes the next character with it (so an
+    escaped quote does not close the literal); a backslash at a line break or
+    end of file is a continuation, which this surface does not support -- the
+    literal is then unterminated. Returns the index of the closing quote, or
+    of the line break / end of file where the literal stops."""
+    n = len(source)
+    while i < n and source[i] != quote and source[i] not in "\r\n":
+        if source[i] == "\\":
+            if i + 1 >= n or source[i + 1] in "\r\n":
+                return i + 1
+            i += 2
+            continue
         i += 1
-    return "".join(result)
+    return i
 
 
 # ---------------------------------------------------------------------------
@@ -270,20 +373,23 @@ def _parse_py_type(name: str) -> TypeNode:
 # ---------------------------------------------------------------------------
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
 def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize_raw(source: str) -> list[Token]:
+def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Produce tokens including NEWLINE but without INDENT/DEDENT."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -327,18 +433,22 @@ def _tokenize_raw(source: str) -> list[Token]:
             i += 2
             col += 2
             start = i
-            while i < n and source[i] != quote:
-                if source[i] == "\\":
-                    i += 1
-                    col += 1
-                i += 1
-                col += 1
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            i = _scan_py_quoted(source, i, quote)
+            col += i - start
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
-            hex_val = _py_byte_string_to_hex(val)
-            tokens.append(Token(TOK_STRING, hex_val, line, start_col))
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
+            # F-203: escapes decode as in CPython bytes literals.
+            _, hex_val, esc_err = _decode_py_literal(val, True)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
+            tokens.append(Token(TOK_STRING, hex_val, line, start_col, is_bytes=True))
             continue
 
         # String literals
@@ -348,6 +458,7 @@ def _tokenize_raw(source: str) -> list[Token]:
             if i + 2 < n and source[i + 1] == quote and source[i + 2] == quote:
                 i += 3
                 col += 3
+                open_line = line
                 while i + 2 < n:
                     if source[i] == quote and source[i + 1] == quote and source[i + 2] == quote:
                         break
@@ -360,37 +471,37 @@ def _tokenize_raw(source: str) -> list[Token]:
                 if i + 2 < n:
                     i += 3
                     col += 3
+                else:
+                    # F-011: still open at end of file.
+                    lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, open_line, start_col))
+                    i = n
                 continue
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
-                if source[i] == "\\":
-                    i += 1
-                    col += 1
-                i += 1
-                col += 1
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            i = _scan_py_quoted(source, i, quote)
+            col += i - start
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
-            tokens.append(Token(TOK_STRING, val, line, start_col))
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
+            # F-203: a str literal decodes the same escapes as CPython does.
+            text_val, _, esc_err = _decode_py_literal(val, False)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
+            tokens.append(Token(TOK_STRING, text_val, line, start_col))
             continue
 
-        # Numbers
-        if ch.isdigit():
-            start = i
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                i += 2
-                col += 2
-                while i < n and _is_hex_digit(source[i]):
-                    i += 1
-                    col += 1
-            else:
-                while i < n and (source[i].isdigit() or source[i] == "_"):
-                    i += 1
-                    col += 1
-            num_str = source[start:i].replace("_", "")
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("py", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
             tokens.append(Token(TOK_NUMBER, num_str, line, start_col))
             continue
 
@@ -451,12 +562,9 @@ def _tokenize_raw(source: str) -> list[Token]:
             ")": TOK_RPAREN,
             "[": TOK_LBRACKET,
             "]": TOK_RBRACKET,
-            "{": TOK_LBRACE,
-            "}": TOK_RBRACE,
             ",": TOK_COMMA,
             ".": TOK_DOT,
             ":": TOK_COLON,
-            ";": TOK_SEMICOLON,
             "=": TOK_ASSIGN,
             "<": TOK_LT,
             ">": TOK_GT,
@@ -484,7 +592,9 @@ def _tokenize_raw(source: str) -> list[Token]:
             col += 1
             continue
 
-        # Skip unknown
+        # N-033: a character the TS reference does not tokenize (`;`, `{`,
+        # `}`, `$`, `?`, ...) is refused, never skipped.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line, start_col))
         i += 1
         col += 1
 
@@ -548,6 +658,33 @@ class _PyParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+        # N-046: the locals already bound in the current method, so a later
+        # ``name = expr`` of one of them is emitted as an AssignmentStmt, not a
+        # fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+        # existing local inside a loop body or an if-arm IS an assignment; ANF
+        # lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+        # binding's name. Snapshot/restored around if-branches and loop bodies
+        # exactly as the Ruby parser's ``declared_locals``.
+        self.declared_locals: set[str] = set()
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
+
+    def _bind_local(self, name: str, typ, init: Expression, loc: SourceLocation) -> Statement:
+        """N-046: ``name = init`` is an assignment when the method already
+        bound ``name``, otherwise a declaration."""
+        if name in self.declared_locals:
+            return AssignmentStmt(target=Identifier(name=name), value=init, source_location=loc)
+        self.declared_locals.add(name)
+        return VariableDeclStmt(name=name, type=typ, mutable=True, init=init, source_location=loc)
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = py_convert_name(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -618,14 +755,16 @@ class _PyParser:
 
         if name == "Readonly":
             if self.match(TOK_LBRACKET):
-                inner = self.parse_type_annotation()
+                with self._nest.nested(self.loc):
+                    inner = self.parse_type_annotation()
                 self.expect(TOK_RBRACKET)
                 return inner
             return CustomType(name=name)
 
         if name == "FixedArray":
             if self.match(TOK_LBRACKET):
-                elem_type = self.parse_type_annotation()
+                with self._nest.nested(self.loc):
+                    elem_type = self.parse_type_annotation()
                 self.expect(TOK_COMMA)
                 size_tok = self.expect(TOK_NUMBER)
                 try:
@@ -681,7 +820,10 @@ class _PyParser:
             "StatefulSmartContract",
             "UnsafeSmartContract",
         ):
-            raise ValueError(f"unknown parent class: {parent_class}")
+            raise ValueError(
+                f"unknown parent class: '{parent_class}', expected SmartContract, "
+                "StatefulSmartContract, or UnsafeSmartContract"
+            )
 
         self.expect(TOK_COLON)
         self.skip_newlines()
@@ -696,15 +838,49 @@ class _PyParser:
             if self.check(TOK_DEDENT) or self.check(TOK_EOF):
                 break
 
-            # Decorator
+            # Decorators: @public (any others make a private method). N-050: a
+            # method may carry several (`@public @staticmethod`), so read them all.
             if self.check(TOK_AT):
-                self.advance()
-                decorator_tok = self.expect(TOK_IDENT)
-                decorator = decorator_tok.value
-                self.skip_newlines()
+                decorators: list[str] = []
+                sighash_specs: list[str | None] = []
+                while self.check(TOK_AT):
+                    self.advance()
+                    dec_name = self.expect(TOK_IDENT).value
+                    decorators.append(dec_name)
+                    # N-093: ``@public(sighash="FLAGS")`` is the native
+                    # spelling of the ``@sighash`` directive.
+                    if dec_name == "public" and self.check(TOK_LPAREN):
+                        sighash_specs.extend(self._parse_public_decorator_args())
+                    self.skip_newlines()
+                decorator = decorators[-1]
+
+                if (
+                    self.check_ident("def")
+                    and sighash_specs
+                    and self.pos + 1 < len(self.tokens)
+                    and self.tokens[self.pos + 1].value == "__init__"
+                ):
+                    # N-093: the constructor is not a spending entry point.
+                    self.errors.append(Diagnostic(
+                        message=lost_directive_message("@sighash"),
+                        severity=Severity.ERROR, loc=self.loc()))
+                    sighash_specs = []
 
                 if self.check_ident("def"):
-                    method = self.parse_method(decorator)
+                    if "staticmethod" in decorators or "classmethod" in decorators:
+                        # N-050: a class-level function is not a contract method.
+                        name = self.tokens[self.pos + 1].value if self.pos + 1 < len(self.tokens) else ""
+                        self.errors.append(Diagnostic(
+                            message=static_method_message(name),
+                            severity=Severity.ERROR, loc=self.loc()))
+                    if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1].value == "__init__":
+                        # N-303: the TS reference decides "constructor" from the
+                        # name alone; decorators on __init__ are ignored.
+                        constructor = self.parse_constructor(properties)
+                        continue
+                    method = self.parse_method(
+                        "public" if "public" in decorators else "private", sighash_specs,
+                    )
                     methods.append(method)
                 else:
                     self.add_error(f"line {self.peek().line}: expected 'def' after @{decorator}")
@@ -731,17 +907,45 @@ class _PyParser:
                     properties.append(prop)
                 continue
 
-            self.advance()
+            # N-033: any other token is refused, never skipped.
+            self._refuse_class_body_token()
 
         self.match(TOK_DEDENT)
 
+        # N-410: nothing but blank lines may follow the class (N-004 did this
+        # for .runar.rb); a method or class after it used to be dropped unread.
+        self.skip_newlines()
+        if not self.check(TOK_EOF):
+            trailing = self.peek()
+            self.errors.append(lex_error(unexpected_token_after_class_message(_py_token_text(trailing)), self.file_name, trailing.line, trailing.col))
+
         if constructor is None:
+            # N-032: auto-generate from the uninitialized properties (declaration
+            # order): super(...) first, then self.p = p.
+            uninit = [p for p in properties if p.initializer is None]
+            ctor_loc = SourceLocation(file=self.file_name, line=1, column=0)
             constructor = MethodNode(
                 name="constructor",
-                params=[],
-                body=[],
+                params=[ParamNode(name=p.name, type=p.type) for p in uninit],
+                body=[
+                    ExpressionStmt(
+                        expr=CallExpr(
+                            callee=Identifier(name="super"),
+                            args=[Identifier(name=p.name) for p in uninit],
+                        ),
+                        source_location=ctor_loc,
+                    ),
+                    *[
+                        AssignmentStmt(
+                            target=PropertyAccessExpr(property=p.name),
+                            value=Identifier(name=p.name),
+                            source_location=ctor_loc,
+                        )
+                        for p in uninit
+                    ],
+                ],
                 visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=0),
+                source_location=ctor_loc,
             )
 
         return ContractNode(
@@ -753,6 +957,16 @@ class _PyParser:
             source_file=self.file_name,
         )
 
+    def _refuse_class_body_token(self) -> None:
+        """N-033: a class-body token that begins no property, method,
+        decorator or ``pass`` is refused at that token (N-004's diagnostic),
+        and the rest of its line is skipped."""
+        tok = self.advance()
+        text = "INDENT" if tok.kind == TOK_INDENT else tok.value
+        self.errors.append(lex_error(unexpected_class_body_token_message(text), self.file_name, tok.line, tok.col))
+        while not (self.check(TOK_NEWLINE) or self.check(TOK_DEDENT) or self.check(TOK_EOF)):
+            self.advance()
+
     def _is_property_decl(self) -> bool:
         if self.pos + 1 >= len(self.tokens):
             return False
@@ -763,24 +977,38 @@ class _PyParser:
     def parse_property(self, parent_class: str) -> PropertyNode | None:
         location = self.loc()
         name_tok = self.expect(TOK_IDENT)
-        prop_name = py_convert_name(name_tok.value)
+        prop_name = self.declare(name_tok.value)
         self.expect(TOK_COLON)
 
+        # Parse type (possibly Readonly[T]). N-093: ``EmbedAlways[T]`` is the
+        # native spelling of the ``@embedAlways`` directive; the two wrappers
+        # compose in either order.
         is_readonly = False
-        if self.check_ident("Readonly"):
-            is_readonly = True
+        embed_always = False
+        wrappers = 0
+        while self.check_ident("Readonly") or self.check_ident("EmbedAlways"):
+            if self.advance().value == "Readonly":
+                is_readonly = True
+            else:
+                embed_always = True
+            self.expect(TOK_LBRACKET)
+            wrappers += 1
         # In SmartContract (and UnsafeSmartContract), all properties are
         # automatically readonly.
         if parent_class in ("SmartContract", "UnsafeSmartContract"):
             is_readonly = True
 
         typ_node = self.parse_type_annotation()
+        for _ in range(wrappers):
+            self.expect(TOK_RBRACKET)
 
         # Parse optional initializer: = value
         initializer = None
         if self.match(TOK_ASSIGN):
             initializer = self.parse_expression()
 
+        # F-026: the field declaration ends at its line break.
+        self._expect_statement_end()
         self.skip_newlines()
 
         return PropertyNode(
@@ -788,6 +1016,7 @@ class _PyParser:
             type=typ_node,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=location,
         )
 
@@ -797,6 +1026,9 @@ class _PyParser:
         location = self.loc()
         self.expect_ident("def")
         self.expect_ident("__init__")
+
+        # N-046: reset local tracking for this method's scope.
+        self.declared_locals = set()
 
         params = self.parse_params()
 
@@ -808,7 +1040,6 @@ class _PyParser:
 
         # Transform super().__init__(...) -> super(...) form
         constructor_body: list[Statement] = []
-        found_super = False
 
         for stmt in body:
             if isinstance(stmt, ExpressionStmt):
@@ -826,19 +1057,8 @@ class _PyParser:
                                     ),
                                     source_location=stmt.source_location,
                                 ))
-                                found_super = True
                                 continue
             constructor_body.append(stmt)
-
-        if not found_super:
-            super_args = [Identifier(name=p.name) for p in params]
-            constructor_body.insert(0, ExpressionStmt(
-                expr=CallExpr(
-                    callee=Identifier(name="super"),
-                    args=super_args,
-                ),
-                source_location=location,
-            ))
 
         return MethodNode(
             name="constructor",
@@ -850,25 +1070,74 @@ class _PyParser:
 
     # -- Method parsing ------------------------------------------------------
 
-    def parse_method(self, visibility: str) -> MethodNode:
+    def _parse_public_decorator_args(self) -> list[str | None]:
+        """N-093: the argument list of ``@public(...)``. The only argument is
+        the keyword ``sighash=<str>``; each one yields its string, and any other
+        argument (positional, another keyword, a non-str value) yields ``None``,
+        which is refused as a malformed spelling."""
+        specs: list[str | None] = []
+        self.expect(TOK_LPAREN)
+        while not self.check(TOK_RPAREN) and not self.check(TOK_NEWLINE) and not self.check(TOK_EOF):
+            is_sighash_kw = (
+                self.check_ident("sighash")
+                and self.pos + 1 < len(self.tokens)
+                and self.tokens[self.pos + 1].kind == TOK_ASSIGN
+            )
+            if is_sighash_kw:
+                self.advance()  # 'sighash'
+                self.advance()  # '='
+            # One argument value: up to the next top-level ',' or ')'.
+            first = self.peek()
+            count = 0
+            depth = 0
+            while not self.check(TOK_NEWLINE) and not self.check(TOK_EOF):
+                k = self.peek().kind
+                if k in (TOK_COMMA, TOK_RPAREN) and depth == 0:
+                    break
+                if k in (TOK_LPAREN, TOK_LBRACKET):
+                    depth += 1
+                if k in (TOK_RPAREN, TOK_RBRACKET):
+                    depth -= 1
+                self.advance()
+                count += 1
+            ok = is_sighash_kw and count == 1 and first.kind == TOK_STRING and not first.is_bytes
+            specs.append(first.value if ok else None)
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RPAREN)
+        return specs
+
+    def parse_method(self, visibility: str, sighash_specs: list[str | None] | None = None) -> MethodNode:
         location = self.loc()
         self.expect_ident("def")
         name_tok = self.expect(TOK_IDENT)
-        name = py_convert_name(name_tok.value)
+        name = self.declare(name_tok.value)
+
+        # N-046: reset local tracking for this method's scope.
+        self.declared_locals = set()
 
         params = self.parse_params()
 
         if self.match(TOK_ARROW):
-            self.parse_type_annotation()  # skip return type
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            # `None` is Python's spelling of "returns nothing".
+            ret_type = self.parse_type_annotation()
+            if not (isinstance(ret_type, CustomType) and ret_type.name == "None"):
+                reject_unknown_return_type(self.errors, ret_type, name_tok.value, location, visibility == "public")
 
         self.expect(TOK_COLON)
         body = self.parse_block()
+
+        sighash = resolve_native_sighash(name, visibility == "public", sighash_specs or [])
+        if sighash is not None and sighash.error is not None:
+            self.errors.append(Diagnostic(message=sighash.error, severity=Severity.ERROR, loc=location))
 
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility=visibility,
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=location,
         )
 
@@ -891,7 +1160,7 @@ class _PyParser:
             if self.match(TOK_COLON):
                 typ = self.parse_type_annotation()
 
-            params.append(ParamNode(name=py_convert_name(param_name), type=typ))
+            params.append(ParamNode(name=self.declare(param_name), type=typ))
 
             if not self.match(TOK_COMMA):
                 break
@@ -913,13 +1182,32 @@ class _PyParser:
             stmt = self.parse_statement()
             if stmt is not None:
                 stmts.append(stmt)
+            self._expect_statement_end()
 
         self.match(TOK_DEDENT)
         return stmts
 
+    def _expect_statement_end(self) -> None:
+        """F-026: a simple statement ends at its line break; compound
+        statements end on a NEWLINE / DEDENT they consumed themselves.
+        Pre-fix, ``lim = 0b1010`` parsed as ``lim = 0`` plus a second
+        statement ``b1010``."""
+        nxt = self.peek()
+        if nxt.kind in (TOK_NEWLINE, TOK_DEDENT, TOK_EOF):
+            return
+        if self.pos > 0 and self.tokens[self.pos - 1].kind in (TOK_NEWLINE, TOK_DEDENT):
+            return
+        self.errors.append(lex_error(PY_STATEMENT_LINE_BREAK, self.file_name, nxt.line, nxt.col))
+        while not (self.check(TOK_NEWLINE) or self.check(TOK_DEDENT) or self.check(TOK_EOF)):
+            self.advance()
+
     # -- Statement parsing ---------------------------------------------------
 
     def parse_statement(self) -> Statement | None:
+        with self._nest.nested(self.loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         location = self.loc()
 
         if self.check_ident("assert") or self.check_ident("assert_"):
@@ -947,6 +1235,17 @@ class _PyParser:
                 severity=Severity.ERROR,
                 loc=location,
             ))
+            return None
+
+        # N-053: a statement must start with a name or a token that can begin
+        # an expression; anything else (a stray `elif`, `from`, `@`, an
+        # unexpected indent, ...) is refused with the shared diagnostic.
+        tok = self.peek()
+        if ((tok.kind == TOK_IDENT and tok.value in _PY_NON_EXPR_KEYWORDS)
+                or (tok.kind != TOK_IDENT and tok.kind not in _PY_EXPR_START_KINDS)):
+            self.advance()
+            self.errors.append(lex_error(
+                unsupported_statement_message(_py_token_text(tok)), self.file_name, tok.line, tok.col))
             return None
 
         return self._parse_expr_or_assign(location)
@@ -990,18 +1289,24 @@ class _PyParser:
         condition = self.parse_expression()
         self.expect(TOK_COLON)
 
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = set(self.declared_locals)
         then_block = self.parse_block()
+        self.declared_locals = set(locals_before)
 
         else_block: list[Statement] = []
         self.skip_newlines()
         if self.check_ident("elif"):
             elif_loc = self.loc()
             self.advance()
-            elif_stmt = self._parse_if_body(elif_loc)
+            with self._nest.nested(self.loc):
+                elif_stmt = self._parse_if_body(elif_loc)
             else_block = [elif_stmt]
+            self.declared_locals = set(locals_before)
         elif self.match_ident("else"):
             self.expect(TOK_COLON)
             else_block = self.parse_block()
+            self.declared_locals = set(locals_before)
 
         return IfStmt(
             condition=condition,
@@ -1013,7 +1318,7 @@ class _PyParser:
     def _parse_for(self, loc: SourceLocation) -> Statement:
         self.expect_ident("for")
         var_tok = self.expect(TOK_IDENT)
-        var_name = py_convert_name(var_tok.value)
+        var_name = self.declare(var_tok.value)
 
         self.expect_ident("in")
         self.expect_ident("range")
@@ -1050,7 +1355,12 @@ class _PyParser:
         self.expect(TOK_RPAREN)
         self.expect(TOK_COLON)
 
+        # N-046: the loop variable and the body's first bindings are body-local;
+        # a rebinding of the loop variable inside the body is an assignment.
+        locals_before_body = set(self.declared_locals)
+        self.declared_locals.add(var_name)
         body = self.parse_block()
+        self.declared_locals = locals_before_body
 
         init_stmt = VariableDeclStmt(
             name=var_name,
@@ -1103,7 +1413,7 @@ class _PyParser:
                 self.pos + 1 < len(self.tokens) and
                 self.tokens[self.pos + 1].kind == TOK_COLON):
             name_tok = self.advance()
-            var_name = py_convert_name(name_tok.value)
+            var_name = self.declare(name_tok.value)
             self.expect(TOK_COLON)
             typ_node = self.parse_type_annotation()
 
@@ -1113,14 +1423,10 @@ class _PyParser:
             else:
                 init = BigIntLiteral(value=0)
             self.skip_newlines()
-            return VariableDeclStmt(
-                name=var_name,
-                type=typ_node,
-                mutable=True,
-                init=init,
-                source_location=loc,
-            )
+            # N-046: rebinding a local of this method is an assignment in Python.
+            return self._bind_local(var_name, typ_node, init, loc)
 
+        target_tok = self.peek()
         expr = self.parse_expression()
         if expr is None:
             self.advance()
@@ -1132,13 +1438,11 @@ class _PyParser:
             value = self.parse_expression()
             self.skip_newlines()
             if isinstance(expr, Identifier):
-                return VariableDeclStmt(
-                    name=expr.name,
-                    type=None,
-                    mutable=True,
-                    init=value,
-                    source_location=loc,
-                )
+                if target_tok.kind == TOK_IDENT:
+                    self.declared.append((target_tok.value, expr.name))
+                # N-046: rebinding a local of this method is an assignment in
+                # Python (function-scoped).
+                return self._bind_local(expr.name, None, value, loc)
             return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Compound assignments
@@ -1162,7 +1466,8 @@ class _PyParser:
     # -- Expression parsing --------------------------------------------------
 
     def parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self.loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -1170,144 +1475,162 @@ class _PyParser:
             self.advance()
             condition = self._parse_or()
             self.expect_ident("else")
-            alternate = self._parse_ternary()
+            with self._nest.nested(self.loc):
+                alternate = self._parse_ternary()
             return TernaryExpr(condition=condition, consequent=expr, alternate=alternate)
         return expr
 
     def _parse_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_and()
         while self.match(TOK_PIPEPIPE):
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_not()
         while self.match(TOK_AMPAMP):
             right = self._parse_not()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_not(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_BANG):
-            operand = self._parse_not()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_not()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         return self._parse_bitwise_or()
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_xor()
         while self.match(TOK_PIPE):
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self.loc()
         left = self._parse_bitwise_and()
         while self.match(TOK_CARET):
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self.loc()
         left = self._parse_equality()
         while self.match(TOK_AMP):
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self.loc()
         left = self._parse_comparison()
         while True:
             if self.match(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif self.match(TOK_NOTEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self.loc()
         left = self._parse_shift()
         while True:
             if self.match(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif self.match(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif self.match(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif self.match(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self.loc()
         left = self._parse_additive()
         while True:
             if self.match(TOK_LSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif self.match(TOK_RSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_additive(self) -> Expression:
+        start = self.loc()
         left = self._parse_multiplicative()
         while True:
             if self.match(TOK_PLUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif self.match(TOK_MINUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_multiplicative(self) -> Expression:
+        start = self.loc()
         left = self._parse_unary()
         while True:
             if self.match(TOK_STAR):
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASHSLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_SLASH):
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif self.match(TOK_PERCENT):
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self.loc()
         if self.match(TOK_MINUS):
-            operand = self._parse_unary()
-            return UnaryExpr(op="-", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="-", operand=operand, source_location=op_loc)
         if self.match(TOK_TILDE):
-            operand = self._parse_unary()
-            return UnaryExpr(op="~", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="~", operand=operand, source_location=op_loc)
         if self.match(TOK_BANG):
-            operand = self._parse_unary()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self.loc):
+                operand = self._parse_unary()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         return self._parse_power()
 
     def _parse_power(self) -> Expression:
         base = self._parse_postfix()
         if self.match(TOK_STARSTAR):
-            exp = self._parse_unary()
+            with self._nest.nested(self.loc):
+                exp = self._parse_unary()
             return CallExpr(callee=Identifier(name="pow"), args=[base, exp])
         return base
 
@@ -1363,7 +1686,7 @@ class _PyParser:
 
         if tok.kind == TOK_STRING:
             self.advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_IDENT:
             self.advance()
@@ -1388,9 +1711,9 @@ class _PyParser:
 
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
-                return CallExpr(callee=Identifier(name=converted), args=args)
+                return CallExpr(callee=Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col)), args=args)
 
-            return Identifier(name=converted)
+            return Identifier(name=converted, source_location=SourceLocation(file=self.file_name, line=tok.line, column=tok.col))
 
         if tok.kind == TOK_LPAREN:
             self.advance()
@@ -1412,7 +1735,7 @@ class _PyParser:
             self.expect(TOK_LPAREN)
             str_tok = self.expect(TOK_STRING)
             self.expect(TOK_RPAREN)
-            return ByteStringLiteral(value=str_tok.value)
+            return ByteStringLiteral(value=str_tok.value, source_location=SourceLocation(file=self.file_name, line=str_tok.line, column=str_tok.col))
         if self.check(TOK_LPAREN):
             args = self._parse_call_args()
             return CallExpr(
@@ -1481,10 +1804,22 @@ def _literal_int_value(expr: Expression | None) -> int | None:
 # ---------------------------------------------------------------------------
 
 def parse_python(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_python_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_python_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Python-syntax Runar contract (.runar.py)."""
     p = _PyParser(file_name)
 
-    raw = _tokenize_raw(source)
+    raw = _tokenize_raw(source, lex, file_name)
     p.tokens = _insert_indentation(raw)
     p.pos = 0
 
@@ -1493,6 +1828,7 @@ def parse_python(source: str, file_name: str) -> ParseResult:
     except ValueError as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

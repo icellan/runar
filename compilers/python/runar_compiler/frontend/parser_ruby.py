@@ -30,6 +30,19 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
+from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    static_method_message,
+    unexpected_class_body_token_message,
+    unexpected_token_after_class_message,
+    unsupported_statement_message,
+    with_lex_errors,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +117,13 @@ TOK_SUPER = 66
 TOK_REQUIRE = 67
 TOK_ASSERT = 68
 TOK_DO = 69
+
+# N-053: the tokens that can begin an expression and are not already a
+# statement form of their own (mirrors the TS reference's RB_EXPRESSION_START).
+_RB_EXPR_START_KINDS = frozenset({
+    TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_TRUE, TOK_FALSE, TOK_NIL,
+    TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG, TOK_NOT,
+})
 
 _KEYWORDS: dict[str, int] = {
     "class": TOK_CLASS,
@@ -292,6 +312,7 @@ _TYPE_MAP: dict[str, str] = {
     "Integer": "bigint",
     "Int": "bigint",
     "Boolean": "boolean",
+    "Bool": "boolean",
     "ByteString": "ByteString",
     "PubKey": "PubKey",
     "Sig": "Sig",
@@ -350,14 +371,25 @@ _COMPOUND_OPS: dict[int, str] = {
 
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
-def _tokenize(source: str) -> list[Token]:
+def _is_embedded_doc_marker(line: str, marker: str) -> bool:
+    """Whether ``line`` starts at column 0 with ``marker`` (``=begin`` or
+    ``=end``) as a whole word: followed by ASCII whitespace (Ruby's ``\\s``)
+    or end of line."""
+    if not line.startswith(marker):
+        return False
+    return len(line) == len(marker) or line[len(marker)] in " \t\n\v\f\r"
+
+
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenise a Ruby Runar source file line by line.
 
     The tokenizer processes one line at a time, tracking parenthesis depth to
@@ -365,14 +397,31 @@ def _tokenize(source: str) -> list[Token]:
     behavior of the TypeScript reference implementation.
     """
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     lines = source.split("\n")
     paren_depth = 0
+    # Line number of an open ``=begin`` embedded document, or 0.
+    block_comment_start = 0
 
     for line_idx, raw_line in enumerate(lines):
         line_num = line_idx + 1
 
         # Strip trailing carriage return
         line = raw_line.rstrip("\r")
+
+        # N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+        # own). ``=begin`` / ``=end`` open and close a block comment only at
+        # column 0 and only as a whole word (followed by whitespace or end of
+        # line). Every line from ``=begin`` through ``=end`` is a comment.
+        # Before this, a method "commented out" this way compiled as a live
+        # spend path and the ``end`` of ``=end`` closed the class early.
+        if block_comment_start:
+            if _is_embedded_doc_marker(line, "=end"):
+                block_comment_start = 0
+            continue
+        if _is_embedded_doc_marker(line, "=begin"):
+            block_comment_start = line_num
+            continue
 
         # Skip blank lines and comment-only lines
         stripped = line.lstrip()
@@ -384,7 +433,7 @@ def _tokenize(source: str) -> list[Token]:
 
         while pos < len(line):
             ch = line[pos]
-            col = pos + 1  # 1-based column
+            col = pos
 
             # Whitespace within a line
             if ch in (" ", "\t"):
@@ -405,8 +454,10 @@ def _tokenize(source: str) -> list[Token]:
                 if name:
                     tokens.append(Token(TOK_IVAR, name, line_num, col))
                 else:
-                    # Bare @ (unusual, but safe to skip)
-                    pass
+                    # N-214: a bare `@` was skipped, so `a + @ b` compiled as
+                    # `a + b`. The TS reference lexes it as its own token and
+                    # refuses it in the expression; refuse it with TS's diagnostic.
+                    lex.append(lex_error("Unexpected token in expression: '@'", file_name, line_num, col))
                 continue
 
             # Three-dot range operator (must be tried before two-dot)
@@ -537,6 +588,10 @@ def _tokenize(source: str) -> list[Token]:
                         pos += 1
                 if pos < len(line):
                     pos += 1  # skip closing quote
+                else:
+                    # F-011: line-based, so reaching the line break means the
+                    # literal is unterminated; refuse it, never end it silently.
+                    lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col))
                 tokens.append(Token(TOK_HEXSTRING, "".join(val_chars), line_num, col))
                 continue
 
@@ -554,26 +609,17 @@ def _tokenize(source: str) -> list[Token]:
                         pos += 1
                 if pos < len(line):
                     pos += 1  # skip closing quote
+                else:
+                    # F-011: line-based, so reaching the line break means the
+                    # literal is unterminated; refuse it, never end it silently.
+                    lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col))
                 tokens.append(Token(TOK_STRING, "".join(val_chars), line_num, col))
                 continue
 
-            # Numbers (decimal and hex)
-            if ch.isdigit():
-                num_chars: list[str] = []
-                if (ch == "0" and pos + 1 < len(line)
-                        and line[pos + 1] in ("x", "X")):
-                    num_chars.append("0x")
-                    pos += 2
-                    while pos < len(line) and (line[pos] in "0123456789abcdefABCDEF_"):
-                        if line[pos] != "_":
-                            num_chars.append(line[pos])
-                        pos += 1
-                else:
-                    while pos < len(line) and (line[pos].isdigit() or line[pos] == "_"):
-                        if line[pos] != "_":
-                            num_chars.append(line[pos])
-                        pos += 1
-                tokens.append(Token(TOK_NUMBER, "".join(num_chars), line_num, col))
+            # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+            if "0" <= ch <= "9":
+                pos, num_str, _, _ = lex_number("rb", line, pos, lex, file_name, line_num, col)
+                tokens.append(Token(TOK_NUMBER, num_str, line_num, col))
                 continue
 
             # Identifiers and keywords
@@ -592,14 +638,21 @@ def _tokenize(source: str) -> list[Token]:
                     tokens.append(Token(TOK_IDENT, word, line_num, col))
                 continue
 
-            # Skip unrecognized characters
+            # N-214: an unrecognised character is refused, as the TS reference
+            # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.append(lex_error("Unexpected character '%s'" % ch, file_name, line_num, col))
             pos += 1
 
         # Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0:
-            tokens.append(Token(TOK_NEWLINE, "", line_num, len(line) + 1))
+            tokens.append(Token(TOK_NEWLINE, "", line_num, len(line)))
 
-    tokens.append(Token(TOK_EOF, "", len(lines) + 1, 1))
+    if block_comment_start:
+        lex.append(lex_error(
+            f"unterminated '=begin' block comment starting at line {block_comment_start}: missing '=end'",
+            file_name, block_comment_start, 0))
+
+    tokens.append(Token(TOK_EOF, "", len(lines) + 1, 0))
     return tokens
 
 
@@ -673,6 +726,17 @@ class _RbParser:
         self._errors: list[str] = []
         # Track locally declared variables per method scope
         self._declared_locals: set[str] = set()
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self._declared: list[tuple[str, str]] = []
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
+
+    def _declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self._declared.append((raw, name))
+        return name
 
     # -----------------------------------------------------------------------
     # Token navigation
@@ -732,6 +796,7 @@ class _RbParser:
 
     def parse(self) -> ParseResult:
         from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+        from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
         self._skip_newlines()
 
@@ -741,9 +806,16 @@ class _RbParser:
             self._skip_newlines()
 
         contract = self._parse_class()
+        if contract is not None:
+            # N-004: nothing may follow the class's ``end``.
+            self._skip_newlines()
+            trailing = self._peek()
+            if trailing.kind != TOK_EOF:
+                self._errors.append(unexpected_token_after_class_message(trailing.value))
         diagnostics = [Diagnostic(message=e, severity=Severity.ERROR) for e in self._errors]
         if contract is None:
             return ParseResult(errors=diagnostics)
+        diagnostics.extend(collision_diagnostics(self._declared))
         return ParseResult(contract=contract, errors=diagnostics)
 
     def _parse_require_line(self) -> None:
@@ -784,7 +856,8 @@ class _RbParser:
             "UnsafeSmartContract",
         ):
             self._errors.append(
-                f"{self._file}:{first_part.line}: unknown parent class: {parent_class}"
+                f"{self._file}:{first_part.line}: unknown parent class: '{parent_class}', "
+                "expected SmartContract, StatefulSmartContract, or UnsafeSmartContract"
             )
             return None
 
@@ -796,6 +869,8 @@ class _RbParser:
         # Pending visibility/param types for the next method
         pending_visibility: str | None = None
         pending_param_types: dict[str, TypeNode] | None = None
+        # N-093: ``runar_sighash`` flag specs awaiting the next ``def``.
+        pending_sighash: list[str | None] = []
 
         while self._peek().kind not in (TOK_END, TOK_EOF):
             self._skip_newlines()
@@ -807,6 +882,20 @@ class _RbParser:
                 prop = self._parse_prop(parent_class)
                 if prop is not None:
                     properties.append(prop)
+                self._skip_newlines()
+                continue
+
+            # N-093: ``runar_sighash 'FLAGS'`` is the native spelling of the
+            # ``@sighash`` directive; it applies to the next ``def``.
+            if self._check_ident("runar_sighash"):
+                self._advance()  # 'runar_sighash'
+                arg = self._peek()
+                count = 0
+                while self._peek().kind not in (TOK_NEWLINE, TOK_EOF):
+                    self._advance()
+                    count += 1
+                is_str = arg.kind in (TOK_STRING, TOK_HEXSTRING)
+                pending_sighash.append(arg.value if count == 1 and is_str else None)
                 self._skip_newlines()
                 continue
 
@@ -829,18 +918,42 @@ class _RbParser:
             if self._peek().kind == TOK_DEF:
                 method = self._parse_method(pending_visibility, pending_param_types)
                 if method.name == "constructor":
+                    # N-093: the constructor is not a spending entry point.
+                    for _ in pending_sighash:
+                        self._errors.append(lost_directive_message("@sighash"))
                     constructor = method
                 else:
+                    sighash = resolve_native_sighash(
+                        method.name, method.visibility == "public", pending_sighash,
+                    )
+                    if sighash is not None and sighash.error is not None:
+                        self._errors.append(sighash.error)
+                    elif sighash is not None:
+                        method.sighash_type = sighash.value
                     methods.append(method)
                 pending_visibility = None
                 pending_param_types = None
+                pending_sighash = []
                 self._skip_newlines()
                 continue
 
-            # Skip unknown tokens
-            self._advance()
+            # Ruby's bare visibility markers are no-ops here (visibility comes
+            # from ``runar_public``); examples/ruby uses them.
+            if self._check_ident("private") or self._check_ident("public"):
+                self._advance()
+                continue
 
-        self._match(TOK_END)  # end of class
+            # N-004: refuse anything else (an indented ``=begin`` lexes as ``=``).
+            stray = self._advance()
+            self._errors.append(unexpected_class_body_token_message(stray.value))
+
+        # N-093: a ``runar_sighash`` with no ``def`` after it annotates nothing.
+        for _ in pending_sighash:
+            self._errors.append(lost_directive_message("@sighash"))
+
+        # N-319: the class `end` is required; EOF here means it is missing.
+        if not self._match(TOK_END):
+            self._errors.append("unterminated class: missing closing 'end'")
 
         # Auto-generate constructor if not provided
         if constructor is None:
@@ -863,6 +976,7 @@ class _RbParser:
         _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "addDataOutput", "getStateScript"}
         method_names = {m.name for m in methods} | _INTRINSIC_METHODS
         for method in methods:
+            assert_body_nesting(method.body)  # F-213: (B) before the recursive rewrite
             _rewrite_bare_method_calls(method.body, method_names)
 
         # Implicit return conversion for private methods.
@@ -935,13 +1049,30 @@ class _RbParser:
         type_node = self._parse_type()
 
         is_readonly = False
+        embed_always = False
         initializer: Expression | None = None
 
         # Check for optional trailing ``readonly: true`` or ``default: value``
+        option_error = False
         while self._peek().kind == TOK_COMMA:
             self._advance()  # ','
 
-            if self._check_ident("readonly"):
+            if self._check_ident("embed_always"):
+                # N-093: the native spelling of the ``@embedAlways`` directive.
+                self._advance()  # 'embed_always'
+                self._expect(TOK_COLON, ":")
+                if self._peek().kind == TOK_TRUE:
+                    self._advance()
+                    embed_always = True
+                elif self._peek().kind == TOK_FALSE:
+                    self._advance()
+                    embed_always = False
+                else:
+                    self._bad_boolean_prop_option("embed_always")
+                    option_error = True
+                    break
+
+            elif self._check_ident("readonly"):
                 self._advance()  # 'readonly'
                 self._expect(TOK_COLON, ":")
                 if self._peek().kind == TOK_TRUE:
@@ -950,11 +1081,42 @@ class _RbParser:
                 elif self._peek().kind == TOK_FALSE:
                     self._advance()
                     is_readonly = False
+                else:
+                    self._bad_boolean_prop_option("readonly")
+                    option_error = True
+                    break
 
             elif self._check_ident("default"):
                 self._advance()  # 'default'
                 self._expect(TOK_COLON, ":")
-                initializer = self._parse_primary()
+                if self._peek().kind == TOK_NIL:
+                    # N-414: ``nil`` is not a Rúnar literal; refused, never read as 0.
+                    self._errors.append(
+                        "prop default 'nil' is not a literal (expected a number, true, false or a hex string)"
+                    )
+                    self._advance()  # 'nil'
+                else:
+                    initializer = self._parse_unary()
+
+            else:
+                # N-301: an unknown option (e.g. a typo of ``embed_always``) is
+                # refused, never silently dropped. Same text in all seven tiers.
+                self._errors.append(
+                    f"unknown prop option '{self._peek().value}' "
+                    "(expected readonly, embed_always or default)"
+                )
+                option_error = True
+                break
+
+        # N-413: nothing may follow the type or an option value except ``,``
+        # (the next option) or end of line, so ``default: 1 + 2`` is refused
+        # rather than silently truncated to its first operand. Same text in
+        # all seven tiers.
+        if not option_error and self._peek().kind not in (TOK_NEWLINE, TOK_EOF):
+            self._errors.append(
+                f"unexpected '{self._peek().value}' in prop declaration "
+                "(expected ',' or end of line)"
+            )
 
         # In stateless contracts (SmartContract and UnsafeSmartContract),
         # all properties are always readonly.
@@ -966,11 +1128,24 @@ class _RbParser:
             self._advance()
 
         return PropertyNode(
-            name=_snake_to_camel(raw_name),
+            name=self._declare(raw_name),
             type=type_node,
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=embed_always,
             source_location=loc,
+        )
+
+    def _bad_boolean_prop_option(self, option: str) -> None:
+        """N-313: ``readonly:`` / ``embed_always:`` take a literal true or false.
+
+        Any other value is refused, never silently dropped. Same text in all
+        seven tiers.
+        """
+        tok = self._peek()
+        got = "<end of line>" if tok.kind in (TOK_NEWLINE, TOK_EOF) else tok.value
+        self._errors.append(
+            f"invalid value '{got}' for prop option '{option}' (expected true or false)"
         )
 
     def _parse_type(self) -> TypeNode:
@@ -981,10 +1156,18 @@ class _RbParser:
         # FixedArray[T, N] style generic
         if raw_name == "FixedArray" and self._peek().kind == TOK_LBRACKET:
             self._advance()  # '['
-            elem_type = self._parse_type()
+            with self._nest.nested(self._loc):
+                elem_type = self._parse_type()
             self._expect(TOK_COMMA, ",")
             size_tok = self._expect(TOK_NUMBER, "number")
-            size = int(size_tok.value)
+            try:
+                size = int(size_tok.value)
+            except ValueError:
+                # _expect already logged the token-mismatch diagnostic above;
+                # fall back to 0 instead of raising so a non-numeric length
+                # (e.g. an unresolved constant) is a clean diagnostic, not an
+                # uncaught exception out of the parser.
+                size = 0
             self._expect(TOK_RBRACKET, "]")
             return FixedArrayType(element=elem_type, length=size)
 
@@ -1000,6 +1183,12 @@ class _RbParser:
         self._expect(TOK_DEF, "def")
 
         name_tok = self._advance()
+        # N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        # method, not a contract method.
+        if self._peek().kind == TOK_DOT:
+            self._advance()  # '.'
+            name_tok = self._advance()
+            self._errors.append(static_method_message(name_tok.value))
         raw_name = name_tok.value
 
         # Reset local variable tracking for this method scope
@@ -1029,7 +1218,7 @@ class _RbParser:
             )
 
         is_public = pending_visibility == "public"
-        method_name = _snake_to_camel(raw_name)
+        method_name = self._declare(raw_name)
 
         return MethodNode(
             name=method_name,
@@ -1048,7 +1237,7 @@ class _RbParser:
         while self._peek().kind not in (TOK_RPAREN, TOK_EOF):
             name_tok = self._advance()
             raw_name = name_tok.value
-            camel_name = _snake_to_camel(raw_name)
+            camel_name = self._declare(raw_name)
 
             type_node: TypeNode | None = None
             if param_types:
@@ -1137,6 +1326,10 @@ class _RbParser:
         return stmts
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self._loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self._loc()
         kind = self._peek().kind
 
@@ -1157,8 +1350,14 @@ class _RbParser:
         if kind == TOK_IDENT:
             return self._parse_ident_statement(loc)
 
-        # Skip unrecognized token
-        self._advance()
+        # N-053: a token that can begin an expression begins an expression
+        # statement (a private helper's last one is its implicit return
+        # value); any other token is refused. Skipping it dropped `!` / `(` /
+        # literals.
+        if kind in _RB_EXPR_START_KINDS:
+            return ExpressionStmt(expr=self._parse_expression(), source_location=loc)
+        tok = self._advance()
+        self._errors.append(unsupported_statement_message(tok.value))
         return None
 
     def _parse_assert_statement(self, loc: SourceLocation) -> Statement:
@@ -1191,7 +1390,8 @@ class _RbParser:
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
-            else_stmts = [self._parse_elsif_statement(elif_loc)]
+            with self._nest.nested(self._loc):
+                else_stmts = [self._parse_elsif_statement(elif_loc)]
             self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
@@ -1222,7 +1422,8 @@ class _RbParser:
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
-            else_stmts = [self._parse_elsif_statement(elif_loc)]
+            with self._nest.nested(self._loc):
+                else_stmts = [self._parse_elsif_statement(elif_loc)]
             self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
@@ -1262,7 +1463,7 @@ class _RbParser:
         self._advance()  # 'for'
 
         iter_tok = self._advance()  # loop variable name
-        var_name = _snake_to_camel(iter_tok.value)
+        var_name = self._declare(iter_tok.value)
 
         self._expect(TOK_IN, "in")
 
@@ -1380,6 +1581,7 @@ class _RbParser:
 
     def _parse_ivar_statement(self, loc: SourceLocation) -> Statement:
         """Parse ``@var = expr``, ``@var[i] = expr``, ``@var += expr``, or ``@var`` as expression."""
+        start = self._pos
         ivar_tok = self._advance()  # ivar token
         raw_name = ivar_tok.value
         prop_name = _snake_to_camel(raw_name)
@@ -1406,10 +1608,12 @@ class _RbParser:
             value = BinaryExpr(op=_COMPOUND_OPS[op_kind], left=target, right=right)
             return AssignmentStmt(target=target, value=value, source_location=loc)
 
-        # Expression statement: bare ``@var`` (e.g. followed by ``.method(...)``)
-        expr: Expression = target
-        expr = self._parse_postfix_from(expr)
-        return ExpressionStmt(expr=expr, source_location=loc)
+        # Expression statement: bare ``@var``, ``@var.method(...)``, or a
+        # private helper's implicit return such as ``@x + 1``. N-053: re-parse
+        # from the ivar as a whole expression; continuing only the postfix
+        # chain left ``+ 1`` behind, and the statement dispatcher skipped it.
+        self._pos = start
+        return ExpressionStmt(expr=self._parse_expression(), source_location=loc)
 
     def _parse_ident_statement(self, loc: SourceLocation) -> Statement | None:
         """Parse a statement starting with an identifier."""
@@ -1421,7 +1625,7 @@ class _RbParser:
             self._advance()  # consume ident
             self._advance()  # consume '='
             value = self._parse_expression()
-            camel_name = _snake_to_camel(raw_name)
+            camel_name = self._declare(raw_name)
 
             if camel_name in self._declared_locals:
                 return AssignmentStmt(
@@ -1460,7 +1664,8 @@ class _RbParser:
     # -----------------------------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self._loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         expr = self._parse_or()
@@ -1473,155 +1678,171 @@ class _RbParser:
         return expr
 
     def _parse_or(self) -> Expression:
+        start = self._loc()
         left = self._parse_and()
         while self._peek().kind in (TOK_OR, TOK_PIPEPIPE):
             self._advance()
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self._loc()
         left = self._parse_not()
         while self._peek().kind in (TOK_AND, TOK_AMPAMP):
             self._advance()
             right = self._parse_not()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_not(self) -> Expression:
+        op_loc = self._loc()
         if self._peek().kind in (TOK_NOT, TOK_BANG):
             self._advance()
-            operand = self._parse_not()
-            return UnaryExpr(op="!", operand=operand)
+            with self._nest.nested(self._loc):
+                operand = self._parse_not()
+            return UnaryExpr(op="!", operand=operand, source_location=op_loc)
         return self._parse_bitwise_or()
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self._loc()
         left = self._parse_bitwise_xor()
         while self._peek().kind == TOK_PIPE:
             self._advance()
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self._loc()
         left = self._parse_bitwise_and()
         while self._peek().kind == TOK_CARET:
             self._advance()
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self._loc()
         left = self._parse_equality()
         while self._peek().kind == TOK_AMP:
             self._advance()
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self._loc()
         left = self._parse_comparison()
         while True:
             kind = self._peek().kind
             if kind == TOK_EQEQ:
                 self._advance()
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif kind == TOK_NOTEQ:
                 self._advance()
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self._loc()
         left = self._parse_shift()
         while True:
             kind = self._peek().kind
             if kind == TOK_LT:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif kind == TOK_LTEQ:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif kind == TOK_GT:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif kind == TOK_GTEQ:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self._loc()
         left = self._parse_add_sub()
         while True:
             kind = self._peek().kind
             if kind == TOK_LSHIFT:
                 self._advance()
                 right = self._parse_add_sub()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif kind == TOK_RSHIFT:
                 self._advance()
                 right = self._parse_add_sub()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_add_sub(self) -> Expression:
+        start = self._loc()
         left = self._parse_mul_div()
         while True:
             kind = self._peek().kind
             if kind == TOK_PLUS:
                 self._advance()
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif kind == TOK_MINUS:
                 self._advance()
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_mul_div(self) -> Expression:
+        start = self._loc()
         left = self._parse_unary()
         while True:
             kind = self._peek().kind
             if kind == TOK_STAR:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif kind == TOK_SLASH:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif kind == TOK_PERCENT:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self._loc()
         kind = self._peek().kind
         if kind == TOK_MINUS:
             self._advance()
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="-", operand=self._parse_unary(), source_location=op_loc)
         if kind == TOK_TILDE:
             self._advance()
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="~", operand=self._parse_unary(), source_location=op_loc)
         if kind == TOK_BANG:
             self._advance()
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="!", operand=self._parse_unary(), source_location=op_loc)
         return self._parse_power()
 
     def _parse_power(self) -> Expression:
@@ -1629,7 +1850,8 @@ class _RbParser:
         # ``**`` is right-associative and maps to ``pow(base, exp)``
         if self._peek().kind == TOK_STARSTAR:
             self._advance()
-            exp = self._parse_power()  # right-recursive for right-associativity
+            with self._nest.nested(self._loc):
+                exp = self._parse_power()  # right-recursive for right-associativity
             return CallExpr(
                 callee=Identifier(name="pow"),
                 args=[base, exp],
@@ -1712,15 +1934,18 @@ class _RbParser:
         # Hex string literal (single-quoted)
         if kind == TOK_HEXSTRING:
             self._advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Double-quoted string literal
         if kind == TOK_STRING:
             self._advance()
-            return ByteStringLiteral(value=tok.value)
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
-        # ``nil`` → 0
+        # N-416: ``nil`` is not a Rúnar value; refused, never read as 0.
         if kind == TOK_NIL:
+            self._errors.append(
+                "'nil' is not a Rúnar value (use a number, true, false or a hex string)"
+            )
             self._advance()
             return BigIntLiteral(value=0)
 
@@ -1753,7 +1978,7 @@ class _RbParser:
             self._advance()
             raw_name = tok.value
             name = _map_builtin_name(raw_name)
-            return Identifier(name=name)
+            return Identifier(name=name, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # ``super`` as expression
         if kind == TOK_SUPER:
@@ -1784,7 +2009,19 @@ class _RbParser:
 # ---------------------------------------------------------------------------
 
 def parse_ruby(source: str, file_name: str = "contract.runar.rb") -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_ruby_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_ruby_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Ruby-format Runar contract (.runar.rb) and return a ParseResult."""
-    tokens = _tokenize(source)
+    tokens = _tokenize(source, lex, file_name)
     parser = _RbParser(tokens, file_name)
     return parser.parse()

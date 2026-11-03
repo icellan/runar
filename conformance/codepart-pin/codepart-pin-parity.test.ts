@@ -36,6 +36,7 @@ import {
   findRustBinary,
   findZigBinary,
 } from '../runner/runner.js';
+import { isCiEnv } from '../env.js';
 
 const REPO = resolve(__dirname, '../..');
 const FIXTURE = join(__dirname, 'VarLenP384Ctor.runar.ts');
@@ -202,7 +203,7 @@ describe('R-095: the code-part length pin equals the deployed length, in every t
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = TIERS.filter((t) => t.cmd === null).map((t) => t.id);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(missing, `CI=true but these tiers have no toolchain: ${missing.join(', ')}`).toEqual([]);
     }
     expect(AVAILABLE.length).toBeGreaterThanOrEqual(2);

@@ -5,6 +5,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeNewStateAndDataOutputs } from '../../packages/runar-sdk/src/index.js';
 import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
+import { enforceDriverGate } from './driver-gate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
@@ -12,8 +13,6 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
 const EXPECTED_DIR = join(__dirname, 'expected');
 const DRIVERS_DIR = join(__dirname, 'drivers');
-
-const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
   /**
@@ -167,10 +166,10 @@ describe('ANF interpreter parity (TS SDK)', () => {
 // protocol spec at `drivers/PROTOCOL.md`. The test below spawns each driver
 // for every input fixture and asserts the output equals the TS-pinned golden.
 //
-// CI policy: when CI=true, missing drivers/binaries hard-fail the suite.
-// Local devs without a given toolchain see a single warning and skip the
-// per-language describe block (matches the cross-compiler.test.ts gate).
-// Set RUNAR_ANF_DRIVERS_STRICT=1 to upgrade to hard-fail locally too.
+// Missing-driver policy lives in driver-gate.ts (shared by all three suites):
+// under CI (any non-false CI, or GITHUB_ACTIONS=true) or
+// RUNAR_ANF_DRIVERS_STRICT=1 a missing driver hard-fails the suite; locally
+// it warns once per missing driver and skips that describe block.
 // ---------------------------------------------------------------------------
 
 interface DriverConfig {
@@ -278,15 +277,8 @@ function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
   return JSON.parse(trimmed) as CaseOutput;
 }
 
-const requireAll = IS_CI || process.env.RUNAR_ANF_DRIVERS_STRICT === '1';
-
 const missingDrivers: DriverConfig[] = driverConfigs.filter(c => !isDriverAvailable(c));
-if (requireAll && missingDrivers.length > 0) {
-  throw new Error(
-    `ANF parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
-    missingDrivers.map(c => `  - ${c.name}: ${c.setupHint}`).join('\n'),
-  );
-}
+enforceDriverGate('ANF parity', missingDrivers, process.env);
 
 for (const cfg of driverConfigs) {
   describe.skipIf(!isDriverAvailable(cfg))(`ANF interpreter parity (${cfg.name} SDK)`, () => {

@@ -121,8 +121,8 @@ class TestParserPy < Minitest::Test
     PY
 
     result = parse(source, 'bad.runar.py')
-    invalid = result.contract.nil? || !result.errors.empty?
-    assert invalid, 'expected errors for invalid Python syntax'
+    # F-376: require a diagnostic, not a silent nil-contract/empty-errors pass.
+    refute_empty result.errors, 'expected errors for invalid Python syntax'
   end
 
   # ---------------------------------------------------------------------------

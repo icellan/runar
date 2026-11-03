@@ -115,13 +115,16 @@ class BigIntWideningTest {
             + "      \"body\": [\n"
             + "        { \"name\": \"t0\", \"value\": { \"kind\": \"load_const\", \"value\": \""
             + EC_N.toString(10) + "n\" } }\n"
+            // N-071: a public method must end with an assert.
+            + "        ,{ \"name\": \"_ok\", \"value\": { \"kind\": \"load_const\", \"value\": true } }\n"
+            + "        ,{ \"name\": \"_ok_assert\", \"value\": { \"kind\": \"assert\", \"value\": \"_ok\" } }\n"
             + "      ]\n"
             + "    }\n"
             + "  ]\n"
             + "}";
         var prog = AnfLoader.parse(irJson);
         var body = prog.methods().get(0).body();
-        assertEquals(1, body.size());
+        assertEquals(3, body.size()); // the constant, then N-071's `_ok = true; assert(_ok)`
         var v = body.get(0).value();
         assertNotNull(v);
         // Round-trip via Jcs gives back the same `n`-suffix encoding.
@@ -141,6 +144,9 @@ class BigIntWideningTest {
             + "    { \"name\": \"verify\", \"isPublic\": true, \"params\": [],\n"
             + "      \"body\": [\n"
             + "        { \"name\": \"t0\", \"value\": { \"kind\": \"load_const\", \"value\": \"deadbeef\" } }\n"
+            // N-071: a public method must end with an assert.
+            + "        ,{ \"name\": \"_ok\", \"value\": { \"kind\": \"load_const\", \"value\": true } }\n"
+            + "        ,{ \"name\": \"_ok_assert\", \"value\": { \"kind\": \"assert\", \"value\": \"_ok\" } }\n"
             + "      ]\n"
             + "    }\n"
             + "  ]\n"

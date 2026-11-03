@@ -4,6 +4,7 @@ const base = @import("base.zig");
 const hex = @import("hex.zig");
 const test_keys = @import("test_keys.zig");
 const wots = @import("wots_helpers.zig");
+const der_mod = @import("sdk_der.zig");
 
 const Sha256Hasher = std.crypto.hash.sha2.Sha256;
 const test_message = "runar-test-message-v1";
@@ -131,7 +132,7 @@ const slh_sha2_128f = slhParams(16, 66, 22, 3, 6, 33, 35);
 const slh_sha2_192s = slhParams(24, 63, 7, 9, 14, 17, 51);
 const slh_sha2_192f = slhParams(24, 66, 22, 3, 8, 33, 51);
 const slh_sha2_256s = slhParams(32, 64, 8, 8, 14, 22, 67);
-const slh_sha2_256f = slhParams(32, 68, 17, 4, 8, 35, 67);
+const slh_sha2_256f = slhParams(32, 68, 17, 4, 9, 35, 67);
 pub const assert_failure_message = "runar assertion failed";
 
 pub const MockPreimageParts = struct {
@@ -353,6 +354,13 @@ pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     return extracted;
 }
 
+/// Returns 10000 in test mode — the mock input amount every other tier's
+/// `extractAmount` stub returns, and the default of `continuationAmount`.
+pub fn extractAmount(preimage: base.SigHashPreimage) base.Bigint {
+    _ = preimage;
+    return 10000;
+}
+
 /// Returns 0xfffffffe in test mode. That is
 /// the SDK's own non-final default (`resolveInputSequence`), the value the
 /// TypeScript TestContract interpreter returns, and the value all the SDK ANF
@@ -374,30 +382,129 @@ pub fn extractSequence(preimage: base.SigHashPreimage) base.Bigint {
 // contracts. See docs/cross-covenant-pattern.md.
 // ============================================================================
 
-/// extractPrevOutputScript is the test-mode stub for the cross-input
-/// previous-output script witness-bridge intrinsic. The compiler emits
-/// hash256(witness) == expectedScriptHash on-chain; the off-chain mock
-/// cannot see other inputs, so this returns an empty ByteString.
-pub fn extractPrevOutputScript(input_index: base.Bigint, expected_script_hash: base.ByteString) base.ByteString {
-    _ = input_index;
-    _ = expected_script_hash;
+/// Mock witnesses for `extractPrevOutputScript`, keyed by input index. The
+/// compiler turns `extractPrevOutputScript(i, h)` into an injected
+/// `_prevOutScript_<i>` parameter plus `hash256(witness) == h`; natively the
+/// "unlocking script" is whatever a test registers with
+/// `setMockPrevOutputScript`. The slices are NOT copied: the caller keeps them
+/// alive (string literals and test-arena buffers both work).
+const mock_prev_output_capacity = 16;
+var mock_prev_output_indices: [mock_prev_output_capacity]base.Bigint = undefined;
+var mock_prev_output_scripts: [mock_prev_output_capacity]base.ByteString = undefined;
+var mock_prev_output_count: usize = 0;
+
+/// Registers the witness `extractPrevOutputScript(input_index, ..)` sees and
+/// returns the previous witness for that index (empty if none), so a test can
+/// restore it. Registering an empty slice is the same as having none.
+pub fn setMockPrevOutputScript(input_index: base.Bigint, script: base.ByteString) base.ByteString {
+    var i: usize = 0;
+    while (i < mock_prev_output_count) : (i += 1) {
+        if (mock_prev_output_indices[i] == input_index) {
+            const prev = mock_prev_output_scripts[i];
+            mock_prev_output_scripts[i] = script;
+            return prev;
+        }
+    }
+    if (mock_prev_output_count == mock_prev_output_capacity) {
+        // CONTRACT-ABORT: test-harness misuse, not a script condition.
+        @panic("setMockPrevOutputScript: too many distinct input indices");
+    }
+    mock_prev_output_indices[mock_prev_output_count] = input_index;
+    mock_prev_output_scripts[mock_prev_output_count] = script;
+    mock_prev_output_count += 1;
     return &[_]u8{};
 }
 
-/// requireOutputP2PKH is the test-mode stub for the P2PKH-output-binding
-/// intrinsic. The compiler emits a hashOutputs reconstruction + substring
-/// assertion on-chain; the off-chain mock has no real outputs to inspect,
-/// so this is a no-op.
-pub fn requireOutputP2PKH(output_index: base.Bigint, pubkey_hash: base.ByteString, amount: base.Bigint) void {
-    _ = output_index;
-    _ = pubkey_hash;
-    _ = amount;
+/// extractPrevOutputScript is the native form of the cross-input
+/// previous-output script witness-bridge intrinsic. The compiler emits
+/// `hash256(witness) == expectedScriptHash` on-chain, with the witness
+/// supplied by the unlocking script; natively the witness is the one a test
+/// registered with `setMockPrevOutputScript` (empty when none was), and the
+/// same equality is asserted, so a witness that does not hash to
+/// `expected_script_hash` aborts as the script would. It cannot see other
+/// inputs, so it does not check that the witness is a real previous output.
+/// See docs/cross-covenant-pattern.md.
+pub fn extractPrevOutputScript(input_index: base.Bigint, expected_script_hash: base.ByteString) base.ByteString {
+    var witness: base.ByteString = &[_]u8{};
+    var i: usize = 0;
+    while (i < mock_prev_output_count) : (i += 1) {
+        if (mock_prev_output_indices[i] == input_index) witness = mock_prev_output_scripts[i];
+    }
+    assert(bytesEq(hash256(witness), expected_script_hash));
+    return witness;
 }
 
-/// currentBlockHeight is the test-mode stub for the locktime-as-height
-/// shorthand. On-chain the compiler desugars to extractLocktime(txPreimage).
+var mock_serialised_outputs: base.ByteString = &[_]u8{};
+
+/// Sets the serialised transaction outputs `requireOutputP2PKH` inspects (the
+/// native counterpart of the compiler's injected `_serialisedOutputs`
+/// witness) and returns the previous value. The slice is not copied.
+pub fn setMockSerialisedOutputs(outputs: base.ByteString) base.ByteString {
+    const prev = mock_serialised_outputs;
+    mock_serialised_outputs = outputs;
+    return prev;
+}
+
+/// requireOutputP2PKH is the native form of the P2PKH-output-binding
+/// intrinsic. On-chain the compiler asserts that bytes 0..34 of the injected
+/// `_serialisedOutputs` witness are `num2bin(amount, 8) || 1976a914 ||
+/// pubkey_hash || 88ac`, after binding the witness to the preimage's
+/// hashOutputs. Natively the witness is the one registered with
+/// `setMockSerialisedOutputs` (empty when none was) and the 34-byte
+/// comparison is made; the hashOutputs binding needs a preimage and is not
+/// modelled. The compiler accepts output index 0 only (the offset i*34 is an
+/// output boundary only for index 0), so any other index aborts here too.
+pub fn requireOutputP2PKH(output_index: base.Bigint, pubkey_hash: base.ByteString, amount: base.Bigint) void {
+    assert(output_index == 0);
+    // A hash that is not 20 bytes makes the on-chain expected output a
+    // different length, which can never equal the 34-byte slice.
+    assert(pubkey_hash.len == 20);
+    var expected: [34]u8 = undefined;
+    @memcpy(expected[0..8], num2bin(amount, 8));
+    @memcpy(expected[8..12], &[_]u8{ 0x19, 0x76, 0xa9, 0x14 });
+    @memcpy(expected[12..32], pubkey_hash);
+    @memcpy(expected[32..34], &[_]u8{ 0x88, 0xac });
+    assert(mock_serialised_outputs.len >= 34 and bytesEq(mock_serialised_outputs[0..34], &expected));
+}
+
+var mock_block_height: base.Bigint = 0;
+
+/// Sets what `currentBlockHeight` returns in test mode and returns the
+/// previous value, like `setMockContinuationAmount`.
+pub fn setMockBlockHeight(height: base.Bigint) base.Bigint {
+    const prev = mock_block_height;
+    mock_block_height = height;
+    return prev;
+}
+
+/// currentBlockHeight is the native form of the locktime-as-height shorthand.
+/// On-chain the compiler desugars to extractLocktime(txPreimage); natively it
+/// returns the value set with `setMockBlockHeight` (0 by default).
 pub fn currentBlockHeight() base.Bigint {
-    return 0;
+    return mock_block_height;
+}
+
+/// continuationAmount is the test-mode stub for the read-only view of the
+/// satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
+/// compiler lowers it to the injected `_newAmount` witness, already bound to
+/// `>= extractAmount(txPreimage)`. Returns 10000 — the mock input amount the
+/// other tiers' `extractAmount` stubs return (an honest continuation) —
+/// unless a test has set another value with `setMockContinuationAmount`.
+pub fn continuationAmount() base.Bigint {
+    return mock_continuation_amount;
+}
+
+var mock_continuation_amount: base.Bigint = 10000;
+
+/// Sets what `continuationAmount` returns in test mode and returns the
+/// previous value. `extractAmount` stays 10000, so a native test of an author
+/// rule such as `continuationAmount() == extractAmount(ctx.txPreimage) + bet`
+/// sets 10000 + bet for the paying call and anything else for a non-paying one
+/// (N-027).
+pub fn setMockContinuationAmount(amount: base.Bigint) base.Bigint {
+    const prev = mock_continuation_amount;
+    mock_continuation_amount = amount;
+    return prev;
 }
 
 pub const BuildChangeOutputError = error{
@@ -462,10 +569,24 @@ pub fn hexToBytes(comptime hex_str: []const u8) *const [hex_str.len / 2]u8 {
     };
 }
 
+/// N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+/// OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second
+/// against the REMAINDER `size(data) - start`. It ABORTS whenever `start` is
+/// outside `[0, size(data)]` or `length` is outside `[0, size(data) -
+/// start]`, which collapses to: start < 0, length < 0, or start + length >
+/// size(data). The previous `start < 0 or len <= 0` check returned an empty
+/// value for a negative `length` or an out-of-range `start` with `length ==
+/// 0` instead of aborting, and never checked `start + length` against the
+/// data's size at all.
 pub fn substr(bytes: base.ByteString, start: base.Bigint, len: base.Bigint) base.ByteString {
-    if (start < 0 or len <= 0) return &.{};
-    const start_usize = std.math.cast(usize, start) orelse return &.{};
-    const len_usize = std.math.cast(usize, len) orelse return &.{};
+    // CONTRACT-ABORT: OP_SPLIT fails on a position below zero or past the
+    // end of the element; it does not clamp.
+    if (start < 0 or len < 0) @panic("substr: start/length is negative");
+    const start_usize = std.math.cast(usize, start) orelse @panic("substr: start out of range");
+    const len_usize = std.math.cast(usize, len) orelse @panic("substr: length out of range");
+    if (start_usize > bytes.len or len_usize > bytes.len - start_usize) {
+        @panic("substr: start/length is outside the data's size");
+    }
     // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
     return bsvz.script.substr(std.heap.page_allocator, bytes, start_usize, len_usize) catch @panic("OOM");
 }
@@ -484,6 +605,97 @@ pub fn num2bin(value: anytype, size: base.Bigint) base.ByteString {
     };
 }
 
+/// N-375: `split(data, index)` -- the tail of `data` from `index`, the half
+/// Rúnar's tuple-free surface keeps (`OP_SPLIT` then `OP_NIP`). `OP_SPLIT`
+/// FAILS on a position below zero or past the end and does not clamp, so this
+/// aborts there; `index == len` is legal and yields the empty string.
+pub fn split(data: base.ByteString, index: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT: OP_SPLIT fails on a position outside the element.
+    const n = std.math.cast(usize, index) orelse @panic("split: position is negative");
+    if (n > data.len) @panic("split: position is past the end of the data");
+    return data[n..];
+}
+
+/// N-375: `int2str` is `num2bin` under another name (every frontend maps both
+/// spellings to one builtin and every tier emits OP_NUM2BIN): a fixed-width
+/// little-endian sign-magnitude encoding, `width` being bytes and not a
+/// radix. OP_NUM2BIN fails on a negative size or one too small for the value.
+pub fn int2str(value: anytype, width: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT: OP_NUM2BIN fails on a negative size.
+    if (width < 0) @panic("int2str: width is negative");
+    return num2bin(value, width);
+}
+
+/// The most bytes `reverseBytes` can reverse: every tier lowers it to a fixed
+/// unrolled loop of exactly this many peel-one-byte iterations and drops the
+/// remainder, so past it the script would return the reverse of only the
+/// first 520 bytes.
+pub const reverse_bytes_max = 520;
+
+/// N-375: `data` with its bytes in the opposite order. Aborts past
+/// `reverse_bytes_max`, as returning the whole reversal would hand the caller
+/// a value the script cannot produce.
+pub fn reverseBytes(data: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: the emitted loop handles 520 bytes and drops the rest.
+    if (data.len > reverse_bytes_max) @panic("reverseBytes: more than 520 bytes");
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, data.len) catch @panic("OOM");
+    for (data, 0..) |byte, i| out[data.len - 1 - i] = byte;
+    return out;
+}
+
+const p256_field_prime: u256 = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff;
+const p384_field_prime: u384 = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff;
+
+/// Negates a NIST point given as raw `x || y` big-endian: `(x, p - y)`. Aborts
+/// on a wrong width or a coordinate that is not below the field prime, as the
+/// emitted script does (its guards cover canonicity AND the width).
+fn nistNegate(comptime Int: type, comptime coord_len: usize, prime: Int, point: base.ByteString, what: []const u8) base.ByteString {
+    // CONTRACT-ABORT: the emitted script guards the point width.
+    if (point.len != 2 * coord_len) @panic(what);
+    const x = std.mem.readInt(Int, point[0..coord_len], .big);
+    const y = std.mem.readInt(Int, point[coord_len..][0..coord_len], .big);
+    // CONTRACT-ABORT: the emitted script guards coordinate canonicity.
+    if (x >= prime or y >= prime) @panic(what);
+    const neg_y: Int = if (y == 0) 0 else prime - y;
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, 2 * coord_len) catch @panic("OOM");
+    @memcpy(out[0..coord_len], point[0..coord_len]);
+    std.mem.writeInt(Int, out[coord_len..][0..coord_len], neg_y, .big);
+    return out;
+}
+
+/// `02`/`03` (the parity of y) followed by x, for a raw `x || y` NIST point.
+fn nistEncodeCompressed(comptime coord_len: usize, point: base.ByteString, what: []const u8) base.ByteString {
+    // CONTRACT-ABORT: the emitted script guards the point width.
+    if (point.len != 2 * coord_len) @panic(what);
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
+    const out = std.heap.page_allocator.alloc(u8, 1 + coord_len) catch @panic("OOM");
+    out[0] = 0x02 | (point[2 * coord_len - 1] & 1);
+    @memcpy(out[1..], point[0..coord_len]);
+    return out;
+}
+
+/// N-375: P-256 negation, `(x, p - y)`, of a 64-byte `x || y` point.
+pub fn p256Negate(point: base.P256Point) base.P256Point {
+    return nistNegate(u256, 32, p256_field_prime, point, "p256Negate: point must be 64 bytes with canonical coordinates");
+}
+
+/// N-375: 33-byte compressed encoding of a 64-byte P-256 point.
+pub fn p256EncodeCompressed(point: base.P256Point) base.ByteString {
+    return nistEncodeCompressed(32, point, "p256EncodeCompressed: point must be 64 bytes");
+}
+
+/// N-375: P-384 negation, `(x, p - y)`, of a 96-byte `x || y` point.
+pub fn p384Negate(point: base.P384Point) base.P384Point {
+    return nistNegate(u384, 48, p384_field_prime, point, "p384Negate: point must be 96 bytes with canonical coordinates");
+}
+
+/// N-375: 49-byte compressed encoding of a 96-byte P-384 point.
+pub fn p384EncodeCompressed(point: base.P384Point) base.ByteString {
+    return nistEncodeCompressed(48, point, "p384EncodeCompressed: point must be 96 bytes");
+}
+
 pub fn bin2num(bytes: base.ByteString) i64 {
     // Native Zig contracts use `base.Bigint = i64` (see SchnorrZKP_test.zig
     // BUG-001). Returning i64 lets `bin2num(...) == 0` type-check in
@@ -500,27 +712,62 @@ pub fn within(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) bool {
     return value >= lo and value < hi;
 }
 
+// F-033: the math builtins below must return what the compiled script
+// returns (05-stack-lower.ts), vector-checked against Spend.validate in
+// builtins_math_onchain_test.zig. Where the script aborts, these abort too.
+
+/// Script: `<v> <lo> OP_MAX <hi> OP_MIN`. The order matters when lo > hi:
+/// the result is then always `hi`.
 pub fn clamp(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) base.Bigint {
-    return @max(lo, @min(hi, value));
+    return @min(@max(value, lo), hi);
 }
 
+/// Script: `OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV` — a zero divisor fails.
 pub fn safediv(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
-    if (rhs == 0) return 0;
+    assert(rhs != 0);
     return @divTrunc(lhs, rhs);
 }
 
+/// Script: `OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD` — a zero divisor fails.
 pub fn safemod(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
-    if (rhs == 0) return 0;
+    assert(rhs != 0);
     return @rem(lhs, rhs);
+}
+
+/// Script: `OP_2DUP OP_DIV ... OP_MOD OP_DROP` — the truncated quotient; a
+/// zero divisor fails in OP_DIV.
+pub fn divmod(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
+    // CONTRACT-ABORT: OP_DIV by zero fails the script.
+    if (rhs == 0) @panic("divmod: division by zero");
+    return @divTrunc(lhs, rhs);
+}
+
+pub fn abs(value: base.Bigint) base.Bigint {
+    return checkedAbs(value);
+}
+
+pub fn min(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @min(a, b);
+}
+
+pub fn max(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @max(a, b);
+}
+
+/// The Rúnar `bool(x)` builtin (`x != 0`); exported from root.zig as
+/// `runar.bool`.
+pub fn boolCast(value: base.Bigint) bool {
+    return value != 0;
 }
 
 pub fn sign(value: base.Bigint) base.Bigint {
     return if (value < 0) -1 else if (value > 0) 1 else 0;
 }
 
+/// Script: `OP_DUP 0 33 OP_WITHIN OP_VERIFY` then 32 unrolled rounds — any
+/// exponent outside 0..32 fails (R-169), even where the power is trivial.
 pub fn pow(base_value: base.Bigint, exponent: base.Bigint) base.Bigint {
-    // CONTRACT-ABORT: negative exponent is an in-contract math error.
-    if (exponent < 0) @panic("pow: negative exponent");
+    assert(within(exponent, 0, 33));
     if (exponent == 0) return 1;
 
     var result: i64 = 1;
@@ -533,25 +780,35 @@ pub fn pow(base_value: base.Bigint, exponent: base.Bigint) base.Bigint {
     return result;
 }
 
+/// Script: `<a> <b> OP_MUL <c> OP_DIV` — truncated; a zero divisor fails.
 pub fn mulDiv(a: base.Bigint, b: base.Bigint, divisor: base.Bigint) base.Bigint {
-    if (divisor == 0) return 0;
+    // CONTRACT-ABORT: OP_DIV by zero fails the script.
+    if (divisor == 0) @panic("mulDiv: division by zero");
     return @divTrunc(checkedMul(a, b), divisor);
 }
 
-pub fn percentOf(value: base.Bigint, percentage: base.Bigint) base.Bigint {
-    return @divTrunc(checkedMul(value, percentage), 100);
+/// Script: `<amount> <bps> OP_MUL 10000 OP_DIV` — basis points, truncated
+/// toward zero.
+pub fn percentOf(amount: base.Bigint, bps: base.Bigint) base.Bigint {
+    return @divTrunc(checkedMul(amount, bps), 10000);
 }
 
+/// Script: n >= 0 is VERIFIED, then `guess = n` and 256 rounds of
+/// `guess = min(guess, (guess + n / guess) / 2)`, which is exact floor(sqrt(n)).
+/// Iterating to the fixed point gives the same result; i128 keeps
+/// `guess + n / guess` from overflowing at n near maxInt(i64).
 pub fn sqrt(value: base.Bigint) base.Bigint {
-    if (value <= 0) return 0;
+    assert(value >= 0);
+    if (value == 0) return 0;
 
-    var x = value;
-    var y = @divTrunc(value, 2) + 1;
-    while (y < x) {
-        x = y;
-        y = @divTrunc(y + @divTrunc(value, y), 2);
+    const n: i128 = value;
+    var guess: i128 = n;
+    while (true) {
+        const next = @divTrunc(guess + @divTrunc(n, guess), 2);
+        if (next >= guess) break;
+        guess = next;
     }
-    return x;
+    return @intCast(guess);
 }
 
 pub fn gcd(a: base.Bigint, b: base.Bigint) base.Bigint {
@@ -565,8 +822,10 @@ pub fn gcd(a: base.Bigint, b: base.Bigint) base.Bigint {
     return x;
 }
 
+/// Exact floor(log2(n)); the compiled script aborts for n <= 0 (N-103).
 pub fn log2(value: base.Bigint) base.Bigint {
-    if (value <= 1) return 0;
+    assert(value > 0);
+    if (value == 1) return 0;
 
     var count: i64 = 0;
     var current = value;
@@ -576,10 +835,23 @@ pub fn log2(value: base.Bigint) base.Bigint {
     return count;
 }
 
+// N-173: the length-mismatch panics below used to omit the actual length,
+// unlike the shared diagnostic text every other tier uses for the same
+// checks (packages/runar-testing/src/interpreter/interpreter.ts,
+// packages/runar-py/runar/builtins.py, packages/runar-java/.../MockCrypto.java):
+// "<prefix>, got <N>". `lengthPanic` formats that suffix into a small stack
+// buffer and aborts; the fallback only fires if formatting itself fails,
+// which it cannot for the `usize` values passed here.
+fn lengthPanic(comptime prefix: []const u8, got: usize) noreturn {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, prefix ++ ", got {d}", .{got}) catch prefix;
+    @panic(msg);
+}
+
 pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: length invariants of the in-contract SHA-256 builtin.
-    if (chaining_value.len != 32) @panic("sha256Compress: state must be 32 bytes");
-    if (block.len != 64) @panic("sha256Compress: block must be 64 bytes");
+    if (chaining_value.len != 32) lengthPanic("sha256Compress: state must be 32 bytes", chaining_value.len);
+    if (block.len != 64) lengthPanic("sha256Compress: block must be 64 bytes", block.len);
 
     var out: [32]u8 = undefined;
     sha256CompressBlock(&out, chaining_value, block);
@@ -588,8 +860,11 @@ pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) b
 
 pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteString, total_len: base.Bigint) base.ByteString {
     // CONTRACT-ABORT: length / range invariants of the in-contract SHA-256 finalize builtin.
-    if (chaining_value.len != 32) @panic("sha256Finalize: state must be 32 bytes");
-    if (remaining.len > 119) @panic("sha256Finalize: remaining must be <= 119 bytes");
+    if (chaining_value.len != 32) lengthPanic("sha256Finalize: state must be 32 bytes", chaining_value.len);
+    // N-173: "0-119 bytes" (not "<= 119 bytes") matches the shared diagnostic
+    // text (interpreter.ts, runar.go, builtins.rb) for this bound.
+    if (remaining.len > 119) lengthPanic("sha256Finalize: remaining must be 0-119 bytes", remaining.len);
+    // No shared counterpart checks this; wording is Zig-specific by design.
     if (total_len < 0) @panic("sha256Finalize: total bit length must be non-negative");
 
     const blocks: usize = if (remaining.len + 1 + 8 <= 64) 1 else 2;
@@ -648,8 +923,8 @@ fn blake3CompressBlock(chaining_value: base.ByteString, block: base.ByteString, 
 
 pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: length invariants of the in-contract Blake3 builtin.
-    if (chaining_value.len != 32) @panic("blake3Compress: chaining value must be 32 bytes");
-    if (block.len != 64) @panic("blake3Compress: block must be 64 bytes");
+    if (chaining_value.len != 32) lengthPanic("blake3Compress: chaining value must be 32 bytes", chaining_value.len);
+    if (block.len != 64) lengthPanic("blake3Compress: block must be 64 bytes", block.len);
 
     // Full 64-byte block → block_len = 64.
     return blake3CompressBlock(chaining_value, block, 64);
@@ -657,7 +932,7 @@ pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) b
 
 pub fn blake3Hash(message: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: message length invariant of the in-contract Blake3 builtin.
-    if (message.len > 64) @panic("blake3Hash: message must be <= 64 bytes");
+    if (message.len > 64) lengthPanic("blake3Hash: message must be <= 64 bytes", message.len);
 
     var block = [_]u8{0} ** 64;
     @memcpy(block[0..message.len], message);
@@ -690,6 +965,10 @@ pub fn verifyRabinSig(message: base.ByteString, sig: base.RabinSig, padding: bas
     var pad_limit = BigUint.fromU64(std.heap.page_allocator, RABIN_PADDING_LIMIT) catch return false;
     defer pad_limit.deinit();
     if (pad_bn.cmp(&pad_limit) != .lt) return false;
+
+    // Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+    // the same residue but the deployed script aborts on it.
+    if (sig_bn.cmp(&modulus) != .lt) return false;
 
     var sig_sq = sig_bn.mul(&sig_bn) catch return false;
     defer sig_sq.deinit();
@@ -755,7 +1034,11 @@ pub fn verifySLHDSA_SHA2_256f(message: base.ByteString, sig: base.ByteString, pu
 
 fn slhVerifySha2(comptime params: SlhParams, message: []const u8, sig: []const u8, pub_key: []const u8) bool {
     if (pub_key.len != 2 * params.n) return false;
-    if (sig.len < params.sig_len) return false;
+    // F-232: FIPS 205 fixes the signature length per parameter set at
+    // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+    // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+    // garbage or truncation) is rejected.
+    if (sig.len != params.sig_len) return false;
 
     const pk_seed = pub_key[0..params.n];
     const pk_root = pub_key[params.n .. 2 * params.n];
@@ -807,6 +1090,7 @@ fn slhVerifySha2(comptime params: SlhParams, message: []const u8, sig: []const u
         current_leaf_idx = @intCast(current_tree_idx & ((@as(u64, 1) << @intCast(params.hp)) - 1));
         current_tree_idx >>= @intCast(params.hp);
     }
+    if (offset != sig.len) return false;
 
     return std.mem.eql(u8, &current_msg, pk_root);
 }
@@ -1114,43 +1398,112 @@ fn slhForsPkFromSig(comptime params: SlhParams, fors_sig: []const u8, md: []cons
     return slhT(params, pk_seed, &fors_pk_adrs, &roots);
 }
 
-pub fn ecMakePoint(x: base.Bigint, y: base.Bigint) base.Point {
-    var point = [_]u8{0} ** 64;
-    std.mem.writeInt(u64, point[24..32], @bitCast(x), .big);
-    std.mem.writeInt(u64, point[56..64], @bitCast(y), .big);
+/// N-183 / R-156: the script requires each coordinate to be a field element,
+/// 0 <= v < p (OP_WITHIN + OP_VERIFY). u256 already excludes negatives and
+/// anything wider than 32 bytes; this refuses [p, 2^256).
+pub fn ecMakePointChecked(x: base.BigintBig, y: base.BigintBig) EcBuiltinError!base.Point {
+    var point: [64]u8 = undefined;
+    std.mem.writeInt(u256, point[0..32], x, .big);
+    std.mem.writeInt(u256, point[32..64], y, .big);
+    _ = try ecDecodeCanonical(&point);
     return dupeBytes(&point);
 }
 
-pub fn ecPointX(point: base.Point) base.Bigint {
-    // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
-    if (point.len != 64) @panic("ecPointX: point must be 64 bytes");
-    return @bitCast(std.mem.readInt(u64, point[24..32], .big));
+pub fn ecMakePoint(x: base.BigintBig, y: base.BigintBig) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; a non-field-element coordinate = script-abort.
+    return ecMakePointChecked(x, y) catch @panic("ecMakePoint: coordinate is not a field element (0 <= v < p)");
 }
 
-pub fn ecPointY(point: base.Point) base.Bigint {
+pub fn ecPointX(point: base.Point) base.BigintBig {
     // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
-    if (point.len != 64) @panic("ecPointY: point must be 64 bytes");
-    return @bitCast(std.mem.readInt(u64, point[56..64], .big));
+    // N-173: "EC point must be 64 bytes" (with "EC") matches the shared
+    // diagnostic text (runar-lang/src/runtime/builtins.ts's ecDecode).
+    if (point.len != 64) lengthPanic("ecPointX: EC point must be 64 bytes", point.len);
+    return std.mem.readInt(u256, point[0..32], .big);
+}
+
+pub fn ecPointY(point: base.Point) base.BigintBig {
+    // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
+    if (point.len != 64) lengthPanic("ecPointY: EC point must be 64 bytes", point.len);
+    return std.mem.readInt(u256, point[32..64], .big);
+}
+
+// N-111: the compiled EC builtins gate their operands, and these mirror the
+// gates exactly (vectors: fixtures/n111-ec-operand-gates-onchain.json):
+//   - ecAdd / ecNegate: 64 bytes and x, y < p (R-117); off-curve operands and
+//     the all-zero identity O are ACCEPTED (R-053), so they use raw affine
+//     field arithmetic rather than bsvz, which decodes on-curve points only.
+//   - ecMul: on-curve OR O (R-157) -- exactly what `parsePoint` admits.
+//   - ecEncodeCompressed: width only; parity from y's last byte; O -> 02||0^32.
+// Each `*Checked` variant returns the abort as an error; the plain builtin
+// (called from contract bodies) panics on it, as the script aborts.
+
+pub const EcBuiltinError = error{
+    InvalidPointLength,
+    NonCanonicalCoordinate,
+    PointNotOnCurveOrIdentity,
+    InvalidScalar,
+    /// N-110: ecAdd doubling a point with y = 0 (other than O).
+    VerticalTangent,
+};
+
+const Secp256k1Fe = std.crypto.ecc.Secp256k1.Fe;
+
+fn ecDecodeCanonical(point: []const u8) EcBuiltinError![2]Secp256k1Fe {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    const x = Secp256k1Fe.fromBytes(point[0..32].*, .big) catch return EcBuiltinError.NonCanonicalCoordinate;
+    const y = Secp256k1Fe.fromBytes(point[32..64].*, .big) catch return EcBuiltinError.NonCanonicalCoordinate;
+    return .{ x, y };
+}
+
+fn ecEncodeFe(x: Secp256k1Fe, y: Secp256k1Fe) base.Point {
+    var out: [64]u8 = undefined;
+    out[0..32].* = x.toBytes(.big);
+    out[32..64].* = y.toBytes(.big);
+    return dupeBytes(&out);
+}
+
+pub fn ecAddChecked(left: base.Point, right: base.Point) EcBuiltinError!base.Point {
+    const l = try ecDecodeCanonical(left);
+    const r = try ecDecodeCanonical(right);
+    if (l[0].isZero() and l[1].isZero()) return ecEncodeFe(r[0], r[1]);
+    if (r[0].isZero() and r[1].isZero()) return ecEncodeFe(l[0], l[1]);
+    const same_x = l[0].equivalent(r[0]);
+    if (same_x and !l[1].equivalent(r[1])) return dupeBytes(&([_]u8{0} ** 64));
+    // N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+    if (same_x and l[1].isZero()) return EcBuiltinError.VerticalTangent;
+    const three = comptime Secp256k1Fe.fromInt(3) catch unreachable;
+    // Tangent or chord; invert(0) = 0, as the script's Fermat inverse gives.
+    const s = if (same_x)
+        l[0].sq().mul(three).mul(l[1].dbl().invert())
+    else
+        r[1].sub(l[1]).mul(r[0].sub(l[0]).invert());
+    const rx = s.sq().sub(l[0]).sub(r[0]);
+    const ry = s.mul(l[0].sub(rx)).sub(l[1]);
+    return ecEncodeFe(rx, ry);
 }
 
 pub fn ecAdd(left: base.Point, right: base.Point) base.Point {
     // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const lp = parsePoint(left) catch @panic("ecAdd: invalid point");
-    const rp = parsePoint(right) catch @panic("ecAdd: invalid point");
-    return serializePoint(lp.add(rp));
+    return ecAddChecked(left, right) catch @panic("ecAdd: invalid point");
 }
 
-pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
-    // CONTRACT-ABORT: in-contract EC builtin; invalid Point/scalar = script-abort.
-    const p = parsePoint(point) catch @panic("ecMul: invalid point");
+pub fn ecMulChecked(point: base.Point, scalar: anytype) EcBuiltinError!base.Point {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    const p = parsePoint(point) catch return EcBuiltinError.PointNotOnCurveOrIdentity;
     if (isIdentityPoint(point)) return dupeBytes(&([_]u8{0} ** 64));
 
     const reduced_scalar = reduceScalarForSecp256k1(scalar);
     if (reduced_scalar.is_zero) return dupeBytes(&([_]u8{0} ** 64));
 
-    var result = p.mul(reduced_scalar.bytes) catch @panic("ecMul: invalid scalar");
+    var result = p.mul(reduced_scalar.bytes) catch return EcBuiltinError.InvalidScalar;
     if (reduced_scalar.negative) result = result.negate();
     return serializePoint(result);
+}
+
+pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point/scalar = script-abort.
+    return ecMulChecked(point, scalar) catch @panic("ecMul: invalid point");
 }
 
 pub fn ecMulGen(scalar: anytype) base.Point {
@@ -1163,10 +1516,14 @@ pub fn ecMulGen(scalar: anytype) base.Point {
     return serializePoint(result);
 }
 
+pub fn ecNegateChecked(point: base.Point) EcBuiltinError!base.Point {
+    const c = try ecDecodeCanonical(point);
+    return ecEncodeFe(c[0], c[1].neg());
+}
+
 pub fn ecNegate(point: base.Point) base.Point {
     // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const p = parsePoint(point) catch @panic("ecNegate: invalid point");
-    return serializePoint(p.negate());
+    return ecNegateChecked(point) catch @panic("ecNegate: invalid point");
 }
 
 pub fn ecOnCurve(point: base.Point) bool {
@@ -1188,12 +1545,17 @@ pub fn ecModReduce(value: base.Bigint, modulus: base.Bigint) base.Bigint {
     return if (reduced < 0) reduced + modulus else reduced;
 }
 
+pub fn ecEncodeCompressedChecked(point: base.Point) EcBuiltinError!base.ByteString {
+    if (point.len != 64) return EcBuiltinError.InvalidPointLength;
+    var out: [33]u8 = undefined;
+    out[0] = if (point[63] & 1 == 0) 0x02 else 0x03;
+    @memcpy(out[1..33], point[0..32]);
+    return dupeBytes(&out);
+}
+
 pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
     // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
-    const p = parsePoint(point) catch @panic("ecEncodeCompressed: invalid point");
-    if (isIdentityPoint(point)) return dupeBytes(&[_]u8{0x00});
-    const compressed = p.toCompressedSec1();
-    return dupeBytes(compressed.slice());
+    return ecEncodeCompressedChecked(point) catch @panic("ecEncodeCompressed: invalid point");
 }
 
 // -- Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921) --------
@@ -1383,19 +1745,12 @@ fn parseFixturePrivateKey(priv_key_hex: []const u8) !bsvz.crypto.PrivateKey {
 }
 
 fn parseChecksigDer(sig: []const u8) ?bsvz.crypto.DerSignature {
-    if (sig.len < 2 or sig[0] != 0x30) {
-        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
-    }
-
-    const pure_der_len = @as(usize, sig[1]) + 2;
-    if (sig.len == pure_der_len + 1) {
-        const tx_sig = bsvz.crypto.TxSignature.fromChecksigFormat(sig) catch return null;
-        return tx_sig.der;
-    }
-    if (sig.len == pure_der_len) {
-        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
-    }
-    return null;
+    if (sig.len < 2) return null;
+    // One trailing sighash type byte (OP_CHECKSIG convention) is dropped.
+    const pure = if (sig.len == @as(usize, sig[1]) + 3) sig[0 .. sig.len - 1] else sig;
+    // F-242: strict DER (BIP66), as OP_CHECKSIG on a node.
+    if (!der_mod.isStrictDerSignature(pure)) return null;
+    return bsvz.crypto.DerSignature.fromDer(pure) catch null;
 }
 
 fn dupeBytes(bytes: []const u8) []const u8 {
@@ -2144,12 +2499,22 @@ test "cat and substr preserve current Runar byte-string semantics" {
     defer freeIfOwned(middle);
     try std.testing.expectEqualSlices(u8, "world", middle);
 
-    try std.testing.expectEqualSlices(u8, &.{}, substr("hello", -1, 2));
+    // `substr(data, 0, 0)` is the only in-range case among the three below:
+    // start=0 <= size(data)=5, length=0 <= size(data)-start=5.
     try std.testing.expectEqualSlices(u8, &.{}, substr("hello", 0, 0));
 
-    const past_end = substr("hello", 99, 3);
-    defer freeIfOwned(past_end);
-    try std.testing.expectEqualSlices(u8, &.{}, past_end);
+    // N-171 (sibling of F-274): `substr("hello", -1, 2)` and
+    // `substr("hello", 99, 3)` used to clamp to an empty `ByteString` here
+    // -- this test's name used to call that "current ... semantics" without
+    // qualifying it as the on-chain value. Both now ABORT instead (start < 0
+    // and start > size(data), respectively; see `substr`'s doc comment for
+    // the full bound), matching what the compiled `OP_SPLIT`-based script
+    // does. A Zig panic aborts the whole test binary, so it cannot be
+    // asserted in-process here (same documented limitation as
+    // builtins_math_onchain_test.zig) -- `builtins_n171_substr_onchain_test.zig`
+    // replays every non-abort vector instead, and the abort vectors are
+    // proven on the real engine in
+    // packages/runar-testing/src/__tests__/n171-split-substr-builtins-onchain.test.ts.
 }
 
 test "mock preimage extractors round trip" {
@@ -2170,6 +2535,32 @@ test "mock preimage extractors round trip" {
     defer freeIfOwned(extracted_hash);
     try std.testing.expect(std.mem.eql(u8, extracted_hash, expected_hash));
     try std.testing.expectEqual(@as(i64, 500), extractLocktime(preimage));
+}
+
+// N-246: Go/Rust/Python/Ruby's native extractOutputHash mocks echoed
+// bytes[0:32] of the preimage instead of reading the actual hashOutputs
+// field. Zig's extractOutputHash delegates to bsvz.transaction's real
+// BIP-143 preimage parser (Preimage.parse), which already reads
+// hashOutputs by field, not by a leading-bytes echo — this test proves
+// that and is why this tier's mock is NOT touched by the N-246 fix. Does
+// not prove anything about on-chain behaviour, which this mock never
+// touches.
+test "extractOutputHash returns hashOutputs, not the leading bytes (N-246)" {
+    const prevouts_hash = hash256("prevouts-marker");
+    defer freeIfOwned(prevouts_hash);
+    const output_hash = hash256("outputs-marker");
+    defer freeIfOwned(output_hash);
+
+    const preimage = mockPreimage(.{
+        .hashPrevouts = prevouts_hash,
+        .outputHash = output_hash,
+    });
+    defer freeIfOwned(preimage);
+
+    const extracted = extractOutputHash(preimage);
+    defer freeIfOwned(extracted);
+    try std.testing.expect(std.mem.eql(u8, extracted, output_hash));
+    try std.testing.expect(!std.mem.eql(u8, extracted, prevouts_hash));
 }
 
 test "num2bin and bin2num follow signed magnitude semantics" {
@@ -2227,7 +2618,11 @@ test "wide signed-magnitude values flow through bin2num and secp256k1 scalar mul
 test "safemod keeps the dividend sign" {
     try std.testing.expectEqual(@as(i64, -1), safemod(-7, 3));
     try std.testing.expectEqual(@as(i64, 1), safemod(7, 3));
-    try std.testing.expectEqual(@as(i64, 0), safemod(7, 0));
+    // F-033: `safemod(7, 0) == 0` used to be asserted here. The script VERIFIES
+    // a non-zero divisor, so a zero divisor fails on-chain (vector
+    // `safemod(5, 0)` in fixtures/f033-math-builtins-onchain.json) and now
+    // aborts natively; that abort is checked out-of-process by the
+    // examples/zig `moduloBy(0)` vector (a panic cannot be caught here).
 }
 
 test "sha256Compress matches known abc hash" {
@@ -2329,12 +2724,44 @@ test "ec helpers use real secp256k1 arithmetic" {
 }
 
 test "ec small-value point helpers round trip" {
-    const p = ecMakePoint(12345, -67890);
+    // N-182: was (12345, -67890). A Point is x[32]||y[32] big-endian
+    // UNSIGNED, so a negative coordinate is not representable (u256), as in
+    // Go's EcMakePoint, which panics on one.
+    const p = ecMakePoint(12345, 67890);
     defer freeIfOwned(p);
 
-    try std.testing.expectEqual(@as(i64, 12345), ecPointX(p));
-    try std.testing.expectEqual(@as(i64, -67890), ecPointY(p));
+    try std.testing.expectEqual(@as(base.BigintBig, 12345), ecPointX(p));
+    try std.testing.expectEqual(@as(base.BigintBig, 67890), ecPointY(p));
     try std.testing.expect(!ecOnCurve(p));
+}
+
+// N-182: ecPointX / ecPointY must return the whole 32-byte big-endian
+// coordinate (BigintBig = u256), not its low 8 bytes, and ecMakePoint must
+// take the whole coordinate back.
+// Proves: for 2G (published x/y) and G, the native accessors return the full
+// coordinate and ecMakePoint(ecPointX(p), ecPointY(p)) rebuilds p byte for byte.
+// Does NOT prove: the compiled script's ecPointX/ecMakePoint (covered by the
+// conformance goldens and the N-111 on-chain vectors), or negative inputs,
+// which u256 cannot represent (Go's EcMakePoint refuses them too).
+test "N-182: ecPointX / ecPointY return the full 256-bit coordinate and round-trip through ecMakePoint" {
+    const g2 = ecMulGen(2);
+    defer freeIfOwned(g2);
+    // Widened to i512 so the comparison is against the true coordinate value.
+    try std.testing.expectEqual(
+        @as(i512, 0xC6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5),
+        @as(i512, ecPointX(g2)),
+    );
+    try std.testing.expectEqual(
+        @as(i512, 0x1AE168FEA63DC339A3C58419466CEAEEF7F632653266D0E1236431A950CFE52A),
+        @as(i512, ecPointY(g2)),
+    );
+
+    const g = ecMulGen(1);
+    defer freeIfOwned(g);
+    const rebuilt = ecMakePoint(ecPointX(g), ecPointY(g));
+    defer freeIfOwned(rebuilt);
+    try std.testing.expectEqualSlices(u8, g, rebuilt);
+    try std.testing.expect(ecOnCurve(rebuilt));
 }
 
 test "verifyWOTS accepts a valid deterministic signature" {
@@ -2401,13 +2828,38 @@ test "verifyRabinSig rejects the sig=0/padding=SHA256(msg) forgery via the paddi
     try std.testing.expect(verifyRabinSig(message, &[_]u8{0x00}, honest_pad, &small_mod));
 }
 
+// N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts on
+// chain. Proves: sig = 0 verifies under n = 251, and sig = n (0xfb) and
+// sig = 2n (0xf6 0x01), which square to the same residue, are rejected. Does
+// not prove the verdict equals the consensus interpreter's (conformance/
+// negatives/f368 does that).
+test "verifyRabinSig rejects non-canonical sig >= n" {
+    const modulus = [_]u8{0xfb}; // 251, little-endian
+    const message = "oracle-message";
+    var hash_bytes: [32]u8 = undefined;
+    Sha256Hasher.hash(message, &hash_bytes, .{});
+    var hash_bn = try BigUint.fromLeBytes(std.heap.page_allocator, &hash_bytes);
+    defer hash_bn.deinit();
+    var modulus_bn = try BigUint.fromLeBytes(std.heap.page_allocator, &modulus);
+    defer modulus_bn.deinit();
+    var padding_bn = try hash_bn.rem(&modulus_bn);
+    defer padding_bn.deinit();
+    const padding = try padding_bn.toLeBytes();
+    defer std.heap.page_allocator.free(padding);
+
+    try std.testing.expect(verifyRabinSig(message, &[_]u8{0x00}, padding, &modulus));
+    try std.testing.expect(!verifyRabinSig(message, &[_]u8{0xfb}, padding, &modulus));
+    try std.testing.expect(!verifyRabinSig(message, &[_]u8{ 0xf6, 0x01 }, padding, &modulus));
+}
+
 test "SLH SHA2 parameter sizes stay aligned with the published script matrix" {
     try std.testing.expectEqual(@as(usize, 7856), slh_sha2_128s.sig_len);
     try std.testing.expectEqual(@as(usize, 17088), slh_sha2_128f.sig_len);
     try std.testing.expectEqual(@as(usize, 16224), slh_sha2_192s.sig_len);
     try std.testing.expectEqual(@as(usize, 35664), slh_sha2_192f.sig_len);
     try std.testing.expectEqual(@as(usize, 29792), slh_sha2_256s.sig_len);
-    try std.testing.expectEqual(@as(usize, 48736), slh_sha2_256f.sig_len);
+    // F-034: FIPS 205 Table 2 SLH-DSA-SHA2-256f uses FORS height a=9 (was a=8: 48,736).
+    try std.testing.expectEqual(@as(usize, 49856), slh_sha2_256f.sig_len);
 }
 
 test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects tampering" {
@@ -2605,6 +3057,60 @@ test "verifySLHDSA_SHA2_128f accepts a real deterministic signature and rejects 
     );
 }
 
+// F-232: SLH-DSA verify must accept ONLY a signature of the parameter set's
+// exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length the
+// on-chain verifier enforces with OP_SIZE <len> OP_EQUALVERIFY.
+//
+// Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector tcId 422, copied from
+// conformance/runtime-vectors/slh-dsa-acvp-kat.json into fixtures/) and
+// SLH-DSA-SHA2-128f (fixture signature), the honest signature verifies while the
+// same signature with one appended 0x00 byte, 32 appended bytes, or its last byte
+// removed is rejected. Before F-232 the guard was `sig.len < sig_len`, a lower
+// bound, so the appended variants verified true.
+// Does not prove: anything about the 192/256 parameter sets beyond sharing the
+// same guard, nor anything about the on-chain script.
+fn expectSlhExactSigLength(
+    message: []const u8,
+    sig: []const u8,
+    pk: []const u8,
+    comptime verify_fn: *const fn (base.ByteString, base.ByteString, base.ByteString) bool,
+) !void {
+    const a = std.testing.allocator;
+    try std.testing.expect(verify_fn(message, sig, pk));
+
+    const with_byte = try std.mem.concat(a, u8, &.{ sig, &[_]u8{0x00} });
+    defer a.free(with_byte);
+    try std.testing.expect(!verify_fn(message, with_byte, pk));
+
+    var tail32: [32]u8 = undefined;
+    for (&tail32, 0..) |*b, i| b.* = @truncate(0xA5 ^ (i * 37));
+    const with32 = try std.mem.concat(a, u8, &.{ sig, &tail32 });
+    defer a.free(with32);
+    try std.testing.expect(!verify_fn(message, with32, pk));
+
+    try std.testing.expect(!verify_fn(message, sig[0 .. sig.len - 1], pk));
+}
+
+test "F-232: SLH-DSA verify rejects trailing or truncated signatures (128s ACVP, 128f)" {
+    const a = std.testing.allocator;
+    {
+        const pk = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-pk.hex"));
+        defer a.free(pk);
+        const sig = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-sig.hex"));
+        defer a.free(sig);
+        const msg = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-msg.hex"));
+        defer a.free(msg);
+        try expectSlhExactSigLength(msg, sig, pk, &verifySLHDSA_SHA2_128s);
+    }
+    {
+        const pk = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128f-pk.hex"));
+        defer a.free(pk);
+        const sig = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128f-sig.hex"));
+        defer a.free(sig);
+        try expectSlhExactSigLength("128f", sig, pk, &verifySLHDSA_SHA2_128f);
+    }
+}
+
 test "verifySLHDSA_SHA2_192s accepts a real deterministic signature and rejects tampering" {
     try expectRealSlhVariant(
         "192s",
@@ -2635,6 +3141,10 @@ test "verifySLHDSA_SHA2_256s accepts a real deterministic signature and rejects 
     );
 }
 
+// F-034: the 256f fixtures are FIPS 205 a=9 (49,856-byte signature), signed over
+// "256f" by the third-party slh-dsa 0.2.5 PyPI package's SHA-256-only
+// instantiation Sha2_1Parameter(25, 32, 68, 17, 4, 9, 35, 4, 49), with the same
+// key as conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json.
 test "verifySLHDSA_SHA2_256f accepts a real deterministic signature and rejects tampering" {
     try expectRealSlhVariant(
         "256f",
@@ -2643,6 +3153,70 @@ test "verifySLHDSA_SHA2_256f accepts a real deterministic signature and rejects 
         47,
         &verifySLHDSA_SHA2_256f,
     );
+}
+
+// F-242 (CL-BUG-160): strict DER (BIP66). checkSig parsed through the Zig std
+// ECDSA fromDer, which left-pads each INTEGER into a 32-byte buffer and checks
+// the sign bit of that BUFFER: for an r or s shorter than 32 bytes the check
+// sees a pad zero, so a missing 0x00 sign pad or a superfluous 0x00 passed,
+// and two byte strings verified as one signature. The conformance/sdk-der
+// vectors for this shape are signed over other digests, and checkSig only
+// verifies the test message, so this test finds keys whose test-message
+// signature has such a component and re-encodes it.
+//
+// Proves: for both shapes (31-byte component given a superfluous 0x00;
+// 0x00-padded component with the pad removed) the canonical signature
+// verifies and the re-encoding does not. Does not prove anything about other
+// verify paths (see sdk_anf_interpreter.zig and the envelope interop test).
+test "checkSig refuses non-canonical DER INTEGERs shorter than 32 bytes (F-242)" {
+    var found_short: usize = 0;
+    var found_pad: usize = 0;
+    var k: u16 = 1;
+    while (k < 4000 and (found_short == 0 or found_pad == 0)) : (k += 1) {
+        var priv_bytes = [_]u8{0x11} ** 32;
+        priv_bytes[30] = @intCast(k >> 8);
+        priv_bytes[31] = @intCast(k & 0xff);
+        const priv = try bsvz.crypto.PrivateKey.fromBytes(priv_bytes);
+        const pub_key = try priv.publicKey();
+        const sig = try priv.signSha256(test_message);
+        const der = sig.asSlice();
+        try std.testing.expect(checkSig(der, &pub_key.bytes));
+
+        const r_len: usize = der[3];
+        const r = der[4 .. 4 + r_len];
+        const s = der[6 + r_len ..];
+        for ([_]bool{ true, false }) |is_r| {
+            const c = if (is_r) r else s;
+            var buf: [80]u8 = undefined;
+            var nc: [34]u8 = undefined;
+            var new_c: []const u8 = undefined;
+            if (c.len == 31 and c[0] & 0x80 == 0) {
+                nc[0] = 0;
+                @memcpy(nc[1 .. 1 + c.len], c);
+                new_c = nc[0 .. c.len + 1];
+                found_short += 1;
+            } else if (c.len == 32 and c[0] == 0 and c[1] & 0x80 != 0) {
+                new_c = c[1..];
+                found_pad += 1;
+            } else continue;
+            const nr = if (is_r) new_c else r;
+            const ns = if (is_r) s else new_c;
+            buf[0] = 0x30;
+            buf[1] = @intCast(4 + nr.len + ns.len);
+            buf[2] = 0x02;
+            buf[3] = @intCast(nr.len);
+            @memcpy(buf[4 .. 4 + nr.len], nr);
+            buf[4 + nr.len] = 0x02;
+            buf[5 + nr.len] = @intCast(ns.len);
+            @memcpy(buf[6 + nr.len .. 6 + nr.len + ns.len], ns);
+            const malformed = buf[0 .. 6 + nr.len + ns.len];
+            if (checkSig(malformed, &pub_key.bytes)) {
+                std.debug.print("F-242: key {d}: non-canonical {s} re-encoding verified\n", .{ k, if (is_r) "r" else "s" });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    try std.testing.expect(found_short > 0 and found_pad > 0);
 }
 
 test "non-SLH PQ stubs still fail closed" {

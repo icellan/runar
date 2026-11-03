@@ -503,12 +503,16 @@ describe('Pass 2: Validate', () => {
           public m() { assert(true); }
         }
       `;
-      // The parse should succeed but validate should catch void property
+      // The parse should succeed but validate should catch void property.
+      // F-226: the contract is asserted unconditionally — the old
+      // `if (parseResult.contract)` guard let a parser that dropped the
+      // contract pass this test having asserted nothing. Proves validate
+      // rejects a void property on a parsed contract; does not prove which
+      // pass would catch it if the parser itself started rejecting `void`.
       const parseResult = parse(source);
-      if (parseResult.contract) {
-        const result = validate(parseResult.contract);
-        expect(hasError(result, "void")).toBe(true);
-      }
+      expect(parseResult.contract).not.toBeNull();
+      const result = validate(parseResult.contract!);
+      expect(hasError(result, "void")).toBe(true);
     });
 
     it('reports error when SmartContract has a non-readonly property', () => {
@@ -763,4 +767,319 @@ describe('Validator: contract name validation', () => {
     const result = validate(contract);
     expect(result.errors.some(e => e.message.toLowerCase().includes('name'))).toBe(true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// F-063: array-literal elements are walked by every validator walker
+// ---------------------------------------------------------------------------
+//
+// `array_literal` was missing from validateExpression, collectMethodCallsInExpr,
+// walkExpr and subExpressions, so anything written INSIDE `[...]` (the only
+// place checkMultiSig's arguments can be written) escaped every rule those
+// walkers enforce. Each test puts the offending construct in an array element
+// and asserts the rule the validator already enforces outside one.
+//
+// Proves: the validator itself refuses these shapes (with the same diagnostic
+// it gives the un-nested form). Does not prove: anything about typecheck or
+// codegen — the cross-tier CLI verdicts live in conformance/negatives N99+.
+
+describe('Validator: array-literal elements are walked (F-063)', () => {
+  it('detects recursion through a self-call inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+      }
+    `);
+    expect(hasError(result, 'Recursion detected')).toBe(true);
+  });
+
+  it('rejects an odd-length ByteString literal inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'abc' has odd length (3)")).toBe(true);
+  });
+
+  it('rejects a non-hex ByteString literal inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zz' contains non-hex characters")).toBe(true);
+  });
+
+  it('rejects a readonly-property increment inside an array literal (walkExpr)', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly n: bigint;
+        readonly pk: PubKey;
+        constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+        public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+      }
+    `);
+    expect(hasError(result, "Cannot assign to readonly property 'n'")).toBe(true);
+  });
+
+  it('rejects an output intrinsic inside an array literal in a loop body (subExpressions)', () => {
+    const result = validateSource(`
+      class C extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        public step() {
+          for (let i = 0n; i < 2n; i++) {
+            const a = [this.addOutput(1000n, this.count)];
+          }
+          assert(true);
+        }
+      }
+    `);
+    expect(hasError(result, "Output intrinsic 'addOutput'")).toBe(true);
+  });
+});
+
+describe('Validator: ByteString property initializer hex validation (F-265)', () => {
+  // Proves: a malformed ByteString literal used as a PROPERTY INITIALIZER is
+  // caught here, at the property's own source location, instead of surviving
+  // this pass and only surfacing two passes later as an opaque stack-lowering
+  // error with no location. `isLiteralExpression` only checks the literal's
+  // SHAPE (is it a ByteStringLiteral at all); it never validated the hex
+  // FORMAT, because that check lives in `validateExpression`'s
+  // `bytestring_literal` arm, which method bodies reach via the statement
+  // walk but a property initializer never did.
+  //
+  // Does not prove: anything about Rust or any other tier (see the Rust
+  // peer test in validator.rs and the cross-tier parity fixture in
+  // conformance/negatives), or about non-ByteString initializer defects.
+
+  it('rejects an odd-length ByteString literal used as a property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit extends SmartContract {
+        readonly k: ByteString = "zzz" as ByteString;
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zzz' has odd length (3)")).toBe(true);
+  });
+
+  it('rejects a non-hex (even-length) ByteString literal used as a property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit2 extends SmartContract {
+        readonly k: ByteString = "zz" as ByteString;
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zz' contains non-hex characters")).toBe(true);
+  });
+
+  it('rejects an odd-length ByteString literal inside a toByteString(...) property initializer', () => {
+    const result = validateSource(`
+      class BadHexInit3 extends SmartContract {
+        readonly k: ByteString = toByteString('zzz');
+        constructor() { super(); }
+        public unlock() { assert(this.k === this.k); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zzz' has odd length (3)")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-325: a parameter annotated with a type name that is not a Rúnar type
+// ---------------------------------------------------------------------------
+//
+// Proves the TS validator refuses an unknown named type on a public-method,
+// private-method and constructor parameter, quoting the name, and still accepts
+// `StatefulContext` (the explicit context parameter of the Zig/Go/Move stateful
+// surfaces) and ordinary types. Does NOT prove the other six tiers or the other
+// eight surfaces: conformance/negatives/n325-* covers those.
+describe('N-325: unknown parameter type names', () => {
+  it('rejects an unknown type on a public method parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        public verify(a: bigint, c: TTT) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 'c' in method 'verify' is not a Rúnar type")).toBe(true);
+  });
+
+  it('rejects an unknown type on a private method parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        private helper(x: TTT): bigint { return 1n; }
+        public verify(a: bigint) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 'x' in method 'helper' is not a Rúnar type")).toBe(true);
+  });
+
+  it('rejects an unknown type on a constructor parameter', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: TTT) { super(t); this.t = t; }
+        public verify(a: bigint) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, "Type 'TTT' of parameter 't' in constructor is not a Rúnar type")).toBe(true);
+  });
+
+  it('accepts the same contract with a real type', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly t: bigint;
+        constructor(t: bigint) { super(t); this.t = t; }
+        private helper(x: bigint): bigint { return 1n; }
+        public verify(a: bigint, c: ByteString) { assert(a === this.t); }
+      }
+    `);
+    expect(hasError(result, 'is not a Rúnar type')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-012: expression walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+
+// Proves: the validator's expression walker (the one behind the asm() gate)
+// visits all three header slots of a `for` statement, so an `asm(...)` call
+// planted in the init, condition or update of a loop in a NON-Unsafe contract
+// is refused. The AST is hand-built (mutated after parsing) because the parser
+// and the for-update / literal-init rules make these shapes unreachable from
+// source today.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of those rules cannot reopen the asm gate through the walker.
+describe('N-012: for-loop header slots are walked', () => {
+  const FOR_SOURCE = `
+    class C extends SmartContract {
+      readonly t: bigint;
+      constructor(t: bigint) { super(t); this.t = t; }
+      public verify(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+      }
+    }
+  `;
+  const asmCall = () => ({
+    kind: 'call_expr' as const,
+    callee: { kind: 'identifier' as const, name: 'asm' },
+    args: [],
+  });
+
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`refuses asm() planted in the for-loop ${slot}`, () => {
+      const contract = parseContract(FOR_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      if (slot === 'init') loop.init = { ...loop.init, init: asmCall() };
+      else if (slot === 'condition') loop.condition = asmCall();
+      else loop.update = { kind: 'expression_statement', expression: asmCall(), sourceLocation: loop.sourceLocation };
+      const result = validate(contract);
+      expect(hasError(result, "'asm' is only available in contracts extending UnsafeSmartContract")).toBe(true);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// N-401: statement walkers cover a for-loop's init, condition AND update
+// ---------------------------------------------------------------------------
+
+// Proves: the validator's statement-level walkers (the method-call collector
+// behind the recursion check, and the output-intrinsic search behind the
+// no-addOutput-in-a-loop rule) visit all three header slots of a `for`
+// statement. A `this.m()` call planted only in a loop's init, condition or
+// update is seen by the call-graph (so self-recursion through a header is
+// refused), and an `addOutput` planted only in a NESTED loop's header is found
+// from the enclosing loop. The checkReadonlyWrites walker already visits all
+// three slots; the readonly case pins that so it cannot regress.
+// The AST is hand-built (mutated after parsing) because the parser and the
+// for-update / literal-init rules make these shapes unreachable from source.
+// Does not prove: that any source program can reach these shapes today.
+describe('N-401: statement walkers visit for-loop header slots', () => {
+  const thisCall = (name: string) => ({
+    kind: 'call_expr' as const,
+    callee: { kind: 'property_access' as const, property: name },
+    args: [],
+  });
+  const plant = (loop: any, slot: 'init' | 'condition' | 'update', expr: any): void => {
+    if (slot === 'init') loop.init = { ...loop.init, init: expr };
+    else if (slot === 'condition') loop.condition = expr;
+    else loop.update = { kind: 'expression_statement', expression: expr, sourceLocation: loop.sourceLocation };
+  };
+
+  const REC_SOURCE = `
+    class C extends SmartContract {
+      readonly t: bigint;
+      constructor(t: bigint) { super(t); this.t = t; }
+      public m(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+      }
+    }
+  `;
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`sees a method call planted only in the for-loop ${slot} (recursion check)`, () => {
+      const contract = parseContract(REC_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      plant(loop, slot, thisCall('m'));
+      expect(hasError(validate(contract), 'Recursion detected')).toBe(true);
+    });
+  }
+
+  const NESTED_SOURCE = `
+    class C extends StatefulSmartContract {
+      count: bigint;
+      constructor(count: bigint) { super(count); this.count = count; }
+      public m(a: bigint) {
+        let s = 0n;
+        for (let i = 0n; i < 3n; i++) {
+          for (let j = 0n; j < 3n; j++) { s = s + a; }
+        }
+        this.count = s;
+      }
+    }
+  `;
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`finds an addOutput planted only in a nested for-loop ${slot}`, () => {
+      const contract = parseContract(NESTED_SOURCE);
+      const outer = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!outer || outer.kind !== 'for_statement') throw new Error('no for_statement');
+      const inner = outer.body.find((s) => s.kind === 'for_statement');
+      if (!inner || inner.kind !== 'for_statement') throw new Error('no nested for_statement');
+      plant(inner, slot, thisCall('addOutput'));
+      expect(hasError(validate(contract), "Output intrinsic 'addOutput'")).toBe(true);
+    });
+  }
+
+  for (const slot of ['init', 'condition', 'update'] as const) {
+    it(`refuses a readonly write planted only in the for-loop ${slot}`, () => {
+      const contract = parseContract(REC_SOURCE);
+      const loop = contract.methods[0]!.body.find((s) => s.kind === 'for_statement');
+      if (!loop || loop.kind !== 'for_statement') throw new Error('no for_statement');
+      plant(loop, slot, {
+        kind: 'increment_expr',
+        operand: { kind: 'property_access', property: 't' },
+        prefix: false,
+      });
+      expect(hasError(validate(contract), "Cannot assign to readonly property 't'")).toBe(true);
+    });
+  }
 });

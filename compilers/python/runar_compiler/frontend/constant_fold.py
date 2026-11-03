@@ -28,6 +28,11 @@ from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
 # reference interpreter.
 POW_FOLD_EXPONENT_LIMIT = 32
 
+# Unroll count of the emitted gcd loop (codegen/stack.py). Past it the script
+# returns a partial value, not the mathematical one, so the folder declines
+# there (N-029). log2 is exact for every n > 0 since N-103.
+GCD_FOLD_ITERATIONS = 256
+
 
 # Kinds that fall through ``_fold_value`` unchanged. Listing them explicitly
 # lets us raise UnknownANFKindError on any kind that isn't a known fold case,
@@ -146,10 +151,12 @@ def _eval_bin_op(op: str, left: ConstValue, right: ConstValue) -> ConstValue | N
             if not _is_valid_hex(a_s) or not _is_valid_hex(b_s):
                 return None
             return ("str", a_s + b_s)
+        # F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+        # case, so 'aa' === 'AA' is true on-chain.
         if op == "===":
-            return ("bool", a_s == b_s)
+            return ("bool", _hex_equal(a_s, b_s))
         if op == "!==":
-            return ("bool", a_s != b_s)
+            return ("bool", not _hex_equal(a_s, b_s))
         return None
 
     # Cross-type equality
@@ -163,6 +170,14 @@ def _eval_bin_op(op: str, left: ConstValue, right: ConstValue) -> ConstValue | N
 
 def _is_valid_hex(s: str) -> bool:
     return all(c in "0123456789abcdefABCDEF" for c in s)
+
+
+def _hex_equal(a: str, b: str) -> bool:
+    """Compare two ByteString literals as bytes: case-insensitively when both
+    are hex, by exact text otherwise."""
+    if _is_valid_hex(a) and _is_valid_hex(b):
+        return a.lower() == b.lower()
+    return a == b
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +252,9 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 3:
             return None
         val, lo, hi = int_args[0], int_args[1], int_args[2]
-        return ("int", max(lo, min(val, hi)))
+        # The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+        # That differs from max(lo, min(val, hi)) once lo > hi (N-029).
+        return ("int", min(max(val, lo), hi))
 
     if func_name == "sign":
         if len(int_args) != 1:
@@ -312,8 +329,14 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 2:
             return None
         a, b = abs(int_args[0]), abs(int_args[1])
-        while b != 0:
+        # The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if that is
+        # not enough it returns a partial remainder. Decline there (N-029).
+        for _ in range(GCD_FOLD_ITERATIONS):
+            if b == 0:
+                break
             a, b = b, a % b
+        if b != 0:
+            return None
         return ("int", a)
 
     if func_name == "divmod":
@@ -328,8 +351,9 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 1:
             return None
         n = int_args[0]
+        # The script aborts for n <= 0 (N-103): decline, so the abort survives.
         if n <= 0:
-            return ("int", 0)
+            return None
         return ("int", n.bit_length() - 1)
 
     if func_name == "bool":
@@ -418,13 +442,44 @@ def _fold_bindings(bindings: list[ANFBinding], env: ConstEnv) -> list[ANFBinding
     return [_fold_binding(b, env) for b in bindings]
 
 
+def _bound_names(bindings: list[ANFBinding], out: set[str]) -> set[str]:
+    """Every name bound in ``bindings``, including inside nested if arms and loop bodies."""
+    for b in bindings:
+        out.add(b.name)
+        if b.value.kind == "if":
+            _bound_names(b.value.then or [], out)
+            _bound_names(b.value.else_ or [], out)
+        elif b.value.kind == "loop":
+            _bound_names(b.value.body or [], out)
+    return out
+
+
 def _fold_binding(binding: ANFBinding, env: ConstEnv) -> ANFBinding:
     folded_value = _fold_value(binding.value, env)
 
-    # If the folded value is a load_const, register in the environment
+    # If the folded value is a load_const, register in the environment.
+    #
+    # A name may be bound more than once (reassignment, or a user local that
+    # shares a compiler temp's name). The env must track the LATEST binding:
+    # a rebinding to a non-constant drops the old constant, or later uses
+    # would fold with a value the name no longer holds (N-064).
+    #
+    # N-397: an ``@ref:<t>`` alias (what ``const x = 7n`` lowers to) is not
+    # itself a constant, but when its target currently holds one the alias
+    # holds the same value, so later uses of the alias fold too. The binding
+    # stays an alias; the prune removes it if the fold orphaned it.
     cv = _anf_value_to_const(folded_value)
+    alias = None
+    if folded_value.kind == "load_const":
+        ref = folded_value.const_string if folded_value.const_string is not None else folded_value.raw_value
+        if isinstance(ref, str) and ref.startswith("@ref:"):
+            alias = ref[5:]
     if cv is not None:
         env[binding.name] = cv
+    elif alias is not None and alias in env:
+        env[binding.name] = env[alias]
+    else:
+        env.pop(binding.name, None)
 
     return ANFBinding(name=binding.name, value=folded_value, source_loc=binding.source_loc)
 
@@ -502,6 +557,11 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
         else_env = dict(env)
         folded_then = _fold_bindings(value.then or [], then_env)
         folded_else = _fold_bindings(value.else_ or [], else_env)
+        # N-064: a name either arm rebinds may hold the arm's value after the
+        # if (that is how a branch reassigns a local), so the enclosing env's
+        # constant for it is stale past this point.
+        for n in _bound_names(value.else_ or [], _bound_names(value.then or [], set())):
+            env.pop(n, None)
         return ANFValue(
             kind="if",
             cond=value.cond,
@@ -515,8 +575,14 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
         )
 
     if kind == "loop":
-        body_env = dict(env)
+        # N-064: the body runs once per iteration, so a name it rebinds holds
+        # the entry constant only in iteration 0 -- it is not a constant
+        # inside the body, nor after the loop.
+        rebound = _bound_names(value.body or [], set())
+        body_env = {k: v for k, v in env.items() if k not in rebound}
         folded_body = _fold_bindings(value.body or [], body_env)
+        for n in rebound:
+            env.pop(n, None)
         return ANFValue(
             kind="loop",
             count=value.count,
@@ -555,6 +621,28 @@ def _fold_method(method: ANFMethod) -> ANFMethod:
         # Issue #123: preserve the declared @sighash type through folding.
         sighash_type=method.sighash_type,
     )
+
+
+def fold_constants_and_prune(program: ANFProgram) -> ANFProgram:
+    """``fold_constants`` followed by removal of the operand bindings the fold
+    orphaned (N-138).
+
+    ``fold_constants`` rewrites ``t1 = -t0`` to the constant ``t1 = -1`` but
+    leaves ``t0 = 1`` in place, and stack lowering then pushes it and drops it
+    again (``51 4f 7b 7c a0 77`` for ``a > -1n``). Only names that some binding
+    referenced BEFORE folding are removal candidates, so a binding that was
+    already dead is left exactly as it was. ``fold_constants`` itself stays a
+    pure rewrite.
+    """
+    from runar_compiler.frontend.dce import collect_refs, eliminate_dead_bindings
+
+    folded = fold_constants(program)
+    for before, after in zip(program.methods, folded.methods):
+        candidates: set[str] = set()
+        for binding in before.body:
+            collect_refs(binding.value, candidates)
+        eliminate_dead_bindings(after, candidates)
+    return folded
 
 
 def fold_constants(program: ANFProgram) -> ANFProgram:

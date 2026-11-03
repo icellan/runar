@@ -149,6 +149,35 @@ class TestOnCurve:
         # (1, 1): 1^2 mod p = 1, (1^3 + 7) mod p = 8 => not on curve
         assert ec_on_curve(off_curve) is False
 
-    def test_wrong_length_raises(self):
-        with pytest.raises(ValueError, match='64 bytes'):
-            ec_on_curve(b'\x00' * 32)
+    def test_wrong_length_is_false_not_a_raise(self):
+        # N-184: ecOnCurve is a PREDICATE over untrusted bytes, so the
+        # compiled script answers false for a wrong-width blob -- it does
+        # not abort (emitPointLengthGate ANDs a width flag into the result;
+        # verified on @bsv/sdk Spend by packages/runar-testing's
+        # r052-point-length-gate.test.ts, "onCurve(G <plus> surplus) is
+        # FALSE, not true"). This used to raise ValueError here, which
+        # disagreed with the script this mock stands in for.
+        assert ec_on_curve(b'\x00' * 32) is False
+        assert ec_on_curve(b'\x00' * 63) is False
+        assert ec_on_curve(b'\x00' * 65) is False
+
+    def test_rejects_noncanonical_x(self):
+        """CL-BUG-161 / F-243: coordinate canonicity.
+
+        x0 = 1 is a genuine secp256k1 curve point (y0 below). _decode_point
+        parses each half as an unsigned big-endian int with no range check,
+        so a coordinate written as x0 + EC_P (still exactly 32 bytes) reaches
+        the field arithmetic below, which reduces it mod EC_P and accepts it
+        as if it were x0. The compiled script range-checks x < p AND y < p
+        BEFORE the curve-equation check (GAP-301), so this mock must reject
+        what the script rejects. Verified against the real compiled script
+        via @bsv/sdk's Spend in
+        packages/runar-testing/src/__tests__/r117-coordinate-canonicity.test.ts
+        ("the predicate stays TOTAL: onCurve(alias) is false").
+        """
+        y0 = 0x4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee
+        noncanonical_x = EC_P + 1
+        # N-183: ec_make_point now refuses x >= p, as the script does, so the
+        # alias is written out as raw bytes (it is still a 64-byte Point).
+        alias_point = noncanonical_x.to_bytes(32, 'big') + y0.to_bytes(32, 'big')
+        assert ec_on_curve(alias_point) is False

@@ -19,7 +19,7 @@ import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, readdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, runAllIrRoundTripChecks, printIrRoundTripReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -45,6 +45,8 @@ interface CLIOptions {
   parserOnly: boolean;
   /** When true, run the IR -> hex cross-tier parity gate and exit. */
   irParity: boolean;
+  /** When true, run the --emit-ir -> --ir artifact round-trip gate and exit. */
+  irRoundTrip: boolean;
   prebuild: boolean;
   help: boolean;
 }
@@ -57,6 +59,7 @@ function parseArgs(argv: string[]): CLIOptions {
     multiFormat: false,
     parserOnly: false,
     irParity: false,
+    irRoundTrip: false,
     // Pre-build is OFF by default to keep the runner safe to drop into CI
     // jobs that ship prebuilt binaries via actions/download-artifact. Local
     // dev loops should pass --prebuild (or set RUNAR_PREBUILD=1) to ensure
@@ -91,6 +94,9 @@ function parseArgs(argv: string[]): CLIOptions {
         break;
       case '--ir-parity':
         opts.irParity = true;
+        break;
+      case '--ir-roundtrip':
+        opts.irRoundTrip = true;
         break;
       case '--prebuild':
         opts.prebuild = true;
@@ -147,6 +153,11 @@ Options:
                         were stamped fold-OFF). This mode is the single
                         source of truth for the rule that ci.yml used to
                         re-implement inline in bash/jq.
+  --ir-roundtrip        F-038: per non-TS tier, compile every fixture with
+                        --source, and again via its own --emit-ir -> --ir,
+                        and require the two artifacts to agree on script,
+                        parentClass, abi and stateFields. The per-fixture
+                        \`compilers\` allowlist scopes it.
   --prebuild            Pre-build all native compiler binaries (Go, Rust, Zig,
                         Java) before running the suite. Default: off (so CI
                         jobs that download prebuilt artifacts aren't slowed
@@ -324,7 +335,44 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Handle --update-golden mode
+  // Handle --ir-roundtrip mode (F-038): --emit-ir -> --ir must reproduce the
+  // --source artifact in every non-TS tier.
+  if (opts.irRoundTrip) {
+    console.log(`Running --emit-ir -> --ir artifact round trip from: ${opts.testsDir}`);
+    if (opts.filter) console.log(`Filter: ${opts.filter}`);
+    const startedAt = Date.now();
+    const report = await runAllIrRoundTripChecks(opts.testsDir, { filter: opts.filter });
+    console.log(`\nCompleted ${report.results.length} fixture round trips in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
+    printIrRoundTripReport(report);
+    const empty = emptyFixtureSetError(report.results.length, {
+      mode: 'ir-roundtrip', testsDir: opts.testsDir, filter: opts.filter,
+    });
+    if (empty) {
+      console.error(empty);
+      await shutdownJavaDaemon();
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
+    await shutdownJavaDaemon();
+    if (reportHarnessFaults()) process.exit(EXIT_HARNESS_FAILURE);
+    if (!report.allOk) {
+      for (const f of report.failures) {
+        console.error(`::error::conformance: ${f.fixture} — ${f.error.split('\n')[0]}`);
+      }
+      process.exit(1);
+    }
+    return;
+  }
+
+  // Handle --update-golden mode.
+  //
+  // N-088: this used to catch a fixture's failure or F-051 allowlist
+  // refusal, print `Failed: <dir>: <message>`, and continue to the next
+  // fixture. Nothing recorded that a fixture was skipped, so `main()` fell
+  // through to `return` with no `process.exit` call at all — a scripted
+  // regeneration could not tell "every golden was refreshed" from "N were
+  // silently skipped" without scraping stdout for the word "Failed". Now
+  // every failure/refusal is collected and the run exits 1 (not the
+  // harness-fault 2 — the harness worked fine, a fixture just refused).
   if (opts.updateGolden) {
     console.log('Updating golden files from TypeScript compiler output...');
     const entries = readdirSync(opts.testsDir, { withFileTypes: true });
@@ -332,15 +380,24 @@ async function main(): Promise<void> {
       .filter((e) => e.isDirectory())
       .map((e) => join(opts.testsDir, e.name));
 
+    const failedDirs: string[] = [];
     for (const testDir of testDirs) {
       try {
         await updateGoldenFiles(testDir);
         console.log(`  Updated: ${testDir}`);
       } catch (err) {
         console.error(`  Failed: ${testDir}: ${err instanceof Error ? err.message : err}`);
+        failedDirs.push(testDir);
       }
     }
     await shutdownJavaDaemon();
+    if (failedDirs.length > 0) {
+      console.error(
+        `\n${failedDirs.length} of ${testDirs.length} fixture(s) could not be updated:\n` +
+        failedDirs.map((d) => `  - ${d}`).join('\n'),
+      );
+      process.exit(1);
+    }
     return;
   }
 

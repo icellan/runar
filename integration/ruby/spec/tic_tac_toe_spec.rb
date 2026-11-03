@@ -42,7 +42,8 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, player_x[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     call_txid, _count = contract.call(
-      'join', [player_o[:pub_key_hex], nil], provider, player_o[:signer]
+      'join', [player_o[:pub_key_hex], nil], provider, player_o[:signer],
+      Runar::SDK::CallOptions.new(satoshis: 10_000) # N-027: the join pays the 5000 bet
     )
     expect(call_txid).to be_truthy
     expect(call_txid.length).to eq(64)
@@ -58,7 +59,8 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
     contract = Runar::SDK::RunarContract.new(artifact, [player_x[:pub_key_hex], 5000])
     contract.deploy(provider, player_x[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer])
+    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer],
+                  Runar::SDK::CallOptions.new(satoshis: 10_000)) # N-027: pays the 5000 bet
 
     # Player X moves to center (position 4)
     move_txid, _count = contract.call(
@@ -120,7 +122,8 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
     contract = Runar::SDK::RunarContract.new(artifact, [player_x[:pub_key_hex], 5000])
     contract.deploy(provider, player_x[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer])
+    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer],
+                  Runar::SDK::CallOptions.new(satoshis: 10_000)) # N-027: pays the 5000 bet
 
     # Player O tries to move when it's X's turn
     expect do
@@ -138,11 +141,14 @@ RSpec.describe 'TicTacToe' do # rubocop:disable RSpec/DescribeClass
     contract = Runar::SDK::RunarContract.new(artifact, [player_x[:pub_key_hex], 5000])
     contract.deploy(provider, player_x[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer])
+    contract.call('join', [player_o[:pub_key_hex], nil], provider, player_o[:signer],
+                  Runar::SDK::CallOptions.new(satoshis: 10_000)) # N-027: pays the 5000 bet
 
     another = create_funded_wallet(provider)
     expect do
-      contract.call('join', [another[:pub_key_hex], nil], provider, another[:signer])
+      # Paid (N-027), so only the status guard can reject it.
+      contract.call('join', [another[:pub_key_hex], nil], provider, another[:signer],
+                    Runar::SDK::CallOptions.new(satoshis: 15_000))
     end.to raise_error(StandardError)
   end
 end

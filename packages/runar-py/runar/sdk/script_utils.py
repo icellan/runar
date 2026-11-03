@@ -5,6 +5,7 @@ Ports extractConstructorArgs() and matchesArtifact() from the TypeScript SDK.
 
 from __future__ import annotations
 
+from runar.sdk.errors import MalformedScriptError
 from runar.sdk.types import RunarArtifact
 from runar.sdk.state import find_last_op_return
 
@@ -13,37 +14,72 @@ from runar.sdk.state import find_last_op_return
 # Script element reading
 # ---------------------------------------------------------------------------
 
+def _need(hex_str: str, offset: int, chars: int, what: str) -> None:
+    """Raise :class:`MalformedScriptError` unless ``chars`` hex chars are
+    available from ``offset`` (F-238). Mirrors the Java tier's
+    ``ScriptUtils.need`` guard -- the pattern already used for the on-chain
+    state-section reader, applied here to the push-data reader used by
+    constructor-arg extraction and artifact matching.
+    """
+    if offset + chars > len(hex_str):
+        remaining = max(0, len(hex_str) - offset)
+        raise MalformedScriptError(
+            f"_read_script_element: truncated script -- {what} runs past the end "
+            f"(needs {chars // 2} byte(s) at hex offset {offset}, only {remaining // 2} remain)"
+        )
+
+
 def _read_script_element(
     hex_str: str, offset: int
 ) -> tuple[str, int, int]:
     """Read a single script element at the given hex offset.
 
     Returns (data_hex, total_hex_chars, opcode).
+
+    Raises :class:`MalformedScriptError` (F-238) if the opcode byte itself,
+    an OP_PUSHDATA1/2/4 length prefix, or the declared push payload runs past
+    the end of ``hex_str`` -- a provider-supplied script is untrusted input,
+    and a truncated push must never come back as a short, silently-wrong
+    ``data_hex`` (it would also desynchronise every later slot's offset in
+    the caller's walk).
     """
-    opcode = int(hex_str[offset:offset + 2], 16)
+    _need(hex_str, offset, 2, 'push opcode')
+    try:
+        opcode = int(hex_str[offset:offset + 2], 16)
+    except ValueError as exc:
+        raise MalformedScriptError(
+            f"_read_script_element: non-hex byte at hex offset {offset}"
+        ) from exc
 
     if opcode == 0x00:
         return '', 2, opcode
     if 0x01 <= opcode <= 0x4B:
         data_len = opcode * 2
+        _need(hex_str, offset, 2 + data_len, 'push payload')
         return hex_str[offset + 2:offset + 2 + data_len], 2 + data_len, opcode
     if opcode == 0x4C:
+        _need(hex_str, offset, 4, 'OP_PUSHDATA1 length prefix')
         length = int(hex_str[offset + 2:offset + 4], 16)
         data_len = length * 2
+        _need(hex_str, offset, 4 + data_len, 'OP_PUSHDATA1 payload')
         return hex_str[offset + 4:offset + 4 + data_len], 4 + data_len, opcode
     if opcode == 0x4D:
+        _need(hex_str, offset, 6, 'OP_PUSHDATA2 length prefix')
         lo = int(hex_str[offset + 2:offset + 4], 16)
         hi = int(hex_str[offset + 4:offset + 6], 16)
         length = lo | (hi << 8)
         data_len = length * 2
+        _need(hex_str, offset, 6 + data_len, 'OP_PUSHDATA2 payload')
         return hex_str[offset + 6:offset + 6 + data_len], 6 + data_len, opcode
     if opcode == 0x4E:
+        _need(hex_str, offset, 10, 'OP_PUSHDATA4 length prefix')
         b0 = int(hex_str[offset + 2:offset + 4], 16)
         b1 = int(hex_str[offset + 4:offset + 6], 16)
         b2 = int(hex_str[offset + 6:offset + 8], 16)
         b3 = int(hex_str[offset + 8:offset + 10], 16)
         length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         data_len = length * 2
+        _need(hex_str, offset, 10 + data_len, 'OP_PUSHDATA4 payload')
         return hex_str[offset + 10:offset + 10 + data_len], 10 + data_len, opcode
 
     # Single-byte opcode (no data)
@@ -61,9 +97,9 @@ def _decode_script_number(data_hex: str) -> int:
     negative = (byte_list[-1] & 0x80) != 0
     byte_list[-1] &= 0x7F
 
-    result = 0
-    for i in range(len(byte_list) - 1, -1, -1):
-        result = (result << 8) | byte_list[i]
+    # N-320: one conversion. Shifting a byte in at a time is quadratic: a
+    # 1 MiB constructor arg held from_utxo for ~90 s.
+    result = int.from_bytes(bytes(byte_list), 'little')
 
     if result == 0:
         return 0
@@ -215,6 +251,14 @@ def restore_constructor_args(
 # Script matching
 # ---------------------------------------------------------------------------
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def is_hex_bytes(s: str) -> bool:
+    """True when ``s`` is an even-length string of hex digits (N-317)."""
+    return len(s) % 2 == 0 and all(ch in _HEX_DIGITS for ch in s)
+
+
 def matches_artifact(
     artifact: RunarArtifact,
     script_hex: str,
@@ -222,6 +266,12 @@ def matches_artifact(
     """Determine whether a given on-chain script was produced from the given
     contract artifact (regardless of what constructor args were used).
     """
+    # N-317: refuse anything that is not whole bytes of hex up front, so no
+    # reader below sees a partial byte and every tier makes the same call.
+    if not is_hex_bytes(script_hex):
+        raise MalformedScriptError(
+            "matches_artifact: script is not an even-length hex string"
+        )
     code_hex = script_hex
     if artifact.state_fields:
         op_return_pos = find_last_op_return(script_hex)
@@ -230,30 +280,90 @@ def matches_artifact(
 
     template = artifact.script
 
-    if not artifact.constructor_slots:
+    # N-316: compare literally only when the template has no slot of ANY kind.
+    if (
+        not artifact.constructor_slots
+        and not artifact.code_sep_index_slots
+        and not artifact.code_part_len_slots
+    ):
         return code_hex == template
 
-    # Deduplicate by byte_offset, keeping first occurrence
-    seen_offsets: set[int] = set()
-    slots = sorted(artifact.constructor_slots, key=lambda s: s.byte_offset)
-    unique_slots = []
-    for slot in slots:
-        if slot.byte_offset not in seen_offsets:
-            seen_offsets.add(slot.byte_offset)
-            unique_slots.append(slot)
+    # Every OP_0 placeholder the SDK substitutes at deploy time -- constructor
+    # args AND codeSepIndex slots -- is a variable element in the deployed
+    # code. Skipping the codeSepIndex slots made every stateful artifact that
+    # carries one (the placeholder bakes as OP_1) fail to match its own
+    # honest deployment. Deduplicated, ascending.
+    offsets = sorted(
+        {s.byte_offset for s in artifact.constructor_slots}
+        | {s.byte_offset for s in artifact.code_sep_index_slots}
+    )
+
+    # N-051: a `code_part_len_slots` field holds the DEPLOYED code-part length,
+    # not the template's placeholder value. It must equal the length of the
+    # code part being matched (everything before the state section,
+    # inscription envelope included).
+    len_fields = {s.byte_offset * 2 for s in artifact.code_part_len_slots}
+    deployed_len = ((len(code_hex) // 2) & 0xFFFFFFFF).to_bytes(4, 'little').hex()
+
+    def segment_matches(t_start: int, t_end: int, c_start: int) -> bool:
+        t = t_start
+        c = c_start
+        while t < t_end:
+            if t in len_fields:
+                if c + 8 > len(code_hex) or code_hex[c:c + 8] != deployed_len:
+                    return False
+                t += 8
+                c += 8
+                continue
+            if c >= len(code_hex) or template[t] != code_hex[c]:
+                return False
+            t += 1
+            c += 1
+        return True
 
     template_pos = 0
     code_pos = 0
+    # N-318: the element read at each placeholder, keyed by template byte offset.
+    elems: dict[int, str] = {}
 
-    for slot in unique_slots:
-        slot_hex_offset = slot.byte_offset * 2
-        template_segment = template[template_pos:slot_hex_offset]
-        code_segment = code_hex[code_pos:code_pos + len(template_segment)]
-        if template_segment != code_segment:
+    for offset in offsets:
+        slot_hex_offset = offset * 2
+        seg_len = slot_hex_offset - template_pos
+        if code_pos + seg_len > len(code_hex):
+            return False
+        if not segment_matches(template_pos, slot_hex_offset, code_pos):
             return False
         template_pos = slot_hex_offset + 2
-        elem_offset = code_pos + len(template_segment)
+        elem_offset = code_pos + seg_len
         _, total_hex_chars, _ = _read_script_element(code_hex, elem_offset)
+        elems[offset] = code_hex[elem_offset:elem_offset + total_hex_chars]
         code_pos = elem_offset + total_hex_chars
 
-    return template[template_pos:] == code_hex[code_pos:]
+    if not (
+        len(code_hex) - code_pos == len(template) - template_pos
+        and segment_matches(template_pos, len(template), code_pos)
+    ):
+        return False
+
+    # N-318: a codeSepIndex slot is not free. Deploy bakes exactly
+    # _encode_script_number(code_sep_index + shift) there
+    # (``_resolved_code_sep_slot_values``), shift = the growth of every
+    # constructor slot before code_sep_index plus that of every earlier codeSep
+    # slot before it. The matcher does not know the constructor args, so their
+    # growth is taken from the elements actually read.
+    from runar.sdk.contract import _encode_script_number  # contract imports this module
+
+    resolved: list[tuple[int, int]] = []  # (byte_offset, width)
+    for slot in sorted(artifact.code_sep_index_slots, key=lambda s: s.byte_offset):
+        shift = 0
+        for cs in artifact.constructor_slots:
+            if cs.byte_offset < slot.code_sep_index:
+                shift += len(elems[cs.byte_offset]) // 2 - 1
+        for prev_offset, prev_width in resolved:
+            if prev_offset < slot.code_sep_index:
+                shift += prev_width - 1
+        expected = _encode_script_number(slot.code_sep_index + shift)
+        if elems.get(slot.byte_offset) != expected:
+            return False
+        resolved.append((slot.byte_offset, len(expected) // 2))
+    return True

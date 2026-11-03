@@ -409,7 +409,7 @@ console.log(counter.state.count); // decoded from the on-chain script
 
 ### OP_PUSH_TX
 
-The OP_PUSH_TX pattern lets a script verify the transaction it's part of without OP_CHECKSIGVERIFY of an external signature. The SDK uses private key `k = 1` (public key = generator point `G`), computes the BIP-143 preimage that the on-chain script will rebuild, signs the preimage with low-S enforcement, and pushes both onto the unlocking stack as `<opPushTxSig> <preimage>`. The on-chain `checkPreimage` opcode recomputes the preimage from the spending tx and verifies it against the signature.
+The OP_PUSH_TX pattern lets a script verify the transaction it's part of without OP_CHECKSIGVERIFY of an external signature. The SDK computes the BIP-143 preimage that the on-chain script will rebuild and pushes only that preimage onto the unlocking stack; the on-chain `checkPreimage` opcode recomputes the preimage from the spending tx and derives the authenticating signature itself (against the well-known `k = 1` generator-point key `G`), so no spender-supplied signature is pushed.
 
 `computeOpPushTx(tx, inputIndex, subscript, satoshis, codeSeparatorIndex?)` is exported for advanced use; you almost never need to call it manually because `RunarContract.call` invokes it as part of `prepareCall`. The `codeSeparatorIndex` argument is required for stateful contracts because the BIP-143 `scriptCode` for the OP_PUSH_TX sig must start *after* the contract's `OP_CODESEPARATOR`.
 
@@ -672,7 +672,7 @@ import { WhatsOnChainProvider } from 'runar-sdk';
 const provider = new WhatsOnChainProvider('mainnet'); // 'mainnet' | 'testnet'
 ```
 
-WoC's UTXO endpoint does not return locking scripts, so `getUtxos` populates `script: ''`. If you need the script, fetch the source transaction with `getTransaction(txid)` and read it from the `outputs[outputIndex]`.
+WoC's UTXO endpoint does not return locking scripts, so `getUtxos` fetches each UTXO's transaction from `/tx/{txid}/hex`, checks that it hashes to the txid and that the listed output and value exist, and returns the real `script`. It throws rather than return an empty script (F-040).
 
 ### GorillaPoolProvider
 
@@ -791,7 +791,6 @@ Multi-signer flow. See [9b](#9b-multi-signer-preparecall--finalizecall). Pass `n
 
 - `sighash` (hex): BIP-143 sighash for external signers.
 - `preimage` (hex): full preimage if you need to re-derive the sighash.
-- `opPushTxSig` (hex): OP_PUSH_TX DER signature + sighash byte. Empty when not needed.
 - `tx`: `@bsv/sdk` `Transaction` with funding inputs already signed.
 - `sigIndices`: argument indices that need external signatures.
 - Opaque internal fields (prefixed `_`) consumed by `finalizeCall`.
@@ -936,7 +935,7 @@ Issues JSON-RPC calls (`getrawtransaction`, `sendrawtransaction`, `listunspent`,
 new WhatsOnChainProvider(network?: 'mainnet' | 'testnet') // default 'mainnet'
 ```
 
-UTXO entries returned by `getUtxos()` have empty `script` strings (WoC API limitation). `getFeeRate()` returns the BSV standard 100 sat/KB.
+UTXO entries returned by `getUtxos()` carry the locking script read from the verified `/tx/{txid}/hex` (one extra request per distinct txid). `getFeeRate()` returns the BSV standard 100 sat/KB.
 
 #### `GorillaPoolProvider` ([src/providers/gorillapool.ts](src/providers/gorillapool.ts))
 
@@ -1202,6 +1201,8 @@ getUtxos(): Promise<UTXO[]>
 
 Convenience wrapper for fungible-token contracts that expose `transfer(sig, to)` and `merge(sig, otherSupply, otherHolder)` methods and a `supply` / `balance` / `amount` state field. For more flexible token flows, use `RunarContract` directly.
 
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/ts/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
+
 ### Ordinals
 
 #### `Inscription` ([src/ordinals/types.ts](src/ordinals/types.ts))
@@ -1329,7 +1330,7 @@ interface DeployOptions { satoshis?; changeAddress? }
 interface CallOptions { satoshis?; changeAddress?; changePubKey?; newState?; outputs?;
                         additionalContractInputs?; additionalContractInputArgs?;
                         terminalOutputs?; fundingUtxos?; dataOutputs? }
-interface PreparedCall { sighash; preimage; opPushTxSig; tx; sigIndices; ... }
+interface PreparedCall { sighash; preimage; tx; sigIndices; ... }
 
 // Re-exported from @bsv/sdk
 type Transaction        // @bsv/sdk Transaction class
@@ -1414,7 +1415,7 @@ The SDK follows semver. Pre-1.0 minor versions may include breaking changes; che
 
 The `_`-prefixed fields on `PreparedCall` are explicitly internal — `prepareCall` and `finalizeCall` round-trip them; do not depend on their shape.
 
-The cross-SDK `conformance/sdk-output/` suite verifies that the TypeScript SDK produces byte-identical locking scripts to the Go, Rust, Python, Zig, Ruby, and Java SDKs for the same artifact + constructor args. As of this writing, 70 fixtures pass on all seven SDKs.
+The cross-SDK `conformance/sdk-output/` suite verifies that the TypeScript SDK produces byte-identical locking scripts to the Go, Rust, Python, Zig, Ruby, and Java SDKs for the same artifact + constructor args. As of this writing, 80 fixtures pass on all seven SDKs.
 
 ---
 

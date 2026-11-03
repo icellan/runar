@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { extractStateFromScript, serializeState, findLastOpReturn } from '../state.js';
 import type { RunarArtifact, StateField } from 'runar-ir-schema';
 
@@ -426,6 +429,40 @@ describe('findLastOpReturn', () => {
   it('skips 0x6a inside OP_PUSHDATA1', () => {
     // OP_PUSHDATA1 len=3 data=[0x6a, 0x6a, 0x6a] OP_RETURN
     expect(findLastOpReturn('4c036a6a6a6a')).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-167 (sibling of F-367): findLastOpReturn's doc comment must describe the
+// first-match walk it actually performs, not a "last OP_RETURN" search.
+//
+// Proves: the JSDoc immediately above `findLastOpReturn` in state.ts no
+// longer claims to find the LAST OP_RETURN. All seven SDKs implement the
+// same "stop at the first opcode-boundary 0x6a" walk, and that is correct
+// (the on-chain interpreter stops at the first OP_RETURN it executes, and
+// the compiler emits exactly one separator), so "first" and "last" coincide
+// for every script this function will ever see.
+// Does not prove: runtime behaviour — that is already pinned by the
+// `describe('findLastOpReturn', ...)` block above, unchanged by this fix.
+// ---------------------------------------------------------------------------
+describe('findLastOpReturn doc comment (N-167)', () => {
+  const stateSource = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../state.ts'),
+    'utf8',
+  );
+  const fnIndex = stateSource.indexOf('export function findLastOpReturn');
+  const docBlock = stateSource.slice(0, fnIndex);
+  const lastDocCommentStart = docBlock.lastIndexOf('/**');
+  const doc = docBlock.slice(lastDocCommentStart, fnIndex);
+
+  it('has a doc comment directly above the function', () => {
+    // Anchor: fails loudly (empty doc) if the slicing above ever points at
+    // the wrong comment instead of silently passing.
+    expect(doc).toContain('OP_RETURN');
+  });
+
+  it('does not claim to find the last OP_RETURN', () => {
+    expect(doc).not.toMatch(/last\s+OP_RETURN/i);
   });
 });
 

@@ -168,12 +168,33 @@ class TestParserRs < Minitest::Test
 
     result = parse(source, 'notacontract.runar.rs')
 
-    # Either errors are reported, the contract is nil, or it is an empty
-    # placeholder with no properties or non-constructor methods.
-    if !result.errors.empty? || result.contract.nil?
-      assert true
+    # F-377: no vacuous branch. Whenever a contract IS returned, the
+    # empty-placeholder invariant must hold regardless of whether
+    # diagnostics were also reported -- a parser that starts attaching an
+    # unrelated error to every result must not be able to hide a real
+    # content regression behind that error (mutation-proven: injecting one
+    # unrelated diagnostic + a bogus property used to leave the old
+    # `assert true` branch green). If no contract is returned, that absence
+    # must itself be explained by a diagnostic: a silent `nil` with zero
+    # errors is not a passing outcome either -- though that branch is not
+    # mutation-exercised here, since this parser never returns nil for this
+    # input (see "does not prove" below).
+    #
+    # What this proves: a non-contract .runar.rs source cannot produce a
+    # contract carrying real properties or non-constructor methods, and that
+    # this is still checked even when the parser also reports diagnostics.
+    # What this does NOT prove: that the Ruby parser rejects non-contract
+    # source outright. Today it returns an empty placeholder with ZERO
+    # diagnostics for this input (unlike the Go sibling test,
+    # TestParseRustMacro_InvalidSyntax_Error, which requires a nil contract
+    # plus a non-empty error list for the same shape of input) -- that
+    # behavioural difference is a frontend-parity observation, not something
+    # this single-tier item authorizes changing.
+    c = result.contract
+    if c.nil?
+      refute_empty result.errors,
+                   'a nil contract for non-contract source must come with at least one diagnostic'
     else
-      c = result.contract
       assert_empty c.properties,
                    'non-contract source should not produce real properties'
       non_ctor_methods = c.methods.reject { |m| m.name == 'constructor' }

@@ -44,7 +44,7 @@ class Meta extends SmartContract {
 }
 
 const WARN_RE =
-  /readonly field 'metadataId' is not referenced .* eliminated by DCE.*@embedAlways/s;
+  /readonly field 'metadataId' is not referenced .* eliminated by DCE.*embedAlways directive/s;
 
 describe('#109 parser: @embedAlways directive', () => {
   it('sets embedAlways on a field with a /** @embedAlways */ JSDoc directive', () => {
@@ -216,5 +216,95 @@ describe('#109 preservation survives fixed-point DCE (EC-armed)', () => {
     expect(r.success, JSON.stringify(r.diagnostics)).toBe(true);
     const json = JSON.stringify(r.anf, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v));
     expect(json).not.toContain('preserve');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-098 / R35 — `@embedAlways` on a FixedArray property propagates to every
+// expanded slot.
+//
+// `03b-expand-fixed-arrays` rebuilds a `FixedArray<T, N>` property as N scalar
+// siblings. It used to rebuild them without `embedAlways`, so the directive was
+// silently ignored: an annotated, unread array compiled to the SAME bytes as
+// the un-annotated one (every slot DCE'd), while the identical scalar kept its
+// value. The oracle here is independent of the expansion pass: the array must
+// compile to exactly the bytes of the same contract written as N annotated
+// scalars, which never goes through the expansion pass at all.
+//
+// Proves: every slot of an annotated FixedArray survives DCE, in slot order,
+// byte-identical to the hand-expanded scalar form; an un-annotated array still
+// loses its unread slots. Does not prove anything about on-chain spending
+// (a conformance fixture with a real-crypto witness is tracked as N-093).
+// ---------------------------------------------------------------------------
+
+function arraySource(directive: string): string {
+  return `
+import { SmartContract, assert } from 'runar-lang';
+
+class Arr extends SmartContract {
+  ${directive}
+  readonly tags: FixedArray<bigint, 2> = [7n, 9n];
+
+  constructor() {
+    super();
+  }
+
+  public unlock(x: bigint) {
+    assert(x === 0n);
+  }
+}
+`;
+}
+
+const HAND_EXPANDED = `
+import { SmartContract, assert } from 'runar-lang';
+
+class Arr extends SmartContract {
+  /** @embedAlways */
+  readonly first: bigint = 7n;
+  /** @embedAlways */
+  readonly second: bigint = 9n;
+
+  constructor() {
+    super();
+  }
+
+  public unlock(x: bigint) {
+    assert(x === 0n);
+  }
+}
+`;
+
+describe('F-098: @embedAlways on a FixedArray propagates to every expanded slot', () => {
+  for (const disableConstantFolding of [true, false]) {
+    const mode = disableConstantFolding ? 'fold-off' : 'fold-on';
+    it(`annotated array compiles to the hand-expanded annotated scalars (${mode})`, () => {
+      const arr = compile(arraySource('/** @embedAlways */'), { fileName: 'Arr.runar.ts', disableConstantFolding });
+      const scal = compile(HAND_EXPANDED, { fileName: 'Arr.runar.ts', disableConstantFolding });
+      expect(arr.success, JSON.stringify(arr.diagnostics)).toBe(true);
+      expect(scal.success, JSON.stringify(scal.diagnostics)).toBe(true);
+      expect(arr.scriptHex).toBe(scal.scriptHex);
+      // Both slot values are pushed: OP_7 and OP_9 survive.
+      expect(arr.scriptHex).toContain('57');
+      expect(arr.scriptHex).toContain('59');
+    });
+
+    it(`un-annotated array still loses its unread slots (${mode})`, () => {
+      const on = compile(arraySource('/** @embedAlways */'), { fileName: 'Arr.runar.ts', disableConstantFolding });
+      const off = compile(arraySource(''), { fileName: 'Arr.runar.ts', disableConstantFolding });
+      expect(off.success, JSON.stringify(off.diagnostics)).toBe(true);
+      expect(off.scriptHex).toBe('91');
+      expect(on.scriptHex).not.toBe(off.scriptHex);
+    });
+  }
+
+  it('the expanded slot properties carry embedAlways', () => {
+    const r = compile(arraySource('/** @embedAlways */'), { fileName: 'Arr.runar.ts' });
+    expect(r.success, JSON.stringify(r.diagnostics)).toBe(true);
+    const loads = r.anf!.methods
+      .find(m => m.name === 'unlock')!
+      .body.filter(b => b.value.kind === 'load_prop')
+      .map(b => (b.value as { name: string }).name);
+    expect(loads).toEqual(['tags__0', 'tags__1']);
   });
 });

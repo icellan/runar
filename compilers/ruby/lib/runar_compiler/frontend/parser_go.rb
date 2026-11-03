@@ -9,6 +9,9 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
+require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -77,7 +80,7 @@ module RunarCompiler
       "BigintBig"       => "bigint",
       "Bool"            => "boolean",
       "bool"            => "boolean",
-      "int"             => "bigint",
+      "int64"           => "bigint",
       "ByteString"      => "ByteString",
       "PubKey"          => "PubKey",
       "Sig"             => "Sig",
@@ -167,6 +170,7 @@ module RunarCompiler
       "ExtractPrevOutputScript" => "extractPrevOutputScript",
       "RequireOutputP2PKH" => "requireOutputP2PKH",
       "CurrentBlockHeight" => "currentBlockHeight",
+      "ContinuationAmount" => "continuationAmount",
       # Output construction
       "AddOutput" => "addOutput", "AddRawOutput" => "addRawOutput",
       "AddDataOutput" => "addDataOutput",
@@ -242,41 +246,64 @@ module RunarCompiler
       name[0].downcase + name[1..]
     end
 
-    # Decode Go string escape sequences (\n, \t, \r, \0, \\, \", \xNN) from the
-    # raw text of a Go string literal.
-    def self.go_decode_string_escapes(raw)
+    # N-437: decode the body of a Go interpreted string literal with Go's
+    # rules (https://go.dev/ref/spec#String_literals). Returns [bytes, bad]:
+    # `bytes` is the Go string's bytes (literal text and \u / \U escapes UTF-8
+    # encoded, \xNN and octal \NNN (at most 255) the single byte); `bad` is the
+    # offending escape (the backslash plus the escape letter, or the whole
+    # octal run) for an escape Go refuses, else nil.
+    GO_SIMPLE_ESCAPES = {
+      "a" => "\a", "b" => "\b", "f" => "\f", "n" => "\n",
+      "r" => "\r", "t" => "\t", "v" => "\v", "\\" => "\\", '"' => '"'
+    }.freeze
+
+    def self.go_decode_string(raw)
       out = String.new(encoding: Encoding::ASCII_8BIT)
       i = 0
       n = raw.length
       while i < n
         c = raw[i]
-        if c == "\\" && i + 1 < n
-          nx = raw[i + 1]
-          case nx
-          when "n" then out << "\n".b; i += 2
-          when "t" then out << "\t".b; i += 2
-          when "r" then out << "\r".b; i += 2
-          when "0" then out << "\x00".b; i += 2
-          when "\\" then out << "\\".b; i += 2
-          when '"' then out << '"'.b; i += 2
-          when "x"
-            if i + 3 < n && raw[i + 2].match?(/[0-9a-fA-F]/) && raw[i + 3].match?(/[0-9a-fA-F]/)
-              out << raw[(i + 2)..(i + 3)].to_i(16).chr
-              i += 4
-            else
-              out << c.b
-              i += 1
-            end
-          else
-            out << nx.b
-            i += 2
-          end
-        else
+        unless c == "\\"
           out << c.b
           i += 1
+          next
+        end
+        nx = i + 1 < n ? raw[i + 1] : ""
+        if GO_SIMPLE_ESCAPES.key?(nx)
+          out << GO_SIMPLE_ESCAPES[nx].b
+          i += 2
+        elsif nx == "x"
+          h = raw[(i + 2), 2].to_s
+          return [out, "\\x"] unless h.match?(/\A[0-9a-fA-F]{2}\z/)
+
+          out << h.to_i(16).chr
+          i += 4
+        elsif nx == "u" || nx == "U"
+          width = nx == "u" ? 4 : 8
+          h = raw[(i + 2), width].to_s
+          return [out, "\\#{nx}"] unless h.match?(/\A[0-9a-fA-F]+\z/) && h.length == width
+
+          cp = h.to_i(16)
+          return [out, "\\#{nx}"] if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)
+
+          out << [cp].pack("U").b
+          i += 2 + width
+        elsif nx.match?(/\A[0-7]\z/)
+          run = raw[(i + 1), 3].to_s[/\A[0-7]{1,3}/]
+          return [out, "\\#{run}"] if run.length < 3 || run.to_i(8) > 0xff
+
+          out << run.to_i(8).chr
+          i += 4
+        else
+          return [out, "\\#{nx}"]
         end
       end
-      out
+      [out, nil]
+    end
+
+    # The bytes of a Go interpreted string literal (see go_decode_string).
+    def self.go_decode_string_escapes(raw)
+      go_decode_string(raw).first
     end
 
     def self.go_map_type(name)
@@ -346,7 +373,13 @@ module RunarCompiler
       go_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_go(source)
+    # +directives+ (N-093) collects every Go DSL directive comment
+    # `//runar:<name> <args>` (Go's own `//go:` convention: no space after
+    # `//`) as {name:, args:, token_index:, line:, column:}. +token_index+ is
+    # the index of the first token after the comment, so a directive attaches
+    # to the declaration that follows it, with only comments and blank lines
+    # in between.
+    def self.tokenize_go(source, lex = [], file_name = "", directives = [])
       tokens = []
       line = 1
       col = 0
@@ -382,8 +415,17 @@ module RunarCompiler
 
         # Single-line comment //
         if ch == "/" && i + 1 < n && source[i + 1] == "/"
+          comment_start = i
           while i < n && source[i] != "\n" && source[i] != "\r"
             i += 1
+          end
+          # N-093: `//runar:<name> <args>` is a directive, not prose.
+          text = source[comment_start...i]
+          if text.start_with?("//runar:")
+            body = text["//runar:".length..]
+            dname = body[/\A[^ \t]*/]
+            directives << { name: dname, args: body[dname.length..], token_index: tokens.length,
+                             line: line, column: col }
           end
           next
         end
@@ -413,6 +455,7 @@ module RunarCompiler
 
         # Backtick-delimited struct tags
         if ch == "`"
+          tag_line = line
           i += 1
           col += 1
           tag_start = i
@@ -426,9 +469,13 @@ module RunarCompiler
             i += 1
           end
           val = source[tag_start...i]
+          # F-011: a raw string may span lines, so only end of file leaves it
+          # unterminated.
           if i < n
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, tag_line, start_col)
           end
           tokens << GoToken.new(kind: GoTokens::TOK_BACKTICK, value: val, line: line, col: start_col)
           next
@@ -439,8 +486,12 @@ module RunarCompiler
           i += 1
           col += 1
           str_start = i
-          while i < n && source[i] != '"'
+          # F-011: a literal that reaches a line break (escaped or not) or end
+          # of file is unterminated; it must never run on into the next lines.
+          while i < n && source[i] != '"' && source[i] != "\n" && source[i] != "\r"
             if source[i] == "\\"
+              break if i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r"
+
               i += 1
               col += 1
             end
@@ -450,35 +501,25 @@ module RunarCompiler
             end
           end
           val = source[str_start...i]
-          if i < n
+          if i < n && source[i] == '"'
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
+          # N-437: an escape Go refuses is refused here too.
+          _, bad_escape = Frontend.go_decode_string(val)
+          lex << Frontend.lex_error(Frontend.invalid_escape_sequence_message(bad_escape), file_name, line, start_col) if bad_escape
           tokens << GoToken.new(kind: GoTokens::TOK_STRING, value: val, line: line, col: start_col)
           next
         end
 
-        # Hex literal: 0x...
-        if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-          i += 2
-          col += 2
-          hex_start = i
-          while i < n && GO_HEX_CHARS.include?(source[i])
-            i += 1
-            col += 1
-          end
-          tokens << GoToken.new(kind: GoTokens::TOK_HEXSTRING, value: source[hex_start...i], line: line, col: start_col)
-          next
-        end
-
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-            i += 1
-            col += 1
-          end
-          tokens << GoToken.new(kind: GoTokens::TOK_NUMBER, value: source[num_start...i].delete("_"), line: line, col: start_col)
+          stop, value, = IntLiteral.lex_number("go", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
+          tokens << GoToken.new(kind: GoTokens::TOK_NUMBER, value: value, line: line, col: start_col)
           next
         end
 
@@ -515,7 +556,9 @@ module RunarCompiler
           next
         end
 
-        # Skip unknown characters
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, line, start_col)
         i += 1
         col += 1
       end
@@ -528,7 +571,67 @@ module RunarCompiler
     # Go parser
     # -------------------------------------------------------------------
 
+    # F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser
+    # (TS reference: goNoContractMessage / goMultipleContractsMessage /
+    # goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+    GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source"
+
+    def self.go_multiple_contracts_message(first, second)
+      "multiple Rúnar contract structs found in Go source: '#{first}' and '#{second}'; " \
+        "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract"
+    end
+
+    def self.go_foreign_receiver_message(method, receiver_type, contract)
+      "method '#{method}' has receiver type '#{receiver_type}', not the contract type '#{contract}'; " \
+        "methods on other types are not allowed"
+    end
+
+    # -------------------------------------------------------------------------
+    # N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+    # -------------------------------------------------------------------------
+    #
+    # Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+    # (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+    # BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+    # prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which
+    # the schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as
+    # `&` over a prefix `^`, i.e. `&`.
+
+    GO_PRECEDENCE_CLASS = {
+      "*" => "mul", "/" => "mul", "%" => "mul",
+      "<<" => "shift", ">>" => "shift",
+      "&" => "and",
+      "+" => "add", "-" => "add",
+      "|" => "or", "^" => "xor",
+      "<" => "rel", "<=" => "rel", ">" => "rel", ">=" => "rel",
+      "===" => "eq", "!==" => "eq",
+      "&&" => "land", "||" => "lor"
+    }.freeze
+
+    GO_AMBIGUOUS_PRECEDENCE_PAIRS = Set[
+      %w[shift mul], %w[shift add],
+      %w[and mul], %w[and shift], %w[and add], %w[and rel], %w[and eq],
+      %w[add shift], %w[add and],
+      %w[or add], %w[or xor], %w[or rel], %w[or eq],
+      %w[xor add], %w[xor rel], %w[xor eq],
+      %w[rel and], %w[rel or], %w[rel xor],
+      %w[eq and], %w[eq or], %w[eq xor], %w[eq rel]
+    ].freeze
+
+    def self.go_ambiguous_precedence?(first, second)
+      GO_AMBIGUOUS_PRECEDENCE_PAIRS.include?([GO_PRECEDENCE_CLASS[first], GO_PRECEDENCE_CLASS[second]])
+    end
+
+    def self.go_ambiguous_precedence_message(first, second)
+      go = { "===" => "==", "!==" => "!=" }
+      "ambiguous operator precedence in .runar.go: `a #{go.fetch(first, first)} b " \
+        "#{go.fetch(second, second)} c` groups differently under Go precedence than in " \
+        "Rúnar's other surfaces; add parentheses"
+    end
+
     class GoParser
+      include InputLimits::NestingCounter
+
       include GoTokens
 
       def initialize(file_name)
@@ -538,9 +641,29 @@ module RunarCompiler
         @errors = []
         @self_names = Set.new
         @contract_name = ""
+        @go_atoms = {}.compare_by_identity # N-056: expression operands
+        # N-233: operand -> location of its first token, so the N-056 refusal
+        # is anchored where the TS reference anchors it (the ambiguous
+        # expression's leftmost operand).
+        @go_starts = {}.compare_by_identity
+        @bare_literal_ok = Set.new # N-448: token indexes of legal bare literals
       end
 
       attr_accessor :tokens, :pos, :errors
+
+      # N-093: every `//runar:` directive in the file, in source order.
+      attr_writer :directives
+
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.go_to_camel(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
 
       # -- Token helpers --------------------------------------------------
 
@@ -608,25 +731,50 @@ module RunarCompiler
         # Skip imports
         skip_imports
 
-        parent_class = "SmartContract"
-        properties = []
-        methods = []
+        structs = []
+        funcs = []
 
         # Parse top-level declarations
         while !check(TOK_EOF)
           if check_ident("type")
-            result = parse_struct_decl
-            if result
-              @contract_name = result[:name]
-              parent_class = result[:parent_class]
-              properties = result[:properties]
-            end
+            structs << parse_struct_decl
           elsif check_ident("func")
-            method = parse_func_decl
-            methods << method if method
+            funcs << parse_func_decl
           else
             advance # skip unknown top-level tokens
           end
+        end
+        report_stray_directives
+
+        # F-010: the contract is THE struct embedding a Rúnar base class --
+        # never "the last struct in the file". Any other struct is ignored,
+        # and a method whose receiver is not the contract type is refused:
+        # before this rule an exported method on a helper type became a
+        # public entry point.
+        contracts = structs.select { |st| st[:embeds_base] }
+        if contracts.empty?
+          add_error(Frontend::GO_NO_CONTRACT_MESSAGE)
+          return nil
+        end
+        contract_struct = contracts.first
+        contracts.drop(1).each do |extra|
+          add_error(Frontend.go_multiple_contracts_message(contract_struct[:name], extra[:name]))
+        end
+        @contract_name = contract_struct[:name]
+        parent_class = contract_struct[:parent_class]
+        properties = contract_struct[:properties].dup
+        methods = []
+        funcs.each do |f|
+          if !f[:receiver_type].nil? && f[:receiver_type] != @contract_name
+            add_error(Frontend.go_foreign_receiver_message(f[:go_name], f[:receiver_type], @contract_name))
+            next
+          end
+          # N-018: a free `init`/`main` is not an ordinary private helper.
+          # Real Go reserves both names for the package initializer / entry
+          # point, which can never be called as a function.
+          next if f[:receiver_type].nil? && %w[init main].include?(f[:go_name])
+
+          methods << f[:method]
         end
 
         # Process init() method: extract property initializers
@@ -644,7 +792,9 @@ module RunarCompiler
                       type: prop.type,
                       readonly: prop.readonly,
                       initializer: stmt.value,
-                      source_location: prop.source_location
+                      source_location: prop.source_location,
+                      synthetic_array_chain: prop.synthetic_array_chain,
+                      embed_always: prop.embed_always
                     )
                     break
                   end
@@ -656,8 +806,9 @@ module RunarCompiler
           end
         end
 
-        # Build auto-generated constructor
-        default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)
+        # Build auto-generated constructor, anchored at the contract's `struct`
+        # keyword (N-490), not a fake 1:0.
+        default_loc = contract_struct[:struct_loc]
         uninit_props = properties.reject { |p| p.initializer }
 
         super_call = ExpressionStmt.new(
@@ -725,10 +876,12 @@ module RunarCompiler
         expect_ident("type")
         name_tok = expect(TOK_IDENT)
         name = name_tok.value
+        struct_loc = loc
         expect_ident("struct")
         expect(TOK_LBRACE)
 
         parent_class = "SmartContract"
+        embeds_base = false
         properties = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
@@ -742,6 +895,7 @@ module RunarCompiler
             embed_name = expect(TOK_IDENT).value
             parent_class = "StatefulSmartContract" if embed_name == "StatefulSmartContract"
             parent_class = "UnsafeSmartContract" if embed_name == "UnsafeSmartContract"
+            embeds_base = true if %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(embed_name)
             next
           end
 
@@ -758,26 +912,33 @@ module RunarCompiler
           # Parse type
           prop_type = parse_go_type
 
-          # Check for struct tag
+          # Check for struct tag. The `runar` key holds comma-separated
+          # options (N-093): `readonly`, and `embedAlways` -- the native
+          # spelling of the `@embedAlways` directive -- in any order.
           readonly = false
+          embed_always = false
           if check(TOK_BACKTICK)
             tag_value = peek.value
-            readonly = true if tag_value.include?('runar:"readonly"')
+            runar_tag = tag_value.match(/(?:\A|\s)runar:"([^"]*)"/)
+            options = runar_tag ? runar_tag[1].split(",", -1).map(&:strip) : []
+            readonly = true if options.include?("readonly")
+            embed_always = true if options.include?("embedAlways")
             advance
           end
 
           field_names.each do |field_name|
             properties << PropertyNode.new(
-              name: Frontend.go_to_camel(field_name),
+              name: declare(field_name),
               type: prop_type,
               readonly: readonly,
+              embed_always: embed_always,
               source_location: prop_loc
             )
           end
         end
         expect(TOK_RBRACE)
 
-        { name: name, parent_class: parent_class, properties: properties }
+        { name: name, parent_class: parent_class, properties: properties, embeds_base: embeds_base, struct_loc: struct_loc }
       end
 
       def expect_ident(value)
@@ -815,7 +976,7 @@ module RunarCompiler
             0
           end
           expect(TOK_RBRACKET)
-          element = parse_go_type
+          element = nested { parse_go_type }
           return FixedArrayType.new(element: element, length: length)
         end
 
@@ -826,13 +987,48 @@ module RunarCompiler
 
       # -- Function/method declaration --------------------------------------
 
+      # N-093: the flag specs of the `//runar:sighash` directives attached to
+      # the declaration starting at token +token_index+ (nil for a malformed
+      # one).
+      def take_sighash_directives(token_index)
+        specs = []
+        (@directives || []).each do |d|
+          next if d[:token_index] != token_index || d[:name] != "sighash"
+
+          (@consumed_directives ||= Set.new.compare_by_identity) << d
+          specs << (d[:args].empty? || d[:args].match?(/\A[ \t][A-Za-z0-9_| \t]*\z/) ? d[:args] : nil)
+        end
+        specs
+      end
+
+      # N-093: refuse every directive that is unknown or attached to no func.
+      def report_stray_directives
+        consumed = @consumed_directives || Set.new.compare_by_identity
+        (@directives || []).each do |d|
+          next if consumed.include?(d)
+
+          msg = if d[:name] == "sighash"
+                  SighashDirective.lost_directive_message("@sighash")
+                else
+                  SighashDirective.unknown_go_directive_message(d[:name] + d[:args])
+                end
+          @errors << Diagnostic.new(
+            message: msg, severity: Severity::ERROR,
+            loc: SourceLocation.new(file: @file_name, line: d[:line], column: d[:column])
+          )
+        end
+      end
+
       def parse_func_decl
         location = loc
+        # N-093: the `//runar:sighash` directives directly above this func.
+        func_token_index = @pos
         expect_ident("func")
 
         # Check for receiver: (c *Type)
         has_receiver = false
         recv_name = ""
+        receiver_type = nil
 
         if check(TOK_LPAREN)
           advance # '('
@@ -841,9 +1037,13 @@ module RunarCompiler
           if check(TOK_STAR)
             advance
           end
-          # Skip type name
+          # Type name. An unnamed receiver `(Type)` has only the type.
+          receiver_type = ""
           if check(TOK_IDENT)
-            advance
+            receiver_type = advance.value
+          elsif check(TOK_RPAREN)
+            receiver_type = recv_name
+            recv_name = ""
           end
           expect(TOK_RPAREN)
           has_receiver = true
@@ -891,7 +1091,7 @@ module RunarCompiler
           p_type = parse_go_type
 
           param_names.each do |p_name|
-            params << ParamNode.new(name: Frontend.go_to_camel(p_name), type: p_type)
+            params << ParamNode.new(name: declare(p_name), type: p_type)
           end
 
           match_tok(TOK_COMMA)
@@ -900,13 +1100,20 @@ module RunarCompiler
 
         # Optional return type
         unless check(TOK_LBRACE)
-          parse_go_type
+          # The AST keeps no return type; N-331 refuses an unknown name.
+          Frontend.reject_unknown_return_type(@errors, parse_go_type, func_name, location,
+                                          has_receiver && !func_name.empty? &&
+                                          func_name[0] == func_name[0].upcase &&
+                                          func_name[0] != func_name[0].downcase)
         end
 
         # Body
         expect(TOK_LBRACE)
         body = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           body << parse_statement
         end
         expect(TOK_RBRACE)
@@ -921,27 +1128,75 @@ module RunarCompiler
         visibility = "private" unless has_receiver
 
         # Convert method name from Go PascalCase to Runar camelCase
-        name = Frontend.go_to_camel(func_name)
+        name = declare(func_name)
 
-        MethodNode.new(
+        sighash = SighashDirective.resolve_native_sighash(
+          name, visibility == "public", take_sighash_directives(func_token_index)
+        )
+        if sighash && sighash[:error]
+          @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: location)
+        end
+
+        method = MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
-          source_location: location
+          source_location: location,
+          sighash_type: sighash && sighash[:value]
         )
+        # F-010: parse_contract checks receiver_type against the contract.
+        { method: method, go_name: func_name, receiver_type: receiver_type }
       end
 
       # -- Statement parsing -------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      # N-154: a `;` that ends a statement on the same line separates it from
+      # the next one (`a := 1; b := 2`, `runar.Assert(x);`), as go/parser
+      # accepts. Any other `;` -- after another `;`, or on a later line than
+      # the statement it would end (where Go has already inserted one) -- is
+      # an EMPTY statement, which stays refused (N-153) with the TS
+      # reference's diagnostic. Called before every statement of a block
+      # (so a `;` right after `{` is refused too), never in a `for` header.
+      def skip_statement_separators
+        while check(TOK_SEMICOLON)
+          prev = @pos.positive? ? @tokens[@pos - 1] : nil
+          separates = !prev.nil? &&
+                      prev.kind != TOK_LBRACE && prev.kind != TOK_SEMICOLON &&
+                      prev.line == peek.line
+          add_error("Unexpected token in expression: ';'") unless separates
+          advance
+        end
+      end
+
+      def parse_statement_inner
         location = loc
+
+        # N-153: a `{` cannot start a statement (no block statement, and not a
+        # brace composite literal). Refuse it, as the TS reference does, and
+        # skip the balanced braces.
+        if check(TOK_LBRACE)
+          add_error("Unexpected token in expression: '{'")
+          depth = 0
+          loop do
+            kind = advance.kind
+            depth += 1 if kind == TOK_LBRACE
+            depth -= 1 if kind == TOK_RBRACE
+            break if depth <= 0 || check(TOK_EOF)
+          end
+          return ExpressionStmt.new(expr: BigIntLiteral.new(value: 0), source_location: location)
+        end
 
         # return
         if check_ident("return")
           advance
           value = nil
-          if !check(TOK_RBRACE) && !check(TOK_EOF)
+          # N-154: a `;` separator also ends a bare return.
+          if !check(TOK_RBRACE) && !check(TOK_EOF) && !check(TOK_SEMICOLON)
             value = parse_expression
           end
           return ReturnStmt.new(value: value, source_location: location)
@@ -960,7 +1215,7 @@ module RunarCompiler
         # var declaration: var name Type = expr
         if check_ident("var")
           advance
-          var_name = Frontend.go_to_camel(expect(TOK_IDENT).value)
+          var_name = declare(expect(TOK_IDENT).value)
           var_type = parse_go_type
           expect(TOK_ASSIGN)
           init = parse_expression
@@ -975,7 +1230,7 @@ module RunarCompiler
 
         # Short variable declaration: name := expr
         if check(TOK_IDENT) && peek_next.kind == TOK_COLONEQ
-          var_name = Frontend.go_to_camel(advance.value)
+          var_name = declare(advance.value)
           advance # skip ':='
           init = parse_expression
           return VariableDeclStmt.new(
@@ -1040,6 +1295,9 @@ module RunarCompiler
         expect(TOK_LBRACE)
         then_block = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           then_block << parse_statement
         end
         expect(TOK_RBRACE)
@@ -1049,10 +1307,13 @@ module RunarCompiler
           advance
           if check_ident("if")
             # else if -- parse as nested if_statement in the else branch
-            else_block = [parse_if_statement]
+            else_block = [nested { parse_if_statement }]
           else
             expect(TOK_LBRACE)
             while !check(TOK_RBRACE) && !check(TOK_EOF)
+              skip_statement_separators
+              break if check(TOK_RBRACE) || check(TOK_EOF)
+
               else_block << parse_statement
             end
             expect(TOK_RBRACE)
@@ -1076,7 +1337,7 @@ module RunarCompiler
           init_stmt = parse_statement
         else
           # Short variable declaration: name := expr
-          init_name = Frontend.go_to_camel(expect(TOK_IDENT).value)
+          init_name = declare(expect(TOK_IDENT).value)
           expect(TOK_COLONEQ)
           init_value = parse_expression
           init_stmt = VariableDeclStmt.new(
@@ -1127,6 +1388,9 @@ module RunarCompiler
         expect(TOK_LBRACE)
         body = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          skip_statement_separators
+          break if check(TOK_RBRACE) || check(TOK_EOF)
+
           body << parse_statement
         end
         expect(TOK_RBRACE)
@@ -1143,58 +1407,95 @@ module RunarCompiler
       # -- Expression parsing (precedence climbing) -------------------------
 
       def parse_expression
-        parse_or
+        nested { parse_expression_inner }
+      end
+
+      def parse_expression_inner
+        expr = parse_or
+        # N-056: refuse an unparenthesised operand edge that groups differently
+        # under Go precedence; nested ( ... ) groups were checked by their own
+        # parse_expression call and are atoms here.
+        atoms = @go_atoms
+        work = [expr]
+        until work.empty?
+          e = work.pop
+          next if !e.is_a?(BinaryExpr) || atoms.key?(e)
+
+          edges = []
+          edges << [e.left, e.left.op, e.op] if e.left.is_a?(BinaryExpr) && !atoms.key?(e.left)
+          edges << [e.right, e.op, e.right.op] if e.right.is_a?(BinaryExpr) && !atoms.key?(e.right)
+          edges.each do |child, first, second|
+            if Frontend.go_ambiguous_precedence?(first, second)
+              leftmost = e
+              leftmost = leftmost.left while leftmost.is_a?(BinaryExpr) && !atoms.key?(leftmost)
+              @errors << Diagnostic.new(
+                message: Frontend.go_ambiguous_precedence_message(first, second),
+                severity: Severity::ERROR,
+                loc: @go_starts[leftmost]
+              )
+              return expr
+            end
+            work << child
+          end
+        end
+        expr
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match_tok(TOK_PIPEPIPE)
-          left = BinaryExpr.new(op: "||", left: left, right: parse_and)
+          left = BinaryExpr.new(op: "||", left: left, right: parse_and, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bit_or
         while match_tok(TOK_AMPAMP)
-          left = BinaryExpr.new(op: "&&", left: left, right: parse_bit_or)
+          left = BinaryExpr.new(op: "&&", left: left, right: parse_bit_or, source_location: start)
         end
         left
       end
 
       def parse_bit_or
+        start = loc
         left = parse_bit_xor
         while check(TOK_PIPE) && !(@pos + 1 < @tokens.length && @tokens[@pos + 1].kind == TOK_PIPE)
           advance
-          left = BinaryExpr.new(op: "|", left: left, right: parse_bit_xor)
+          left = BinaryExpr.new(op: "|", left: left, right: parse_bit_xor, source_location: start)
         end
         left
       end
 
       def parse_bit_xor
+        start = loc
         left = parse_bit_and
         while match_tok(TOK_CARET)
-          left = BinaryExpr.new(op: "^", left: left, right: parse_bit_and)
+          left = BinaryExpr.new(op: "^", left: left, right: parse_bit_and, source_location: start)
         end
         left
       end
 
       def parse_bit_and
+        start = loc
         left = parse_equality
         while check(TOK_AMP) && !(@pos + 1 < @tokens.length && @tokens[@pos + 1].kind == TOK_AMP)
           advance
-          left = BinaryExpr.new(op: "&", left: left, right: parse_equality)
+          left = BinaryExpr.new(op: "&", left: left, right: parse_equality, source_location: start)
         end
         left
       end
 
       def parse_equality
+        start = loc
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
-            left = BinaryExpr.new(op: "===", left: left, right: parse_comparison)
+            left = BinaryExpr.new(op: "===", left: left, right: parse_comparison, source_location: start)
           elsif match_tok(TOK_NOTEQ)
-            left = BinaryExpr.new(op: "!==", left: left, right: parse_comparison)
+            left = BinaryExpr.new(op: "!==", left: left, right: parse_comparison, source_location: start)
           else
             break
           end
@@ -1203,16 +1504,17 @@ module RunarCompiler
       end
 
       def parse_comparison
+        start = loc
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = BinaryExpr.new(op: "<", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: "<", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_LTEQ)
-            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_GT)
-            left = BinaryExpr.new(op: ">", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: ">", left: left, right: parse_shift, source_location: start)
           elsif match_tok(TOK_GTEQ)
-            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift)
+            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift, source_location: start)
           else
             break
           end
@@ -1221,12 +1523,13 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match_tok(TOK_LSHIFT)
-            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive, source_location: start)
           elsif match_tok(TOK_RSHIFT)
-            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive, source_location: start)
           else
             break
           end
@@ -1235,12 +1538,13 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match_tok(TOK_PLUS)
-            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative, source_location: start)
           elsif match_tok(TOK_MINUS)
-            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative, source_location: start)
           else
             break
           end
@@ -1249,14 +1553,15 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match_tok(TOK_STAR)
-            left = BinaryExpr.new(op: "*", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "*", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_SLASH)
-            left = BinaryExpr.new(op: "/", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "/", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_PERCENT)
-            left = BinaryExpr.new(op: "%", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "%", left: left, right: parse_unary, source_location: start)
           else
             break
           end
@@ -1265,22 +1570,31 @@ module RunarCompiler
       end
 
       def parse_unary
+        start = loc
+        expr = parse_unary_operand
+        @go_starts[expr] = start
+        expr
+      end
+
+      def parse_unary_operand
+        op_loc = loc
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_MINUS)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         # Go uses ^ as bitwise NOT (complement) when used as unary prefix
         if match_tok(TOK_CARET)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
 
-        expr = parse_primary
-        parse_postfix_chain(expr)
+        expr = parse_postfix_chain(parse_primary)
+        @go_atoms[expr] = true # N-056: an operand is an atom
+        expr
       end
 
       def parse_postfix_chain(expr)
@@ -1322,7 +1636,7 @@ module RunarCompiler
         elements = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
           elements << if check(TOK_LBRACE)
-            parse_go_brace_literal
+            nested { parse_go_brace_literal }
           else
             parse_expression
           end
@@ -1349,13 +1663,28 @@ module RunarCompiler
         # Hex string literal
         if tok.kind == TOK_HEXSTRING
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
-        # String literal -- used for hex-encoded ByteString values in Go contracts
-        if tok.kind == TOK_STRING
+        # String literal -- used for hex-encoded ByteString values in Go contracts.
+        # N-439: the literal is first decoded with Go's string rules (the
+        # tokenizer has already refused an invalid escape), then the decoded
+        # text goes through the hex check; a raw (backtick) literal is its
+        # text verbatim, carriage returns discarded.
+        # N-448: a bare non-empty literal is refused (natively ASCII text, to the
+        # compiler hex). Exempt: "" and a runar.Asm body.
+        if tok.kind == TOK_STRING || tok.kind == TOK_BACKTICK
+          idx = @pos
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          value = if tok.kind == TOK_STRING
+                    Frontend.go_decode_string_escapes(tok.value).force_encoding("UTF-8").scrub
+                  else
+                    tok.value.delete("\r")
+                  end
+          if !value.empty? && !@bare_literal_ok.include?(idx)
+            @errors << Frontend.lex_error(Frontend.go_bare_string_literal_message(value), @file_name, tok.line, tok.col)
+          end
+          return ByteStringLiteral.new(value: value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Boolean literals
@@ -1438,12 +1767,41 @@ module RunarCompiler
             # Special-case runar.ByteString("literal") -> ByteStringLiteral
             # with hex-encoded raw bytes. Any other arg form (e.g. a variable)
             # falls through to the generic type-cast unwrap below.
-            if member_name == "ByteString" && check(TOK_LPAREN) && @tokens[@pos + 1]&.kind == TOK_STRING && @tokens[@pos + 2]&.kind == TOK_RPAREN
+            if member_name == "ByteString" && check(TOK_LPAREN) && [TOK_STRING, TOK_BACKTICK].include?(@tokens[@pos + 1]&.kind) && @tokens[@pos + 2]&.kind == TOK_RPAREN
               advance # consume '('
               str_tok = advance # consume string
               advance # consume ')'
-              hex_str = Frontend.go_decode_string_escapes(str_tok.value).bytes.map { |b| format("%02x", b) }.join
+              # N-437: a raw (backtick) string is its text verbatim as UTF-8,
+              # carriage returns discarded (Go spec).
+              str_bytes = if str_tok.kind == TOK_BACKTICK
+                            str_tok.value.delete("\r").b
+                          else
+                            Frontend.go_decode_string_escapes(str_tok.value)
+                          end
+              hex_str = str_bytes.bytes.map { |b| format("%02x", b) }.join
               return ByteStringLiteral.new(value: hex_str)
+            end
+
+            # N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+            if member_name == "HexToBytes" && check(TOK_LPAREN)
+              arg_tok = @tokens[@pos + 1]
+              if [TOK_STRING, TOK_BACKTICK].include?(arg_tok&.kind) && @tokens[@pos + 2]&.kind == TOK_RPAREN
+                advance # '('
+                advance # literal
+                advance # ')'
+                value = if arg_tok.kind == TOK_STRING
+                          Frontend.go_decode_string_escapes(arg_tok.value).force_encoding("UTF-8").scrub
+                        else
+                          arg_tok.value.delete("\r")
+                        end
+                return ByteStringLiteral.new(value: value, source_location: SourceLocation.new(file: @file_name, line: arg_tok.line, column: arg_tok.col))
+              end
+              @errors << Frontend.lex_error("runar.HexToBytes expects a single string literal argument", @file_name, tok.line, tok.col)
+            end
+
+            # N-448: the first argument of runar.Asm(...) is an opcode body.
+            if member_name == "Asm" && check(TOK_LPAREN) && [TOK_STRING, TOK_BACKTICK].include?(@tokens[@pos + 1]&.kind)
+              @bare_literal_ok << (@pos + 1)
             end
 
             # Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.
@@ -1476,7 +1834,7 @@ module RunarCompiler
           end
 
           # Non-receiver identifiers get camelCase conversion
-          return Identifier.new(name: Frontend.go_to_camel(tok.value))
+          return Identifier.new(name: Frontend.go_to_camel(tok.value), source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback
@@ -1495,18 +1853,34 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_go(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_go_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_go_tokens(source, file_name, lex)
       p = GoParser.new(file_name)
-      p.tokens = tokenize_go(source)
+      directives = []
+      p.tokens = tokenize_go(source, lex, file_name, directives)
+      p.directives = directives
       p.pos = 0
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

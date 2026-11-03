@@ -29,7 +29,6 @@ import {
   SLH_SHA2_256s, SLH_SHA2_256f,
   type SLHParams,
 } from '../crypto/slh-dsa.js';
-import { runSlowTests } from '../test-env.js';
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
@@ -190,7 +189,7 @@ function expectedSlhSigLen(p: SLHParams): number {
   return p.n + forsLen + p.d * xmssLen;
 }
 
-describe.skipIf(!runSlowTests)('SLH-DSA adversarial bound-violation tests (all 6 parameter sets)', () => {
+describe('SLH-DSA adversarial bound-violation tests (all 6 parameter sets)', () => {
   for (const tc of SLH_PARAM_SETS) {
     describe(tc.params.name, () => {
       const seed = new Uint8Array(3 * tc.params.n);

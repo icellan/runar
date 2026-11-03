@@ -67,6 +67,13 @@ contract Auction is StatefulSmartContract {
         // Reject bids that do not exceed the current highest
         require(bidAmount > this.highestBid);
 
+        // The bid must be paid into the pot (N-027): the continuation carries the
+        // prior pot plus the new bid. This example never refunds an outbid bidder,
+        // so the pot is the deposit plus every bid, and close() hands all of it to
+        // the auctioneer. `>=` lets a bidder add more; the compiler's own
+        // `>= input` floor alone would let a bid pay nothing.
+        require(continuationAmount() >= extractAmount(this.txPreimage) + bidAmount);
+
         // Persist new leader into on-chain state
         this.highestBidder = bidder;
         this.highestBid = bidAmount;

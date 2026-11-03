@@ -38,6 +38,20 @@ public final class CompileCheck {
      * @throws CompileException if any frontend pass reports errors
      */
     public static void check(String source, String fileName) {
+        checkWithWarnings(source, fileName);
+    }
+
+    /**
+     * Same frontend run as {@link #check(String, String)}, but returns the
+     * validator's warnings (e.g. a readonly field DCE'd out of the on-chain
+     * script because no method body references it) instead of discarding
+     * them. {@code check}/{@code run} keep their void signature and
+     * behaviour unchanged; this is the way to see what they otherwise log
+     * nowhere (N-131).
+     *
+     * @throws CompileException if any frontend pass reports errors
+     */
+    public static List<String> checkWithWarnings(String source, String fileName) {
         ContractNode contract;
         try {
             contract = ParserDispatch.parse(source, fileName);
@@ -55,8 +69,9 @@ public final class CompileCheck {
             );
         }
 
+        List<String> warnings;
         try {
-            Validate.run(contract);
+            warnings = Validate.run(contract);
         } catch (Validate.ValidationException e) {
             throw new CompileException(
                 "validation errors in " + fileName,
@@ -88,6 +103,8 @@ public final class CompileCheck {
                 e
             );
         }
+
+        return warnings;
     }
 
     /**
@@ -100,5 +117,17 @@ public final class CompileCheck {
     public static void run(Path file) throws IOException {
         String source = Files.readString(file);
         check(source, file.toString());
+    }
+
+    /**
+     * Same frontend run as {@link #run(Path)}, but returns the validator's
+     * warnings instead of discarding them. See {@link #checkWithWarnings}.
+     *
+     * @throws IOException      if the file cannot be read
+     * @throws CompileException if any frontend pass reports errors
+     */
+    public static List<String> runWithWarnings(Path file) throws IOException {
+        String source = Files.readString(file);
+        return checkWithWarnings(source, file.toString());
     }
 }

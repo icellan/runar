@@ -1,8 +1,8 @@
 use runar::prelude::*;
 
 #[runar::contract]
-struct HashRegistry {
-    current_hash: Ripemd160,
+pub struct HashRegistry {
+    pub current_hash: Ripemd160,
 }
 
 impl HashRegistry {

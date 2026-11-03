@@ -1,0 +1,16 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+# compilers/ruby has no runtime gem dependencies (stdlib only: digest, json,
+# open3, optparse, set, tmpdir, ...). This Gemfile pins the dev/test
+# toolchain `rake test` needs, so the Ruby compiler tier has the same
+# reproducible-build surface as every other tier (go.mod/go.sum, Cargo.toml/
+# Cargo.lock, pyproject.toml, build.zig.zon, build.gradle) instead of relying
+# on whatever `rake`/`minitest`/`ostruct` happen to be installed.
+gem 'rake', '13.1.0'
+
+group :test do
+  gem 'minitest', '5.26.1'
+  gem 'ostruct', '0.6.0'
+end

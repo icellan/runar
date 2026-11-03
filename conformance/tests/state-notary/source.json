@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "./Notary.runar.ts",
+    ".runar.sol": "./Notary.runar.sol",
+    ".runar.move": "./Notary.runar.move",
+    ".runar.go": "./Notary.runar.go",
+    ".runar.rs": "./Notary.runar.rs",
+    ".runar.py": "./Notary.runar.py",
+    ".runar.zig": "./Notary.runar.zig",
+    ".runar.rb": "./Notary.runar.rb",
+    ".runar.java": "./Notary.runar.java"
+  }
+}

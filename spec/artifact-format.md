@@ -35,6 +35,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
     "constructorSlots": [ ... ],
     "templateDigest": { ... },
     "codeSepIndexSlots": [ ... ],
+    "codePartLenSlots": [ ... ],
     "codeSeparatorIndex": 0,
     "codeSeparatorIndices": [ ... ],
     "rawScriptSpans": [ ... ],
@@ -246,25 +247,31 @@ The SDK uses these offsets to splice serialized constructor argument values dire
 - **Required**: No (omitted when the script contains no codeSepIndex placeholder)
 - **Description**: Byte offsets of `push_codesep_index` placeholders in the script, in the same shape and for the same reason as `constructorSlots`: the value is not known until byte offsets exist, so the emitter reserves space and records where to patch.
 
-### 3.15 `codeSeparatorIndex` / `codeSeparatorIndices`
+### 3.15 `codePartLenSlots`
+
+- **Type**: `{ byteOffset: number }[]`
+- **Required**: No (omitted unless a `SIZE(_codePart)` pin's value is unknown at compile time)
+- **Description**: A stateful contract with a variable-length state section pins `SIZE(_codePart)` with `OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY`. When a variable-width readonly constructor argument (`ByteString`, `bigint`) is baked into the code, the compiler cannot know the deployed length. Each entry gives the TEMPLATE byte offset of the first of the four little-endian length bytes. When an SDK deploys, it writes the deployed code-part length into those four bytes, in place, after splicing every constructor and codeSepIndex slot. That length includes any inscription envelope, because the envelope is part of `_codePart`. The field is fixed-width, so writing it moves no offset. The template carries a compile-time lower bound as a placeholder; the comparison is always an equality (N-051: a lower bound let a spender claim a truncated `_codePart` ending at a `0x6a` inside the baked value). An artifact matcher compares these four bytes against the candidate's own code-part length, not against the template.
+
+### 3.16 `codeSeparatorIndex` / `codeSeparatorIndices`
 
 - **Type**: `number` / `number[]`
 - **Required**: No (present only for stateful contracts)
 - **Description**: Byte offset(s) of `OP_CODESEPARATOR` in the locking script, needed to compute the BIP-143 sighash subscript. `codeSeparatorIndices` is indexed by public method (index 0 = first public method); `codeSeparatorIndex` is the single-method form. **Multi-method contracts must use `codeSeparatorIndices`** — the singular field names only one separator and signing against it for a different method produces a sighash the script will not accept.
 
-### 3.16 `rawScriptSpans`
+### 3.17 `rawScriptSpans`
 
 - **Type**: `RawScriptSpan[]`
 - **Required**: No (present only when the contract uses `asm(...)`)
 - **Description**: Byte ranges produced by `raw_script` ANF nodes. These bytes are opaque: the stack analyzer cannot model their effect and relies on the declared arity, so a consumer must treat these ranges as unanalysable rather than as ordinary script.
 
-### 3.17 `unsoundPrimitives`
+### 3.18 `unsoundPrimitives`
 
 - **Type**: `string[]`
 - **Required**: No — **absent**, not empty, on any artifact that reaches no such builtin
 - **Description**: Names of unsound primitives this artifact's script reaches. Read by the SDKs (`packages/runar-sdk/src/unsound-primitives.ts`) and by all six native tiers.
 
-### 3.18 `buildTimestamp`
+### 3.19 `buildTimestamp`
 
 - **Type**: `string` (ISO 8601)
 - **Required**: Yes

@@ -257,6 +257,8 @@ fn compileScriptHex(
         disable_constant_folding,
     );
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 
@@ -266,6 +268,8 @@ fn compileArtifact(
 ) ![]const u8 {
     const result = try compiler_api.compileSourceWithOptions(allocator, source, "C.runar.ts", true);
     allocator.free(result.script_hex);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.artifact_json orelse error.NoArtifact;
 }
 

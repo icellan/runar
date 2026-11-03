@@ -95,7 +95,7 @@ pub const HashToMint = struct {
         }
 
         // Reward inscription + P2PKH (covenant enforced via hashOutputs)
-        const p2pkh = runar.cat(runar.cat(runar.toByteString("76a914"), reward_pkh), runar.toByteString("88ac"));
+        const p2pkh = runar.cat(runar.cat(runar.hexToBytes("76a914"), reward_pkh), runar.hexToBytes("88ac"));
         self.addRawOutput(1, runar.cat(self.reward_inscription, p2pkh));
     }
 };

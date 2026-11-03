@@ -7,21 +7,21 @@ module Runar
     # Opcode concerns (spec §10).
     module OpcodeConcerns
       # Format n/1024 as JS (n/1024).toFixed(1).
-      # spec §5.1: k = round_half_to_even(n * 10 / 1024) / 10
-      # Use Ruby's BigDecimal-equivalent via integer arithmetic with
-      # banker's rounding.
+      #
+      # Per ECMA-262, toFixed picks the integer k for which k/10 - value
+      # is closest to zero, and on an exact tie picks the LARGER k -
+      # round-half-up (ties away from zero for our non-negative n), not
+      # IEEE-754 round-half-to-even. Verified live:
+      # node -e "console.log((500992/1024).toFixed(1))" prints "489.3",
+      # where round-half-to-even would give "489.2".
+      # spec §5.1: k = round_half_up(n * 10 / 1024) / 10
       def self.format_kb(n)
-        # Compute scaled = n*10/1024 with banker's (half-to-even) rounding.
+        # Compute scaled = n*10/1024 with round-half-up on exact ties.
         numer = n * 10
         denom = 1024
         q, r = numer.divmod(denom)
         twice = r * 2
-        if twice > denom
-          q += 1
-        elsif twice == denom
-          # Round half to even.
-          q += 1 if q.odd?
-        end
+        q += 1 if twice >= denom
         # q is the integer tenths. Render as "<int>.<digit>".
         whole = q / 10
         tenth = q % 10

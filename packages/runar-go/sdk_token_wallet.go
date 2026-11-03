@@ -2,12 +2,30 @@ package runar
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
 // TokenWallet — Token UTXO management
 // ---------------------------------------------------------------------------
+
+// N-239 (user decision R92): Merge and Transfer drive an ABI that cannot be
+// made sound, so they are deprecated rather than redesigned or removed. Each
+// warns once per process on first use.
+const (
+	tokenWalletMergeDeprecation = "runar-sdk: warning: TokenWallet.Merge is deprecated and unsafe. " +
+		"Its merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion input, " +
+		"so a holder can call merge on ONE input with a made-up otherSupply (supply inflation). " +
+		"Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).\n"
+	tokenWalletTransferDeprecation = "runar-sdk: warning: TokenWallet.Transfer is deprecated and unsafe. " +
+		"Its transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, " +
+		"so the token stays with the current holder instead of moving to the recipient. " +
+		"Use the token-ft example (FungibleTokenExample, examples/*/token-ft/) instead (N-239).\n"
+)
+
+var tokenWalletMergeWarnOnce, tokenWalletTransferWarnOnce sync.Once
 
 // TokenWallet manages token UTXOs for a fungible token contract.
 //
@@ -63,7 +81,12 @@ func (tw *TokenWallet) GetBalance() (int64, error) {
 // recipientAddr is the BSV address of the recipient.
 // amount is the minimum token balance required in the source UTXO.
 // Returns the txid of the transfer transaction.
+//
+// Deprecated: unsafe (N-239). The transfer(sig, to: Addr) ABI cannot re-key
+// a PubKey holder, so the token does not move to recipientAddr. Use the
+// token-ft example (FungibleTokenExample) instead.
 func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, error) {
+	tokenWalletTransferWarnOnce.Do(func() { fmt.Fprint(os.Stderr, tokenWalletTransferDeprecation) })
 	utxos, err := tw.GetUtxos()
 	if err != nil {
 		return "", err
@@ -82,47 +105,23 @@ func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, err
 
 		if balance >= amount {
 			// FungibleToken.transfer(sig: Sig, to: Addr)
-			// Build a preliminary unlocking script with a placeholder sig
-			placeholderSig := strings.Repeat("00", 72)
-			prelimUnlock := contract.BuildUnlockingScript("transfer", []interface{}{placeholderSig, recipientAddr})
-
+			// F-045: pass nil for the Sig so Call auto-signs the transaction
+			// it actually builds and broadcasts. Signing a locally built
+			// preliminary tx covers a different tx and is rejected on-chain.
+			// An Addr is a 20-byte hash160: accept a Base58 address (as
+			// documented), a raw hash160, or a public key.
+			toPKH, err := addrToPKH(recipientAddr)
+			if err != nil {
+				return "", fmt.Errorf("TokenWallet.transfer: %w", err)
+			}
 			changeAddress, err := tw.signer.GetAddress()
 			if err != nil {
 				return "", fmt.Errorf("TokenWallet.transfer: getting address: %w", err)
 			}
-			feeRate, err := tw.provider.GetFeeRate()
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: getting fee rate: %w", err)
-			}
-			additionalUtxos, err := tw.provider.GetUtxos(changeAddress)
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: getting UTXOs: %w", err)
-			}
-			changeScript := BuildP2PKHScript(changeAddress)
-
-			prelimTx, _, _, prelimErr := BuildCallTransaction(
-				utxo,
-				prelimUnlock,
-				"",  // FungibleToken is stateless (SmartContract base)
-				0,
-				changeAddress,
-				changeScript,
-				additionalUtxos,
-				feeRate,
-			)
-			if prelimErr != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: %w", prelimErr)
-			}
-
-			// Sign input 0 against the contract UTXO's locking script
-			sig, err := tw.signer.Sign(prelimTx.Hex(), 0, utxo.Script, utxo.Satoshis, nil)
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: signing: %w", err)
-			}
 
 			txid, _, err := contract.Call(
 				"transfer",
-				[]interface{}{sig, recipientAddr},
+				[]interface{}{nil, toPKH},
 				tw.provider,
 				tw.signer,
 				&CallOptions{ChangeAddress: changeAddress},
@@ -144,7 +143,12 @@ func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, err
 // on-chain state and passed as arguments.
 //
 // Returns the txid of the merge transaction.
+//
+// Deprecated: unsafe (N-239). The merge(sig, otherSupply, otherHolder) ABI
+// cannot authenticate its companion input, so a holder can inflate supply.
+// Use the token-ft example (FungibleTokenExample) instead.
 func (tw *TokenWallet) Merge() (string, error) {
+	tokenWalletMergeWarnOnce.Do(func() { fmt.Fprint(os.Stderr, tokenWalletMergeDeprecation) })
 	utxos, err := tw.GetUtxos()
 	if err != nil {
 		return "", err
@@ -173,49 +177,31 @@ func (tw *TokenWallet) Merge() (string, error) {
 	}
 
 	// FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-	placeholderSig := strings.Repeat("00", 72)
-	prelimUnlock := contract.BuildUnlockingScript("merge", []interface{}{placeholderSig, int64(otherSupply), otherHolder})
+	// F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+	// the OTHER input's supply/holder, and every Sig is nil so Call signs
+	// each input over the transaction it actually broadcasts.
+	firstState := contract.GetState()
+	firstSupply := toInt64(getBalanceField(firstState))
+	firstHolder := ""
+	if h, ok := firstState["holder"]; ok {
+		firstHolder = fmt.Sprintf("%v", h)
+	}
 
 	changeAddress, err := tw.signer.GetAddress()
 	if err != nil {
 		return "", fmt.Errorf("TokenWallet.merge: getting address: %w", err)
 	}
-	feeRate, err := tw.provider.GetFeeRate()
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: getting fee rate: %w", err)
-	}
-	additionalUtxos, err := tw.provider.GetUtxos(changeAddress)
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: getting UTXOs: %w", err)
-	}
-	changeScript := BuildP2PKHScript(changeAddress)
-
-	prelimTx, _, _, prelimErr := BuildCallTransaction(
-		firstUtxo,
-		prelimUnlock,
-		"",
-		0,
-		changeAddress,
-		changeScript,
-		additionalUtxos,
-		feeRate,
-	)
-	if prelimErr != nil {
-		return "", fmt.Errorf("TokenWallet.merge: %w", prelimErr)
-	}
-
-	// Sign input 0 against the first contract UTXO's locking script
-	sig, err := tw.signer.Sign(prelimTx.Hex(), 0, firstUtxo.Script, firstUtxo.Satoshis, nil)
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: signing: %w", err)
-	}
 
 	txid, _, err := contract.Call(
 		"merge",
-		[]interface{}{sig, int64(otherSupply), otherHolder},
+		[]interface{}{nil, int64(otherSupply), otherHolder},
 		tw.provider,
 		tw.signer,
-		&CallOptions{ChangeAddress: changeAddress},
+		&CallOptions{
+			ChangeAddress:               changeAddress,
+			AdditionalContractInputs:    []*UTXO{&secondUtxo},
+			AdditionalContractInputArgs: [][]interface{}{{nil, int64(firstSupply), firstHolder}},
+		},
 	)
 	if err != nil {
 		return "", fmt.Errorf("TokenWallet.merge: %w", err)
@@ -234,19 +220,58 @@ func (tw *TokenWallet) GetUtxos() ([]UTXO, error) {
 		return nil, fmt.Errorf("TokenWallet.getUtxos: %w", err)
 	}
 
-	scriptPrefix := tw.artifact.Script
+	// N-076: the artifact script is the TEMPLATE; every slot (constructor
+	// arg, codeSepIndex, code-part length) is a placeholder that deployment
+	// replaces, so a raw prefix of it never matches a slotted deployment. With
+	// constructor slots, use the slot-aware MatchesArtifact; a template with
+	// none is deployed verbatim, so its literal prefix is exact.
+	template := tw.artifact.Script
+	slotted := len(tw.artifact.ConstructorSlots) > 0
 
 	var filtered []UTXO
 	for _, utxo := range allUtxos {
-		if utxo.Script != "" && scriptPrefix != "" {
-			if strings.HasPrefix(utxo.Script, scriptPrefix) {
+		if utxo.Script == "" || template == "" {
+			filtered = append(filtered, utxo)
+			continue
+		}
+		if !slotted {
+			if strings.HasPrefix(utxo.Script, template) {
 				filtered = append(filtered, utxo)
 			}
-		} else {
+			continue
+		}
+		// N-317: any UTXO the provider lists is attacker-influenced; a script
+		// that is not whole hex bytes is not an instance of this contract.
+		if !isHexBytes(utxo.Script) {
+			continue
+		}
+		// MatchesArtifact strips the state section only for artifacts that
+		// declare StateFields; cut it here for the rest.
+		codeHex := utxo.Script
+		if len(tw.artifact.StateFields) == 0 {
+			if pos := FindLastOpReturn(codeHex); pos != -1 {
+				codeHex = codeHex[:pos]
+			}
+		}
+		// A script that is not well-formed at the artifact's slot offsets
+		// (F-238) returns an error and is not an instance of this contract.
+		if ok, err := MatchesArtifact(tw.artifact, codeHex); err == nil && ok {
 			filtered = append(filtered, utxo)
 		}
 	}
 	return filtered, nil
+}
+
+// addrToPKH returns the 20-byte hash160 (hex) an Addr argument carries, from a
+// Base58 address, a raw hash160, or a public key. BuildP2PKHScript panics on
+// malformed input; surface that as an error instead.
+func addrToPKH(addr string) (pkh string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid recipient address %q: %v", addr, r)
+		}
+	}()
+	return BuildP2PKHScript(addr)[6:46], nil
 }
 
 // getBalanceField extracts the balance/supply/amount field from state.

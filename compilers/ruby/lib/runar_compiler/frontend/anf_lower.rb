@@ -42,6 +42,7 @@ module RunarCompiler
       # Mirrors the TS reference compiler's liftBranchUpdateProps (04-anf-lower.ts line 50).
       methods.each do |m|
         m.body = _lift_branch_update_props(m.body)
+        _drop_terminal_if_results(m.body) if m.is_public
       end
 
       IR::ANFProgram.new(
@@ -71,43 +72,22 @@ module RunarCompiler
     BYTE_TYPES = BYTESTRING_SUBTYPES
     private_constant :BYTE_TYPES
 
-    BYTE_RETURNING_FUNCTIONS = %w[
-      sha256 ripemd160 hash160 hash256 cat substr num2bin reverseBytes
-      left right int2str toByteString pack ecAdd ecMul ecMulGen ecNegate
-      ecMakePoint ecEncodeCompressed blake3Compress blake3Hash
-      p256Add p256Mul p256MulGen p256Negate p256EncodeCompressed
-      p384Add p384Mul p384MulGen p384Negate p384EncodeCompressed
-    ].to_set.freeze
-    private_constant :BYTE_RETURNING_FUNCTIONS
-
-    # Preimage field extractors that return BYTES (ByteString / Sha256).
+    # Does the builtin +name+ return a ByteString-family value?
     #
-    # N-054: this list is a transcription of the return_type the type checker
-    # already records for these builtins in typecheck.rb, and the stack lowerer
-    # agrees with it byte for byte: _lower_extractor ends the split sequence
-    # with OP_BIN2NUM for exactly the SIX extractors that are NOT listed here,
-    # and for none of the ones that are.
+    # N-347: read off the return_type column of typecheck.rb's
+    # BUILTIN_FUNCTIONS, not a second hand-written list. Two such lists lived
+    # here and drifted: N-054 (a name-prefix test swept the six numeric
+    # extractors in) and N-345 / N-347 (byte-returning builtins left out --
+    # merkleRootSha256, merkleRootHash256, bn254G1Add, bn254G1Negate,
+    # bn254G1ScalarMul -- so `===` on two of their results compiled to
+    # OP_NUMEQUAL). Do not reintroduce one.
     #
-    # So an extractor listed here leaves a byte string on the stack and must be
-    # compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
-    # leaves a minimally-encoded script NUMBER and must be compared with
-    # OP_NUMEQUAL and added with OP_ADD.
-    #
-    # Getting it backwards is a correctness defect in both directions. OP_EQUAL
-    # on a number is over-strict -- it rejects a witness that encodes the same
-    # value with different bytes (0400 for 4), i.e. it refuses a valid spend.
-    # OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing
-    # high-order zero bytes and negative zero compare equal to values they are
-    # not byte-equal to, i.e. a covenant bypass.
-    #
-    # This replaces a name[0, 7] == "extract" prefix test that swept the six
-    # numeric extractors in with the byte ones.
-    BYTE_RETURNING_EXTRACTORS = %w[
-      extractHashPrevouts extractHashSequence extractOutpoint
-      extractScriptCode extractOutputHash extractOutputs
-      extractPrevOutputScript
-    ].to_set.freeze
-    private_constant :BYTE_RETURNING_EXTRACTORS
+    # @param name [String]
+    # @return [Boolean]
+    def self._byte_returning_builtin?(name)
+      sig = BUILTIN_FUNCTIONS[name]
+      !sig.nil? && BYTE_TYPES.include?(sig.return_type)
+    end
 
     # @param expr [Expression, nil]
     # @param ctx [LoweringContext]
@@ -118,11 +98,15 @@ module RunarCompiler
       return true if expr.is_a?(ByteStringLiteral)
 
       if expr.is_a?(Identifier)
+        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+        # binding, never by the parameter or property it shadows.
+        renamed = ctx.scope_rename(expr.name)
+        return ctx.local_byte_var?(renamed) unless renamed.nil?
         t = ctx.get_param_type(expr.name)
         return true if t && BYTE_TYPES.include?(t)
         t = ctx.get_property_type(expr.name)
         return true if t && BYTE_TYPES.include?(t)
-        return true if ctx.local_byte_var?(expr.name)
+        return true if ctx.local_byte_var?(ctx.local_name(expr.name))
         return false
       end
 
@@ -144,8 +128,7 @@ module RunarCompiler
         if expr.callee.is_a?(Identifier)
           # Expression-form asm<ByteString>({...}) yields a byte value.
           return expr.asm_return_type == "ByteString" if expr.callee.name == "asm"
-          return true if BYTE_RETURNING_FUNCTIONS.include?(expr.callee.name)
-          return true if BYTE_RETURNING_EXTRACTORS.include?(expr.callee.name)
+          return true if _byte_returning_builtin?(expr.callee.name)
         end
         return false
       end
@@ -364,6 +347,16 @@ module RunarCompiler
         # property? before param? (below), so a stored property still wins.
         method.params.each do |p|
           method_ctx.add_param(p.name)
+          # N-016: a private helper's parameter is not part of any ABI, so one
+          # that shadows a property is bound under the collision-proof local
+          # name. (A PUBLIC parameter keeps its ABI name.) N-360: a public one
+          # the body REASSIGNS is renamed too -- its rebinding is merged out of
+          # an if by name, where a property result of the same name would
+          # capture it. The ABI keeps the source name either way.
+          if method_ctx.property?(p.name) &&
+             (method.visibility == "private" || Frontend._statements_reassign(method.body, p.name))
+            method_ctx.rename_private_param(p.name)
+          end
         end
 
         if contract.parent_class == "StatefulSmartContract" && method.visibility == "public"
@@ -371,11 +364,16 @@ module RunarCompiler
           # Methods that use addOutput / addDataOutput or mutate state need hashOutputs
           # verification.
           has_data_output = _method_has_add_data_output(method, contract)
-          needs_change_output = (
+          needs_continuation = (
             _method_mutates_state(method, contract) ||
             _method_has_add_output(method, contract) ||
             has_data_output
           )
+          # N-038: under a SIGHASH_SINGLE base BIP-143 commits hashOutputs to the
+          # same-index output only, so the change output is not committed and the
+          # method takes no _changePKH / _changeAmount.
+          needs_change_output = needs_continuation &&
+                                ((method_sighash.nil? ? SIGHASH_DEFAULT : method_sighash) & 0x1F) != 0x03
 
           # Register implicit parameters
           if needs_change_output
@@ -463,6 +461,26 @@ module RunarCompiler
           add_output_refs = method_ctx.get_add_output_refs
           add_data_output_refs = method_ctx.get_add_data_output_refs
           if add_output_refs.any? || add_data_output_refs.any? || _method_mutates_state(method, contract)
+            # F-024 (R14): the default single-output continuation carries the
+            # spender-chosen +_newAmount+ into the new state UTXO. Without this
+            # check a spender sets +_newAmount = 1+ and pays the rest of the
+            # input value to their own change output -- the committed outputs
+            # then match the covenant's hash exactly. Value may grow (a
+            # deposit) but never shrink below the input amount. addOutput /
+            # addRawOutput methods size their outputs explicitly and terminal
+            # methods have no continuation. Mirrors 04-anf-lower.ts.
+            if add_output_refs.empty?
+              amount_preimage_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+              input_amount_ref = method_ctx.emit(_make_call("extractAmount", [amount_preimage_ref]))
+              new_amount_check_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
+              amount_ok_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+                v.op = ">="
+                v.left = new_amount_check_ref
+                v.right = input_amount_ref
+              end)
+              method_ctx.emit(_make_assert(amount_ok_ref))
+            end
+
             # Build the P2PKH change output for hashOutputs verification
             #
             # #116: the SDK's buildCallTransaction OMITS the change output when
@@ -473,25 +491,35 @@ module RunarCompiler
             # (cat with empty is a no-op) when zero, reproducing the omission.
             # For any change > 0 the hashed bytes are unchanged; only the emitted
             # script gains the guard.
-            change_pkh_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changePKH" })
-            change_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changeAmount" })
-            zero_ref = method_ctx.emit(_make_load_const_int(0))
-            change_nonzero_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
-              v.op = "!=="
-              v.left = change_amount_ref
-              v.right = zero_ref
-            end)
-            change_then_ctx = method_ctx.sub_context
-            change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
-            method_ctx.sync_counter(change_then_ctx)
-            change_else_ctx = method_ctx.sub_context
-            change_else_ctx.emit(_make_load_const_string(""))
-            method_ctx.sync_counter(change_else_ctx)
-            change_output_ref = method_ctx.emit(IR::ANFValue.new(kind: "if").tap do |v|
-              v.cond = change_nonzero_ref
-              v.then = change_then_ctx.bindings
-              v.else_ = change_else_ctx.bindings
-            end)
+            # N-038: under a SIGHASH_SINGLE base no change segment exists
+            # (hashOutputs = hash256(output[inputIndex])).
+            change_output_ref = nil
+            if needs_change_output
+              change_pkh_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changePKH" })
+              change_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changeAmount" })
+              zero_ref = method_ctx.emit(_make_load_const_int(0))
+              change_nonzero_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+                v.op = "!=="
+                v.left = change_amount_ref
+                v.right = zero_ref
+              end)
+              change_then_ctx = method_ctx.sub_context
+              change_then_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
+              method_ctx.sync_counter(change_then_ctx)
+              change_else_ctx = method_ctx.sub_context
+              change_else_ctx.emit(_make_load_const_string(""))
+              method_ctx.sync_counter(change_else_ctx)
+              change_output_ref = method_ctx.emit(IR::ANFValue.new(kind: "if").tap do |v|
+                v.cond = change_nonzero_ref
+                v.then = change_then_ctx.bindings
+                v.else_ = change_else_ctx.bindings
+              end)
+            end
+            cat_change = lambda do |acc|
+              next acc if change_output_ref.nil?
+
+              method_ctx.emit(_make_call("cat", [acc, change_output_ref]))
+            end
 
             if add_output_refs.any?
               # Multi-output continuation: concat all state outputs, then all
@@ -503,7 +531,7 @@ module RunarCompiler
               add_data_output_refs.each do |data_ref|
                 accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
               end
-              accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+              accumulated = cat_change.call(accumulated)
               hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
               preimage_ref2 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref2]))
@@ -526,7 +554,7 @@ module RunarCompiler
               add_data_output_refs.each do |data_ref|
                 accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
               end
-              all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+              all_outputs = cat_change.call(accumulated)
               hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
               preimage_ref4 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
@@ -544,6 +572,7 @@ module RunarCompiler
           augmented_params = _lower_params(
             method.params.reject { |p| _is_stateful_context_param(p) }
           )
+          augmented_params.each { |ap| ap.name = method_ctx.param_slot(ap.name) }
           if needs_change_output
             augmented_params << IR::ANFParam.new(name: "_changePKH", type: "Ripemd160")
             augmented_params << IR::ANFParam.new(name: "_changeAmount", type: "bigint")
@@ -579,6 +608,7 @@ module RunarCompiler
           augmented = _lower_params(
             method.params.reject { |p| _is_stateful_context_param(p) }
           )
+          augmented.each { |ap| ap.name = method_ctx.param_slot(ap.name) }
           # Private methods can also call the intent intrinsics; capture
           # their auto-injected witness params so a public method that
           # inlines this private picks them up via the shared methodScope.
@@ -641,6 +671,9 @@ module RunarCompiler
     end
     private_class_method :_is_stateful_context_param
 
+    # N-016: suffix of the binding name of a local that shadows a property.
+    SHADOW_LOCAL_SUFFIX = "@local"
+
     # @param params [Array<ParamNode>]
     # @return [Array<IR::ANFParam>]
     def self._lower_params(params)
@@ -665,6 +698,15 @@ module RunarCompiler
       def initialize
         @auto_injected_params = []
         @auto_injected_set = {}
+        # N-046 / N-047: the last `<name>@<n>` suffix handed out in this
+        # method, shared by every sub-context and inlined helper body.
+        @shadow_seq = 0
+      end
+
+      # N-046: a method-unique `<name>@<n>` binding name.
+      def next_shadow_name(name)
+        @shadow_seq += 1
+        "#{name}@#{@shadow_seq}"
       end
 
       # Idempotent: second call with the same name is a no-op.
@@ -700,6 +742,18 @@ module RunarCompiler
         @add_output_refs = []
         @add_data_output_refs = []
         @local_aliases = {}
+        # N-016: private-helper params renamed because they shadow a property,
+        # and loop variables in scope whose name is a property's.
+        @renamed_private_params = {}
+        @shadowing_loop_vars = Set.new
+        # N-046 / N-047: source name -> binding name of a declaration that
+        # reused a name already bound in an enclosing scope (an outer local, a
+        # parameter, a loop variable, or, inside an inlined helper, a caller
+        # local). Copied by value into sub-contexts, so the rename ends with the
+        # declaring block.
+        @scope_renames = {}
+        # N-046: source names of the loop variables in scope.
+        @loop_vars = Set.new
         @local_byte_vars = Set.new
         @current_source_loc = nil
         # Param substitution stack used when inlining a private method's body
@@ -719,6 +773,8 @@ module RunarCompiler
         @nested = false
         # R-072: see the +did_emit_hash_outputs_check+ accessor below.
         @did_emit_hash_outputs_check = false
+        # N-202: see the +enclosing_loop_count+ accessor below.
+        @enclosing_loop_count = 1
       end
 
       # @return [MethodScope] shared per-method bookkeeping for intent intrinsics
@@ -749,6 +805,13 @@ module RunarCompiler
       # own commitment constrains nothing about the transaction's real outputs,
       # and the bond it claims to enforce can be satisfied with invented bytes.
       attr_accessor :did_emit_hash_outputs_check
+
+      # N-202: the product of the counts of every for-loop enclosing the block
+      # this context lowers (1 at method top level). Copied unchanged into if /
+      # ternary arms; a loop body gets +enclosing * count+. The per-loop
+      # MAX_LOOP_COUNT check bounds one loop; this bounds the unrolled work
+      # along a nesting path, the rule the --ir loader applies (F-283).
+      attr_accessor :enclosing_loop_count
 
       # Push an alias for a parameter name, used while inlining the body of
       # a private method into this context: identifier references to that
@@ -821,8 +884,13 @@ module RunarCompiler
       def should_inline_private?(name)
         m = get_private_method(name)
         return false if m.nil?
+        # N-070: a helper that calls requireOutputP2PKH is inlined too, so the
+        # _serialisedOutputs witness lands on the public method. N-315: the
+        # same for extractPrevOutputScript and _prevOutScript_<i>.
         RunarCompiler::Frontend.send(:_method_has_add_output, m, @contract) ||
-          RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract)
+          RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract) ||
+          RunarCompiler::Frontend.send(:_method_calls_require_output_p2pkh, m, @contract, false) ||
+          RunarCompiler::Frontend.send(:_method_calls_extract_prev_output_script, m, @contract)
       end
 
       # Inline a private method's body directly into this context. Mirrors
@@ -838,16 +906,38 @@ module RunarCompiler
           end)
         end
 
+        # N-362: a parameter the body reassigns is not aliased -- a write cannot
+        # rebind an alias, so the helper read the caller's argument after it and
+        # the write landed on the caller's same-named variable. It is bound as a
+        # local of the helper below.
         aliased_params = []
+        reassigned = []
         n = [method.params.size, arg_refs.size].min
         n.times do |i|
           param_name = method.params[i].name
+          if Frontend._statements_reassign(method.body, param_name)
+            reassigned << i
+            next
+          end
           push_param_alias(param_name, arg_refs[i])
           aliased_params << param_name
         end
 
+        # N-047: the helper body is its own lexical scope. Its locals are
+        # declared against the caller's (a collision is alpha-renamed by
+        # declare_local) and go out of scope when it returns.
+        caller_scope = enter_inlined_scope
+        # N-362: `let <param> = <arg>` for each reassigned parameter (spec 6.3).
+        reassigned.each do |i|
+          param = method.params[i]
+          binding_name = declare_local(param.name)
+          add_local(binding_name)
+          @local_byte_vars.add(binding_name) if BYTE_TYPES.include?(Frontend._type_node_to_string(param.type))
+          emit_named(binding_name, Frontend._make_load_const_string("@ref:#{arg_refs[i]}"))
+        end
         start_index = @bindings.size
         lower_statements(method.body)
+        leave_inlined_scope(caller_scope)
         end_index = @bindings.size
 
         aliased_params.reverse_each { |p| pop_param_alias(p) }
@@ -979,6 +1069,101 @@ module RunarCompiler
         @contract.properties.any? { |p| p.name == name }
       end
 
+      # N-016: the ANF binding name for a source-level local (or loop variable,
+      # or private-helper parameter) called +name+. Binding names and property
+      # names share one namespace downstream -- stack lowering resolves
+      # load_prop / update_prop / the state continuation / an if's results by
+      # name -- so a local bound as `x` next to a property `x` made `this.x`
+      # read the local. A property-named local is bound under `<name>@local`
+      # (`@` is in no surface's identifiers, so it cannot collide with a
+      # property, another local or a temp); every other name is unchanged,
+      # keeping non-shadowing ANF byte-identical.
+      # @return [String]
+      def local_name(name)
+        renamed = @scope_renames[name]
+        return renamed unless renamed.nil?
+        property?(name) ? "#{name}#{Frontend::SHADOW_LOCAL_SUFFIX}" : name
+      end
+
+      # N-046: the renamed binding of +name+ in this scope, or nil.
+      def scope_rename(name)
+        @scope_renames[name]
+      end
+
+      # N-046 / N-047: the binding name of a block-scoped declaration of +name+.
+      # A declaration that reuses a name already bound in an enclosing scope (an
+      # outer local, a parameter, a loop variable, an inlined helper's
+      # parameter) is bound under the fresh `<name>@<n>` and recorded in this
+      # scope, so it can never be mistaken for a reassignment of the outer
+      # binding (if-arm reconciliation matches arm bindings to outer locals BY
+      # NAME). A declaration that collides with nothing keeps local_name(name),
+      # which keeps non-shadowing ANF byte-identical.
+      # @return [String]
+      def declare_local(name)
+        in_scope = @scope_renames.key?(name) ||
+                   local?(local_name(name)) ||
+                   param?(name) ||
+                   !get_param_alias(name).nil? ||
+                   @loop_vars.include?(name)
+        return local_name(name) unless in_scope
+        fresh = @method_scope.next_shadow_name(name)
+        @scope_renames[name] = fresh
+        fresh
+      end
+
+      # N-046: register a loop variable (source name) as in scope.
+      def add_loop_var(name)
+        @loop_vars.add(name)
+      end
+
+      # N-047: an inlined private helper's body is its own lexical scope: none
+      # of the caller's renames apply inside it, and none of its locals outlive
+      # it. Returns the state leave_inlined_scope restores.
+      def enter_inlined_scope
+        saved = [@scope_renames, @local_names.dup, @local_byte_vars.dup, @local_aliases.dup, @loop_vars.dup]
+        @scope_renames = {}
+        saved
+      end
+
+      def leave_inlined_scope(saved)
+        @scope_renames, @local_names, @local_byte_vars, @local_aliases, @loop_vars = saved
+      end
+
+      # N-016: the binding a write to the bare identifier +name+ rebinds -- the
+      # local's (possibly renamed) binding when a local of that name is in
+      # scope, otherwise the name itself, exactly as before.
+      # @return [String]
+      def local_target(name)
+        local = local_name(name)
+        return local if local?(local)
+
+        # N-360: a renamed parameter is read from its slot, so it is rebound there.
+        param?(name) ? param_slot(name) : name
+      end
+
+      # N-360: whether +name+ is the load_param slot of one of this method's
+      # parameters.
+      # @return [Boolean]
+      def param_slot?(name)
+        @param_names.any? { |p| param_slot(p) == name }
+      end
+
+      # N-016: record a private helper's parameter that shadows a property.
+      def rename_private_param(name)
+        @renamed_private_params[name] = local_name(name)
+      end
+
+      # N-016: the load_param name a source parameter resolves to.
+      # @return [String]
+      def param_slot(name)
+        @renamed_private_params.fetch(name, name)
+      end
+
+      # N-016: register a loop variable that shadows a property in this scope.
+      def add_shadowing_loop_var(name)
+        @shadowing_loop_vars.add(name)
+      end
+
       # Whether `name` is a private (non-public) method on the contract.
       # Used to route bare-identifier calls through the method_call inlining
       # path so Move's free-function helpers match TypeScript's `this.foo()`.
@@ -1024,6 +1209,12 @@ module RunarCompiler
         sub.instance_variable_set(:@param_names, @param_names.dup)
         sub.instance_variable_set(:@param_types, @param_types.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
+        sub.instance_variable_set(:@renamed_private_params, @renamed_private_params.dup)
+        sub.instance_variable_set(:@shadowing_loop_vars, @shadowing_loop_vars.dup)
+        # N-046: the block inherits the enclosing renames and loop variables by
+        # value, so a rename made inside it ends with it.
+        sub.instance_variable_set(:@scope_renames, @scope_renames.dup)
+        sub.instance_variable_set(:@loop_vars, @loop_vars.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
         # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1050,6 +1241,8 @@ module RunarCompiler
         # Propagate the method's declared @sighash flag (issue #123) so a manual
         # checkPreimage inside an if/else branch binds under the same mode.
         sub.sighash_flag = @sighash_flag
+        # N-202: if / ternary arms inherit the enclosing loop product.
+        sub.enclosing_loop_count = @enclosing_loop_count
         # _lift_branch_update_props walks method.body and does NOT recurse, so
         # an +if+ its recogniser accepts is only actually REWRITTEN at method
         # top level. lower_if_statement needs the same distinction before it
@@ -1086,7 +1279,8 @@ module RunarCompiler
             modified_if = IfStmt.new(
               condition: stmt.condition,
               then: stmt.then,
-              else_: remaining
+              else_: remaining,
+              source_location: stmt.source_location
             )
             lower_statement(modified_if, reads_after_block)
             return
@@ -1279,11 +1473,15 @@ module RunarCompiler
       # @param stmt [VariableDeclStmt]
       def _lower_variable_decl(stmt)
         value_ref = lower_expr_to_ref(stmt.init)
-        add_local(stmt.name)
-        if Frontend._is_byte_typed_expr(stmt.init, self)
-          @local_byte_vars.add(stmt.name)
-        end
-        emit_named(stmt.name, Frontend._make_load_const_string("@ref:#{value_ref}"))
+        # Byte-typedness of the initialiser is judged before the new name is in
+        # scope (the initialiser reads the OUTER binding of a shadowed name).
+        is_bytes = Frontend._is_byte_typed_expr(stmt.init, self)
+        # N-046 / N-047: a declaration reusing an enclosing binding's name is
+        # alpha-renamed (see declare_local).
+        binding_name = declare_local(stmt.name)
+        add_local(binding_name)
+        @local_byte_vars.add(binding_name) if is_bytes
+        emit_named(binding_name, Frontend._make_load_const_string("@ref:#{value_ref}"))
       end
 
       # @param stmt [AssignmentStmt]
@@ -1298,7 +1496,7 @@ module RunarCompiler
 
         # local = expr -> re-bind
         if stmt.target.is_a?(Identifier)
-          emit_named(stmt.target.name, Frontend._make_load_const_string("@ref:#{value_ref}"))
+          emit_named(local_target(stmt.target.name), Frontend._make_load_const_string("@ref:#{value_ref}"))
           return
         end
 
@@ -1512,7 +1710,8 @@ module RunarCompiler
         last_rebind_order = lambda do |branch|
           last_index = {}
           branch.bindings.each_with_index do |b, i|
-            last_index[b.name] = i if local?(b.name)
+            # N-360: a reassigned parameter merges like a local (by its slot name).
+            last_index[b.name] = i if local?(b.name) || param_slot?(b.name)
           end
           last_index.sort_by { |_, i| i }.map(&:first)
         end
@@ -1530,19 +1729,48 @@ module RunarCompiler
         # supported (#121) — on iteration i the iterator holds start + i*step.
         shape = Frontend._extract_loop_shape(stmt)
 
+        # N-202: bound the PRODUCT along the nesting path, not just this loop.
+        max_count = ::RunarCompiler::IR::MAX_LOOP_COUNT
+        total_loop_count = @enclosing_loop_count * shape[:count]
+        if total_loop_count > max_count
+          raise "For loop unrolls to #{shape[:count]} iterations nested inside an " \
+                "enclosing loop of total count #{@enclosing_loop_count}, producing " \
+                "#{total_loop_count} total iterations, exceeding the maximum loop count of #{max_count}."
+        end
+
         # Lower body into sub-context. The body repeats, so every read anywhere
         # in it is a read that happens after any given statement inside it.
         body_reads = reads_after.dup
         stmt.body.each { |s| Frontend._collect_statement_reads(s, body_reads) }
 
         body_ctx = sub_context
+        body_ctx.enclosing_loop_count = total_loop_count
+        body_ctx.add_shadowing_loop_var(stmt.init.name) if stmt.init && property?(stmt.init.name)
+        # N-046: a loop variable reusing an enclosing binding's name is
+        # alpha-renamed in the body's scope (see declare_local).
+        iter_var = ""
+        if stmt.init
+          iter_var = body_ctx.declare_local(stmt.init.name)
+          body_ctx.add_loop_var(stmt.init.name)
+        end
         body_ctx.lower_statements(stmt.body, body_reads)
         sync_counter(body_ctx)
+
+        # N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+        # intrinsic in the body registered its ref on body_ctx, which is
+        # dropped here, so the continuation hash would not commit to that
+        # output. Merging the refs cannot work (one body name denotes N
+        # unrolled slots), so refuse. `Frontend.lower_to_anf` is public, so
+        # this cannot rely on the validator having run.
+        if body_ctx.get_add_output_refs.any? || body_ctx.get_add_data_output_refs.any?
+          intrinsic = Frontend._first_output_intrinsic(body_ctx.bindings) || "addOutput"
+          raise ArgumentError, ValidationContext.loop_output_intrinsic_msg(intrinsic, nil)
+        end
 
         emit(IR::ANFValue.new(kind: "loop").tap do |v|
           v.count = shape[:count]
           v.body = body_ctx.bindings
-          v.iter_var = stmt.init ? stmt.init.name : ""
+          v.iter_var = iter_var
           v.start = shape[:start]
           v.step = shape[:step]
         end)
@@ -1556,6 +1784,19 @@ module RunarCompiler
         # 'this' is not a value in ANF
         return emit(Frontend._make_load_const_string("@this")) if name == "this"
 
+        # N-046 / N-047: a declaration that shadowed an enclosing binding is
+        # the innermost binding of its name, ahead of params and param aliases.
+        # A renamed loop variable is not a local; it is read with load_param
+        # like every loop variable.
+        renamed = @scope_renames[name]
+        unless renamed.nil?
+          if local?(renamed)
+            a = get_local_alias(renamed)
+            return a.empty? ? renamed : a
+          end
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = renamed })
+        end
+
         # Param alias takes precedence over normal param lookup. Set when a
         # private method's body is being inlined into this context — the
         # private's param names map to the caller's arg refs.
@@ -1563,14 +1804,21 @@ module RunarCompiler
         return param_alias unless param_alias.nil?
 
         # Check if it's a registered parameter (e.g. txPreimage)
-        return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = name }) if param?(name)
+        return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = param_slot(name) }) if param?(name)
 
         # Check if it's a local variable -- reference it directly
         # (or use its alias if reassigned by an if-statement)
-        if local?(name)
-          a = get_local_alias(name)
+        local = local_name(name)
+        if local?(local)
+          a = get_local_alias(local)
           return a unless a.empty?
-          return name
+          return local
+        end
+
+        # N-016: a loop variable named like a property is the loop variable,
+        # not the property (it used to fall through to load_prop below).
+        if @shadowing_loop_vars.include?(name)
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = local })
         end
 
         # Check if it's a contract property
@@ -1806,6 +2054,17 @@ module RunarCompiler
             v.result_type = "bytes"
           end)
           return emit(Frontend._make_assert(out_eq_ref))
+        end
+
+        # continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+        # auto-injected +_newAmount+ witness. It exists only in a public
+        # StatefulSmartContract method that continues through the default
+        # single-output continuation; anywhere else (private helpers, terminal
+        # methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+        if callee.is_a?(Identifier) && callee.name == "continuationAmount"
+          raise Frontend::CONTINUATION_AMOUNT_UNAVAILABLE unless param?("_newAmount")
+
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
         end
 
         # currentBlockHeight() -> bigint. Pure source-level desugar to
@@ -2064,6 +2323,17 @@ module RunarCompiler
         else_ctx._lower_ternary_arm(e.alternate)
         sync_counter(else_ctx)
 
+        # N-049 backstop: an output intrinsic in an arm registered its ref on
+        # the arm's sub-context, which is dropped here, so the continuation
+        # hash would not commit to that output. `Frontend.lower_to_anf` is
+        # public, so this cannot rely on the validator having run.
+        [then_ctx, else_ctx].each do |arm_ctx|
+          next unless arm_ctx.get_add_output_refs.any? || arm_ctx.get_add_data_output_refs.any?
+
+          intrinsic = Frontend._first_output_intrinsic(arm_ctx.bindings) || "addOutput"
+          raise ArgumentError, ValidationContext.ternary_output_intrinsic_msg(intrinsic, nil)
+        end
+
         emit(IR::ANFValue.new(kind: "if").tap do |v|
           v.cond = cond_ref
           v.then = then_ctx.bindings
@@ -2084,7 +2354,7 @@ module RunarCompiler
 
         # If the operand is a named variable, update it
         if e.operand.is_a?(Identifier)
-          emit_named(e.operand.name, Frontend._make_load_const_string("@ref:#{result}"))
+          emit_named(local_target(e.operand.name), Frontend._make_load_const_string("@ref:#{result}"))
         end
         if e.operand.is_a?(PropertyAccessExpr)
           emit(Frontend._make_update_prop(e.operand.property, result))
@@ -2106,7 +2376,7 @@ module RunarCompiler
 
         # If the operand is a named variable, update it
         if e.operand.is_a?(Identifier)
-          emit_named(e.operand.name, Frontend._make_load_const_string("@ref:#{result}"))
+          emit_named(local_target(e.operand.name), Frontend._make_load_const_string("@ref:#{result}"))
         end
         if e.operand.is_a?(PropertyAccessExpr)
           emit(Frontend._make_update_prop(e.operand.property, result))
@@ -2182,6 +2452,29 @@ module RunarCompiler
     # @param func_name [String]
     # @param args [Array<String>]
     # @return [IR::ANFValue]
+    OUTPUT_KIND_TO_INTRINSIC = {
+      "add_output" => "addOutput",
+      "add_raw_output" => "addRawOutput",
+      "add_data_output" => "addDataOutput"
+    }.freeze
+
+    # Name the source intrinsic of the first output node in +bindings+,
+    # searching nested if/loop bodies, for the N-006 refusal.
+    def self._first_output_intrinsic(bindings)
+      (bindings || []).each do |b|
+        v = b.value
+        return OUTPUT_KIND_TO_INTRINSIC[v.kind] if OUTPUT_KIND_TO_INTRINSIC.key?(v.kind)
+
+        name =
+          case v.kind
+          when "if" then _first_output_intrinsic(v.then) || _first_output_intrinsic(v.else_)
+          when "loop" then _first_output_intrinsic(v.body)
+          end
+        return name if name
+      end
+      nil
+    end
+
     def self._make_call(func_name, args)
       IR::ANFValue.new(kind: "call").tap do |v|
         v.func = func_name
@@ -2279,6 +2572,68 @@ module RunarCompiler
       end
     end
 
+    # N-360: whether any statement writes the bare identifier +name+ -- an
+    # assignment to it, or a ++ / -- of it -- anywhere, nested blocks included.
+    def self._statements_reassign(stmts, name)
+      (stmts || []).any? { |s| _statement_reassigns(s, name) }
+    end
+
+    def self._statement_reassigns(stmt, name)
+      case stmt
+      when VariableDeclStmt
+        _expression_reassigns(stmt.init, name)
+      when AssignmentStmt
+        (stmt.target.is_a?(Identifier) && stmt.target.name == name) ||
+          _expression_reassigns(stmt.target, name) ||
+          _expression_reassigns(stmt.value, name)
+      when IfStmt
+        _expression_reassigns(stmt.condition, name) ||
+          _statements_reassign(stmt.then, name) ||
+          _statements_reassign(stmt.else_, name)
+      when ForStmt
+        (stmt.init ? _statement_reassigns(stmt.init, name) : false) ||
+          _expression_reassigns(stmt.condition, name) ||
+          (stmt.update ? _statement_reassigns(stmt.update, name) : false) ||
+          _statements_reassign(stmt.body, name)
+      when ReturnStmt
+        _expression_reassigns(stmt.value, name)
+      when ExpressionStmt
+        _expression_reassigns(stmt.expr, name)
+      else
+        false
+      end
+    end
+
+    def self._expression_reassigns(expr, name)
+      case expr
+      when BinaryExpr
+        _expression_reassigns(expr.left, name) || _expression_reassigns(expr.right, name)
+      when UnaryExpr
+        _expression_reassigns(expr.operand, name)
+      when CallExpr
+        _expression_reassigns(expr.callee, name) ||
+          (expr.args || []).any? { |a| _expression_reassigns(a, name) }
+      when MethodCallExpr
+        _expression_reassigns(expr.object, name) ||
+          (expr.args || []).any? { |a| _expression_reassigns(a, name) }
+      when MemberExpr
+        _expression_reassigns(expr.object, name)
+      when TernaryExpr
+        _expression_reassigns(expr.condition, name) ||
+          _expression_reassigns(expr.consequent, name) ||
+          _expression_reassigns(expr.alternate, name)
+      when IndexAccessExpr
+        _expression_reassigns(expr.object, name) || _expression_reassigns(expr.index, name)
+      when IncrementExpr, DecrementExpr
+        (expr.operand.is_a?(Identifier) && expr.operand.name == name) ||
+          _expression_reassigns(expr.operand, name)
+      when ArrayLiteralExpr
+        (expr.elements || []).any? { |e| _expression_reassigns(e, name) }
+      else
+        false
+      end
+    end
+
     # Collect every identifier an expression reads.
     def self._collect_expression_reads(expr, out)
       return if expr.nil?
@@ -2371,7 +2726,8 @@ module RunarCompiler
       # 4. INV-B: a rebound local that survives the +if+ is protected from being
       #    rolled away, so the arm ends one slot deeper than lowerIf accounts
       #    for.
-      live_merged = merged_locals.select { |name| reads_after.include?(name) }
+      # N-016 / N-046: the source spelling is everything before the first `@`.
+      live_merged = merged_locals.select { |name| reads_after.include?(name.split("@", 2).first) }
       unless live_merged.empty?
         return "reassigns local variables read after it (#{live_merged.join(', ')})"
       end
@@ -2399,6 +2755,12 @@ module RunarCompiler
 
     # @param value_ref [String]
     # @return [IR::ANFValue]
+    # F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+    CONTINUATION_AMOUNT_UNAVAILABLE =
+      "continuationAmount() is only available in a public StatefulSmartContract method whose state " \
+      "continues through the default single-output continuation (it mutates state or emits a data " \
+      "output, and does not call addOutput/addRawOutput)"
+
     def self._make_assert(value_ref)
       raw = JSON.generate(value_ref)
       IR::ANFValue.new(kind: "assert").tap do |v|
@@ -2508,6 +2870,24 @@ module RunarCompiler
     # State mutation analysis
     # -------------------------------------------------------------------
 
+    # N-264: the private-method bodies a cross-call predicate below still has
+    # to scan, each at most once.
+    class CalleeQueue
+      attr_reader :pending
+
+      def initialize(seen)
+        @visited = seen.dup
+        @pending = []
+      end
+
+      def enqueue(target)
+        return if target.nil? || @visited.include?(target.name)
+
+        @visited.add(target.name)
+        @pending << (target.body || [])
+      end
+    end
+
     # Determine whether a method mutates any mutable (non-readonly) property.
     # Conservative: if ANY code path can mutate state, returns true. Walks
     # the private-method call graph so a public method that delegates the
@@ -2529,26 +2909,38 @@ module RunarCompiler
     # @param seen [Set<String>] private methods currently on the recursion stack
     # @return [Boolean]
     def self._body_mutates_state(stmts, mutable_props, contract, seen)
-      stmts.any? { |stmt| _stmt_mutates_state(stmt, mutable_props, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_mutates_state(stmt, mutable_props, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_mutates_state
 
     # @return [Boolean]
-    def self._stmt_mutates_state(stmt, mutable_props, contract, seen)
+    def self._stmt_mutates_state(stmt, mutable_props, contract, q)
       if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(PropertyAccessExpr) &&
          mutable_props.include?(stmt.target.property)
         return true
       end
 
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_mutates_state(e, mutable_props, contract, seen)
+        _expr_mutates_state(e, mutable_props, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, q) }
     end
     private_class_method :_stmt_mutates_state
 
     # @return [Boolean]
-    def self._expr_mutates_state(expr, mutable_props, contract, seen)
+    def self._expr_mutates_state(expr, mutable_props, contract, q)
       return false if expr.nil?
       if expr.is_a?(IncrementExpr) || expr.is_a?(DecrementExpr)
         # The reference stops here -- it does not descend into the operand.
@@ -2557,12 +2949,9 @@ module RunarCompiler
       end
       if expr.is_a?(CallExpr)
         target = _resolve_private_method(expr.callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_mutates_state(target.body, mutable_props, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, q) }
     end
     private_class_method :_expr_mutates_state
 
@@ -2596,21 +2985,33 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._body_has_add_output(stmts, contract, seen)
-      stmts.any? { |stmt| _stmt_has_add_output(stmt, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_has_add_output(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_has_add_output
 
     # @return [Boolean]
-    def self._stmt_has_add_output(stmt, contract, seen)
+    def self._stmt_has_add_output(stmt, contract, q)
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_has_add_output(e, contract, seen)
+        _expr_has_add_output(e, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, q) }
     end
     private_class_method :_stmt_has_add_output
 
     # @return [Boolean]
-    def self._expr_has_add_output(expr, contract, seen)
+    def self._expr_has_add_output(expr, contract, q)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -2624,12 +3025,9 @@ module RunarCompiler
           return true
         end
         target = _resolve_private_method(callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_has_add_output(target.body, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, q) }
     end
     private_class_method :_expr_has_add_output
 
@@ -2646,21 +3044,33 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._body_has_add_data_output(stmts, contract, seen)
-      stmts.any? { |stmt| _stmt_has_add_data_output(stmt, contract, seen) }
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_has_add_data_output(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
     end
     private_class_method :_body_has_add_data_output
 
     # @return [Boolean]
-    def self._stmt_has_add_data_output(stmt, contract, seen)
+    def self._stmt_has_add_data_output(stmt, contract, q)
       return true if _statement_expressions(stmt).any? { |e|
-        _expr_has_add_data_output(e, contract, seen)
+        _expr_has_add_data_output(e, contract, q)
       }
-      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, seen) }
+      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, q) }
     end
     private_class_method :_stmt_has_add_data_output
 
     # @return [Boolean]
-    def self._expr_has_add_data_output(expr, contract, seen)
+    def self._expr_has_add_data_output(expr, contract, q)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -2674,14 +3084,107 @@ module RunarCompiler
           return true
         end
         target = _resolve_private_method(callee, contract)
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if _body_has_add_data_output(target.body, contract, new_seen)
-        end
+        q.enqueue(target)
       end
-      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, seen) }
+      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, q) }
     end
     private_class_method :_expr_has_add_data_output
+
+    # -------------------------------------------------------------------
+    # requireOutputP2PKH detection (recursive across private calls)
+    # -------------------------------------------------------------------
+    # F-075: consumed by typecheck.rb's requireOutputP2PKH output-layout
+    # guards (together with the three predicates above) so the guards see the
+    # same transitive effects the continuation is injected from.
+
+    # True if +method+ (or a private helper it reaches) calls
+    # requireOutputP2PKH(...); with +zero_only+, only a call whose output index
+    # is the literal 0 counts.
+    def self._method_calls_require_output_p2pkh(method, contract, zero_only)
+      _body_calls_require_output_p2pkh(method.body, contract, zero_only, [].to_set)
+    end
+    private_class_method :_method_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._body_calls_require_output_p2pkh(stmts, contract, zero_only, seen)
+      # N-264: a called private method's body is QUEUED, not recursed into
+      # from the middle of the caller's statement walk. A chain of D helpers
+      # that each call the next under K nested ifs held D*K frames at once and
+      # overflowed. Plain reachability, exactly what the recursive walk (which
+      # pruned a method only when already on the current call path) answered.
+      q = CalleeQueue.new(seen)
+      nxt = stmts
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_calls_require_output_p2pkh(stmt, contract, zero_only, q) }
+
+        nxt = q.pending.shift
+      end
+      false
+    end
+    private_class_method :_body_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._stmt_calls_require_output_p2pkh(stmt, contract, zero_only, q)
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_calls_require_output_p2pkh(e, contract, zero_only, q)
+      }
+      _child_statements(stmt).any? { |s| _stmt_calls_require_output_p2pkh(s, contract, zero_only, q) }
+    end
+    private_class_method :_stmt_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._expr_calls_require_output_p2pkh(expr, contract, zero_only, q)
+      return false if expr.nil?
+      if expr.is_a?(CallExpr)
+        callee = expr.callee
+        if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
+          return true unless zero_only
+          idx = expr.args[0]
+          return true if idx.is_a?(BigIntLiteral) && idx.value == 0
+        end
+        target = _resolve_private_method(callee, contract)
+        q.enqueue(target)
+      end
+      _child_expressions(expr).any? { |e| _expr_calls_require_output_p2pkh(e, contract, zero_only, q) }
+    end
+    private_class_method :_expr_calls_require_output_p2pkh
+
+    # N-315: true if +method+ (or a private helper it reaches) calls
+    # extractPrevOutputScript(...). Consumed by should_inline_private? so the
+    # auto-injected _prevOutScript_<i> witness lands on the public method.
+    def self._method_calls_extract_prev_output_script(method, contract)
+      q = CalleeQueue.new([].to_set)
+      nxt = method.body
+      until nxt.nil?
+        return true if nxt.any? { |stmt| _stmt_calls_extract_prev_output_script(stmt, contract, q) }
+
+        nxt = q.pending.shift
+      end
+      false
+    end
+    private_class_method :_method_calls_extract_prev_output_script
+
+    # @return [Boolean]
+    def self._stmt_calls_extract_prev_output_script(stmt, contract, q)
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_calls_extract_prev_output_script(e, contract, q)
+      }
+      _child_statements(stmt).any? { |s| _stmt_calls_extract_prev_output_script(s, contract, q) }
+    end
+    private_class_method :_stmt_calls_extract_prev_output_script
+
+    # @return [Boolean]
+    def self._expr_calls_extract_prev_output_script(expr, contract, q)
+      return false if expr.nil?
+      if expr.is_a?(CallExpr)
+        callee = expr.callee
+        return true if callee.is_a?(Identifier) && callee.name == "extractPrevOutputScript"
+        target = _resolve_private_method(callee, contract)
+        q.enqueue(target)
+      end
+      _child_expressions(expr).any? { |e| _expr_calls_extract_prev_output_script(e, contract, q) }
+    end
+    private_class_method :_expr_calls_extract_prev_output_script
 
     # -------------------------------------------------------------------
     # Loop shape extraction (#121)
@@ -2878,7 +3381,8 @@ module RunarCompiler
     private_class_method :_all_side_effect_free?
 
     # Extract the update_prop target from a branch's last binding.
-    # Returns { prop_name:, value_bindings:, value_ref: } or nil.
+    # Returns { prop_name:, value_bindings:, value_ref:, update_loc: } or nil.
+    # update_loc (N-350) is the original update_prop statement's source_loc.
     def self._extract_branch_update(bindings)
       return nil if bindings.empty?
 
@@ -2891,7 +3395,8 @@ module RunarCompiler
       {
         prop_name: last.value.name,
         value_bindings: value_bindings,
-        value_ref: last.value.value_ref || last.value.raw_value
+        value_ref: last.value.value_ref || last.value.raw_value,
+        update_loc: last.source_loc
       }
     end
     private_class_method :_extract_branch_update
@@ -2990,12 +3495,26 @@ module RunarCompiler
       when "load_param", "load_prop", "get_state_script"
         value
       when "load_const"
-        if value.raw_value.is_a?(String) && value.raw_value.start_with?("@ref:")
-          target = value.raw_value[5..]
+        # N-024: the alias target lives in +const_string+ (the decoded value),
+        # not +raw_value+ -- +_make_load_const_string+ JSON-encodes raw_value
+        # (so a "@ref:t15" alias is stored there as the 11-char string
+        # `"@ref:t15"`, quote marks included, which never matches a bare
+        # `start_with?("@ref:")`). const_string holds the undecorated value in
+        # BOTH construction paths (freshly made here, and loaded from --ir via
+        # IR::_decode_const_value), matching the check stack.rb's
+        # _lower_load_const uses to resolve the same alias at codegen time.
+        # Checking raw_value left every "@ref:"-aliased load_const inside a
+        # lifted branch (e.g. a reassigned local referenced by the branch's
+        # final property update) silently unremapped, pointing at a pre-lift
+        # temp name stack lowering could never find.
+        if value.const_string.is_a?(String) && value.const_string.start_with?("@ref:")
+          target = value.const_string[5..]
           remapped = map[target]
           if remapped
             new_v = _clone_anf_value(value)
-            new_v.raw_value = "@ref:#{remapped}"
+            new_ref = "@ref:#{remapped}"
+            new_v.const_string = new_ref
+            new_v.raw_value = JSON.generate(new_ref)
             return new_v
           end
         end
@@ -3112,6 +3631,45 @@ module RunarCompiler
     end
     private_class_method :_clone_anf_value
 
+    # N-261: mirrors the TS reference's +dropTerminalIfResults+. A TERMINAL
+    # +if+ (the last binding of a public method body, or recursively of an arm
+    # of a terminal +if+ -- the rule stack lowering uses for terminal_assert)
+    # carries no results. Its arms' final asserts are the script's verdict, so
+    # nothing reads a merged local afterwards, but the _append_branch_results
+    # block sat AFTER the assert and every tier refused the legal
+    # +let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }+.
+    # Strips exactly that block (N +__merge$i+ copies then N rebinds of LOCAL
+    # results) and the results list; any other shape is left alone. In place.
+    def self._drop_terminal_if_results(bindings)
+      return if bindings.nil? || bindings.empty?
+      node = bindings[-1].value
+      return unless node.kind == "if"
+      then_arm = node.then || []
+      else_arm = node.else_ || []
+      results = node.results || []
+      n = results.length
+      if n > 0
+        const_ref = ->(v, want) { v.kind == "load_const" && v.const_string == want }
+        is_block = lambda do |arm|
+          return false if arm.length < 2 * n
+          block = arm[(arm.length - 2 * n)..]
+          results.each_with_index.all? do |name, i|
+            temp = "#{IR::MERGED_LOCAL_TEMP_PREFIX}#{i}"
+            block[i].name == temp && const_ref.call(block[i].value, "@ref:#{name}") &&
+              block[n + i].name == name && const_ref.call(block[n + i].value, "@ref:#{temp}")
+          end
+        end
+        if is_block.call(then_arm) && is_block.call(else_arm)
+          then_arm.pop(2 * n)
+          else_arm.pop(2 * n)
+          node.results = nil
+        end
+      end
+      _drop_terminal_if_results(then_arm)
+      _drop_terminal_if_results(else_arm)
+    end
+    private_class_method :_drop_terminal_if_results
+
     # Transform if-bindings whose branches all end with update_prop into
     # flat conditional assignments.
     def self._lift_branch_update_props(bindings)
@@ -3127,6 +3685,10 @@ module RunarCompiler
         end
 
         if_val = binding.value
+        # N-350: the rewrite replaces this located `if`; keep its location on
+        # the shared condition temporaries, and each branch's own update
+        # statement location on that branch's synthesized bindings (Java F-188).
+        if_loc = binding.source_loc
         branches = _collect_update_branches(
           if_val.cond,
           _strip_declared_results(if_val.then || [], if_val.results),
@@ -3150,7 +3712,8 @@ module RunarCompiler
             name_map[csb.name] = new_name
             result << IR::ANFBinding.new(
               name: new_name,
-              value: _remap_value_refs(csb.value, name_map)
+              value: _remap_value_refs(csb.value, name_map),
+              source_loc: csb.source_loc || if_loc
             )
           end
           cond_refs << (branch[:cond_ref] ? (name_map[branch[:cond_ref]] || branch[:cond_ref]) : nil)
@@ -3176,7 +3739,8 @@ module RunarCompiler
               value: IR::ANFValue.new(kind: "unary_op").tap do |v|
                 v.op = "!"
                 v.operand = cond_refs[j]
-              end
+              end,
+              source_loc: if_loc
             )
             negated_conds << neg_name
           end
@@ -3191,7 +3755,8 @@ module RunarCompiler
                 v.op = "&&"
                 v.left = and_ref
                 v.right = negated_conds[j]
-              end
+              end,
+              source_loc: if_loc
             )
             and_ref = and_name
           end
@@ -3205,7 +3770,8 @@ module RunarCompiler
                 v.op = "&&"
                 v.left = and_ref
                 v.right = cond_refs[i]
-              end
+              end,
+              source_loc: if_loc
             )
             effective_conds << final_name
           else
@@ -3239,23 +3805,28 @@ module RunarCompiler
                 v.op = "||"
                 v.left = or_ref
                 v.right = cond_refs[i]
-              end
+              end,
+              source_loc: if_loc
             )
             or_ref = or_name
           end
           result << IR::ANFBinding.new(
             name: fresh.call,
-            value: _make_assert(or_ref)
+            value: _make_assert(or_ref),
+            source_loc: if_loc
           )
         end
 
         # 3. For each branch, emit: load_old, conditional if-expression, update_prop
         branches.each_with_index do |branch, i|
+          branch_loc = branch[:update_loc] || if_loc
+
           # Load old property value
           old_prop_ref = fresh.call
           result << IR::ANFBinding.new(
             name: old_prop_ref,
-            value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = branch[:prop_name] }
+            value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = branch[:prop_name] },
+            source_loc: branch_loc
           )
 
           # Remap value bindings for the then-branch
@@ -3266,7 +3837,8 @@ module RunarCompiler
             branch_map[vb.name] = new_name
             then_bindings << IR::ANFBinding.new(
               name: new_name,
-              value: _remap_value_refs(vb.value, branch_map)
+              value: _remap_value_refs(vb.value, branch_map),
+              source_loc: vb.source_loc || branch_loc
             )
           end
 
@@ -3288,7 +3860,8 @@ module RunarCompiler
           if then_bindings.empty? || then_bindings.last.name != then_value_ref
             then_bindings << IR::ANFBinding.new(
               name: fresh.call,
-              value: _make_load_const_string("@ref:#{then_value_ref}")
+              value: _make_load_const_string("@ref:#{then_value_ref}"),
+              source_loc: branch_loc
             )
           end
 
@@ -3297,7 +3870,8 @@ module RunarCompiler
           else_bindings = [
             IR::ANFBinding.new(
               name: keep_name,
-              value: _make_load_const_string("@ref:#{old_prop_ref}")
+              value: _make_load_const_string("@ref:#{old_prop_ref}"),
+              source_loc: branch_loc
             )
           ]
 
@@ -3309,7 +3883,8 @@ module RunarCompiler
               v.cond = effective_conds[i]
               v.then = then_bindings
               v.else_ = else_bindings
-            end
+            end,
+            source_loc: branch_loc
           )
 
           # Emit update_prop
@@ -3319,7 +3894,8 @@ module RunarCompiler
               v.name = branch[:prop_name]
               v.value_ref = cond_if_ref
               v.raw_value = cond_if_ref
-            end
+            end,
+            source_loc: branch_loc
           )
         end
       end

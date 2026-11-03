@@ -99,8 +99,18 @@ function auctionSpend(opts: {
     signerKey: 'alice',
     lockTime: opts.lockTime,
     sequence: opts.sequence,
+    // N-027: bid() requires the bid to be paid into the pot
+    // (continuationAmount() >= extractAmount(txPreimage) + bidAmount), so every
+    // bid here pays exactly its bid on top of the 10000-sat pot. That keeps the
+    // locktime the only thing each case varies, and a reject below comes from
+    // the guard it names, not from an unpaid bid.
+    ...(opts.method === 'bid'
+      ? { deploySatoshis: POT, satoshis: POT + Number(opts.args[2] as bigint) }
+      : {}),
   });
 }
+
+const POT = 10_000;
 
 // ---------------------------------------------------------------------------
 // Part A — the polarity itself. True before and after the fix; this is a

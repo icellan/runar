@@ -14,17 +14,22 @@
 //!   - Property access: `contract.field` maps to `this.field`
 //!   - `assert!(cond, code)` maps to `assert(cond)`
 //!   - `assert_eq!(a, b, code)` maps to `assert(a === b)`
-//!   - `abort 0` maps to `assert(false)`
 //!   - `==` maps to `===`, `!=` maps to `!==`
 //!   - `let` / `let mut` for variable declarations
 //!   - `if (cond) { ... } else { ... }` — conditions
 //!   - snake_case to camelCase conversion for identifiers
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const operand_loc = @import("operand_loc.zig");
+const loop_condition = @import("loop_condition.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
+const input_limits = @import("../frontend/input_limits.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -68,14 +73,50 @@ pub const ParseResult = struct {
 };
 
 pub fn parseMove(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry,
+    // not just runPipeline's Pass 0. N-136.
+    if (input_limits.sourceSizeGuardErrors(allocator, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-213: an over-nested source is refused with the one shared diagnostic,
+    // before anything here or downstream recurses over the tree.
+    if (input_limits.nestingGuardErrors(allocator, parser.nest_error, r.contract, file_name)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
+    // F-011: tokenize the whole source once more so an unterminated literal
+    // is reported even where the parser stopped before reaching it.
+    var t = Tokenizer.init(source);
+    var guard: usize = 0;
+    while (guard <= source.len) : (guard += 1) {
+        if (t.next().kind == .eof) break;
+    }
+    // N-019: a terminated quoted literal is refused as an unexpected character
+    // (as the TS reference); the earlier of the two diagnostics comes first.
+    const quoted_msg: []const u8 = if (t.quoted_char == '"') "Unexpected character '\"'" else "Unexpected character '''";
+    const quoted_first = if (t.quoted) |q| (if (t.unterminated) |u| (q.line < u.line or (q.line == u.line and q.col < u.col)) else true) else false;
+    const errs = if (quoted_first) blk: {
+        const e1 = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+        break :blk lex_diag.prepend(allocator, e1, file_name, quoted_msg, t.quoted);
+    } else blk: {
+        const e1 = lex_diag.prepend(allocator, r.errors, file_name, quoted_msg, t.quoted);
+        break :blk lex_diag.prepend(allocator, e1, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    };
+    return .{ .contract = r.contract, .errors = lex_diag.prependUnexpected(allocator, errs, file_name, t.unexpected) };
 }
 
 
 // ============================================================================
 // Token Types
 // ============================================================================
+
+/// N-093: one parsed `#[...]` attribute (see `Parser.parseAttributes`).
+const MoveAttribute = struct {
+    kind: enum { embed_always, sighash },
+    flags: ?[]const u8,
+    loc: types.SourceLocation,
+};
 
 const TokenKind = enum {
     eof,
@@ -130,6 +171,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -138,6 +183,14 @@ const Token = struct {
 
 const Tokenizer = struct {
     source: []const u8,
+    /// F-011: the first unterminated quoted literal, if any.
+    unterminated: ?lex_diag.Pos = null,
+    /// N-214: the first unrecognised character, if any.
+    unexpected: ?lex_diag.Unexpected = null,
+    /// N-019: the first TERMINATED quoted literal (this surface has none) and
+    /// the quote character that opened it.
+    quoted: ?lex_diag.Pos = null,
+    quoted_char: u8 = '"',
     pos: usize,
     line: u32,
     col: u32,
@@ -194,6 +247,16 @@ const Tokenizer = struct {
         }
     }
 
+    /// N-214: record the first character this surface does not recognise
+    /// (its whole UTF-8 sequence, one column; `advance` took its first byte)
+    /// and hand it on as a one-character token.
+    fn unexpectedChar(self: *Tokenizer, start: usize, sl: u32, sc: u32) Token {
+        self.pos = start + lex_diag.charLen(self.source, start);
+        const text = self.source[start..self.pos];
+        if (self.unexpected == null) self.unexpected = .{ .at = .{ .line = sl, .col = sc }, .text = text };
+        return .{ .kind = .ident, .text = text, .line = sl, .col = sc };
+    }
+
     fn next(self: *Tokenizer) Token {
         self.skipWhitespaceAndComments();
         if (self.pos >= self.source.len) return .{ .kind = .eof, .text = "", .line = self.line, .col = self.col };
@@ -207,35 +270,44 @@ const Tokenizer = struct {
         if (c == '"' or c == '\'') {
             const quote = c;
             _ = self.advance();
-            while (self.pos < self.source.len and self.source[self.pos] != quote) {
-                if (self.source[self.pos] == '\\') _ = self.advance();
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while (self.pos < self.source.len and self.source[self.pos] != quote and self.source[self.pos] != '\n' and self.source[self.pos] != '\r') {
+                if (self.source[self.pos] == '\\') {
+                    const nx = self.peekAt(1);
+                    if (self.pos + 1 >= self.source.len or nx == '\n' or nx == '\r') break;
+                    _ = self.advance();
+                }
                 _ = self.advance();
             }
-            if (self.pos < self.source.len) _ = self.advance();
-            const end = self.pos;
-            const content_start = start + 1;
-            const content_end = if (end > 0) end - 1 else end;
-            return .{ .kind = .string_literal, .text = self.source[content_start..content_end], .line = sl, .col = sc };
+            const content_end = self.pos;
+            if (self.pos < self.source.len and self.source[self.pos] == quote) {
+                _ = self.advance();
+                if (self.quoted == null) {
+                    self.quoted = .{ .line = sl, .col = sc };
+                    self.quoted_char = quote;
+                }
+            } else if (self.unterminated == null) {
+                self.unterminated = .{ .line = sl, .col = sc };
+            }
+            return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
 
         // Numbers (decimal, hex; strip trailing type suffixes like u64, u128, u256)
         if (c >= '0' and c <= '9') {
-            if (c == '0' and (self.peekAt(1) == 'x' or self.peekAt(1) == 'X')) {
+            if (c == '0' and self.peekAt(1) == 'x') {
+                // A lowercase `0x` spells a ByteString on this surface (F-026:
+                // `0X` is not, and is refused as an integer literal).
                 _ = self.advance(); // '0'
                 _ = self.advance(); // 'x'
                 while (self.pos < self.source.len and isHexDigit(self.source[self.pos])) _ = self.advance();
-            } else {
-                while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '9') or self.source[self.pos] == '_')) _ = self.advance();
+                return .{ .kind = .number, .text = self.source[start..self.pos], .raw = self.source[start..self.pos], .line = sl, .col = sc };
             }
-            const num_end = self.pos;
-            // Strip trailing type suffix: u8, u16, u32, u64, u128, u256
-            if (self.pos < self.source.len and self.source[self.pos] == 'u') {
-                _ = self.advance(); // 'u'
-                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') _ = self.advance();
-            }
-            // Also strip trailing BigInt suffix 'n' (for compatibility)
-            if (self.pos < self.source.len and self.source[self.pos] == 'n') _ = self.advance();
-            return .{ .kind = .number, .text = self.source[start..num_end], .line = sl, .col = sc };
+            // F-026: the whole glued [0-9A-Za-z_] run is one integer literal.
+            while (self.pos < self.source.len and int_literal.isNumberContinue(self.source[self.pos])) _ = self.advance();
+            const lit_text = self.source[start..self.pos];
+            return .{ .kind = .number, .text = int_literal.stripMoveSuffix(lit_text), .raw = lit_text, .line = sl, .col = sc };
         }
 
         // Identifiers and keywords; handle assert! and assert_eq! macros
@@ -333,7 +405,10 @@ const Tokenizer = struct {
                 _ = self.advance();
                 break :blk .{ .kind = .pipe_pipe, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
-            else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
+            // N-093: `#[` opens an attribute, which the parser reads from this
+            // `#` token; a `#` not followed by `[` is refused like any other.
+            '#' => if (c2 == '[') .{ .kind = .ident, .text = t, .line = sl, .col = sc } else self.unexpectedChar(start, sl, sc),
+            else => self.unexpectedChar(start, sl, sc),
         };
     }
 
@@ -580,26 +655,157 @@ const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
     current: Token,
+    /// N-464: the argument locations of the list `parseArgList` returned
+    /// last; the caller copies them onto the call node it builds, as
+    /// parse_ts.zig does (N-463).
+    last_arg_locs: []const ?types.SourceLocation = &.{},
     file_name: []const u8,
+    /// N-492: parenthesised-primary positions, for operand locations.
+    operand_locs: operand_loc.OperandLocs(Token) = .{},
     errors: std.ArrayListUnmanaged([]const u8),
-    depth: u32,
+    nest: input_limits.NestingCounter = .{},
+    /// N-422: the name declared by the statement immediately before the one
+    /// `parseMoveBlock` is about to parse, i.e. the only name a `while` there
+    /// can be iterating over. Lets `parseMoveWhile` mirror `n > i` as the
+    /// reference does.
+    move_prev_decl: ?[]const u8 = null,
+    nest_error: ?[]const u8 = null,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
-    const max_depth: u32 = 256;
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, snakeToCamel(self.allocator, raw));
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty };
+        p.current = p.normalizeNumber(p.current);
+        return p;
+    }
+
+    /// F-213 measure (A): enter one counted nesting level — a statement, a
+    /// full-expression parse, a prefix-unary operand, another self-recursion
+    /// or a nested type (see frontend/input_limits.zig). False once the source
+    /// is over-nested: the caller then returns without parsing, and must not
+    /// call `self.nest.exit()`.
+    fn enterNest(self: *Parser) bool {
+        if (self.nest.enter()) return true;
+        self.refuseNesting();
+        return false;
+    }
+
+    /// Record the shared F-213 diagnostic (once) and jump to end of input, so
+    /// every parse loop winds down; the parse entry then returns that
+    /// diagnostic alone. Called again on every later refused `enterNest`, so a
+    /// parse that rewinds the token stream after a refusal still ends.
+    fn refuseNesting(self: *Parser) void {
+        self.nest.exceeded = true;
+        if (self.nest_error == null) self.nest_error = input_limits.nestingErrorAt(self.allocator, self.file_name, self.current.line, self.current.col);
+        self.tokenizer.pos = self.tokenizer.source.len;
+        self.current = self.fetch();
+    }
+
+    /// F-213 measure (A): run `f` one counted nesting level deeper — the
+    /// prefix-unary operand, ternary-arm, else-if and nested-type recursions.
+    fn nestedParse(self: *Parser, comptime T: type, comptime f: fn (*Parser) ?T) ?T {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return f(self);
+    }
+
+    /// F-213 measure (A) for the nested-type recursions, whose parse functions
+    /// return a value rather than an optional: `fallback` stands in for the
+    /// refused parse (the whole source is refused anyway).
+    fn nestedValue(self: *Parser, comptime T: type, fallback: T, comptime f: anytype, args: anytype) T {
+        if (!self.enterNest()) return fallback;
+        defer self.nest.exit();
+        return @call(.auto, f, .{self} ++ args);
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.errors.append(self.allocator, f) catch {};
+    }
+
+    fn addErrorAtLoc(self: *Parser, loc: types.SourceLocation, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, lex_diag.diagCol(loc.column), msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// N-093: `#[` opens an attribute. The tokenizer yields an unknown `#` as
+    /// a one-byte ident; it starts an attribute only when `[` follows it
+    /// directly (a lone `#` stays the unexpected token it was).
+    fn atAttributeStart(self: *const Parser) bool {
+        if (self.current.kind != .ident or !std.mem.eql(u8, self.current.text, "#")) return false;
+        const t = &self.tokenizer;
+        return t.pos < t.source.len and t.source[t.pos] == '[';
+    }
+
+    /// N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+    /// `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+    /// otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+    /// identifier list, or null when the parentheses hold anything else or
+    /// are missing.
+    fn parseAttributes(self: *Parser) []MoveAttribute {
+        var attrs: std.ArrayListUnmanaged(MoveAttribute) = .empty;
+        while (self.atAttributeStart()) {
+            const loc = self.currentSourceLoc();
+            _ = self.bump(); // '#'
+            _ = self.expect(.lbracket);
+            const name: []const u8 = if (self.current.kind == .ident) self.bump().text else "";
+            var flags: ?[]const u8 = null;
+            var has_args = false;
+            if (self.current.kind == .lparen) {
+                has_args = true;
+                _ = self.bump();
+                var text: std.ArrayListUnmanaged(u8) = .empty;
+                var ok = true;
+                var depth: usize = 1;
+                while (self.current.kind != .eof) {
+                    const t = self.current;
+                    if (t.kind == .lparen) depth += 1;
+                    if (t.kind == .rparen) {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
+                    if (t.kind == .ident or t.kind == .pipe) {
+                        text.appendSlice(self.allocator, t.text) catch {};
+                    } else ok = false;
+                    _ = self.bump();
+                }
+                _ = self.expect(.rparen);
+                flags = if (ok) text.items else null;
+            }
+            while (self.current.kind != .rbracket and self.current.kind != .eof) _ = self.bump();
+            _ = self.expect(.rbracket);
+            if (std.mem.eql(u8, name, "embed_always") and !has_args) {
+                attrs.append(self.allocator, .{ .kind = .embed_always, .flags = null, .loc = loc }) catch {};
+            } else if (std.mem.eql(u8, name, "sighash")) {
+                attrs.append(self.allocator, .{ .kind = .sighash, .flags = flags, .loc = loc }) catch {};
+            } else {
+                const shown = if (has_args) std.fmt.allocPrint(self.allocator, "{s}(...)", .{name}) catch name else name;
+                self.addErrorAtLoc(loc, sighash_directive.unknownMoveAttributeMessage(self.allocator, shown));
+            }
+        }
+        return attrs.items;
+    }
+
+    fn reportLostAttributes(self: *Parser, attrs: []const MoveAttribute) void {
+        for (attrs) |attr| {
+            self.addErrorAtLoc(attr.loc, switch (attr.kind) {
+                .sighash => sighash_directive.LOST_SIGHASH_ERROR,
+                .embed_always => sighash_directive.LOST_EMBED_ALWAYS_ERROR,
+            });
+        }
     }
 
     fn addErrorFmt(self: *Parser, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, self.current.col, msg }) catch return;
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, self.current.line, lex_diag.diagCol(self.current.col), msg }) catch return;
         self.allocator.free(msg);
         self.errors.append(self.allocator, f) catch {};
     }
@@ -622,7 +828,8 @@ const Parser = struct {
 
     fn bump(self: *Parser) Token {
         const prev = self.current;
-        self.current = self.tokenizer.next();
+        self.operand_locs.consumed(prev);
+        self.current = self.fetch();
         return prev;
     }
 
@@ -662,6 +869,9 @@ const Parser = struct {
 
     fn parse(self: *Parser) ParseResult {
         const contract = self.parseModule();
+        if (contract != null) {
+            if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
+        }
         return .{ .contract = contract, .errors = self.errors.items };
     }
 
@@ -679,6 +889,11 @@ const Parser = struct {
         const is_unsafe = self.matchIdent("unsafe");
 
         // module Name { ... }
+        // N-490: the synthesized constructor is anchored at the first struct's
+        // `struct` keyword (the `resource` token when it stands alone), or at
+        // `module` when the contract declares no struct.
+        var ctor_loc = self.currentSourceLoc();
+        var saw_struct = false;
         if (!self.matchIdent("module")) {
             self.addError("expected 'module' keyword");
             return null;
@@ -700,6 +915,14 @@ const Parser = struct {
         var has_init_fn = false;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            // N-093: attributes before a function (`#[sighash(...)]`).
+            // Anything else they precede reads neither directive, so each one
+            // is refused.
+            const attrs = self.parseAttributes();
+            if (attrs.len > 0 and !self.checkIdent("public") and !self.checkIdent("fun")) {
+                self.reportLostAttributes(attrs);
+            }
+
             // Skip use declarations inside the module
             if (self.checkIdent("use")) {
                 self.skipUseDecl();
@@ -709,11 +932,17 @@ const Parser = struct {
             // resource struct or struct
             if (self.checkIdent("resource") or self.checkIdent("struct")) {
                 const is_resource = self.checkIdent("resource");
+                var kind_loc = self.currentSourceLoc();
                 if (is_resource) {
                     _ = self.bump(); // consume "resource"
                     if (!is_unsafe) {
                         parent_class = .stateful_smart_contract;
                     }
+                    if (self.checkIdent("struct")) kind_loc = self.currentSourceLoc();
+                }
+                if (!saw_struct) {
+                    saw_struct = true;
+                    ctor_loc = kind_loc;
                 }
                 const props = self.parseMoveStruct(parent_class);
                 for (props) |p| properties.append(self.allocator, p) catch {};
@@ -722,7 +951,7 @@ const Parser = struct {
 
             // public fun or fun
             if (self.checkIdent("public") or self.checkIdent("fun")) {
-                const method = self.parseMoveFunction();
+                const method = self.parseMoveFunction(attrs);
                 if (method) |m| {
                     if (std.mem.eql(u8, m.name, "init")) {
                         has_init_fn = true;
@@ -748,7 +977,7 @@ const Parser = struct {
         }
 
         // Build constructor from properties (auto-generate)
-        const constructor = self.buildMoveConstructor(properties.items);
+        const constructor = self.buildMoveConstructor(properties.items, ctor_loc);
 
         return ContractNode{
             .name = module_name,
@@ -791,6 +1020,13 @@ const Parser = struct {
         var props: std.ArrayListUnmanaged(PropertyNode) = .empty;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            // N-093: `#[embed_always]` before a field is the native spelling
+            // of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+            var embed_always = false;
+            for (self.parseAttributes()) |attr| {
+                if (attr.kind == .embed_always) embed_always = true else self.reportLostAttributes(&.{attr});
+            }
+
             if (self.current.kind != .ident) {
                 _ = self.bump();
                 continue;
@@ -798,7 +1034,7 @@ const Parser = struct {
 
             const field_name_tok = self.bump();
             const raw_field_name = field_name_tok.text;
-            const field_name = snakeToCamel(self.allocator, raw_field_name);
+            const field_name = self.declare(raw_field_name);
 
             if (self.expect(.colon) == null) continue;
 
@@ -847,6 +1083,7 @@ const Parser = struct {
                 .type_info = type_info,
                 .readonly = readonly,
                 .initializer = initializer,
+                .embed_always = embed_always,
                 // N-109: spelled type name + field-name token, for the
                 // validator's unsupported-type diagnostic. Diagnostics only.
                 .type_name = types.typeNodeName(type_node),
@@ -864,6 +1101,13 @@ const Parser = struct {
     }
 
     fn parseMoveTypeName(self: *Parser) RunarType {
+        var discard: []const u8 = "";
+        return self.parseMoveTypeNameNamed(&discard);
+    }
+
+    /// `parseMoveTypeName`, additionally reporting the type name as the author
+    /// spelled it (final path component), for diagnostics (N-323).
+    fn parseMoveTypeNameNamed(self: *Parser, out_name: *[]const u8) RunarType {
         // Handle & references in type position (skip them)
         if (self.current.kind == .ampersand) {
             _ = self.bump();
@@ -904,6 +1148,7 @@ const Parser = struct {
             self.skipTypeArgs();
         }
 
+        out_name.* = name;
         return mapMoveType(name);
     }
 
@@ -964,7 +1209,7 @@ const Parser = struct {
         // FixedArray<T, N> — nestable
         if (std.mem.eql(u8, name, "FixedArray") and self.current.kind == .lt) {
             _ = self.bump(); // <
-            const inner = self.parseMoveTypeNode();
+            const inner = self.nestedValue(TypeNode, .{ .primitive_type = .void }, Parser.parseMoveTypeNode, .{});
             _ = self.expect(.comma);
             if (self.current.kind != .number) {
                 self.addError("FixedArray length must be a non-negative integer literal");
@@ -1019,7 +1264,7 @@ const Parser = struct {
 
     // ---- Function parsing ----
 
-    fn parseMoveFunction(self: *Parser) ?MethodNode {
+    fn parseMoveFunction(self: *Parser, attrs: []const MoveAttribute) ?MethodNode {
         var is_public = false;
 
         if (self.matchIdent("public")) {
@@ -1046,7 +1291,7 @@ const Parser = struct {
         const name_tok = self.bump();
         const raw_name = name_tok.text;
         const method_loc = self.tokenSourceLoc(name_tok);
-        const method_name = snakeToCamel(self.allocator, raw_name);
+        const method_name = self.declare(raw_name);
 
         const params = self.parseMoveParams();
 
@@ -1054,7 +1299,16 @@ const Parser = struct {
         var has_return_type = false;
         if (self.current.kind == .colon) {
             _ = self.bump();
-            _ = self.parseMoveTypeName(); // skip return type
+            // The AST keeps no return type; N-331 refuses an unknown name.
+            var ret_spelled: []const u8 = "";
+            const ret_ti = self.parseMoveTypeNameNamed(&ret_spelled);
+            const ret_unknown = types.spelledIfUnknown(ret_ti, ret_spelled);
+            if (ret_unknown.len > 0 and !std.mem.eql(u8, ret_unknown, "unknown")) {
+                self.addErrorFmt(lex_diag.UNKNOWN_RETURN_TYPE_FMT, .{ ret_unknown, method_name });
+            } else if (is_public and ret_ti != .void) {
+                // N-332: public methods return nothing.
+                self.addErrorFmt(lex_diag.PUBLIC_RETURN_TYPE_FMT, .{method_name});
+            }
             has_return_type = true;
         }
 
@@ -1075,17 +1329,30 @@ const Parser = struct {
             const last = &body[body.len - 1];
             switch (last.*) {
                 .expr_stmt => |e| {
-                    last.* = .{ .return_stmt = e.expr };
+                    last.* = .{ .return_stmt = .{ .value = e.expr, .source_loc = e.source_loc } };
                 },
                 else => {},
             }
         }
+
+        // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+        // annotates nothing.
+        var sighash_specs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        for (attrs) |attr| {
+            if (attr.kind == .sighash) sighash_specs.append(self.allocator, attr.flags) catch {} else self.reportLostAttributes(&.{attr});
+        }
+        var sighash_type: ?i32 = null;
+        if (sighash_directive.resolveNativeSighash(self.allocator, method_name, is_public, sighash_specs.items)) |r| switch (r) {
+            .value => |v| sighash_type = v,
+            .err => |e| self.addErrorAtLoc(method_loc, e),
+        };
 
         return MethodNode{
             .name = method_name,
             .is_public = is_public,
             .params = params,
             .body = body,
+            .sighash_type = sighash_type,
             .source_loc = method_loc,
         };
     }
@@ -1127,7 +1394,8 @@ const Parser = struct {
                 }
             }
 
-            const type_info = self.parseMoveTypeName();
+            var spelled_type: []const u8 = "";
+            const type_info = self.parseMoveTypeNameNamed(&spelled_type);
 
             // Skip self/contract parameters (first param that refers to the contract)
             if (std.mem.eql(u8, param_name, "self") or std.mem.eql(u8, param_name, "contract")) {
@@ -1138,12 +1406,13 @@ const Parser = struct {
                 break;
             }
 
-            const camel_name = snakeToCamel(self.allocator, param_name);
+            const camel_name = self.declare(param_name);
 
             params.append(self.allocator, .{
                 .name = camel_name,
                 .type_info = type_info,
                 .type_name = runarTypeToTypeName(type_info),
+                .spelled_type = types.spelledIfUnknown(type_info, spelled_type),
             }) catch {};
 
             if (self.current.kind == .comma) {
@@ -1162,7 +1431,20 @@ const Parser = struct {
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             self.skipSemicolons();
             if (self.current.kind == .rbrace or self.current.kind == .eof) break;
+            const starts_while = self.checkIdent("while");
+            self.move_prev_decl = null;
+            if (stmts.items.len > 0) switch (stmts.items[stmts.items.len - 1]) {
+                .let_decl => |ld| self.move_prev_decl = ld.name,
+                .const_decl => |cd| self.move_prev_decl = cd.name,
+                else => {},
+            };
             if (self.parseStatement()) |s| {
+                // N-421: a Move `while` must follow the declaration of its
+                // loop variable immediately; the fold below is the only place
+                // the start value is learned, so a `while` that does not fold
+                // would silently start from the default 0. Refuse it with the
+                // same sentence the other six tiers emit.
+                var folded = false;
                 // Fold `let i: Int = K; while (i < N) { ...; i = i + 1; }`
                 // into a single for_stmt by patching init_value from a
                 // preceding let/const decl whose name matches the loop variable.
@@ -1193,10 +1475,12 @@ const Parser = struct {
                             merged.init_value = init_val;
                             merged.init_is_const = init_const;
                             stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
-                            continue;
+                            folded = true;
                         }
                     }
                 }
+                if (folded) continue;
+                if (starts_while and s == .for_stmt) self.addError(move_while_shape_diagnostic);
                 stmts.append(self.allocator, s) catch {};
             }
         }
@@ -1211,6 +1495,12 @@ const Parser = struct {
     // ---- Statements ----
 
     fn parseStatement(self: *Parser) ?Statement {
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
+        return self.parseStatementInner();
+    }
+
+    fn parseStatementInner(self: *Parser) ?Statement {
         // let [mut] name [: Type] = expr;
         if (self.checkIdent("let")) return self.parseMoveLetDecl();
 
@@ -1229,8 +1519,8 @@ const Parser = struct {
         // return expr;
         if (self.checkIdent("return")) return self.parseMoveReturn();
 
-        // abort code — maps to assert(false)
-        if (self.checkIdent("abort")) return self.parseMoveAbort();
+        // N-153: `abort` is not part of the Move surface; it parses as a name
+        // and is refused like any undefined one, as in the TS reference.
 
         // Expression statement or assignment
         return self.parseMoveExprStatement();
@@ -1247,13 +1537,14 @@ const Parser = struct {
             return null;
         }
         const name_tok = self.bump();
-        const var_name = snakeToCamel(self.allocator, name_tok.text);
+        const var_name = self.declare(name_tok.text);
 
         // Optional type annotation
         var ti: ?RunarType = null;
+        var spelled: []const u8 = "";
         if (self.current.kind == .colon) {
             _ = self.bump();
-            ti = self.parseMoveTypeName();
+            ti = self.parseMoveTypeNameNamed(&spelled);
         }
 
         // Initializer
@@ -1269,9 +1560,9 @@ const Parser = struct {
         self.skipSemicolons();
 
         if (mutable) {
-            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+            return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc, .type_name = spelled } };
         } else {
-            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val orelse return null, .source_loc = loc } };
+            return .{ .const_decl = .{ .name = var_name, .type_info = ti, .value = val orelse return null, .source_loc = loc, .type_name = spelled } };
         }
     }
 
@@ -1338,7 +1629,7 @@ const Parser = struct {
             _ = self.bump();
             if (self.checkIdent("if")) {
                 // else if ...
-                const nested = self.parseMoveIf() orelse return null;
+                const nested = self.nestedParse(Statement, Parser.parseMoveIf) orelse return null;
                 const a = self.allocator.alloc(Statement, 1) catch return null;
                 a[0] = nested;
                 else_body = a;
@@ -1386,8 +1677,15 @@ const Parser = struct {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'while'
 
+        // N-422: read before the condition is parsed (the body's own blocks
+        // overwrite it).
+        const prev_decl = self.move_prev_decl;
         const has_paren = self.match(.lparen);
         const _cond = self.parseExpression();
+        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`. N-422: so
+        // does `while (n > i)`, whose left side is an identifier, once the
+        // iterator is known to be the preceding declaration.
+        if (_cond) |c| loop_condition.normalize(c, prev_decl);
         if (has_paren) {
             _ = self.expect(.rparen);
         }
@@ -1402,6 +1700,7 @@ const Parser = struct {
         var var_name: []const u8 = "_w";
         var bound: i64 = 0;
         var bound_is_const = false;
+        var bound_ident: ?[]const u8 = null;
         var descending = false;
         var inclusive = false;
         var representable = false;
@@ -1427,10 +1726,19 @@ const Parser = struct {
                         // bound is not unrollable, and leaving
                         // `bound_is_const` at its `true` default silently
                         // collapsed it to a 0-iteration loop here.
+                        //
+                        // F-025: the SHAPE is still a counting loop, though.
+                        // The reference folds it (`foldCountingWhile` does not
+                        // look at the bound) and refuses the bound afterwards
+                        // with the for-loop sentence, so the shape diagnostic
+                        // here is not the reference's. Fold it and let
+                        // validate.zig refuse the bound the same way.
+                        representable = true;
                         if (loopStartLiteral(bop.right)) |v| {
                             bound = v;
                             bound_is_const = true;
-                            representable = true;
+                        } else if (bop.right == .identifier) {
+                            bound_ident = bop.right.identifier;
                         }
                     }
                 },
@@ -1489,8 +1797,10 @@ const Parser = struct {
         return .{ .for_stmt = .{
             .var_name = var_name,
             .init_value = 0,
+            .init_is_const = true,
             .bound = bound,
             .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .inclusive = inclusive,
             .update = update,
@@ -1505,37 +1815,29 @@ const Parser = struct {
         const body = self.parseMoveBlock();
         self.skipSemicolons();
 
-        // Infinite loop — use a large bound
-        return .{ .for_stmt = .{ .var_name = "_l", .init_value = 0, .bound = 1000, .body = body, .source_loc = loc } };
+        // Infinite loop — use a large bound. N-026: the reference lowers
+        // `loop { }` to a `for` whose condition is the literal `true`, which its
+        // validator refuses because the condition does not test the iterator
+        // (`cond_tests_iter`). Mark it the same way so this tier emits that
+        // sentence rather than the bound one.
+        return .{ .for_stmt = .{ .var_name = "_l", .init_value = 0, .init_is_const = true, .bound = 1000, .bound_is_const = true, .cond_tests_iter = false, .body = body, .source_loc = loc } };
     }
 
     fn parseMoveReturn(self: *Parser) ?Statement {
+        const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'return'
 
         if (self.current.kind == .semicolon) {
             _ = self.bump();
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
         if (self.current.kind == .rbrace or self.current.kind == .eof) {
-            return .{ .return_stmt = null };
+            return .{ .return_stmt = .{ .value = null, .source_loc = loc } };
         }
 
         const expr = self.parseExpression();
         self.skipSemicolons();
-        return .{ .return_stmt = expr };
-    }
-
-    fn parseMoveAbort(self: *Parser) ?Statement {
-        const loc = self.currentSourceLoc();
-        _ = self.bump(); // consume 'abort'
-        // Skip the error code
-        _ = self.parseExpression();
-        self.skipSemicolons();
-
-        // abort maps to assert(false)
-        const call = self.allocator.create(CallExpr) catch return null;
-        call.* = .{ .callee = "assert", .args = self.makeExprSlice(.{ .literal_bool = false }) };
-        return .{ .expr_stmt = .{ .expr = .{ .call = call }, .source_loc = loc } };
+        return .{ .return_stmt = .{ .value = expr, .source_loc = loc } };
     }
 
     fn parseMoveExprStatement(self: *Parser) ?Statement {
@@ -1624,12 +1926,8 @@ const Parser = struct {
     //   primary
 
     fn parseExpression(self: *Parser) ?Expression {
-        self.depth += 1;
-        defer self.depth -= 1;
-        if (self.depth > max_depth) {
-            self.addError("expression nesting depth exceeds maximum (256)");
-            return null;
-        }
+        if (!self.enterNest()) return null;
+        defer self.nest.exit();
         return self.parseTernary();
     }
 
@@ -1637,9 +1935,9 @@ const Parser = struct {
         var expr = self.parseLogicalOr() orelse return null;
         if (self.current.kind == .question) {
             _ = self.bump();
-            const consequent = self.parseTernary() orelse return null;
+            const consequent = self.nestedParse(Expression, Parser.parseTernary) orelse return null;
             if (self.expect(.colon) == null) return null;
-            const alternate = self.parseTernary() orelse return null;
+            const alternate = self.nestedParse(Expression, Parser.parseTernary) orelse return null;
             const tern = self.allocator.create(Ternary) catch return null;
             tern.* = .{ .condition = expr, .then_expr = consequent, .else_expr = alternate };
             expr = .{ .ternary = tern };
@@ -1648,69 +1946,105 @@ const Parser = struct {
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseLogicalAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .pipe_pipe) {
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseLogicalAnd() orelse return null;
-            left = self.makeBinaryExpr(.or_op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.or_op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseLogicalAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseOr() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .amp_amp) {
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseBitwiseOr() orelse return null;
-            left = self.makeBinaryExpr(.and_op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.and_op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseOr(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseXor() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .pipe) {
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseBitwiseXor() orelse return null;
-            left = self.makeBinaryExpr(.bitor, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitor, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseXor(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseBitwiseAnd() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .caret) {
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseBitwiseAnd() orelse return null;
-            left = self.makeBinaryExpr(.bitxor, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitxor, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseBitwiseAnd(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseEquality() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .ampersand) {
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseEquality() orelse return null;
-            left = self.makeBinaryExpr(.bitand, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(.bitand, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseEquality(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseComparison() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .eqeq or self.current.kind == .bang_eq) {
             // Move == maps to === and != maps to !==
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseComparison() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
+            // N-505: the comparison node is located at its first token (a leading
+            // `(` included), as the TS reference locates it; `===` / `!==` type
+            // errors anchor here.
+            left.binary_op.loc = left_loc;
         }
         return left;
     }
 
     fn parseComparison(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseShift() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lt or self.current.kind == .lt_eq or
             self.current.kind == .gt or self.current.kind == .gt_eq)
         {
@@ -1722,36 +2056,51 @@ const Parser = struct {
                 else => unreachable,
             };
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseShift() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseShift(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseAdditive() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .lshift or self.current.kind == .rshift) {
             const op: BinOperator = if (self.current.kind == .lshift) .lshift else .rshift;
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseAdditive() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseAdditive(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseMultiplicative() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .plus or self.current.kind == .minus) {
             const op: BinOperator = if (self.current.kind == .plus) .add else .sub;
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseMultiplicative() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseMultiplicative(self: *Parser) ?Expression {
+        const left_start = self.current;
         var left = self.parseUnary() orelse return null;
+        var left_loc = self.operandLocFrom(left_start);
         while (self.current.kind == .star or self.current.kind == .slash or self.current.kind == .percent) {
             const op: BinOperator = switch (self.current.kind) {
                 .star => .mul,
@@ -1760,32 +2109,35 @@ const Parser = struct {
                 else => unreachable,
             };
             _ = self.bump();
+            const right_start = self.current;
             const right = self.parseUnary() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            const right_loc = self.operandLocFrom(right_start);
+            left = self.makeLocatedBinaryExpr(op, left, left_loc, right, right_loc) orelse return null;
+            left_loc = self.operandLocFrom(left_start);
         }
         return left;
     }
 
     fn parseUnary(self: *Parser) ?Expression {
         if (self.current.kind == .minus) {
-            _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const op_loc = self.tokenSourceLoc(self.bump());
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .negate, .operand = o };
+            uop.* = .{ .op = .negate, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .bang) {
-            _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const op_loc = self.tokenSourceLoc(self.bump());
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .not, .operand = o };
+            uop.* = .{ .op = .not, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         if (self.current.kind == .tilde) {
-            _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const op_loc = self.tokenSourceLoc(self.bump());
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
-            uop.* = .{ .op = .bitnot, .operand = o };
+            uop.* = .{ .op = .bitnot, .operand = o, .location = op_loc };
             return .{ .unary_op = uop };
         }
         // Skip & (reference) — no-op in Runar
@@ -1794,12 +2146,12 @@ const Parser = struct {
             if (self.matchIdent("mut")) {
                 // &mut expr — skip both
             }
-            return self.parseUnary();
+            return self.nestedParse(Expression, Parser.parseUnary);
         }
         // Prefix ++
         if (self.current.kind == .plus_plus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const inc = self.allocator.create(IncrementExpr) catch return null;
             inc.* = .{ .operand = o, .prefix = true };
             return .{ .increment = inc };
@@ -1807,7 +2159,7 @@ const Parser = struct {
         // Prefix --
         if (self.current.kind == .minus_minus) {
             _ = self.bump();
-            const o = self.parseUnary() orelse return null;
+            const o = self.nestedParse(Expression, Parser.parseUnary) orelse return null;
             const dec = self.allocator.create(DecrementExpr) catch return null;
             dec.* = .{ .operand = o, .prefix = true };
             return .{ .decrement = dec };
@@ -1831,26 +2183,27 @@ const Parser = struct {
                     // Method call: expr.method(args)
                     _ = self.bump();
                     const args = self.parseArgList();
+                    const arg_locs = self.last_arg_locs;
                     switch (expr) {
                         .identifier => |id| {
                             if (std.mem.eql(u8, id, "contract") or std.mem.eql(u8, id, "self")) {
                                 // contract.method(args) → this.method(args)
                                 const mc = self.allocator.create(MethodCall) catch return null;
-                                mc.* = .{ .object = "this", .method = member, .args = args };
+                                mc.* = .{ .object = "this", .method = member, .args = args, .arg_locs = arg_locs };
                                 expr = .{ .method_call = mc };
                             } else if (std.mem.eql(u8, id, "this")) {
                                 const mc = self.allocator.create(MethodCall) catch return null;
-                                mc.* = .{ .object = "this", .method = member, .args = args };
+                                mc.* = .{ .object = "this", .method = member, .args = args, .arg_locs = arg_locs };
                                 expr = .{ .method_call = mc };
                             } else {
                                 const mc = self.allocator.create(MethodCall) catch return null;
-                                mc.* = .{ .object = id, .method = member, .args = args };
+                                mc.* = .{ .object = id, .method = member, .args = args, .arg_locs = arg_locs };
                                 expr = .{ .method_call = mc };
                             }
                         },
                         else => {
                             const mc = self.allocator.create(MethodCall) catch return null;
-                            mc.* = .{ .object = "unknown", .method = member, .args = args };
+                            mc.* = .{ .object = "unknown", .method = member, .args = args, .arg_locs = arg_locs };
                             expr = .{ .method_call = mc };
                         },
                     }
@@ -1886,6 +2239,7 @@ const Parser = struct {
                     .identifier => |id| {
                         _ = self.bump();
                         const raw_args = self.parseArgList();
+                        var arg_locs = self.last_arg_locs;
                         // Strip `contract`/`self` first arg (Move self-param convention)
                         var args = raw_args;
                         if (raw_args.len > 0) {
@@ -1893,13 +2247,14 @@ const Parser = struct {
                                 .identifier => |first_id| {
                                     if (std.mem.eql(u8, first_id, "contract") or std.mem.eql(u8, first_id, "self")) {
                                         args = raw_args[1..];
+                                        if (arg_locs.len == raw_args.len) arg_locs = arg_locs[1..];
                                     }
                                 },
                                 else => {},
                             }
                         }
                         const call = self.allocator.create(CallExpr) catch return null;
-                        call.* = .{ .callee = id, .args = args };
+                        call.* = .{ .callee = id, .args = args, .arg_locs = arg_locs };
                         expr = .{ .call = call };
                     },
                     else => break,
@@ -1925,56 +2280,17 @@ const Parser = struct {
         return switch (self.current.kind) {
             .number => blk: {
                 const tok = self.bump();
-                // Strip underscores from number text. Buffer sized for 256-bit
-                // decimal literals (78 digits) with headroom.
-                var stripped_buf: [160]u8 = undefined;
-                var stripped_len: usize = 0;
-                var overflow = false;
-                for (tok.text) |ch| {
-                    if (ch == '_') continue;
-                    if (stripped_len >= stripped_buf.len) {
-                        overflow = true;
-                        break;
-                    }
-                    stripped_buf[stripped_len] = ch;
-                    stripped_len += 1;
-                }
-                if (overflow) {
-                    self.addErrorFmt("integer literal too long: '{s}'", .{tok.text});
-                    break :blk null;
-                }
-                const stripped = stripped_buf[0..stripped_len];
-                // Hex literals with even digit count → ByteString
-                if (stripped.len > 2 and stripped[0] == '0' and (stripped[1] == 'x' or stripped[1] == 'X')) {
-                    const hex_digits = stripped[2..];
-                    if (hex_digits.len > 0 and hex_digits.len % 2 == 0) {
-                        const duped = self.allocator.dupe(u8, hex_digits) catch break :blk null;
-                        break :blk Expression{ .literal_bytes = duped };
-                    }
-                }
-                if (std.fmt.parseInt(i64, stripped, 0)) |val| {
-                    break :blk Expression{ .literal_int = val };
-                } else |_| {
-                    // Oversize decimal literal — carry as `literal_bigint`.
-                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-                    // ordinary way to write secp256k1's group order, and accepted by the
-                    // other six tiers -- used to fall into the `invalid integer` arm
-                    // below, because this fallback only recognised decimal digits.
-                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
-                        break :blk Expression{ .literal_bigint = decimal };
-                    }
-                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
-                    break :blk null;
-                }
+                break :blk self.numberLiteral(tok);
             },
             .string_literal => blk: {
                 const tok = self.bump();
-                break :blk Expression{ .literal_bytes = tok.text };
+                break :blk Expression{ .literal_bytes = .{ .value = tok.text, .location = self.tokenSourceLoc(tok) } };
             },
             .lparen => blk: {
-                _ = self.bump();
+                const open = self.bump();
+                const inner_first = self.current;
                 const inner = self.parseExpression() orelse break :blk null;
-                _ = self.expect(.rparen);
+                if (self.expect(.rparen)) |close| self.operand_locs.recordParen(self.allocator, open, inner_first, close);
                 break :blk inner;
             },
             .lbracket => blk: {
@@ -2009,6 +2325,7 @@ const Parser = struct {
                 if (self.current.kind == .lparen) {
                     _ = self.bump();
                     const raw_args = self.parseArgList();
+                    var arg_locs = self.last_arg_locs;
                     // Strip `contract`/`self` first arg (Move self-param convention)
                     var args = raw_args;
                     if (raw_args.len > 0) {
@@ -2016,13 +2333,14 @@ const Parser = struct {
                             .identifier => |first_id| {
                                 if (std.mem.eql(u8, first_id, "contract") or std.mem.eql(u8, first_id, "self")) {
                                     args = raw_args[1..];
+                                    if (arg_locs.len == raw_args.len) arg_locs = arg_locs[1..];
                                 }
                             },
                             else => {},
                         }
                     }
                     const call = self.allocator.create(CallExpr) catch break :blk null;
-                    call.* = .{ .callee = mapped, .args = args };
+                    call.* = .{ .callee = mapped, .args = args, .arg_locs = arg_locs };
                     break :blk Expression{ .call = call };
                 }
 
@@ -2035,11 +2353,25 @@ const Parser = struct {
         };
     }
 
+    /// N-464: the first token of the argument about to be parsed, as
+    /// parse_ts.zig's `operandLoc` (null on `(`, whose inner expression
+    /// this one-token view cannot see).
+    fn argLoc(self: *const Parser) ?types.SourceLocation {
+        if (self.current.kind == .lparen) return null;
+        return self.tokenSourceLoc(self.current);
+    }
+
     fn parseArgList(self: *Parser) []Expression {
         var args: std.ArrayListUnmanaged(Expression) = .empty;
+        // N-464: published only once the whole list is parsed, so a call
+        // nested inside an argument cannot clobber it.
+        var locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty;
+        defer self.last_arg_locs = if (locs.items.len == args.items.len) locs.items else &.{};
         while (self.current.kind != .rparen and self.current.kind != .eof) {
+            const arg_loc = self.argLoc();
             const arg = self.parseExpression() orelse break;
             args.append(self.allocator, arg) catch {};
+            locs.append(self.allocator, arg_loc) catch {};
             if (self.current.kind == .comma) {
                 _ = self.bump();
             } else break;
@@ -2067,7 +2399,7 @@ const Parser = struct {
     /// Auto-generate a constructor from the struct properties.
     /// Non-initialized properties become constructor params.
     /// super() is called with all non-initialized property identifiers.
-    fn buildMoveConstructor(self: *Parser, properties: []PropertyNode) ConstructorNode {
+    fn buildMoveConstructor(self: *Parser, properties: []PropertyNode, ctor_loc: types.SourceLocation) ConstructorNode {
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
@@ -2093,6 +2425,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .super_loc = ctor_loc,
         };
     }
 
@@ -2102,6 +2435,18 @@ const Parser = struct {
         const bop = self.allocator.create(BinaryOp) catch return null;
         bop.* = .{ .op = op, .left = left, .right = right };
         return .{ .binary_op = bop };
+    }
+
+    fn makeLocatedBinaryExpr(self: *Parser, op: BinOperator, left: Expression, left_loc: ?types.SourceLocation, right: Expression, right_loc: ?types.SourceLocation) ?Expression {
+        const bop = self.allocator.create(BinaryOp) catch return null;
+        bop.* = .{ .op = op, .left = left, .right = right, .left_loc = left_loc, .right_loc = right_loc };
+        return .{ .binary_op = bop };
+    }
+
+    /// N-492: where the TS reference locates the operand that began at token
+    /// `start` and ends at the token just consumed. See `operand_loc.zig`.
+    fn operandLocFrom(self: *const Parser, start: Token) ?types.SourceLocation {
+        return self.tokenSourceLoc(self.operand_locs.startOf(start));
     }
 
     fn makeExprSlice(self: *Parser, expr: Expression) []Expression {
@@ -2121,9 +2466,62 @@ const Parser = struct {
             .star_eq => .mul,
             .slash_eq => .div,
             .percent_eq => .mod,
-            else => .add,
+            else => unreachable, // N-057: guarded by isCompoundAssignOp above; no fallback to add
         };
     }
+
+    test "N-057: binOpFromCompoundAssign has no silent fallback to add (Move)" {
+        // Proves: this file's source for binOpFromCompoundAssign's switch no longer
+        // contains a default arm that maps every otherwise-unmapped compound
+        // assignment token to the add operator. The needle is built by
+        // concatenation so this assertion's own text cannot satisfy itself.
+        // Does not prove runtime behavior of the removed default arm: every call
+        // site already narrows to compound-assignment tokens via
+        // isCompoundAssignOp (over the identical set the switch maps) before
+        // calling binOpFromCompoundAssign, so that arm was unreachable before this
+        // change and is `unreachable` now (a checked panic under Debug/ReleaseSafe,
+        // undefined behavior under ReleaseFast/ReleaseSmall) — this test cannot and
+        // does not exercise that code path directly.
+        const bad_arm = "else " ++ "=> ." ++ "add";
+        const src = @embedFile("parse_move.zig");
+        try std.testing.expect(std.mem.indexOf(u8, src, bad_arm) == null);
+    }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        // A lowercase `0x` spells a ByteString on this surface.
+        if (std.mem.startsWith(u8, tok.raw, "0x")) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "move", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "move", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, lex_diag.diagCol(tok.col), msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        // A lowercase `0x` spells a ByteString on this surface (any length;
+        // an odd one is refused downstream, as in the TS reference).
+        if (std.mem.startsWith(u8, tok.raw, "0x")) return Expression{ .literal_bytes = .{ .value = tok.raw[2..], .location = self.tokenSourceLoc(tok) } };
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================

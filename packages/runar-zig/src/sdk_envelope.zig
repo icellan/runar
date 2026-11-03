@@ -10,6 +10,7 @@ const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const envelope_sign = @import("sdk_envelope_sign.zig");
+const der_mod = @import("sdk_der.zig");
 
 // ---------------------------------------------------------------------------
 // Value tree — minimal JSON-shaped value used by the canonical serializer.
@@ -488,7 +489,7 @@ pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
 /// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-/// also far above what the wire needs: the deepest of the 165 checked-in
+/// also far above what the wire needs: the deepest of the 199 checked-in
 /// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
 /// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
 /// bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -667,6 +668,8 @@ fn readI64(value: ?std.json.Value) ?i64 {
 
 fn verifyRawEcdsa(digest: [32]u8, der_sig: []const u8, sec1_pubkey: []const u8) !bool {
     const pub_key = Ecdsa.PublicKey.fromSec1(sec1_pubkey) catch return false;
+    // F-242: one signature, one byte string — strict DER before parsing.
+    if (!der_mod.isStrictDerSignature(der_sig)) return false;
     const sig = Ecdsa.Signature.fromDer(der_sig) catch return false;
     sig.verifyPrehashed(digest, pub_key) catch return false;
     return true;

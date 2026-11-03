@@ -232,6 +232,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "oraclePubKey",

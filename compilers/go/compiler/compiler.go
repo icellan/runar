@@ -89,8 +89,14 @@ type ConstructorSlot = codegen.ConstructorSlot
 // CodeSepIndexSlot records a codeSepIndex placeholder in the compiled script.
 type CodeSepIndexSlot = codegen.CodeSepIndexSlot
 
+// CodePartLenSlot is re-exported from codegen (N-051).
+type CodePartLenSlot = codegen.CodePartLenSlot
+
 // SourceMapping is re-exported from codegen.
 type SourceMapping = codegen.SourceMapping
+
+// RawScriptSpan is re-exported from codegen (N-151).
+type RawScriptSpan = codegen.RawScriptSpan
 
 // SourceMap holds the source-level debug mappings (opcode index -> source location).
 type SourceMap struct {
@@ -140,8 +146,10 @@ type Artifact struct {
 	StateFields          []StateField       `json:"stateFields,omitempty"`
 	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
 	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodePartLenSlots     []CodePartLenSlot  `json:"codePartLenSlots,omitempty"`
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
+	RawScriptSpans       []RawScriptSpan    `json:"rawScriptSpans,omitempty"`
 	BuildTimestamp       string             `json:"buildTimestamp"`
 	ANF                  *ir.ANFProgram     `json:"anf,omitempty"`
 	SourceMapData        *SourceMap         `json:"sourceMap,omitempty"`
@@ -153,16 +161,14 @@ type Artifact struct {
 	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
 
 	// UnsoundPrimitives names every builtin in this script that the project
-	// itself does not claim is sound (R-062 / CL-BUG-105). Today that is
-	// exactly `verifySP1FRI`, whose codegen is a documented PoC with stubbed
-	// protocol algebra.
+	// itself does not claim is sound (R-062 / CL-BUG-105). Part of the shared
+	// artifact schema, read by every SDK's deploy gate.
 	//
-	// R-012 made the compiler REFUSE such a program unless the author or the
-	// invoker acknowledged the gap — but that acknowledgement stopped at the
-	// person running the compiler. Whoever is handed the artifact afterwards
-	// (a deployer, a reviewer, another tier's SDK) saw an ordinary contract.
-	// The fact travels with the artifact now, and every SDK's deploy path
-	// refuses to fund it unless the caller acknowledges the same list.
+	// F-007: this compiler no longer sets it. The only such builtin was
+	// `verifySP1FRI`, and compiling it is now always refused, so no artifact
+	// this compiler emits can reach it. The field stays for schema parity and
+	// so artifacts from older compilers still round-trip; the SDK gates keep
+	// refusing those.
 	//
 	// `omitempty`: an artifact that reaches no unsound primitive is unchanged,
 	// byte for byte, from before this field existed.
@@ -249,11 +255,31 @@ func buildLowerOptions(o CompileOptions) (codegen.LowerToStackOptions, error) {
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
 
-	// R-012: the IR entry points never run frontend.Validate, so the
-	// verifySP1FRI soundness refusal has to be re-asserted here against the
-	// ANF observable. No-op when the frontend already adjudicated it (source
-	// path) or the invoker acknowledged it. See sp1_fri_ir_guard.go.
-	if err := guardUnsoundSP1FriIR(program, o); err != nil {
+	// F-223: applyConstructorArgs below mutates Properties slice elements in
+	// place (program.Properties[i].InitialValue = v, see options.go). Clone
+	// the program first so baking never mutates the caller's own
+	// *ir.ANFProgram — a caller that loads a program once and calls
+	// CompileFromProgram on it twice (e.g. with different ConstructorArgs)
+	// would otherwise see the second call's bake leak backward into the
+	// object it still holds. Mirrors FoldConstants' own copy-on-write below
+	// and the Rust tier's compile_from_program_with_options, which clones
+	// its &ir::ANFProgram borrow for the same reason.
+	clonedProgram := *program
+	clonedProgram.Properties = append([]ir.ANFProperty(nil), program.Properties...)
+	program = &clonedProgram
+
+	// R-012 / F-007: the IR entry points never run frontend.Validate, so the
+	// verifySP1FRI refusal has to be re-asserted here against the ANF
+	// observable. Unconditional: the verifier is not implemented for v1.
+	// See sp1_fri_ir_guard.go.
+	if err := guardUnsoundSP1FriIR(program); err != nil {
+		return nil, err
+	}
+
+	// F-004: re-assert the validator rules that decide covenant vs
+	// anyone-can-spend (terminal assert, no readonly writes) on the ANF.
+	// See ir_frontend_rules.go.
+	if err := checkIRFrontendRules(program); err != nil {
 		return nil, err
 	}
 
@@ -264,7 +290,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		program = frontend.FoldConstants(program)
+		program = frontend.FoldConstantsAndPrune(program)
 	}
 
 	// EC optimization — algebraic simplification of EC calls.
@@ -298,7 +324,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, emitResult.RawScriptSpans, stackMethods, o)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +332,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 }
 
 // assembleArtifact builds the final output artifact from the compilation products.
-func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
+func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codePartLenSlots []CodePartLenSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, rawScriptSpans []RawScriptSpan, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
 	// ---------------------------------------------------------------------
 	// Build ABI
 	// ---------------------------------------------------------------------
@@ -331,7 +357,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 	if err != nil {
 		return nil, err
 	}
-	var constructorParams []ABIParam
+	constructorParams := []ABIParam{}
 	for _, e := range regroupedCtor {
 		p := ABIParam{Name: e.name, Type: e.typ}
 		if e.fixedArray != nil {
@@ -375,7 +401,14 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		stateFields = append(stateFields, sf)
 	}
 
+	// N-139: statefulness follows parentClass (the TS reference rule for
+	// isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+	// keeps both. An IR input without parentClass falls back to stateFields
+	// (the loader already requires parentClass for any mutable property).
 	isStateful := len(stateFields) > 0
+	if program.ParentClass != "" {
+		isStateful = program.ParentClass == "StatefulSmartContract"
+	}
 	// Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
 	var methods []ABIMethod
 	for _, method := range program.Methods {
@@ -384,7 +417,14 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		}
 		params := make([]ABIParam, len(method.Params))
 		for j, p := range method.Params {
-			params[j] = ABIParam{Name: p.Name, Type: p.Type}
+			// N-360: a reassigned property-named public param is bound in the
+			// ANF under its `<name>@local` slot; the ABI keeps the source name
+			// the caller passes.
+			name := p.Name
+			if method.IsPublic {
+				name = strings.TrimSuffix(name, "@local")
+			}
+			params[j] = ABIParam{Name: name, Type: p.Type}
 		}
 		m := ABIMethod{
 			Name:     method.Name,
@@ -406,6 +446,12 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 					hasChange = true
 					break
 				}
+			}
+			// N-038: a SIGHASH_SINGLE method continues the contract without
+			// declaring _changePKH (the change output is not committed), so
+			// its continuation is read from the method body instead.
+			if !hasChange && method.SigHashType != nil && (*method.SigHashType&0x1f) == 0x03 {
+				hasChange, _, _ = scaffoldShape(program, &method)
 			}
 			if !hasChange {
 				t := true
@@ -451,17 +497,11 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		StateFields:          stateFields,
 		ConstructorSlots:     constructorSlots,
 		CodeSepIndexSlots:    codeSepIndexSlots,
+		CodePartLenSlots:     codePartLenSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
+		RawScriptSpans:       rawScriptSpans, // N-151: omitempty, matching the TS assembler
 		BuildTimestamp:       buildTimestamp(),
-	}
-
-	// R-062: record the unsound primitives this script reaches. Same observable
-	// the --ir soundness guard keys on (a `call` binding naming the builtin, at
-	// any nesting depth), so the marker and the refusal can never disagree
-	// about whether a program reaches the verifier.
-	if programCallsSP1FriVerifier(program) {
-		artifact.UnsoundPrimitives = []string{"verifySP1FRI"}
 	}
 
 	// Always include ANF IR for stateful contracts — the SDK uses it
@@ -505,6 +545,11 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 // stop-at-first-failure semantics — the only addition is the second return
 // value.
 func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptions) (*Artifact, []frontend.Diagnostic, error) {
+	o := mergeOptions(opts)
+	if err := rejectUnsupportedStopAfterPassOptions(o); err != nil {
+		return nil, nil, err
+	}
+
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading source file: %w", err)
@@ -549,15 +594,9 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 		return nil, nil, err
 	}
 
-	// Feed into existing compilation pipeline (passes 4.25+).
-	//
-	// frontend.Validate accepted this contract above, so the verifySP1FRI
-	// soundness refusal (and its @acknowledgeUnsoundSP1FriVerifier directive)
-	// has already been adjudicated against the real source. Mark the options so
-	// the IR-path guard in CompileFromProgram stands down instead of refusing
-	// what Validate just allowed. See sp1_fri_ir_guard.go (R-012).
-	o := mergeOptions(opts)
-	o.sp1FriAdjudicatedByFrontend = true
+	// Feed into existing compilation pipeline (passes 4.25+). o was merged
+	// (and checked for ParseOnly/ValidateOnly/TypecheckOnly) at the top of
+	// this function.
 
 	// R-162 divergence (3), in the other direction: the issue-#109 embedAlways
 	// DCE notice ran ONLY in the *WithResult paths, so the API whose entire
@@ -608,6 +647,42 @@ func ParseAndValidateOnly(source []byte, sourcePath string) ParseAndValidateOnly
 	return ParseAndValidateOnlyResult{Err: nil, Warnings: validResult.Warnings}
 }
 
+// N-194: ParseOnly / ValidateOnly / TypecheckOnly are honored only by
+// CompileFromSourceStrWithResult (and CompileFromSourceWithResult), which
+// collect diagnostics into a CompileResult and can represent "stopped
+// successfully after an earlier pass, no artifact yet" as a value.
+//
+// CompileFromSourceCollectingWarnings and CompileSourceToIRCollectingWarnings
+// (and their thin wrappers CompileFromSource / CompileSourceToIR) cannot
+// represent that outcome — there is no value to put in the *Artifact /
+// *ir.ANFProgram return slot after stopping before it exists. Before this
+// fix they never checked these fields and ran every later pass anyway, so
+// whether the option did anything depended on which entry point the caller
+// happened to call rather than on the option itself (the same gap F-217
+// fixed in the Rust tier's sibling APIs). Reject explicitly instead, before
+// any pass runs, and name the dedicated API that does honor it.
+func rejectUnsupportedStopAfterPassOptions(o CompileOptions) error {
+	var set []string
+	if o.ParseOnly {
+		set = append(set, "ParseOnly")
+	}
+	if o.ValidateOnly {
+		set = append(set, "ValidateOnly")
+	}
+	if o.TypecheckOnly {
+		set = append(set, "TypecheckOnly")
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"CompileOptions.%s is not supported by this API: it would stop before an artifact "+
+			"or ANF program exists, and this API has no way to return a value for that. Use "+
+			"CompileFromSourceStrWithResult (or CompileFromSourceWithResult), which honors this "+
+			"option and reports partial success via CompileResult.",
+		strings.Join(set, " / "))
+}
+
 // diagStrings renders a diagnostic slice as a list of error messages for
 // `fmt.Errorf` consumption.
 func diagStrings(diags []frontend.Diagnostic) []string {
@@ -619,51 +694,74 @@ func diagStrings(diags []frontend.Diagnostic) []string {
 }
 
 // CompileSourceToIR runs passes 1-4 on a .runar.ts source file and returns the ANF program.
+//
+// Warning-severity diagnostics are discarded; CompileSourceToIRCollectingWarnings
+// returns them.
 func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgram, error) {
+	program, _, err := CompileSourceToIRCollectingWarnings(sourcePath, opts...)
+	return program, err
+}
+
+// CompileSourceToIRCollectingWarnings is CompileSourceToIR plus the warnings
+// CompileFromSourceCollectingWarnings reports: the validator's warnings and
+// the issue-#109 embedAlways DCE notice, computed from the same
+// (expanded contract, freshly lowered program) pair.
+//
+// F-220: `--emit-ir` used CompileSourceToIR, so every warning (the H2
+// locktime-bypass advisory among them) was dropped on that path.
+func CompileSourceToIRCollectingWarnings(sourcePath string, opts ...CompileOptions) (*ir.ANFProgram, []frontend.Diagnostic, error) {
+	o := mergeOptions(opts)
+	if err := rejectUnsupportedStopAfterPassOptions(o); err != nil {
+		return nil, nil, err
+	}
+
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading source file: %w", err)
+		return nil, nil, fmt.Errorf("reading source file: %w", err)
 	}
 
 	parseResult := frontend.ParseSource(source, sourcePath)
 	if len(parseResult.Errors) > 0 {
-		return nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, nil, fmt.Errorf("no contract found in %s", sourcePath)
 	}
 
 	validResult := frontend.Validate(parseResult.Contract)
 	if len(validResult.Errors) > 0 {
-		return nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
 	}
+	warnings := validResult.Warnings
 
 	tcResult := frontend.TypeCheck(parseResult.Contract)
 	if len(tcResult.Errors) > 0 {
-		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
 	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
 	if len(expandResult.Errors) > 0 {
-		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
 
 	// Pass 4: ANF lowering (recover from panics)
 	program, err := lowerToANFRecovering(expandResult.Contract)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	warnings = append(warnings, frontend.CollectEmbedAlwaysDCEWarnings(expandResult.Contract, program)...)
 
-	o := mergeOptions(opts)
+	// o was merged (and checked for ParseOnly/ValidateOnly/TypecheckOnly) at
+	// the top of this function.
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		program = frontend.FoldConstants(program)
+		program = frontend.FoldConstantsAndPrune(program)
 	}
 
 	if !o.DisableEcOptimizer {
 		program = frontend.OptimizeEC(program)
 	}
-	return program, nil
+	return program, warnings, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -831,7 +929,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 
 	// Pass 4.25: Constant folding (on by default)
 	if !o.DisableConstantFolding {
-		result.ANF = frontend.FoldConstants(result.ANF)
+		result.ANF = frontend.FoldConstantsAndPrune(result.ANF)
 	}
 
 	// Pass 4.5: EC optimization
@@ -910,7 +1008,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			return
 		}
 
-		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, emitResult.RawScriptSpans, stackMethods, o)
 		if aerr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
 				aerr.Error(),

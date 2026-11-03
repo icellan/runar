@@ -127,16 +127,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: MerkleBuiltin, depth: u32)
         // Stack: [current, sibling, direction_bit]  Alt: [rest_proof, index]
 
         // --- Step 3: Conditional swap + concatenate + hash ---
-        // Rearrange to get current and sibling adjacent with direction_bit:
-        // Roll current to top:
-        try ops.append(allocator, .{ .rot = {} });
-        // Stack: [sibling, direction_bit, current]
-        try ops.append(allocator, .{ .rot = {} });
-        // Stack: [direction_bit, current, sibling]
-
-        // Now: if direction_bit=1, swap current and sibling before CAT
-        try ops.append(allocator, .{ .rot = {} });
-        // Stack: [current, sibling, direction_bit]
+        // F-249: no rotation here. [current, sibling, direction_bit] is already the
+        // order OP_IF wants (it pops direction_bit, leaving current and sibling
+        // adjacent); the three OP_ROTs that used to sit here composed to the identity.
 
         // Build the if-then block: if direction=1, swap
         const then_ops = try allocator.alloc(StackOp, 1);

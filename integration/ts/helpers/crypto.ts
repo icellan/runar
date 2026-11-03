@@ -23,7 +23,7 @@ function wotsSha256(data: Buffer): Buffer {
  * Must match the on-chain script which uses 1-byte indices in a single 66-byte hash.
  */
 function wotsChain(x: Buffer, start: number, steps: number, pubSeed: Buffer, chainIdx: number): Buffer {
-  let tmp = Buffer.from(x);
+  let tmp: Buffer = Buffer.from(x);
   for (let i = start; i < start + steps; i++) {
     const input = Buffer.concat([pubSeed, Buffer.from([chainIdx, i]), tmp]);
     tmp = wotsSha256(input);

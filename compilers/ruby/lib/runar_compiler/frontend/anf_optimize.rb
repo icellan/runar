@@ -36,14 +36,6 @@ module RunarCompiler
         ecModReduce ecEncodeCompressed ecMakePoint ecPointX ecPointY
       ].to_set.freeze
 
-      # Counter for generating fresh constant binding names
-      @fresh_counter = 0
-
-      class << self
-        # @return [Integer]
-        attr_accessor :fresh_counter
-      end
-
       # -----------------------------------------------------------------
       # Public API
       # -----------------------------------------------------------------
@@ -57,10 +49,142 @@ module RunarCompiler
         any_changed = program.methods.any? { |m| has_ec_calls?(m) }
         return program unless any_changed
 
+        # N-097: the has-EC-call check above is only a fast path (a rule can
+        # only fire on an EC call, at any depth since N-201). The gate is the TS reference's
+        # (anf-ec.ts optimizeEC): dead binding elimination runs over EVERY
+        # method iff a rewrite fired in ANY method, else the program is
+        # returned untouched, dead bindings included.
+        # N-201: the names each method references before any rewrite -- the
+        # candidate set of the nested prune below.
+        candidates = program.methods.map do |m|
+          refs = Set.new
+          m.body.each { |b| DCE.collect_refs(b.value, refs) }
+          refs
+        end
+
         result = deep_copy_program(program)
-        result.methods.each { |m| optimize_method(m) }
+        fired = false
+        result.methods.each { |m| fired = true if optimize_method(m, result.properties) }
+        return program unless fired
+
+        # Dead binding elimination
+        result.methods.each_with_index do |method, i|
+          eliminate_dead_bindings(method)
+          # N-201: a rewrite inside an if arm or a loop body orphans its
+          # operands there, and the DCE above filters only the top level; an
+          # orphan left in an arm unbalances the arms (the N-446 hazard).
+          # Same candidate rule as the constant folder's prune.
+          DCE.eliminate_dead_bindings(method, candidates[i])
+          # N-113: drop the inner ecMul/ecMulGen calls a fusion orphaned whose
+          # abort is still performed, then prune what that orphans.
+          while remove_gate_subsumed_ec_calls(method, candidates[i])
+            DCE.eliminate_dead_bindings(method, candidates[i])
+          end
+        end
         result
       end
+
+      # N-113 (the TS reference's anf-ec.ts removeGateSubsumedEcCalls): remove
+      # dead scalar multiplications whose only effect, a possible abort, is
+      # provably still performed. Mutates +method+; true when anything went.
+      #
+      # - ecMulGen(<const k>) cannot abort: its point is the fixed generator,
+      #   which passes ecMul's operand gate, and the ladder reduces any k.
+      # - ecMul(q, <const k>) aborts exactly when its operand gate
+      #   `q === O || ecOnCurve(q)` fails (R-157). It may go when a WITNESS
+      #   performs the same gate: another ecMul(q', _), q' the same binding as
+      #   q (F-269), not itself removable, in the same scope or an ENCLOSING
+      #   one -- never a nested one, which runs only on some paths.
+      # - ecNegate is never removed: R7, R8 and R8r rely on it as a gate.
+      #
+      # Only a removal candidate goes (a name referenced before the EC pass
+      # ran -- the inner call a fusion orphaned), referenced nowhere in the
+      # method now, not a private method's return value (F-108) and not one of
+      # its if's results.
+      def self.remove_gate_subsumed_ec_calls(method, candidates)
+        vm = ValueMap.new(collect_rebound_names(method))
+        refs = Set.new
+        index = lambda do |bindings|
+          (bindings || []).each do |b|
+            vm[b.name] = b.value
+            DCE.collect_refs(b.value, refs)
+            case b.value.kind
+            when "if"
+              index.call(b.value.then)
+              index.call(b.value.else_)
+            when "loop"
+              index.call(b.value.body)
+            end
+          end
+        end
+        index.call(method.body)
+        keep_last = method.name != "constructor" && !method.is_public
+
+        removable = lambda do |b, protect, is_return|
+          v = b.value
+          next false if v.kind != "call" || is_return || !candidates.include?(b.name) ||
+                        refs.include?(b.name) || protect.include?(b.name)
+          args = v.args || []
+          case v.func
+          when "ecMulGen"
+            args.length == 1 && !get_const_int(args[0], vm).nil?
+          when "ecMul"
+            args.length == 2 && !get_const_int(args[1], vm).nil? && stable?(args[0], vm)
+          else
+            false
+          end
+        end
+
+        filter_scope = nil
+        filter_scope = lambda do |bindings, outer, protect, top_level|
+          bindings ||= []
+          n = bindings.length
+          is_cand = bindings.each_with_index.map do |b, i|
+            removable.call(b, protect, top_level && keep_last && i == n - 1)
+          end
+          witnesses = outer.dup
+          bindings.each_with_index do |b, i|
+            v = b.value
+            next unless !is_cand[i] && v.kind == "call" && v.func == "ecMul" && (v.args || []).length == 2
+            c = canonical(v.args[0], vm)
+            witnesses << c unless c.nil?
+          end
+          changed = false
+          out = []
+          bindings.each_with_index do |b, i|
+            v = b.value
+            if is_cand[i] && (v.func == "ecMulGen" || witnesses.include?(canonical(v.args[0], vm)))
+              changed = true
+              next
+            end
+            case v.kind
+            when "if"
+              results = Set.new(v.results || [])
+              then_b = filter_scope.call(v.then, witnesses, results, false)
+              else_b = filter_scope.call(v.else_, witnesses, results, false)
+              unless then_b.nil? && else_b.nil?
+                changed = true
+                v.then = then_b unless then_b.nil?
+                v.else_ = else_b unless else_b.nil?
+              end
+            when "loop"
+              body_b = filter_scope.call(v.body, witnesses, Set.new, false)
+              unless body_b.nil?
+                changed = true
+                v.body = body_b
+              end
+            end
+            out << b
+          end
+          changed ? out : nil
+        end
+
+        body = filter_scope.call(method.body, [], Set.new, true)
+        return false if body.nil?
+        method.body = body
+        true
+      end
+      private_class_method :remove_gate_subsumed_ec_calls
 
       # -----------------------------------------------------------------
       # Deep copy helpers
@@ -132,10 +256,18 @@ module RunarCompiler
       # EC call detection
       # -----------------------------------------------------------------
 
+      # Any EC intrinsic call at any depth (N-201: if arms and loop bodies
+      # are rewritten too).
       def self.has_ec_calls?(method)
-        method.body.any? do |binding|
-          binding.value.kind == "call" && EC_FUNCS.include?(binding.value.func)
+        walk = lambda do |bindings|
+          (bindings || []).any? do |binding|
+            v = binding.value
+            (v.kind == "call" && EC_FUNCS.include?(v.func)) ||
+              (v.kind == "if" && (walk.call(v.then) || walk.call(v.else_))) ||
+              (v.kind == "loop" && walk.call(v.body))
+          end
         end
+        walk.call(method.body)
       end
       private_class_method :has_ec_calls?
 
@@ -143,64 +275,324 @@ module RunarCompiler
       # Per-method optimization
       # -----------------------------------------------------------------
 
-      def self.optimize_method(method)
-        value_map = {}
-        changed = true
-        while changed
-          changed = false
-          new_body = []
-          method.body.each do |binding|
-            # +new_body+ doubles as the prelude list: a rule that folds a new
-            # constant appends its binding here, i.e. immediately BEFORE the
-            # binding being rewritten (see fresh_const_name).
-            optimized = try_optimize(binding.value, value_map, new_body)
-            if optimized
-              binding = IR::ANFBinding.new(
-                name: binding.name,
-                value: optimized,
-                source_loc: binding.source_loc
-              )
-              changed = true
+      # F-086: every name the method already uses -- binding names at any
+      # depth (if/loop arms included), loop iteration variables, params, and
+      # the contract's properties. A scalar-fusing rewrite mints a new
+      # binding; ANF is single-assignment and stack lowering resolves a name
+      # to its shallowest slot, so a minted name that is already in use
+      # silently aliases the two values. +--ir+ input chooses these names
+      # freely.
+      def self.collect_used_names(method, properties)
+        used = Set.new
+        properties.each { |p| used << p.name }
+        method.params.each { |p| used << p.name }
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            used << b.name
+            v = b.value
+            case v.kind
+            when "load_param", "load_prop"
+              used << v.name if v.name
+            when "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            when "loop"
+              used << v.iter_var if v.iter_var
+              walk.call(v.body)
             end
-            value_map[binding.name] = binding.value
-            new_body << binding
           end
-          method.body = new_body
+        end
+        walk.call(method.body)
+        used
+      end
+      private_class_method :collect_used_names
+
+      # Binding name -> value, plus the method's rebound names (F-269, see
+      # +canonical+).
+      class ValueMap < Hash
+        attr_reader :rebound
+
+        def initialize(rebound)
+          super()
+          @rebound = rebound
         end
 
-        # Dead binding elimination
-        eliminate_dead_bindings(method)
+        # N-201: the map an if arm or a loop body starts from (the TS
+        # ValueMap.nestedScope) -- every binding visible at the if/loop, and
+        # nothing the nested scope binds flows back out. +hidden+ is a loop's
+        # iteration variable, never resolved through an outer binding.
+        def nested_scope(hidden = nil)
+          scope = ValueMap.new(@rebound)
+          each { |k, v| scope[k] = v }
+          scope.delete(hidden) if hidden
+          scope
+        end
       end
+
+      # F-269: every name bound more than once in the method -- binding names
+      # at any depth (if/loop arms included) and loop iteration variables (the
+      # TS collectReboundNames). +canonical+ never resolves through one.
+      def self.collect_rebound_names(method)
+        seen = Set.new
+        rebound = Set.new
+        bind = lambda do |name|
+          if seen.include?(name)
+            rebound << name
+          else
+            seen << name
+          end
+        end
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            bind.call(b.name)
+            v = b.value
+            case v.kind
+            when "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            when "loop"
+              bind.call(v.iter_var) if v.iter_var
+              walk.call(v.body)
+            end
+          end
+        end
+        walk.call(method.body)
+        rebound
+      end
+      private_class_method :collect_rebound_names
+
+      # Rewrite one method's EC calls -- top level, if arms and loop bodies
+      # (N-201) -- to a fixed point; true iff a rule fired.
+      def self.optimize_method(method, properties)
+        rebound = collect_rebound_names(method)
+        used_names = collect_used_names(method, properties)
+        fired = false
+        loop do
+          # N-460: the fusion guard's referrer counts, once per sweep.
+          referrers = count_referrers(method.body, method)
+          new_body = optimize_body(method.body, ValueMap.new(rebound), nil, used_names, referrers, Set.new)
+          break if new_body.nil?
+          method.body = new_body
+          fired = true
+        end
+        fired
+      end
+
+      # One left-to-right sweep over a scope (the TS optimizeBodyOnce): each
+      # binding is tried once against the values of the bindings before it,
+      # as already rewritten in this sweep. N-201: it descends into if arms
+      # (then before else) and loop bodies at the position of their binding,
+      # each with its own scope (ValueMap#nested_scope). nil when no rule
+      # fired.
+      def self.optimize_body(body, outer, hidden, used_names, referrers, outer_frame)
+        value_map = outer.nested_scope(hidden)
+        # N-460: an if arm sees its enclosing frame, a loop body starts a new one.
+        local = Set.new((body || []).map(&:name))
+        scope = FusionScope.new(referrers, local, outer_frame | local, count_mul_readers(body, outer, hidden))
+        new_body = []
+        changed = false
+        (body || []).each do |binding|
+          v = binding.value
+          if v.kind == "if" || v.kind == "loop"
+            value_map[binding.name] = v
+            if v.kind == "if"
+              then_b = optimize_body(v.then, value_map, nil, used_names, referrers, scope.frame)
+              else_b = optimize_body(v.else_, value_map, nil, used_names, referrers, scope.frame)
+              unless then_b.nil? && else_b.nil?
+                v.then = then_b unless then_b.nil?
+                v.else_ = else_b unless else_b.nil?
+                changed = true
+              end
+            else
+              body_b = optimize_body(v.body, value_map, v.iter_var, used_names, referrers, Set.new)
+              unless body_b.nil?
+                v.body = body_b
+                changed = true
+              end
+            end
+            new_body << binding
+            next
+          end
+          # +new_body+ doubles as the prelude list: a rule that folds a new
+          # constant appends its binding here, i.e. immediately BEFORE the
+          # binding being rewritten (see fresh_const_name).
+          prelude_start = new_body.length
+          value_map[binding.name] = v
+          optimized = try_optimize(v, value_map, new_body, used_names, scope, binding.name)
+          if optimized
+            # N-218: every helper a rewrite mints (the N-104/N-251 gate
+            # bindings, the fused-scalar helper) takes the rewritten
+            # binding's own source_loc, mirroring F-343 in the TS
+            # reference (anf-ec.ts optimizeBodyOnce) -- it exists only
+            # because of that source expression, and stack lowering maps
+            # opcodes through binding.source_loc.
+            new_body[prelude_start..].each { |helper| helper.source_loc = binding.source_loc }
+            binding = IR::ANFBinding.new(
+              name: binding.name,
+              value: optimized,
+              source_loc: binding.source_loc
+            )
+            changed = true
+          end
+          value_map[binding.name] = binding.value
+          new_body << binding
+        end
+        changed ? new_body : nil
+      end
+      private_class_method :optimize_body
       private_class_method :optimize_method
+
+      # N-460 -- what a fusing rule (R9, R10, R11) needs to know at its fire
+      # site (the TS FusionScope in anf-ec.ts).
+      #
+      # A fusion replaces the outer call with ONE new scalar multiplication,
+      # so it shrinks the script only if remove_gate_subsumed_ec_calls then
+      # drops an inner call it read. Each fusing rule therefore fires only
+      # when at least one of its inner operands is ELIMINABLE
+      # (fusion_eliminates?):
+      #
+      # - every name on its alias chain (the operand, each @ref: hop, the call
+      #   binding itself -- canonical's walk) has exactly one referrer: the
+      #   rewritten binding for the operand, the previous hop for the rest.
+      #   Any other reader keeps the inner call alive after the fusion;
+      # - the call is an ecMulGen bound in the current scope or an enclosing
+      #   one inside the same loop body (frame). It needs no witness, but one
+      #   bound outside a loop the fusion sits in would trade one
+      #   multiplication for one per iteration;
+      # - or the call is an ecMul bound in the current scope itself (local):
+      #   the fused ecMul on the same point is then its witness. One bound in
+      #   an enclosing scope has no witness (the fused call is nested) and
+      #   stays.
+      #
+      # referrers is computed once per sweep, from the body the sweep starts
+      # with (count_referrers), and not updated as the sweep rewrites. A
+      # rewrite only adds a reference to a name its own binding, or the inner
+      # binding it lifts from, already read, so a stale count is never too
+      # low. Every tier computes it the same way, because which rules fire
+      # decides the bytes.
+      #
+      # N-465: R9 alone (shared) also accepts a name whose every referrer is
+      # one of mul_readers: a binding of the current scope ecMul(<name>, k)
+      # with k a constant other than 0 and 1 (R3/R4 would rewrite it first and
+      # keep reading the name). Each such reader fires R9 in this same sweep —
+      # everything R9 checks besides k is a property of the shared inner, the
+      # same for all of them — so the inner loses every reader, and the fused
+      # calls, ecMuls on its point in its own scope, are its witness. R10/R11
+      # never use this: an ecAdd reader beside R9 readers is not one of them,
+      # so the two would decide differently and the inner would stay.
+      FusionScope = Struct.new(:referrers, :local, :frame, :mul_readers)
+
+      # N-465: per name, the bindings of this scope (body, not its arms or loop
+      # bodies) that are ecMul(<name>, k) with k resolving to a constant other
+      # than 0 and 1 — resolved as R9 will resolve it at that binding, against
+      # the bindings before it. Taken from the body the sweep starts with: a
+      # rewrite never turns a binding into an integer constant, so k resolves
+      # the same way after the rewrites ahead of it.
+      def self.count_mul_readers(body, outer, hidden)
+        vm = outer.nested_scope(hidden)
+        counts = Hash.new(0)
+        (body || []).each do |b|
+          v = b.value
+          vm[b.name] = v
+          next unless v.kind == "call" && v.func == "ecMul" && v.args && v.args.length == 2
+          k = get_const_int(v.args[1], vm)
+          next if k.nil? || k == 0 || k == 1
+          counts[v.args[0]] += 1
+        end
+        counts
+      end
+      private_class_method :count_mul_readers
+
+      # N-460: referrer count per name -- the bindings, at any depth, whose
+      # value reads it (once per binding, however many operands name it; an
+      # if reads its cond, its arms' bindings are counted themselves), plus
+      # one for each name in an if's results and one for a private method's
+      # return binding (F-108): the two things remove_gate_subsumed_ec_calls
+      # protects.
+      def self.count_referrers(body, method)
+        counts = Hash.new(0)
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            v = b.value
+            reads = Set.new
+            if v.kind == "if"
+              reads << v.cond
+              (v.results || []).each { |r| reads << r }
+            elsif v.kind != "loop"
+              DCE.collect_refs(v, reads)
+            end
+            reads.each { |name| counts[name] += 1 }
+            if v.kind == "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            elsif v.kind == "loop"
+              walk.call(v.body)
+            end
+          end
+        end
+        walk.call(body)
+        counts[body.last.name] += 1 if method.name != "constructor" && !method.is_public && body && !body.empty?
+        counts
+      end
+      private_class_method :count_referrers
+
+      # N-460: does fusing these inner operands let at least one inner call go?
+      def self.fusion_eliminates?(operands, vm, scope, shared = false)
+        operands.any? do |operand|
+          c = canonical(operand, vm)
+          next false if c.nil?
+          # canonical already walked this chain, so every hop is an @ref:.
+          cur = operand
+          single = true
+          loop do
+            n = scope.referrers[cur]
+            if n != 1 && !(shared && n > 1 && n == scope.mul_readers[cur])
+              single = false
+              break
+            end
+            break if cur == c
+            cur = vm[cur].const_string[5..]
+          end
+          next false unless single
+          v = vm[c]
+          next false if v.nil? || v.kind != "call"
+          (v.func == "ecMulGen" && scope.frame.include?(c)) || (v.func == "ecMul" && scope.local.include?(c))
+        end
+      end
+      private_class_method :fusion_eliminates?
 
       # -----------------------------------------------------------------
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm, prelude)
+      def self.try_optimize(v, vm, prelude, used_names, scope, name = "")
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
         args = v.args
 
-        # Rule 1: ecAdd(x, INFINITY) -> x
-        if func == "ecAdd" && args.size == 2
-          return make_ref(args[0]) if infinity?(args[1], vm)
+        # Rule 1: ecAdd(x, INFINITY) -> x, keeping ecAdd's operand gate (N-104)
+        if func == "ecAdd" && args.size == 2 && infinity?(args[1], vm)
+          emit_operand_gate(false, name, args[0], vm, prelude, used_names)
+          return make_ref(args[0])
         end
 
-        # Rule 2: ecAdd(INFINITY, x) -> x
-        if func == "ecAdd" && args.size == 2
-          return make_ref(args[1]) if infinity?(args[0], vm)
+        # Rule 2: ecAdd(INFINITY, x) -> x, keeping ecAdd's operand gate (N-104)
+        if func == "ecAdd" && args.size == 2 && infinity?(args[0], vm)
+          emit_operand_gate(false, name, args[1], vm, prelude, used_names)
+          return make_ref(args[1])
         end
 
-        # Rule 3: ecMul(x, 1) -> x
-        if func == "ecMul" && args.size == 2
-          return make_ref(args[0]) if const_int?(args[1], 1, vm)
+        # Rule 3: ecMul(x, 1) -> x, keeping ecMul's operand gate (N-104)
+        if func == "ecMul" && args.size == 2 && const_int?(args[1], 1, vm)
+          emit_operand_gate(true, name, args[0], vm, prelude, used_names)
+          return make_ref(args[0])
         end
 
-        # Rule 4: ecMul(x, 0) -> INFINITY
-        if func == "ecMul" && args.size == 2
-          return make_const_hex(INFINITY_HEX) if const_int?(args[1], 0, vm)
+        # Rule 4: ecMul(x, 0) -> INFINITY, keeping ecMul's operand gate (N-104)
+        if func == "ecMul" && args.size == 2 && const_int?(args[1], 0, vm)
+          emit_operand_gate(true, name, args[0], vm, prelude, used_names)
+          return make_const_hex(INFINITY_HEX)
         end
 
         # Rule 5: ecMulGen(0) -> INFINITY
@@ -216,16 +608,22 @@ module RunarCompiler
         # Rule 7: ecNegate(ecNegate(x)) -> x
         if func == "ecNegate" && args.size == 1
           inner = resolve(args[0], vm)
-          if inner && inner.kind == "call" && inner.func == "ecNegate" && inner.args && inner.args.size == 1
+          # F-269 attempt 2: x is lifted out of the inner binding and
+          # re-emitted here, so it must denote one value at both sites.
+          if inner && inner.kind == "call" && inner.func == "ecNegate" && inner.args && inner.args.size == 1 &&
+             stable?(inner.args[0], vm)
             return make_ref(inner.args[0])
           end
         end
 
-        # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+        # Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY, keeping the adder's y = 0 abort (N-251)
         if func == "ecAdd" && args.size == 2
           neg = resolve(args[1], vm)
           if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
-            return make_const_hex(INFINITY_HEX) if same_binding?(args[0], neg.args[0], vm)
+            if same_binding?(args[0], neg.args[0], vm)
+              emit_neg_cancel_gate(name, args[0], vm, prelude, used_names)
+              return make_const_hex(INFINITY_HEX)
+            end
           end
         end
 
@@ -242,7 +640,13 @@ module RunarCompiler
         if func == "ecAdd" && args.size == 2
           neg = resolve(args[0], vm)
           if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
-            return make_const_hex(INFINITY_HEX) if same_binding?(args[1], neg.args[0], vm)
+            if same_binding?(args[1], neg.args[0], vm)
+              # The gate reads the ecNegate operand: the name the JSON's `$x`
+              # binds first, as the Go engine binds it (differs from args[1]
+              # only through an alias, F-269).
+              emit_neg_cancel_gate(name, neg.args[0], vm, prelude, used_names)
+              return make_const_hex(INFINITY_HEX)
+            end
           end
         end
 
@@ -250,11 +654,12 @@ module RunarCompiler
         if func == "ecMul" && args.size == 2
           inner = resolve(args[0], vm)
           k2 = get_const_int(args[1], vm)
-          if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2
+          if inner && k2 && inner.kind == "call" && inner.func == "ecMul" && inner.args && inner.args.size == 2 &&
+             stable?(inner.args[0], vm)
             k1 = get_const_int(inner.args[1], vm)
-            if k1
+            if k1 && fusion_eliminates?([args[0]], vm, scope, true)
               combined = (k1 * k2) % CURVE_N
-              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude)])
+              return make_call("ecMul", [inner.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
             end
           end
         end
@@ -268,9 +673,9 @@ module RunarCompiler
              right_v.kind == "call" && right_v.func == "ecMulGen" && right_v.args && right_v.args.size == 1
             k1 = get_const_int(left_v.args[0], vm)
             k2 = get_const_int(right_v.args[0], vm)
-            if k1 && k2
+            if k1 && k2 && fusion_eliminates?(args, vm, scope)
               combined = (k1 + k2) % CURVE_N
-              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude)])
+              return make_call("ecMulGen", [fresh_const_name(name, combined, vm, prelude, used_names)])
             end
           end
         end
@@ -285,9 +690,9 @@ module RunarCompiler
             if same_binding?(left_v.args[0], right_v.args[0], vm)
               k1 = get_const_int(left_v.args[1], vm)
               k2 = get_const_int(right_v.args[1], vm)
-              if k1 && k2
+              if k1 && k2 && fusion_eliminates?(args, vm, scope)
                 combined = (k1 + k2) % CURVE_N
-                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude)])
+                return make_call("ecMul", [left_v.args[0], fresh_const_name(name, combined, vm, prelude, used_names)])
               end
             end
           end
@@ -306,23 +711,16 @@ module RunarCompiler
       # Helpers -- value inspection
       # -----------------------------------------------------------------
 
-      # Resolve a binding name to its ANFValue.
+      # Resolve a binding name to its ANFValue, following @ref: aliases
+      # (F-269, +canonical+).
       #
-      # R-263: this used to carry an alias-chasing loop guarded on
-      # `val.kind == "load_param" && val.name.start_with?("@ref:")`. No such
-      # value exists. Aliases are created as load_const carrying the reference
-      # in `const_string` (see make_alias below, and anf_lower's
-      # `_make_load_const_string("@ref:...")`); `load_param` values carry real
-      # parameter names like "txPreimage". The branch could not fire, and the
-      # loop around it did nothing but walk one step and return.
-      #
-      # Not repaired into a working chase, which would be a behaviour change:
-      # the TypeScript reference's `resolveArg` is a plain map lookup too, so
-      # following aliases here would enable rewrites no other tier performs.
-      # Where alias-following genuinely belongs, dce.rb:98 already does it
-      # correctly, through `const_string`.
+      # R-263 removed a chase guarded on an impossible `load_param` shape and
+      # kept this a plain lookup because the TypeScript reference was one too.
+      # F-269 (user decision R77) made every tier follow aliases; they are
+      # load_const values carrying the reference in `const_string`.
       def self.resolve(name, vm)
-        vm[name]
+        c = canonical(name, vm)
+        c.nil? ? nil : vm[c]
       end
       private_class_method :resolve
 
@@ -356,17 +754,47 @@ module RunarCompiler
       private_class_method :get_const_int
 
       def self.same_binding?(a, b, vm)
-        canonical(a, vm) == canonical(b, vm)
+        ca = canonical(a, vm)
+        !ca.nil? && ca == canonical(b, vm)
       end
       private_class_method :same_binding?
 
-      # The canonical binding name.
+      # F-269 attempt 2: may a name lifted out of an earlier binding be emitted
+      # at the current site? Only when it denotes one value (R7, R9).
+      def self.stable?(name, vm)
+        !canonical(name, vm).nil?
+      end
+      private_class_method :stable?
+
+      # F-269 (user decision R77): the binding +name+ ultimately names,
+      # following load_const "@ref:<x>" aliases -- pass 04's
+      # `const y = <expr>` and the ones R1/R2/R3/R7 leave behind (the TS
+      # canonicalName in anf-ec.ts).
       #
-      # R-263: the @ref: chain this claimed to follow was guarded on the same
-      # impossible `load_param` shape as `resolve` above, so every call already
-      # returned its argument unchanged.
-      def self.canonical(name, _vm)
-        name
+      # nil when +name+ has no position-independent identity: ANF re-emits a
+      # local's name when the source reassigns it (top level or in an if/loop
+      # arm), so a REBOUND name means different values at different sites. Two
+      # uses of one are not "the same $x", and nothing lifted out of an earlier
+      # binding may name one (F-269 attempt 2). An alias cycle (only
+      # hand-written --ir) is nil too. A hop is never taken INTO a rebound
+      # name: the chain stops at the last name bound once, which is itself a
+      # fixed value, and its value is the opaque alias. Matching only --
+      # rewrites emit the literal names they matched.
+      def self.canonical(name, vm)
+        rebound = vm.respond_to?(:rebound) ? vm.rebound : Set.new
+        return nil if rebound.include?(name)
+        seen = Set[name]
+        current = name
+        loop do
+          val = vm[current]
+          s = val && val.kind == "load_const" ? val.const_string : nil
+          return current unless s.is_a?(String) && s.length > 5 && s.start_with?("@ref:")
+          nxt = s[5..]
+          return current if rebound.include?(nxt)
+          return nil if seen.include?(nxt)
+          seen << nxt
+          current = nxt
+        end
       end
       private_class_method :canonical
 
@@ -416,6 +844,100 @@ module RunarCompiler
       end
       private_class_method :make_call
 
+      FIELD_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+      # N-104 -- the operand gate a rewrite must leave behind. Byte-for-byte the
+      # TS reference (emitAddOperandGate / emitMulOperandGate in
+      # packages/runar-compiler/src/optimizer/anf-ec.ts) and the "gate" entries
+      # in optimizer/ec-rules.json:
+      #
+      #   ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+      #   ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+      #
+      # R1-R4 replace a builtin whose first act is to validate q; without this a
+      # malformed or off-curve q was accepted by the default compile and aborted
+      # under disableEcOptimizer. Built only from forms no rule matches, so the
+      # fixed-point loop cannot rewrite it on a later pass. Names follow the TS
+      # freshName: <base><suffix>, else the first unused ..._<i>.
+      def self.emit_operand_gate(of_mul, base, q, vm, prelude, used_names)
+        add = lambda do |suffix, value|
+          name = "#{base}#{suffix}"
+          i = 1
+          while used_names.include?(name)
+            name = "#{base}#{suffix}_#{i}"
+            i += 1
+          end
+          used_names << name
+          vm[name] = value
+          prelude << IR::ANFBinding.new(name: name, value: value)
+          name
+        end
+        bin = lambda do |op, left, right, result_type = nil|
+          IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = op
+            v.left = left
+            v.right = right
+            v.result_type = result_type if result_type
+          end
+        end
+        if of_mul
+          inf = add.call("_inf", make_const_hex(INFINITY_HEX))
+          is_inf = add.call("_isinf", bin.call("===", q, inf, "bytes"))
+          on_curve = add.call("_oncurve", make_call("ecOnCurve", [q]))
+          ok = add.call("_ok", bin.call("||", is_inf, on_curve))
+        else
+          px = add.call("_px", make_call("ecPointX", [q]))
+          py = add.call("_py", make_call("ecPointY", [q]))
+          fp = add.call("_fp", make_const_int(FIELD_P))
+          x_ok = add.call("_pxok", bin.call("<", px, fp))
+          y_ok = add.call("_pyok", bin.call("<", py, fp))
+          ok = add.call("_ok", bin.call("&&", x_ok, y_ok))
+        end
+        add.call("_gate", Frontend._make_assert(ok))
+      end
+      private_class_method :emit_operand_gate
+
+      # N-251 -- the gate R8/R8r (ecAdd(q, ecNegate(q)) -> O and its mirror)
+      # must leave behind (user decision R96). Byte-for-byte the TS reference
+      # (emitNegCancelGate in packages/runar-compiler/src/optimizer/anf-ec.ts):
+      #
+      #   assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+      #
+      # The replaced ecAdd doubles exactly when y(q) = 0, and N-110 made the
+      # adder abort on a doubling with px != 0 and py == 0; the px == 0 term
+      # keeps O + O = O. Width and canonicity are checked by the inner
+      # ecNegate(q) call, which is never dead-code-eliminated. Names as in
+      # emit_operand_gate.
+      def self.emit_neg_cancel_gate(base, q, vm, prelude, used_names)
+        add = lambda do |suffix, value|
+          name = "#{base}#{suffix}"
+          i = 1
+          while used_names.include?(name)
+            name = "#{base}#{suffix}_#{i}"
+            i += 1
+          end
+          used_names << name
+          vm[name] = value
+          prelude << IR::ANFBinding.new(name: name, value: value)
+          name
+        end
+        bin = lambda do |op, left, right|
+          IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = op
+            v.left = left
+            v.right = right
+          end
+        end
+        px = add.call("_px", make_call("ecPointX", [q]))
+        py = add.call("_py", make_call("ecPointY", [q]))
+        zero = add.call("_zero", make_const_int(0))
+        x_zero = add.call("_pxz", bin.call("===", px, zero))
+        y_non_zero = add.call("_pynz", bin.call("!==", py, zero))
+        ok = add.call("_ok", bin.call("||", x_zero, y_non_zero))
+        add.call("_gate", Frontend._make_assert(ok))
+      end
+      private_class_method :emit_neg_cancel_gate
+
       # Bind a freshly folded constant and return its name.
       #
       # This is needed when optimization produces a new constant (e.g. k1*k2)
@@ -426,12 +948,24 @@ module RunarCompiler
       # registered in the value map. Registering it in the value map alone is
       # not enough: stack lowering walks the body, so a call referencing a name
       # that never got a binding dies with
-      # <tt>value "__ec_opt_N" not found on stack</tt>. Mirrors
+      # <tt>value "<name>" not found on stack</tt>. Mirrors
       # AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
       # +newBindings+ list in anf-ec.ts (TypeScript).
-      def self.fresh_const_name(value, vm, prelude)
-        self.fresh_counter += 1
-        name = "__ec_opt_#{fresh_counter}"
+      #
+      # The name follows the TS +freshName(`${binding.name}_k`, usedNames)+:
+      # +<base>_k+, else the first unused +<base>_k_<i>+ (F-086: against every
+      # name the method already uses, see collect_used_names), and is reserved
+      # there. N-112: it is derived from the program alone -- no class-level
+      # counter -- so the same program always gets the same names.
+      def self.fresh_const_name(base, value, vm, prelude, used_names)
+        stem = "#{base}_k"
+        name = stem
+        i = 1
+        while used_names.include?(name)
+          name = "#{stem}_#{i}"
+          i += 1
+        end
+        used_names << name
         const = make_const_int(value)
         vm[name] = const
         prelude << IR::ANFBinding.new(name: name, value: const)

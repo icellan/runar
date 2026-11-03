@@ -16,6 +16,8 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_validate = @import("sighash_validate.zig");
+const reserved_names = @import("reserved_names.zig");
+const input_limits = @import("../frontend/input_limits.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -71,7 +73,18 @@ fn validateWithMode(
     try validateProperties(allocator, contract, &errors, &warnings);
     try validateConstructor(allocator, contract, mode, &errors);
     try validateMethods(allocator, contract, &errors, &warnings);
-    try checkNoRecursion(allocator, contract, &errors);
+    const call_depth_exceeded = try checkNoRecursion(allocator, contract, &errors);
+    try checkReservedNames(allocator, contract, &errors);
+    // N-180: the Rabin-provenance and sighash passes walk the private-method
+    // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    // refuses, so stop here.
+    if (call_depth_exceeded) {
+        return .{
+            .errors = try errors.toOwnedSlice(allocator),
+            .warnings = try warnings.toOwnedSlice(allocator),
+        };
+    }
+    try checkRabinPubKeyProvenance(allocator, contract, &errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). The pass
@@ -95,6 +108,57 @@ fn validateWithMode(
         .errors = try errors.toOwnedSlice(allocator),
         .warnings = try warnings.toOwnedSlice(allocator),
     };
+}
+
+/// N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+/// pass mints (see reserved_names.zig). Checks properties, method names,
+/// constructor and method parameters, locals and loop variables. A stateful
+/// `txPreimage` PROPERTY keeps its older, dedicated diagnostic (V27).
+fn checkReservedNames(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const Checker = struct {
+        a: Allocator,
+        errs: *std.ArrayListUnmanaged(CompilerDiagnostic),
+        stateful: bool,
+
+        fn check(self: @This(), name: []const u8, loc: ?SourceLocation) !void {
+            if (!reserved_names.isReservedSourceName(name, self.stateful)) return;
+            const msg = try reserved_names.message(self.a, name);
+            try self.errs.append(self.a, .{ .message = msg, .location = loc, .severity = .@"error", .owned_message = true });
+        }
+
+        fn walk(self: @This(), stmts: []const Statement, loc: ?SourceLocation) !void {
+            for (stmts) |stmt| switch (stmt) {
+                .const_decl => |d| try self.check(d.name, d.source_loc orelse loc),
+                .let_decl => |d| try self.check(d.name, d.source_loc orelse loc),
+                .if_stmt => |i| {
+                    try self.walk(i.then_body, loc);
+                    if (i.else_body) |e| try self.walk(e, loc);
+                },
+                .for_stmt => |f| {
+                    try self.check(f.var_name, f.source_loc orelse loc);
+                    try self.walk(f.body, loc);
+                },
+                else => {},
+            };
+        }
+    };
+    const c = Checker{ .a = allocator, .errs = errors, .stateful = contract.parent_class == .stateful_smart_contract };
+
+    for (contract.properties) |prop| {
+        if (c.stateful and std.mem.eql(u8, prop.name, "txPreimage")) continue;
+        try c.check(prop.name, prop.source_loc);
+    }
+    for (contract.constructor.params) |p| try c.check(p.name, null);
+    try c.walk(contract.constructor.body, null);
+    for (contract.methods) |m| {
+        if (!std.mem.eql(u8, m.name, "constructor")) try c.check(m.name, m.source_loc);
+        for (m.params) |p| try c.check(p.name, m.source_loc);
+        try c.walk(m.body, m.source_loc);
+    }
 }
 
 /// Free a ValidationResult previously returned by validate().
@@ -223,6 +287,11 @@ fn validateProperties(
             }
         }
 
+        // N-414 (peer of TS F-265): the shape checks above never validate a
+        // ByteString literal's HEX FORMAT. An odd-length initializer used to
+        // surface two passes later as an opaque StackLowerFailed.
+        if (prop.initializer) |init_expr| try validateInitializerHex(allocator, errors, init_expr);
+
         // V27: txPreimage is implicit in StatefulSmartContract
         if (contract.parent_class == .stateful_smart_contract and
             std.mem.eql(u8, prop.name, "txPreimage"))
@@ -268,6 +337,146 @@ fn validateProperties(
 // ============================================================================
 // Constructor validation
 // ============================================================================
+
+/// N-414: hex-format check for the ByteString literals of a property
+/// initializer (the literal itself, the argument of `toByteString(...)`, and
+/// array-literal elements). Same two messages as the TS validator.
+fn validateInitializerHex(
+    allocator: Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    expr: Expression,
+) !void {
+    switch (expr) {
+        .literal_bytes => |lit| try checkByteStringHex(allocator, errors, lit.value, lit.location),
+        .call => |c| for (c.args) |a| try validateInitializerHex(allocator, errors, a),
+        .array_literal => |els| for (els) |el| try validateInitializerHex(allocator, errors, el),
+        else => {},
+    }
+}
+
+/// The TS validator's `bytestring_literal` arm, shared by property
+/// initializers and method bodies (N-429). Odd length is checked BEFORE the
+/// hex alphabet, and the length is TS's `String.length` -- UTF-16 code units
+/// -- so a non-ASCII literal such as `"\u{e9}"` reports `odd length (1)` as TS
+/// does rather than `non-hex` (its UTF-8 form is 2 bytes). Input that is not
+/// valid UTF-8 falls back to its byte count.
+fn checkByteStringHex(
+    allocator: Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    val: []const u8,
+    location: ?types.SourceLocation,
+) !void {
+    if (val.len == 0) return;
+    const units = utf16Len(val);
+    if (units % 2 != 0) {
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "ByteString literal '{s}' has odd length ({d}) \u{2014} hex strings must have an even number of characters",
+                .{ val, units },
+            ),
+            .location = location,
+            .severity = .@"error",
+            .owned_message = true,
+        });
+        return;
+    }
+    for (val) |c| {
+        if (!std.ascii.isHex(c)) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "ByteString literal '{s}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
+                    .{val},
+                ),
+                .location = location,
+                .severity = .@"error",
+                .owned_message = true,
+            });
+            return;
+        }
+    }
+}
+
+/// Length of `s` in UTF-16 code units (JS `String.length`); `s.len` when `s`
+/// is not valid UTF-8.
+fn utf16Len(s: []const u8) usize {
+    var n: usize = 0;
+    var it = (std.unicode.Utf8View.init(s) catch return s.len).iterator();
+    while (it.nextCodepoint()) |cp| n += if (cp >= 0x10000) 2 else 1;
+    return n;
+}
+
+/// N-429: hex-format check for every ByteString literal in a method body,
+/// mirroring the TS `validateExpression` walk. `asm(...)` calls are skipped:
+/// their body literal is validated by `checkAsmCall` under its own messages.
+fn walkStatementForHex(
+    allocator: Allocator,
+    stmt: Statement,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (stmt) {
+        .expr_stmt => |e| try walkExprForHex(allocator, e.expr, errors),
+        .const_decl => |cd| try walkExprForHex(allocator, cd.value, errors),
+        .let_decl => |ld| {
+            if (ld.value) |v| try walkExprForHex(allocator, v, errors);
+        },
+        .assign => |a| try walkExprForHex(allocator, a.value, errors),
+        .if_stmt => |if_s| {
+            try walkExprForHex(allocator, if_s.condition, errors);
+            for (if_s.then_body) |s| try walkStatementForHex(allocator, s, errors);
+            if (if_s.else_body) |eb| {
+                for (eb) |s| try walkStatementForHex(allocator, s, errors);
+            }
+        },
+        .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementForHex(allocator, u.*, errors);
+            for (fs.body) |s| try walkStatementForHex(allocator, s, errors);
+        },
+        .assert_stmt => |a| try walkExprForHex(allocator, a.condition, errors),
+        .return_stmt => |opt_r| {
+            const opt = opt_r.value;
+            if (opt) |e| try walkExprForHex(allocator, e, errors);
+        },
+    }
+}
+
+fn walkExprForHex(
+    allocator: Allocator,
+    expr: Expression,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (expr) {
+        .literal_bytes => |lit| try checkByteStringHex(allocator, errors, lit.value, lit.location),
+        .call => |c| {
+            if (std.mem.eql(u8, c.callee, "asm")) return;
+            for (c.args) |arg| try walkExprForHex(allocator, arg, errors);
+        },
+        .method_call => |mc| {
+            for (mc.args) |arg| try walkExprForHex(allocator, arg, errors);
+        },
+        .binary_op => |b| {
+            try walkExprForHex(allocator, b.left, errors);
+            try walkExprForHex(allocator, b.right, errors);
+        },
+        .unary_op => |u| try walkExprForHex(allocator, u.operand, errors),
+        .ternary => |t| {
+            try walkExprForHex(allocator, t.condition, errors);
+            try walkExprForHex(allocator, t.then_expr, errors);
+            try walkExprForHex(allocator, t.else_expr, errors);
+        },
+        .index_access => |ia| {
+            try walkExprForHex(allocator, ia.object, errors);
+            try walkExprForHex(allocator, ia.index, errors);
+        },
+        .increment => |inc| try walkExprForHex(allocator, inc.operand, errors),
+        .decrement => |dec| try walkExprForHex(allocator, dec.operand, errors),
+        .array_literal => |al| {
+            for (al) |e| try walkExprForHex(allocator, e, errors);
+        },
+        .literal_int, .literal_bigint, .literal_bool, .identifier, .property_access => {},
+    }
+}
 
 /// Whether an expression is a literal allowed as a property initializer
 /// (bigint, bool, bytestring, or a negated bigint literal). Mirrors the TS/Go
@@ -390,9 +599,32 @@ fn validateConstructor(
                 .severity = .@"error",
             });
         }
+        try rejectUnknownParamType(allocator, errors, param, "constructor", null, null);
     }
 
     try validateConstructorSlotBijection(allocator, contract, errors);
+}
+
+/// N-325: a parameter whose annotation names a type no tier recognises. Every
+/// parser lowers an unrecognised name to `.unknown`, which the checker treats as
+/// compatible with anything, so `c: TTT` used to compile. `spelled_type` is empty
+/// for a missing annotation (the parsers diagnose that) and `StatefulContext` is
+/// the explicit context parameter of the stateful surfaces, dropped by ANF lowering.
+fn rejectUnknownParamType(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+    param: types.ParamNode,
+    comptime kind: []const u8,
+    method_name: ?[]const u8,
+    location: ?types.SourceLocation,
+) !void {
+    if (param.spelled_type.len == 0) return;
+    if (std.mem.eql(u8, param.spelled_type, "unknown") or std.mem.eql(u8, param.spelled_type, "StatefulContext")) return;
+    const message = if (method_name) |m|
+        try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} '{s}' is not a Rúnar type", .{ param.spelled_type, param.name, kind, m })
+    else
+        try std.fmt.allocPrint(allocator, "type '{s}' of parameter '{s}' in {s} is not a Rúnar type", .{ param.spelled_type, param.name, kind });
+    try errors.append(allocator, .{ .message = message, .owned_message = true, .severity = .@"error", .location = location });
 }
 
 /// Distinct bare constructor parameters the constructor assigns to one
@@ -640,8 +872,10 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "FixedArray is not allowed as a method parameter",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
+            try rejectUnknownParamType(allocator, errors, p, "method", method.name, method.source_loc);
         }
 
         // `return` is a PRIVATE-helper construct only (NEW-012).
@@ -672,6 +906,7 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "public method must end with an assert() call",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
         }
@@ -680,6 +915,7 @@ fn validateMethods(
                 try errors.append(allocator, .{
                     .message = "public method in UnsafeSmartContract must end with an assert() call or a terminal asm({...}) with out_arity 1",
                     .severity = .@"error",
+                    .location = method.source_loc,
                 });
             }
         }
@@ -698,6 +934,9 @@ fn validateMethods(
 
         // Gate asm({...}) calls on UnsafeSmartContract + check structural args.
         try validateAsmUsage(allocator, contract, method, errors);
+
+        // N-429: ByteString literal hex format (TS `validateExpression`).
+        for (method.body) |stmt| try walkStatementForHex(allocator, stmt, errors);
 
         // readonly properties may only be assigned in the constructor.
         try checkReadonlyWrites(allocator, contract, method, errors);
@@ -791,6 +1030,7 @@ fn walkReadonlyWrites(
                     try errors.append(allocator, .{
                         .message = msg,
                         .severity = .@"error",
+                        .owned_message = true,
                     });
                 }
                 try walkExprForReadonlyMutation(allocator, contract, a.value, errors);
@@ -801,7 +1041,8 @@ fn walkReadonlyWrites(
             },
             .expr_stmt => |e| try walkExprForReadonlyMutation(allocator, contract, e.expr, errors),
             .assert_stmt => |a| try walkExprForReadonlyMutation(allocator, contract, a.condition, errors),
-            .return_stmt => |v| {
+            .return_stmt => |v_r| {
+                const v = v_r.value;
                 if (v) |e| try walkExprForReadonlyMutation(allocator, contract, e, errors);
             },
             .if_stmt => |if_s| {
@@ -809,7 +1050,10 @@ fn walkReadonlyWrites(
                 try walkReadonlyWrites(allocator, contract, if_s.then_body, errors);
                 if (if_s.else_body) |eb| try walkReadonlyWrites(allocator, contract, eb, errors);
             },
-            .for_stmt => |f| try walkReadonlyWrites(allocator, contract, f.body, errors),
+            .for_stmt => |f| {
+                if (f.update) |u| try walkReadonlyWrites(allocator, contract, u[0..1], errors);
+                try walkReadonlyWrites(allocator, contract, f.body, errors);
+            },
         }
     }
 }
@@ -939,10 +1183,12 @@ fn walkStatementForAsm(
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementForAsm(allocator, u.*, contract, errors);
             for (fs.body) |s| try walkStatementForAsm(allocator, s, contract, errors);
         },
         .assert_stmt => |a| try walkExprForAsm(allocator, a.condition, contract, errors),
-        .return_stmt => |opt| {
+        .return_stmt => |opt_r| {
+            const opt = opt_r.value;
             if (opt) |e| try walkExprForAsm(allocator, e, contract, errors);
         },
     }
@@ -1011,7 +1257,8 @@ fn checkAsmCall(
 
     // Body must be a ByteString literal with even-length hex.
     switch (call.args[0]) {
-        .literal_bytes => |body| {
+        .literal_bytes => |body_lit| {
+            const body = body_lit.value;
             if (body.len == 0) {
                 try errors.append(allocator, .{
                     .message = "asm() body must be a non-empty hex string literal",
@@ -1165,6 +1412,106 @@ const IntrinsicSite = struct {
     location: ?SourceLocation = null,
 };
 
+/// The R-127 diagnostic (`{intrinsic}`, `{via clause}`), shared verbatim with
+/// the other six tiers and with the pass-4 backstop in
+/// `anf_lower.lowerForStatement` (N-006).
+pub const LOOP_OUTPUT_INTRINSIC_FMT =
+    "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
+    "lowers into its own scope whose declared outputs never reach the method's " ++
+    "output list, so the continuation hash would commit to fewer outputs than the " ++
+    "transaction actually creates: the spend is rejected by every shipped SDK and " ++
+    "any successor it produces is unspendable. Move the call out of the loop.";
+
+/// The N-049 diagnostic (`{intrinsic}`, `{via clause}`), shared verbatim with
+/// the other six tiers (TS reference: `ternaryOutputIntrinsicDiagnostic` in
+/// 02-validate.ts) and with the pass-4 backstop in `anf_lower.lowerTernaryExpr`.
+pub const TERNARY_OUTPUT_INTRINSIC_FMT =
+    "Output intrinsic '{s}'{s} cannot be called inside a conditional (ternary) expression arm. " ++
+    "A ternary arm lowers into its own scope whose declared outputs never reach the method's " ++
+    "output list, so the continuation hash would commit to fewer outputs than the transaction " ++
+    "actually creates: a spender can drop the output and the honest spend is rejected. " ++
+    "Use an if/else statement instead.";
+
+/// Reject an output intrinsic in either arm of any ternary inside `expr`
+/// (N-049). `anf_lower.lowerTernaryExpr` lowers each arm into a sub-context
+/// whose output refs are dropped -- unlike the if-statement lowering, which
+/// merges each arm's refs into the parent -- so the continuation hash would
+/// omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout was
+/// accepted on every tier). Private helpers are followed because they are
+/// inlined into the arm. A ternary that only selects values is untouched.
+fn validateNoOutputIntrinsicInTernaryArm(
+    allocator: Allocator,
+    contract: ContractNode,
+    expr: Expression,
+    loc: ?SourceLocation,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) Allocator.Error!void {
+    switch (expr) {
+        .ternary => |t| {
+            for ([_]Expression{ t.then_expr, t.else_expr }) |arm| {
+                var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+                defer seen.deinit(allocator);
+                if (try findOutputIntrinsicInExpr(allocator, contract, arm, loc, &seen)) |site| {
+                    const via_clause = if (site.via) |v|
+                        try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
+                    else
+                        try allocator.dupe(u8, "");
+                    defer allocator.free(via_clause);
+                    try errors.append(allocator, .{
+                        .owned_message = true,
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            TERNARY_OUTPUT_INTRINSIC_FMT,
+                            .{ site.intrinsic, via_clause },
+                        ),
+                        .severity = .@"error",
+                        .location = loc,
+                    });
+                    break;
+                }
+            }
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.condition, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.then_expr, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.else_expr, loc, errors);
+        },
+        .call => |c| for (c.args) |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a, loc, errors),
+        .method_call => |mc| for (mc.args) |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a, loc, errors),
+        .binary_op => |b| {
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, b.left, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, b.right, loc, errors);
+        },
+        .unary_op => |u| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, u.operand, loc, errors),
+        .index_access => |ia| {
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, ia.object, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, ia.index, loc, errors);
+        },
+        .increment => |inc| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, inc.operand, loc, errors),
+        .decrement => |dec| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, dec.operand, loc, errors),
+        .array_literal => |els| for (els) |el| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, el, loc, errors),
+        else => {},
+    }
+}
+
+/// The N-049 check over the expressions a statement owns directly; nested
+/// bodies are reached through `validateStatement`'s own recursion.
+fn validateNoOutputIntrinsicInTernaryArmsOfStatement(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmt: Statement,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) Allocator.Error!void {
+    switch (stmt) {
+        .expr_stmt => |e| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, e.expr, e.source_loc, errors),
+        .const_decl => |d| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, d.value, d.source_loc, errors),
+        .let_decl => |d| if (d.value) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, d.source_loc, errors),
+        .assign => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.value, a.source_loc, errors),
+        .assert_stmt => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.condition, a.source_loc, errors),
+        .return_stmt => |r| if (r.value) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, null, errors),
+        .if_stmt => |i| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, i.condition, i.source_loc, errors),
+        .for_stmt => {},
+    }
+}
+
 /// Reject an output intrinsic called inside a loop body (R-127).
 ///
 /// `anf_lower` lowers a loop body into its own sub-context, which starts with a
@@ -1208,14 +1555,12 @@ fn validateNoOutputIntrinsicInLoop(
         try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
     else
         try allocator.dupe(u8, "");
+    defer allocator.free(via_clause);
     try errors.append(allocator, .{
+        .owned_message = true,
         .message = try std.fmt.allocPrint(
             allocator,
-            "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
-                "lowers into its own scope whose declared outputs never reach the method's " ++
-                "output list, so the continuation hash would commit to fewer outputs than the " ++
-                "transaction actually creates: the spend is rejected by every shipped SDK and " ++
-                "any successor it produces is unspendable. Move the call out of the loop.",
+            LOOP_OUTPUT_INTRINSIC_FMT,
             .{ site.intrinsic, via_clause },
         ),
         .severity = .@"error",
@@ -1270,7 +1615,7 @@ fn findOutputIntrinsicInStatement(
             null,
         .assign => |a| findOutputIntrinsicInExpr(allocator, contract, a.value, a.source_loc, seen),
         .assert_stmt => |a| findOutputIntrinsicInExpr(allocator, contract, a.condition, a.source_loc, seen),
-        .return_stmt => |r| if (r) |v|
+        .return_stmt => |r| if (r.value) |v|
             findOutputIntrinsicInExpr(allocator, contract, v, null, seen)
         else
             null,
@@ -1284,7 +1629,12 @@ fn findOutputIntrinsicInStatement(
             }
             break :blk null;
         },
-        .for_stmt => |f| findOutputIntrinsic(allocator, contract, f.body, seen),
+        .for_stmt => |f| blk: {
+            if (f.update) |u| {
+                if (try findOutputIntrinsicInStatement(allocator, contract, u.*, seen)) |site| break :blk site;
+            }
+            break :blk try findOutputIntrinsic(allocator, contract, f.body, seen);
+        },
     };
 }
 
@@ -1337,6 +1687,9 @@ fn findOutputIntrinsicInExpr(
             if (try findOutputIntrinsicInExpr(allocator, contract, ia.object, loc, seen)) |site| return site;
             if (try findOutputIntrinsicInExpr(allocator, contract, ia.index, loc, seen)) |site| return site;
         },
+        .array_literal => |els| for (els) |el| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, el, loc, seen)) |site| return site;
+        },
         else => {},
     }
     return null;
@@ -1349,8 +1702,17 @@ fn findOutputIntrinsicInExpr(
 /// Python, Ruby and Java peers. This tier raises it earlier, in validation,
 /// because its parsers discard the start expression rather than carrying it to
 /// ANF; the user-visible sentence is identical either way.
-const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
+pub const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
     "For-loop iterators must start at an integer literal.";
+
+/// F-025: the BOUND's counterpart, for a bound that is a bare identifier (a
+/// parameter or a local). The reference's `isCompileTimeConstant` lets an
+/// identifier through pass 2 and `extractLoopShape` refuses it from ANF
+/// lowering with this sentence; a `this.<prop>` bound is refused by pass 2
+/// with the compile-time-constant sentence below instead. Same raise-early
+/// reasoning as `loop_start_diagnostic`.
+const loop_bound_ident_diagnostic = "Cannot determine loop bound at compile time. " ++
+    "For-loop bounds must be integer literals.";
 
 /// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
 /// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
@@ -1396,16 +1758,20 @@ fn isLiteralOne(expr: Expression) bool {
 /// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig, Move and Java
 /// parsers; and the effect-free no-op sentinel (a literal or a bare identifier)
 /// that the while-shaped parsers synthesize when the source has no continue
-/// expression at all.
-fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
+/// expression at all -- but only on a loop whose condition does not test its
+/// declared iterator (already refused by the condition rule). On a real
+/// iterator a no-op update never advances it: `var i = 3; while (i < 5) : (i)`
+/// compiled two laps over i = 3, 4 (N-116).
+fn isRepresentableForUpdate(allowed: []const u8, update: Statement, accept_no_op_sentinel: bool) bool {
     return switch (update) {
         .expr_stmt => |e| switch (e.expr) {
             .increment => |inc| isAllowedLoopVar(allowed, inc.operand),
             .decrement => |dec| isAllowedLoopVar(allowed, dec.operand),
             // The no-op sentinel a while-shaped frontend synthesizes when the
             // source carries no continue expression. Reading a literal or a
-            // bare identifier has no effect, so discarding it loses nothing.
-            .literal_int, .literal_bool, .identifier => true,
+            // bare identifier has no effect, so discarding it loses nothing --
+            // on a loop the condition rule already refuses (N-116).
+            .literal_int, .literal_bool, .identifier => accept_no_op_sentinel,
             else => false,
         },
         // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
@@ -1463,6 +1829,7 @@ fn validateStatement(
     stmt: Statement,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
+    try validateNoOutputIntrinsicInTernaryArmsOfStatement(allocator, contract, stmt, errors);
     switch (stmt) {
         .for_stmt => |f| {
             // The parser collapses a for-loop bound to a concrete i64, but a
@@ -1475,7 +1842,10 @@ fn validateStatement(
             // `iterVar = start + i*step` on each unrolled iteration).
             if (!f.bound_is_const) {
                 try errors.append(allocator, .{
-                    .message = "For loop bound must be a compile-time constant (literal or const variable)",
+                    .message = if (f.bound_ident != null)
+                        loop_bound_ident_diagnostic
+                    else
+                        "For loop bound must be a compile-time constant (literal or const variable)",
                     .severity = .@"error",
                 });
             }
@@ -1577,7 +1947,17 @@ fn validateStatement(
             // records which of the two shapes produced the null, and only the
             // implied-step surfaces are exempt.
             if (f.update) |u| {
-                if (!isRepresentableForUpdate(f.var_name, u.*)) {
+                // N-008: as in the reference, the update may advance the
+                // declared iterator or the variable the condition tests (an
+                // unfolded `.runar.zig` while carries the placeholder iterator).
+                //
+                // N-116: the no-op sentinel is tolerated only on a loop the
+                // condition rule already refuses (placeholder iterator). On a
+                // real iterator it never advances, yet the unrolled loop would
+                // still step by one.
+                const accept_sentinel = !f.cond_tests_iter;
+                const via_cond = if (f.cond_lhs_name) |c| isRepresentableForUpdate(c, u.*, accept_sentinel) else false;
+                if (!isRepresentableForUpdate(f.var_name, u.*, accept_sentinel) and !via_cond) {
                     try errors.append(allocator, .{
                         .message = loop_update_diagnostic,
                         .severity = .@"error",
@@ -1604,8 +1984,38 @@ fn validateStatement(
                 for (eb) |s| try validateStatement(allocator, contract, s, errors);
             }
         },
+        .assign => |a| try validateIndexAssignmentTarget(allocator, contract, a, errors),
         else => {},
     }
+}
+
+/// N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+/// property is index-writable. Any other index target (a ByteString property,
+/// a local, a parameter, a member-chained root) is left alone by
+/// `expand_fixed_arrays` and ANF lowering lowers it as a READ, dropping the
+/// write -- a deployable script whose state never changes. Reject it here with
+/// a location instead. Every surface parser records an index-access LHS on
+/// `index_target`, whatever its root.
+fn validateIndexAssignmentTarget(
+    allocator: Allocator,
+    contract: ContractNode,
+    a: types.Assign,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const ia = a.index_target orelse return;
+    var root = ia.object;
+    while (root == .index_access) root = root.index_access.object;
+    if (root == .property_access) {
+        for (contract.properties) |p| {
+            if (std.mem.eql(u8, p.name, root.property_access.property) and p.type_info == .fixed_array) return;
+        }
+    }
+    try errors.append(allocator, .{
+        .message = "index assignment is only supported on FixedArray contract properties; " ++
+            "the target here is not a FixedArray property",
+        .severity = .@"error",
+        .location = a.source_loc,
+    });
 }
 
 /// Warn on manual checkPreimage() or getStateScript() usage in StatefulSmartContract methods.
@@ -1640,10 +2050,12 @@ fn walkStatementsForPreimage(
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| try walkStatementsForPreimage(allocator, u.*, method_name, warnings);
             for (fs.body) |s| try walkStatementsForPreimage(allocator, s, method_name, warnings);
         },
         .assert_stmt => |a| try walkExprForPreimage(allocator, a.condition, method_name, warnings),
-        .return_stmt => |opt_expr| {
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
             if (opt_expr) |expr| try walkExprForPreimage(allocator, expr, method_name, warnings);
         },
     }
@@ -1696,8 +2108,9 @@ fn walkExprForPreimage(
         },
         .increment => |inc| try walkExprForPreimage(allocator, inc.operand, method_name, warnings),
         .decrement => |dec| try walkExprForPreimage(allocator, dec.operand, method_name, warnings),
+        .array_literal => |els| for (els) |el| try walkExprForPreimage(allocator, el, method_name, warnings),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
+        .property_access,
         => {},
     }
 }
@@ -1822,8 +2235,9 @@ fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool
         },
         .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard, count_guard),
         .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard, count_guard),
+        .array_literal => |els| for (els) |el| scanExprForLocktime(el, reads_locktime, has_guard, count_guard),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
+        .property_access,
         => {},
     }
 }
@@ -1845,10 +2259,12 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
             }
         },
         .for_stmt => |fs| {
+            if (fs.update) |u| scanStmtForLocktime(u.*, reads_locktime, has_guard);
             for (fs.body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
         },
         .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard, true),
-        .return_stmt => |opt_expr| {
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
             if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard, false);
         },
     }
@@ -1869,6 +2285,17 @@ fn warnLocktimeWithoutSequenceGuard(
     var reads_locktime = false;
     var has_sequence_guard = false;
 
+    // N-266: private helpers by name, built once, so the BFS below resolves
+    // a callee in O(1) instead of re-scanning contract.methods linearly for
+    // every callee of every queued method. That rescan made this function
+    // O(methods^2) on a long private-helper chain. Mirrors the Go/Rust tiers'
+    // privateMethods map in their warnLocktimeWithoutSequenceGuard.
+    var private_methods = std.StringHashMapUnmanaged(MethodNode){};
+    defer private_methods.deinit(allocator);
+    for (contract.methods) |m| {
+        if (!m.is_public) try private_methods.put(allocator, m.name, m);
+    }
+
     var visited = StringSet{};
     defer visited.deinit(allocator);
     try visited.put(allocator, method.name, {});
@@ -1888,18 +2315,15 @@ fn warnLocktimeWithoutSequenceGuard(
         var calls = StringSet{};
         defer calls.deinit(allocator);
         for (current.body) |stmt| {
-            try collectMethodCalls(allocator, stmt, &calls);
+            try collectMethodCalls(allocator, stmt, &calls, false);
         }
         var it = calls.iterator();
         while (it.next()) |entry| {
             const callee = entry.key_ptr.*;
             if (visited.get(callee) != null) continue;
-            for (contract.methods) |m| {
-                if (!m.is_public and std.mem.eql(u8, m.name, callee)) {
-                    try visited.put(allocator, callee, {});
-                    try queue.append(allocator, m);
-                    break;
-                }
+            if (private_methods.get(callee)) |m| {
+                try visited.put(allocator, callee, {});
+                try queue.append(allocator, m);
             }
         }
     }
@@ -1926,12 +2350,13 @@ fn warnLocktimeWithoutSequenceGuard(
 
 const StringSet = std.StringHashMapUnmanaged(void);
 
-/// Build a call graph and check for cycles using DFS.
+/// Build a call graph, report recursion and the N-180 call depth. Returns true
+/// iff MAX_CALL_DEPTH was exceeded.
 fn checkNoRecursion(
     allocator: Allocator,
     contract: ContractNode,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
-) !void {
+) !bool {
     // Build call graph: method_name -> set of called method names
     var call_graph = std.StringHashMapUnmanaged(StringSet){};
     defer {
@@ -1951,116 +2376,733 @@ fn checkNoRecursion(
 
         var calls = StringSet{};
         for (method.body) |stmt| {
-            try collectMethodCalls(allocator, stmt, &calls);
+            try collectMethodCalls(allocator, stmt, &calls, true);
         }
         try call_graph.put(allocator, method.name, calls);
     }
 
-    // Check for cycles using DFS from each method
-    for (contract.methods) |method| {
-        var visited = StringSet{};
-        defer visited.deinit(allocator);
-        var stack = StringSet{};
-        defer stack.deinit(allocator);
+    // N-180: one iterative pass answers, for every method, whether it reaches
+    // a cycle and how deep its call chain is, in O(methods + calls). The old
+    // per-method DFS restarted for each method (quadratic on a chain) and
+    // recursed once per link.
+    var analysis = try analyzeCallGraph(allocator, contract, &call_graph, &method_names);
+    defer analysis.deinit(allocator);
 
-        if (try hasCycle(allocator, method.name, &call_graph, &method_names, &visited, &stack)) {
+    for (contract.methods) |method| {
+        if (analysis.reaches_cycle.get(method.name) orelse false) {
             try errors.append(allocator, .{
                 .message = "recursion detected: method calls itself directly or indirectly",
                 .severity = .@"error",
+                .location = method.source_loc,
             });
         }
     }
+
+    // N-180: private methods are inlined at every call site, so the call depth
+    // is the inlining depth. Report the first method (declaration order) past it.
+    for (contract.methods) |method| {
+        if (analysis.reaches_cycle.get(method.name) orelse false) continue;
+        if ((analysis.depth.get(method.name) orelse 0) <= input_limits.MAX_CALL_DEPTH) continue;
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(allocator, input_limits.CALL_DEPTH_MESSAGE_FMT, .{method.name}),
+            .location = method.source_loc,
+            .severity = .@"error",
+            .owned_message = true,
+        });
+        return true;
+    }
+    return false;
 }
 
-fn hasCycle(
+const CallGraphAnalysis = struct {
+    reaches_cycle: std.StringHashMapUnmanaged(bool) = .{},
+    depth: std.StringHashMapUnmanaged(usize) = .{},
+
+    fn deinit(self: *CallGraphAnalysis, allocator: Allocator) void {
+        self.reaches_cycle.deinit(allocator);
+        self.depth.deinit(allocator);
+    }
+};
+
+/// N-180: for every method, whether it reaches a call cycle, and (when it does
+/// not) its call depth: 0 if it calls no contract method, else 1 + the largest
+/// call depth among the contract methods it calls. Iterative three-colour DFS
+/// with memoisation: O(methods + calls), no recursion. `reaches_cycle` matches
+/// what a fresh DFS from each method reports.
+fn analyzeCallGraph(
     allocator: Allocator,
-    name: []const u8,
+    contract: ContractNode,
     call_graph: *std.StringHashMapUnmanaged(StringSet),
     method_names: *StringSet,
-    visited: *StringSet,
-    stack: *StringSet,
-) !bool {
-    if (stack.get(name) != null) return true;
-    if (visited.get(name) != null) return false;
+) !CallGraphAnalysis {
+    const Frame = struct {
+        name: []const u8,
+        it: ?StringSet.KeyIterator,
+        cyc: bool = false,
+        depth: usize = 0,
+    };
+    var out = CallGraphAnalysis{};
+    errdefer out.deinit(allocator);
+    var on_stack = StringSet{};
+    defer on_stack.deinit(allocator);
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer stack.deinit(allocator);
 
-    try visited.put(allocator, name, {});
-    try stack.put(allocator, name, {});
+    for (contract.methods) |root| {
+        if (out.reaches_cycle.contains(root.name)) continue;
+        try on_stack.put(allocator, root.name, {});
+        try stack.append(allocator, .{ .name = root.name, .it = if (call_graph.getPtr(root.name)) |c| c.keyIterator() else null });
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const next: ?[]const u8 = if (top.it) |*it| (if (it.next()) |k| k.* else null) else null;
+            if (next) |callee| {
+                if (method_names.get(callee) == null) continue;
+                if (on_stack.contains(callee)) {
+                    top.cyc = true;
+                } else if (out.reaches_cycle.get(callee)) |cyc| {
+                    if (cyc) {
+                        top.cyc = true;
+                    } else {
+                        top.depth = @max(top.depth, 1 + (out.depth.get(callee) orelse 0));
+                    }
+                } else {
+                    try on_stack.put(allocator, callee, {});
+                    try stack.append(allocator, .{ .name = callee, .it = if (call_graph.getPtr(callee)) |c| c.keyIterator() else null });
+                }
+                continue;
+            }
+            const done = stack.pop().?;
+            _ = on_stack.remove(done.name);
+            try out.reaches_cycle.put(allocator, done.name, done.cyc);
+            try out.depth.put(allocator, done.name, done.depth);
+            if (stack.items.len > 0) {
+                const parent = &stack.items[stack.items.len - 1];
+                if (done.cyc) {
+                    parent.cyc = true;
+                } else {
+                    parent.depth = @max(parent.depth, 1 + done.depth);
+                }
+            }
+        }
+    }
+    return out;
+}
 
-    if (call_graph.getPtr(name)) |calls| {
-        var it = calls.iterator();
+/// Collect method calls from statements.
+fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet, self_receiver: bool) !void {
+    switch (stmt) {
+        .expr_stmt => |expr| try collectMethodCallsInExpr(allocator, expr.expr, calls, self_receiver),
+        .const_decl => |cd| try collectMethodCallsInExpr(allocator, cd.value, calls, self_receiver),
+        .let_decl => |ld| {
+            if (ld.value) |v| try collectMethodCallsInExpr(allocator, v, calls, self_receiver);
+        },
+        .assign => |a| try collectMethodCallsInExpr(allocator, a.value, calls, self_receiver),
+        .if_stmt => |if_s| {
+            try collectMethodCallsInExpr(allocator, if_s.condition, calls, self_receiver);
+            for (if_s.then_body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
+            if (if_s.else_body) |eb| {
+                for (eb) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
+            }
+        },
+        .for_stmt => |fs| {
+            if (fs.update) |u| try collectMethodCalls(allocator, u.*, calls, self_receiver);
+            for (fs.body) |s| try collectMethodCalls(allocator, s, calls, self_receiver);
+        },
+        .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls, self_receiver),
+        .return_stmt => |opt_expr_r| {
+            const opt_expr = opt_expr_r.value;
+            if (opt_expr) |expr| try collectMethodCallsInExpr(allocator, expr, calls, self_receiver);
+        },
+    }
+}
+
+fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *StringSet, self_receiver: bool) !void {
+    switch (expr) {
+        .call => |c| {
+            // Bare function calls that might be method references
+            try calls.put(allocator, c.callee, {});
+            for (c.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls, self_receiver);
+        },
+        .method_call => |mc| {
+            // this.methodName() calls. N-180: the .runar.zig surface spells
+            // the receiver `self`; anf_lower inlines `self.m()` like
+            // `this.m()`, so the recursion / call-depth graph
+            // (`self_receiver`) counts it too.
+            if (std.mem.eql(u8, mc.object, "this") or (self_receiver and std.mem.eql(u8, mc.object, "self"))) {
+                try calls.put(allocator, mc.method, {});
+            }
+            for (mc.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls, self_receiver);
+        },
+        .binary_op => |b| {
+            try collectMethodCallsInExpr(allocator, b.left, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, b.right, calls, self_receiver);
+        },
+        .unary_op => |u| try collectMethodCallsInExpr(allocator, u.operand, calls, self_receiver),
+        .ternary => |t| {
+            try collectMethodCallsInExpr(allocator, t.condition, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, t.then_expr, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, t.else_expr, calls, self_receiver);
+        },
+        .index_access => |ia| {
+            try collectMethodCallsInExpr(allocator, ia.object, calls, self_receiver);
+            try collectMethodCallsInExpr(allocator, ia.index, calls, self_receiver);
+        },
+        .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls, self_receiver),
+        .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls, self_receiver),
+        .array_literal => |els| for (els) |el| try collectMethodCallsInExpr(allocator, el, calls, self_receiver),
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
+        .property_access,
+        => {},
+    }
+}
+
+// ============================================================================
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ============================================================================
+
+/// The one diagnostic every tier emits for F-286 (user decision R78).
+pub const RABIN_PUBKEY_PROVENANCE_MESSAGE =
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; " ++
+    "a spender-supplied Rabin modulus lets anyone forge a signature";
+
+/// One method's (or the constructor's) view for the provenance check: its
+/// parameters, every value bound to each local name (initialisers and
+/// assignments), and the names that are ever ++/-- or are loop counters.
+const RabinScope = struct {
+    /// N-453: without StatefulContext handles, so a parameter index lines up
+    /// with a call site's argument index (`rabinValueArgs`).
+    params: []const types.ParamNode,
+    /// N-453: every declared parameter, handles included.
+    all_params: []const types.ParamNode = &.{},
+    /// Name of the private method this scope is, or null for a public method
+    /// or the constructor (whose parameters are never trusted).
+    private_name: ?[]const u8,
+    body: []const Statement,
+    loc: ?SourceLocation,
+    bindings: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Expression)) = .empty,
+    mutated: StringSet = .empty,
+    /// N-205: names declared as locals (a bare property write also lands in
+    /// `bindings`, so `bindings` cannot tell a local from a property).
+    declared: StringSet = .empty,
+
+    fn isParam(self: *const RabinScope, name: []const u8) ?usize {
+        for (self.params, 0..) |p, i| {
+            if (std.mem.eql(u8, p.name, name)) return i;
+        }
+        return null;
+    }
+};
+
+const RabinCallSite = struct { args: []const Expression, scope: *const RabinScope };
+
+/// N-453: `params` without StatefulContext handles. Typecheck and ANF
+/// lowering elide the handle from a method's parameter list and drop a bare
+/// handle from a `self.helper(ctx, ...)` call, so a helper may be called with
+/// or without it; pairing parameters with arguments by position over the
+/// declared lists would then shift every later pair onto the wrong argument.
+fn rabinValueParams(a: Allocator, params: []const types.ParamNode) ![]const types.ParamNode {
+    var out: std.ArrayListUnmanaged(types.ParamNode) = .empty;
+    for (params) |p| {
+        if (std.mem.eql(u8, p.type_name, "StatefulContext")) continue;
+        try out.append(a, p);
+    }
+    return out.items;
+}
+
+/// N-453: a `self.helper(...)` call's arguments without the bare identifiers
+/// naming a StatefulContext handle of the calling scope (see rabinValueParams).
+fn rabinValueArgs(a: Allocator, args: []const Expression, scope: *const RabinScope) ![]const Expression {
+    var out: std.ArrayListUnmanaged(Expression) = .empty;
+    outer: for (args) |arg| {
+        if (arg == .identifier) {
+            for (scope.all_params) |p| {
+                if (std.mem.eql(u8, p.type_name, "StatefulContext") and std.mem.eql(u8, p.name, arg.identifier)) continue :outer;
+            }
+        }
+        try out.append(a, arg);
+    }
+    return out.items;
+}
+
+/// Port of the TS reference `checkRabinPubKeyProvenance` (02-validate.ts).
+///
+/// `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod n ==
+/// SHA256(msg) mod n`; a spender who chooses `n` forges any message (`n = 1`,
+/// `sig = 0` passes on chain). Trusted values for the 4th argument:
+///   - a property read (`this.x`), or a bare identifier naming a property that
+///     no parameter or local of the method shadows (Java's bare field);
+///   - an integer literal;
+///   - a local whose every binding (initialiser and assignments) is trusted;
+///   - a parameter of a PRIVATE method that every call site (at least one)
+///     binds to a trusted value in the caller (least fixed point).
+/// Everything else is refused.
+fn checkRabinPubKeyProvenance(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const scopes = try a.alloc(RabinScope, contract.methods.len + 1);
+    scopes[0] = .{ .params = contract.constructor.params, .private_name = null, .body = contract.constructor.body, .loc = null };
+    for (contract.methods, 0..) |m, i| {
+        scopes[i + 1] = .{ .params = try rabinValueParams(a, m.params), .all_params = m.params, .private_name = if (m.is_public) null else m.name, .body = m.body, .loc = m.source_loc };
+    }
+    for (scopes) |*sc| try rabinCollectBindings(a, sc, sc.body);
+
+    // Private method name -> per-parameter "proven trusted" flags.
+    var trusted = std.StringHashMapUnmanaged([]bool){};
+    var sites = std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)){};
+    for (contract.methods) |m| {
+        if (m.is_public) continue;
+        const flags = try a.alloc(bool, (try rabinValueParams(a, m.params)).len);
+        @memset(flags, false);
+        try trusted.put(a, m.name, flags);
+        try sites.put(a, m.name, .empty);
+    }
+
+    const SiteCollector = struct {
+        a: Allocator,
+        scope: *const RabinScope,
+        sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            const hit: ?struct { name: []const u8, args: []const Expression } = switch (expr) {
+                .method_call => |mc| if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) .{ .name = mc.method, .args = try rabinValueArgs(self.a, mc.args, self.scope) } else null,
+                .call => |c| .{ .name = c.callee, .args = c.args },
+                else => null,
+            };
+            if (hit) |h| {
+                if (self.sites.getPtr(h.name)) |list| try list.append(self.a, .{ .args = h.args, .scope = self.scope });
+            }
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, SiteCollector{ .a = a, .scope = sc, .sites = &sites });
+    }
+
+    // Least fixed point: monotone, so it terminates.
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = trusted.iterator();
         while (it.next()) |entry| {
-            const callee = entry.key_ptr.*;
-            if (method_names.get(callee) != null) {
-                if (try hasCycle(allocator, callee, call_graph, method_names, visited, stack)) {
-                    return true;
+            const list = sites.get(entry.key_ptr.*).?;
+            if (list.items.len == 0) continue;
+            for (entry.value_ptr.*, 0..) |*flag, i| {
+                if (flag.*) continue;
+                var all = true;
+                for (list.items) |site| {
+                    if (i >= site.args.len or !(try rabinIsTrusted(a, contract, &trusted, site.args[i], site.scope))) {
+                        all = false;
+                        break;
+                    }
+                }
+                if (all) {
+                    flag.* = true;
+                    changed = true;
                 }
             }
         }
     }
 
-    _ = stack.remove(name);
-    return false;
-}
+    const Checker = struct {
+        a: Allocator,
+        gpa: Allocator,
+        contract: ContractNode,
+        trusted: *std.StringHashMapUnmanaged([]bool),
+        scope: *const RabinScope,
+        errs: *std.ArrayListUnmanaged(CompilerDiagnostic),
+        fn visit(self: @This(), expr: Expression, loc: ?SourceLocation) !void {
+            if (expr != .call) return;
+            const c = expr.call;
+            if (!std.mem.eql(u8, c.callee, "verifyRabinSig") or c.args.len < 4) return;
+            if (try rabinIsTrusted(self.a, self.contract, self.trusted, c.args[3], self.scope)) return;
+            // N-464 (user decision R186): anchored at the 4th argument itself;
+            // the statement only when the parser recorded no location for it.
+            const arg_loc: ?SourceLocation = if (c.arg_locs.len == c.args.len) c.arg_locs[3] else null;
+            try self.errs.append(self.gpa, .{
+                .message = RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                .location = arg_loc orelse loc orelse self.scope.loc,
+                .severity = .@"error",
+            });
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, Checker{ .a = a, .gpa = allocator, .contract = contract, .trusted = &trusted, .scope = sc, .errs = errors });
+    }
 
-/// Collect method calls from statements.
-fn collectMethodCalls(allocator: Allocator, stmt: Statement, calls: *StringSet) !void {
-    switch (stmt) {
-        .expr_stmt => |expr| try collectMethodCallsInExpr(allocator, expr.expr, calls),
-        .const_decl => |cd| try collectMethodCallsInExpr(allocator, cd.value, calls),
-        .let_decl => |ld| {
-            if (ld.value) |v| try collectMethodCallsInExpr(allocator, v, calls);
-        },
-        .assign => |a| try collectMethodCallsInExpr(allocator, a.value, calls),
-        .if_stmt => |if_s| {
-            try collectMethodCallsInExpr(allocator, if_s.condition, calls);
-            for (if_s.then_body) |s| try collectMethodCalls(allocator, s, calls);
-            if (if_s.else_body) |eb| {
-                for (eb) |s| try collectMethodCalls(allocator, s, calls);
+    // N-205 (a): a MUTABLE property used as the key is state the previous
+    // spend chose, so outside the constructor it may only be written with a
+    // value `rabinIsTrusted` accepts. KEY properties: those whose value
+    // reaches a 4th argument, closed under "is written into a key property".
+    var key_props = StringSet{};
+    const KeyCollector = struct {
+        a: Allocator,
+        contract: ContractNode,
+        sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+        scope: *const RabinScope,
+        out: *StringSet,
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            if (expr != .call) return;
+            const c = expr.call;
+            if (!std.mem.eql(u8, c.callee, "verifyRabinSig") or c.args.len < 4) return;
+            var visiting = StringSet{};
+            try rabinSourcesOf(self.a, self.contract, self.sites, c.args[3], self.scope, self.out, &visiting);
+        }
+    };
+    for (scopes) |*sc| {
+        try rabinWalkStmts(sc.body, sc.loc, KeyCollector{ .a = a, .contract = contract, .sites = &sites, .scope = sc, .out = &key_props });
+    }
+
+    // Every write to a property outside the constructor (scopes[0]). `value`
+    // is null for ++/--, which no value makes trusted.
+    var writes: std.ArrayListUnmanaged(RabinPropWrite) = .empty;
+    var mutable_props: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (contract.properties) |p| {
+        if (!p.readonly) try mutable_props.append(a, p.name);
+    }
+    const WriteCollector = struct {
+        a: Allocator,
+        contract: ContractNode,
+        scope: *const RabinScope,
+        mutable_props: []const []const u8,
+        writes: *std.ArrayListUnmanaged(RabinPropWrite),
+        fn visit(self: @This(), expr: Expression, loc: ?SourceLocation) !void {
+            const where = loc orelse self.scope.loc;
+            switch (expr) {
+                .increment, .decrement => {
+                    const operand = if (expr == .increment) expr.increment.operand else expr.decrement.operand;
+                    if (rabinWrittenProp(self.contract, self.scope, operand)) |prop| {
+                        try self.writes.append(self.a, .{ .prop = prop, .value = null, .scope = self.scope, .loc = where });
+                    }
+                },
+                .method_call => |mc| {
+                    if (!std.mem.eql(u8, mc.method, "addOutput") or mc.args.len < 1) return;
+                    // addOutput(satoshis, ...values): values are positional
+                    // over the mutable properties in declaration order.
+                    // The `.{a, b}` tuple form carries them in one array
+                    // literal, as ANF lowering (`lowerAddOutputArgs`) reads it.
+                    const values: []const Expression = if (mc.args.len == 2 and mc.args[1] == .array_literal) mc.args[1].array_literal else mc.args[1..];
+                    for (values, 0..) |value, i| {
+                        if (i < self.mutable_props.len) {
+                            try self.writes.append(self.a, .{ .prop = self.mutable_props[i], .value = value, .scope = self.scope, .loc = where });
+                        }
+                    }
+                },
+                else => {},
             }
-        },
-        .for_stmt => |fs| {
-            for (fs.body) |s| try collectMethodCalls(allocator, s, calls);
-        },
-        .assert_stmt => |a| try collectMethodCallsInExpr(allocator, a.condition, calls),
-        .return_stmt => |opt_expr| {
-            if (opt_expr) |expr| try collectMethodCallsInExpr(allocator, expr, calls);
-        },
+        }
+    };
+    for (scopes[1..]) |*sc| {
+        try rabinCollectAssignments(a, contract, sc, sc.body, sc.loc, &writes);
+        try rabinWalkStmts(sc.body, sc.loc, WriteCollector{ .a = a, .contract = contract, .scope = sc, .mutable_props = mutable_props.items, .writes = &writes });
+    }
+
+    var grew = true;
+    while (grew) {
+        const before = key_props.count();
+        for (writes.items) |w| {
+            if (key_props.get(w.prop) == null) continue;
+            const value = w.value orelse continue;
+            if (!(try rabinIsTrusted(a, contract, &trusted, value, w.scope))) continue;
+            var visiting = StringSet{};
+            try rabinSourcesOf(a, contract, &sites, value, w.scope, &key_props, &visiting);
+        }
+        grew = key_props.count() != before;
+    }
+
+    for (writes.items) |w| {
+        if (key_props.get(w.prop) == null) continue;
+        var is_mutable = false;
+        for (mutable_props.items) |m| {
+            if (std.mem.eql(u8, m, w.prop)) is_mutable = true;
+        }
+        if (!is_mutable) continue;
+        if (w.value) |value| {
+            if (try rabinIsTrusted(a, contract, &trusted, value, w.scope)) continue;
+        }
+        try errors.append(allocator, .{
+            .message = try rabinKeyWriteMessage(allocator, w.prop),
+            .location = w.loc,
+            .severity = .@"error",
+            .owned_message = true,
+        });
     }
 }
 
-fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *StringSet) !void {
+/// N-205 (a): the diagnostic every tier emits when a mutable key property is
+/// written, outside the constructor, with a value the F-286 rule does not
+/// trust. Caller owns the returned slice.
+pub fn rabinKeyWriteMessage(allocator: Allocator, prop: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, RABIN_KEY_WRITE_FMT, .{prop});
+}
+
+/// `{s}` is the property name. Shared with the `--ir` loader
+/// (ir/rabin_key_provenance.zig).
+pub const RABIN_KEY_WRITE_FMT = "verifyRabinSig public key property '{s}' may only be assigned a contract property or a literal " ++
+    "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature";
+
+const RabinPropWrite = struct { prop: []const u8, value: ?Expression, scope: *const RabinScope, loc: ?SourceLocation };
+
+/// The property a write target names: `this.x`, or a bare name that is a
+/// property and neither a parameter nor a declared local of the method.
+fn rabinWrittenProp(contract: ContractNode, scope: *const RabinScope, target: Expression) ?[]const u8 {
+    switch (target) {
+        .property_access => |pa| return if (std.mem.eql(u8, pa.object, "this")) pa.property else null,
+        .identifier => |name| return rabinBarePropName(contract, scope, name),
+        else => return null,
+    }
+}
+
+fn rabinBarePropName(contract: ContractNode, scope: *const RabinScope, name: []const u8) ?[]const u8 {
+    if (scope.isParam(name) != null or scope.declared.get(name) != null) return null;
+    for (contract.properties) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p.name;
+    }
+    return null;
+}
+
+fn rabinCollectAssignments(
+    a: Allocator,
+    contract: ContractNode,
+    scope: *const RabinScope,
+    stmts: []const Statement,
+    fallback: ?SourceLocation,
+    writes: *std.ArrayListUnmanaged(RabinPropWrite),
+) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .assign => |as| {
+                if (as.index_target != null) continue;
+                const prop: ?[]const u8 = if (as.target_is_property) as.target else rabinBarePropName(contract, scope, as.target);
+                if (prop) |p| try writes.append(a, .{ .prop = p, .value = as.value, .scope = scope, .loc = as.source_loc orelse fallback });
+            },
+            .if_stmt => |i| {
+                try rabinCollectAssignments(a, contract, scope, i.then_body, fallback, writes);
+                if (i.else_body) |e| try rabinCollectAssignments(a, contract, scope, e, fallback, writes);
+            },
+            .for_stmt => |f| {
+                if (f.update) |u| try rabinCollectAssignments(a, contract, scope, (u)[0..1], f.source_loc orelse fallback, writes);
+                try rabinCollectAssignments(a, contract, scope, f.body, fallback, writes);
+            },
+            else => {},
+        }
+    }
+}
+
+/// The properties a trusted expression's value can come from, through local
+/// aliases and private-helper call sites (port of the TS `sourcesOf`).
+fn rabinSourcesOf(
+    a: Allocator,
+    contract: ContractNode,
+    sites: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RabinCallSite)),
+    expr: Expression,
+    scope: *const RabinScope,
+    out: *StringSet,
+    visiting: *StringSet,
+) Allocator.Error!void {
     switch (expr) {
-        .call => |c| {
-            // Bare function calls that might be method references
-            try calls.put(allocator, c.callee, {});
-            for (c.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls);
+        .property_access => |pa| {
+            if (std.mem.eql(u8, pa.object, "this")) try out.put(a, pa.property, {});
         },
-        .method_call => |mc| {
-            // this.methodName() calls
-            if (std.mem.eql(u8, mc.object, "this")) {
-                try calls.put(allocator, mc.method, {});
+        .identifier => |name| {
+            const param_idx = scope.isParam(name);
+            const locals = scope.bindings.get(name);
+            if (param_idx == null and locals == null) {
+                for (contract.properties) |p| {
+                    if (std.mem.eql(u8, p.name, name)) try out.put(a, p.name, {});
+                }
+                return;
             }
-            for (mc.args) |arg| try collectMethodCallsInExpr(allocator, arg, calls);
+            const key = try std.fmt.allocPrint(a, "{x}\x00{s}", .{ @intFromPtr(scope), name });
+            if (visiting.get(key) != null) return;
+            try visiting.put(a, key, {});
+            if (locals) |list| {
+                for (list.items) |v| try rabinSourcesOf(a, contract, sites, v, scope, out, visiting);
+            }
+            if (param_idx) |idx| {
+                const pname = scope.private_name orelse return;
+                const list = sites.get(pname) orelse return;
+                for (list.items) |site| {
+                    if (idx < site.args.len) try rabinSourcesOf(a, contract, sites, site.args[idx], site.scope, out, visiting);
+                }
+            }
         },
+        else => {},
+    }
+}
+
+fn rabinBind(a: Allocator, scope: *RabinScope, name: []const u8, value: Expression) !void {
+    const gop = try scope.bindings.getOrPut(a, name);
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    try gop.value_ptr.append(a, value);
+}
+
+fn rabinCollectBindings(a: Allocator, scope: *RabinScope, stmts: []const Statement) !void {
+    const Mut = struct {
+        a: Allocator,
+        scope: *RabinScope,
+        fn visit(self: @This(), expr: Expression, _: ?SourceLocation) !void {
+            const operand: ?Expression = switch (expr) {
+                .increment => |inc| inc.operand,
+                .decrement => |dec| dec.operand,
+                else => null,
+            };
+            if (operand) |op| {
+                if (op == .identifier) try self.scope.mutated.put(self.a, op.identifier, {});
+            }
+        }
+    };
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| {
+                try scope.declared.put(a, d.name, {});
+                try rabinBind(a, scope, d.name, d.value);
+            },
+            .let_decl => |d| {
+                try scope.declared.put(a, d.name, {});
+                // A declaration with no initialiser binds nothing provable.
+                if (d.value) |v| try rabinBind(a, scope, d.name, v) else try scope.mutated.put(a, d.name, {});
+            },
+            .assign => |as| {
+                if (!as.target_is_property and as.index_target == null) try rabinBind(a, scope, as.target, as.value);
+            },
+            .if_stmt => |i| {
+                try rabinCollectBindings(a, scope, i.then_body);
+                if (i.else_body) |e| try rabinCollectBindings(a, scope, e);
+            },
+            .for_stmt => |f| {
+                // The loop counter is never a trusted modulus.
+                try scope.mutated.put(a, f.var_name, {});
+                try scope.declared.put(a, f.var_name, {});
+                if (f.update) |u| try rabinCollectBindings(a, scope, (u)[0..1]);
+                try rabinCollectBindings(a, scope, f.body);
+            },
+            else => {},
+        }
+    }
+    try rabinWalkStmtsShallow(stmts, Mut{ .a = a, .scope = scope });
+}
+
+/// Visit every expression directly in `stmts` (not nested statement bodies),
+/// for the ++/-- scan — `rabinCollectBindings` recurses into the bodies itself.
+fn rabinWalkStmtsShallow(stmts: []const Statement, ctx: anytype) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| try rabinWalkExpr(d.value, null, ctx),
+            .let_decl => |d| if (d.value) |v| try rabinWalkExpr(v, null, ctx),
+            .assign => |as| try rabinWalkExpr(as.value, null, ctx),
+            .if_stmt => |i| try rabinWalkExpr(i.condition, null, ctx),
+            .expr_stmt => |e| try rabinWalkExpr(e.expr, null, ctx),
+            .assert_stmt => |as| try rabinWalkExpr(as.condition, null, ctx),
+            .return_stmt => |r| if (r.value) |v| try rabinWalkExpr(v, null, ctx),
+            .for_stmt => {},
+        }
+    }
+}
+
+fn rabinIsTrusted(
+    a: Allocator,
+    contract: ContractNode,
+    trusted: *std.StringHashMapUnmanaged([]bool),
+    expr: Expression,
+    scope: *const RabinScope,
+) !bool {
+    var visiting = StringSet{};
+    return rabinIsTrustedInner(a, contract, trusted, expr, scope, &visiting);
+}
+
+fn rabinIsTrustedInner(
+    a: Allocator,
+    contract: ContractNode,
+    trusted: *std.StringHashMapUnmanaged([]bool),
+    expr: Expression,
+    scope: *const RabinScope,
+    visiting: *StringSet,
+) Allocator.Error!bool {
+    switch (expr) {
+        .property_access => |pa| return std.mem.eql(u8, pa.object, "this"),
+        .literal_int, .literal_bigint => return true,
+        .identifier => |name| {
+            const param_idx = scope.isParam(name);
+            const locals = scope.bindings.get(name);
+            if (param_idx == null and locals == null) {
+                if (scope.mutated.get(name) != null) return false;
+                for (contract.properties) |p| {
+                    if (std.mem.eql(u8, p.name, name)) return true;
+                }
+                return false;
+            }
+            if (scope.mutated.get(name) != null) return false;
+            if (param_idx) |idx| {
+                const pname = scope.private_name orelse return false;
+                const flags = trusted.get(pname) orelse return false;
+                if (idx >= flags.len or !flags[idx]) return false;
+            }
+            if (locals) |list| {
+                if (visiting.get(name) != null) return false;
+                try visiting.put(a, name, {});
+                defer _ = visiting.remove(name);
+                for (list.items) |v| {
+                    if (!(try rabinIsTrustedInner(a, contract, trusted, v, scope, visiting))) return false;
+                }
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// Visit every expression in `stmts` at any depth, including each `for`
+/// loop's update statement. `ctx.visit(expr, loc)` gets the nearest enclosing
+/// statement's location (or `fallback`).
+fn rabinWalkStmts(stmts: []const Statement, fallback: ?SourceLocation, ctx: anytype) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| try rabinWalkExpr(d.value, d.source_loc orelse fallback, ctx),
+            .let_decl => |d| if (d.value) |v| try rabinWalkExpr(v, d.source_loc orelse fallback, ctx),
+            .assign => |as| try rabinWalkExpr(as.value, as.source_loc orelse fallback, ctx),
+            .if_stmt => |i| {
+                try rabinWalkExpr(i.condition, i.source_loc orelse fallback, ctx);
+                try rabinWalkStmts(i.then_body, fallback, ctx);
+                if (i.else_body) |e| try rabinWalkStmts(e, fallback, ctx);
+            },
+            .for_stmt => |f| {
+                if (f.update) |u| try rabinWalkStmts((u)[0..1], f.source_loc orelse fallback, ctx);
+                try rabinWalkStmts(f.body, fallback, ctx);
+            },
+            .expr_stmt => |e| try rabinWalkExpr(e.expr, e.source_loc orelse fallback, ctx),
+            .assert_stmt => |as| try rabinWalkExpr(as.condition, as.source_loc orelse fallback, ctx),
+            .return_stmt => |r| if (r.value) |v| try rabinWalkExpr(v, fallback, ctx),
+        }
+    }
+}
+
+fn rabinWalkExpr(expr: Expression, loc: ?SourceLocation, ctx: anytype) !void {
+    try ctx.visit(expr, loc);
+    switch (expr) {
+        .call => |c| for (c.args) |arg| try rabinWalkExpr(arg, loc, ctx),
+        .method_call => |mc| for (mc.args) |arg| try rabinWalkExpr(arg, loc, ctx),
         .binary_op => |b| {
-            try collectMethodCallsInExpr(allocator, b.left, calls);
-            try collectMethodCallsInExpr(allocator, b.right, calls);
+            try rabinWalkExpr(b.left, loc, ctx);
+            try rabinWalkExpr(b.right, loc, ctx);
         },
-        .unary_op => |u| try collectMethodCallsInExpr(allocator, u.operand, calls),
+        .unary_op => |u| try rabinWalkExpr(u.operand, loc, ctx),
         .ternary => |t| {
-            try collectMethodCallsInExpr(allocator, t.condition, calls);
-            try collectMethodCallsInExpr(allocator, t.then_expr, calls);
-            try collectMethodCallsInExpr(allocator, t.else_expr, calls);
+            try rabinWalkExpr(t.condition, loc, ctx);
+            try rabinWalkExpr(t.then_expr, loc, ctx);
+            try rabinWalkExpr(t.else_expr, loc, ctx);
         },
         .index_access => |ia| {
-            try collectMethodCallsInExpr(allocator, ia.object, calls);
-            try collectMethodCallsInExpr(allocator, ia.index, calls);
+            try rabinWalkExpr(ia.object, loc, ctx);
+            try rabinWalkExpr(ia.index, loc, ctx);
         },
-        .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls),
-        .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls),
-        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
-        => {},
+        .increment => |inc| try rabinWalkExpr(inc.operand, loc, ctx),
+        .decrement => |dec| try rabinWalkExpr(dec.operand, loc, ctx),
+        .array_literal => |els| for (els) |el| try rabinWalkExpr(el, loc, ctx),
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => {},
     }
 }
 
@@ -2148,7 +3190,7 @@ test "bare return in a public method is rejected" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var then_body = [_]Statement{.{ .return_stmt = null }};
+    var then_body = [_]Statement{.{ .return_stmt = .{ .value = null } }};
     var body = [_]Statement{
         .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
         .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
@@ -2179,7 +3221,7 @@ test "valued return in a public method is rejected" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var then_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var then_body = [_]Statement{.{ .return_stmt = .{ .value = Expression{ .literal_bool = true } } }};
     var body = [_]Statement{
         .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
         .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
@@ -2213,7 +3255,7 @@ test "return in a private helper is allowed" {
     var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
     var super_args = [_]Expression{.{ .identifier = "pk" }};
     var params = [_]types.ParamNode{makeParam("pk")};
-    var helper_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var helper_body = [_]Statement{.{ .return_stmt = .{ .value = Expression{ .literal_bool = true } } }};
     var public_body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
     var methods = [_]MethodNode{
         .{ .name = "helper", .is_public = false, .params = &.{}, .body = &helper_body },
@@ -2962,6 +4004,25 @@ test "zero-start counting-up for loop is accepted" {
     try testing.expect(!try validateLoopHasError(testing.allocator, for_stmt, "countdown"));
 }
 
+// -- N-012: the expression walkers cover a for-loop's update slot -------------
+//
+// Proves: the walker behind the asm() gate visits the `update` statement of a
+// `for` loop, so an `asm(...)` call planted there in a non-Unsafe contract is
+// refused. The AST is hand-built because the for-update rule makes the shape
+// unreachable from source today. Zig lowers a `for` header to constants
+// (`init_value`, `bound`, `bound_ident`), so the update is the only header slot
+// that can hold an expression; init and condition have nothing to walk here.
+// Does not prove: that any source program can reach this; only that a future
+// loosening of the update rule cannot reopen the asm gate through the walker.
+test "N-012: asm() planted in a for-loop update is refused outside UnsafeSmartContract" {
+    const allocator = testing.allocator;
+    var asm_args = [_]Expression{};
+    var asm_call = types.CallExpr{ .callee = "asm", .args = &asm_args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .call = &asm_call } } };
+    const for_stmt = types.ForStmt{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update };
+    try testing.expect(try validateLoopHasError(allocator, for_stmt, "'asm' is only available in contracts extending UnsafeSmartContract"));
+}
+
 // -- #131 (H2): extractLocktime without extractSequence guard ----------------
 
 const LOCKTIME_NEEDLE = "does not assert extractSequence";
@@ -3327,4 +4388,251 @@ test "H2: negated sequence comparison still warns" {
     defer freeLocktimeResult(allocator, result);
 
     try testing.expect(hasLocktimeWarning(result));
+}
+
+// -- F-063: array-literal elements are walked by every validator walker --
+//
+// `.array_literal` was listed as a LEAF in collectMethodCallsInExpr,
+// walkExprForPreimage and scanExprForLocktime, and fell to `else` in
+// findOutputIntrinsicInExpr, so a construct written inside `[...]` (the only
+// place checkMultiSig's arguments can be written) escaped the rule those
+// walkers enforce. Pre-fix the recursion shape segfaulted in stack lowering
+// instead of being refused.
+//
+// Proves: validate() reports each shape exactly as it does the un-nested form.
+// Does not prove: CLI exit status or cross-tier parity (conformance/negatives).
+
+test "F-063: recursion through a self-call inside an array literal is detected" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("x", .bigint, true)};
+    var self_call = types.MethodCall{ .object = "this", .method = "foo", .args = &.{} };
+    const elems = [_]Expression{.{ .method_call = &self_call }};
+    var body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var assert_body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "foo", .is_public = false, .params = &.{}, .body = &body },
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &assert_body },
+    };
+    var assignments = [_]types.AssignmentNode{makeAssignment("x")};
+    var super_args = [_]Expression{.{ .identifier = "x" }};
+    var params = [_]types.ParamNode{makeParam("x")};
+    const contract = ContractNode{
+        .name = "Recursive",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "recursion detected") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "F-063: manual checkPreimage inside an array literal still warns" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("counter", .bigint, false)};
+    var check_call = types.CallExpr{ .callee = "checkPreimage", .args = &.{} };
+    const elems = [_]Expression{.{ .call = &check_call }};
+    var body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "increment", .is_public = true, .params = &.{}, .body = &body },
+    };
+    var assignments = [_]types.AssignmentNode{makeAssignment("counter")};
+    var super_args = [_]Expression{.{ .identifier = "counter" }};
+    var params = [_]types.ParamNode{makeParam("counter")};
+    const contract = ContractNode{
+        .name = "Counter",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.warnings) |w| {
+        if (std.mem.indexOf(u8, w.message, "checkPreimage") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "F-063: an extractLocktime read inside an array literal is seen by the locktime check" {
+    const allocator = testing.allocator;
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    const elems = [_]Expression{.{ .call = &lt_call }};
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "F-063: an output intrinsic inside an array literal in a loop body is rejected" {
+    const allocator = testing.allocator;
+    var ao_args = [_]Expression{ .{ .literal_int = 1000 }, .{ .property_access = .{ .object = "this", .property = "count" } } };
+    var ao_call = types.MethodCall{ .object = "this", .method = "addOutput", .args = &ao_args };
+    const elems = [_]Expression{.{ .method_call = &ao_call }};
+    var loop_body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var body = [_]Statement{
+        .{ .for_stmt = .{
+            .var_name = "i",
+            .init_value = 0,
+            .bound = 2,
+            .bound_is_const = true,
+            .body = &loop_body,
+        } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "step", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "Looper",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "Output intrinsic 'addOutput'") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+// N-325: a method / constructor parameter annotated with a type name no tier
+// recognises. Every parser lowers it to `.unknown` and records the spelled name
+// in `spelled_type`; the validator refuses it, but not the missing-annotation
+// case (empty `spelled_type`) and not the explicit `StatefulContext` parameter.
+// Proves the validator side only; conformance/negatives/n325-* covers the source
+// path through every parser.
+test "validate: N-325 parameter with an unknown type name is refused" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("pk", .pub_key, true)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
+    var super_args = [_]Expression{.{ .identifier = "pk" }};
+    var ctor_params = [_]types.ParamNode{
+        .{ .name = "pk", .type_info = .unknown, .type_name = "unknown", .spelled_type = "UUU" },
+    };
+    var mparams = [_]types.ParamNode{
+        .{ .name = "c", .type_info = .unknown, .type_name = "unknown", .spelled_type = "TTT" },
+        .{ .name = "ctx", .type_info = .unknown, .type_name = "StatefulContext", .spelled_type = "StatefulContext" },
+        .{ .name = "bare", .type_info = .unknown },
+    };
+    var body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &mparams, .body = &body },
+    };
+    const contract = ContractNode{
+        .name = "P2PKH",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &ctor_params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var saw_ctor = false;
+    var saw_method = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "type 'UUU' of parameter 'pk' in constructor is not a Rúnar type") != null) saw_ctor = true;
+        if (std.mem.indexOf(u8, err.message, "type 'TTT' of parameter 'c' in method 'unlock' is not a Rúnar type") != null) saw_method = true;
+        try testing.expect(std.mem.indexOf(u8, err.message, "StatefulContext") == null);
+    }
+    try testing.expect(saw_ctor);
+    try testing.expect(saw_method);
+}
+
+// -- N-401: the statement walkers cover a for-loop's update slot --------------
+//
+// Proves: the three statement walkers N-012 left behind -- walkReadonlyWrites,
+// collectMethodCalls and findOutputIntrinsic -- each visit the `update`
+// statement of a `for` loop. A readonly write or a `this.m()` call planted only
+// in the update is seen, and an addOutput planted only in a NESTED loop's
+// update is found from the enclosing loop. The AST is hand-built because the
+// for-update rule makes these shapes unreachable from source today. Zig lowers
+// a `for` header to constants (`init_value`, `bound`, `bound_ident`), so the
+// update is the only header slot that can hold a statement; init and condition
+// have nothing to walk here.
+// Does not prove: that any source program can reach these shapes today.
+test "N-401: a readonly write planted only in a for-loop update is refused" {
+    const update = Statement{ .assign = .{ .target = "x", .value = .{ .literal_int = 1 }, .target_is_property = true } };
+    const for_stmt = types.ForStmt{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update };
+    try testing.expect(try validateLoopHasError(testing.allocator, for_stmt, "cannot assign to readonly property 'x'"));
+}
+
+test "N-401: collectMethodCalls sees a call planted only in a for-loop update" {
+    const allocator = testing.allocator;
+    var args = [_]Expression{};
+    var call = types.MethodCall{ .object = "this", .method = "m", .args = &args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .method_call = &call } } };
+    const loop = Statement{ .for_stmt = .{ .var_name = "i", .init_value = 0, .bound = 3, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update } };
+    var calls = StringSet{};
+    defer calls.deinit(allocator);
+    try collectMethodCalls(allocator, loop, &calls, true);
+    try testing.expect(calls.contains("m"));
+}
+
+test "N-401: findOutputIntrinsic sees an addOutput planted only in a nested for-loop update" {
+    const allocator = testing.allocator;
+    var ao_args = [_]Expression{ .{ .literal_int = 1000 }, .{ .property_access = .{ .object = "this", .property = "count" } } };
+    var ao_call = types.MethodCall{ .object = "this", .method = "addOutput", .args = &ao_args };
+    const update = Statement{ .expr_stmt = .{ .expr = .{ .method_call = &ao_call } } };
+    var inner_body = [_]Statement{.{ .for_stmt = .{ .var_name = "j", .init_value = 0, .bound = 2, .body = &.{}, .bound_is_const = true, .init_is_const = true, .update = &update } }};
+    var body = [_]Statement{
+        .{ .for_stmt = .{ .var_name = "i", .init_value = 0, .bound = 2, .body = &inner_body, .bound_is_const = true, .init_is_const = true } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "step", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "Looper",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer seen.deinit(allocator);
+    const site = try findOutputIntrinsic(allocator, contract, &body, &seen);
+    try testing.expect(site != null);
+    try testing.expectEqualStrings("addOutput", site.?.intrinsic);
 }

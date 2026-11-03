@@ -52,18 +52,10 @@ func ComputeOpPushTxWithCodeSep(txHex string, inputIndex int, subscript string, 
 	return ComputeOpPushTxWithSigHash(txHex, inputIndex, subscript, satoshis, codeSeparatorIndex, int(sighash.AllForkID))
 }
 
-// ComputeOpPushTxWithSigHash is the mode-aware form (issue #123). sigHashType is
-// the BIP-143 sighash type the preimage is built under (e.g. 0x43 for
-// SINGLE|FORKID); it drives which preimage fields the node zeroes AND the
-// sighash flag byte appended to the DER signature. Must match the method's
-// declared @sighash mode or the on-chain binding fails to verify. Pass 0 or
-// 0x41 for the default ALL|FORKID.
-func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, satoshis int64, codeSeparatorIndex int, sigHashType int) ([]byte, []byte, error) {
-	if sigHashType == 0 {
-		sigHashType = int(sighash.AllForkID)
-	}
-	flag := sighash.Flag(sigHashType & 0xff)
-
+// opPushTxPreimageForInput validates the inputs and builds the BIP-143
+// preimage shared by ComputeOpPushTxWithSigHash and
+// ComputeOpPushTxPreimageWithSigHash (N-253).
+func opPushTxPreimageForInput(txHex string, inputIndex int, subscript string, satoshis int64, codeSeparatorIndex int, flag sighash.Flag) (*transaction.Transaction, []byte, error) {
 	tx, err := transaction.NewTransactionFromHex(txHex)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse transaction: %w", err)
@@ -71,6 +63,13 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 
 	if inputIndex >= len(tx.Inputs) {
 		return nil, nil, fmt.Errorf("input index %d out of range (%d inputs)", inputIndex, len(tx.Inputs))
+	}
+
+	// N-041: the subscript is the locking script of the UTXO being spent (e.g.
+	// a provider's contract UTXO). An empty one can never match the script the
+	// node executes, so refuse it.
+	if subscript == "" {
+		return nil, nil, fmt.Errorf("compute_op_push_tx: refusing to build a preimage for input %d with an empty subscript (scriptCode)", inputIndex)
 	}
 
 	// If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
@@ -87,6 +86,16 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 				codeSeparatorIndex, len(subscript)/2)
 		}
 		scriptCode = subscript[trimPos:]
+
+		// N-155: a codeSeparatorIndex pointing at the LAST byte of the
+		// subscript passes the "past the end" check above (trimPos == len,
+		// not >) but trims scriptCode down to the empty string -- the same
+		// unsignable condition the empty-subscript check above exists to
+		// catch, just reached a different way. Refuse it too, with the same
+		// message.
+		if scriptCode == "" {
+			return nil, nil, fmt.Errorf("compute_op_push_tx: refusing to build a preimage for input %d with an empty subscript (scriptCode)", inputIndex)
+		}
 	}
 
 	lockScript, err := script.NewFromHex(scriptCode)
@@ -106,6 +115,31 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("calc preimage: %w", err)
 	}
+	return tx, preimage, nil
+}
+
+// opPushTxSign signs the BIP-143 sighash with the OP_PUSH_TX key (k=1). A
+// package-level seam so a test can count signing calls (N-253).
+var opPushTxSign = func(sigHash []byte) (*ec.Signature, error) {
+	return opPushTxPrivKey.Sign(sigHash)
+}
+
+// ComputeOpPushTxWithSigHash is the mode-aware form (issue #123). sigHashType is
+// the BIP-143 sighash type the preimage is built under (e.g. 0x43 for
+// SINGLE|FORKID); it drives which preimage fields the node zeroes AND the
+// sighash flag byte appended to the DER signature. Must match the method's
+// declared @sighash mode or the on-chain binding fails to verify. Pass 0 or
+// 0x41 for the default ALL|FORKID.
+func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, satoshis int64, codeSeparatorIndex int, sigHashType int) ([]byte, []byte, error) {
+	if sigHashType == 0 {
+		sigHashType = int(sighash.AllForkID)
+	}
+	flag := sighash.Flag(sigHashType & 0xff)
+
+	tx, preimage, err := opPushTxPreimageForInput(txHex, inputIndex, subscript, satoshis, codeSeparatorIndex, flag)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Compute sighash
 	sigHashBytes, err := tx.CalcInputSignatureHash(uint32(inputIndex), flag)
@@ -114,7 +148,7 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 	}
 
 	// Sign with k=1 private key using the go-sdk
-	sig, err := opPushTxPrivKey.Sign(sigHashBytes)
+	sig, err := opPushTxSign(sigHashBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sign: %w", err)
 	}
@@ -129,6 +163,21 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 	derBytes = append(derBytes, byte(flag))
 
 	return derBytes, preimage, nil
+}
+
+// ComputeOpPushTxPreimageWithSigHash (N-253) returns only the BIP-143 preimage
+// ComputeOpPushTxWithSigHash returns -- same arguments, same validation, same
+// bytes -- without computing the k=1 ECDSA signature. Post-BUG-100 the
+// OP_PUSH_TX signature is derived on-chain from the preimage and the unlocking
+// script has no slot for one, so the stateful PrepareCall path uses this
+// instead of signing and discarding a signature.
+func ComputeOpPushTxPreimageWithSigHash(txHex string, inputIndex int, subscript string, satoshis int64, codeSeparatorIndex int, sigHashType int) ([]byte, error) {
+	if sigHashType == 0 {
+		sigHashType = int(sighash.AllForkID)
+	}
+	flag := sighash.Flag(sigHashType & 0xff)
+	_, preimage, err := opPushTxPreimageForInput(txHex, inputIndex, subscript, satoshis, codeSeparatorIndex, flag)
+	return preimage, err
 }
 
 // OpPushTxPubKeyHex returns the hex-encoded compressed public key for OP_PUSH_TX

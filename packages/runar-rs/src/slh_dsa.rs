@@ -90,7 +90,7 @@ pub const SLH_SHA2_256S: SlhParams = SlhParams {
 
 pub const SLH_SHA2_256F: SlhParams = SlhParams {
     name: "SLH-DSA-SHA2-256f",
-    n: 32, h: 68, d: 17, hp: 4, a: 8, k: 35, w: 16,
+    n: 32, h: 68, d: 17, hp: 4, a: 9, k: 35, w: 16,
     len: wots_len(32, 16),
 };
 
@@ -871,7 +871,11 @@ pub fn slh_sign(params: &SlhParams, msg: &[u8], sk: &[u8]) -> Vec<u8> {
     for i in 0..tree_idx_len {
         tree_idx = (tree_idx << 8) | (digest[md_len + i] as u64);
     }
-    tree_idx &= (1u64 << (params.h - hp)) - 1;
+    // h - h' is 64 for SHA2-256f: `1u64 << 64` panics in debug and is masked to
+    // `1 << 0` in release (mask 0). Mask only below 64 bits (F-130).
+    if params.h - hp < 64 {
+        tree_idx &= (1u64 << (params.h - hp)) - 1;
+    }
 
     let mut leaf_idx: u32 = 0;
     for i in 0..leaf_idx_len {
@@ -941,6 +945,14 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
     let pk_seed = &pk[..n];
     let pk_root = &pk[n..2 * n];
 
+    // F-232: FIPS 205 fixes the signature length per parameter set at
+    // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+    // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+    // garbage or truncation) is rejected.
+    if sig.len() != n + k * (1 + a) * n + d * (len + hp) * n {
+        return false;
+    }
+
     // Parse signature
     let mut offset = 0;
     if sig.len() < n {
@@ -968,7 +980,11 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
     for i in 0..tree_idx_len {
         tree_idx = (tree_idx << 8) | (digest[md_len + i] as u64);
     }
-    tree_idx &= (1u64 << (params.h - hp)) - 1;
+    // h - h' is 64 for SHA2-256f: `1u64 << 64` panics in debug and is masked to
+    // `1 << 0` in release (mask 0). Mask only below 64 bits (F-130).
+    if params.h - hp < 64 {
+        tree_idx &= (1u64 << (params.h - hp)) - 1;
+    }
 
     let mut leaf_idx: u32 = 0;
     for i in 0..leaf_idx_len {
@@ -1010,6 +1026,9 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
 
         current_leaf_idx = (current_tree_idx & ((1u64 << hp) - 1)) as u32;
         current_tree_idx >>= hp;
+    }
+    if offset != sig.len() {
+        return false;
     }
 
     // Compare computed root to PK.root
@@ -1112,5 +1131,105 @@ mod tests {
     fn test_verify_bad_pk_length() {
         let params = &SLH_SHA2_128F;
         assert!(!slh_verify(params, b"msg", b"sig", b"short"));
+    }
+
+    /// F-130: SHA2-256f has h - h' = 64, and the tree-index mask was
+    /// `(1u64 << 64) - 1`. Debug builds panic on that shift; release builds
+    /// mask the count to 0 (like Java), so the mask is 0 and idx_tree collapses.
+    ///
+    /// Proves: the Rust SDK verifies the on-chain-accepted 256f witness
+    /// (conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json, signed by
+    /// the third-party PyPI slh-dsa 0.2.5 SHA-256-only instantiation, tree index
+    /// 0x9cc4feac04b4276d >= 2^63), rejects its 1-bit near-miss, and `slh_sign`
+    /// reproduces that independent signature byte-for-byte from the same seeds.
+    ///
+    /// Does not prove: anything about the other parameter sets, or about the
+    /// release-mode codegen specifically (cargo test runs a debug build; the fix
+    /// removes the over-wide shift, so both profiles take the same path).
+    #[test]
+    fn test_sha2_256f_onchain_witness_high_tree_index() {
+        use crate::analyzer::script_parser::decode_hex;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json");
+        let w: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let hex0x = |v: &serde_json::Value| decode_hex(&v.as_str().unwrap()[2..]).unwrap();
+        let params = &SLH_SHA2_256F;
+        let pk = hex0x(&w["constructorArgs"]["pubkey"]);
+        let mut honest: Option<(Vec<u8>, Vec<u8>)> = None;
+        let (mut accepts, mut rejects) = (0, 0);
+        for spend in w["spends"].as_array().unwrap() {
+            let msg = hex0x(&spend["args"][0]);
+            let sig = hex0x(&spend["args"][1]);
+            if spend["expect"] == "accept" {
+                assert!(slh_verify(params, &msg, &sig, &pk), "256f witness must verify");
+                honest = Some((msg, sig));
+                accepts += 1;
+            } else {
+                assert!(!slh_verify(params, &msg, &sig, &pk), "256f near-miss must be rejected");
+                rejects += 1;
+            }
+        }
+        assert_eq!((accepts, rejects), (1, 1));
+
+        let mut seed = Vec::with_capacity(96);
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 sk_seed"));
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 sk_prf"));
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 pk_seed"));
+        let kp = slh_keygen(params, Some(&seed));
+        assert_eq!(kp.pk, pk, "keygen from the witness seeds must give the witness pubkey");
+        let (msg, sig) = honest.unwrap();
+        assert!(slh_sign(params, &msg, &kp.sk) == sig, "slh_sign must reproduce the witness signature");
+    }
+
+    /// F-232: `slh_verify` must accept ONLY a signature of the parameter set's
+    /// exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length the
+    /// on-chain verifier enforces with OP_SIZE <len> OP_EQUALVERIFY.
+    ///
+    /// Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector) and
+    /// SLH-DSA-SHA2-128f (self-signed), the honest signature verifies while the
+    /// same signature with one appended 0x00 byte, 32 appended bytes, or its
+    /// last byte removed is rejected. Before F-232 every length guard was a
+    /// lower bound, so the appended variants verified true.
+    ///
+    /// Does not prove: anything about the 192/256 parameter sets beyond sharing
+    /// the same guard, nor anything about the on-chain script.
+    #[test]
+    fn test_verify_rejects_non_canonical_signature_length() {
+        use crate::analyzer::script_parser::decode_hex;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/runtime-vectors/slh-dsa-acvp-kat.json");
+        let kat: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let v = kat["slh_dsa_acvp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["param_set"] == "SLH-DSA-SHA2-128s")
+            .expect("SLH-DSA-SHA2-128s ACVP vector");
+        let hx = |k: &str| decode_hex(v[k].as_str().unwrap()).unwrap();
+        let mut cases = vec![("128s-acvp", &SLH_SHA2_128S, hx("message"), hx("signature"), hx("pk"))];
+
+        let params = &SLH_SHA2_128F;
+        let seed: Vec<u8> = (0..3 * params.n as u8).collect();
+        let kp = slh_keygen(params, Some(&seed));
+        let msg = b"F-232 exact-length probe".to_vec();
+        let sig = slh_sign(params, &msg, &kp.sk);
+        cases.push(("128f-self", params, msg, sig, kp.pk));
+
+        let tail32: Vec<u8> = (0..32u32).map(|i| (0xA5 ^ (i * 37)) as u8).collect();
+        for (name, params, msg, sig, pk) in cases {
+            assert!(slh_verify(params, &msg, &sig, &pk), "{name}: honest signature rejected");
+            let mut with_byte = sig.clone();
+            with_byte.push(0x00);
+            assert!(!slh_verify(params, &msg, &with_byte, &pk), "{name}: accepted sig||0x00");
+            let mut with32 = sig.clone();
+            with32.extend_from_slice(&tail32);
+            assert!(!slh_verify(params, &msg, &with32, &pk), "{name}: accepted sig||32 bytes");
+            assert!(
+                !slh_verify(params, &msg, &sig[..sig.len() - 1], &pk),
+                "{name}: accepted a signature truncated by one byte"
+            );
+        }
     }
 }

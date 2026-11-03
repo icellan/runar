@@ -69,6 +69,14 @@ final class ScriptParser {
                 if (i + 1 >= byteLen) {
                     ops.add(OpStep.push(offset, b, "OP_PUSHDATA1", byteLen - i,
                         "pushdata1", 0));
+                    // Truncated header (no length byte) still counts as a
+                    // 0-byte PUSHDATA1 payload for §6.2 — TS/Python emit
+                    // INEFFICIENT_PUSH here too (dataLength 0 <= 75).
+                    findings.add(new Finding(
+                        "info", "INEFFICIENT_PUSH",
+                        "OP_PUSHDATA1 used for 0-byte data — direct push (opcode 0x00)"
+                            + " would be more efficient",
+                        offset, "OP_PUSHDATA1", null));
                     return new Parsed(ops, findings);
                 }
                 int dataLen = bytes[i + 1] & 0xff;
@@ -96,6 +104,12 @@ final class ScriptParser {
                 if (i + 2 >= byteLen) {
                     ops.add(OpStep.push(offset, b, "OP_PUSHDATA2", byteLen - i,
                         "pushdata2", 0));
+                    // Truncated header — see OP_PUSHDATA1 note above.
+                    findings.add(new Finding(
+                        "info", "INEFFICIENT_PUSH",
+                        "OP_PUSHDATA2 used for 0-byte data — OP_PUSHDATA1 would be"
+                            + " more efficient",
+                        offset, "OP_PUSHDATA2", null));
                     return new Parsed(ops, findings);
                 }
                 int dataLen = (bytes[i + 1] & 0xff) | ((bytes[i + 2] & 0xff) << 8);
@@ -121,6 +135,12 @@ final class ScriptParser {
                 if (i + 4 >= byteLen) {
                     ops.add(OpStep.push(offset, b, "OP_PUSHDATA4", byteLen - i,
                         "pushdata4", 0));
+                    // Truncated header — see OP_PUSHDATA1 note above.
+                    findings.add(new Finding(
+                        "info", "INEFFICIENT_PUSH",
+                        "OP_PUSHDATA4 used for 0-byte data — OP_PUSHDATA2 would be"
+                            + " more efficient",
+                        offset, "OP_PUSHDATA4", null));
                     return new Parsed(ops, findings);
                 }
                 long dataLenL =

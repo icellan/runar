@@ -30,6 +30,27 @@ module Runar
     # fund-safety gate fired, rather than matching on a generic RuntimeError.
     class BroadcastRejected < StandardError; end
 
+    # Raised when a provider-supplied script cannot be parsed as a sequence of
+    # Bitcoin Script push elements (F-238).
+    #
+    # ScriptUtils.read_script_element used to raise a bare
+    # ArgumentError/TypeError on an empty/out-of-range offset (`nil#to_i(16)`
+    # has no `to_i` that takes a radix) and silently return a SHORT data_hex
+    # when a push's declared length ran past the remaining bytes — which
+    # corrupts every later constructor slot's offset in the same walk. A
+    # script fetched via a Provider (from_txid / from_utxo) is untrusted
+    # input and needs a typed, specific rejection, not a crash or a quietly
+    # wrong value.
+    class MalformedScriptError < StandardError; end
+
+    # Raised by RunarContract.new when a ByteString-family constructor arg
+    # (ByteString, PubKey, Sig, Addr, Ripemd160, Sha256, Point, P256Point,
+    # P384Point, SigHashPreimage) is a String that is not an even-length hex
+    # string (N-329). The SDK treats such a String as hex when it splices it
+    # into the locking script, so raw bytes would otherwise build a corrupt
+    # script.
+    class InvalidConstructorArgError < ArgumentError; end
+
     # Raise ScriptSizeExceededError if `script_hex` (hex-encoded) exceeds
     # `limit` bytes. Hex is 2 chars per byte; tolerate odd-length defensively.
     def self.assert_script_hex_under_limit(script_hex, limit, context)
@@ -68,6 +89,8 @@ module Runar
     # whoever ran the compiler: the artifact handed on afterwards looked like
     # any other and every SDK funded it in silence. The compiler now stamps
     # +unsoundPrimitives+ into the artifact, and this is the SDK half.
+    # F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+    # outright, so this gate only matters for artifacts from older compilers.
     #
     # Deploy only, deliberately. Spending an already-deployed contract is how
     # funds are RECOVERED from one.
@@ -103,6 +126,28 @@ module Runar
       raise ArgumentError, 'witness value: invalid hex characters' unless h.match?(/\A[0-9a-fA-F]*\z/)
 
       h.downcase
+    end
+
+    # Intent-intrinsic witness params the compiler auto-injects
+    # (extractPrevOutputScript -> `_prevOutScript_<i>`, requireOutputP2PKH ->
+    # `_serialisedOutputs`). Their values come from set_prev_out_script /
+    # set_serialised_outputs.
+    def self.intent_witness_param?(name)
+      name.start_with?('_prevOutScript_') || name == '_serialisedOutputs'
+    end
+
+    # True when the SDK supplies this param itself, so it is never part of the
+    # caller's args: the intent witnesses always, plus the stateful
+    # continuation params (SigHashPreimage, _changePKH, _changeAmount,
+    # _newAmount) on stateful contracts. Single source of truth for
+    # RunarContract#prepare_call's arity check and the typed-wrapper codegen.
+    def self.sdk_supplied_param?(name, type, is_stateful)
+      return true if intent_witness_param?(name)
+
+      is_stateful && (
+        type == 'SigHashPreimage' ||
+        %w[_changePKH _changeAmount _newAmount].include?(name)
+      )
     end
 
     class WitnessValueMissingError < StandardError

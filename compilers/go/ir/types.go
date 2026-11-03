@@ -21,13 +21,14 @@ type ANFProgram struct {
 	Methods      []ANFMethod   `json:"methods"`
 	// ParentClass is the base class the source contract extends
 	// ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract").
-	// It is an in-memory carrier ONLY (json:"-") so it never appears in the
-	// emitted ANF IR JSON that the conformance suite compares cross-tier.
+	// F-038 / F-066: wire data. The source path always sets it, so --emit-ir
+	// always writes it; it is empty only for IR written before it existed.
 	// The artifact assembler copies it to the top-level artifact field so
 	// SDKs can gate the issue-#42/#44 terminal sighash subscript trim on the
 	// authoritative parent class (a StatefulSmartContract with zero mutable
-	// fields still needs the trim even though stateFields is empty).
-	ParentClass string `json:"-"`
+	// fields still needs the trim even though stateFields is empty), so an
+	// --emit-ir -> --ir round trip must keep it.
+	ParentClass string `json:"parentClass,omitempty"`
 }
 
 // ANFSyntheticArrayLevel is one level of the synthetic FixedArray chain
@@ -54,6 +55,27 @@ type ANFProperty struct {
 	SyntheticArrayChain []ANFSyntheticArrayLevel `json:"syntheticArrayChain,omitempty"`
 }
 
+// UnmarshalJSON decodes an ANFProperty with UseNumber, so a bare-number
+// initialValue reaches DecodeConstants as its exact token rather than a
+// float64 that has already rounded away every digit past 2^53 (N-212).
+func (p *ANFProperty) UnmarshalJSON(data []byte) error {
+	type anfPropertyAlias ANFProperty
+	var a anfPropertyAlias
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&a); err != nil {
+		return err
+	}
+	*p = ANFProperty(a)
+	return nil
+}
+
+// fitsFloat64Exactly reports whether |v| <= 2^53-1, the range in which every
+// integer is exactly one float64.
+func fitsFloat64Exactly(v *big.Int) bool {
+	return new(big.Int).Abs(v).Cmp(big.NewInt(1<<53-1)) <= 0
+}
+
 // ANFMethod is a single contract method.
 type ANFMethod struct {
 	Name     string       `json:"name"`
@@ -63,12 +85,12 @@ type ANFMethod struct {
 
 	// SigHashType is the non-default BIP-143 sighash mode a `@sighash`
 	// directive declared for this (public) method (issue #123), e.g. 0x43 for
-	// SINGLE|FORKID. Nil = default ALL|FORKID (0x41). Carried in-memory only
-	// (json:"-") so it never appears in the emitted ANF IR JSON compared
-	// cross-tier — the codegen-relevant flag rides on each check_preimage
-	// node's sighashFlag instead. The artifact assembler copies it to
-	// ABIMethod.SigHashType so the SDK builds a matching preimage.
-	SigHashType *int `json:"-"`
+	// SINGLE|FORKID. Nil = default ALL|FORKID (0x41), and then the key is
+	// omitted. F-065: wire data, so an --emit-ir -> --ir round trip keeps it;
+	// the codegen-relevant flag rides on each check_preimage node's
+	// sighashFlag. The artifact assembler copies it to ABIMethod.SigHashType
+	// so the SDK builds a matching preimage.
+	SigHashType *int `json:"sigHashType,omitempty"`
 }
 
 // ANFParam describes a method parameter.
@@ -412,6 +434,22 @@ func DecodeConstants(program *ANFProgram) error {
 // value means the same thing in both positions by construction rather than by
 // two implementations agreeing.
 func decodePropertyInitialValue(p *ANFProperty) error {
+	// N-212: ANFProperty.UnmarshalJSON keeps a bare number as its json.Number
+	// token. An integer token outside float64's exact range becomes a
+	// *big.Int with every digit; everything else stays the float64 that
+	// encoding/json has always produced, so no in-range value changes type.
+	if num, ok := p.InitialValue.(json.Number); ok {
+		if bi, ok := new(big.Int).SetString(num.String(), 10); ok && !fitsFloat64Exactly(bi) {
+			p.InitialValue = bi
+			return nil
+		}
+		f, err := num.Float64()
+		if err != nil {
+			return fmt.Errorf("initialValue %s: %w", num, err)
+		}
+		p.InitialValue = f
+		return nil
+	}
 	s, ok := p.InitialValue.(string)
 	if !ok || !isDecimalBigIntLiteral(s) {
 		return nil

@@ -1,7 +1,6 @@
 package runar.lang.runtime;
 
 import java.math.BigInteger;
-import java.util.Arrays;
 
 import org.junit.jupiter.api.Test;
 
@@ -30,7 +29,9 @@ class PreimageTest {
         assertEquals(BigInteger.valueOf(0x41), Preimage.extractSigHashType(p));
         assertEquals(BigInteger.ZERO, Preimage.extractLocktime(p));
         assertEquals(BigInteger.ZERO, Preimage.extractInputIndex(p));
-        assertTrue(Preimage.checkPreimage(p));
+        // N-099: checkPreimage is no stub. With no simulator spend to check
+        // against it throws; it used to return true for any preimage.
+        assertThrows(IllegalStateException.class, () -> Preimage.checkPreimage(p));
     }
 
     @Test
@@ -71,16 +72,25 @@ class PreimageTest {
     }
 
     @Test
-    void extractOutputHashEchoesFirst32Bytes() {
+    void extractOutputHashReturnsHashOutputsNotTheLeadingBytes() {
+        // N-188: extractOutputHash used to echo the first 32 bytes of the
+        // serialized preimage (4-byte version + 28 bytes of hashPrevouts),
+        // not hashOutputs. hashPrevouts and hashOutputs are set to distinct
+        // values here so the two cannot be confused: if extractOutputHash
+        // ever regresses to reading the leading window again, this fails.
         byte[] hpr = new byte[32];
-        for (int i = 0; i < 32; i++) hpr[i] = (byte) 0xaa;
-        // extractOutputHash returns the first 32 bytes of the serialized preimage;
-        // in BIP-143 format the first 32 bytes are: 4-byte version + 28 bytes of
-        // hashPrevouts. With version=1 that's little-endian 01 00 00 00 || hpr[0..28].
-        Preimage p = Preimage.builder().version(1L).hashPrevouts(hpr).build();
-        byte[] raw = p.toBytes();
-        byte[] expected = Arrays.copyOfRange(raw, 0, 32);
-        assertEquals(bytesToHex(expected), Preimage.extractOutputHash(p).toHex());
+        byte[] ho = new byte[32];
+        for (int i = 0; i < 32; i++) { hpr[i] = (byte) 0xaa; ho[i] = (byte) 0x55; }
+        Preimage p = Preimage.builder().version(1L).hashPrevouts(hpr).hashOutputs(ho).build();
+
+        // Would have failed before the fix: extractOutputHash echoed
+        // version||hashPrevouts[0..28), which is neither all-0x55 nor equal
+        // to hashOutputs.
+        assertEquals(bytesToHex(ho), Preimage.extractOutputHash(p).toHex());
+        // The compiler lowers extractOutputHash and extractOutputs to the
+        // same byte-window opcode sequence (StackLower#lowerExtractor); the
+        // two mock extractors must agree.
+        assertEquals(Preimage.extractOutputs(p).toHex(), Preimage.extractOutputHash(p).toHex());
     }
 
     @Test

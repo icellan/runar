@@ -12,7 +12,7 @@
  *   - GREEN: the real TS and Python goldens (confirmed clean by direct
  *     inspection) pass with zero violations.
  *   - Inventory / regression gate: every committed `expected-source-map.json`
- *     across all 5 fixtures × 7 tiers is evaluated against
+ *     across all 6 fixtures × 7 tiers is evaluated against
  *     `anchor-known-issues.json`. Pairs with no entry must be fully clean;
  *     pairs with an entry must match its exact recorded signature. This is
  *     what makes the independent oracle "run in CI alongside the golden
@@ -28,7 +28,9 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   checkSourceAnchors,
+  checkAgainstReference,
   evaluateAgainstKnownIssues,
+  evaluateShapeAgainstKnownIssues,
   loadKnownIssues,
   type SourceMap,
   type AnchorReport,
@@ -234,6 +236,96 @@ describe('independent anchor oracle vs anchor-known-issues.json — regression g
         const sm = JSON.parse(readFileSync(goldenPath, 'utf-8')) as SourceMap;
         const report = checkSourceAnchors(sm, REPO_ROOT);
         const evaluation = evaluateAgainstKnownIssues(fixture, tier, report, knownIssues);
+        expect(evaluation.ok, evaluation.reason).toBe(true);
+      });
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F-293 -- whole-map check against the TS reference.
+//
+// Proves: a source map can pass every per-mapping rule (checkSourceAnchors)
+// and still be wrong as a WHOLE -- anchors that merge constructs the
+// reference keeps apart (Rust if-else), or hundreds of compiler-injected
+// opcodes mapped onto one user line (Zig stateful-counter). The gate pins the
+// exact signature per (fixture, tier), so it fails on regression AND on a fix
+// that forgets to drop its known-issues entry.
+// Does NOT prove: that any tier's anchor is the CORRECT one (no independent
+// statement-boundary derivation), nor that the TS reference itself is right
+// (it cannot flag itself; trivially (0,0)). It also does not wire the rule
+// into run.ts (live-compile path); only committed goldens are gated here.
+// ---------------------------------------------------------------------------
+
+describe('checkAgainstReference -- whole-map rule (F-293)', () => {
+  const tsIfElse = loadGolden('if-else', 'ts');
+
+  it('is clean for the reference against itself', () => {
+    expect(checkAgainstReference(tsIfElse, tsIfElse)).toEqual({ mergedAnchors: 0, extraMappings: 0 });
+  });
+
+  it('allows a finer tier (splitting is tier granularity, not a defect)', () => {
+    const split: SourceMap = {
+      mappings: tsIfElse.mappings.map((m) => ({ ...m, column: m.column + (m.opcodeIndex % 2) })),
+    };
+    expect(checkAgainstReference(split, tsIfElse)).toEqual({ mergedAnchors: 0, extraMappings: 0 });
+  });
+
+  // Non-vacuity: the rule must fire on synthetic maps, independent of any golden.
+  it('flags a map that repeats one TS mapping across the enclosing construct (merge)', () => {
+    const first = tsIfElse.mappings[0]!;
+    const merged: SourceMap = { mappings: tsIfElse.mappings.map((m) => ({ ...m, line: first.line, column: first.column })) };
+    const r = checkAgainstReference(merged, tsIfElse);
+    // 5 distinct TS anchors collapse onto one.
+    expect(r.mergedAnchors).toBe(4);
+    expect(r.extraMappings).toBe(0);
+  });
+
+  it('flags a map that duplicates one TS mapping N times onto opcodes the reference leaves unmapped', () => {
+    const first = tsIfElse.mappings[0]!;
+    const mapped = new Set(tsIfElse.mappings.map((m) => m.opcodeIndex));
+    const exploded: SourceMap = { mappings: [...tsIfElse.mappings] };
+    for (let i = 100; i < 300; i++) if (!mapped.has(i)) exploded.mappings.push({ ...first, opcodeIndex: i });
+    const r = checkAgainstReference(exploded, tsIfElse);
+    expect(r.extraMappings).toBe(200);
+    expect(r.mergedAnchors).toBe(0);
+    // ... and every one of the 200 passes the per-mapping oracle, which is the defect.
+    expect(checkSourceAnchors(exploded, REPO_ROOT).violations).toEqual([]);
+  });
+
+  it('ignores untracked (line 0) mappings on both sides', () => {
+    const untracked: SourceMap = { mappings: [{ opcodeIndex: 500, sourceFile: 'x', line: 0, column: 0 }] };
+    expect(checkAgainstReference(untracked, tsIfElse)).toEqual({ mergedAnchors: 0, extraMappings: 0 });
+  });
+});
+
+describe('evaluateShapeAgainstKnownIssues', () => {
+  const entry = { fixture: 'fx', tier: 'rs', violationCount: 0, trackedCount: 1, totalCount: 1, mergedAnchors: 2, extraMappings: 0, reason: 'r' };
+  it('requires (0,0) without an entry', () => {
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 0, extraMappings: 0 }, []).ok).toBe(true);
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 1, extraMappings: 0 }, []).ok).toBe(false);
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 0, extraMappings: 9 }, []).ok).toBe(false);
+  });
+  it('requires an exact match with an entry, in both directions', () => {
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 2, extraMappings: 0 }, [entry]).ok).toBe(true);
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 3, extraMappings: 0 }, [entry]).ok).toBe(false);
+    expect(evaluateShapeAgainstKnownIssues('fx', 'rs', { mergedAnchors: 0, extraMappings: 0 }, [entry]).ok).toBe(false);
+  });
+});
+
+describe('whole-map shape vs the TS reference -- regression gate over every committed golden (F-293)', () => {
+  const knownIssues = loadKnownIssues(join(SOURCE_MAP_DIR, 'anchor-known-issues.json')).knownIssues;
+  const FIXTURES = readdirSync(SOURCE_MAP_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
+    .map((d) => d.name);
+
+  for (const fixture of FIXTURES) {
+    for (const tier of ['go', 'rs', 'py', 'zig', 'rb', 'java']) {
+      const goldenPath = join(SOURCE_MAP_DIR, fixture, tier, 'expected-source-map.json');
+      if (!existsSync(goldenPath)) continue; // absence is already failed by the 7-tier inventory test above
+      it(`${fixture}/${tier} shape matches anchor-known-issues.json (or is clean)`, () => {
+        const shape = checkAgainstReference(loadGolden(fixture, tier), loadGolden(fixture, 'ts'));
+        const evaluation = evaluateShapeAgainstKnownIssues(fixture, tier, shape, knownIssues);
         expect(evaluation.ok, evaluation.reason).toBe(true);
       });
     }

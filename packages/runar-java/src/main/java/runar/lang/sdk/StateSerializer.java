@@ -117,6 +117,11 @@ public final class StateSerializer {
 
     /** Extracts state from a full locking script. Returns {@code null} if absent. */
     public static Map<String, Object> extractFromScript(RunarArtifact artifact, String scriptHex) {
+        // N-320: the script is untrusted (fromUtxo / fromTxId). Refuse anything
+        // that is not whole bytes of hex before any reader sees it — the N-317 rule.
+        if (!ScriptUtils.isHexBytes(scriptHex)) {
+            throw new IllegalArgumentException("extractFromScript: script is not an even-length hex string");
+        }
         if (!artifact.isStateful()) return null;
         int opReturnPos = ScriptUtils.findLastOpReturn(scriptHex);
         if (opReturnPos < 0) return null;
@@ -128,9 +133,46 @@ public final class StateSerializer {
     // Encoding — matches Go encodeStateValue
     // ------------------------------------------------------------------
 
+    /**
+     * N-045 (defence in depth): refuses a fixed-width byte value — PubKey 33,
+     * Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+     * that is not a hex string of exactly its declared width. The on-chain
+     * reader slices each such field at its declared width, so a wrong-width
+     * value in a state section (or an argument a covenant copies into one)
+     * shifts every later field. The compiled covenant refuses such a
+     * continuation on chain ({@code OP_SIZE <width> OP_NUMEQUALVERIFY}); this
+     * is the off-chain refusal. No-op for every other type.
+     *
+     * @throws IllegalArgumentException on a wrong-width or non-hex value
+     */
+    public static void checkFixedWidthValue(Object value, String fieldType, String what) {
+        switch (fieldType) {
+            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" -> { }
+            default -> { return; }
+        }
+        int width = stateFieldByteWidth(fieldType);
+        if (!(value instanceof String hex)) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got %s",
+                what, fieldType, width, value == null ? "null" : value.getClass().getSimpleName()));
+        }
+        if (hex.length() % 2 != 0 || !hex.matches("[0-9a-fA-F]*")) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got a non-hex string", what, fieldType, width));
+        }
+        if (hex.length() != width * 2) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got %d bytes. A wrong-width %s shifts "
+                    + "every later state field when the contract's on-chain reader slices it at %d bytes",
+                what, fieldType, width, hex.length() / 2, fieldType, width));
+        }
+    }
+
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
-            case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
+            // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+            // stores them as the same 8-byte OP_NUM2BIN word.
+            case "int", "bigint", "RabinSig", "RabinPubKey" -> encodeNum2Bin(toBigInteger(value, label, fieldType), 8, label);
             // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
             // what every compiler writes into stateFields[].type, alongside
             // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
@@ -160,6 +202,8 @@ public final class StateSerializer {
                             + "on-chain reader cannot parse, leaving the output unspendable",
                         label, fieldType));
                 }
+                // N-045: a wrong-width value shifts every later field for the reader.
+                checkFixedWidthValue(value, fieldType, "serializeState: state field \"" + label + "\"");
                 yield String.valueOf(value);
             }
             default -> {
@@ -233,7 +277,7 @@ public final class StateSerializer {
     static Integer stateFieldByteWidth(String fieldType) {
         return switch (fieldType) {
             case "bool", "boolean" -> 1;
-            case "int", "bigint" -> 8;
+            case "int", "bigint", "RabinSig", "RabinPubKey" -> 8;
             case "PubKey" -> 33;
             case "Addr", "Ripemd160" -> 20;
             case "Sha256" -> 32;
@@ -266,7 +310,8 @@ public final class StateSerializer {
         // every field after it.
         if (fieldType.equals("bool") || fieldType.equals("boolean")) return !"00".equals(data);
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8).
-        if (fieldType.equals("int") || fieldType.equals("bigint")) return decodeNum2Bin(data);
+        if (fieldType.equals("int") || fieldType.equals("bigint")
+            || fieldType.equals("RabinSig") || fieldType.equals("RabinPubKey")) return decodeNum2Bin(data);
         // Raw fixed-size byte types.
         return data;
     }
@@ -478,15 +523,22 @@ public final class StateSerializer {
     // Value coercion
     // ------------------------------------------------------------------
 
-    static BigInteger toBigInteger(Object value) {
-        if (value == null) return BigInteger.ZERO;
+    // N-084: only an integer, or a decimal integer string with the optional
+    // JSON "n" suffix (e.g. "0n", "1000n"), is a num2bin value. null used to
+    // write 0, and BigInteger accepts "+5"; anything else failed without
+    // naming the field.
+    static BigInteger toBigInteger(Object value, String label, String fieldType) {
         if (value instanceof BigInteger b) return b;
         if (value instanceof Long l) return BigInteger.valueOf(l);
         if (value instanceof Integer i) return BigInteger.valueOf(i);
-        if (value instanceof String s) {
-            String t = s.endsWith("n") ? s.substring(0, s.length() - 1) : s;
-            return new BigInteger(t);
+        if (value instanceof String s && s.matches("-?[0-9]+n?")) {
+            return new BigInteger(s.endsWith("n") ? s.substring(0, s.length() - 1) : s);
         }
-        throw new IllegalArgumentException("toBigInteger: unsupported " + value.getClass());
+        String got = value instanceof String ? "a non-decimal string"
+            : value == null ? "null" : value.getClass().getSimpleName();
+        throw new IllegalArgumentException(String.format(
+            "serializeState: state field \"%s\" (%s) must be an integer or a decimal integer "
+                + "string, got %s. Serializing anything else would write a number the caller "
+                + "never supplied into the state section", label, fieldType, got));
     }
 }

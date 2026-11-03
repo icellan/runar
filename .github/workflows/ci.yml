@@ -95,19 +95,22 @@ jobs:
     # (sha256 + verified-against + reason + reviewer sign-off). Cheap (Node
     # built-ins only, no install) — gates the heavy matrix like the other lints.
     #
-    # Security note: the only github.event.* value consumed is the base commit
-    # SHA, passed via `env:` (never interpolated into the shell) and used solely
-    # as a git ref for the three-dot diff. No untrusted event text reaches a
-    # `run:` block.
+    # Runs on EVERY event (pull_request, merge_group, push, dispatch), not just
+    # pull_request (F-053): most commits reach main by direct push (see the
+    # wire-format gate below), so a PR-only gate never saw them. On push it
+    # still fails the run, which makes an unjustified golden on main loud even
+    # though it has already landed.
+    #
+    # Security note: the only github.event.* values consumed are the base
+    # branch NAME and base commit SHAs, passed via `env:` (never interpolated
+    # into the shell) and used solely as git refs for the three-dot diff. No
+    # untrusted event text reaches a `run:` block.
     name: Lint — golden-regeneration provenance gate
     runs-on: ubuntu-latest
-    # A merged golden change on `main` is already landed; the gate is a PR
-    # admission control, so scope it to pull_request events.
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so the PR base commit is present for the merge-base
+          # Full history so the base commit is present for the merge-base
           # three-dot diff below.
           fetch-depth: 0
       - uses: actions/setup-node@v4
@@ -115,12 +118,41 @@ jobs:
           node-version: 22
       - name: Check golden/vector provenance (changed set vs merge-base)
         env:
-          # base.sha = tip of the branch this PR merges into. The script diffs
-          # `<base>...HEAD` (three-dot = merge-base) to get the PR's true
-          # changed set, so an already-merged commit from another PR is never
-          # misattributed here.
-          GOLDEN_GATE_BASE: ${{ github.event.pull_request.base.sha }}
-        run: node conformance/scripts/check-golden-provenance.mjs
+          # The script diffs `<base>...HEAD` (three-dot = merge-base). Base per
+          # event: pull_request -> the LIVE tip of the branch the PR merges
+          # into, resolved at run time from base.ref (F-163: base.sha is the
+          # base tip as of the PR's last sync and goes stale when another PR
+          # merges into the target branch in the meantime -- the same hazard
+          # documented below for wire-format-must-move-golden, resolved the
+          # same way); merge_group -> the queue's base SHA; push -> the tip
+          # before this push. Same resolution order as
+          # wire-format-must-move-golden.
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_BASE_REF:-}" ]; then
+            base="origin/${PR_BASE_REF}"
+            # fetch-depth: 0 already creates this ref; fetch it explicitly if a
+            # future checkout change ever stops doing so, so the gate keeps
+            # working instead of hard-failing every PR.
+            git rev-parse --verify -q "${base}^{commit}" >/dev/null \
+              || git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+          elif [ -n "${MERGE_GROUP_BASE:-}" ]; then
+            base="${MERGE_GROUP_BASE}"
+          elif [ -n "${PUSH_BEFORE:-}" ] \
+            && [ "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            base="${PUSH_BEFORE}"
+          else
+            # New branch or tag (all-zero before), a force-pushed-away tip not
+            # in the clone, or workflow_dispatch: the first parent. --verify -q
+            # so a root commit falls through to HEAD (empty changed set).
+            base="$(git rev-parse --verify -q HEAD^ || git rev-parse --verify HEAD)"
+          fi
+          echo "golden-provenance gate base ref: ${base}"
+          GOLDEN_GATE_BASE="${base}" node conformance/scripts/check-golden-provenance.mjs
       - name: Self-test the gate (both directions)
         # Belt-and-suspenders: proves the checker still rejects an unjustified
         # golden change and passes a justified one, so the gate can't silently
@@ -212,6 +244,10 @@ jobs:
         # lands. A gate whose globs match nothing is worse than no gate — it
         # reports green forever.
         run: pnpm run wire-format-audit:self-test
+      - name: BIP-143 fixture nLockTime check (F-299)
+        # conformance/ is not a pnpm workspace member, so turbo never runs the
+        # vitest files under conformance/scripts/__tests__/; name the path.
+        run: npx vitest run conformance/scripts/__tests__/bip143-fixture-locktime.test.ts
       - name: Wire-format audit (changed set vs merge-base)
         # Fail mode (the plan allows a one-PR warn phase via `--warn-only`; the
         # flag exists on the script but CI is wired to fail).
@@ -276,10 +312,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Validate envelope fixture against the TS reference (drift guard)
         run: cd conformance && npx tsx sdk-envelope/validate-fixtures.ts
-      - name: Assert every non-TS SDK has an envelope interop test wired to the fixture
+      - name: Assert every SDK has an envelope interop test wired to the fixture
         run: |
           set -euo pipefail
           files=(
+            "packages/runar-sdk/src/__tests__/f359-envelope-interop-fixture.test.ts"
             "packages/runar-go/sdk_envelope_interop_test.go"
             "packages/runar-rs/tests/envelope_interop.rs"
             "packages/runar-py/tests/test_envelope_interop.py"
@@ -301,7 +338,7 @@ jobs:
             echo "Cross-tier envelope interop coverage is incomplete. See conformance/sdk-envelope/."
             exit 1
           fi
-          echo "All 6 non-TS SDK envelope interop tests present and wired to the fixture."
+          echo "All 7 SDK envelope interop tests present and wired to the fixture."
 
   sdk-bip143-fixtures:
     # Guards the cross-tier BIP-143 transaction-sighash fixture (GAP-003). The
@@ -400,6 +437,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Rust compiler (for cross-compiler tests)
         run: cd compilers/rust && cargo build --release
@@ -414,7 +452,7 @@ jobs:
       - name: Build Zig compiler (for cross-compiler tests)
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe
       - name: Build Java compiler jar (for cross-compiler tests)
-        run: cd compilers/java && gradle jar --no-daemon
+        run: cd compilers/java && ./gradlew jar --no-daemon
       # ---- turbo build-output cache (shared by every job that runs
       #      `pnpm run build`) -------------------------------------------------
       # Seven jobs in this workflow (plus four in fuzzer-nightly.yml and one in
@@ -476,6 +514,19 @@ jobs:
           cd conformance
           npm ci
           npx tsx fuzz-regressions/replay.ts
+      - name: Fuzzer regression corpus — entries are never deleted (rule 3)
+        # The replay above only fails if an entry's PINNED VERDICTS change, or
+        # if the whole corpus is wiped to zero entries (F-250). Deleting ONE
+        # entry out of several is a passing, non-empty replay — nothing
+        # caught that until N-230. This diffs entries/ against the
+        # merge-base with origin/main (not origin/main's live tip, so a base
+        # branch that gains entries after this branch forked is never
+        # misreported as a deletion here) and fails naming any entry id that
+        # existed there and is gone now. This job's checkout already has
+        # fetch-depth: 0, so origin/main is resolvable.
+        run: |
+          cd conformance
+          npx tsx fuzz-regressions/replay.ts --check-no-deletions --base origin/main
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
       - name: Chronicle opcode-policy disclosure gate
@@ -536,9 +587,17 @@ jobs:
       # (exit 143 / "runner has received a shutdown signal"). Root package
       # passes; codegen dies ~70s in. Split so each package is a fresh
       # process, and skip -race on codegen (SLH/EC tests).
-      - run: cd compilers/go && go test -race -timeout 10m .
+      # The root package's TestConformanceGoldens now compiles bn254-pairing
+      # (~9.4 MB script): ~7.7 GB RSS under -race, ~4.6 GB without. It is a
+      # single-goroutine golden comparison, so it runs without -race.
+      - run: cd compilers/go && go test -race -timeout 10m -skip '^TestConformanceGoldens$' .
+      - run: cd compilers/go && go test -timeout 10m -run '^TestConformanceGoldens$' .
       - run: cd compilers/go && go test -race -timeout 10m ./frontend ./ir
-      - run: cd compilers/go && go test -race -timeout 20m ./compiler
+      # ./compiler's all-fixture tests (bn254-pairing) and the F-058 /
+      # WA-MSM Groth16 tests each peak at ~8 GB RSS under -race on their own;
+      # they are sequential, so they run without the race detector.
+      - run: cd compilers/go && go test -race -timeout 20m -skip 'AllConformance|TestF058|TestGroth16WAMSM' ./compiler
+      - run: cd compilers/go && go test -timeout 20m -run 'AllConformance|TestF058|TestGroth16WAMSM' ./compiler
       - run: cd compilers/go && go test -timeout 20m ./codegen
       - uses: actions/upload-artifact@v4
         with:
@@ -587,8 +646,14 @@ jobs:
           cache-dependency-path: compilers/go/go.sum
       - name: Build the Go peer compiler
         run: cd compilers/go && go build -o runar-go .
-      - run: pip install pytest
-      - run: cd compilers/python && python -m pytest tests/ -v
+      # `bsv-sdk` and `packages/runar-py` on `PYTHONPATH` are what
+      # `tests/test_cli_debug.py` (F-324) and
+      # `tests/test_f092_poseidon2_merkle_root_binds_every_limb.py` need to
+      # run their real path instead of silently skipping via
+      # `pytest.importorskip("bsv"/"runar.sdk.script_vm")` — see
+      # docs/test-skips.md.
+      - run: pip install pytest bsv-sdk
+      - run: cd compilers/python && PYTHONPATH=../../packages/runar-py python -m pytest tests/ -v
 
   zig-compiler:
     name: Zig Compiler
@@ -632,6 +697,13 @@ jobs:
         run: cd compilers/zig && zig build test
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
+      # N-391: `zig build test` does not depend on this step, so the per-tier
+      # byte-identical golden harness (src/tests/conformance_goldens.zig) ran
+      # nowhere. Kept a separate step rather than folded into `zig build test`
+      # (about 60s incl. build); it reads ../../conformance/tests relative to
+      # compilers/zig, which the checkout provides.
+      - name: Zig conformance goldens
+        run: cd compilers/zig && zig build conformance-goldens
       - name: Build release binary
         # ReleaseSafe + baseline CPU: ReleaseFast was SIGILL-ing on heavier
         # conformance fixtures on the conformance runner (different ubuntu-
@@ -655,11 +727,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Java compiler
-        run: cd compilers/java && gradle build --no-daemon
+        run: cd compilers/java && ./gradlew build --no-daemon
       - name: Java compiler unit tests
-        run: cd compilers/java && gradle test --no-daemon
+        run: cd compilers/java && ./gradlew test --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: runar-java
@@ -674,6 +747,8 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: compilers/ruby
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -689,7 +764,7 @@ jobs:
       - name: Build the Go peer compiler
         run: cd compilers/go && go build -o runar-go .
       - name: Ruby compiler unit tests
-        run: cd compilers/ruby && rake test
+        run: cd compilers/ruby && bundle exec rake test
       - name: Ruby compiler conformance (IR -> hex)
         run: |
           fail=0
@@ -697,9 +772,16 @@ jobs:
             dir=$(dirname "$test")
             name=$(basename "$dir")
             expected=$(tr -d '[:space:]' < "$dir/expected-script.hex" | tr '[:upper:]' '[:lower:]')
-            actual=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>&1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            # A fixture whose `compilers` allowlist excludes ruby is held to
+            # the go-only-parity rule (R-037): refuse it, or match byte for byte.
+            targeted=$(jq -r 'if has("compilers") then (.compilers | index("ruby") != null) else true end' "$dir/source.json")
+            rc=0
+            raw=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>&1) || rc=$?
+            actual=$(printf '%s' "$raw" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
             if [ "$expected" = "$actual" ]; then
               echo "PASS $name"
+            elif [ "$targeted" = "false" ] && [ "$rc" -ne 0 ]; then
+              echo "PASS $name (refused; not a ruby target)"
             else
               echo "FAIL $name"
               fail=1
@@ -807,6 +889,10 @@ jobs:
           bundler-cache: true
           working-directory: packages/runar-rb
       - name: SDK tests
+        # N-477: strict gate - an absent compilers/ruby CLI fails the
+        # issue100/106/123 specs instead of skipping them.
+        env:
+          RUNAR_INTEGRATION_STRICT: '1'
         run: cd packages/runar-rb && bundle exec rspec
       - name: Example tests
         run: |
@@ -824,11 +910,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       - name: SDK tests
-        run: cd packages/runar-java && gradle test --no-daemon
+        run: cd packages/runar-java && ./gradlew test --no-daemon
       - name: Example tests
-        run: cd examples/java && gradle test --no-daemon
+        run: cd examples/java && ./gradlew test --no-daemon
       - name: Build conformance SDK driver
         run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
 
@@ -842,6 +931,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # conformance/fuzz-regressions/replay.test.ts (N-230) resolves
+          # `origin/main` for its real-corpus smoke test on
+          # checkEntriesNotDeleted. A default (shallow) checkout fetches only
+          # the checked-out ref/sha — no `origin/main` remote-tracking ref
+          # exists at all — so that test fails here, not for the reason it
+          # tests. fetch-depth: 0 is the same fix the ts-compiler and
+          # golden-provenance jobs already apply for the same reason.
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: runar-go
@@ -935,6 +1033,20 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --ir-parity
+      - name: Run --emit-ir -> --ir artifact round trip (F-038)
+        # `--ir-parity` above proves every tier's `--ir` loader reproduces the
+        # checked-in golden hex; it says nothing about a tier's own
+        # `--emit-ir` output, which F-038 found was missing `parentClass` and
+        # method `sigHashType` on the way out (so a second process compiling
+        # with `--ir` built an SDK-unsignable artifact even though the hex
+        # matched). This mode compiles each probe with `--source` and with
+        # `--emit-ir` -> `--ir` and requires the two artifacts to agree.
+        # CI sets CI=true, which the runner already treats as strict (a
+        # missing toolchain is a hard failure, not a silent skip) — same as
+        # the `--ir-parity` step above.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --ir-roundtrip
       - name: Run all-tier parser-only coverage (every compiler × every fixture × every format)
         # Universal frontend coverage: every available compiler runs
         # `--parse-only` on every fixture × every declared format. The
@@ -962,6 +1074,19 @@ jobs:
         # `tsx sdk-vertical/runner/vertical-runner.ts` — that does not execute
         # the directory's vitest files.
         #
+        # sdk-call (N-038) and sdk-output/runner/sdk-runner-refusal-build-
+        # isolation.test.ts (N-091) are the same shape: their CI steps below
+        # invoke the sdk-output/sdk-vertical runners directly, which never
+        # collects either test file as vitest. sdk-output/runner/
+        # sdk-output-coverage-audit.test.ts (CK21-FU2 / PL27-FU1) is the same
+        # shape again, landed next to sdk-runner-refusal-build-isolation.test.ts.
+        #
+        # wire-primitives.test.ts (F-279) is the same shape again, but via a
+        # dead package.json script: `conformance:wire-primitives` was defined
+        # but no workflow ever invoked `pnpm run conformance:wire-primitives`,
+        # so Requirement #4's register gate (conformance/wire-primitives.json)
+        # never ran despite looking reachable.
+        #
         # tests/conformance-tests-reachable-from-ci.test.ts fails if a future
         # conformance test file is added without being named here.
         run: >
@@ -971,14 +1096,26 @@ jobs:
           conformance/go-only-executing-coverage.test.ts
           conformance/fixture-count-doc.test.ts
           conformance/split-stack-desync.test.ts
+          conformance/ci-predicate-sweep.test.ts
+          conformance/state-shape-witnesses.test.ts
           conformance/codepart-pin
           conformance/dce
           conformance/source-map
           conformance/subtype-parity
           conformance/sdk-vertical
+          conformance/sdk-call
+          conformance/sdk-output/runner/sdk-runner-refusal-build-isolation.test.ts
+          conformance/sdk-output/runner/sdk-runner-stale-tool.test.ts
+          conformance/sdk-output/runner/sdk-output-coverage-audit.test.ts
           conformance/runner/__tests__
           conformance/anf-interpreter/num2bin-engine-parity.test.ts
+          conformance/anf-interpreter/driver-gate.test.ts
+          conformance/wire-primitives.test.ts
           conformance/analyzer/__tests__
+          conformance/ir-roundtrip
+          conformance/fuzz-regressions
+          conformance/checkmultisigverify-golden-pin.test.ts
+          conformance/ec-optimizer
       - name: Cross-tier rejection parity (programs that must NOT compile)
         # The parser-only step above proves every tier ACCEPTS what it should.
         # Nothing proved they agree on what to REFUSE, and that gap let a Go
@@ -1115,6 +1252,17 @@ jobs:
         # step needs no extra assertion. Runs in the `conformance` job because
         # it needs the same seven compiler binaries already downloaded above.
         run: npx tsx conformance/analyzer/run.ts
+      - name: Live source-map runner (7 tiers, fail-closed)
+        # N-372: the vitest step above only collects conformance/source-map/*.test.ts
+        # (committed-golden checks). run.ts compiles every (fixture, tier) pair
+        # live and applies the structural, source-anchor and whole-map shape
+        # rules (N-370), so a regression in a live compile that was never
+        # re-stamped into a golden is invisible without it. Known anchor rows in
+        # anchor-known-issues.json stay tolerated exactly as the runner decides.
+        # run.ts reports an unavailable tier as a SKIP row and still exits 0, so
+        # this step also fails on any SKIP row: all seven compilers are
+        # downloaded in this job and must actually have run.
+        run: out=$(mktemp) && npx tsx conformance/source-map/run.ts > "$out" 2>&1; rc=$?; cat "$out"; test $rc -eq 0 && ! grep -Eq ' SKIP( |$)' "$out"
       - name: Derived-artifact freshness
         # Analyzer reports, sdk-output input.json / locking hex, source-map
         # goldens, decompiler templates + coverage, and the script-size
@@ -1171,6 +1319,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       # Read-only restore of the turbo build-output cache (see the ts-compiler
       # job's writer step for the staleness argument). This job runs in parallel
       # with ts-compiler, so it restores the newest prior entry via restore-keys
@@ -1212,7 +1362,9 @@ jobs:
     # compiler/SDK jobs, so we don't gate it on their (sometimes flaky,
     # sometimes pre-existing) failures.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold Lake build (cache miss, or a change to a root module such as
+    # Stack/Eval.lean) already took 13-14 min of the old 15-min budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install elan
@@ -1247,8 +1399,13 @@ jobs:
         working-directory: runar-verification
         run: ./scripts/check-tcb-drift.sh
       - name: Verify all discovered fixtures parse + satisfy WF
+        id: golden-load-gate
         working-directory: runar-verification
-        run: lake env ./.lake/build/bin/goldenLoad | tee /tmp/goldenload.out
+        run: |
+          set -o pipefail
+          lake env ./.lake/build/bin/goldenLoad | tee /tmp/goldenload.out
+          total=$(grep -oE 'found [0-9]+ expected-ir.json files' /tmp/goldenload.out | grep -oE '[0-9]+' | head -n1)
+          echo "golden_total=${total}" >> "$GITHUB_OUTPUT"
       - name: Assert README discovered-count matches goldenLoad runtime count
         working-directory: runar-verification
         # DOC-003 drift guard: goldenLoad walks conformance/tests with readDir
@@ -1272,8 +1429,13 @@ jobs:
             exit 1
           fi
       - name: Verify all discovered fixtures round-trip through ANF JSON
+        id: roundtrip-gate
         working-directory: runar-verification
-        run: lake env ./.lake/build/bin/roundtrip
+        run: |
+          set -o pipefail
+          lake env ./.lake/build/bin/roundtrip | tee /tmp/roundtrip.out
+          total=$(grep -oE 'round-trip checking [0-9]+ goldens' /tmp/roundtrip.out | grep -oE '[0-9]+' | head -n1)
+          echo "roundtrip_total=${total}" >> "$GITHUB_OUTPUT"
       - name: Verify pipelineConformance (2-tier classifier)
         id: conformance-gate
         # Wraps the pipelineConformance binary with ulimit -s unlimited
@@ -1281,10 +1443,19 @@ jobs:
         # fixtures. The wrapper exits nonzero only on hard-failure buckets
         # (DEFERRED-parse-failure, DEFERRED-not-well-formed); soft buckets
         # (DEFERRED-compile-safe-error, DEFERRED-no-public-method) are
-        # reported but do not fail the gate. Current expected:
-        # VERIFIED-modulo-codegen-axioms = 63/63 (discovered dynamically),
-        # 0 hard failures.
-        run: ./runar-verification/scripts/run-pipeline-conformance.sh | tee /tmp/pconf.out
+        # reported but do not fail the gate. Counts below (pconf_total,
+        # pconf_modulo_codegen) are read back out of the harness's own
+        # legend block, never hand-maintained.
+        run: |
+          set -o pipefail
+          ./runar-verification/scripts/run-pipeline-conformance.sh | tee /tmp/pconf.out
+          total=$(grep -oE 'PipelineConformance: [0-9]+ fixtures' /tmp/pconf.out | grep -oE '[0-9]+' | head -n1)
+          hard_parse=$(grep -oE 'DEFERRED-parse-failure +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          hard_wf=$(grep -oE 'DEFERRED-not-well-formed +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          soft_compile=$(grep -oE 'DEFERRED-compile-safe-error +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          soft_no_public=$(grep -oE 'DEFERRED-no-public-method +: [0-9]+' /tmp/pconf.out | grep -oE '[0-9]+$' | head -n1)
+          echo "pconf_total=${total}" >> "$GITHUB_OUTPUT"
+          echo "pconf_modulo_codegen=$((total - hard_parse - hard_wf - soft_compile - soft_no_public))" >> "$GITHUB_OUTPUT"
       - name: Verify byte-exact regression gate (34/49 live fixtures)
         id: byte-exact-gate
         working-directory: runar-verification
@@ -1310,23 +1481,43 @@ jobs:
       - name: Emit verification step summary
         if: always()
         env:
-          # Internal output from previous step — produced entirely by
+          # Internal outputs from previous steps — produced entirely by
           # tools in this repo, never by user-controlled GitHub event
-          # data. Quoted via env: per workflow-injection guidelines.
+          # data. Quoted via env: per workflow-injection guidelines. Each
+          # is empty when its step never ran or failed before writing it
+          # (e.g. a hard failure in run-pipeline-conformance.sh), so the
+          # summary falls back to an honest "(did not run)" instead of
+          # repeating a stale pass count.
+          GOLDEN_TOTAL: ${{ steps.golden-load-gate.outputs.golden_total }}
+          ROUNDTRIP_TOTAL: ${{ steps.roundtrip-gate.outputs.roundtrip_total }}
+          PCONF_TOTAL: ${{ steps.conformance-gate.outputs.pconf_total }}
+          PCONF_MODULO_CODEGEN: ${{ steps.conformance-gate.outputs.pconf_modulo_codegen }}
           BYTE_EXACT: ${{ steps.byte-exact-gate.outputs.byte_exact }}
         run: |
           {
             printf '## Rúnar Lean 4 Verification\n\n'
             printf '| Check | Result |\n'
             printf '|-------|--------|\n'
-            printf '| Parse + WF | 56/56 |\n'
-            printf '| ANF JSON round-trip | 56/56 |\n'
+            if [ -n "${GOLDEN_TOTAL:-}" ]; then
+              printf '| Parse + WF | %s/%s |\n' "$GOLDEN_TOTAL" "$GOLDEN_TOTAL"
+            else
+              printf '| Parse + WF | (did not run) |\n'
+            fi
+            if [ -n "${ROUNDTRIP_TOTAL:-}" ]; then
+              printf '| ANF JSON round-trip | %s/%s |\n' "$ROUNDTRIP_TOTAL" "$ROUNDTRIP_TOTAL"
+            else
+              printf '| ANF JSON round-trip | (did not run) |\n'
+            fi
             if [ -n "${BYTE_EXACT:-}" ]; then
               printf '| Byte-exact vs. TS reference | %s |\n' "$BYTE_EXACT"
             else
               printf '| Byte-exact vs. TS reference | (binary did not run) |\n'
             fi
-            printf '| pipelineConformance (modulo codegen axioms) | 56/56 |\n'
+            if [ -n "${PCONF_MODULO_CODEGEN:-}" ] && [ -n "${PCONF_TOTAL:-}" ]; then
+              printf '| pipelineConformance (modulo codegen axioms) | %s/%s |\n' "$PCONF_MODULO_CODEGEN" "$PCONF_TOTAL"
+            else
+              printf '| pipelineConformance (modulo codegen axioms) | (did not run) |\n'
+            fi
             printf '\n'
             printf 'Trust manifest: see `runar-verification/TRUST_MANIFEST.md`\n'
             printf 'Phase history: see `runar-verification/HANDOFF.md`\n'
@@ -1424,6 +1615,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it). See that job's writer step for
       # the staleness argument.
@@ -1526,6 +1719,10 @@ jobs:
       RPC_URL: http://localhost:18332
       RPC_USER: regtest
       RPC_PASS: regtest
+      # N-480: the in-repo BRC-100 test wallet started below. Job-wide so the
+      # Ruby integration step's wallet_client_spec.rb runs too, not just the
+      # dedicated per-tier wallet-client steps.
+      RUNAR_WALLET_ENDPOINT: http://127.0.0.1:18480
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -1545,6 +1742,7 @@ jobs:
         with:
           workspaces: |
             integration/rust
+            packages/runar-rs
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -1565,6 +1763,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it). See that job's writer step for
@@ -1606,6 +1805,19 @@ jobs:
       - name: Start BSV regtest node
         run: cd integration && ./regtest.sh start
 
+      - name: Start mock BRC-100 wallet
+        # N-480: in-repo test wallet (integration/mock-wallet/server.mjs) on
+        # 127.0.0.1:18480, so the seven tiers' RUNAR_WALLET_ENDPOINT-gated
+        # wallet-client tests run here instead of skipping. `start` returns
+        # only once the server answers a getPublicKey call.
+        run: cd integration/mock-wallet && ./mock-wallet.sh start
+
+      - name: Start mock HTTP echo server
+        # N-485: in-repo httpbin stand-in (integration/mock-http/server.mjs) on
+        # 127.0.0.1:18481 for the Zig SDK's RUN_LIVE_HTTP live-GET tests, so
+        # they run in the Zig step below instead of skipping.
+        run: cd integration/mock-http && ./mock-http.sh start
+
       - name: Go integration tests
         # Timeout raised to 30min because TestRollupGroth16WAMSM_AdvanceState
         # broadcasts a ~900KB Groth16 MSM tx and regularly spends 10+ minutes
@@ -1617,8 +1829,18 @@ jobs:
       - name: TypeScript integration tests
         run: cd integration/ts && npx vitest run
 
+      - name: TypeScript SDK regtest test (assembleMultiContractCall)
+        # N-474: this file lives in packages/runar-sdk, so the only other step
+        # that reaches it is ts-compiler's `pnpm run test` — which has no node,
+        # so its two on-chain cases skipped on every run. Run it here, after
+        # the node is up. RUNAR_INTEGRATION_STRICT=1 makes an unreachable node
+        # a failure instead of a skip (see the file's strict-mode case).
+        env:
+          RUNAR_INTEGRATION_STRICT: '1'
+        run: cd packages/runar-sdk && npx vitest run src/__tests__/multi-contract-call.regtest.test.ts
+
       - name: Rust integration tests
-        run: cd integration/rust && cargo test --release -- --ignored
+        run: cd integration/rust && cargo test --release -- --include-ignored
         timeout-minutes: 10
 
       - name: Python integration tests
@@ -1632,14 +1854,55 @@ jobs:
         timeout-minutes: 5
 
       - name: Java integration tests
-        run: cd integration/java && gradle test -Drunar.integration=true --no-daemon
+        run: cd integration/java && ./gradlew test -Drunar.integration=true --no-daemon
         timeout-minutes: 35
+
+      # N-480: each tier's BRC-100 wallet-client round-trip (getPublicKey +
+      # listOutputs) against the mock wallet. RUNAR_WALLET_ENDPOINT comes from
+      # the job env; with it set, a dead wallet is a connection failure, not a
+      # skip. Ruby's wallet_client_spec.rb already ran in the Ruby step above.
+      - name: TypeScript wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-sdk && npx vitest run src/__tests__/wallet-client.spec.ts
+
+      - name: Go wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-go && go test -run TestWalletClient_LiveEndpoint_RoundTrip -v
+
+      - name: Rust wallet-client test (mock BRC-100 wallet)
+        # The test is #[ignore]d so a plain `cargo test` skips it; --ignored runs it.
+        run: cd packages/runar-rs && cargo test --test wallet_client_integration -- --ignored
+        timeout-minutes: 30
+
+      - name: Python wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-py && python3 -m pytest tests/test_wallet_client_integration.py -v
+
+      - name: Zig wallet-client test (mock BRC-100 wallet)
+        # build.zig has no test filter: this reruns the whole runar-zig suite,
+        # with the wallet test (SkipZigTest when the endpoint is unset) now live.
+        # N-485: RUN_LIVE_HTTP/RUN_LIVE_HTTP_BASE make the two sdk_http_client.zig
+        # live-GET tests hit the local echo server instead of skipping.
+        env:
+          RUN_LIVE_HTTP: '1'
+          RUN_LIVE_HTTP_BASE: http://127.0.0.1:18481
+        run: cd packages/runar-zig && zig build test
+        timeout-minutes: 30
+
+      - name: Java wallet-client test (mock BRC-100 wallet)
+        run: cd packages/runar-java && ./gradlew test --tests runar.lang.sdk.WalletClientIntegrationTest --no-daemon
+        timeout-minutes: 30
 
       - name: Install end-to-end Ruby deps
         run: cd examples/end2end-example/ruby && bundle install
 
       - name: All end-to-end PriceBet examples
         run: pnpm run e2e:all
+
+      - name: Stop mock BRC-100 wallet
+        if: always()
+        run: cd integration/mock-wallet && ./mock-wallet.sh stop
+
+      - name: Stop mock HTTP echo server
+        if: always()
+        run: cd integration/mock-http && ./mock-http.sh stop
 
       - name: Stop regtest node
         if: always()

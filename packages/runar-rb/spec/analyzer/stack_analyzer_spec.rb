@@ -45,4 +45,42 @@ RSpec.describe Runar::Analyzer::StackAnalyzer do
     ops = parse('63')
     expect(described_class.flat_delta(ops, 0, 1)).to be_nil
   end
+
+  # F-131. The seven Chronicle opcodes the compiler emits, with the
+  # (pops, pushes) the @bsv/sdk interpreter (Spend.ts) gives them.
+  # Proves: each is named per spec §4.1 and modelled with its real stack
+  # effect, in the lookup and in the observable report (underflow message,
+  # stackDepthAtEnd, maxStackDepth). Does not prove runtime semantics (the
+  # analyzer is static) and does not re-derive the arities from the interpreter.
+  [
+    ['8d', 'OP_2MUL', 1, 1],
+    ['8e', 'OP_2DIV', 1, 1],
+    ['b3', 'OP_SUBSTR', 3, 1],
+    ['b4', 'OP_LEFT', 2, 1],
+    ['b5', 'OP_RIGHT', 2, 1],
+    ['b6', 'OP_LSHIFTNUM', 2, 1],
+    ['b7', 'OP_RSHIFTNUM', 2, 1]
+  ].each do |byte, name, pops, pushes|
+    it "names 0x#{byte} #{name} and models it as (#{pops}, #{pushes})" do
+      op = parse(byte).first
+      expect(op[:name]).to eq(name)
+      expect(described_class.stack_effect(op)).to eq([pops, pushes])
+
+      # OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+      lin = described_class.analyze(parse("75#{byte}"), initial_depth: 1)
+      want = "#{name} requires #{pops} stack item(s) but only 0 available"
+      expect(lin[:findings].any? { |f| f[:code] == 'STACK_UNDERFLOW' && f[:message] == want }).to be(true)
+
+      # `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+      result = Runar::Analyzer.analyze_script(('51' * pops) + byte)
+      expect(result[:paths].first[:stack_depth_at_end]).to eq(pushes)
+      expect(result[:summary][:max_stack_depth]).to eq(pushes)
+    end
+  end
+
+  it 'keeps the OP_UNKNOWN name and (0, 0) effect for a genuinely unknown byte' do
+    op = parse('b8').first
+    expect(op[:name]).to eq('OP_UNKNOWN(0xb8)')
+    expect(described_class.stack_effect(op)).to eq([0, 0])
+  end
 end

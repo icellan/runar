@@ -1,0 +1,72 @@
+{
+  "fixture": "embed-always-fixed-array",
+  "kind": "stateless-signed",
+  "note": "N-093 / F-098. EmbedTags: readonly tags: FixedArray<bigint,3> = [7,9,11] carries @embedAlways, so all three expanded slots are pushed although unlock reads only tags[1]. unlock(sig, pubKey, amount) requires amount >= tags[1] (= 9), then P2PKH. The near-miss amount 8 proves the slot the script reads is tags[1] and not one of the embedded neighbours (7 would accept 8; 11 would reject 9). Expected verdicts are derived by hand from the source.",
+  "constructorArgs": {
+    "pubKeyHash": {
+      "$pkh": "alice"
+    }
+  },
+  "spends": [
+    {
+      "method": "unlock",
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "9n"
+      ],
+      "expect": "accept",
+      "note": "boundary: amount == tags[1] == 9"
+    },
+    {
+      "method": "unlock",
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "8n"
+      ],
+      "expect": "reject",
+      "note": "near-miss: 8 < tags[1]; would ACCEPT if the read slot were tags[0] (7)"
+    },
+    {
+      "method": "unlock",
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "10n"
+      ],
+      "expect": "accept",
+      "note": "10 >= 9; would REJECT if the read slot were tags[2] (11)"
+    },
+    {
+      "method": "unlock",
+      "args": [
+        {
+          "$sig": "bob"
+        },
+        {
+          "$pubkey": "bob"
+        },
+        "9n"
+      ],
+      "expect": "reject",
+      "note": "wrong committed key"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "b09cb7345a4824076afb71c3f872ec8601e70e503a0c5b31d3777e351751ea9d",
+    "expected-ir.json": "47a0883bdea88905d7dd9613bae6626f7c99ffc92dda7c0b786bc42c7bb8e1db"
+  }
+}

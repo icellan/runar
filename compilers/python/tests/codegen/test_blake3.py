@@ -20,7 +20,7 @@ from runar_compiler.codegen.stack import StackOp
 def test_compress_op_count():
     ops: list[StackOp] = []
     emit_blake3_compress(ops.append)
-    assert len(ops) == 10373
+    assert len(ops) == 10379
 
 
 def test_hash_op_count():
@@ -35,10 +35,14 @@ def test_hash_op_count():
 
 def test_compress_starts_with_15x_push4_split():
     """Compression starts by splitting the 64-byte block into 16 × 4-byte
-    little-endian words. First 30 ops alternate (push 4, OP_SPLIT) × 15."""
+    little-endian words. After the F-114 block size guard (OP_SIZE 64
+    OP_EQUALVERIFY), the next 30 ops alternate (push 4, OP_SPLIT) × 15."""
     ops: list[StackOp] = []
     emit_blake3_compress(ops.append)
-    for i in range(0, 30, 2):
+    assert ops[0].op == "opcode" and ops[0].code == "OP_SIZE"
+    assert ops[1].op == "push" and ops[1].value is not None and ops[1].value.big_int == 64
+    assert ops[2].op == "opcode" and ops[2].code == "OP_EQUALVERIFY"
+    for i in range(3, 33, 2):
         push = ops[i]
         split = ops[i + 1]
         assert push.op == "push", f"op[{i}] must be push"

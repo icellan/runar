@@ -32,9 +32,29 @@
       "expectedState": {
         "count": "4n"
       }
+    },
+    {
+      "method": "increment",
+      "args": [],
+      "deploySatoshis": 10000,
+      "satoshis": 1,
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "F-024 drain: the continuation keeps 1 of the 10000 input sats and the SDK pays the rest to change; the injected _newAmount >= extractAmount(txPreimage) check must reject it on the Spend engine"
+    },
+    {
+      "method": "increment",
+      "args": [],
+      "deploySatoshis": 10000,
+      "satoshis": 12000,
+      "expect": "accept",
+      "note": "F-024 deposit: continuation grows 10000 -> 12000, funded by the signer's UTXO; allowed by the >= rule",
+      "expectedState": {
+        "count": "6n"
+      }
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "8470cbd1f7e2c1049ed7f238f97f56fab0d758635b18c54981d1fa81676c943e"
+    "expected-script.hex": "33968618316909f2cf563b2107208d9194bfd6ca077d3a399af47f22930f163a"
   }
 }

@@ -220,8 +220,13 @@ inductive ANFValue where
   | updateProp      (name : String) (value : TempRef) : ANFValue
   /-- `{kind: "get_state_script"}` — produce the contract's codePart bytes. -/
   | getStateScript  : ANFValue
-  /-- `{kind: "check_preimage", preimage}` — BIP-143 preimage verification. -/
-  | checkPreimage   (preimage : TempRef) : ANFValue
+  /-- `{kind: "check_preimage", preimage, sighashFlag?}` — BIP-143 preimage
+  verification. `sighashFlag` (issue #123) is the sighash byte the on-chain
+  OP_PUSH_TX binding appends to its derived signature; `none` = absent =
+  default `ALL|FORKID` (`0x41`). Required (not an optParam) so every pattern
+  match must name it: an optParam would default-fill to `none` in patterns
+  and silently route flagged nodes to a wildcard arm. -/
+  | checkPreimage   (preimage : TempRef) (sighashFlag : Option Nat) : ANFValue
   /-- `{kind: "deserialize_state", preimage}` — load mutable state from preimage scriptCode. -/
   | deserializeState (preimage : TempRef) : ANFValue
   /-- `{kind: "add_output", satoshis, stateValues, preimage}` — emit a state continuation output. -/

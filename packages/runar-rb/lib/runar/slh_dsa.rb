@@ -50,7 +50,7 @@ module Runar
       sha2_192s: { name: 'SLH-DSA-SHA2-192s', n: 24, h: 63, d: 7,  hp: 9, a: 14, k: 17, w: 16, len: wots_len(24) }.freeze,
       sha2_192f: { name: 'SLH-DSA-SHA2-192f', n: 24, h: 66, d: 22, hp: 3, a: 8,  k: 33, w: 16, len: wots_len(24) }.freeze,
       sha2_256s: { name: 'SLH-DSA-SHA2-256s', n: 32, h: 64, d: 8,  hp: 8, a: 14, k: 22, w: 16, len: wots_len(32) }.freeze,
-      sha2_256f: { name: 'SLH-DSA-SHA2-256f', n: 32, h: 68, d: 17, hp: 4, a: 8,  k: 35, w: 16, len: wots_len(32) }.freeze
+      sha2_256f: { name: 'SLH-DSA-SHA2-256f', n: 32, h: 68, d: 17, hp: 4, a: 9,  k: 35, w: 16, len: wots_len(32) }.freeze
     }.freeze
 
     # --------------------------------------------------------------------
@@ -710,6 +710,11 @@ module Runar
 
       sig = safe_hex_decode(sig_hex)
       return false if sig.nil?
+      # F-232: FIPS 205 fixes the signature length per parameter set at
+      # n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+      # enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+      # garbage or truncation) is rejected.
+      return false if sig.bytesize != n + (k * (1 + a) * n) + (d * (len + hp) * n)
 
       msg = safe_hex_decode(msg_hex)
       return false if msg.nil?
@@ -772,6 +777,7 @@ module Runar
         current_leaf_idx = current_tree_idx & ((1 << hp) - 1)
         current_tree_idx >>= hp
       end
+      return false if offset != sig.bytesize
 
       current_msg == pk_root
     end

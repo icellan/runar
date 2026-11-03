@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract, slhKeygen, slhSign, SLH_SHA2_192s, runSlowTests } from 'runar-testing';
+import { TestContract, slhKeygen, slhSign, SLH_SHA2_192s } from 'runar-testing';
 import { compile } from 'runar-compiler';
 
 /**
@@ -21,9 +21,10 @@ import { compile } from 'runar-compiler';
  * it ever starts failing, the contract stopped being the teaching example it
  * claims to be.
  *
- * The signing cases are gated behind `runSlowTests` (SLH-DSA keygen and signing
- * are expensive). The compile-shape cases are NOT gated, so this file still
- * asserts something on an ordinary run instead of skipping to a green nothing.
+ * The signing cases used to be gated behind `runSlowTests` (SLH-DSA keygen and
+ * signing were thought too expensive for an ordinary run). Measured for N-474
+ * at seconds per file, so they run unconditionally, alongside the compile-shape
+ * cases.
  */
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FILE = 'PostQuantumSLHDSANaiveInsecure192s.runar.ts';
@@ -52,7 +53,7 @@ describe('PostQuantumSLHDSANaiveInsecure192s (always-on shape checks)', () => {
   });
 });
 
-describe.skipIf(!runSlowTests)('PostQuantumSLHDSANaiveInsecure192s (real signatures)', () => {
+describe('PostQuantumSLHDSANaiveInsecure192s (real signatures)', () => {
   const params = SLH_SHA2_192s;
   const seed = new Uint8Array(3 * params.n);
   seed[0] = 0x42;

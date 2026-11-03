@@ -172,11 +172,16 @@ type OutputSpec struct {
 // are consumed by FinalizeCall().
 type PreparedCall struct {
 	// Public: callers use these to coordinate external signing
-	Sighash     string `json:"sighash"`     // 64-char hex — hash256(preimage), the BIP-143 digest external signers ECDSA-sign directly
-	Preimage    string `json:"preimage"`    // hex — full BIP-143 preimage
-	OpPushTxSig string `json:"opPushTxSig"` // hex — OP_PUSH_TX DER sig (empty if not needed)
-	TxHex       string `json:"txHex"`       // hex — built TX (for backward compat / JSON serialization)
-	SigIndices  []int  `json:"sigIndices"`  // which user-visible arg positions need external Sig values
+	//
+	// N-213: there is deliberately NO OpPushTxSig field. Post-BUG-100 the
+	// OP_PUSH_TX signature is derived ON-CHAIN from Preimage — buildStatefulPrefix's
+	// signature parameter is accepted for call-site compatibility but ignored
+	// (see its "_ = opSigHex" discard), so there was nothing for an external
+	// signer to produce or push here. Mirrors F-369's TS fix.
+	Sighash    string `json:"sighash"`    // 64-char hex — hash256(preimage), the BIP-143 digest external signers ECDSA-sign directly
+	Preimage   string `json:"preimage"`   // hex — full BIP-143 preimage
+	TxHex      string `json:"txHex"`      // hex — built TX (for backward compat / JSON serialization)
+	SigIndices []int  `json:"sigIndices"` // which user-visible arg positions need external Sig values
 
 	// Internal — consumed by FinalizeCall()
 	methodName        string
@@ -257,6 +262,7 @@ type RunarArtifact struct {
 	StateFields          []StateField       `json:"stateFields,omitempty"`
 	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
 	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodePartLenSlots     []CodePartLenSlot  `json:"codePartLenSlots,omitempty"`
 	BuildTimestamp       string             `json:"buildTimestamp"`
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
@@ -338,4 +344,12 @@ type ConstructorSlot struct {
 type CodeSepIndexSlot struct {
 	ByteOffset   int `json:"byteOffset"`
 	CodeSepIndex int `json:"codeSepIndex"`
+}
+
+// CodePartLenSlot (N-051) is a `verify_code_part_len` length field whose value
+// is only known at deploy time. ByteOffset is the TEMPLATE offset of the first
+// of the 4 little-endian length bytes (the byte after the `04` push opcode);
+// the SDK writes the deployed code-part length there.
+type CodePartLenSlot struct {
+	ByteOffset int `json:"byteOffset"`
 }

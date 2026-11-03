@@ -48,7 +48,7 @@ Layered test entry points (see the table in [`README.md`](README.md)):
 |---|---|
 | `pnpm test` | TS unit suites only (fast inner loop). |
 | `pnpm test:all` | `test` + conformance + examples + e2e + wallet-client. Excludes the live regtest node. |
-| `pnpm test:ci` | `test:all` + integration suite (requires `pnpm integration:svnode:start` first). Mirrors CI. |
+| `pnpm test:ci` | `test:all` + integration suite (requires `pnpm integration:svnode:start` first) + `test:ci-local` (45 `ci-local:*` steps, ~45–60 min). Mirrors CI except the merge-base lint gates, the network-setup step (`bundle install`) and the cross-target Zig build — see `tests/n283-test-ci-mirrors-ci-contract.test.ts` for the measured, categorized gap. |
 
 **`pnpm test:all` must be green before you open a PR.** If your change touches a
 specific tier, also run that tier's native suite:
@@ -80,7 +80,8 @@ seven-tier invariant. A new language feature needs a fixture under
   ports.
 - **Stamp goldens from the TypeScript reference compiler.** `expected-ir.json`
   is canonical JSON (RFC 8785); `expected-script.hex` is the compiled script.
-  Use `runar compile … --ir` / `runar compile …`, or `pnpm run update-golden`.
+  Use `runar compile … --ir` / `runar compile …`, or
+  `cd conformance && pnpm run update-golden`.
 - **Goldens are stamped fold-OFF.** CI runs the suite **twice**: once with
   `--disable-constant-folding` (matches the checked-in goldens *and* enforces
   cross-tier parity) and once with `RUNAR_DISABLE_CONSTANT_FOLDING=0` (folding
@@ -95,7 +96,7 @@ seven-tier invariant. A new language feature needs a fixture under
   [`conformance/README.md`](conformance/README.md).
 
 SDK changes additionally need coverage in `conformance/sdk-output/` (byte-
-identical locking script across all seven SDKs) — run `pnpm run sdk-output`.
+identical locking script across all seven SDKs) — run `pnpm run conformance:sdk`.
 
 ## Pull Request Expectations
 

@@ -132,13 +132,13 @@ pub fn main(init: std.process.Init) !void {
             .spendable = true,
         });
 
-        const txid = runar.deployWithWallet(&contract, mock.walletClient(), .{
+        const txid: ?[]u8 = runar.deployWithWallet(&contract, mock.walletClient(), .{
             .satoshis = satoshis,
             .basket = "conformance",
             .protocol_id = .{ .level = 2, .name = "conformance" },
             .key_id = "1",
             .acknowledge_unsound = ack_list.items,
-        }) catch |err| {
+        }) catch |err| blk: {
             if (err == error.UnsoundPrimitiveNotAcknowledged) {
                 // Zig errors carry no payload; the SDK records the primitive and
                 // the call-site context, and the message is rendered from those.
@@ -153,9 +153,23 @@ pub fn main(init: std.process.Init) !void {
                 );
                 std.process.exit(1);
             }
+            // N-260 / R100: the Zig WalletProvider fails closed on broadcast
+            // (BRC-100 has no "relay this signed tx" primitive), so a deploy
+            // that cleared the R-062 gate always ends in DeployFailed with the
+            // recorded refusal. This fixture compares the gate verdict, and the
+            // gate has passed, so exactly that refusal counts as "funding
+            // accepted". Any other DeployFailed (UTXO selection, signing) is
+            // still a real failure.
+            if (err == error.DeployFailed) {
+                if (runar.sdk_errors.last_broadcast_refusal) |msg| {
+                    if (std.mem.eql(u8, msg, runar.WalletProvider.RAW_BROADCAST_UNSUPPORTED_MSG)) {
+                        break :blk null;
+                    }
+                }
+            }
             return err;
         };
-        allocator.free(txid);
+        if (txid) |t| allocator.free(t);
     }
 
     const locking_script = try contract.getLockingScript();

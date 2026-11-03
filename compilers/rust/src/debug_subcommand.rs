@@ -38,9 +38,17 @@ struct ArtifactProbe {
 
 /// Parse the `debug` subcommand's arguments from the slice that follows
 /// the subcommand name. Returns a wrapper error on malformed flags; an
-/// execution failure is reported via stdout, not as an error.
-pub fn run(argv: &[String]) -> Result<(), String> {
+/// execution failure is reported via stdout and as `Ok(false)` so the
+/// caller can exit non-zero (F-221). `Ok(true)` means the script passed.
+pub fn run(argv: &[String]) -> Result<bool, String> {
     let parsed = parse_args(argv)?;
+
+    // F-386: --script and --artifact are alternatives (see the usage string
+    // below), but one used to silently win over the other with no
+    // diagnostic. Refuse the ambiguous combination explicitly instead.
+    if parsed.script_hex.is_some() && parsed.artifact.is_some() {
+        return Err("--script and --artifact are mutually exclusive; pass exactly one".to_string());
+    }
 
     // Resolve the locking script hex: either --script direct, or --artifact's
     // `script` field. Mirrors the Go debug subcommand's flag surface.
@@ -89,15 +97,17 @@ pub fn run(argv: &[String]) -> Result<(), String> {
     match spend.validate() {
         Ok(true) => {
             println!("final: pass");
+            Ok(true)
         }
         Ok(false) => {
             println!("final: fail (script evaluated to false)");
+            Ok(false)
         }
         Err(e) => {
             println!("final: fail (interpreter error: {:?})", e);
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 fn parse_args(argv: &[String]) -> Result<DebugArgs, String> {

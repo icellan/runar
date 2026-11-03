@@ -4,30 +4,32 @@ from __future__ import annotations
 import hashlib
 import warnings
 from typing import Sequence
+from runar._ripemd160 import ripemd160_digest
 from runar.sdk.types import (
     RunarArtifact, Utxo, TransactionData, TxOutput,
     DeployOptions, CallOptions, OutputSpec, TerminalOutput, PreparedCall,
 )
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
-from runar.sdk.errors import assert_script_hex_under_limit, WitnessValueMissingError
+from runar.sdk.errors import assert_script_hex_under_limit, InvalidConstructorArgError, MalformedScriptError, WitnessValueMissingError
 from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
     build_deploy_transaction, select_utxos, build_p2pkh_script,
+    change_address_mismatch_message,
     _to_le32, _to_le64, _encode_varint, _reverse_hex,
 )
 from runar.sdk.calling import (
     build_call_transaction, insert_unlocking_script, resolve_input_sequence,
 )
-from runar.sdk.script_utils import restore_constructor_args
+from runar.sdk.script_utils import is_hex_bytes, restore_constructor_args
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
-    encode_push_data,
+    encode_push_data, check_fixed_width_value,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
-from runar.sdk.oppushtx import compute_op_push_tx
-from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs
+from runar.sdk.oppushtx import compute_op_push_tx_preimage
+from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs, _IntentCtx
 from runar.sdk.ordinals import (
     Inscription, build_inscription_envelope, parse_inscription_envelope,
 )
@@ -64,22 +66,84 @@ def is_empty_sig(value: object) -> bool:
     return isinstance(value, _EmptySig)
 
 
+def patch_code_part_len_slots(
+    artifact: RunarArtifact,
+    spliced: str,
+    subs: Sequence[tuple[int, str]],
+    code_part_len: int,
+) -> str:
+    """N-051 -- write the deployed code-part length into every
+    ``code_part_len_slots`` field of a spliced code script.
+
+    The compiler cannot know the deployed length of a code part that bakes a
+    variable-width readonly constructor arg (a ByteString, a bigint), so the
+    ``SIZE(_codePart)`` equality pin carries a 4-byte little-endian field the
+    SDK fills in. The field is fixed-width, so writing it changes no length and
+    no offset. A wrong or missing value is fail-safe on chain (honest spends
+    fail OP_NUMEQUAL); it is never a lower bound.
+
+    ``spliced`` is the template with every OP_0 placeholder substituted;
+    ``subs`` are those substitutions as ``(template_byte_offset, encoded_hex)``
+    (each replaced one placeholder byte with ``encoded_hex``);
+    ``code_part_len`` is the deployed code-part length in bytes, including any
+    inscription envelope (it is part of ``_codePart``).
+    """
+    slots = artifact.code_part_len_slots
+    if not slots:
+        return spliced
+    if (
+        isinstance(code_part_len, bool)
+        or not isinstance(code_part_len, int)
+        or code_part_len < 0
+        or code_part_len > 0x7FFFFFFF
+    ):
+        raise ValueError(
+            f'patch_code_part_len_slots: code part length {code_part_len} does '
+            f'not fit the 4-byte pin field'
+        )
+    le = code_part_len.to_bytes(4, 'little').hex()
+    out = spliced
+    for slot in slots:
+        off = slot.byte_offset
+        # The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+        # OP_VERIFY` here; anything else means the descriptor does not
+        # describe this script.
+        if (
+            off < 1
+            or artifact.script[(off - 1) * 2:off * 2] != '04'
+            or artifact.script[(off + 4) * 2:(off + 7) * 2] != '819c69'
+        ):
+            raise ValueError(
+                f'patch_code_part_len_slots: {artifact.contract_name} '
+                f'codePartLenSlots entry at byteOffset {off} does not point at '
+                f'a verify_code_part_len length field (corrupted or mismatched '
+                f'artifact)'
+            )
+        shift = 0
+        for sub_offset, encoded in subs:
+            if sub_offset < off:
+                shift += len(encoded) // 2 - 1
+        at = (off + shift) * 2
+        out = out[:at] + le + out[at + 8:]
+    return out
+
+
 def decode_exact_code_part_len_pins(script_hex: str) -> list[int]:
     """Decode the value of every EQUALITY ``verify_code_part_len`` pin in a
     compiled script.
 
     The compiler emits the pin as a fixed-width, unambiguous nine-byte run::
 
-        76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-        OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+        76 | 04 LL LL LL LL | 81 | 9c | 69
+        OP_DUP  <len LE32>    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
 
-    ``9c`` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
-    can violate. ``a2`` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
-    satisfy, so it is deliberately not returned here.
+    Only ``9c`` (OP_NUMEQUAL) is returned. Since N-051 the compiler never emits
+    the ``a2`` (OP_GREATERTHANOREQUAL) lower-bound variant; an artifact from an
+    older compiler that still carries one is not decoded here, because extra
+    bytes satisfy it.
 
-    Read from the emitted TEMPLATE rather than from a built code script: the
-    template holds OP_0 placeholders where constructor args go, so no
-    caller-supplied byte string can be mistaken for a pin.
+    The N-043 guard calls this on the BUILT code script, so a deploy-time pin
+    (``code_part_len_slots``) is read with the value the SDK patched in.
     """
     values: list[int] = []
     for i in range(0, max(len(script_hex) - 17, 0), 2):
@@ -125,6 +189,28 @@ def _is_likely_or_checksig(artifact) -> bool:
 #: converged. It is the ONLY ByteString slot for which a ``None`` call arg is a
 #: request rather than a mistake.
 AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts'
+
+
+def is_intent_witness_param(name: str) -> bool:
+    """Intent-intrinsic witness params the compiler auto-injects
+    (``extractPrevOutputScript`` -> ``_prevOutScript_<i>``,
+    ``requireOutputP2PKH`` -> ``_serialisedOutputs``). Their values come from
+    ``set_prev_out_script`` / ``set_serialised_outputs``."""
+    return name.startswith('_prevOutScript_') or name == '_serialisedOutputs'
+
+
+def is_sdk_supplied_param(name: str, type_: str, is_stateful: bool) -> bool:
+    """True when the SDK supplies this param itself, so it is never part of
+    the caller's args: the intent witnesses always, plus the stateful
+    continuation params (SigHashPreimage, ``_changePKH``, ``_changeAmount``,
+    ``_newAmount``) on stateful contracts. Single source of truth for
+    ``prepare_call``'s arity check and the typed-wrapper codegen."""
+    if is_intent_witness_param(name):
+        return True
+    return is_stateful and (
+        type_ == 'SigHashPreimage'
+        or name in ('_changePKH', '_changeAmount', '_newAmount')
+    )
 
 
 def _is_auto_prevouts_param(param) -> bool:
@@ -181,13 +267,16 @@ class RunarContract:
     Handles deployment, method invocation, state tracking, and script construction.
     """
 
-    def __init__(self, artifact: RunarArtifact, constructor_args: list):
+    def __init__(self, artifact: RunarArtifact, constructor_args: list, *, _restoring: bool = False):
         expected = len(artifact.abi.constructor_params)
         if len(constructor_args) != expected:
             raise ValueError(
                 f"RunarContract: expected {expected} constructor args for "
                 f"{artifact.contract_name}, got {len(constructor_args)}"
             )
+
+        if not _restoring:
+            constructor_args = _check_byte_string_ctor_args(artifact, constructor_args)
 
         self.artifact = artifact
         self._constructor_args = list(constructor_args)
@@ -461,19 +550,31 @@ class RunarContract:
         raw_tx = result.get('raw_tx', '')
         actual_satoshis = satoshis
         if raw_tx:
+            # N-241: this used to swallow a raw_tx parse failure (routing it
+            # through a bare `except Exception: pass`, the same shape N-168
+            # fixed for TS's deployWithWallet BEEF parse). deploy_with_wallet's
+            # whole job is to hand back a real (txid, output_index) for a
+            # contract UTXO that exists on chain; it must not report success
+            # — with output_index silently defaulted to 0 — when the wallet
+            # handed back a raw_tx it could not parse. The caller would
+            # otherwise track the wrong vout, or one that doesn't exist.
+            from runar.sdk.wallet import _parse_raw_tx_to_data
             try:
-                from runar.sdk.wallet import _parse_raw_tx_to_data
                 tx_data = _parse_raw_tx_to_data(txid, raw_tx)
-                for i, out in enumerate(tx_data.outputs):
-                    if out.script == locking_script:
-                        output_index = i
-                        actual_satoshis = out.satoshis
-                        break
-                # Cache for future EF lookups
-                if txid:
-                    wallet_provider.cache_tx(txid, raw_tx)
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"{self.artifact.contract_name}.deploy_with_wallet: deploy tx "
+                    f"raw_tx returned by the wallet did not parse: {e}"
+                ) from e
+
+            for i, out in enumerate(tx_data.outputs):
+                if out.script == locking_script:
+                    output_index = i
+                    actual_satoshis = out.satoshis
+                    break
+            # Cache for future EF lookups
+            if txid:
+                wallet_provider.cache_tx(txid, raw_tx)
 
         # Track the deployed UTXO
         self._current_utxo = Utxo(
@@ -586,6 +687,14 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
+        # N-038: a SIGHASH_SINGLE stateful method continues the contract but
+        # takes no _changePKH (BIP-143 SINGLE does not commit the change
+        # output), so "has a continuation" is read from the ABI's sighash base
+        # + isTerminal, not from the change param alone.
+        method_has_continuation = method_needs_change or (
+            ((method.sig_hash_type if method.sig_hash_type is not None else 0x41) & 0x1F) == 0x03
+            and method.is_terminal is not True
+        )
         # Whether the unlocking script is prefixed with _codePart. New artifacts
         # carry the authoritative uses_code_part flag (true for continuation
         # builders AND terminal var-length-state readers — issue #100). Older
@@ -598,20 +707,11 @@ class RunarContract:
         # params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
         # user-facing arg count check. Witness values come from
         # set_prev_out_script / set_serialised_outputs, not from the args list.
-        def _is_intent_witness_param(name: str) -> bool:
-            return name.startswith('_prevOutScript_') or name == '_serialisedOutputs'
-
-        if is_stateful:
-            user_params = [
-                p for p in method.params
-                if p.type != 'SigHashPreimage'
-                and p.name != '_changePKH'
-                and p.name != '_changeAmount'
-                and p.name != '_newAmount'
-                and not _is_intent_witness_param(p.name)
-            ]
-        else:
-            user_params = [p for p in method.params if not _is_intent_witness_param(p.name)]
+        # Shared with the typed-wrapper codegen (F-245).
+        user_params = [
+            p for p in method.params
+            if not is_sdk_supplied_param(p.name, p.type, is_stateful)
+        ]
 
         if len(user_params) != len(args):
             raise ValueError(
@@ -666,6 +766,14 @@ class RunarContract:
             # None, so it is never added to `sig_indices` and never signed. It
             # stays in `resolved_args` and `_encode_arg` emits OP_0 for it.
 
+        # N-045 (defence in depth): a fixed-width method arg must have its
+        # declared width — a covenant may copy it straight into its state.
+        for i, param in enumerate(user_params):
+            check_fixed_width_value(
+                resolved_args[i], param.type,
+                f"RunarContract.prepare_call: method '{method_name}' arg '{param.name}' (index {i})",
+            )
+
         # Soft heuristic (issue #106): warn only for likely OR-CHECKSIG
         # (OP_BOOLOR + OP_CHECKSIG), not genuine multi-sig (OP_CHECKMULTISIG).
         if len(sig_indices) >= 2 and _is_likely_or_checksig(self.artifact):
@@ -704,10 +812,12 @@ class RunarContract:
         if is_stateful and method_needs_change:
             change_pub_key_hex = opts.change_pub_key or signer.get_public_key()
             pub_key_bytes = bytes.fromhex(change_pub_key_hex)
-            hash160_bytes = hashlib.new(
-                'ripemd160', hashlib.sha256(pub_key_bytes).digest()
-            ).digest()
+            hash160_bytes = ripemd160_digest(hashlib.sha256(pub_key_bytes).digest())
             change_pkh_hex = hash160_bytes.hex()
+            # N-426: refuse before any signing/broadcast when the explicit change
+            # address is not the key the covenant's _changePKH enforces.
+            if opts.change_address and build_p2pkh_script(opts.change_address) != build_p2pkh_script(change_pkh_hex):
+                raise ValueError(change_address_mismatch_message(opts.change_address))
 
         # Pre-resolve intent-intrinsic witness hex (raises
         # WitnessValueMissingError if a `_prevOutScript_<i>` or
@@ -732,15 +842,16 @@ class RunarContract:
         # Non-terminal path
         # -------------------------------------------------------------------
         # Initial unlocking script (with placeholders). Intent-witness hex is
-        # suffixed so size estimation accounts for the witness pushes; the
+        # included (before the selector, N-412) so size estimation accounts
+        # for the witness pushes; the
         # real ABI-correct unlock is rebuilt by _build_stateful_unlock below
         # for stateful methods.
         if needs_op_push_tx:
             # Prepend placeholder prefix (optionally _codePart + _opPushTxSig)
             unlocking_script = self._build_stateful_prefix('00' * 72, method_uses_code_part) + \
-                self.build_unlocking_script(method_name, resolved_args) + witness_hex
+                self.build_unlocking_script(method_name, resolved_args, witness_hex)
         else:
-            unlocking_script = self.build_unlocking_script(method_name, resolved_args) + witness_hex
+            unlocking_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
         new_locking_script = ''
         new_satoshis = 0
@@ -760,6 +871,26 @@ class RunarContract:
                     ))
                 else:
                     extra_contract_utxos.append(item)
+
+        # N-227 Part 2 / N-258: the is_stateful branch below builds a REAL
+        # per-input unlock (its own OP_PUSH_TX preimage + signed Sig args) for
+        # every extra contract input via _build_stateful_unlock. The
+        # non-stateful branch does the same (N-258) only for a
+        # zero-mutable-field StatefulSmartContract whose preimage the SDK
+        # derives (parent_stateful and needs_op_push_tx); there each extra
+        # input gets its own preimage and Sig. Any other non-stateful call (a
+        # plain SmartContract, or a caller-supplied preimage) has no per-input
+        # unlock builder, and shipping the SIZING placeholder as the FINAL
+        # unlocking script would broadcast an invalid spend for every input
+        # after the primary. Fail closed there.
+        if extra_contract_utxos and not is_stateful and not (parent_stateful and needs_op_push_tx):
+            raise ValueError(
+                f"RunarContract.call({method_name}): additional_contract_inputs is not "
+                "supported for this call — only a StatefulSmartContract (with an "
+                "SDK-derived preimage) builds a real unlock for each extra contract "
+                "input; any other path would ship a placeholder unlock and the "
+                "resulting tx would be invalid"
+            )
 
         # Normalize outputs
         has_multi_output = opts.outputs is not None and len(opts.outputs) > 0
@@ -803,9 +934,60 @@ class RunarContract:
             )
             try:
                 ordered: list[dict] = []
+                # F-024 (R14): a default single-output continuation reads its
+                # own satoshis (``continuationAmount()`` = ``_newAmount``) and
+                # the spent UTXO's (``extractAmount(txPreimage)``); both are
+                # known before the tx is built, and the state the script
+                # re-derives must match.
+                interp_args = dict(named_args)
+                # Intent-intrinsic witnesses the caller set via
+                # set_prev_out_script / set_serialised_outputs: the method body
+                # loads them as params, so the interpreter needs them too.
+                for wp in method.params:
+                    if wp.name.startswith('_prevOutScript_'):
+                        idx_str = wp.name[len('_prevOutScript_'):]
+                        if idx_str.isdigit() and int(idx_str) in self._prev_out_scripts:
+                            interp_args[wp.name] = self._prev_out_scripts[int(idx_str)]
+                    elif wp.name == '_serialisedOutputs' and self._serialised_outputs is not None:
+                        interp_args[wp.name] = self._serialised_outputs
+                if self._current_utxo is not None:
+                    interp_args['txPreimage'] = int(self._current_utxo.satoshis)
+                    if method_needs_new_amount:
+                        interp_args['_newAmount'] = int(
+                            opts.satoshis if opts is not None and opts.satoshis else self._current_utxo.satoshis
+                        )
+                # R67: extractScriptCode(txPreimage) gets the contract's OWN
+                # real codePart (post-OP_CODESEPARATOR, CompactSize-prefixed
+                # exactly as the BIP-143 preimage carries it) instead of the
+                # historical empty dummy, so a method like
+                # FungibleToken.merge that inspects its own scriptCode
+                # during off-chain state derivation sees realistic bytes
+                # rather than aborting substr on an empty value.
+                # _get_code_sep_index is the SAME call every other signing
+                # path uses to trim the codePart to the post-separator
+                # subscript.
+                # N-189: trim the SPENT UTXO's locking script (the subscript
+                # the primary input's preimage signs), not the bare codePart
+                # -- BIP-143's scriptCode carries the `OP_RETURN <state>` tail.
+                utxo_script_hex = contract_utxo.script
+                method_index = self._find_method_index(method_name)
+                code_sep_idx = self._get_code_sep_index(method_index)
+                script_code_body = (
+                    utxo_script_hex[(code_sep_idx + 1) * 2:] if code_sep_idx >= 0 else utxo_script_hex
+                )
+                intent = _IntentCtx()
+                # `_encode_varint` returns a HEX STRING (see
+                # runar/sdk/deployment.py), not bytes -- it must be decoded
+                # before concatenating with the `bytes.fromhex(...)` body,
+                # or this raises `TypeError: can only concatenate str (not
+                # "bytes") to str` (N-171-FU regression).
+                intent.mock_preimage_bytes['scriptCode'] = (
+                    bytes.fromhex(_encode_varint(len(script_code_body) // 2))
+                    + bytes.fromhex(script_code_body)
+                )
                 computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
-                    self.artifact.anf, method_name, flat_state, named_args,
-                    flat_ctor_args, ordered_outputs=ordered,
+                    self.artifact.anf, method_name, flat_state, interp_args,
+                    flat_ctor_args, ordered_outputs=ordered, intent=intent,
                 )
                 anf_ordered_outputs = ordered
             except Exception as err:
@@ -835,7 +1017,9 @@ class RunarContract:
 
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
-            code_script = self._code_script or self._build_code_script()
+            # N-075: _get_code_part_hex() carries the inscription envelope, as the
+            # single-output path's get_locking_script() does.
+            code_script = self._get_code_part_hex()
             contract_outputs = []
             for out_spec in opts.outputs:
                 if isinstance(out_spec, dict):
@@ -872,7 +1056,11 @@ class RunarContract:
                 if len(anf_ordered_outputs) == 1 and len(anf_state_entries) == 1
                 else None
             )
-            if opts.satoshis > 0:
+            # None (e.g. a hand-built CallOptions, or a pre-fix codegen
+            # wrapper) is "unspecified", same as the declared default 0 --
+            # matches the TS SDK's `options?.satoshis ?? ...` fallback
+            # (F-239).
+            if opts.satoshis and opts.satoshis > 0:
                 new_satoshis = opts.satoshis
             elif single_explicit_state_sats is not None:
                 new_satoshis = single_explicit_state_sats
@@ -881,7 +1069,7 @@ class RunarContract:
             if opts.new_state:
                 for k, v in opts.new_state.items():
                     self._state[k] = v
-            elif method_needs_change and anf_computed_state is not None:
+            elif method_has_continuation and anf_computed_state is not None:
                 self._state = {**self._state, **anf_computed_state}
             new_locking_script = self.get_locking_script()
             # DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
@@ -935,10 +1123,14 @@ class RunarContract:
         fee_rate = provider.get_fee_rate()
         change_script = build_p2pkh_script(change_address)
         all_funding_utxos = provider.get_utxos(address)
-        # Filter out the contract UTXO to avoid duplicate inputs
+        # Filter out every contract UTXO this tx spends (the primary and any
+        # additional_contract_inputs) to avoid duplicate inputs (F-045: a
+        # merge's second token UTXO listed at the same address was picked as a
+        # P2PKH funding input too).
         candidate_funding_utxos: list[Utxo] = [
             u for u in all_funding_utxos
             if not (u.txid == self._current_utxo.txid and u.output_index == self._current_utxo.output_index)
+            and not any(x.txid == u.txid and x.output_index == u.output_index for x in extra_contract_utxos)
         ]
 
         # Resolve per-input args for additional contract inputs (same
@@ -1115,15 +1307,15 @@ class RunarContract:
                 unlock_script = encode_push_data(sig) + encode_push_data(pub_key)
                 signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
 
-        final_op_push_tx_sig = ''
         final_preimage = ''
 
         if is_stateful:
             # Helper: build a stateful unlock.  For input_idx==0 (primary),
             # keeps placeholder Sig params.  For input_idx>0 (extra), signs
             # with signer.
-            def _build_stateful_unlock(tx: str, input_idx: int, subscript: str, sats: int, args_override: list | None = None, tx_change_amount: int = 0, pi: list[int] | None = None) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, input_idx, subscript, sats, code_sep_idx, method_sig_hash_type)
+            def _build_stateful_unlock(tx: str, input_idx: int, subscript: str, sats: int, args_override: list | None = None, tx_change_amount: int = 0, pi: list[int] | None = None) -> tuple[str, str]:
+                # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                preimage = compute_op_push_tx_preimage(tx, input_idx, subscript, sats, code_sep_idx, method_sig_hash_type)
                 base_args = args_override if args_override is not None else resolved_args
                 input_args = list(base_args)
                 # Only sign Sig params for extra inputs, not the primary
@@ -1151,7 +1343,7 @@ class RunarContract:
                 if method_needs_new_amount:
                     new_amount_hex = _encode_script_number(new_satoshis)
                 unlock = (
-                    self._build_stateful_prefix(op_sig, method_uses_code_part) +
+                    self._build_stateful_prefix('', method_uses_code_part) +
                     args_hex +
                     change_hex +
                     new_amount_hex +
@@ -1159,10 +1351,10 @@ class RunarContract:
                     witness_hex +
                     method_selector_hex
                 )
-                return unlock, op_sig, preimage
+                return unlock, preimage
 
             # First pass: build unlocking scripts with current tx layout
-            input0_unlock, _, _ = _build_stateful_unlock(
+            input0_unlock, _ = _build_stateful_unlock(
                 signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
                 tx_change_amount=change_amount,
                 pi=prevouts_indices,
@@ -1170,7 +1362,7 @@ class RunarContract:
             extra_unlocks: list[str] = []
             for i, mu in enumerate(extra_contract_utxos):
                 extra_args = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else None
-                eu, _, _ = _build_stateful_unlock(
+                eu, _ = _build_stateful_unlock(
                     signed_tx, i + 1, mu.script, mu.satoshis, extra_args,
                     tx_change_amount=change_amount,
                     pi=prevouts_indices,
@@ -1208,18 +1400,17 @@ class RunarContract:
                     signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
 
             # Second pass: recompute with final tx (preimage changes with unlock size)
-            final_input0_unlock, op_sig, preimage = _build_stateful_unlock(
+            final_input0_unlock, preimage = _build_stateful_unlock(
                 signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
                 tx_change_amount=change_amount,
                 pi=prevouts_indices,
             )
-            final_op_push_tx_sig = op_sig
             final_preimage = preimage
             signed_tx = insert_unlocking_script(signed_tx, 0, final_input0_unlock)
 
             for i, mu in enumerate(extra_contract_utxos):
                 extra_args = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else None
-                final_merge_unlock, _, _ = _build_stateful_unlock(
+                final_merge_unlock, _ = _build_stateful_unlock(
                     signed_tx, i + 1, mu.script, mu.satoshis, extra_args,
                     tx_change_amount=change_amount,
                     pi=prevouts_indices,
@@ -1244,27 +1435,125 @@ class RunarContract:
 
         elif needs_op_push_tx or sig_indices:
             # Stateless: keep placeholder sigs, compute OP_PUSH_TX
+            # N-433: preimage only -- _build_stateful_prefix discards the signature.
             if needs_op_push_tx:
-                sig_hex, preimage_hex = compute_op_push_tx(
+                preimage_hex = compute_op_push_tx_preimage(
                     signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                     method_sig_hash_type,
                 )
-                final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
             # Don't sign Sig params -- keep placeholders
-            real_unlocking_script = self.build_unlocking_script(method_name, resolved_args)
-            if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlocking_script = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlocking_script
+            real_unlocking_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
+            if needs_op_push_tx:
+                real_unlocking_script = self._build_stateful_prefix('', False) + real_unlocking_script
                 tmp_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
-                final_sig, final_pre = compute_op_push_tx(
+                final_pre = compute_op_push_tx_preimage(
                     tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                     method_sig_hash_type,
                 )
                 resolved_args[preimage_index] = final_pre
-                final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlocking_script = self._build_stateful_prefix(final_sig, False) + \
-                    self.build_unlocking_script(method_name, resolved_args)
+                real_unlocking_script = self._build_stateful_prefix('', False) + \
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
+
+                # N-258: a zero-mutable-field StatefulSmartContract merge. Each
+                # extra contract input gets a REAL unlock of the same layout as
+                # the primary's: its own OP_PUSH_TX preimage (its own outpoint,
+                # scriptCode and amount) and its Sig params signed at its own
+                # input index over the post-OP_CODESEPARATOR subscript (the
+                # contract is parent_stateful, issue #44). Built here once so
+                # the rebuild below sizes fee/change against real bytes, and
+                # again after it because the rebuild can move the change output
+                # that the sighash commits.
+                def _build_extra_unlock(tx: str, i: int) -> str:
+                    mu = extra_contract_utxos[i]
+                    base = (
+                        resolved_per_input_args[i]
+                        if resolved_per_input_args and i < len(resolved_per_input_args)
+                        else resolved_args
+                    )
+                    input_args = list(base)
+                    extra_pre = compute_op_push_tx_preimage(
+                        tx, i + 1, mu.script, mu.satoshis, code_sep_idx, method_sig_hash_type,
+                    )
+                    sig_subscript = mu.script
+                    if code_sep_idx >= 0:
+                        trim_pos = (code_sep_idx + 1) * 2
+                        if trim_pos <= len(mu.script):
+                            sig_subscript = mu.script[trim_pos:]
+                    for idx in sig_indices:
+                        input_args[idx] = signer.sign(tx, i + 1, sig_subscript, mu.satoshis)
+                    input_args[preimage_index] = extra_pre
+                    return self._build_stateful_prefix('', False) + \
+                        self.build_unlocking_script(method_name, input_args, witness_hex)
+
+                extra_real_unlocks = [
+                    _build_extra_unlock(tmp_tx, i) for i in range(len(extra_contract_utxos))
+                ]
+
+                # N-227 (port of N-085): the BIP-143 scriptCode is everything
+                # AFTER the checkPreimage-injected OP_CODESEPARATOR, which can
+                # sit right at method entry — for a zero-mutable-field
+                # StatefulSmartContract (empty state_fields makes is_stateful
+                # False here even though it IS parent_stateful) that leaves
+                # almost the ENTIRE locking script as scriptCode. The real
+                # preimage — and therefore real_unlocking_script — can end up
+                # far bigger than the sizing pass above assumed. The
+                # is_stateful branch above already re-derives fee/change from
+                # the REAL unlock via a second build_call_transaction call; do
+                # the same here so change_amount isn't pinned to the
+                # undersized estimate — otherwise the broadcast tx pays less
+                # than the fee floor even though its real byte size is larger
+                # than what fee/change were computed for.
+                tx_hex, input_count, change_amount = build_call_transaction(
+                    self._current_utxo, real_unlocking_script, new_locking_script,
+                    new_satoshis, change_address, change_script,
+                    additional_utxos if additional_utxos else None, fee_rate,
+                    contract_outputs=contract_outputs,
+                    additional_contract_inputs=[
+                        {'utxo': u, 'unlocking_script': extra_real_unlocks[i]}
+                        for i, u in enumerate(extra_contract_utxos)
+                    ] if extra_contract_utxos else None,
+                    data_outputs=resolved_data_outputs or None,
+                    locktime=opts.locktime,
+                    sequence=opts.sequence,
+                )
+                signed_tx = tx_hex
+
+                # buildCallTransaction above returned a FRESH tx whose P2PKH
+                # funding inputs (already signed once, before this stateless
+                # branch ran) are blank again — re-sign them against the
+                # rebuilt tx (issue #134's funding_signer), mirroring the
+                # is_stateful branch's re-sign step (once, matching TS).
+                p2pkh_start_idx = 1 + len(extra_contract_utxos)
+                for i in range(p2pkh_start_idx, input_count):
+                    utxo_idx = i - p2pkh_start_idx
+                    if utxo_idx < len(additional_utxos):
+                        utxo = additional_utxos[utxo_idx]
+                        sig = funding_signer.sign(signed_tx, i, utxo.script, utxo.satoshis)
+                        unlock_script = encode_push_data(sig) + encode_push_data(pub_key)
+                        signed_tx = insert_unlocking_script(signed_tx, i, unlock_script)
+
+                # The rebuild may have changed the change output's satoshis,
+                # which hashOutputs (and therefore the preimage above)
+                # commits to — recompute it against the REBUILT tx before
+                # embedding it in the final unlock.
+                signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
+                rebuilt_pre = compute_op_push_tx_preimage(
+                    signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
+                    method_sig_hash_type,
+                )
+                resolved_args[preimage_index] = rebuilt_pre
+                final_preimage = rebuilt_pre
+                real_unlocking_script = self._build_stateful_prefix('', False) + \
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
+
+                # N-258: re-derive every extra input's preimage and Sig against
+                # the rebuilt tx (its change output is final now).
+                for i in range(len(extra_contract_utxos)):
+                    signed_tx = insert_unlocking_script(
+                        signed_tx, i + 1, _build_extra_unlock(signed_tx, i),
+                    )
             signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
             if not final_preimage and needs_op_push_tx:
                 final_preimage = resolved_args[preimage_index]
@@ -1276,7 +1565,6 @@ class RunarContract:
         return PreparedCall(
             sighash=sighash,
             preimage=final_preimage,
-            op_push_tx_sig=final_op_push_tx_sig,
             tx_hex=signed_tx,
             sig_indices=sig_indices,
             method_name=method_name,
@@ -1320,6 +1608,22 @@ class RunarContract:
         if provider is None:
             raise RuntimeError("finalize_call: no provider")
 
+        # F-247: every declared sig_indices slot MUST be covered by
+        # `signatures`. A missing entry would otherwise leave
+        # resolved_args[idx] at the 72-zero-byte placeholder stubbed in by
+        # prepare_call -- a well-formed but all-zero signature push that
+        # would silently reach provider.broadcast below instead of being
+        # refused up front.
+        missing_sig_indices = [idx for idx in prepared.sig_indices if idx not in signatures]
+        if missing_sig_indices:
+            raise RuntimeError(
+                f"RunarContract.finalize_call: missing signature(s) for method "
+                f"'{prepared.method_name}' at sig_indices {missing_sig_indices} (F-247). "
+                f"Every index in prepared.sig_indices must have a corresponding entry in "
+                f"the signatures dict, or finalize_call would broadcast a 72-byte all-zero "
+                f"placeholder signature in its place"
+            )
+
         # Replace placeholder sigs with real signatures
         resolved_args = list(prepared.resolved_args)
         for idx in prepared.sig_indices:
@@ -1338,7 +1642,11 @@ class RunarContract:
             if prepared.method_needs_new_amount:
                 new_amount_hex = _encode_script_number(prepared.new_amount)
             primary_unlock = (
-                self._build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_uses_code_part) +
+                # N-213: _build_stateful_prefix's first param is accepted for
+                # call-site compatibility but ignored (post-BUG-100 no
+                # signature is pushed) -- pass '' rather than a
+                # now-nonexistent prepared.op_push_tx_sig.
+                self._build_stateful_prefix('', prepared.method_uses_code_part) +
                 args_hex +
                 change_hex +
                 new_amount_hex +
@@ -1349,10 +1657,10 @@ class RunarContract:
         elif prepared.needs_op_push_tx:
             if prepared.preimage_index >= 0:
                 resolved_args[prepared.preimage_index] = prepared.preimage
-            primary_unlock = self._build_stateful_prefix(prepared.op_push_tx_sig, False) + \
-                self.build_unlocking_script(prepared.method_name, resolved_args)
+            primary_unlock = self._build_stateful_prefix('', False) + \
+                self.build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
         else:
-            primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args)
+            primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args, prepared.intent_witness_hex)
 
         final_tx = insert_unlocking_script(prepared.tx_hex, 0, primary_unlock)
 
@@ -1421,8 +1729,16 @@ class RunarContract:
         # placeholders make a restored stateful spend unspendable. Params with
         # no ctor slot (mutable state fields) fall back to 0 and are overwritten
         # by extract_state_from_script below.
+        # N-320: the script is untrusted. Refuse anything that is not whole
+        # bytes of hex before any reader sees it -- the N-317 rule.
+        if not is_hex_bytes(utxo.script):
+            raise MalformedScriptError(
+                "RunarContract.from_utxo: script is not an even-length hex string"
+            )
         restored_args = restore_constructor_args(artifact, utxo.script)
-        contract = cls(artifact, restored_args)
+        # N-330: restored args hold 0 placeholders for unslotted params; they
+        # are internal values, so the ByteString-family arg check is skipped.
+        contract = cls(artifact, restored_args, _restoring=True)
 
         if artifact.state_fields:
             last_op_return = find_last_op_return(utxo.script)
@@ -1447,8 +1763,15 @@ class RunarContract:
 
         if artifact.state_fields:
             state = extract_state_from_script(artifact, utxo.script)
-            if state is not None:
-                contract._state = state
+            # N-320 (C10, as in TS): no state section at all is a refusal, not
+            # constructor-initial values presented as live on-chain state.
+            if state is None:
+                raise MalformedScriptError(
+                    f"RunarContract.from_utxo: no state section (OP_RETURN) in the "
+                    f"script, but {artifact.contract_name} declares "
+                    f"{len(artifact.state_fields)} state field(s)"
+                )
+            contract._state = state
 
         return contract
 
@@ -1461,7 +1784,7 @@ class RunarContract:
     ) -> RunarContract:
         """Reconnect to an existing deployed contract."""
         tx = provider.get_transaction(txid)
-        if output_index >= len(tx.outputs):
+        if output_index < 0 or output_index >= len(tx.outputs):
             raise ValueError(
                 f"RunarContract.from_txid: output index {output_index} out of range "
                 f"(tx has {len(tx.outputs)} outputs)"
@@ -1497,11 +1820,19 @@ class RunarContract:
 
         return script
 
-    def build_unlocking_script(self, method_name: str, args: list) -> str:
-        """Build the unlocking script for a method call."""
+    def build_unlocking_script(self, method_name: str, args: list, witness_hex: str = '') -> str:
+        """Build the unlocking script for a method call.
+
+        ``witness_hex`` is the method's pre-encoded intent-witness pushes
+        (``_build_intent_witness_hex``). N-412: the auto-injected
+        ``_prevOutScript_<i>`` / ``_serialisedOutputs`` params are the LAST ABI
+        params, so they go after the args and before the selector -- the slot
+        the stateful unlock gives them too (after the preimage).
+        """
         script = ''
         for arg in args:
             script += _encode_arg(arg)
+        script += witness_hex
 
         public_methods = self._get_public_methods()
         if len(public_methods) > 1:
@@ -1561,14 +1892,16 @@ class RunarContract:
         produces.
 
         The check is the invariant itself, not a restatement of the compiler's
-        derivation: it decodes the pinned number straight out of the emitted
-        template and compares it to ``_get_code_part_hex()``. So it permits
-        every combination that actually works -- a stateless contract or a
-        fixed-size state layout carries no pin at all, and a lower-bound pin is
-        satisfied by a longer code part -- and rejects only the shape that would
-        lock funds.
+        derivation: it decodes the pinned number straight out of the code this
+        contract really deploys and compares it to ``_get_code_part_hex()``. So
+        it permits every combination that actually works -- a stateless
+        contract or a fixed-size state layout carries no pin at all, and a
+        deploy-time pin (N-051 ``code_part_len_slots``) is patched to the
+        inscribed length -- and rejects only the shape that would lock funds:
+        an exact compile-time pin that the envelope breaks.
         """
-        pinned = decode_exact_code_part_len_pins(self.artifact.script)
+        # Decode from the built code: a deploy-time pin is patched there.
+        pinned = decode_exact_code_part_len_pins(self._build_code_script())
         if not pinned:
             return
         actual = len(self._get_code_part_hex()) // 2
@@ -1612,6 +1945,18 @@ class RunarContract:
         witness_hex: str = '',
     ) -> PreparedCall:
         """Handle the terminal method code path for prepare_call."""
+        # N-271: this builder lays out exactly one contract input (plus an
+        # optional fee/funding input below) and never reads
+        # opts.additional_contract_inputs -- accepting it here would
+        # silently spend less than the caller asked for while reporting
+        # success. Fail closed instead of dropping the extra UTXOs.
+        if opts.additional_contract_inputs:
+            raise ValueError(
+                f"RunarContract.call({method_name}): additional_contract_inputs is only "
+                "supported on the OP_PUSH_TX call path. Terminal calls spend the contract "
+                "into a caller-supplied output set and take a single contract input."
+            )
+
         # Normalize terminal outputs
         term_outputs = []
         for item in opts.terminal_outputs:
@@ -1625,15 +1970,14 @@ class RunarContract:
             else:
                 term_outputs.append(item)
 
-        # Build placeholder unlocking script (witness_hex suffixed for sizing
-        # — the real ABI-correct unlock is built by
+        # Build placeholder unlocking script (witness_hex in its ABI slot,
+        # before the selector -- N-412; the real unlock is built by
         # build_stateful_terminal_unlock below for stateful methods).
         if needs_op_push_tx:
             term_unlock_script = self._build_stateful_prefix('00' * 72, False) + \
-                self.build_unlocking_script(method_name, resolved_args)
+                self.build_unlocking_script(method_name, resolved_args, witness_hex)
         else:
-            term_unlock_script = self.build_unlocking_script(method_name, resolved_args)
-        term_unlock_script += witness_hex
+            term_unlock_script = self.build_unlocking_script(method_name, resolved_args, witness_hex)
 
         # Funding (and terminal fee) inputs are signed by funding_signer when
         # set (issue #134). The method's own Sig args stay with the connected
@@ -1694,7 +2038,6 @@ class RunarContract:
             return tx
 
         term_tx = build_terminal_tx(term_unlock_script)
-        final_op_push_tx_sig = ''
         final_preimage = ''
 
         term_code_sep_idx = self._get_code_sep_index(self._find_method_index(method_name))
@@ -1703,8 +2046,9 @@ class RunarContract:
 
         if is_stateful:
             # Build stateful terminal unlock with PLACEHOLDER user sigs
-            def build_stateful_terminal_unlock(tx: str) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)
+            def build_stateful_terminal_unlock(tx: str) -> tuple[str, str]:
+                # N-253: preimage only -- the stateful unlock carries no OP_PUSH_TX signature.
+                preimage = compute_op_push_tx_preimage(tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx, term_sig_hash_type)
                 # Keep placeholder Sig params (don't sign for primary)
                 args_hex = ''
                 for arg in resolved_args:
@@ -1714,49 +2058,47 @@ class RunarContract:
                 if method_needs_change and change_pkh_hex:
                     change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(0)
                 unlock = (
-                    self._build_stateful_prefix(op_sig, False) +
+                    self._build_stateful_prefix('', False) +
                     args_hex +
                     change_hex +
                     encode_push_data(preimage) +
                     witness_hex +
                     method_selector_hex
                 )
-                return unlock, op_sig, preimage
+                return unlock, preimage
 
             # First pass
-            first_unlock, _, _ = build_stateful_terminal_unlock(term_tx)
+            first_unlock, _ = build_stateful_terminal_unlock(term_tx)
             term_tx = build_terminal_tx(first_unlock)
 
             # Second pass
-            final_unlock, op_sig, preimage = build_stateful_terminal_unlock(term_tx)
+            final_unlock, preimage = build_stateful_terminal_unlock(term_tx)
             term_tx = insert_unlocking_script(term_tx, 0, final_unlock)
-            final_op_push_tx_sig = op_sig
             final_preimage = preimage
 
         elif needs_op_push_tx or sig_indices:
             # Stateless terminal -- keep placeholder sigs
+            # N-433: preimage only -- _build_stateful_prefix discards the signature.
             if needs_op_push_tx:
-                sig_hex, preimage_hex = compute_op_push_tx(
+                preimage_hex = compute_op_push_tx_preimage(
                     term_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                     term_sig_hash_type,
                 )
-                final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
 
             # Don't sign Sig params -- keep 72-byte placeholders
-            real_unlock = self.build_unlocking_script(method_name, resolved_args)
-            if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlock = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlock
+            real_unlock = self.build_unlocking_script(method_name, resolved_args, witness_hex)
+            if needs_op_push_tx:
+                real_unlock = self._build_stateful_prefix('', False) + real_unlock
                 tmp_tx = insert_unlocking_script(term_tx, 0, real_unlock)
-                final_sig, final_pre = compute_op_push_tx(
+                final_pre = compute_op_push_tx_preimage(
                     tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                     term_sig_hash_type,
                 )
                 resolved_args[preimage_index] = final_pre
-                final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlock = self._build_stateful_prefix(final_sig, False) + \
-                    self.build_unlocking_script(method_name, resolved_args)
+                real_unlock = self._build_stateful_prefix('', False) + \
+                    self.build_unlocking_script(method_name, resolved_args, witness_hex)
             term_tx = insert_unlocking_script(term_tx, 0, real_unlock)
             if not final_preimage and needs_op_push_tx:
                 final_preimage = resolved_args[preimage_index]
@@ -1782,7 +2124,6 @@ class RunarContract:
         return PreparedCall(
             sighash=sighash,
             preimage=final_preimage,
-            op_push_tx_sig=final_op_push_tx_sig,
             tx_hex=term_tx,
             sig_indices=sig_indices,
             method_name=method_name,
@@ -1835,7 +2176,7 @@ class RunarContract:
         if self.artifact.constructor_slots:
             for slot in self.artifact.constructor_slots:
                 if slot.byte_offset < base_offset:
-                    encoded = _encode_arg(self._constructor_args[slot.param_index])
+                    encoded = _encode_arg(self._resolve_constructor_arg(slot.param_index))
                     shift += len(encoded) // 2 - 1  # encoded bytes minus 1-byte placeholder
         # Account for codeSepIndex slot expansions
         for template_offset, adjusted_value in self._resolved_code_sep_slot_values():
@@ -1860,7 +2201,7 @@ class RunarContract:
             if self.artifact.constructor_slots:
                 for cs in self.artifact.constructor_slots:
                     if cs.byte_offset < slot.code_sep_index:
-                        encoded = _encode_arg(self._constructor_args[cs.param_index])
+                        encoded = _encode_arg(self._resolve_constructor_arg(cs.param_index))
                         shift += len(encoded) // 2 - 1
             for prev_offset, prev_value in result:
                 if prev_offset < slot.code_sep_index:
@@ -1930,6 +2271,29 @@ class RunarContract:
 
     # -- Private helpers --
 
+    def _resolve_constructor_arg(self, param_index: int):
+        """N-223: shared out-of-range guard for every ``_constructor_args[param_index]``
+        read in this file. The constructor only checks
+        ``len(constructor_args) == len(abi.constructor.params)`` -- it never
+        cross-checks that every ``ConstructorSlot.param_index`` actually falls
+        within that range. Before this fix, ``_build_code_script``,
+        ``_adjust_code_sep_offset``, and ``_resolved_code_sep_slot_values``
+        each indexed ``self._constructor_args`` directly: a malformed or
+        hostile artifact's out-of-range ``param_index`` crashed with a raw
+        Python ``IndexError`` instead of a named error (this item's brief:
+        "Go/Rust/Zig/Python crash with a raw index error"). A negative index
+        is rejected too -- Python's ``list[-1]`` means "from the end", which
+        would otherwise silently read the WRONG real arg rather than failing
+        at all.
+        """
+        if param_index < 0 or param_index >= len(self._constructor_args):
+            raise ValueError(
+                f'RunarContract: constructorSlots entry for {self.artifact.contract_name} has '
+                f'out-of-range paramIndex {param_index} (constructorArgs has '
+                f'{len(self._constructor_args)} entries)'
+            )
+        return self._constructor_args[param_index]
+
     def _build_code_script(self) -> str:
         script = self.artifact.script
 
@@ -1947,7 +2311,7 @@ class RunarContract:
                 for slot in self.artifact.constructor_slots:
                     subs.append((
                         slot.byte_offset,
-                        _encode_arg(self._constructor_args[slot.param_index]),
+                        _encode_arg(self._resolve_constructor_arg(slot.param_index)),
                     ))
 
             # CodeSepIndex slots: replace OP_0 placeholder with encoded adjusted
@@ -1965,12 +2329,28 @@ class RunarContract:
             for byte_offset, encoded in subs:
                 hex_offset = byte_offset * 2
                 script = script[:hex_offset] + encoded + script[hex_offset + 2:]
-        elif not self.artifact.state_fields:
-            # Backward compatibility: old stateless artifacts without constructorSlots.
-            # For stateful contracts, constructor args initialize the state section
-            # (after OP_RETURN), not the code portion.
-            for arg in self._constructor_args:
-                script += _encode_arg(arg)
+
+            # N-051: the deploy-time code-part length pins. The inscription
+            # envelope, when present, is part of `_codePart` (see
+            # _get_code_part_hex).
+            envelope_len = 0
+            if self._inscription:
+                envelope_len = len(build_inscription_envelope(
+                    self._inscription.content_type,
+                    self._inscription.data,
+                )) // 2
+            script = patch_code_part_len_slots(
+                self.artifact, script, subs, len(script) // 2 + envelope_len,
+            )
+        # R84: no fallback append for args without a constructor slot. A
+        # ctor arg with no corresponding constructor_slots entry means the
+        # property it initializes was eliminated by DCE (never read by any
+        # surviving method), so there is no placeholder in the compiled
+        # template for it to fill -- appending it would deploy a script that
+        # is not the one the compiler produced (and fails the consensus
+        # clean-stack rule on spend; see packages/runar-sdk's
+        # n013-dce-eliminated-ctor-args.test.ts). Matches the Java SDK,
+        # which never had this fallback.
 
         return script
 
@@ -2091,6 +2471,60 @@ def _regroup_fixed_array_state(state: dict, state_fields: list) -> dict:
                     flat[i] = prior_flat[i]
         rebuilt, _ = _regroup_nested(flat, dims)
         out[field.name] = rebuilt
+    return out
+
+
+# Constructor param types whose arg is spliced into the locking script as a push
+# of hex-decoded bytes.
+_BYTE_STRING_CTOR_TYPES = frozenset({
+    'ByteString', 'PubKey', 'Sig', 'Addr', 'Ripemd160', 'Sha256',
+    'Point', 'P256Point', 'P384Point', 'SigHashPreimage',
+})
+
+
+def _check_byte_string_ctor_args(artifact: RunarArtifact, args: list) -> list:
+    """N-329 / N-330: a ByteString-family constructor arg must be an
+    even-length hex string or raw bytes (``bytes`` / ``bytearray``).
+    ``_encode_arg`` treats every string as hex, so raw text (e.g. 20 raw Addr
+    bytes) was emitted as a push header followed by non-hex text, and its
+    ``str(value)`` fallback turned ``None`` into ``"None"``: corrupt locking
+    scripts with no error. Raw bytes are converted to their hex string (so the
+    script and any state built from the arg agree); every other kind is
+    refused. Returns the (possibly rewritten) args; the input is not mutated.
+    Same diagnostic in the TS/Go/Python/Ruby/Java/Rust tiers; Zig returns an
+    error tag.
+    """
+    out = list(args)
+    for i, (param, arg) in enumerate(zip(artifact.abi.constructor_params, args)):
+        leaf_type = _unwrap_fixed_array_leaf_type(param.type)
+        if leaf_type not in _BYTE_STRING_CTOR_TYPES:
+            continue
+        is_fixed_array = bool(getattr(param, 'fixed_array', None))
+
+        def refuse():
+            raise InvalidConstructorArgError(
+                f"RunarContract: constructor arg '{param.name}' ({param.type}) "
+                f"of {artifact.contract_name} must be an even-length hex string"
+            )
+
+        def width(h):
+            # N-073: a fixed-width type must have its declared width (N-045).
+            try:
+                check_fixed_width_value(h, leaf_type, f"RunarContract: constructor arg '{param.name}'")
+            except ValueError as e:
+                raise InvalidConstructorArgError(str(e)) from None
+            return h
+
+        def norm(v):
+            if isinstance(v, str):
+                return width(v) if is_hex_bytes(v) else refuse()
+            if isinstance(v, (bytes, bytearray)):
+                return width(bytes(v).hex())
+            if is_fixed_array and isinstance(v, (list, tuple)):
+                return [norm(x) for x in v]
+            return refuse()
+
+        out[i] = norm(arg)
     return out
 
 

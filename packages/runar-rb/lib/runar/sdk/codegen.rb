@@ -8,6 +8,7 @@
 
 require 'set'
 require_relative 'types'
+require_relative 'errors'
 
 module Runar
   module SDK
@@ -132,6 +133,21 @@ module Runar
       SNAKE_RESERVED = %w[connect deploy contract get_locking_script].to_set.freeze
       private_constant :SNAKE_RESERVED
 
+      # Ruby reserved words cannot be used as local variable / parameter names.
+      RUBY_KEYWORDS = %w[
+        BEGIN END __ENCODING__ __FILE__ __LINE__ alias and begin break case class
+        def defined? do else elsif end ensure false for if in module next nil not
+        or redo rescue retry return self super then true undef unless until when
+        while yield
+      ].to_set.freeze
+      private_constant :RUBY_KEYWORDS
+
+      # snake_case identifier safe to use as a Ruby parameter / local name.
+      def to_snake_ident(name)
+        snake = to_snake_case(name)
+        RUBY_KEYWORDS.include?(snake) ? "#{snake}_" : snake
+      end
+
       def safe_method_name(name)
         snake = to_snake_case(name)
         SNAKE_RESERVED.include?(snake) ? "call_#{snake}" : snake
@@ -143,13 +159,7 @@ module Runar
 
       def classify_params(method, is_stateful)
         method.params.map do |p|
-          hidden = p.type == 'Sig' ||
-                   (is_stateful && (
-                     p.type == 'SigHashPreimage' ||
-                     p.name == '_changePKH' ||
-                     p.name == '_changeAmount' ||
-                     p.name == '_newAmount'
-                   ))
+          hidden = p.type == 'Sig' || SDK.sdk_supplied_param?(p.name, p.type, is_stateful)
           {
             'name'     => p.name,
             'abi_type' => p.type,
@@ -163,15 +173,11 @@ module Runar
         classify_params(method, is_stateful).reject { |p| p['hidden'] }
       end
 
+      # Same predicate as RunarContract#prepare_call's arity check, so the
+      # generated args can never drift from what the SDK accepts (F-245).
       def get_sdk_arg_params(method, is_stateful)
-        classified = classify_params(method, is_stateful)
-        return classified unless is_stateful
-
-        classified.reject do |p|
-          p['abi_type'] == 'SigHashPreimage' ||
-            p['name'] == '_changePKH' ||
-            p['name'] == '_changeAmount' ||
-            p['name'] == '_newAmount'
+        classify_params(method, is_stateful).reject do |p|
+          SDK.sdk_supplied_param?(p['name'], p['abi_type'], is_stateful)
         end
       end
 
@@ -182,6 +188,12 @@ module Runar
       def terminal_method?(method, is_stateful)
         return true unless is_stateful
         return method.is_terminal unless method.is_terminal.nil?
+
+        # N-038: a SIGHASH_SINGLE method continues without _changePKH (BIP-143
+        # SINGLE does not commit the change output); the compiler omits
+        # isTerminal for it.
+        sig_hash_type = method.respond_to?(:sig_hash_type) ? method.sig_hash_type : nil
+        return false if !sig_hash_type.nil? && (sig_hash_type & 0x1F) == 0x03
 
         # Fallback: terminal if no _changePKH param
         method.params.none? { |p| p.name == '_changePKH' }
@@ -215,7 +227,7 @@ module Runar
         ctor_params = artifact.abi.constructor_params
         constructor_params = ctor_params.each_with_index.map do |p, i|
           {
-            'name'    => to_snake_case(p.name),
+            'name'    => to_snake_ident(p.name),
             'type'    => map_type(p.type),
             'abiType' => p.type,
             'isLast'  => i == ctor_params.length - 1,
@@ -233,7 +245,7 @@ module Runar
 
           user_params = user_params_raw.each_with_index.map do |p, i|
             {
-              'name'    => to_snake_case(p['name']),
+              'name'    => to_snake_ident(p['name']),
               'type'    => p['rb_type'],
               'abiType' => p['abi_type'],
               'isLast'  => i == user_params_raw.length - 1,
@@ -242,7 +254,7 @@ module Runar
 
           # SDK args expression
           sdk_args_parts = sdk_args_raw.map do |p|
-            p['hidden'] ? 'nil' : to_snake_case(p['name'])
+            p['hidden'] ? 'nil' : to_snake_ident(p['name'])
           end
           sdk_args_expr = sdk_args_parts.join(', ')
 
@@ -251,7 +263,7 @@ module Runar
           sig_params = sig_params_raw.each_with_index.map do |sp, i|
             idx = sdk_args_raw.index { |p| p['name'] == sp['name'] }
             {
-              'name'     => to_snake_case(sp['name']),
+              'name'     => to_snake_ident(sp['name']),
               'argIndex' => idx,
               'isLast'   => i == sig_params_raw.length - 1,
             }
@@ -338,7 +350,7 @@ module Runar
 
               def to_call_options
                 Runar::SDK::CallOptions.new(
-                  satoshis: satoshis.positive? ? satoshis : nil,
+                  satoshis: satoshis,
                   change_address: change_address.empty? ? nil : change_address,
                   change_pub_key: change_pub_key.empty? ? nil : change_pub_key,
                   new_state: new_state,

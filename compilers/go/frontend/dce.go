@@ -17,17 +17,23 @@ package frontend
 // pure, and the merged locals kept their pre-branch values. See
 // conformance/dce/live-if.test.ts.
 //
-// This module is the canonical, standalone DCE pass for the Go compiler.
-// It mirrors the Zig reference implementation in
-// `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in
-// `anf_optimize.go` has been surgically extracted here.
+// This module is the canonical DEFINITION of DCE for the Go compiler — one
+// extracted implementation, mirroring the Zig reference in
+// `compilers/zig/src/passes/dce.zig` — but it is NOT a standalone pipeline
+// pass (F-303). Its only caller is anf_optimize.go's OptimizeEC, which runs
+// it over every method once optimizeMethodEC has rewritten them, and only
+// behind the `anyChanged` gate (N-097: the TS reference gate), so a program no
+// method of which triggers an EC rewrite is never DCE'd through any public
+// compile entrypoint. The earlier inline implementation in `anf_optimize.go`
+// has been surgically extracted here.
 //
 // Behaviour: byte-for-byte identical, at the time of that extraction, to the
 // previous inline DCE in anf_optimize.go. Verified by the conformance suite
 // (cross-tier hex parity) and the unknown-kind exhaustiveness tests.
 //
-// N-140 is the one deliberate behaviour change since: liveness considers the
-// names a binding DEFINES, not only its own Name.
+// N-140 is a deliberate behaviour change since: liveness considers the
+// names a binding DEFINES, not only its own Name. F-108 is the other: a
+// private method's last binding (its return value) is a liveness root.
 
 import (
 	"strings"
@@ -51,6 +57,85 @@ func EliminateDeadCode(program *ir.ANFProgram) *ir.ANFProgram {
 // EliminateDeadBindings removes bindings that are not referenced by any other
 // binding, iteratively until no more can be removed.
 func EliminateDeadBindings(method *ir.ANFMethod) {
+	eliminateDeadBindingsFiltered(method, nil)
+}
+
+// EliminateDeadBindingsAmong is EliminateDeadBindings restricted to bindings
+// whose Name is in candidates: every other binding is kept as if live (N-138).
+// The constant folder uses it to drop the operand bindings its own rewrites
+// orphaned (the `1` under a folded `-1n`) without also deleting bindings that
+// were already dead before folding, so fold-ON output does not move for a
+// program the folder did not change.
+func EliminateDeadBindingsAmong(method *ir.ANFMethod, candidates map[string]bool) {
+	eliminateDeadBindingsFiltered(method, candidates)
+	// N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+	// (`-5n` in an else arm). Filtering only the top level left them there,
+	// stack lowering pushed them, and the arms ended at different depths.
+	// Prune the nested scopes too, then re-filter the top level, to a fixed
+	// point (a nested removal can orphan a top-level operand).
+	for pruneNestedOrphans(method, candidates) {
+		eliminateDeadBindingsFiltered(method, candidates)
+	}
+}
+
+// pruneNestedOrphans removes fold-orphaned pure bindings from every nested
+// scope (`if` arms, `loop` bodies, recursively) and reports whether anything
+// was removed (N-446).
+//
+// A nested binding is removed only if it is a candidate (referenced before
+// folding), is referenced by NO binding anywhere in the method now (arm
+// bindings can be read after the `if` by name, so an arm is never filtered
+// against its own references alone), is not one of its `if`'s declared
+// Results (stack lowering requires those slots in both arms), is side-effect
+// free, and is not itself an `if` / `loop` (those are recursed into instead).
+// Only the candidate-restricted fold prune calls this; the EC-gated DCE stays
+// top-level, so fold-OFF output cannot move. Rebuilds every slice it changes
+// rather than editing one in place.
+func pruneNestedOrphans(method *ir.ANFMethod, candidates map[string]bool) bool {
+	removedAny := false
+	for {
+		refs := make(map[string]bool)
+		for i := range method.Body {
+			collectValueRefs(&method.Body[i].Value, refs)
+		}
+		changed := false
+		var filterScope func(scope []ir.ANFBinding, nested bool, protect map[string]bool) []ir.ANFBinding
+		filterScope = func(scope []ir.ANFBinding, nested bool, protect map[string]bool) []ir.ANFBinding {
+			out := make([]ir.ANFBinding, 0, len(scope))
+			for _, b := range scope {
+				switch b.Value.Kind {
+				case "if":
+					res := make(map[string]bool, len(b.Value.Results))
+					for _, r := range b.Value.Results {
+						res[r] = true
+					}
+					b.Value.Then = filterScope(b.Value.Then, true, res)
+					b.Value.Else = filterScope(b.Value.Else, true, res)
+					out = append(out, b)
+				case "loop":
+					b.Value.Body = filterScope(b.Value.Body, true, nil)
+					out = append(out, b)
+				default:
+					if nested && candidates[b.Name] && !refs[b.Name] && !protect[b.Name] && !HasSideEffect(&b.Value) {
+						changed = true
+						continue
+					}
+					out = append(out, b)
+				}
+			}
+			return out
+		}
+		next := filterScope(method.Body, false, nil)
+		if !changed {
+			return removedAny
+		}
+		method.Body = next
+		removedAny = true
+	}
+}
+
+func eliminateDeadBindingsFiltered(method *ir.ANFMethod, candidates map[string]bool) {
+	keepLast := returnsLastBinding(method)
 	for {
 		ownRefs := make([]map[string]bool, len(method.Body))
 		refCount := make(map[string]int)
@@ -65,7 +150,9 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 		var kept []ir.ANFBinding
 		removed := false
 		for i, b := range method.Body {
-			if isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
+			if (keepLast && i == len(method.Body)-1) ||
+				(candidates != nil && !candidates[b.Name]) ||
+				isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
 				kept = append(kept, b)
 			} else {
 				removed = true
@@ -76,6 +163,17 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 			break
 		}
 	}
+}
+
+// returnsLastBinding reports whether method's LAST binding is its return value
+// (F-108). Stack lowering inlines a private method at each method_call and
+// takes that binding as the call's result, so it is a liveness root even though
+// nothing inside the method references it; without the root a pure return
+// expression (`return n + 1n`) was deleted and the helper emptied. The
+// predicate is the one stack lowering uses to collect inlinable private
+// methods. A public method's last binding is never a return value.
+func returnsLastBinding(method *ir.ANFMethod) bool {
+	return method.Name != "constructor" && !method.IsPublic
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +242,10 @@ func isReferencedExternally(b *ir.ANFBinding, ownRefs map[string]bool, refCount 
 func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 	switch v.Kind {
 	case "load_param":
-		// Do NOT track @ref: targets here — matches TS collectRefsFromValue
-		// which breaks on load_param without collecting refs.
+		// N-356: a reassigned parameter is bound under its own name and read
+		// back as `load_param <name>`; count the read so DCE keeps the
+		// rebinding. Matches TS collectRefsFromValue.
+		refs[v.Name] = true
 	case "load_prop":
 		// references the property by name, not a binding
 	case "load_const":

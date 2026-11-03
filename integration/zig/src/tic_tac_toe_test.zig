@@ -93,7 +93,7 @@ test "TicTacToe_Join" {
     defer allocator.free(fund_o);
     var signer_o = try player_o.localSigner();
 
-    // join(opponentPK, sig) -- playerO joins. Pass null options so the
+    // join(opponentPK, sig) -- playerO joins. Leave new_state unset so the
     // SDK auto-computes the new state via the ANF interpreter (matches the
     // Go integration test pattern). Explicit `new_state` worked in the
     // legacy SDK path but stops broadcasting once `playerO` (a PubKey) is
@@ -108,7 +108,7 @@ test "TicTacToe_Join" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        null,
+        .{ .satoshis = 2 * bet_amount }, // N-027: the join pays the bet
     );
     defer allocator.free(join_txid);
     std.log.info("TicTacToe join TX: {s}", .{join_txid});
@@ -164,7 +164,7 @@ test "TicTacToe_Move" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        null,
+        .{ .satoshis = 2 * bet_amount }, // N-027: the join pays the bet
     );
     allocator.free(join_txid);
 
@@ -252,7 +252,7 @@ test "TicTacToe_WrongPlayerRejected" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        null,
+        .{ .satoshis = 2 * bet_amount }, // N-027: the join pays the bet
     );
     allocator.free(join_txid);
 
@@ -344,7 +344,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        null,
+        .{ .satoshis = 2 * bet_amount }, // N-027: the join pays the bet
     );
     allocator.free(join_txid);
 
@@ -358,7 +358,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
         },
         rpc_provider.provider(),
         signer_intruder.signer(),
-        null,
+        .{ .satoshis = 3 * bet_amount }, // paid (N-027): only the status guard can reject it
     );
 
     if (second_join_result) |txid| {

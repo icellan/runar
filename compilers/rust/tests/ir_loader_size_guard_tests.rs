@@ -66,7 +66,9 @@ fn load_ir_accepts_minimal_program() {
     // (no public method => empty locking script => spendable with OP_1). The
     // test's subject is the DoS caps, not the schema, so the fix is a fixture
     // that is genuinely minimal AND valid rather than a weaker assertion.
-    let minimal = r#"{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}"#;
+    // N-071: and a public method must end with an assert, so the body is one
+    // constant plus the assert on it.
+    let minimal = r#"{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[{"name":"t0","value":{"kind":"load_const","value":true}},{"name":"t1","value":{"kind":"assert","value":"t0"}}]}]}"#;
     let res = load_ir_from_str_typed(minimal);
     assert!(res.is_ok(), "expected ok, got {:?}", res);
 }

@@ -257,7 +257,9 @@ class TestLoopOuterRefs < Minitest::Test
           "params" => [{ "name" => "x", "type" => "bigint" }],
           "body" => [
             { "name" => "t0", "value" => { "kind" => "load_param", "name" => "ghost" } },
-            { "name" => "t1", "value" => { "kind" => "assert", "valueRef" => "t0" } }
+            # N-069: the wire key is "value" (was "valueRef", which no loader
+            # reads); the loader now refuses an assert without it.
+            { "name" => "t1", "value" => { "kind" => "assert", "value" => "t0" } }
           ]
         }
       ]

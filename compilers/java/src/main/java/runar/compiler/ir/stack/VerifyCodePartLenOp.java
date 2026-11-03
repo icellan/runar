@@ -12,7 +12,7 @@ package runar.compiler.ir.stack;
  * exist after {@code Emit}), so the emitter resolves it: it reserves a
  * FIXED-WIDTH 9-byte sequence
  *
- * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY</pre>
+ * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM OP_NUMEQUAL OP_VERIFY</pre>
  *
  * and back-patches {@code LL LL LL LL} (little-endian) once the whole script
  * has been emitted. The width is fixed so that the patched value can never
@@ -24,13 +24,16 @@ package runar.compiler.ir.stack;
  * {@code exact} says whether every placeholder's growth is type-determined:
  *
  * <ul>
- *   <li>{@code exact == true}  &rarr; {@code SIZE(_codePart) == emittedLen + delta}
- *       (OP_NUMEQUAL).</li>
- *   <li>{@code exact == false} &rarr; {@code SIZE(_codePart) >= emittedLen + delta}
- *       (OP_GREATERTHANOREQUAL). A variable-width readonly constructor argument
- *       ({@code bigint}, {@code ByteString}) has no compile-time width, and
- *       placeholder growth is never negative, so the sum is still a sound LOWER
- *       bound.</li>
+ *   <li>{@code exact == true}  &rarr; {@code SIZE(_codePart) == emittedLen + delta},
+ *       final at compile time.</li>
+ *   <li>{@code exact == false} &rarr; a variable-width readonly constructor
+ *       argument ({@code bigint}, {@code ByteString}) has no compile-time width.
+ *       The comparison is still OP_NUMEQUAL (N-051: a lower bound let a spender
+ *       claim a truncated {@code _codePart} ending at a 0x6a inside the baked
+ *       value), the template holds {@code emittedLen + delta} as a placeholder,
+ *       and the emitter records the field as an artifact
+ *       {@code codePartLenSlots} entry that the SDK overwrites with the real
+ *       deployed code-part length.</li>
  * </ul>
  *
  * <p>Unlike every other Stack IR variant this is a mutable class rather than a
@@ -44,7 +47,7 @@ public final class VerifyCodePartLenOp implements StackOp {
     /** Deploy-time byte growth of the template's OP_0 placeholders. */
     private int delta;
 
-    /** true &rarr; exact equality pin; false &rarr; lower-bound pin. */
+    /** true &rarr; value final at compile time; false &rarr; deploy-time slot (N-051). */
     private boolean exact;
 
     private StackSourceLoc sourceLoc;

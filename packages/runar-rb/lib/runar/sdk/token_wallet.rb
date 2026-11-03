@@ -6,6 +6,8 @@ require_relative 'signer'
 require_relative 'contract'
 require_relative 'calling'
 require_relative 'deployment'
+require_relative 'script_utils'
+require_relative 'state'
 
 # TokenWallet — manages token UTXOs for a fungible token contract.
 #
@@ -24,6 +26,33 @@ require_relative 'deployment'
 module Runar
   module SDK
     class TokenWallet
+      # N-239 (user decision R92): #merge and #transfer drive an ABI that
+      # cannot be made sound, so they are deprecated rather than redesigned or
+      # removed. Each warns once per process on first use. Plain +warn+, not
+      # +category: :deprecated+, which Ruby >= 2.7.2 suppresses by default.
+      MERGE_DEPRECATION =
+        'runar-sdk: warning: TokenWallet#merge is deprecated and unsafe. Its ' \
+        'merge(sig, otherSupply, otherHolder) ABI cannot authenticate the companion ' \
+        'input, so a holder can call merge on ONE input with a made-up otherSupply ' \
+        '(supply inflation). Use the token-ft example (FungibleTokenExample, ' \
+        'examples/*/token-ft/) instead (N-239).'
+      TRANSFER_DEPRECATION =
+        'runar-sdk: warning: TokenWallet#transfer is deprecated and unsafe. Its ' \
+        'transfer(sig, to: Addr) ABI cannot re-key the PubKey holder from an Addr, ' \
+        'so the token stays with the current holder instead of moving to the ' \
+        'recipient. Use the token-ft example (FungibleTokenExample, ' \
+        'examples/*/token-ft/) instead (N-239).'
+
+      @deprecation_warned = {}
+
+      # @api private
+      def self.warn_deprecated_once(key, message)
+        return if @deprecation_warned[key]
+
+        @deprecation_warned[key] = true
+        warn(message)
+      end
+
       # @param artifact [RunarArtifact] compiled token contract artifact
       # @param provider [Provider] blockchain provider
       # @param signer   [Signer] signing key
@@ -59,7 +88,11 @@ module Runar
       # @param recipient_addr [String] the BSV address (Addr) of the recipient
       # @param amount [Integer] minimum token balance required in the source UTXO
       # @return [String] the txid of the transfer transaction
+      # @deprecated Unsafe (N-239): the transfer(sig, to: Addr) ABI cannot
+      #   re-key a PubKey holder, so the token does not move to
+      #   +recipient_addr+. Use the token-ft example (FungibleTokenExample).
       def transfer(recipient_addr, amount)
+        TokenWallet.warn_deprecated_once(:transfer, TRANSFER_DEPRECATION)
         utxos = get_utxos
         raise 'TokenWallet.transfer: no token UTXOs found' if utxos.empty?
 
@@ -71,30 +104,14 @@ module Runar
           next unless balance >= amount
 
           # FungibleToken.transfer(sig: Sig, to: Addr)
-          # Build a preliminary unlocking script with a placeholder sig.
-          placeholder_sig = '00' * 72
-          prelim_unlock = contract.build_unlocking_script('transfer', [placeholder_sig, recipient_addr])
-
-          change_address = @signer.get_address
-          fee_rate = @provider.get_fee_rate
-          additional_utxos = @provider.get_utxos(change_address)
-          change_script = SDK.build_p2pkh_script(change_address)
-
-          _tx_hex, _input_count, _change = SDK.build_call_transaction(
-            utxo,
-            prelim_unlock,
-            '', # FungibleToken is stateless (SmartContract base)
-            0,
-            change_address,
-            change_script,
-            additional_utxos.empty? ? nil : additional_utxos,
-            fee_rate: fee_rate
-          )
-
-          # Call the contract method via the RunarContract API.
+          # F-045: pass nil for the Sig so +call+ auto-signs the transaction it
+          # actually builds and broadcasts. Signing a locally built preliminary
+          # tx covers a different tx and is rejected on-chain.
+          # An Addr is a 20-byte hash160: accept a Base58 address (as
+          # documented), a raw hash160, or a public key.
+          to_pkh = SDK.build_p2pkh_script(recipient_addr)[6, 40]
           contract.connect(@provider, @signer)
-          sig = @signer.sign(_tx_hex, 0, utxo.script, utxo.satoshis)
-          txid, _tx = contract.call('transfer', [sig, recipient_addr])
+          txid, _tx = contract.call('transfer', [nil, to_pkh])
           return txid
         end
 
@@ -108,7 +125,11 @@ module Runar
       # on-chain state and passed as arguments.
       #
       # @return [String] the txid of the merge transaction
+      # @deprecated Unsafe (N-239): the merge(sig, otherSupply, otherHolder)
+      #   ABI cannot authenticate its companion input, so a holder can inflate
+      #   supply. Use the token-ft example (FungibleTokenExample).
       def merge
+        TokenWallet.warn_deprecated_once(:merge, MERGE_DEPRECATION)
         utxos = get_utxos
         raise 'TokenWallet.merge: need at least 2 UTXOs to merge' if utxos.length < 2
 
@@ -123,29 +144,20 @@ module Runar
         other_holder = (second_state['holder'] || '').to_s
 
         # FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-        placeholder_sig = '00' * 72
-        prelim_unlock = contract.build_unlocking_script('merge', [placeholder_sig, other_supply, other_holder])
+        # F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        # the OTHER input's supply/holder, and every Sig is nil so +call+ signs
+        # each input over the transaction it actually broadcasts.
+        first_state = contract.get_state
+        first_supply = (first_state['supply'] || first_state['balance'] || first_state['amount'] || 0).to_i
+        first_holder = (first_state['holder'] || '').to_s
 
-        change_address = @signer.get_address
-        fee_rate = @provider.get_fee_rate
-        additional_utxos = @provider.get_utxos(change_address)
-        change_script = SDK.build_p2pkh_script(change_address)
-
-        _tx_hex, _input_count, _change = SDK.build_call_transaction(
-          first_utxo,
-          prelim_unlock,
-          '',
-          0,
-          change_address,
-          change_script,
-          additional_utxos.empty? ? nil : additional_utxos,
-          fee_rate: fee_rate
-        )
-
-        # Sign and call via the RunarContract API.
         contract.connect(@provider, @signer)
-        sig = @signer.sign(_tx_hex, 0, first_utxo.script, first_utxo.satoshis)
-        txid, _tx = contract.call('merge', [sig, other_supply, other_holder])
+        opts = CallOptions.new(
+          change_address: @signer.get_address,
+          additional_contract_inputs: [second_utxo],
+          additional_contract_input_args: [[nil, first_supply, first_holder]]
+        )
+        txid, _tx = contract.call('merge', [nil, other_supply, other_holder], nil, nil, opts)
         txid
       end
 
@@ -159,13 +171,42 @@ module Runar
         address = @signer.get_address
         all_utxos = @provider.get_utxos(address)
 
-        script_prefix = @artifact.script
+        # N-076: the artifact script is the TEMPLATE; every slot (constructor
+        # arg, codeSepIndex, code-part length) is a placeholder that deployment
+        # replaces, so a raw prefix of it never matches a slotted deployment.
+        # With constructor slots, use the slot-aware +matches_artifact+; a
+        # template with none is deployed verbatim, so its literal prefix is
+        # exact.
+        template = @artifact.script
+        slotted = !@artifact.constructor_slots.nil? && !@artifact.constructor_slots.empty?
+        declares_state = !@artifact.state_fields.nil? && !@artifact.state_fields.empty?
 
         all_utxos.select do |utxo|
-          if utxo.script && !utxo.script.empty? && script_prefix && !script_prefix.empty?
-            utxo.script.start_with?(script_prefix)
-          else
+          if utxo.script.nil? || utxo.script.empty? || template.nil? || template.empty?
             true
+          elsif !slotted
+            utxo.script.start_with?(template)
+          else
+            # N-317: any UTXO the provider lists is attacker-influenced. A
+            # script that is not whole hex bytes, or that fails to parse in any
+            # way below, is not an instance of this contract; it must never
+            # abort the listing.
+            next false unless ScriptUtils.hex_bytes?(utxo.script)
+
+            begin
+              # matches_artifact strips the state section only for artifacts
+              # that declare state fields; cut it here for the rest.
+              code_hex = utxo.script
+              unless declares_state
+                pos = State.find_last_op_return(code_hex)
+                code_hex = code_hex[0, pos] if pos != -1
+              end
+              ScriptUtils.matches_artifact(@artifact, code_hex)
+            rescue StandardError
+              # Not well-formed at the artifact's slot offsets (F-238): not an
+              # instance of this contract.
+              false
+            end
           end
         end
       end

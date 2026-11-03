@@ -116,3 +116,75 @@ func TestR223_ALongVKIsRefusedByArityToo(t *testing.T) {
 	}
 	assertRefusedByMSMArity(t, err)
 }
+
+// F-184 (CL-BUG-221/222/223): the tests above pin the arity gate on the
+// standalone backend (CompileGroth16WA). The LIBRARY path —
+// CompileOptions.Groth16WAVKey -> buildLowerOptions -> loadGroth16WAConfig —
+// never called validateGroth16PublicInputs, so a Mode-3 contract embedding the
+// MSM-binding preamble compiled against a non-5-public-input VK with the
+// missing IC slots zero-filled (a short key) or the extra ones dropped (a long
+// key). The gate now lives in loadGroth16WAConfig, which every entry point
+// passes through.
+//
+// Proves: a well-formed SP1-shaped VK with 3 or 6 public inputs is refused by
+// the MSM-arity check (same sentence as the standalone backend) through the
+// public library API, and the real 5-input key still compiles there.
+// Does not prove: anything about the soundness of the 5-input MSM binding
+// itself, or about on-chain execution — no script is run here.
+const f184MSMSource = `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type F184MSM struct {
+	runar.StatefulSmartContract
+
+	Pinned  runar.Bigint ` + "`" + `runar:"readonly"` + "`" + `
+	Counter runar.Bigint
+}
+
+func (c *F184MSM) Advance(nextCounter runar.Bigint) {
+	runar.AssertGroth16WitnessAssistedWithMSM()
+	runar.Assert(runar.Groth16PublicInput(0) == c.Pinned)
+	c.Counter = nextCounter
+}
+`
+
+func f184CompileMSM(t *testing.T, vkPath string) error {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "F184MSM.runar.go")
+	if err := os.WriteFile(src, []byte(f184MSMSource), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	art, err := CompileFromSource(src, CompileOptions{Groth16WAVKey: vkPath})
+	if err == nil && (art == nil || len(art.Script) == 0) {
+		t.Fatal("compile returned no error but no script")
+	}
+	return err
+}
+
+func TestF184_LibraryPath_RealVKStillCompiles(t *testing.T) {
+	if err := f184CompileMSM(t, sp1VKPath(t)); err != nil {
+		t.Fatalf("the SP1 VK must compile through CompileOptions.Groth16WAVKey: %v", err)
+	}
+}
+
+func TestF184_LibraryPath_ShortVKIsRefusedByArity(t *testing.T) {
+	// 4 IC entries = 3 public inputs: IC[4], IC[5] would be zero-filled.
+	err := f184CompileMSM(t, r223VKWithICCount(t, 4))
+	if err == nil {
+		t.Fatal("a 3-public-input VK compiled through CompileOptions.Groth16WAVKey: " +
+			"IC[4] and IC[5] were padded with (0, 0)")
+	}
+	assertRefusedByMSMArity(t, err)
+}
+
+func TestF184_LibraryPath_LongVKIsRefusedByArity(t *testing.T) {
+	// 7 IC entries = 6 public inputs: IC[6] would be silently dropped.
+	err := f184CompileMSM(t, r223VKWithICCount(t, 7))
+	if err == nil {
+		t.Fatal("a 6-public-input VK compiled through CompileOptions.Groth16WAVKey: " +
+			"IC[6] was silently dropped by the 6-point MSM binding")
+	}
+	assertRefusedByMSMArity(t, err)
+}

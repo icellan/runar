@@ -112,6 +112,7 @@ export type {
   StateField,
   ConstructorSlot,
   CodeSepIndexSlot,
+  CodePartLenSlot,
   TemplateDigest,
   TemplateDigestPiece,
   RunarArtifact,

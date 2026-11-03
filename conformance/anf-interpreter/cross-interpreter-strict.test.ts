@@ -5,6 +5,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { executeStrict, AssertionFailureError } from '../../packages/runar-sdk/src/index.js';
 import type { ANFProgram } from '../../packages/runar-ir-schema/src/index.js';
+import { enforceDriverGate } from './driver-gate.js';
 
 // Strict-mode counterpart to cross-interpreter.test.ts.
 //
@@ -24,8 +25,6 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
 const EXPECTED_DIR = join(__dirname, 'expected-strict');
 const DRIVERS_DIR = join(__dirname, 'drivers');
-
-const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
   /**
@@ -266,15 +265,8 @@ function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
   return JSON.parse(trimmed) as CaseOutput;
 }
 
-const requireAll = IS_CI || process.env.RUNAR_ANF_DRIVERS_STRICT === '1';
-
 const missingDrivers: DriverConfig[] = driverConfigs.filter(c => !isDriverAvailable(c));
-if (requireAll && missingDrivers.length > 0) {
-  throw new Error(
-    `ANF strict-parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
-    missingDrivers.map(c => `  - ${c.name}: ${c.setupHint}`).join('\n'),
-  );
-}
+enforceDriverGate('ANF strict-parity', missingDrivers, process.env);
 
 for (const cfg of driverConfigs) {
   describe.skipIf(!isDriverAvailable(cfg))(`ANF strict parity (${cfg.name} SDK)`, () => {

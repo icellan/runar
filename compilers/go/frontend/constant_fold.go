@@ -24,6 +24,11 @@ import (
 // OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
 const powFoldExponentLimit = 32
 
+// gcdFoldIterations is the unroll count of the emitted gcd loop
+// (codegen/stack.go lowerGcd). Past it the script returns a partial value, so
+// the folder declines (N-029). log2 is exact for every n > 0 since N-103.
+const gcdFoldIterations = 256
+
 type constKind int
 
 const (
@@ -57,6 +62,26 @@ func (e *constEnv) set(name string, v *constValue) {
 
 func (e *constEnv) get(name string) *constValue {
 	return e.m[name]
+}
+
+func (e *constEnv) remove(name string) {
+	delete(e.m, name)
+}
+
+// boundNames collects every name bound in bindings, including inside nested
+// if arms and loop bodies.
+func boundNames(bindings []ir.ANFBinding, out map[string]struct{}) map[string]struct{} {
+	for i := range bindings {
+		out[bindings[i].Name] = struct{}{}
+		switch bindings[i].Value.Kind {
+		case "if":
+			boundNames(bindings[i].Value.Then, out)
+			boundNames(bindings[i].Value.Else, out)
+		case "loop":
+			boundNames(bindings[i].Value.Body, out)
+		}
+	}
+	return out
 }
 
 func (e *constEnv) clone() *constEnv {
@@ -144,10 +169,12 @@ func evalBinOp(op string, left, right *constValue) *constValue {
 				return nil
 			}
 			return &constValue{kind: constString, s: left.s + right.s}
+		// F-160: OP_EQUAL compares the DECODED bytes and hex decoding ignores
+		// case, so 'aa' === 'AA' is true on-chain.
 		case "===":
-			return &constValue{kind: constBool, b: left.s == right.s}
+			return &constValue{kind: constBool, b: hexEqual(left.s, right.s)}
 		case "!==":
-			return &constValue{kind: constBool, b: left.s != right.s}
+			return &constValue{kind: constBool, b: !hexEqual(left.s, right.s)}
 		}
 		return nil
 	}
@@ -167,6 +194,15 @@ var hexRegexp = regexp.MustCompile(`^[0-9a-fA-F]*$`)
 
 func isValidHex(s string) bool {
 	return hexRegexp.MatchString(s)
+}
+
+// hexEqual compares two ByteString literals as bytes: case-insensitively when
+// both are hex, by exact text otherwise.
+func hexEqual(a, b string) bool {
+	if isValidHex(a) && isValidHex(b) {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // ---------------------------------------------------------------------------
@@ -255,14 +291,17 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		if len(bigArgs) != 3 {
 			return nil
 		}
+		// The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+		// That differs from `val < lo ? lo : ...` once lo > hi (N-029).
 		val, lo, hi := bigArgs[0], bigArgs[1], bigArgs[2]
-		if val.Cmp(lo) < 0 {
-			return &constValue{kind: constBigInt, bigint: new(big.Int).Set(lo)}
+		m := val
+		if lo.Cmp(m) > 0 {
+			m = lo
 		}
-		if val.Cmp(hi) > 0 {
-			return &constValue{kind: constBigInt, bigint: new(big.Int).Set(hi)}
+		if hi.Cmp(m) < 0 {
+			m = hi
 		}
-		return &constValue{kind: constBigInt, bigint: new(big.Int).Set(val)}
+		return &constValue{kind: constBigInt, bigint: new(big.Int).Set(m)}
 
 	case "sign":
 		if len(bigArgs) != 1 {
@@ -337,9 +376,18 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		if len(bigArgs) != 2 {
 			return nil
 		}
+		// The script runs at most gcdFoldIterations Euclid steps
+		// (codegen/stack.go lowerGcd); if that is not enough it returns a
+		// partial remainder, not the gcd. Decline there (N-029).
 		a := new(big.Int).Abs(bigArgs[0])
 		b := new(big.Int).Abs(bigArgs[1])
-		return &constValue{kind: constBigInt, bigint: new(big.Int).GCD(nil, nil, a, b)}
+		for i := 0; i < gcdFoldIterations && b.Sign() != 0; i++ {
+			a, b = b, new(big.Int).Rem(a, b)
+		}
+		if b.Sign() != 0 {
+			return nil
+		}
+		return &constValue{kind: constBigInt, bigint: a}
 
 	case "divmod":
 		if len(bigArgs) != 2 || bigArgs[1].Sign() == 0 {
@@ -352,11 +400,11 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 			return nil
 		}
 		n := bigArgs[0]
+		// The script aborts for n <= 0 (N-103): decline, so the abort survives.
 		if n.Sign() <= 0 {
-			return &constValue{kind: constBigInt, bigint: big.NewInt(0)}
+			return nil
 		}
-		bits := int64(n.BitLen() - 1)
-		return &constValue{kind: constBigInt, bigint: big.NewInt(bits)}
+		return &constValue{kind: constBigInt, bigint: big.NewInt(int64(n.BitLen() - 1))}
 
 	case "bool":
 		if len(bigArgs) != 1 {
@@ -384,11 +432,28 @@ func foldBindings(bindings []ir.ANFBinding, env *constEnv) []ir.ANFBinding {
 func foldBinding(binding ir.ANFBinding, env *constEnv) ir.ANFBinding {
 	foldedValue := foldValue(&binding.Value, env)
 
-	// If the folded value is a load_const, register in the environment
+	// If the folded value is a load_const, register in the environment.
+	//
+	// A name may be bound more than once (reassignment, or a user local that
+	// shares a compiler temp's name). The env must track the LATEST binding:
+	// a rebinding to a non-constant drops the old constant, or later uses
+	// would fold with a value the name no longer holds (N-064).
+	//
+	// N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not itself a
+	// constant, but when its target currently holds one the alias holds the
+	// same value, so later uses of the alias fold too. The binding stays an
+	// alias; the prune removes it if the fold orphaned it.
+	var cv *constValue
 	if foldedValue.Kind == "load_const" {
-		if cv := anfValueToConst(foldedValue); cv != nil {
-			env.set(binding.Name, cv)
+		cv = anfValueToConst(foldedValue)
+		if cv == nil && foldedValue.ConstString != nil && strings.HasPrefix(*foldedValue.ConstString, "@ref:") {
+			cv = env.get(strings.TrimPrefix(*foldedValue.ConstString, "@ref:"))
 		}
+	}
+	if cv != nil {
+		env.set(binding.Name, cv)
+	} else {
+		env.remove(binding.Name)
 	}
 
 	result := ir.ANFBinding{Name: binding.Name, Value: *foldedValue}
@@ -527,6 +592,12 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		elseEnv := env.clone()
 		foldedThen := foldBindings(value.Then, thenEnv)
 		foldedElse := foldBindings(value.Else, elseEnv)
+		// N-064: a name either arm rebinds may hold the arm's value after the
+		// if (that is how a branch reassigns a local), so the enclosing env's
+		// constant for it is stale past this point.
+		for n := range boundNames(value.Else, boundNames(value.Then, map[string]struct{}{})) {
+			env.remove(n)
+		}
 		return &ir.ANFValue{
 			Kind: "if",
 			Cond: value.Cond,
@@ -550,8 +621,19 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		// it. The reference tier has always used a spread here
 		// (`{ ...value, body: foldedBody }`), which is the same thing this now
 		// does: every field survives by construction, including any added later.
+		//
+		// N-064: the body runs once per iteration, so a name it rebinds holds
+		// the entry constant only in iteration 0 — it is not a constant inside
+		// the body, nor after the loop.
+		rebound := boundNames(value.Body, map[string]struct{}{})
 		bodyEnv := env.clone()
+		for n := range rebound {
+			bodyEnv.remove(n)
+		}
 		foldedBody := foldBindings(value.Body, bodyEnv)
+		for n := range rebound {
+			env.remove(n)
+		}
 		folded := *value
 		folded.Body = foldedBody
 		return &folded
@@ -584,9 +666,32 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 
 // FoldConstants applies constant folding to an ANF program.
 // It evaluates compile-time-known expressions and replaces them with
-// load_const bindings. Also runs dead binding elimination afterward.
+// load_const bindings. It does NOT run dead-binding elimination (F-303):
+// FoldConstants is just `return foldConstantsOnly(program)` below. Any DCE a
+// compiled program receives comes later and conditionally, from OptimizeEC's
+// EC-gated cleanup (anf_optimize.go) — never from this pass.
 func FoldConstants(program *ir.ANFProgram) *ir.ANFProgram {
 	return foldConstantsOnly(program)
+}
+
+// FoldConstantsAndPrune is FoldConstants followed by removal of the operand
+// bindings the fold orphaned (N-138).
+//
+// FoldConstants rewrites `t1 = -t0` to the constant `t1 = -1` but leaves
+// `t0 = 1` in place, and stack lowering then pushes it and drops it again
+// (`51 4f 7b 7c a0 77` for `a > -1n`). Only names that some binding referenced
+// BEFORE folding are removal candidates, so a binding that was already dead is
+// left exactly as it was. FoldConstants itself stays a pure rewrite.
+func FoldConstantsAndPrune(program *ir.ANFProgram) *ir.ANFProgram {
+	result := foldConstantsOnly(program)
+	for i := range result.Methods {
+		candidates := make(map[string]bool)
+		for j := range program.Methods[i].Body {
+			collectValueRefs(&program.Methods[i].Body[j].Value, candidates)
+		}
+		EliminateDeadBindingsAmong(&result.Methods[i], candidates)
+	}
+	return result
 }
 
 // foldConstantsOnly applies constant folding without dead binding elimination.
@@ -605,9 +710,9 @@ func foldConstantsOnly(program *ir.ANFProgram) *ir.ANFProgram {
 //
 // Enumerating them is how N-093 shipped: the rebuild listed 4 of 5 fields and
 // silently dropped SigHashType, so a `@sighash` directive survived fold-OFF and
-// vanished under the shipped fold-ON default. SigHashType is `json:"-"`, so the
-// cross-tier ANF comparison structurally cannot catch that class of loss.
-// Copy-then-overwrite makes a future sixth field unlosable by construction
+// vanished under the shipped fold-ON default. SigHashType was then `json:"-"`,
+// so the cross-tier ANF comparison could not catch that class of loss (F-065
+// put it on the wire since). Copy-then-overwrite makes a future sixth field unlosable by construction
 // (the same shape frontend/expand_fixed_arrays.go already uses).
 func foldMethod(method *ir.ANFMethod) ir.ANFMethod {
 	env := newConstEnv()

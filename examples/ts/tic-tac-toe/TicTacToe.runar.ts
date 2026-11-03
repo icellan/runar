@@ -1,4 +1,4 @@
-import { StatefulSmartContract, assert, checkSig, num2bin, cat, hash160, hash256, extractOutputHash } from 'runar-lang';
+import { StatefulSmartContract, assert, checkSig, num2bin, cat, hash160, hash256, extractOutputHash, extractAmount, continuationAmount } from 'runar-lang';
 import type { PubKey, Sig, ByteString } from 'runar-lang';
 
 /**
@@ -62,6 +62,11 @@ export class TicTacToe extends StatefulSmartContract {
   public join(opponentPK: PubKey, sig: Sig) {
     assert(this.status == 0n);
     assert(checkSig(sig, opponentPK));
+    // Player O must pay exactly the bet (N-027): the continuation holds the
+    // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+    // payout methods pay out. The compiler's own `>= input` floor alone would
+    // let O join for free.
+    assert(continuationAmount() == extractAmount(this.txPreimage) + this.betAmount);
     this.playerO = opponentPK;
     this.status = 1n;
     this.turn = 1n;

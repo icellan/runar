@@ -898,5 +898,6 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": []
 }

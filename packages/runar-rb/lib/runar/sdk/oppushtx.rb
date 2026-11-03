@@ -2,6 +2,7 @@
 
 require 'digest'
 require_relative '../ec_primitives'
+require_relative 'bip143'
 
 # OP_PUSH_TX helper for checkPreimage contracts.
 #
@@ -23,10 +24,6 @@ module Runar
   module SDK
     SIGHASH_ALL_FORKID = 0x41
 
-    # 32 zero bytes — BIP-143 fills zeroed digest fields (hashPrevouts /
-    # hashSequence / hashOutputs) with this under the relaxed sighash flags.
-    ZERO32 = ("\x00".b * 32).freeze
-
     module_function
 
     # Compute the BIP-143 sighash preimage for a transaction input.
@@ -46,7 +43,8 @@ module Runar
       tx = parse_raw_tx([tx_hex].pack('H*'))
       subscript = [subscript_hex].pack('H*')
 
-      bip143_preimage(tx, input_index, subscript, satoshis, sighash_type).unpack1('H*')
+      # F-137: the one shared BIP-143 builder (also used by LocalSigner).
+      BIP143.bip143_preimage(tx, input_index, subscript, satoshis, sighash_type).unpack1('H*')
     end
 
     # Compute the OP_PUSH_TX DER signature for a preimage.
@@ -91,10 +89,46 @@ module Runar
     # @return [Array(String, String)] [sig_hex, preimage_hex]
     def compute_op_push_tx(tx_hex, input_index, subscript_hex, satoshis, code_separator_index = -1,
                            sighash_type = SIGHASH_ALL_FORKID)
-      effective_subscript = get_subscript(subscript_hex, code_separator_index)
-      preimage_hex = compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
+      preimage_hex = compute_op_push_tx_preimage(
+        tx_hex, input_index, subscript_hex, satoshis, code_separator_index, sighash_type
+      )
       sig_hex = sign_preimage_k1(preimage_hex, sighash_type)
       [sig_hex, preimage_hex]
+    end
+
+    # N-253: the BIP-143 preimage hex +compute_op_push_tx+ returns, WITHOUT the
+    # k=1 ECDSA signature -- same arguments, same validation, same bytes.
+    # Post-BUG-100 the OP_PUSH_TX signature is derived on-chain from the
+    # preimage and the unlocking script has no slot for one, so the stateful
+    # prepare_call path uses this instead of signing and discarding a signature.
+    #
+    # @return [String] BIP-143 preimage as hex
+    def compute_op_push_tx_preimage(tx_hex, input_index, subscript_hex, satoshis, code_separator_index = -1,
+                                    sighash_type = SIGHASH_ALL_FORKID)
+      # N-041: the subscript is the locking script of the UTXO being spent
+      # (e.g. a provider's contract UTXO). An empty one can never match the
+      # script the node executes, so refuse it.
+      if subscript_hex.nil? || subscript_hex.empty?
+        raise ArgumentError,
+              "compute_op_push_tx: refusing to build a preimage for input #{input_index} " \
+              'with an empty subscript (scriptCode)'
+      end
+      effective_subscript = get_subscript(subscript_hex, code_separator_index)
+
+      # N-155: a code_separator_index pointing at the LAST byte of the
+      # subscript passes get_subscript's "past the end" check (trim_pos ==
+      # length, not >) but trims effective_subscript down to the empty
+      # string -- the same unsignable condition the empty-subscript check
+      # above exists to catch, just reached a different way. Refuse it too,
+      # with the same message. (get_subscript itself keeps returning '' here
+      # -- it is a public, independently-tested low-level slicing helper --
+      # this guard lives one level up, where the preimage is actually built.)
+      if effective_subscript.empty?
+        raise ArgumentError,
+              "compute_op_push_tx: refusing to build a preimage for input #{input_index} " \
+              'with an empty subscript (scriptCode)'
+      end
+      compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
     end
 
     # Extract the subscript for BIP-143 sighash computation.
@@ -189,89 +223,6 @@ module Runar
     # rubocop:enable Naming/MethodParameterName
 
     # ---------------------------------------------------------------------------
-    # BIP-143 preimage assembly
-    # ---------------------------------------------------------------------------
-
-    # Build the full BIP-143 preimage for SIGHASH_ALL|FORKID.
-    #
-    # @param tx           [Hash]    parsed transaction ({version:, inputs:, outputs:, locktime:})
-    # @param input_index  [Integer]
-    # @param subscript    [String]  binary subscript bytes
-    # @param satoshis     [Integer] value of the UTXO being spent
-    # @param sighash_type [Integer]
-    # @return [String] binary preimage
-    # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Naming/MethodParameterName
-    def bip143_preimage(tx, input_index, subscript, satoshis, sighash_type)
-      base = sighash_type & 0x1f
-      acp  = (sighash_type & 0x80) != 0
-
-      # hashPrevouts — double-SHA256 of all outpoints.
-      # Issue #123: ANYONECANPAY zeroes hashPrevouts (only this input is signed).
-      hash_prevouts =
-        if acp
-          ZERO32.dup
-        else
-          prevouts = tx[:inputs].flat_map { |inp| [inp[:prev_txid], [inp[:prev_output_index]].pack('V')] }.join
-          [double_sha256(prevouts.unpack1('H*'))].pack('H*')
-        end
-
-      # hashSequence — double-SHA256 of all input sequences.
-      # Issue #123: zeroed under anything but pure SIGHASH_ALL (NONE / SINGLE /
-      # ANYONECANPAY all clear it).
-      hash_sequence =
-        if base == 0x01 && !acp
-          sequences = tx[:inputs].map { |inp| [inp[:sequence]].pack('V') }.join
-          [double_sha256(sequences.unpack1('H*'))].pack('H*')
-        else
-          ZERO32.dup
-        end
-
-      # hashOutputs by sighash base (issue #123):
-      #   ALL    -> hash256(all outputs)
-      #   SINGLE -> hash256(the single output at THIS input's index), or 32 zero
-      #             bytes when input_index >= outputs.length. It must NOT digest
-      #             the whole output set — under SINGLE every other output is
-      #             attacker-controllable (F5).
-      #   NONE   -> 32 zero bytes (no outputs committed)
-      hash_outputs =
-        if base == 0x02 # NONE
-          ZERO32.dup
-        elsif base == 0x03 # SINGLE
-          if input_index < tx[:outputs].length
-            out = tx[:outputs][input_index]
-            single = [out[:satoshis]].pack('Q<') + encode_varint_bin(out[:script].bytesize) + out[:script]
-            [double_sha256(single.unpack1('H*'))].pack('H*')
-          else
-            ZERO32.dup
-          end
-        else
-          outputs_data = tx[:outputs].map do |out|
-            [out[:satoshis]].pack('Q<') + encode_varint_bin(out[:script].bytesize) + out[:script]
-          end.join
-          [double_sha256(outputs_data.unpack1('H*'))].pack('H*')
-        end
-
-      inp = tx[:inputs][input_index]
-
-      preimage = +''
-      preimage << [tx[:version]].pack('V')              # nVersion (4 LE)
-      preimage << hash_prevouts                         # hashPrevouts
-      preimage << hash_sequence                         # hashSequence
-      preimage << inp[:prev_txid]                       # outpoint txid (32 bytes)
-      preimage << [inp[:prev_output_index]].pack('V')   # outpoint index (4 LE)
-      preimage << encode_varint_bin(subscript.bytesize) # scriptCode varint
-      preimage << subscript                             # scriptCode bytes
-      preimage << [satoshis].pack('Q<')                 # value (8 LE)
-      preimage << [inp[:sequence]].pack('V')            # nSequence (4 LE)
-      preimage << hash_outputs                          # hashOutputs
-      preimage << [tx[:locktime]].pack('V')             # nLocktime (4 LE)
-      preimage << [sighash_type].pack('V')              # sighash type (4 LE)
-      preimage
-    end
-    # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Naming/MethodParameterName
-    private_class_method :bip143_preimage
-
-    # ---------------------------------------------------------------------------
     # Minimal raw transaction parser
     # ---------------------------------------------------------------------------
 
@@ -333,19 +284,5 @@ module Runar
       end
     end
     private_class_method :decode_varint_bin
-
-    # Encode a non-negative integer as a Bitcoin varint (binary).
-    def encode_varint_bin(num)
-      if num < 0xFD
-        [num].pack('C')
-      elsif num <= 0xFFFF
-        "\xfd".b + [num].pack('v')
-      elsif num <= 0xFFFFFFFF
-        "\xfe".b + [num].pack('V')
-      else
-        "\xff".b + [num].pack('Q<')
-      end
-    end
-    private_class_method :encode_varint_bin
   end
 end

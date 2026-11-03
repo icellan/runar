@@ -219,9 +219,15 @@ class TestValidatorEdges < Minitest::Test
     parse_result = RunarCompiler.send(:_parse_source, source, 'Empty.runar.ts')
     refute_nil parse_result.contract
     result = RunarCompiler::Frontend.validate(parse_result.contract)
-    # Validator may accept or warn — we just confirm it doesn't crash and
-    # the contract round-trips through the validator.
-    refute_nil result
+    # Proves: a contract with no methods at all is rejected with the
+    # "no public methods" diagnostic (mirrors the TS reference compiler's
+    # `02-validate.test.ts` "reports error when a contract has no methods at
+    # all" case, and test_validator.rb:744-758's strong assertion for the
+    # same rule). Does not prove anything about contracts that have private
+    # methods but no public ones -- that case is covered by
+    # test_validator.rb:744.
+    assert result.errors.any? { |e| e.message.include?("no public methods") },
+           "expected error about no public methods, got: #{result.error_strings}"
   end
 
   # ---------------------------------------------------------------------------

@@ -1,0 +1,462 @@
+{
+  "contractName": "PriceBet",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "alicePubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "bobPubKey"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "strikePrice"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2",
+              "t3"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "alicePubKey"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "alicePubKey",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_prop",
+            "name": "bobPubKey"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "update_prop",
+            "name": "bobPubKey",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "update_prop",
+            "name": "oraclePubKey",
+            "value": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "strikePrice"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "update_prop",
+            "name": "strikePrice",
+            "value": "t11"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "alicePubKey",
+          "type": "PubKey"
+        },
+        {
+          "name": "bobPubKey",
+          "type": "PubKey"
+        },
+        {
+          "name": "oraclePubKey",
+          "type": "RabinPubKey"
+        },
+        {
+          "name": "strikePrice",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "price"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_const",
+            "value": 8
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "num2bin",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "msg",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "rabinSig"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "padding"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "msg",
+              "t3",
+              "t4",
+              "t5"
+            ],
+            "func": "verifyRabinSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "price"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "bin_op",
+            "left": "t8",
+            "op": ">",
+            "right": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "assert",
+            "value": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_param",
+            "name": "price"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_prop",
+            "name": "strikePrice"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "bin_op",
+            "left": "t12",
+            "op": ">",
+            "right": "t13"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "cond": "t14",
+            "else": [
+              {
+                "name": "t19",
+                "value": {
+                  "kind": "load_param",
+                  "name": "bobSig"
+                }
+              },
+              {
+                "name": "t20",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "bobPubKey"
+                }
+              },
+              {
+                "name": "t21",
+                "value": {
+                  "args": [
+                    "t19",
+                    "t20"
+                  ],
+                  "func": "checkSig",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t22",
+                "value": {
+                  "kind": "assert",
+                  "value": "t21"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t15",
+                "value": {
+                  "kind": "load_param",
+                  "name": "aliceSig"
+                }
+              },
+              {
+                "name": "t16",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "alicePubKey"
+                }
+              },
+              {
+                "name": "t17",
+                "value": {
+                  "args": [
+                    "t15",
+                    "t16"
+                  ],
+                  "func": "checkSig",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t18",
+                "value": {
+                  "kind": "assert",
+                  "value": "t17"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "settle",
+      "params": [
+        {
+          "name": "price",
+          "type": "bigint"
+        },
+        {
+          "name": "rabinSig",
+          "type": "RabinSig"
+        },
+        {
+          "name": "padding",
+          "type": "ByteString"
+        },
+        {
+          "name": "aliceSig",
+          "type": "Sig"
+        },
+        {
+          "name": "bobSig",
+          "type": "Sig"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "aliceSig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "alicePubKey"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "bobSig"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "bobPubKey"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "t4",
+              "t5"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "cancel",
+      "params": [
+        {
+          "name": "aliceSig",
+          "type": "Sig"
+        },
+        {
+          "name": "bobSig",
+          "type": "Sig"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": [
+    {
+      "name": "alicePubKey",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "bobPubKey",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "oraclePubKey",
+      "readonly": true,
+      "type": "RabinPubKey"
+    },
+    {
+      "name": "strikePrice",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}

@@ -750,10 +750,12 @@ func bn254ComposePoint(t *BN254Tracker, xName, yName, resultName string) {
 // the curve equation y^2 = x^3 + b), and collapses to 3*px^2/(2*py) when
 // P == Q, which is the correct doubling slope.
 //
-// The only input that still fails is P == -Q (py + qy == 0, group identity),
-// which is out of scope for Groth16 verifier usage: witness-assisted paths
-// never add a point to its inverse, and scalar mul of prepared inputs by
-// Groth16 public inputs does not encounter this case in practice.
+// Every input with py + qy == 0 still fails: P == -Q (group identity), and
+// the omega-partner pairs Q = (w*px, -py), (w^2*px, -py) with px != qx, where
+// the slope is 0/0 and the result is a wrong but ON-CURVE point (F-091). The
+// bn254G1Add builtin handles both in EmitBN254G1Add (infinity mask, omega
+// abort); this helper itself is left unguarded for the Groth16 MSM path, whose
+// bytes it must not move.
 func bn254G1AffineAdd(t *BN254Tracker) {
 	// s_num = px^2 + px*qx + qx^2
 	t.copyToTop("px", "_px_sq_in")
@@ -1117,8 +1119,9 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker, strict 
 // P + Q is an ordinary point, not O. Masking on the denominator would answer
 // "infinity" there: on-curve-looking, plausible, and wrong -- the exact failure
 // mode 03f50d48 introduced on the NIST curves and f16790a9 had to undo. That
-// case keeps its fail-closed off-curve answer
-// (TestBN254G1AffineAdd_NegatedOperandStaysOffCurve). Testing px == qx ALONE
+// case is NOT handled by the unified slope either (0/0, and Fermat gives
+// inv(0) = 0, so it yields a wrong but ON-CURVE point); EmitBN254G1Add rejects
+// it up front with bn254G1OmegaCollisionVerify (F-091). Testing px == qx ALONE
 // would be wrong for the same reason in the other direction: it would swallow
 // the doubling case.
 //
@@ -1152,6 +1155,38 @@ func bn254G1InfinityFlag(t *BN254Tracker) {
 	t.rawBlock([]string{"_xeq", "_cond"}, "_notinf", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_SUB"})
 		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+	})
+}
+
+// bn254G1OmegaCollisionVerify -- F-091: abort when py + qy == 0 mod p while
+// px != qx, reading px/py/qx/qy WITHOUT consuming them.
+//
+// That input is not P == -Q: it is the omega-partner pair Q = (w*px, -py) or
+// (w^2*px, -py), w a primitive cube root of unity (BN254 has j-invariant 0 and
+// p = 1 mod 3). Both numerator and denominator of the unified slope vanish,
+// Fermat gives inv(0) = 0, and bn254G1AffineAdd returns (-(px+qx), -py): a
+// point that satisfies y^2 = x^3 + 3 and is NOT P + Q, so
+// assert(bn254G1OnCurve(r)) cannot catch it. Fail closed instead.
+//
+// The condition is (py + qy mod p != 0) OR (px == qx), so every case the
+// builtin answers correctly keeps its answer: general addition (nonzero
+// denominator), doubling and P == -Q (px == qx; the latter is then masked to
+// the all-zero O by bn254G1MaskInfinity), and all-zero operands.
+//
+// Lives in the builtin entry point only, like the infinity mask: the Groth16
+// MSM bind shares bn254G1AffineAdd and keeps its bytes unchanged.
+func bn254G1OmegaCollisionVerify(t *BN254Tracker) {
+	t.copyToTop("px", "_om_px")
+	t.copyToTop("qx", "_om_qx")
+	t.rawBlock([]string{"_om_px", "_om_qx"}, "_om_xeq", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("py", "_om_py")
+	t.copyToTop("qy", "_om_qy")
+	bn254FieldAdd(t, "_om_py", "_om_qy", "_om_den")
+	t.rawBlock([]string{"_om_xeq", "_om_den"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
 	})
 }
 
@@ -1193,11 +1228,33 @@ func bn254G1Negate(t *BN254Tracker, pointName, resultName string) {
 // Public emit functions -- entry points called from stack.go
 // ===========================================================================
 
+// bn254EmitFieldCanonVerify -- F-196: every operand of the five public BN254
+// scalar-field entry points must BE a field element, aborting form. The R-119
+// gate (bbEmitCanonVerify) for this field: before it, bn254FieldAdd(-1, 0)
+// returned -1, because bn254FieldModPositive reduces with a bare OP_MOD that
+// keeps the dividend's sign, and bn254FieldAdd(p, 0) accepted p as a second
+// spelling of 0. Reject rather than reduce, on the INPUT, on the public entry
+// points only -- the internal helpers run inside the Groth16 / pairing code on
+// values that are canonical by construction or validated by their own
+// preambles. Emitted before PushPrimeCache, so the alt-stack is untouched.
+func bn254EmitFieldCanonVerify(t *BN254Tracker, names ...string) {
+	for _, n := range names {
+		t.copyToTop(n, "_bn_fcv")
+		t.rawBlock([]string{"_bn_fcv"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(bn254FieldP)}})
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
+}
+
 // EmitBN254FieldAdd emits BN254 field addition.
 // Stack in: [..., a, b] (b on top)
 // Stack out: [..., (a + b) mod p]
 func EmitBN254FieldAdd(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldAdd(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1208,6 +1265,7 @@ func EmitBN254FieldAdd(emit func(StackOp)) {
 // Stack out: [..., (a - b) mod p]
 func EmitBN254FieldSub(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldSub(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1218,6 +1276,7 @@ func EmitBN254FieldSub(emit func(StackOp)) {
 // Stack out: [..., (a * b) mod p]
 func EmitBN254FieldMul(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldMul(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1228,6 +1287,7 @@ func EmitBN254FieldMul(emit func(StackOp)) {
 // Stack out: [..., a^(p-2) mod p]
 func EmitBN254FieldInv(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a"}, emit)
+	bn254EmitFieldCanonVerify(t, "a")
 	t.PushPrimeCache()
 	bn254FieldInv(t, "a", "result")
 	t.PopPrimeCache()
@@ -1238,6 +1298,7 @@ func EmitBN254FieldInv(emit func(StackOp)) {
 // Stack out: [..., (p - a) mod p]
 func EmitBN254FieldNeg(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a"}, emit)
+	bn254EmitFieldCanonVerify(t, "a")
 	t.PushPrimeCache()
 	bn254FieldNeg(t, "a", "result")
 	t.PopPrimeCache()
@@ -1331,6 +1392,8 @@ func EmitBN254G1Add(emit func(StackOp)) {
 	// R-141: both points must be canonical before anything consumes them.
 	bn254EmitCoordCanonVerify(t, "px", "py")
 	bn254EmitCoordCanonVerify(t, "qx", "qy")
+	// F-091: the omega-partner 0/0 slope fails closed.
+	bn254G1OmegaCollisionVerify(t)
 	// The flag must be computed BEFORE the add: bn254G1AffineAdd consumes
 	// px/py/qx/qy.
 	bn254G1InfinityFlag(t)

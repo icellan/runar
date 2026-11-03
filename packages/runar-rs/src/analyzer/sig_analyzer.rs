@@ -21,11 +21,12 @@ pub fn analyze_sig_hygiene(opcodes: &[ParsedOp], paths: &[ExecutionPath]) -> Vec
     }
 
     // CHECKSIG_RESULT_DROPPED — only OP_CHECKSIG (0xac) and OP_CHECKMULTISIG
-    // (0xae); the *VERIFY variants don't leave a result.
+    // (0xae); the *VERIFY variants don't leave a result. The discarding
+    // opcode is OP_DROP (0x75) or OP_2DROP (0x6d).
     for i in 0..opcodes.len().saturating_sub(1) {
         let here = &opcodes[i];
         let next = &opcodes[i + 1];
-        if (here.opcode == 0xac || here.opcode == 0xae) && next.opcode == 0x75 {
+        if (here.opcode == 0xac || here.opcode == 0xae) && (next.opcode == 0x75 || next.opcode == 0x6d) {
             out.push(Finding {
                 severity: Severity::Warning,
                 code: "CHECKSIG_RESULT_DROPPED".to_string(),

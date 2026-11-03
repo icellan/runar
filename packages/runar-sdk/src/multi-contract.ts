@@ -42,8 +42,10 @@ import {
 } from '@bsv/sdk';
 import type { RunarContract } from './contract.js';
 import { encodeArg, encodePushData, encodeScriptNumber } from './contract.js';
+import { assertFixedWidthValue } from './state.js';
 import type { Signer } from './signers/index.js';
 import type { UTXO } from './types.js';
+import { isAutoInjectedWitnessParam, isSdkSuppliedParam } from './sdk-params.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,10 +114,6 @@ export interface AssembledMultiContractCall {
 // ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
-
-const AUTO_PARAM_NAMES = new Set(['_changePKH', '_changeAmount', '_newAmount']);
-const isWitnessParam = (name: string): boolean =>
-  name.startsWith('_prevOutScript_') || name === '_serialisedOutputs';
 
 /**
  * Build and sign a transaction whose inputs are N covenant UTXOs from N
@@ -193,7 +191,7 @@ export async function assembleMultiContractCall(
     }
     const method = publicMethods[methodIndex]!;
 
-    const witnessParams = method.params.filter((p) => isWitnessParam(p.name));
+    const witnessParams = method.params.filter((p) => isAutoInjectedWitnessParam(p.name));
     if (witnessParams.length > 0) {
       throw new Error(
         `assembleMultiContractCall: input ${i}: method '${inp.method}' declares intent-intrinsic witness params ` +
@@ -204,9 +202,12 @@ export async function assembleMultiContractCall(
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
     const methodUsesCodePart = method.usesCodePart ?? methodNeedsChange;
-    const userParams = method.params.filter(
-      (p) => p.type !== 'SigHashPreimage' && !AUTO_PARAM_NAMES.has(p.name),
-    );
+    // Shared SDK-supplied-param predicate (N-149), the SAME one
+    // RunarContract.prepareCall uses (N-411): non-empty stateFields. A
+    // StatefulSmartContract with ZERO mutable fields has empty stateFields, so
+    // its txPreimage is a user arg (pass null), as on the single-contract path.
+    const isStateful = (artifact.stateFields?.length ?? 0) > 0;
+    const userParams = method.params.filter((p) => !isSdkSuppliedParam(p, isStateful));
     if (userParams.length !== inp.args.length) {
       throw new Error(
         `assembleMultiContractCall: input ${i}: method '${inp.method}' expects ${userParams.length} args, got ${inp.args.length}`,
@@ -221,12 +222,13 @@ export async function assembleMultiContractCall(
     // OP_PUSH_TX preimage against THIS artifact's codesep layout. BUG-100: the
     // signature is derived on-chain from the preimage, so only the preimage is
     // pushed (buildStatefulPrefix pushes no signature).
-    const { preimageHex } = inp.contract.computeOpPushTxWithCodeSep(
+    const { preimageHex } = inp.contract.computeOpPushTxPreimageWithCodeSep(
       skeleton, i, utxo.script, utxo.satoshis, methodIndex,
     );
 
     // Resolve user args; sign null Sig params over the trimmed subscript.
     let argsHex = '';
+    let preimageInArgs = false;
     for (let a = 0; a < userParams.length; a++) {
       let value = inp.args[a];
       if (userParams[a]!.type === 'Sig' && value === null) {
@@ -238,7 +240,14 @@ export async function assembleMultiContractCall(
         const trimmed = inp.contract.getSubscriptForSigning(utxo.script, methodIndex);
         value = await inp.signer.sign(skeletonHex, i, trimmed, utxo.satoshis);
       }
-      // This low-level surface only auto-resolves null `Sig` params. A null of
+      // N-411: a zero-mutable StatefulSmartContract's txPreimage is a user
+      // arg (null); it resolves to the preimage computed above.
+      if (userParams[a]!.type === 'SigHashPreimage' && value === null) {
+        value = preimageHex;
+        preimageInArgs = true;
+      }
+      // This low-level surface only auto-resolves null `Sig` and
+      // SigHashPreimage params. A null of
       // any other type would otherwise be encoded as the ASCII bytes of "null";
       // reject it with an actionable message instead (pass a concrete value).
       if (value === null || value === undefined) {
@@ -246,6 +255,11 @@ export async function assembleMultiContractCall(
           `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}': ${userParams[a]!.type}) is ${value}; only null Sig params are auto-signed — pass a concrete value for every other param`,
         );
       }
+      // N-045 (defence in depth): a fixed-width arg must have its declared width.
+      assertFixedWidthValue(
+        value, userParams[a]!.type,
+        `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}')`,
+      );
       argsHex += encodeArg(value);
     }
 
@@ -262,7 +276,7 @@ export async function assembleMultiContractCall(
     const unlock =
       inp.contract.buildStatefulPrefix('', methodUsesCodePart) +
       argsHex + changeHex + newAmountHex +
-      encodePushData(preimageHex) +
+      (preimageInArgs ? '' : encodePushData(preimageHex)) +
       selectorHex;
 
     unlocks.push(unlock);

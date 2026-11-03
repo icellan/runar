@@ -95,6 +95,14 @@ module Runar
       end
 
       def sign(tx_hex, input_index, subscript, satoshis, sighash_type = nil)
+        # N-041: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if subscript.nil? || subscript.empty?
+          raise ArgumentError,
+                "ExternalSigner: refusing to sign input #{input_index} with an empty subscript " \
+                '(scriptCode); pass the locking script of the UTXO being spent'
+        end
+
         @sign_fn.call(tx_hex, input_index, subscript, satoshis, sighash_type)
       end
     end

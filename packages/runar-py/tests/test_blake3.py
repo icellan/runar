@@ -88,3 +88,22 @@ def test_blake3_hash_matches_typescript_reference():
         blake3_hash(b"hello world").hex()
         == "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     )
+
+
+def test_blake3_hash_rejects_messages_longer_than_64_bytes():
+    """F-128: the compiled blake3Hash script aborts on >64-byte input.
+
+    The script computes ``64 - len`` and feeds it to OP_NUM2BIN as the padding
+    size; for len > 64 that is negative and execution aborts. The runtime must
+    fail the same way instead of hashing only the first 64 bytes.
+    Proves: blake3_hash raises for 65/100/128 bytes and is unchanged at 64.
+    Does not prove the script behaviour itself (pinned by execution in
+    packages/runar-testing blake3.test.ts).
+    """
+    import pytest
+
+    for n in (65, 100, 128):
+        with pytest.raises(ValueError, match="64 bytes"):
+            blake3_hash(b"\xcd" * n)
+    msg64 = b"\xcd" * 64
+    assert blake3_hash(msg64) == blake3_compress(_BLAKE3_IV_BYTES, msg64)

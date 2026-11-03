@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
 // Re-export macros so `use runar::prelude::*` gets them too.
-pub use runar_lang_macros::{contract, stateful_contract, unsafe_contract};
+pub use runar_lang_macros::{contract, sighash, stateful_contract, unsafe_contract};
 
 // ---------------------------------------------------------------------------
 // Scalar types — type aliases so Rust arithmetic operators work directly
@@ -323,15 +323,12 @@ fn blake3_iv_bytes() -> [u8; 32] {
 }
 
 fn blake3_compress_impl(cv: &[u8], block: &[u8], block_len: u32) -> [u8; 32] {
-    // Defensive: pad / truncate to the canonical sizes so a misuse doesn't
-    // panic. Production code should always pass exactly 32 / 64 bytes.
-    let mut cv_buf = [0u8; 32];
-    let n = cv.len().min(32);
-    cv_buf[..n].copy_from_slice(&cv[..n]);
-
-    let mut blk_buf = [0u8; 64];
-    let n = block.len().min(64);
-    blk_buf[..n].copy_from_slice(&block[..n]);
+    // N-161: refuse wrong operand sizes, matching the on-chain F-114 guard
+    // and the TS interpreter (no silent pad / truncate).
+    assert!(cv.len() == 32, "blake3Compress: chaining value must be 32 bytes, got {}", cv.len());
+    assert!(block.len() == 64, "blake3Compress: block must be 64 bytes, got {}", block.len());
+    let cv_buf = cv;
+    let blk_buf = block;
 
     let mut h = [0u32; 8];
     for i in 0..8 {
@@ -395,9 +392,16 @@ pub fn blake3_compress(chaining_value: &[u8], block: &[u8]) -> ByteString {
 /// block_len. Matches the on-chain codegen.
 pub fn blake3_hash(message: &[u8]) -> ByteString {
     let cv = blake3_iv_bytes();
+    // The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+    // padding size), so the mock must fail too rather than truncate.
+    assert!(
+        message.len() <= 64,
+        "blake3Hash: message must be <= 64 bytes, got {}",
+        message.len()
+    );
     let mut padded = [0u8; 64];
-    let n = message.len().min(64);
-    padded[..n].copy_from_slice(&message[..n]);
+    let n = message.len();
+    padded[..n].copy_from_slice(message);
     blake3_compress_impl(&cv, &padded, n as u32).to_vec()
 }
 
@@ -512,36 +516,26 @@ pub fn sha256_compress(state: &[u8], block: &[u8]) -> ByteString {
 /// append 64-bit big-endian bit length) and runs the final 1-2 compression rounds.
 pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> ByteString {
     assert!(state.len() == 32, "sha256_finalize: state must be 32 bytes");
-    assert!(remaining.len() <= 64, "sha256_finalize: remaining must be <= 64 bytes");
+    // The compiled script's two-block path pads to 120 bytes, so it accepts
+    // 0..=119 bytes of `remaining` and aborts on more (F-142).
+    assert!(remaining.len() <= 119, "sha256_finalize: remaining must be 0-119 bytes");
 
     let rem_len = remaining.len();
 
-    // Build padded buffer: remaining + 0x80 + zeros + 8-byte big-endian bit length
-    // If remaining + 1 (0x80) + 8 (bit length) <= 64, it fits in one block.
-    // Otherwise we need two blocks.
-    if rem_len < 56 {
-        // Fits in one 64-byte block
-        let mut block = [0u8; 64];
-        block[..rem_len].copy_from_slice(remaining);
-        block[rem_len] = 0x80;
-        // Last 8 bytes = bit length in big-endian
-        let bit_len = msg_bit_len as u64;
-        block[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        sha256_compress(state, &block)
-    } else {
-        // Needs two blocks
-        let mut block1 = [0u8; 64];
-        block1[..rem_len].copy_from_slice(remaining);
-        block1[rem_len] = 0x80;
-        // First block: remaining + 0x80 + zeros (no room for bit length)
-        let intermediate = sha256_compress(state, &block1);
+    // Padded buffer: remaining + 0x80 + zeros + 8-byte big-endian bit length.
+    // One 64-byte block if remaining + 1 + 8 <= 64, otherwise two.
+    let total = if rem_len < 56 { 64 } else { 128 };
+    let mut padded = [0u8; 128];
+    padded[..rem_len].copy_from_slice(remaining);
+    padded[rem_len] = 0x80;
+    let bit_len = msg_bit_len as u64;
+    padded[total - 8..total].copy_from_slice(&bit_len.to_be_bytes());
 
-        // Second block: all zeros except last 8 bytes = bit length
-        let mut block2 = [0u8; 64];
-        let bit_len = msg_bit_len as u64;
-        block2[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        sha256_compress(&intermediate, &block2)
+    let mut result = sha256_compress(state, &padded[..64]);
+    if total == 128 {
+        result = sha256_compress(&result, &padded[64..128]);
     }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +545,12 @@ pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> Byte
 /// Returns 0 in test mode.
 pub fn extract_locktime(_p: &[u8]) -> Int {
     0
+}
+
+/// Returns 10000 in test mode — the mock input amount every other tier's
+/// `extract_amount` stub returns, and the default of [`continuation_amount`].
+pub fn extract_amount(_p: &[u8]) -> Int {
+    10000
 }
 
 /// Returns 0xfffffffe in test mode. That is
@@ -563,13 +563,16 @@ pub fn extract_sequence(_p: &[u8]) -> Int {
     0xfffffffe
 }
 
-/// Returns the first 32 bytes of the preimage in test mode.
-/// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
-/// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.
-/// Falls back to 32 zero bytes when the preimage is unset or shorter than 32 bytes.
+/// Returns the preimage's hashOutputs field in test mode: the 32 bytes
+/// ending 8 bytes before the end (end-relative, matching the compiled
+/// opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP).
+/// Falls back to 32 zero bytes when the preimage is unset or shorter than
+/// 40 bytes.
+/// N-246: this used to echo the leading 32 bytes (nVersion + most of
+/// hashPrevouts in a real preimage), ported from the TS/Java fix (N-245/N-188).
 pub fn extract_output_hash(p: &[u8]) -> ByteString {
-    if p.len() >= 32 {
-        p[..32].to_vec()
+    if p.len() >= 40 {
+        p[p.len() - 40..p.len() - 8].to_vec()
     } else {
         vec![0u8; 32]
     }
@@ -642,6 +645,31 @@ pub fn require_output_p2pkh(_output_index: i64, _pubkey_hash: ByteString, _amoun
 /// compiler desugars to `extract_locktime(tx_preimage)`. Returns 0 off-chain.
 pub fn current_block_height() -> i64 {
     0
+}
+
+/// Test-mode stub for the read-only view of the satoshis the call puts in the
+/// next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+/// injected `_newAmount` witness, which it has already bound to
+/// `>= extract_amount(tx_preimage)`. Returns 10000 off-chain — the mock input
+/// amount the other tiers' `extract_amount` stubs return (an honest
+/// continuation) — unless a test has set another value with
+/// [`set_mock_continuation_amount`].
+pub fn continuation_amount() -> i64 {
+    MOCK_CONTINUATION_AMOUNT.with(|c| c.get())
+}
+
+thread_local! {
+    static MOCK_CONTINUATION_AMOUNT: std::cell::Cell<i64> = const { std::cell::Cell::new(10000) };
+}
+
+/// Sets what [`continuation_amount`] returns in test mode on this thread and
+/// returns the previous value. [`extract_amount`] stays 10000, so a native test
+/// of an author rule such as
+/// `continuation_amount() == extract_amount(&self.tx_preimage) + bet` sets
+/// 10000 + bet for the paying call and anything else for a non-paying one
+/// (N-027).
+pub fn set_mock_continuation_amount(amount: i64) -> i64 {
+    MOCK_CONTINUATION_AMOUNT.with(|c| c.replace(amount))
 }
 
 // ---------------------------------------------------------------------------
@@ -853,8 +881,12 @@ pub fn int_2_str(value: Int, byte_len: Int) -> ByteString {
 /// magnitude leaves zero and the push decodes as 0 rather than as -2^63.
 ///
 /// See [`num2bin_big`] for values past `i64`.
-pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
-    num2bin_big(&BigintBig::from(*v), length)
+///
+/// `v` is taken by value or by reference (`num2bin(0, 1)` and `num2bin(&x, 1)`
+/// both compile), so a `.runar.rs` contract can spell the call either way and
+/// still be valid native Rust (F-057).
+pub fn num2bin(v: impl std::borrow::Borrow<Bigint>, length: usize) -> ByteString {
+    num2bin_big(&BigintBig::from(*v.borrow()), length)
 }
 
 /// The arbitrary-precision form of [`num2bin`].
@@ -900,8 +932,11 @@ pub fn num2bin_big(v: &BigintBig, length: usize) -> ByteString {
 /// the emitted opcodes accept it — so this decodes it and returns 1000.
 ///
 /// Use [`bin2num_big`] for the wide answer.
-pub fn bin2num(data: &[u8]) -> Bigint {
-    let r = bin2num_big(data);
+///
+/// `data` is anything byte-like, owned or borrowed, so `bin2num(cat(a, b))`
+/// compiles as native Rust as well as Rúnar (F-057).
+pub fn bin2num(data: impl AsRef<[u8]>) -> Bigint {
+    let r = bin2num_big(data.as_ref());
     i64::try_from(&r).unwrap_or_else(|_| {
         panic!(
             "runar: bin2num decoded {r}, which does not fit i64 — OP_BIN2NUM has no such \
@@ -934,9 +969,12 @@ pub fn bin2num_big(data: &[u8]) -> BigintBig {
 }
 
 /// Concatenates two byte strings.
-pub fn cat(a: &[u8], b: &[u8]) -> ByteString {
-    let mut result = a.to_vec();
-    result.extend_from_slice(b);
+///
+/// Either side may be owned or borrowed, so `cat(substr(x, 0, 1), pad)` compiles
+/// as native Rust as well as Rúnar (F-057).
+pub fn cat(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> ByteString {
+    let mut result = a.as_ref().to_vec();
+    result.extend_from_slice(b.as_ref());
     result
 }
 
@@ -956,9 +994,10 @@ pub fn safemod(a: Int, b: Int) -> Int {
     a % b
 }
 
-/// Clamp value to [lo, hi].
+/// Clamp value to [lo, hi]. The compiled script is `<value> <lo> OP_MAX <hi>
+/// OP_MIN`, i.e. min(max(value, lo), hi), so with lo > hi, hi wins (N-030).
 pub fn clamp(value: Int, lo: Int, hi: Int) -> Int {
-    if value < lo { lo } else if value > hi { hi } else { value }
+    value.max(lo).min(hi)
 }
 
 /// Sign of a number: -1, 0, or 1.
@@ -969,6 +1008,9 @@ pub fn sign(n: Int) -> Int {
 /// Exponentiation for non-negative exponents. Panics on i64 overflow.
 pub fn pow(base: Int, exp: Int) -> Int {
     assert!(exp >= 0, "pow: negative exponent");
+    // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+    // for any exponent above 32, even where the power is trivial (F-134).
+    assert!(exp <= 32, "pow: exponent outside the supported domain (exp > 32)");
     let mut result: Int = 1;
     for _ in 0..exp {
         result = result.checked_mul(base).unwrap_or_else(|| {
@@ -995,16 +1037,15 @@ pub fn percent_of(amount: Int, bps: Int) -> Int {
     product / 10000
 }
 
-/// Integer square root via Newton's method. Panics on i64 overflow.
+/// Integer square root via Newton's method. The Newton sum is taken in i128,
+/// so every i64 input has its exact floor root (sqrt(i64::MAX) is 3037000499
+/// on-chain; the i64 sum overflowed there, N-030).
 pub fn sqrt(n: Int) -> Int {
     assert!(n >= 0, "sqrt: negative input");
     if n == 0 { return 0; }
     let mut guess = n;
     for _ in 0..256 {
-        let sum = guess.checked_add(n / guess).unwrap_or_else(|| {
-            panic!("runar: i64 overflow in sqrt — Bitcoin Script supports arbitrary precision but Rust tests use i64")
-        });
-        let next = sum / 2;
+        let next = ((guess as i128 + (n / guess) as i128) / 2) as Int;
         if next >= guess { break; }
         guess = next;
     }
@@ -1030,9 +1071,9 @@ pub fn divmod(a: Int, b: Int) -> Int {
     a / b
 }
 
-/// Approximate floor(log2(n)).
+/// Exact floor(log2(n)); the compiled script aborts for n <= 0 (N-103).
 pub fn log2(n: Int) -> Int {
-    if n <= 0 { return 0; }
+    assert!(n > 0, "log2: non-positive input");
     let mut bits: Int = 0;
     let mut val = n;
     while val > 1 { val >>= 1; bits += 1; }
@@ -1053,8 +1094,12 @@ pub fn bool(n: Int) -> bool {
 }
 
 /// Absolute value.
+/// Panics if n is i64::MIN (|i64::MIN| is 2^63, which overflows i64),
+/// consistently in debug and release — matches `gcd`'s overflow handling.
 pub fn abs(n: Int) -> Int {
-    if n < 0 { -n } else { n }
+    n.checked_abs().unwrap_or_else(|| {
+        panic!("runar: i64 overflow in abs — |i64::MIN| not representable; Bitcoin Script supports arbitrary precision but Rust tests use i64")
+    })
 }
 
 /// Smaller of two values.
@@ -1295,6 +1340,59 @@ mod tests {
         assert!(check_preimage(&mock_preimage()));
     }
 
+    // N-246: extract_output_hash must return the preimage's actual
+    // hashOutputs field, not the leading 32 bytes (which cover nVersion +
+    // most of hashPrevouts in a real BIP-143 preimage). Mirrors the landed
+    // TS fix (N-245, packages/runar-lang/src/runtime/preimage.ts) and the
+    // Java fix (N-188, Preimage.extractOutputHash).
+    //
+    // build_preimage_hex_n246 lays out a syntactically valid BIP-143
+    // preimage with a zero-length scriptCode, so every field lands at its
+    // fixed offset:
+    //   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    //   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    //   locktime(4) sighashType(4)
+    fn build_preimage_hex_n246(hash_prevouts_byte: &str, hash_outputs_byte: &str) -> String {
+        let version = "01000000";
+        let hash_prevouts = hash_prevouts_byte.repeat(32);
+        let hash_sequence = "00".repeat(32);
+        let outpoint = "00".repeat(36);
+        let script_code_len = "00";
+        let amount = "1027000000000000"; // 10000 satoshis, LE int64
+        let sequence = "feffffff";
+        let hash_outputs = hash_outputs_byte.repeat(32);
+        let locktime = "00000000";
+        let sighash_type = "41000000";
+        format!(
+            "{version}{hash_prevouts}{hash_sequence}{outpoint}{script_code_len}{amount}{sequence}{hash_outputs}{locktime}{sighash_type}"
+        )
+    }
+
+    fn decode_hex_n246(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Proves extract_output_hash reads the end-relative hashOutputs window
+    // (bytes[len-40..len-8]), matching the compiled opcode sequence
+    // (OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP), instead of
+    // echoing bytes[0..32] (nVersion + most of hashPrevouts). Does not
+    // prove anything about on-chain behaviour, which this mock never
+    // touches.
+    #[test]
+    fn test_extract_output_hash_returns_hash_outputs_n246() {
+        let preimage = decode_hex_n246(&build_preimage_hex_n246("aa", "bb"));
+        let result = extract_output_hash(&preimage);
+        assert_eq!(result, vec![0xbbu8; 32], "want hashOutputs");
+        assert_ne!(
+            result,
+            vec![0xaau8; 32],
+            "must not echo the leading bytes (version + hashPrevouts)"
+        );
+    }
+
     #[test]
     fn test_hash160_produces_20_bytes() {
         assert_eq!(hash160(b"hello").len(), 20);
@@ -1401,6 +1499,29 @@ mod tests {
     #[should_panic(expected = "i64 overflow")]
     fn test_gcd_min_panics() {
         gcd(i64::MIN, 1);
+    }
+
+    // N-289: `abs(i64::MIN)` is `|-(-2^63)| = 2^63`, which does not fit i64 —
+    // the naive `if n < 0 { -n } else { n }` relied on Rust's unchecked
+    // negation, which panics with "attempt to negate with overflow" in a
+    // debug build (overflow-checks on) and silently WRAPS to i64::MIN itself
+    // (still negative) in a release build (overflow-checks off) — a release
+    // binary's `abs()` could return a negative number. This test pins the
+    // behaviour to a single, deliberate, debug/release-independent panic
+    // (`checked_abs`, matching the `gcd` fix above), not Rust's implicit
+    // overflow panic that only `should_panic(expected = "i64 overflow")`
+    // would catch in a debug build and silently wrap past in release.
+    #[test]
+    fn test_abs_small_values() {
+        assert_eq!(abs(-7), 7);
+        assert_eq!(abs(7), 7);
+        assert_eq!(abs(0), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_abs_min_panics() {
+        abs(i64::MIN);
     }
 
     // -----------------------------------------------------------------------
@@ -1570,6 +1691,59 @@ mod tests {
         }
     }
 
+    // F-142: the compiled script accepts `remaining` of 0..=119 bytes (its
+    // two-block path pads to 120, `sha256-codegen.ts`), and every other tier
+    // matches it. Rust used to refuse 65..=119 and panic out of bounds at 64.
+    //
+    // Proves: for a non-trivial chained state (one compressed 64-byte block)
+    // and every boundary length of the tail, `sha256_finalize` equals standard
+    // SHA-256 of `first_block || tail` (the `sha2` crate), and 120 is refused
+    // like the script refuses it (OP_NUM2BIN with a negative size).
+    // Does not prove: anything about the compiled script itself. The pinned
+    // 64- and 100-byte digests were computed with Python's hashlib and
+    // confirmed against the TS interpreter's sha256Finalize and the compiled
+    // script (ScriptExecutionContract) for the same inputs, but that
+    // cross-check is not re-run by this test.
+    fn chained_state_and_first_block() -> (Vec<u8>, Vec<u8>) {
+        let iv = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        let first: Vec<u8> = (0u8..64).collect();
+        (sha256_compress(&iv, &first), first)
+    }
+
+    #[test]
+    fn test_sha256_finalize_boundary_lengths_match_standard_sha256() {
+        let (state, first) = chained_state_and_first_block();
+        for &n in &[0usize, 1, 55, 56, 63, 64, 65, 100, 118, 119] {
+            let tail: Vec<u8> = (0..n).map(|i| (0xA0u8).wrapping_add(i as u8)).collect();
+            let got = sha256_finalize(&state, &tail, ((64 + n) * 8) as i64);
+            let mut whole = first.clone();
+            whole.extend_from_slice(&tail);
+            assert_eq!(hex_encode(&got), hex_encode(&sha256(&whole)), "remaining len {}", n);
+        }
+    }
+
+    #[test]
+    fn test_sha256_finalize_two_block_pinned_vectors() {
+        let (state, _) = chained_state_and_first_block();
+        let got64 = sha256_finalize(&state, &[0xAAu8; 64], (128 * 8) as i64);
+        assert_eq!(
+            hex_encode(&got64),
+            "9f6646b1217fe9821f199d32a46d850ce31d4feb3d2e29b1b911f24e8d5a5035"
+        );
+        let got100 = sha256_finalize(&state, &[0xDDu8; 100], (164 * 8) as i64);
+        assert_eq!(
+            hex_encode(&got100),
+            "a32228afd99c6b52f473666cdb10d2b22b9b4e10ce22cc14ba59a994c84e3029"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sha256_finalize: remaining must be 0-119 bytes")]
+    fn test_sha256_finalize_rejects_120_bytes() {
+        let (state, _) = chained_state_and_first_block();
+        sha256_finalize(&state, &[0u8; 120], (184 * 8) as i64);
+    }
+
     // -- BLAKE3 single-block compression -------------------------------------
     //
     // The expected hex strings below are the official BLAKE3 reference digests
@@ -1626,6 +1800,48 @@ mod tests {
             blake3_hash(short),
             "short message must differ: block_len 64 vs real length"
         );
+    }
+
+    // F-128: the compiled blake3Hash script aborts on a message longer than
+    // 64 bytes (`64 - len` goes negative and OP_NUM2BIN refuses a negative
+    // size), so the mock must fail too instead of hashing the first 64 bytes.
+    // Proves: blake3_hash panics for 65/100/128-byte input and is unchanged at
+    // exactly 64 bytes. Does not prove the script behaviour itself (pinned by
+    // execution in packages/runar-testing blake3.test.ts).
+    #[test]
+    fn test_blake3_hash_rejects_messages_longer_than_64_bytes() {
+        for n in [65usize, 100, 128] {
+            let msg = vec![0xcdu8; n];
+            let r = std::panic::catch_unwind(|| blake3_hash(&msg));
+            assert!(
+                r.is_err(),
+                "blake3_hash({} bytes) returned a digest; the on-chain script aborts on >64 bytes",
+                n
+            );
+        }
+        let msg64 = vec![0xcdu8; 64];
+        assert_eq!(blake3_hash(&msg64), blake3_compress(&blake3_iv_bytes(), &msg64));
+    }
+
+    // N-161: the compiled blake3Compress script aborts (F-114 operand-size
+    // guard) unless cv is exactly 32 bytes and block exactly 64 bytes; the mock
+    // used to zero-pad / truncate and return a digest.
+    // Proves: blake3_compress panics for 31/33-byte cv and 63/65-byte block.
+    // Does not prove the script behaviour itself (pinned by execution in
+    // packages/runar-testing f114-compress-operand-size-vm.test.ts).
+    #[test]
+    fn test_blake3_compress_rejects_wrong_operand_sizes() {
+        for (cv_len, blk_len) in [(31usize, 64usize), (33, 64), (32, 63), (32, 65)] {
+            let cv = vec![0x11u8; cv_len];
+            let blk = vec![0x22u8; blk_len];
+            let r = std::panic::catch_unwind(|| blake3_compress(&cv, &blk));
+            assert!(
+                r.is_err(),
+                "blake3_compress(cv={} bytes, block={} bytes) returned a digest; the on-chain script aborts",
+                cv_len,
+                blk_len
+            );
+        }
     }
 
     #[test]

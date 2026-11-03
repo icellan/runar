@@ -627,6 +627,24 @@ function affineAdd(t: ECTracker): void {
     e({ op: 'opcode', code: 'OP_NOT' });
   });
 
+  // N-110: the tangent has no denominator when py == 0 (2*py == 0, and
+  // fieldInv is Fermat, so inv(0) = 0 would silently return (p - 2px, 0)).
+  // No secp256k1 point has y == 0, so only an off-curve operand gets here.
+  // ABORT — the one failure channel this adder has besides the operand gates:
+  //   ok = NOT(cond AND px != 0 AND py == 0)
+  // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+  t.copyToTop('px', '_px_g');
+  t.copyToTop('py', '_py_g');
+  t.copyToTop('_cond', '_cond_g');
+  t.rawBlock(['_px_g', '_py_g', '_cond_g'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_SWAP' });
+    e({ op: 'opcode', code: 'OP_NOT' });
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_NOT' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
+  });
+
   // chord numerator / denominator
   t.copyToTop('qy', '_qy1');
   t.copyToTop('py', '_py1');
@@ -1191,7 +1209,8 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
  * WHY NOT `ecAdd`, which is the other half of the boundary: `affineAdd`
  * implements the group law with no n-dependent trick, so on an off-curve
  * operand it returns the CORRECT sum on that operand's own curve. It does not
- * lie. And O — deliberately not on the curve — must keep flowing through
+ * lie — except doubling an `(x, 0)`, whose vertical tangent has no affine
+ * answer; that case ABORTS (N-110) rather than return `(p - 2x, 0)`. And O — deliberately not on the curve — must keep flowing through
  * `ecAdd` for R-053 to hold. Gating the adder would break a working primitive
  * to fix a different one.
  *

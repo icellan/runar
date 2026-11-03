@@ -216,15 +216,26 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
     };
 
     const WRITE_PINS: Record<string, string> = {
-      ByteString: '5f873f911dbb2caf364021413581423af0f6aaf8ba882d787c8ee9f72d0c0e5b',
-      PubKey: 'c0ba2f049c2a412f6ee80f36ca97d7c615c938cf75f19c33888aa9a26d8cd572',
-      bigint: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      // F-024 (R14) re-stamp: every mutating method gains the injected
+      // `_newAmount >= extractAmount(txPreimage)` value check (+16 B, +17 B for
+      // boolean); each check-stripped ANF re-emits the previous digest, and
+      // bigint == RabinSig still holds.
+      // N-044 re-stamp (ByteString only): the push-data writer gains its
+      // PUSHDATA4 arm. Every non-framed row is unmoved.
+      // N-045 re-stamp (PubKey only): the continuation writer asserts
+      // OP_SIZE 33 OP_NUMEQUALVERIFY before committing a fixed-width field;
+      // re-measured byte-identical in all seven tiers (the same script as
+      // curve-point-state-width's PubKey write pin). The numeric and framed
+      // rows are unmoved.
+      ByteString: 'ffe905dc3e740a5ed3c3ee819b7d5269cc6a78feb7857b0aceef29c5420d332d',
+      PubKey: '758f1fc87b596cfa2eac87f77ee2b3639fef1e3ea5c1bdd6d1b461a07fa98741',
+      bigint: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: '9d0412948a994626f8d3f87b74bdf191ef7cad96d668df73bb944b5d0646a918',
-      RabinSig: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      boolean: 'f38514e87b397d0351f23fc7d9f5a055af45a660982b11f32d41bf229ceab8c4',
+      RabinSig: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {
@@ -240,8 +251,10 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
     }
 
     it('the ByteString control read path is byte-unchanged', () => {
+      // N-044 re-stamp: the push-data reader reads lengths unsigned,
+      // whitelists the header byte and asserts exact consumption.
       expect(sha256(hexOf(terminalSource('ByteString'), READ_FILE))).toBe(
-        'ecfc6f7aea65c879be7375ffbb232a756cada31e1679b5b71c23f73309659522',
+        '0cff82c1a9079c665da13495c3fe0f8d8613507a60bb1fcb1e646255b1970e10',
       );
     });
   });

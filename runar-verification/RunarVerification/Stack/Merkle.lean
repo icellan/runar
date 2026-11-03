@@ -68,15 +68,14 @@ Mirrors `emitMerkleRoot`'s loop body at `merkle-codegen.ts:73-164`:
   7. push 2; OP_MOD        — [current, sibling, index, dir]
   8. swap                  — [current, sibling, dir, index]
   9. OP_TOALTSTACK         — [current, sibling, dir]   alt += index
- 10. rot                   — [sibling, dir, current]
- 11. rot                   — [dir, current, sibling]
- 12. rot                   — [current, sibling, dir]
- 13. IF [swap] — direction=1 swaps so we hash(sibling || current)
- 14. OP_CAT                — [a||b]
- 15. <hashOp>              — [new_current]
- 16. OP_FROMALTSTACK       — [new_current, index]
- 17. OP_FROMALTSTACK       — [new_current, index, rest_proof]
- 18. swap                  — [new_current, rest_proof, index]
+ 10. IF [swap] — direction=1 swaps so we hash(sibling || current)
+     (F-249: no rotation before it; [current, sibling, dir] is already the
+     order IF wants — the three OP_ROTs once emitted here were the identity)
+ 11. OP_CAT                — [a||b]
+ 12. <hashOp>              — [new_current]
+ 13. OP_FROMALTSTACK       — [new_current, index]
+ 14. OP_FROMALTSTACK       — [new_current, index, rest_proof]
+ 15. swap                  — [new_current, rest_proof, index]
 -/
 
 /-- The depth-bit-extraction sub-sequence for level `i` (TS lines 102-110).
@@ -108,10 +107,6 @@ def mLevel (i : Nat) (hashOp : String) : List StackOp :=
      -- Move index to alt stack
      , .swap
      , mOpc "OP_TOALTSTACK"
-     -- Step 3: rearrange to [current, sibling, dir]
-     , .rot
-     , .rot
-     , .rot
      -- Conditional swap
      , .ifOp [.swap] none
      -- Concat + hash
@@ -303,14 +298,6 @@ private theorem mlevel_stepNonIf_dup
   unfold StackState.push
   rw [hStk]
 
-private theorem mlevel_stepNonIf_rot
-    (s : StackState) (a b c : Value) (rest : List Value)
-    (hStk : s.stack = a :: b :: c :: rest) :
-    stepNonIf .rot s = .ok { s with stack := c :: a :: b :: rest } := by
-  show applyRot s = _
-  unfold applyRot
-  rw [hStk]
-
 private theorem mlevel_stepNonIf_drop
     (s : StackState) (v : Value) (rest : List Value)
     (hStk : s.stack = v :: rest) :
@@ -386,7 +373,7 @@ private theorem mlevel_stepNonIf_split
         | Except.ok (vs, s') =>
             match vs with
             | [idx', v] =>
-                match asBytes? v, asNonNegativeNat? idx' with
+                match asBytesNum? v, asNonNegativeNat? idx' with
                 | some bs', some i' =>
                     if i' > bs'.size then
                       Except.error (ANF.Eval.EvalError.unsupported "OP_SPLIT: index past end")
@@ -774,14 +761,12 @@ private theorem runOps_mLevel_state_eq
         altstack := .vBigint index
                     :: .vBytes (proof.extract 32 proof.size)
                     :: s.altstack }
-  -- After three rots starting from [dir, sibling, current, ...rest],
-  -- we're back to [dir, sibling, current, ...rest] (3-cycle).
   -- Open mLevel and use runOps_append to chunk through.
   show runOps ([.swap, mPushI 32, mOpc "OP_SPLIT", mOpc "OP_TOALTSTACK",
                 .swap, mOpc "OP_DUP"]
                ++ mShiftBits i
                ++ [mPushI 2, mOpc "OP_MOD", .swap, mOpc "OP_TOALTSTACK",
-                   .rot, .rot, .rot, .ifOp [.swap] none, mOpc "OP_CAT",
+                   .ifOp [.swap] none, mOpc "OP_CAT",
                    mOpc hashOp, mOpc "OP_FROMALTSTACK",
                    mOpc "OP_FROMALTSTACK", .swap]) s0 = _
   -- Pre-shift chunk: 6 ops, ending at state s6.
@@ -852,34 +837,6 @@ private theorem runOps_mLevel_state_eq
         (mlevel_stepNonIf_toaltstack s10 (.vBigint index)
           (.vBigint (mDir index i) :: .vBytes (proof.extract 0 32)
             :: .vBytes current :: rest) rfl)]
-  -- Three rots: starting from s11 (dir on top), end at the same shape s11.
-  let s12 : StackState := { s with
-        stack := .vBytes current :: .vBigint (mDir index i)
-                  :: .vBytes (proof.extract 0 32) :: rest,
-        altstack := .vBigint index
-                    :: .vBytes (proof.extract 32 proof.size)
-                    :: s.altstack }
-  let s13 : StackState := { s with
-        stack := .vBytes (proof.extract 0 32) :: .vBytes current
-                  :: .vBigint (mDir index i) :: rest,
-        altstack := .vBigint index
-                    :: .vBytes (proof.extract 32 proof.size)
-                    :: s.altstack }
-  rw [mlevel_cons_step .rot _ s11 s12
-        (fun _ _ h => StackOp.noConfusion h)
-        (mlevel_stepNonIf_rot s11 (.vBigint (mDir index i))
-          (.vBytes (proof.extract 0 32)) (.vBytes current) rest rfl)]
-  rw [mlevel_cons_step .rot _ s12 s13
-        (fun _ _ h => StackOp.noConfusion h)
-        (mlevel_stepNonIf_rot s12 (.vBytes current)
-          (.vBigint (mDir index i))
-          (.vBytes (proof.extract 0 32)) rest rfl)]
-  -- After two more rots we'd return to s11 — but we only need 3 rots total,
-  -- after which the shape is back to s11.  Use s14 = s11 below.
-  rw [mlevel_cons_step .rot _ s13 s11
-        (fun _ _ h => StackOp.noConfusion h)
-        (mlevel_stepNonIf_rot s13 (.vBytes (proof.extract 0 32))
-          (.vBytes current) (.vBigint (mDir index i)) rest rfl)]
   -- Now ifOp on dir.  s11 has dir on top.
   rw [runOps.eq_2 s11 [.swap] none _]
   -- s11.pop? = some (vBigint dir, popped).  Reduce explicitly.

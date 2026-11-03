@@ -5,6 +5,7 @@ const signer_mod = @import("sdk_signer.zig");
 const contract_mod = @import("sdk_contract.zig");
 const state_mod = @import("sdk_state.zig");
 const deploy_mod = @import("sdk_deploy.zig");
+const errors_mod = @import("sdk_errors.zig");
 
 // ---------------------------------------------------------------------------
 // BRC-100 Wallet Integration
@@ -276,26 +277,26 @@ pub const WalletProvider = struct {
         return provider_mod.ProviderError.NotFound;
     }
 
-    fn broadcastImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
-        const self: *WalletProvider = @ptrCast(@alignCast(ctx));
+    // N-040 / N-260 / R100: reviewed against BRC-100. The `WalletClient`
+    // abstraction this SDK models (see `createAction` above) has no
+    // "broadcast this exact, already-built, already-signed raw transaction"
+    // primitive — BRC-100's `createAction` builds, signs AND submits a NEW
+    // action from a set of *outputs the wallet composes itself*; it does not
+    // accept an externally assembled transaction to relay verbatim. So the
+    // only data this call could carry about `tx_hex` was the free-text
+    // `description` field, which a real wallet treats as a human-readable
+    // label, not an instruction to broadcast those exact bytes.
+    //
+    // This used to be fail-open (N-040): it called `createAction` anyway,
+    // discarding the transaction `sdk_contract.zig` actually built and
+    // returning the txid of an unrelated, wallet-composed, zero-output
+    // action as if the caller's tx had gone out. Per user decision R100 the
+    // project fails closed instead: refuse, and never touch the wallet, so a
+    // caller can never mistake this for a broadcast that happened.
+    pub const RAW_BROADCAST_UNSUPPORTED_MSG = "raw broadcast unsupported by BRC-100; use an ARC/WhatsOnChain provider";
 
-        // Use createAction with no explicit outputs — the tx_hex is the pre-built
-        // transaction. For a full implementation this would parse the tx and
-        // submit via the wallet. Here we delegate to createAction as a broadcast
-        // mechanism, passing the raw hex as the description.
-        var result = self.wallet.createAction(allocator, tx_hex, &.{}) catch return provider_mod.ProviderError.BroadcastFailed;
-
-        // Copy txid before deinit
-        const txid_copy = if (result.txid.len > 0)
-            allocator.dupe(u8, result.txid) catch return provider_mod.ProviderError.OutOfMemory
-        else
-            null;
-
-        result.deinit(allocator);
-
-        if (txid_copy) |txid| {
-            return txid;
-        }
+    fn broadcastImpl(_: *anyopaque, _: std.mem.Allocator, _: []const u8) provider_mod.ProviderError![]u8 {
+        errors_mod.last_broadcast_refusal = RAW_BROADCAST_UNSUPPORTED_MSG;
         return provider_mod.ProviderError.BroadcastFailed;
     }
 
@@ -321,6 +322,10 @@ pub const WalletProvider = struct {
 
         for (wallet_outputs) |wo| {
             if (!wo.spendable) continue;
+
+            // N-043: an output without a usable locking script is dropped
+            // (fail-closed), matching the TypeScript reference.
+            if (wo.locking_script.len == 0) continue;
 
             // Filter by expected script if set
             if (self.expected_script) |es| {
@@ -376,6 +381,8 @@ pub const WalletSigner = struct {
     protocol_id: ProtocolID,
     key_id: []const u8,
     cached_pub_key: ?[]const u8 = null,
+    /// Address network for getAddress; mainnet by default, like LocalSigner.
+    network: @import("bsvz").primitives.network.Network = .mainnet,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -432,29 +439,26 @@ pub const WalletSigner = struct {
     fn getAddressImpl(ctx: *anyopaque, allocator: std.mem.Allocator) signer_mod.SignerError![]u8 {
         const self: *WalletSigner = @ptrCast(@alignCast(ctx));
 
-        // Get public key and compute hash160 to use as address
         const pub_key_hex = try getPublicKeyImpl(@ptrCast(self), allocator);
         defer allocator.free(pub_key_hex);
 
-        // For the wallet signer, the "address" is the hash160 of the public key
-        // (20 bytes = 40 hex chars), consistent with how the SDK uses addresses
-        // as raw hash160 values internally.
+        // Signer contract: the Base58Check P2PKH address on `network`, as
+        // LocalSigner returns (F-146; was the raw 40-hex hash160).
         const pub_key_bytes = state_mod.hexToBytes(allocator, pub_key_hex) catch return signer_mod.SignerError.InvalidEncoding;
         defer allocator.free(pub_key_bytes);
 
         const bsvz = @import("bsvz");
         const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
-        const hex_buf = allocator.alloc(u8, 40) catch return signer_mod.SignerError.OutOfMemory;
-        _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, hex_buf) catch {
-            allocator.free(hex_buf);
-            return signer_mod.SignerError.InvalidEncoding;
-        };
-        return hex_buf;
+        return bsvz.compat.address.encodeP2pkh(allocator, self.network, ripe_hash) catch return signer_mod.SignerError.OutOfMemory;
     }
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript_hex: []const u8, satoshis: i64, sighash_type: ?u32) signer_mod.SignerError![]u8 {
         const self: *WalletSigner = @ptrCast(@alignCast(ctx));
         const bsvz = @import("bsvz");
+
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if (subscript_hex.len == 0) return error.EmptySubscript;
 
         const scope = sighash_type orelse (bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all);
 
@@ -497,7 +501,12 @@ pub const WalletSigner = struct {
 /// function that creates a WalletProvider and WalletSigner from the given
 /// wallet client, then calls deploy on the contract.
 ///
-/// Returns the broadcast txid (caller owns).
+/// N-260 / R100: `WalletProvider`'s broadcast step fails closed (BRC-100's
+/// `createAction` has no primitive to relay an already-signed raw
+/// transaction) — never a txid: a deploy that clears the unsound-primitive
+/// gate and the funding/UTXO steps still fails at broadcast with
+/// `error.DeployFailed`, until a raw-broadcast-capable provider path exists
+/// for the wallet tier.
 pub fn deployWithWallet(
     contract: *contract_mod.RunarContract,
     wallet: WalletClient,
@@ -679,6 +688,76 @@ test "WalletProvider returns UTXOs from wallet outputs" {
     try std.testing.expectEqual(@as(i32, 0), utxos[0].output_index);
 }
 
+// N-043: an output the wallet reports with an empty locking script is dropped
+// (fail-closed, the TypeScript reference policy), with or without an expected
+// script configured. Proves: only the output that carries a script is returned.
+// Does not prove: behaviour against a real BRC-100 wallet.
+test "N-043 WalletProvider.getUtxos drops an output with an empty locking script" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+
+    const good = "76a914" ++ "00" ** 20 ++ "88ac";
+    try mock.addOutput(.{ .outpoint = "aabb" ++ "00" ** 30 ++ ".0", .satoshis = 5000, .locking_script = good, .spendable = true });
+    try mock.addOutput(.{ .outpoint = "ccdd" ++ "00" ** 30 ++ ".1", .satoshis = 3000, .locking_script = "", .spendable = true });
+
+    const wc = mock.walletClient();
+    var wp = WalletProvider.init(allocator, wc, "test-basket", .{});
+    defer wp.deinit();
+
+    // First without an expected script, then with one.
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        if (round == 1) try wp.setExpectedScript(good);
+        var prov = wp.provider();
+        const utxos = try prov.getUtxos(allocator, "any-address");
+        defer {
+            for (utxos) |*u| {
+                var mu = u.*;
+                mu.deinit(allocator);
+            }
+            allocator.free(utxos);
+        }
+        try std.testing.expectEqual(@as(usize, 1), utxos.len);
+        try std.testing.expectEqual(@as(i64, 5000), utxos[0].satoshis);
+    }
+}
+
+// N-260 / R100: WalletProvider.broadcast used to discard the signed tx and
+// call wallet.createAction(tx_hex as description, zero outputs), returning
+// that unrelated action's txid as if the caller's tx had been broadcast
+// (N-040). Proves the fail-closed replacement: broadcast refuses with
+// BroadcastFailed + the explicit side-channel message, and the wallet is
+// never touched (action_count stays 0, no description is recorded) — so a
+// caller can never mistake this for a broadcast that happened.
+// Does not prove: that a raw-broadcast-capable provider (ARC/WhatsOnChain)
+// exists or works; only that this path no longer fakes success.
+test "N-260 WalletProvider.broadcast fails closed instead of faking success via createAction" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    errors_mod.last_broadcast_refusal = null;
+
+    const wc = mock.walletClient();
+    var wp = WalletProvider.init(allocator, wc, "test-basket", .{});
+    defer wp.deinit();
+
+    var prov = wp.provider();
+    if (prov.broadcast(allocator, "0100000000")) |txid| {
+        allocator.free(txid);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(provider_mod.ProviderError.BroadcastFailed, err);
+    }
+
+    // The wallet must never have been asked to create an action.
+    try std.testing.expectEqual(@as(u32, 0), mock.action_count);
+    try std.testing.expectEqual(@as(usize, 0), mock.last_action_description.len);
+
+    const msg = errors_mod.last_broadcast_refusal orelse return error.TestExpectedRecordedContext;
+    try std.testing.expectEqualStrings(WalletProvider.RAW_BROADCAST_UNSUPPORTED_MSG, msg);
+}
+
 test "WalletProvider getNetwork and getFeeRate return configured values" {
     const allocator = std.testing.allocator;
     var mock = MockWalletClient.init(allocator);
@@ -714,4 +793,65 @@ test "WalletSigner getPublicKey caches result" {
 
     try std.testing.expectEqual(@as(usize, 66), pk1.len);
     try std.testing.expectEqualStrings(pk1, pk2);
+}
+
+// F-040: WalletSigner computes the BIP-143 digest locally, so an empty
+// subscript must be refused (EmptySubscript) before the wallet is asked to sign.
+test "F-040 WalletSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    var ws = WalletSigner.init(allocator, mock.walletClient(), .{ .level = 2, .name = "test" }, "1");
+    defer ws.deinit();
+    var s = ws.signer();
+
+    const tx = "01000000" ++ "01" ++ ("11" ** 32) ++ "00000000" ++ "00" ++ "ffffffff" ++
+        "01" ++ "8403000000000000" ++ "01" ++ "51" ++ "00000000";
+    if (s.sign(allocator, tx, 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
+}
+
+// F-146: Signer.getAddress is the BSV address. WalletSigner returned the raw
+// 40-hex hash160 instead, which providers keying UTXOs by address (WhatsOnChain
+// /address/{address}/unspent, MockProvider) never match.
+// Proves: for the same key (G, private key 1) WalletSigner yields exactly the
+// mainnet Base58Check address LocalSigner yields, and it decodes back to the
+// key's hash160. Does not prove: anything about a live provider lookup.
+test "F-146 WalletSigner.getAddress is LocalSigner's Base58Check address" {
+    const allocator = std.testing.allocator;
+    const g_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const GWallet = struct {
+        fn getPublicKey(_: *anyopaque, a: std.mem.Allocator, _: ProtocolID, _: []const u8) WalletError![]u8 {
+            return a.dupe(u8, g_hex) catch return WalletError.OutOfMemory;
+        }
+        const vtable = WalletClient.VTable{
+            .getPublicKey = getPublicKey,
+            .createSignature = MockWalletClient.createSignatureImpl,
+            .createAction = MockWalletClient.createActionImpl,
+            .listOutputs = MockWalletClient.listOutputsImpl,
+        };
+    };
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    const wc = WalletClient{ .ptr = @ptrCast(&mock), .vtable = &GWallet.vtable };
+    var ws = WalletSigner.init(allocator, wc, .{ .level = 2, .name = "test" }, "1");
+    defer ws.deinit();
+
+    const addr = try ws.signer().getAddress(allocator);
+    defer allocator.free(addr);
+
+    var local = try signer_mod.LocalSigner.fromHex("00" ** 31 ++ "01");
+    const local_addr = try local.signer().getAddress(allocator);
+    defer allocator.free(local_addr);
+
+    try std.testing.expectEqualStrings(local_addr, addr);
+    try std.testing.expectEqualStrings("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH", addr);
+
+    const script = try deploy_mod.buildP2PKHScript(allocator, addr);
+    defer allocator.free(script);
+    try std.testing.expectEqualStrings("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac", script);
 }

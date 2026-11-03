@@ -348,8 +348,14 @@ class TestExpandFixedArrays < Minitest::Test
     # and the six per-method OP_CODESEPARATORs collapse into one at offset 1.
     # W1 took it 7778 -> 7796: six 32-bit-extractor call sites each gained a
     # 3-byte zero-pad ahead of their OP_BIN2NUM.
-    assert_equal 7796, v1.script.length / 2, "v1 script must be 7796 bytes"
-    assert_equal 7796, v2.script.length / 2, "v2 script must be 7796 bytes"
+    # F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
+    # N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
+    # N-045 took it 7849 -> 7857: the mutable PubKey playerO is width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY, +4) before each of its two continuation commits.
+    # N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
+    # N-376 took it 7855 -> 7801: the ROT ROT ROT -> [] peephole rule deletes 18 identity ROT^3 runs (54 bytes).
+    # N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
+    assert_equal 7798, v1.script.length / 2, "v1 script must be 7798 bytes"
+    assert_equal 7798, v2.script.length / 2, "v2 script must be 7798 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 
@@ -358,7 +364,7 @@ class TestExpandFixedArrays < Minitest::Test
       class R extends StatefulSmartContract {
         board: FixedArray<bigint, 3> = [0n, 0n, 0n];
         constructor() { super(); }
-        public m(idx: bigint): bigint {
+        private m(idx: bigint): bigint {
           return this.board[idx] + 1n;
         }
       }

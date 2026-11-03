@@ -2,6 +2,7 @@
 name = "runar-compiler-rust"
 version = "1.0.0-rc.1"
 edition = "2021"
+rust-version = "1.87"
 description = "Rust implementation of the Rúnar compiler (full pipeline: .runar.ts → Bitcoin Script)"
 license = "MIT"
 repository = "https://github.com/icellan/runar"
@@ -22,6 +23,9 @@ num-traits = "0.2"
 swc_common = "0.37"
 swc_ecma_parser = "0.149"
 swc_ecma_ast = "0.118"
+# F-213: the .runar.ts parse (swc) runs on its own stack segment
+# (src/frontend/ts_nesting.rs). Already in the graph via swc_ecma_parser.
+stacker = "0.1"
 
 # Bitcoin Script interpreter for the `debug` subcommand (G-6). Mirrors the
 # upstream wrap that packages/runar-rs's ScriptVm uses; pulled in here

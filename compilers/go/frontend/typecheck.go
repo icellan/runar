@@ -3,7 +3,9 @@ package frontend
 import (
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,7 @@ func (r *TypeCheckResult) ErrorStrings() []string {
 func TypeCheck(contract *ContractNode) *TypeCheckResult {
 	checker := newTypeChecker(contract)
 
+	checker.checkPropertyInitializers()
 	checker.checkConstructor()
 	for _, method := range contract.Methods {
 		checker.checkMethod(method)
@@ -226,6 +229,24 @@ var builtinFunctions = map[string]funcSig{
 	"extractPrevOutputScript": {params: []string{"bigint", "ByteString"}, returnType: "ByteString"},
 	"requireOutputP2PKH":      {params: []string{"bigint", "ByteString", "bigint"}, returnType: "void"},
 	"currentBlockHeight":      {params: []string{}, returnType: "bigint"},
+	// F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+	// satoshis of the default single-output state continuation.
+	"continuationAmount": {params: []string{}, returnType: "bigint"},
+}
+
+// ContinuationAmountReadOnly is the one diagnostic every tier emits for a
+// write to continuationAmount() (F-024 / R14).
+const ContinuationAmountReadOnly = "continuationAmount() is read-only and cannot be assigned"
+
+// refuseContinuationAmountWrite: continuationAmount() is a read-only view of
+// the auto-injected `_newAmount`. Without this check an assignment to it would
+// lower as a plain read and silently drop the write (F-024 / R14).
+func (tc *typeChecker) refuseContinuationAmountWrite(target Expression) {
+	if call, ok := target.(CallExpr); ok {
+		if id, ok := call.Callee.(Identifier); ok && id.Name == "continuationAmount" {
+			tc.addError(ContinuationAmountReadOnly)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +390,13 @@ func isByteFamily(t string) bool {
 	return byteStringSubtypes[t]
 }
 
+// IsBigintFamilyType / IsByteStringFamilyType expose the two family sets to
+// the compiler package (constructorArgs value check, F-101) so it does not
+// keep a second copy of either list.
+func IsBigintFamilyType(t string) bool { return isBigintFamily(t) }
+
+func IsByteStringFamilyType(t string) bool { return isByteFamily(t) }
+
 // ---------------------------------------------------------------------------
 // Type environment
 // ---------------------------------------------------------------------------
@@ -404,6 +432,16 @@ func (e *typeEnv) lookup(name string) (string, bool) {
 	return "", false
 }
 
+// scopeIndexOf returns the index of the innermost scope binding name, or -1.
+func (e *typeEnv) scopeIndexOf(name string) int {
+	for i := len(e.scopes) - 1; i >= 0; i-- {
+		if _, ok := e.scopes[i][name]; ok {
+			return i
+		}
+	}
+	return -1
+}
+
 // ---------------------------------------------------------------------------
 // Type checker
 // ---------------------------------------------------------------------------
@@ -437,8 +475,39 @@ type typeChecker struct {
 	// affine origin it aliases. Populated when a variable_decl of
 	// affine type is initialized from another affine origin.
 	affineAliases    map[string]string
-	currentMethodLoc *SourceLocation
+	// repeatingLoopScopes holds, for every enclosing loop that may run two or
+	// more times, the env scope index its init/body bindings live at
+	// (innermost last). A bounded loop is unrolled count times, so consuming
+	// an affine value bound below the innermost index happens once per
+	// iteration (F-110).
+	repeatingLoopScopes []int
+	currentMethodLoc    *SourceLocation
 	currentStmtLoc   *SourceLocation
+	// sideEffects is computed lazily by methodEffects (F-075).
+	sideEffects SideEffectSummary
+	// consumedParams maps every contract method to the indices of the
+	// parameters it consumes, directly or through further helper calls
+	// (N-109). Private helpers are inlined, so a call consumes the arguments
+	// at those positions. N-288: also the "prop:<name>" origin keys it
+	// consumes, which a call consumes in the caller. Computed lazily by
+	// consumedParamSummary.
+	consumedParams map[string]methodConsumption
+}
+
+// methodConsumption is what a contract method consumes when it is called
+// (inlined): the indices of its affine parameters (N-109) and the
+// "prop:<name>" origin keys of the affine properties it consumes (N-288).
+type methodConsumption struct {
+	params []int
+	props  []string
+}
+
+// methodEffects returns the named method's effects, following private helpers.
+func (tc *typeChecker) methodEffects(name string) MethodEffects {
+	if tc.sideEffects == nil {
+		tc.sideEffects = ComputeSideEffectSummary(tc.contract)
+	}
+	return tc.sideEffects[name]
 }
 
 func newTypeChecker(contract *ContractNode) *typeChecker {
@@ -474,7 +543,25 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 	return tc
 }
 
+// N-321: a diagnostic may echo user-written type text of any length (a 4 MiB
+// annotation made a ~4 MiB error). Every tier caps a typecheck message at
+// MaxDiagnosticBytes and appends "...(N more bytes elided)"; real messages
+// are far shorter, so ordinary diagnostics are unchanged.
+const MaxDiagnosticBytes = 1024
+
+func capDiagnostic(msg string) string {
+	if len(msg) <= MaxDiagnosticBytes {
+		return msg
+	}
+	cut := MaxDiagnosticBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...(%d more bytes elided)", msg[:cut], len(msg)-cut)
+}
+
 func (tc *typeChecker) addError(msg string) {
+	msg = capDiagnostic(msg)
 	loc := tc.currentStmtLoc
 	if loc == nil {
 		loc = tc.currentMethodLoc
@@ -482,8 +569,115 @@ func (tc *typeChecker) addError(msg string) {
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
 }
 
+// addErrorAt anchors an error about an expression at that expression, as the
+// TS reference does, when its position is known (every surface parser records
+// it, N-463); otherwise it falls back to addError's statement/method anchor.
+func (tc *typeChecker) addErrorAt(msg string, at Expression) {
+	if loc := exprLoc(at); loc != nil {
+		tc.addErrorWithLoc(msg, loc)
+		return
+	}
+	tc.addError(msg)
+}
+
+// exprLoc is the position of e's first token, or nil when unknown (N-463).
+// Only identifiers (`this` included), `this.x` and ByteString literals record
+// a position, and only on .runar.ts. A composite expression starts where its
+// leftmost child starts, which is the position TS reports for it (a
+// parenthesised leftmost child is the exception: TS points at the `(`).
+func exprLoc(e Expression) *SourceLocation {
+	for {
+		var loc SourceLocation
+		switch x := e.(type) {
+		case Identifier:
+			loc = x.SourceLocation
+		case PropertyAccessExpr:
+			loc = x.SourceLocation
+		case ByteStringLiteral:
+			loc = x.SourceLocation
+		case BinaryExpr:
+			// N-472: the parser records where the whole expression
+			// starts, which a leading `(` moves left of the leftmost leaf.
+			if x.SourceLocation.Line != 0 {
+				loc := x.SourceLocation
+				return &loc
+			}
+			e = x.Left
+			continue
+		case UnaryExpr:
+			// N-472: the operator token; the other surfaces record none.
+			loc = x.SourceLocation
+		case CallExpr:
+			e = x.Callee
+			continue
+		case MemberExpr:
+			e = x.Object
+			continue
+		case IndexAccessExpr:
+			e = x.Object
+			continue
+		case TernaryExpr:
+			e = x.Condition
+			continue
+		default:
+			return nil
+		}
+		if loc.Line == 0 {
+			return nil
+		}
+		return &loc
+	}
+}
+
+// addOperandErrorAt anchors an operand type error at the operand, as TS does
+// with `operand.sourceLocation` and no fallback (N-472): a bigint or boolean
+// literal carries no location in any TS parser, so the diagnostic prints none
+// rather than the statement. Any other operand without a recorded position
+// (a surface that does not record it) keeps addErrorAt's statement anchor.
+func (tc *typeChecker) addOperandErrorAt(msg string, operand Expression) {
+	if exprLoc(operand) == nil {
+		switch operand.(type) {
+		case BigIntLiteral, BoolLiteral:
+			tc.errors = append(tc.errors, Diagnostic{Message: capDiagnostic(msg), Severity: SeverityError})
+			return
+		}
+	}
+	tc.addErrorAt(msg, operand)
+}
+
 func (tc *typeChecker) addErrorWithLoc(msg string, loc *SourceLocation) {
+	msg = capDiagnostic(msg)
 	tc.errors = append(tc.errors, Diagnostic{Message: msg, Severity: SeverityError, Loc: loc})
+}
+
+// checkPropertyInitializers is N-234's fix: a scalar property initializer
+// whose literal type does not match the declared property type compiled
+// without complaint on every tier (`readonly x: bigint = toByteString('ab')`
+// emitted a locking script that pushes a byte string where the contract's
+// own arithmetic expects a script NUMBER). The validator only checks that an
+// initializer IS a literal of one of the three families, never that it is a
+// literal OF THE DECLARED TYPE. FixedArray properties are skipped here:
+// their element-type check already lives in expand_fixed_arrays.go (N-133),
+// which runs on the expanded array elements, not the whole-array
+// initializer this pass sees. Mirrors the TS reference's method of the same
+// name in 03-typecheck.ts.
+func (tc *typeChecker) checkPropertyInitializers() {
+	for _, prop := range tc.contract.Properties {
+		if prop.Initializer == nil {
+			continue
+		}
+		if _, isArray := prop.Type.(FixedArrayType); isArray {
+			continue
+		}
+		initType := inferExprTypeStatic(prop.Initializer)
+		if initType == "<unknown>" {
+			continue
+		}
+		declaredType := typeNodeToString(prop.Type)
+		if !isSubtype(initType, declaredType) {
+			tc.addErrorWithLoc(fmt.Sprintf("type '%s' is not assignable to type '%s'", initType, declaredType), &prop.SourceLocation)
+		}
+	}
 }
 
 func (tc *typeChecker) checkConstructor() {
@@ -532,8 +726,15 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 	// exercised — attackers could route the bond P2PKH through an
 	// unmatched index. v1 forbids the mix; v2 may relax with a
 	// variable-stride decoder.
-	hasRequireP2PKH := bodyCallsBuiltin(method.Body, "requireOutputP2PKH")
-	hasAddDataOutput := bodyCallsAddDataOutput(method.Body)
+	//
+	// F-075: all three guards here read the method's effects from
+	// ComputeSideEffectSummary, which follows the private-helper call graph —
+	// the same analysis ANF lowering injects the continuation from, and ANF
+	// lowering inlines private helpers. A body-local walk let a developer
+	// disable every guard by moving the triggering call into a helper.
+	effects := tc.methodEffects(method.Name)
+	hasRequireP2PKH := effects.CallsRequireOutputP2PKH
+	hasAddDataOutput := effects.HasDataOutput
 	if hasRequireP2PKH && hasAddDataOutput {
 		tc.addError(fmt.Sprintf(
 			"method '%s' mixes requireOutputP2PKH() with addDataOutput() — "+
@@ -560,14 +761,7 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 	// See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
 	// Mirrors the TS reference guard in 03-typecheck.ts.
 	if tc.contract != nil && tc.contract.ParentClass == "StatefulSmartContract" {
-		mutableProps := make(map[string]bool)
-		for _, p := range tc.contract.Properties {
-			if !p.Readonly {
-				mutableProps[p.Name] = true
-			}
-		}
-		sig := analyzeMethodOutputSignals(method.Body, mutableProps)
-		if hasRequireP2PKH && sig.hasStateOutput {
+		if hasRequireP2PKH && effects.HasStateOutput {
 			tc.addError(fmt.Sprintf(
 				"method '%s' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — "+
 					"the intrinsic reads output i at byte offset i*34, which is only correct when "+
@@ -577,7 +771,7 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 					"permanently unspendable. Assert the payment from a separate method that emits "+
 					"no output of its own", method.Name))
 		}
-		if sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput {
+		if effects.RequiresOutputP2PKHZero && effects.MutatesState && !effects.HasStateOutput {
 			tc.addError(fmt.Sprintf(
 				"method '%s' calls requireOutputP2PKH(0, ...) but also mutates state "+
 					"without this.addOutput()/addRawOutput() — the auto-injected single-output state "+
@@ -585,298 +779,6 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 					"simultaneously be the required 34-byte P2PKH. This contract would be permanently "+
 					"unspendable. Assert the bond on a non-continuation output index, or make the method "+
 					"terminal (no state mutation)", method.Name))
-		}
-	}
-}
-
-// bodyCallsBuiltin reports whether any statement in `body` (recursively)
-// contains a top-level call expression to a builtin function named `name`.
-// Used by the Crit-3 typecheck rejection for requireOutputP2PKH +
-// addDataOutput mixing.
-func bodyCallsBuiltin(body []Statement, name string) bool {
-	for _, stmt := range body {
-		if stmtContainsCallTo(stmt, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// bodyCallsAddDataOutput reports whether any statement in `body`
-// (recursively) contains a call to `this.addDataOutput(...)` or
-// `c.addDataOutput(...)` — matched by the Property name "addDataOutput"
-// on a PropertyAccessExpr or MemberExpr callee.
-func bodyCallsAddDataOutput(body []Statement) bool {
-	for _, stmt := range body {
-		if stmtContainsAddDataOutput(stmt) {
-			return true
-		}
-	}
-	return false
-}
-
-func stmtContainsCallTo(stmt Statement, name string) bool {
-	switch s := stmt.(type) {
-	case ExpressionStmt:
-		return exprContainsCallTo(s.Expr, name)
-	case VariableDeclStmt:
-		return exprContainsCallTo(s.Init, name)
-	case AssignmentStmt:
-		return exprContainsCallTo(s.Value, name) || exprContainsCallTo(s.Target, name)
-	case IfStmt:
-		if exprContainsCallTo(s.Condition, name) {
-			return true
-		}
-		for _, t := range s.Then {
-			if stmtContainsCallTo(t, name) {
-				return true
-			}
-		}
-		for _, e := range s.Else {
-			if stmtContainsCallTo(e, name) {
-				return true
-			}
-		}
-	case ForStmt:
-		for _, t := range s.Body {
-			if stmtContainsCallTo(t, name) {
-				return true
-			}
-		}
-	case ReturnStmt:
-		if s.Value != nil {
-			return exprContainsCallTo(s.Value, name)
-		}
-	}
-	return false
-}
-
-func exprContainsCallTo(expr Expression, name string) bool {
-	if expr == nil {
-		return false
-	}
-	switch e := expr.(type) {
-	case CallExpr:
-		if id, ok := e.Callee.(Identifier); ok && id.Name == name {
-			return true
-		}
-		for _, a := range e.Args {
-			if exprContainsCallTo(a, name) {
-				return true
-			}
-		}
-	case BinaryExpr:
-		return exprContainsCallTo(e.Left, name) || exprContainsCallTo(e.Right, name)
-	case UnaryExpr:
-		return exprContainsCallTo(e.Operand, name)
-	case TernaryExpr:
-		return exprContainsCallTo(e.Condition, name) ||
-			exprContainsCallTo(e.Consequent, name) ||
-			exprContainsCallTo(e.Alternate, name)
-	case IndexAccessExpr:
-		return exprContainsCallTo(e.Object, name) || exprContainsCallTo(e.Index, name)
-	case ArrayLiteralExpr:
-		for _, el := range e.Elements {
-			if exprContainsCallTo(el, name) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func stmtContainsAddDataOutput(stmt Statement) bool {
-	switch s := stmt.(type) {
-	case ExpressionStmt:
-		return exprContainsAddDataOutput(s.Expr)
-	case VariableDeclStmt:
-		return exprContainsAddDataOutput(s.Init)
-	case AssignmentStmt:
-		return exprContainsAddDataOutput(s.Value) || exprContainsAddDataOutput(s.Target)
-	case IfStmt:
-		if exprContainsAddDataOutput(s.Condition) {
-			return true
-		}
-		for _, t := range s.Then {
-			if stmtContainsAddDataOutput(t) {
-				return true
-			}
-		}
-		for _, e := range s.Else {
-			if stmtContainsAddDataOutput(e) {
-				return true
-			}
-		}
-	case ForStmt:
-		for _, t := range s.Body {
-			if stmtContainsAddDataOutput(t) {
-				return true
-			}
-		}
-	case ReturnStmt:
-		if s.Value != nil {
-			return exprContainsAddDataOutput(s.Value)
-		}
-	}
-	return false
-}
-
-func exprContainsAddDataOutput(expr Expression) bool {
-	if expr == nil {
-		return false
-	}
-	switch e := expr.(type) {
-	case CallExpr:
-		if pa, ok := e.Callee.(PropertyAccessExpr); ok && pa.Property == "addDataOutput" {
-			return true
-		}
-		if me, ok := e.Callee.(MemberExpr); ok && me.Property == "addDataOutput" {
-			return true
-		}
-		for _, a := range e.Args {
-			if exprContainsAddDataOutput(a) {
-				return true
-			}
-		}
-	case BinaryExpr:
-		return exprContainsAddDataOutput(e.Left) || exprContainsAddDataOutput(e.Right)
-	case UnaryExpr:
-		return exprContainsAddDataOutput(e.Operand)
-	case TernaryExpr:
-		return exprContainsAddDataOutput(e.Condition) ||
-			exprContainsAddDataOutput(e.Consequent) ||
-			exprContainsAddDataOutput(e.Alternate)
-	case IndexAccessExpr:
-		return exprContainsAddDataOutput(e.Object) || exprContainsAddDataOutput(e.Index)
-	case ArrayLiteralExpr:
-		for _, el := range e.Elements {
-			if exprContainsAddDataOutput(el) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ---------------------------------------------------------------------------
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ---------------------------------------------------------------------------
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the TS
-// analyzeMethodOutputSignals in 03-typecheck.ts.
-
-// stateOutputMethodNames are the intrinsics that emit an explicit output and
-// thereby OPT the method OUT of the auto-injected single-output continuation.
-var stateOutputMethodNames = map[string]bool{"addOutput": true, "addRawOutput": true}
-
-// methodOutputSignals captures the three signals the collision guard needs,
-// collected in one body walk.
-type methodOutputSignals struct {
-	mutatesState            bool // assigns to / ++/-- a non-readonly property
-	hasStateOutput          bool // calls this.addOutput() or this.addRawOutput()
-	requiresOutputP2PKHZero bool // calls requireOutputP2PKH(0n, ...)
-}
-
-func analyzeMethodOutputSignals(body []Statement, mutableProps map[string]bool) methodOutputSignals {
-	sig := methodOutputSignals{}
-	for _, stmt := range body {
-		walkStmtForOutputSignals(stmt, mutableProps, &sig)
-	}
-	return sig
-}
-
-func walkStmtForOutputSignals(stmt Statement, mutableProps map[string]bool, sig *methodOutputSignals) {
-	switch s := stmt.(type) {
-	case AssignmentStmt:
-		if pa, ok := s.Target.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			sig.mutatesState = true
-		}
-		walkExprForOutputSignals(s.Target, mutableProps, sig)
-		walkExprForOutputSignals(s.Value, mutableProps, sig)
-	case ExpressionStmt:
-		walkExprForOutputSignals(s.Expr, mutableProps, sig)
-	case VariableDeclStmt:
-		walkExprForOutputSignals(s.Init, mutableProps, sig)
-	case IfStmt:
-		walkExprForOutputSignals(s.Condition, mutableProps, sig)
-		for _, t := range s.Then {
-			walkStmtForOutputSignals(t, mutableProps, sig)
-		}
-		for _, e := range s.Else {
-			walkStmtForOutputSignals(e, mutableProps, sig)
-		}
-	case ForStmt:
-		walkStmtForOutputSignals(s.Init, mutableProps, sig)
-		walkExprForOutputSignals(s.Condition, mutableProps, sig)
-		if s.Update != nil {
-			walkStmtForOutputSignals(s.Update, mutableProps, sig)
-		}
-		for _, b := range s.Body {
-			walkStmtForOutputSignals(b, mutableProps, sig)
-		}
-	case ReturnStmt:
-		if s.Value != nil {
-			walkExprForOutputSignals(s.Value, mutableProps, sig)
-		}
-	}
-}
-
-func walkExprForOutputSignals(expr Expression, mutableProps map[string]bool, sig *methodOutputSignals) {
-	if expr == nil {
-		return
-	}
-	switch e := expr.(type) {
-	case IncrementExpr:
-		if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			sig.mutatesState = true
-		}
-		walkExprForOutputSignals(e.Operand, mutableProps, sig)
-	case DecrementExpr:
-		if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			sig.mutatesState = true
-		}
-		walkExprForOutputSignals(e.Operand, mutableProps, sig)
-	case CallExpr:
-		if pa, ok := e.Callee.(PropertyAccessExpr); ok && stateOutputMethodNames[pa.Property] {
-			sig.hasStateOutput = true
-		}
-		if me, ok := e.Callee.(MemberExpr); ok && stateOutputMethodNames[me.Property] {
-			sig.hasStateOutput = true
-		}
-		if id, ok := e.Callee.(Identifier); ok && id.Name == "requireOutputP2PKH" {
-			if len(e.Args) > 0 {
-				if lit, ok := e.Args[0].(BigIntLiteral); ok && lit.Value != nil && lit.Value.Sign() == 0 {
-					sig.requiresOutputP2PKHZero = true
-				}
-			}
-		}
-		for _, a := range e.Args {
-			walkExprForOutputSignals(a, mutableProps, sig)
-		}
-		if _, ok := e.Callee.(Identifier); !ok {
-			walkExprForOutputSignals(e.Callee, mutableProps, sig)
-		}
-	case BinaryExpr:
-		walkExprForOutputSignals(e.Left, mutableProps, sig)
-		walkExprForOutputSignals(e.Right, mutableProps, sig)
-	case UnaryExpr:
-		walkExprForOutputSignals(e.Operand, mutableProps, sig)
-	case TernaryExpr:
-		walkExprForOutputSignals(e.Condition, mutableProps, sig)
-		walkExprForOutputSignals(e.Consequent, mutableProps, sig)
-		walkExprForOutputSignals(e.Alternate, mutableProps, sig)
-	case IndexAccessExpr:
-		walkExprForOutputSignals(e.Object, mutableProps, sig)
-		walkExprForOutputSignals(e.Index, mutableProps, sig)
-	case MemberExpr:
-		walkExprForOutputSignals(e.Object, mutableProps, sig)
-	case ArrayLiteralExpr:
-		for _, el := range e.Elements {
-			walkExprForOutputSignals(el, mutableProps, sig)
 		}
 	}
 }
@@ -918,6 +820,7 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		}
 
 	case AssignmentStmt:
+		tc.refuseContinuationAmountWrite(s.Target)
 		targetType := tc.inferExprType(s.Target, env)
 		valueType := tc.inferExprType(s.Value, env)
 		if !isSubtype(valueType, targetType) {
@@ -929,16 +832,30 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		if condType != "boolean" {
 			tc.addError(fmt.Sprintf("if condition must be boolean, got '%s'", condType))
 		}
+		// F-222: the arms are mutually exclusive, so each is checked against
+		// the consumed set as it stood before the if; afterwards a value
+		// consumed in either arm counts as consumed.
+		consumedBefore := make(map[string]bool, len(tc.consumedValues))
+		for origin := range tc.consumedValues {
+			consumedBefore[origin] = true
+		}
 		env.pushScope()
 		tc.checkStatements(s.Then, env)
 		env.popScope()
+		consumedAfterThen := tc.consumedValues
+		tc.consumedValues = consumedBefore
 		if len(s.Else) > 0 {
 			env.pushScope()
 			tc.checkStatements(s.Else, env)
 			env.popScope()
 		}
+		for origin := range consumedAfterThen {
+			tc.consumedValues[origin] = true
+		}
 
 	case ForStmt:
+		loopScope := len(env.scopes)
+		repeats := loopMayRunTwice(s)
 		env.pushScope()
 		tc.checkStatement(s.Init, env)
 		condType := tc.inferExprType(s.Condition, env)
@@ -952,7 +869,14 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		// restricts the clause to a unit-step advance; this is the type-level
 		// half of the same guard.
 		tc.checkStatement(s.Update, env)
+		// F-110: the body runs once per iteration; see repeatingLoopScopes.
+		if repeats {
+			tc.repeatingLoopScopes = append(tc.repeatingLoopScopes, loopScope)
+		}
 		tc.checkStatements(s.Body, env)
+		if repeats {
+			tc.repeatingLoopScopes = tc.repeatingLoopScopes[:len(tc.repeatingLoopScopes)-1]
+		}
 		env.popScope()
 
 	case ExpressionStmt:
@@ -1134,8 +1058,8 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 			// `<unknown>` never reaches here: isSubtype treats it as top of the
 			// lattice, so a private helper's return type is related to
 			// everything, exactly as in TS.
-			tc.addError(fmt.Sprintf(
-				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType))
+			tc.addErrorAt(fmt.Sprintf(
+				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType), e)
 		}
 		return consType
 
@@ -1151,6 +1075,7 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		return "<unknown>"
 
 	case IncrementExpr:
+		tc.refuseContinuationAmountWrite(e.Operand)
 		operandType := tc.inferExprType(e.Operand, env)
 		if !isBigintFamily(operandType) {
 			tc.addError(fmt.Sprintf("++ operator requires bigint, got '%s'", operandType))
@@ -1158,11 +1083,30 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		return "bigint"
 
 	case DecrementExpr:
+		tc.refuseContinuationAmountWrite(e.Operand)
 		operandType := tc.inferExprType(e.Operand, env)
 		if !isBigintFamily(operandType) {
 			tc.addError(fmt.Sprintf("-- operator requires bigint, got '%s'", operandType))
 		}
 		return "bigint"
+
+	case ArrayLiteralExpr:
+		// F-063: without this arm every array literal typed as "<unknown>" —
+		// which isSubtype accepts against anything, making checkMultiSig's
+		// argument check vacuous — and its elements were never visited, so a
+		// call nested in one never reached checkCallExpr's unknown-function
+		// rule. Ported from the TS reference, wording included.
+		if len(e.Elements) == 0 {
+			return "<unknown>[]"
+		}
+		elemType := tc.inferExprType(e.Elements[0], env)
+		for _, el := range e.Elements[1:] {
+			et := tc.inferExprType(el, env)
+			if !isSubtype(et, elemType) && et != "<unknown>" {
+				tc.addError(fmt.Sprintf("Array element type mismatch: expected '%s', got '%s'", elemType, et))
+			}
+		}
+		return elemType + "[]"
 	}
 
 	return "<unknown>"
@@ -1180,28 +1124,28 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType), e.Right)
 		}
 		return "bigint"
 
 	case "-", "*", "/", "%":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
 	case "<", "<=", ">", ">=":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "boolean"
 
@@ -1215,26 +1159,26 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType)
 		if !compatible {
 			if leftType != "<unknown>" && rightType != "<unknown>" {
-				tc.addError(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op))
+				tc.addErrorAt(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op), e)
 			}
 		}
 		return "boolean"
 
 	case "&&", "||":
 		if leftType != "boolean" && leftType != "<unknown>" {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be boolean, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be boolean, got '%s'", e.Op, leftType), e.Left)
 		}
 		if rightType != "boolean" && rightType != "<unknown>" {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be boolean, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be boolean, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "boolean"
 
 	case "<<", ">>":
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 
@@ -1244,15 +1188,26 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(leftType) {
-			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType))
+			tc.addOperandErrorAt(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType), e.Left)
 		}
 		if !isBigintFamily(rightType) {
-			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType))
+			tc.addOperandErrorAt(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType), e.Right)
 		}
 		return "bigint"
 	}
 
 	return "<unknown>"
+}
+
+// addUnaryError anchors a unary operand error at the operator token when the
+// parser recorded it (N-472, .runar.ts only), as TS does; otherwise at the
+// statement.
+func (tc *typeChecker) addUnaryError(msg string, e UnaryExpr) {
+	if exprLoc(e) != nil {
+		tc.addErrorAt(msg, e)
+		return
+	}
+	tc.addError(msg)
 }
 
 func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
@@ -1261,12 +1216,12 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 	switch e.Op {
 	case "!":
 		if operandType != "boolean" && operandType != "<unknown>" {
-			tc.addError(fmt.Sprintf("operand of '!' must be boolean, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of '!' must be boolean, got '%s'", operandType), e)
 		}
 		return "boolean"
 	case "-":
 		if !isBigintFamily(operandType) {
-			tc.addError(fmt.Sprintf("operand of unary '-' must be bigint, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of unary '-' must be bigint, got '%s'", operandType), e)
 		}
 		return "bigint"
 	case "~":
@@ -1275,7 +1230,7 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if !isBigintFamily(operandType) {
-			tc.addError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType))
+			tc.addUnaryError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType), e)
 		}
 		return "bigint"
 	}
@@ -1366,17 +1321,17 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		if len(normalized) >= 1 {
 			satType := tc.inferExprType(normalized[0], env)
 			if !isBigintFamily(satType) && satType != "<unknown>" {
-				tc.addError(fmt.Sprintf(
-					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType))
+				tc.addErrorAt(fmt.Sprintf(
+					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType), args[0])
 			}
 		}
 		for i := 0; i < len(mutableProps) && i+1 < len(normalized); i++ {
 			argType := tc.inferExprType(normalized[i+1], env)
 			propType := typeNodeToString(mutableProps[i].Type)
 			if !isSubtype(argType, propType) && argType != "<unknown>" {
-				tc.addError(fmt.Sprintf(
+				tc.addErrorAt(fmt.Sprintf(
 					"addOutput() argument %d (%s) must be '%s', got '%s'",
-					i+2, mutableProps[i].Name, propType, argType))
+					i+2, mutableProps[i].Name, propType, argType), normalized[i+1])
 			}
 		}
 		// Surplus arguments are still inferred, so a type error inside one
@@ -1395,8 +1350,8 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 	if len(args) >= 1 {
 		satType := tc.inferExprType(args[0], env)
 		if !isBigintFamily(satType) && satType != "<unknown>" {
-			tc.addError(fmt.Sprintf(
-				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType))
+			tc.addErrorAt(fmt.Sprintf(
+				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType), args[0])
 		}
 	}
 	if len(args) >= 2 {
@@ -1404,8 +1359,8 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		// ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
 		scriptType := tc.inferExprType(args[1], env)
 		if !isSubtype(scriptType, "ByteString") && scriptType != "<unknown>" {
-			tc.addError(fmt.Sprintf(
-				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType))
+			tc.addErrorAt(fmt.Sprintf(
+				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType), args[1])
 		}
 	}
 	return "void"
@@ -1444,8 +1399,13 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if sig, ok := tc.methodSigs[id.Name]; ok {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
-		// Check if it's a local variable
+		// Check if it's a local variable -- F-208: Rúnar has no
+		// first-class functions, so a bound local can never be called.
+		// This used to return "<unknown>" with no diagnostic, silently
+		// accepting `const f: bigint = a; const r = f(a, a, a);`.
 		if _, found := env.lookup(id.Name); found {
+			tc.addError(fmt.Sprintf(
+				"local variable '%s' is not callable — Rúnar has no first-class functions; only built-in functions and contract methods can be called", id.Name))
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}
@@ -1677,9 +1637,10 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 		return sig.returnType
 	}
 
-	// requireOutputP2PKH and currentBlockHeight need the auto-injected
-	// txPreimage — only available in StatefulSmartContract methods.
-	if funcName == "requireOutputP2PKH" || funcName == "currentBlockHeight" {
+	// requireOutputP2PKH, currentBlockHeight and continuationAmount need the
+	// auto-injected txPreimage / _newAmount — only available in
+	// StatefulSmartContract methods.
+	if funcName == "requireOutputP2PKH" || funcName == "currentBlockHeight" || funcName == "continuationAmount" {
 		if tc.contract != nil && tc.contract.ParentClass != "StatefulSmartContract" {
 			tc.addError(fmt.Sprintf("%s() is only available in StatefulSmartContract methods", funcName))
 		}
@@ -1703,6 +1664,30 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 			tc.addError(fmt.Sprintf("merkleRootPoseidon2KB() argument count must be 8*depth + 10, got %d (remainder %d)", nArgs, (nArgs-10)%8))
 		}
 		return sig.returnType
+	}
+
+	// F-265: substr(witness, start, len) lowers to a raw OP_SPLIT argument.
+	// A literal negative start used to type-check as plain 'bigint' (the
+	// standard subtype loop below never inspects a literal's VALUE) and
+	// compile to a script that aborts at runtime -- `-5n` minimal-encodes
+	// to `<85>`, which OP_SPLIT rejects. Catch the literal case (bare or
+	// unary-negated BigIntLiteral) at compile time, mirroring the
+	// extractPrevOutputScript/requireOutputP2PKH "must be >= 0" pattern
+	// above. A non-literal start (a variable or computed expression) has
+	// no static value to check and is unaffected.
+	if funcName == "substr" && len(args) >= 2 {
+		lit, ok := args[1].(BigIntLiteral)
+		if !ok {
+			if u, isUnary := args[1].(UnaryExpr); isUnary && u.Op == "-" {
+				if inner, innerOk := u.Operand.(BigIntLiteral); innerOk && inner.Value != nil {
+					lit = BigIntLiteral{Value: new(big.Int).Neg(inner.Value)}
+					ok = true
+				}
+			}
+		}
+		if ok && lit.Value != nil && lit.Value.Sign() < 0 {
+			tc.addError(fmt.Sprintf("substr() argument 2 (start) must be >= 0; got %s", lit.Value.String()))
+		}
 	}
 
 	// Standard arg count check
@@ -1741,8 +1726,21 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 // 2026-04-30 audit finding F6.
 func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression, env *typeEnv) {
 	consumedIndices, ok := consumingFunctions[funcName]
+	var consumedProps []string
 	if !ok {
-		return
+		// N-109: a call to a contract method consumes the arguments at the
+		// parameter positions that method consumes.
+		if _, isBuiltin := builtinFunctions[funcName]; isBuiltin {
+			return
+		}
+		if _, isMethod := tc.methodSigs[funcName]; !isMethod {
+			return
+		}
+		if tc.consumedParams == nil {
+			tc.consumedParams = consumedParamSummary(tc.contract)
+		}
+		consumedIndices = tc.consumedParams[funcName].params
+		consumedProps = tc.consumedParams[funcName].props
 	}
 
 	for _, paramIndex := range consumedIndices {
@@ -1769,12 +1767,125 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 			label = "this." + pa.Property
 		}
 
-		if tc.consumedValues[origin] {
-			tc.addError(fmt.Sprintf("affine value '%s' has already been consumed", label))
+		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
+			tc.addErrorAt(fmt.Sprintf("affine value '%s' has already been consumed", label), arg)
 		} else {
 			tc.consumedValues[origin] = true
 		}
 	}
+
+	// N-288: the call also consumes every property the method consumes.
+	for _, origin := range consumedProps {
+		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
+			msg := fmt.Sprintf("affine value 'this.%s' has already been consumed", strings.TrimPrefix(origin, "prop:"))
+			if len(args) > 0 {
+				tc.addErrorAt(msg, args[0])
+			} else {
+				tc.addError(msg)
+			}
+		} else {
+			tc.consumedValues[origin] = true
+		}
+	}
+}
+
+// consumedParamSummary runs the affine checker over each method body with
+// throwaway diagnostics and records which parameters end up consumed (N-109).
+// Reusing the checker inherits alias, if-arm and loop handling. Consumption
+// only grows as summaries grow, so iterating until no entry changes
+// terminates, also for recursive call graphs (refused separately by the
+// validator). Mirrors consumedParamSummary in the TS reference 03-typecheck.ts.
+func consumedParamSummary(contract *ContractNode) map[string]methodConsumption {
+	summary := make(map[string]methodConsumption, len(contract.Methods))
+	for _, method := range contract.Methods {
+		summary[method.Name] = methodConsumption{params: []int{}, props: []string{}}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, method := range contract.Methods {
+			scratch := newTypeChecker(contract)
+			scratch.consumedParams = summary
+			consumed := scratch.consumedParamIndices(method)
+			prev := summary[method.Name]
+			if len(consumed.params) != len(prev.params) || len(consumed.props) != len(prev.props) {
+				summary[method.Name] = consumed
+				changed = true
+			}
+		}
+	}
+	return summary
+}
+
+// consumedParamIndices returns the indices of method's parameters its body
+// consumes (N-109) and the property origin keys it consumes (N-288).
+func (tc *typeChecker) consumedParamIndices(method MethodNode) methodConsumption {
+	env := newTypeEnv()
+	tc.currentMethodLoc = &method.SourceLocation
+	tc.consumedValues = make(map[string]bool)
+	tc.affineAliases = make(map[string]string)
+	for _, param := range method.Params {
+		env.define(param.Name, typeNodeToString(param.Type))
+	}
+	tc.checkStatements(method.Body, env)
+	indices := []int{}
+	for i, param := range method.Params {
+		if tc.consumedValues[param.Name] {
+			indices = append(indices, i)
+		}
+	}
+	props := []string{}
+	for origin, consumed := range tc.consumedValues {
+		if consumed && strings.HasPrefix(origin, "prop:") {
+			props = append(props, origin)
+		}
+	}
+	sort.Strings(props)
+	return methodConsumption{params: indices, props: props}
+}
+
+// consumedPerLoopIteration reports whether origin is bound outside the
+// innermost enclosing loop that may run two or more times, so this one
+// syntactic consumption executes once per iteration -- a double use. A
+// property, or a name the env does not bind (a bare-identifier property), is
+// always outside (F-110).
+func (tc *typeChecker) consumedPerLoopIteration(origin string, env *typeEnv) bool {
+	if len(tc.repeatingLoopScopes) == 0 {
+		return false
+	}
+	innermost := tc.repeatingLoopScopes[len(tc.repeatingLoopScopes)-1]
+	if strings.HasPrefix(origin, "prop:") {
+		return true
+	}
+	return env.scopeIndexOf(origin) < innermost
+}
+
+// loopMayRunTwice reports whether a for-statement may execute its body two or
+// more times. Mirrors the trip count extractLoopShape unrolls; a shape it
+// cannot resolve is refused elsewhere and is treated as repeating here (F-110).
+func loopMayRunTwice(s ForStmt) bool {
+	start := extractBigIntValue(s.Init.Init)
+	bin, ok := s.Condition.(BinaryExpr)
+	if start == nil || !ok {
+		return true
+	}
+	bound := extractBigIntValue(bin.Right)
+	if bound == nil {
+		return true
+	}
+	count := new(big.Int)
+	switch bin.Op {
+	case "<":
+		count.Sub(bound, start)
+	case "<=":
+		count.Sub(bound, start).Add(count, big.NewInt(1))
+	case ">":
+		count.Sub(start, bound)
+	case ">=":
+		count.Sub(start, bound).Add(count, big.NewInt(1))
+	default:
+		return true
+	}
+	return count.Cmp(big.NewInt(2)) >= 0
 }
 
 // affineOriginOfExpr returns the canonical origin key for affine
@@ -1953,6 +2064,8 @@ func inferExprTypeStatic(expr Expression) string {
 		return inferExprTypeStatic(e.Alternate)
 	case IncrementExpr, DecrementExpr:
 		return "bigint"
+	case ArrayLiteralExpr:
+		return "<unknown>[]"
 	}
 	return "<unknown>"
 }

@@ -34,7 +34,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 ripemd = "0.1"
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa"] }
 
 [[test]]
 name = "integration"

@@ -21,6 +21,11 @@ module RunarCompiler
       # OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
       POW_FOLD_EXPONENT_LIMIT = 32
 
+      # Unroll count of the emitted gcd loop (codegen/stack.rb). Past it the
+      # script returns a partial value, not the mathematical one, so the folder
+      # declines there (N-029). log2 is exact for every n > 0 since N-103.
+      GCD_FOLD_ITERATIONS = 256
+
       # -----------------------------------------------------------------
       # Constant environment
       # -----------------------------------------------------------------
@@ -96,8 +101,10 @@ module RunarCompiler
           when "+"
             return nil unless valid_hex?(a_s) && valid_hex?(b_s)
             return ["str", a_s + b_s]
-          when "===" then return ["bool", a_s == b_s]
-          when "!==" then return ["bool", a_s != b_s]
+          # F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+          # ignores case, so 'aa' === 'AA' is true on-chain.
+          when "===" then return ["bool", hex_equal?(a_s, b_s)]
+          when "!==" then return ["bool", !hex_equal?(a_s, b_s)]
           else
             return nil
           end
@@ -123,6 +130,15 @@ module RunarCompiler
         /\A[0-9a-fA-F]*\z/.match?(s)
       end
       private_class_method :valid_hex?
+
+      # Compares two ByteString literals as bytes: case-insensitively when both
+      # are hex, by exact text otherwise.
+      def self.hex_equal?(a, b)
+        return a.downcase == b.downcase if valid_hex?(a) && valid_hex?(b)
+
+        a == b
+      end
+      private_class_method :hex_equal?
 
       # -----------------------------------------------------------------
       # Unary operation evaluation
@@ -188,7 +204,9 @@ module RunarCompiler
         when "clamp"
           return nil unless int_args.size == 3
           val, lo, hi = int_args[0], int_args[1], int_args[2]
-          return ["int", [lo, [val, hi].min].max]
+          # The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+          # That differs from [lo, [val, hi].min].max once lo > hi (N-029).
+          return ["int", [[val, lo].max, hi].min]
 
         when "sign"
           return nil unless int_args.size == 1
@@ -248,7 +266,13 @@ module RunarCompiler
         when "gcd"
           return nil unless int_args.size == 2
           a, b = int_args[0].abs, int_args[1].abs
-          a, b = b, a % b while b != 0
+          # The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if that
+          # is not enough it returns a partial remainder. Decline (N-029).
+          GCD_FOLD_ITERATIONS.times do
+            break if b == 0
+            a, b = b, a % b
+          end
+          return nil if b != 0
           return ["int", a]
 
         when "divmod"
@@ -258,7 +282,8 @@ module RunarCompiler
         when "log2"
           return nil unless int_args.size == 1
           n = int_args[0]
-          return ["int", 0] if n <= 0
+          # The script aborts for n <= 0 (N-103): decline, so the abort survives.
+          return nil if n <= 0
           return ["int", n.bit_length - 1]
 
         when "bool"
@@ -359,12 +384,50 @@ module RunarCompiler
       end
       private_class_method :fold_bindings
 
+      # Every name bound in +bindings+, including inside nested if arms and
+      # loop bodies.
+      def self.bound_names(bindings, out = [])
+        bindings.each do |b|
+          out << b.name
+          case b.value.kind
+          when "if"
+            bound_names(b.value.then || [], out)
+            bound_names(b.value.else_ || [], out)
+          when "loop"
+            bound_names(b.value.body || [], out)
+          end
+        end
+        out
+      end
+      private_class_method :bound_names
+
       def self.fold_binding(binding, env)
         folded_value = fold_value(binding.value, env)
 
-        # If the folded value is a load_const, register in the environment
+        # If the folded value is a load_const, register in the environment.
+        #
+        # A name may be bound more than once (reassignment, or a user local
+        # that shares a compiler temp's name). The env must track the LATEST
+        # binding: a rebinding to a non-constant drops the old constant, or
+        # later uses would fold with a value the name no longer holds (N-064).
+        #
+        # N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not
+        # itself a constant, but when its target currently holds one the
+        # alias holds the same value, so later uses of the alias fold too.
+        # The binding stays an alias; the prune removes it if the fold
+        # orphaned it.
         cv = anf_value_to_const(folded_value)
-        env[binding.name] = cv unless cv.nil?
+        if cv.nil? && folded_value.kind == "load_const"
+          ref = folded_value.const_string.nil? ? folded_value.raw_value : folded_value.const_string
+          if ref.is_a?(String) && ref.start_with?("@ref:")
+            cv = env[ref[5..]]
+          end
+        end
+        if cv.nil?
+          env.delete(binding.name)
+        else
+          env[binding.name] = cv
+        end
 
         IR::ANFBinding.new(
           name: binding.name,
@@ -464,6 +527,10 @@ module RunarCompiler
           else_env = env.dup
           folded_then = fold_bindings(value.then || [], then_env)
           folded_else = fold_bindings(value.else_ || [], else_env)
+          # N-064: a name either arm rebinds may hold the arm's value after
+          # the if (that is how a branch reassigns a local), so the enclosing
+          # env's constant for it is stale past this point.
+          bound_names(value.else_ || [], bound_names(value.then || [])).each { |n| env.delete(n) }
           new_v = IR::ANFValue.new(kind: "if")
           new_v.cond = value.cond
           new_v.then = folded_then
@@ -477,8 +544,14 @@ module RunarCompiler
         end
 
         if kind == "loop"
+          # N-064: the body runs once per iteration, so a name it rebinds
+          # holds the entry constant only in iteration 0 -- it is not a
+          # constant inside the body, nor after the loop.
+          rebound = bound_names(value.body || [])
           body_env = env.dup
+          rebound.each { |n| body_env.delete(n) }
           folded_body = fold_bindings(value.body || [], body_env)
+          rebound.each { |n| env.delete(n) }
           new_v = IR::ANFValue.new(kind: "loop")
           new_v.count = value.count
           new_v.body = folded_body
@@ -632,6 +705,28 @@ module RunarCompiler
           methods: program.methods.map { |m| fold_method(m) },
           parent_class: program.parent_class
         )
+      end
+
+      # +fold_constants+ followed by removal of the operand bindings the fold
+      # orphaned (N-138).
+      #
+      # +fold_constants+ rewrites +t1 = -t0+ to the constant +t1 = -1+ but
+      # leaves +t0 = 1+ in place, and stack lowering then pushes it and drops it
+      # again (+51 4f 7b 7c a0 77+ for +a > -1n+). Only names that some binding
+      # referenced BEFORE folding are removal candidates, so a binding that was
+      # already dead is left exactly as it was. +fold_constants+ itself stays a
+      # pure rewrite.
+      #
+      # @param program [IR::ANFProgram]
+      # @return [IR::ANFProgram]
+      def self.fold_constants_and_prune(program)
+        folded = fold_constants(program)
+        program.methods.zip(folded.methods).each do |before, after|
+          candidates = Set.new
+          before.body.each { |b| DCE.collect_refs(b.value, candidates) }
+          DCE.eliminate_dead_bindings(after, candidates)
+        end
+        folded
       end
     end
   end

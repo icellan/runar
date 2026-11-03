@@ -34,7 +34,13 @@ Five rules. They are what make the corpus worth having.
 3. **Entries are never deleted.** A fixed bug stays covered forever. If an entry
    becomes hard to keep passing, that is a signal about the change under review,
    not a reason to drop the entry. Removing one requires an explicit rationale in
-   the PR description.
+   the PR description. Machine-enforced (N-230): CI step *Fuzzer regression
+   corpus — entries are never deleted (rule 3)* runs
+   `replay.ts --check-no-deletions --base origin/main`, which diffs `entries/`
+   against the merge-base with `origin/main` and fails naming any entry id that
+   existed there and is gone now. It has no allowlist or override — the only way
+   past it is the rationale this rule already requires, landed as a normal code
+   change to this file and `replay.ts` in the same PR.
 4. **Replay runs on every CI run.** Not nightly. The gate is deterministic and
    costs well under a second for the whole corpus, so it runs on every PR (see
    *CI wiring* below).
@@ -107,6 +113,11 @@ npx tsx fuzz-regressions/replay.ts --verbose         # ... printing every entry
 npx tsx fuzz-regressions/replay.ts --filter shift    # ... only matching ids
 npx tsx fuzz-regressions/replay.ts --list            # list the corpus
 npx tsx fuzzer/index.ts --replay                     # same gate via the fuzzer CLI
+
+npx tsx fuzz-regressions/replay.ts --check-no-deletions --base origin/main
+                                                      # rule 3: fail if any entry id that
+                                                      # existed at the merge-base with <base>
+                                                      # is gone now (see rule 3 above)
 ```
 
 Exit code is non-zero if any entry fails, and the failing entry ids are printed.

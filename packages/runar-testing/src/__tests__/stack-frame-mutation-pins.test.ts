@@ -23,6 +23,13 @@
  *   05-stack-lower.ts:244  `slots.length - 1` -> `- 2` / `- 0`  (StackMap.dup)
  *   05-stack-lower.ts:1125 `depth === 1`      -> `!==`          (residue drain)
  *   05-stack-lower.ts:2406 `&&` -> `||`, twice                  (if-no-else reconcile)
+ *
+ * N-450: those two line numbers are historical (the file has since moved; the
+ * sites are now :1502 and :3036), and the ORIGINAL witnesses stopped reaching
+ * them — drainBranchPrivateResidue found no candidates and the empty-else
+ * condition's operands were all true, so neither mutant changed a byte in
+ * either folding mode. W2 now has a new source witness; the empty-else
+ * condition is pinned by the hand-built-IR test at the end of this file (W5).
  *   05-stack-lower.ts:2538 `d - nDeclared`    -> `d + nDeclared` (#149 sinkBelow)
  *
  * Each witness below was delta-reduced from the generated program that first
@@ -47,7 +54,7 @@
 
 import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
-import { compile } from 'runar-compiler';
+import { compile, compileFromANF, loadANFFromJSON } from 'runar-compiler';
 import { runDifferentialExecution } from '../oracle/index.js';
 
 interface Pin {
@@ -105,17 +112,22 @@ export class TosSelfRead extends SmartContract {
 // W2 — branch-private residue drain: depth 1 is OP_NIP, deeper is ROLL+DROP
 // ---------------------------------------------------------------------------
 //
-// `drainBranchPrivateResidue` removes slots a branch body introduced that the
-// parent's model does not know about, deepest-first. The `depth === 1` arm
-// emits OP_NIP; every other depth emits `push d; ROLL d; DROP`. Inverting the
-// test emits the three-op sequence for depth 1 and a bare OP_NIP for depth 2+,
-// which silently removes the WRONG slot.
+// `drainBranchPrivateResidue` (05-stack-lower.ts:1489) removes slots a branch
+// body introduced that the parent's model does not know about, deepest-first.
+// The `depth === 1` arm (:1502) emits OP_NIP; every other depth emits
+// `push d; ROLL d; DROP`. Inverting the test emits the three-op sequence for
+// depth 1 and a bare OP_NIP for depth 2+, which silently removes the WRONG slot.
 //
-// The residue here is the pre-branch binding of `merge0`, left below TOS
-// because the arm rebinds it and the post-branch assert reads something else.
+// N-450: the arm-local `t` is used twice (`t * t`), so it is still on the stack
+// one slot below the arm's result when the drain runs — a depth-1 candidate.
+// MEASURED (LOGDIR mutants2.txt): the `!==` mutant turns `...7776...` (OP_NIP)
+// into `...7c75...` (SWAP DROP) in BOTH fold-OFF and fold-ON; this source is
+// untouched by the constant folder, so the two modes are the same bytes and
+// either one kills the mutant. The old witness (N-446 era) never produced a
+// drain candidate and killed nothing.
 const W2: Pin = {
   fileName: 'BranchResidue.runar.ts',
-  kills: '1125 (drainBranchPrivateResidue depth===1)',
+  kills: '1502 (drainBranchPrivateResidue depth===1)',
   source: `import { SmartContract, assert } from 'runar-lang';
 
 export class BranchResidue extends SmartContract {
@@ -127,33 +139,33 @@ export class BranchResidue extends SmartContract {
   }
 
   public m(a: bigint): void {
-    let merge0: bigint = ((66n << 1n) | 8982n);
-    if ((a > 3n)) {
-      merge0 = (97n - 8n);
+    let x: bigint = 1n;
+    if (a > 3n) {
+      const t = a * 7n;
+      x = t * t;
     }
-    assert((((-45n) + this.p) <= 28n));
+    assert(x + this.p > 2n);
   }
 }
 `,
-  foldOff: '01425198021623857c53a063015967766877012d8f0093011ca177',
-  foldOn: '01425198021623857c53a06301615801597b757767766877012d01ad0093011ca17777',
+  foldOff: '517853a0637c5795767695776777766877009352a0',
+  foldOn: '517853a0637c5795767695776777766877009352a0',
 };
 
 // ---------------------------------------------------------------------------
-// W3 — if-without-else, arm result already present in the parent model
+// W3 — if-without-else (PLAIN BYTE PIN since N-450)
 // ---------------------------------------------------------------------------
 //
-// `if (elseBindings.length === 0 && thenName && elseCtx.stackMap.has(thenName))`
-// selects the empty-else reconcile. Turning either `&&` into `||` fires that
-// reconcile for arms it was not written for; under folding ON the mutated
-// compiler stops producing a script for this contract at all.
-//
-// The always-failing arm is load-bearing, not decoration: with a satisfiable
-// arm the reconcile is reached by a path the mutation cannot distinguish. This
-// is the `conformance/tests/assert-false-guard` family, one `if` deeper.
+// This source was written to kill `&&` -> `||` in the empty-else reconcile
+// (05-stack-lower.ts:3036). It no longer does: that condition is not reached
+// for it at all, and for BranchResidue-style sources every operand is true, so
+// no mutant of the condition changes a byte in either mode. It stays only as a
+// byte pin of an `if` with an always-failing arm (the
+// `conformance/tests/assert-false-guard` family, one `if` deeper) plus the
+// source-vs-script agreement cases below. The real kill of the condition is W5.
 const W3: Pin = {
   fileName: 'EmptyElseGuard.runar.ts',
-  kills: '2406 (empty-else reconcile, both &&)',
+  kills: 'none (plain byte pin; see W5 for the :3036 condition)',
   source: `import { SmartContract, assert } from 'runar-lang';
 
 export class EmptyElseGuard extends SmartContract {
@@ -178,7 +190,8 @@ export class EmptyElseGuard extends SmartContract {
   // empty-else reconcile further down the stream and is unaffected — the tail
   // of both strings is byte-for-byte what it was.
   foldOff: '767600877c51879b690063516776686351916968006351776891',
-  foldOn: '767600877c51879b69006351677668635100696700680063517b75677c689177',
+  // N-446 re-stamp: the post-fold nested prune shortened fold-ON; fold-OFF is unchanged.
+  foldOn: '767600877c51879b6900635167766863006968006351776891',
 };
 
 // ---------------------------------------------------------------------------
@@ -220,8 +233,16 @@ export class SinkDistance extends StatefulSmartContract {
   // authentication, +79 hex chars fold-OFF), so the pin is `sha256(scriptHex)`
   // rather than a kilobyte of literal hex. Same detection power; when it fires,
   // diff the two scripts rather than reading the digest.
-  foldOff: 'e4e9723d6c78546fd0267cb413843973117f4652e78831cb6ddc07f6481a3f83',
-  foldOn: 'e69b341b4934f092f0230de6ca5c97e9d606caa77bf043354883688c6a40538b',
+  // F-024 (R14) re-stamp: the injected `_newAmount >= extractAmount(txPreimage)`
+  // check added 32 bytes (+64 hex) to both modes. Re-measured with the
+  // 2538 `d + nDeclared` mutant applied: fold-OFF 1496 / fold-ON 1512 hex
+  // chars, different digests — the pin still kills it.
+  // N-216 (2026-10-21) re-stamp: two branch-reconcile `OP_2 OP_ROLL` pairs now
+  // fold to OP_ROT (-4 hex chars, both modes; opcode diff is the folds only).
+  // Re-measured against the same mutant: fold-OFF 1494 / fold-ON 1510 hex
+  // chars, different digests — still killed.
+  foldOff: 'e09d8fba20bc9d24cd2cbe88250816061be18623a135e56bc7e5ac559801310a',
+  foldOn: '968674def6e9d75ba10e9fbabf2d9622d1b65ae2fb0720aafbe289964705563f',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -242,8 +263,12 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
       if (p === W4) {
         // W1's zero-pad before the auto-injected sighash-type pin's OP_BIN2NUM
         // added 6 hex chars to both modes.
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1446);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1464);
+        // F-024 (R14): +64 hex chars in both modes for the value check.
+        // N-216: -4 hex chars in both modes (two reconcile rolls fold to OP_ROT).
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1474);
+        // N-138 (2026-10-30): fold-ON no longer carries the dead operand pushes
+        // the folder orphaned (-22 hex chars); fold-OFF is unchanged.
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1472);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {
@@ -269,11 +294,11 @@ describe('stack-frame byte pins: source and script still agree', () => {
     [W1, { p: 5n }, [-5n]],
     [W1, { p: 5n }, [1n]],
     [W1, { p: -3n }, [40n]],
-    // accepts exactly when p <= 73; `a` picks the branch.
+    // x = a > 3 ? 49a^2 : 1; accepts exactly when x + p > 2.
     [W2, { p: 10n }, [9n]],
-    [W2, { p: 10n }, [0n]],
-    [W2, { p: 500n }, [9n]],
-    [W2, { p: 500n }, [0n]],
+    [W2, { p: -5n }, [0n]],
+    [W2, { p: -5n }, [9n]],
+    [W2, { p: -5000n }, [9n]],
     // accepts only when q === false and b === false.
     [W3, { q: false }, [false]],
     [W3, { q: false }, [true]],
@@ -298,4 +323,57 @@ describe('stack-frame byte pins: source and script still agree', () => {
       ).toBe(r.interpreterAccepted);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// W5 — the empty-else reconcile condition (05-stack-lower.ts:3036)
+// ---------------------------------------------------------------------------
+//
+// `if (elseBindings.length === 0 && thenName && elseCtx.stackMap.has(thenName))`
+// selects "push a COPY of the then arm's rebound local into the empty else
+// arm". No source program was found whose operands differ (an if-without-else
+// always rebinds a local that exists in the parent), so this is hand-built
+// `--ir` input, the same route as n262-nonempty-arm-padding.test.ts: the then
+// arm computes a FRESH name `a` that the parent does not hold, the else arm is
+// empty. The correct lowering pads the else arm with OP_0.
+//
+// MEASURED (LOGDIR mutants2.txt), both fold modes alike (IR input, nothing to
+// fold): each of `&&` -> `||` (first, second, both) makes the compiler throw
+// "Value 'a' not found on stack" instead of padding — so a throw here is the
+// kill. Proves: the guard's three operands are load-bearing for this shape.
+// Does not prove: the copy branch (all operands true) emits the right bytes —
+// that is what the BranchResidue-style byte pins and the agreement cases do.
+describe('stack-frame byte pins: empty-else reconcile condition (hand-built IR)', () => {
+  const ir = JSON.stringify({
+    contractName: 'P',
+    properties: [],
+    methods: [
+      {
+        name: 'm',
+        isPublic: true,
+        params: [{ name: 'x', type: 'bigint' }],
+        body: [
+          { name: 't0', value: { kind: 'load_param', name: 'x' } },
+          { name: 't1', value: { kind: 'load_const', value: 0 } },
+          { name: 't2', value: { kind: 'bin_op', op: '>', left: 't0', right: 't1' } },
+          {
+            name: 't3',
+            value: {
+              kind: 'if',
+              cond: 't2',
+              then: [{ name: 'a', value: { kind: 'load_const', value: 1 } }],
+              else: [],
+            },
+          },
+          { name: 't4', value: { kind: 'assert', value: 't3' } },
+        ],
+      },
+    ],
+  });
+
+  it.each([true, false])('pads the empty else arm with OP_0 (disableConstantFolding=%s)', (off) => {
+    expect(compileFromANF(loadANFFromJSON(ir), { disableConstantFolding: off }).scriptHex).toBe(
+      '00a06351670068',
+    );
+  });
 });

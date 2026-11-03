@@ -437,11 +437,34 @@ fn emit_round(em: &mut Emitter, t: usize) {
 // Reusable compress ops generator
 // =========================================================================
 
-fn generate_compress_ops() -> Vec<StackOp> {
+/// `guard_operands` (F-114): abort unless the block is exactly 64 bytes and
+/// the state exactly 32 bytes. Without it a mis-sized operand (a 5-byte or
+/// short last word) is truncated / zero-extended by the 32-bit word arithmetic
+/// and yields the same digest as a different 64-byte block. sha256Finalize
+/// builds its blocks itself and checks its state once at entry, so its
+/// compressions run unguarded.
+fn generate_compress_ops(guard_operands: bool) -> Vec<StackOp> {
     let mut em = Emitter::new(2); // pretend state+block are the only items
+
+    if guard_operands {
+        // [state, block] -> abort unless len(block) == 64
+        em.oc("OP_SIZE");
+        em.depth += 1;
+        em.push_i(64);
+        em.oc("OP_EQUALVERIFY");
+        em.depth -= 2;
+    }
 
     // Phase 1: Save init state to alt, unpack block into 16 LE words
     em.swap();
+    if guard_operands {
+        // [block, state] -> abort unless len(state) == 32
+        em.oc("OP_SIZE");
+        em.depth += 1;
+        em.push_i(32);
+        em.oc("OP_EQUALVERIFY");
+        em.depth -= 2;
+    }
     em.dup();
     em.to_alt();
     em.to_alt();
@@ -518,9 +541,14 @@ fn generate_compress_ops() -> Vec<StackOp> {
 
 // Cache the ops since they're identical every time
 static COMPRESS_OPS: OnceLock<Vec<StackOp>> = OnceLock::new();
+static GUARDED_COMPRESS_OPS: OnceLock<Vec<StackOp>> = OnceLock::new();
 
 fn get_compress_ops() -> &'static Vec<StackOp> {
-    COMPRESS_OPS.get_or_init(generate_compress_ops)
+    COMPRESS_OPS.get_or_init(|| generate_compress_ops(false))
+}
+
+fn get_guarded_compress_ops() -> &'static Vec<StackOp> {
+    GUARDED_COMPRESS_OPS.get_or_init(|| generate_compress_ops(true))
 }
 
 // =========================================================================
@@ -530,8 +558,9 @@ fn get_compress_ops() -> &'static Vec<StackOp> {
 /// Emit SHA-256 compression in Bitcoin Script.
 /// Stack on entry: [..., state(32 BE), block(64 BE)]
 /// Stack on exit:  [..., newState(32 BE)]
+/// Aborts unless the state is 32 bytes and the block 64 bytes (F-114).
 pub fn emit_sha256_compress(emit: &mut dyn FnMut(StackOp)) {
-    for op in get_compress_ops() {
+    for op in get_guarded_compress_ops() {
         emit(op.clone());
     }
 }
@@ -557,6 +586,16 @@ pub fn emit_sha256_finalize(emit: &mut dyn FnMut(StackOp)) {
     em.bin_op("OP_CAT"); // [bitLenBE(8)]
     em.to_alt(); // save bitLenBE to alt
     em.assert_depth(2, "finalize: after bitLen conversion");
+
+    // F-114: abort unless len(state) == 32 (remaining is variable-length; a
+    // remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+    em.swap(); // [remaining, state]
+    em.oc("OP_SIZE");
+    em.depth += 1;
+    em.push_i(32);
+    em.oc("OP_EQUALVERIFY");
+    em.depth -= 2;
+    em.swap(); // [state, remaining]
 
     // ---- Step 2: Pad remaining ----
     em.push_b(vec![0x80]);

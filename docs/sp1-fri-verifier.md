@@ -11,6 +11,24 @@ Driven by BSVM handoff doc `../bsv-evm/RUNAR-FRI-VERIFIER.md`. Closes
 the Gate 0a Full / Mode 1 mainnet soundness gap flagged by the
 Swift Steele 2026-04-24 external review.
 
+> **v1 status: NOT IMPLEMENTED — v1 refuses `verifySP1FRI` (F-007).**
+>
+> The Go compiler refuses every contract that calls `verifySP1FRI`, on
+> `--source` (any surface format) and on `--ir` / `CompileFromProgram`.
+> There is no override: the `@acknowledgeUnsoundSP1FriVerifier` source
+> directive, the `--acknowledge-unsound-sp1-fri` CLI flag and
+> `CompileOptions.AcknowledgeUnsoundSP1Fri` were removed.
+>
+> The verifier body in `compilers/go/codegen/sp1_fri.go`
+> (`EmitFullSP1FriVerifierBody`) is **fail-closed**: it ends in
+> `OP_0 OP_VERIFY` and can never accept a spend, honest proof included.
+> It used to end in `OP_1`, and because it checks only the Fiat-Shamir
+> transcript and the grinding witnesses it accepted a proof whose every
+> per-query opening was garbage (reproduced under the go-sdk interpreter;
+> the off-chain reference rejects the same proof). Everything below that
+> describes acceptance describes the pre-F-007 PoC, not a shipped
+> feature. The missing pieces and the post-v1 plan are in §8.0.
+
 ## 1. API shape
 
 Go DSL only in this release. BSVM is the sole consumer and its
@@ -382,7 +400,14 @@ The requirement above ("must fail `OP_VERIFY` on regtest") is **not yet
 met for three rows**. Replaying every fixture through the compiled PoC
 covenant and the go-sdk script interpreter gives:
 
-| Fixture | Off-chain `sp1fri.Verify` | Compiled locking script |
+F-007 update: the table below records the pre-F-007 body (which ended in
+`OP_1`). Since F-007 the body ends in `OP_0 OP_VERIFY`, so every row —
+the canonical fixture included — is rejected on-chain, and the three
+rows that used to be accepted are rejected only by that fail-closed
+abort. The gap itself is unchanged; the compiler refuses the builtin
+until it is closed (§8.0).
+
+| Fixture | Off-chain `sp1fri.Verify` | Compiled locking script (pre-F-007) |
 |---|---|---|
 | bad_merkle | rejects | **ACCEPTS** |
 | bad_folding | rejects | **ACCEPTS** |
@@ -408,9 +433,11 @@ verification chain in §10 must land before this verifier can be treated
 as sound for value-bearing covenants.
 
 The gap is pinned by
-`compilers/go/compiler/sp1_fri_negative_test.go::TestSp1FriVerifier_OnChainRejectsCorruptions`,
-which asserts the present behaviour and fails with an ACTION REQUIRED
-message the moment the missing emission lands.
+`compilers/go/compiler/sp1_fri_negative_test.go::TestSp1FriVerifier_OnChainRejectsCorruptions`
+and `compilers/go/compiler/sp1_fri_f007_fail_closed_test.go`, which now
+assert that every fixture (and a crafted garbage-openings proof) is
+rejected by the fail-closed body, and that compiling `verifySP1FRI` is
+refused through every entry point.
 
 ### 6.2. Where the assertions live
 
@@ -419,8 +446,8 @@ message the moment the missing emission lands.
   push-and-hash binding for `truncated`, plus a non-vacuity control that
   requires the canonical fixture to still verify.
 - `compilers/go/compiler/sp1_fri_negative_test.go` — the same fixtures
-  replayed through the compiled covenant, with an on-chain non-vacuity
-  control.
+  replayed through the emitted covenant. Since F-007 there is no
+  on-chain non-vacuity control: the canonical fixture is rejected too.
 
 ## 7. ABI break: publicValues comes from the proof
 
@@ -437,6 +464,49 @@ Mentioned here because it affects the covenant's public ABI and the
 whitepaper's trust-model language (per handoff §3 step 3).
 
 ## 8. Implementation status
+
+### 8.0. v1: refused, fail-closed — and what is missing (F-007)
+
+For v1 `verifySP1FRI` does not compile, and the body the codegen would
+emit is fail-closed (§ header note). What the body emits today: the
+Step 1 proof-blob binding, the typed-`publicValues` binding (R-058), the
+Steps 2-5 transcript, the Step 8 commit phase with both grinding-witness
+checks, and the Step 10 query-index derivation. What it does **not**
+emit, and what a real verifier needs:
+
+1. **Per-query MMCS openings** — the input-batch Merkle verify of each
+   query's opened rows against the trace and quotient commitments
+   (`sp1fri/fri.go` openInput, `sp1fri/mmcs.go`), plus the
+   reduced-opening accumulator (Step 10A).
+2. **FRI fold / colinearity chain** — the per-round commit-phase Merkle
+   verify and the fold of each query down the rounds
+   (`sp1fri/fri.go` verifyQuery).
+3. **Final-poly equality** — the Horner evaluation at each query's
+   point, checked against the folded value (Step 11).
+4. **Steps 6/7 out-of-domain constraint check** — the AIR constraint
+   evaluation at `zeta` against the recomposed quotient.
+   `emitFibAirConstraintEval` / `emitQuotientRecompose` exist and are
+   validated in standalone tests, but have **no production caller**:
+   the body never checks the OOD equation either.
+
+Each of 1-4 has a standalone emitter validated byte-for-byte against
+the off-chain reference in `compilers/go/codegen/sp1_fri_test.go`; none
+is wired into `EmitFullSP1FriVerifierBody`.
+
+**Post-v1 plan.** Wire 1-4 into the body and replace the fail-closed
+`OP_0 OP_VERIFY` with an accept only after all of them pass. Estimate
+from the F-007 investigation: roughly 1,100-1,300 lines across the
+codegen body, the unlocking-script encoder (`packages/runar-go/sp1fri`)
+and the tests. It **changes the unlocking ABI**: the per-query opened
+rows, Merkle siblings and commit-phase sibling values must be pushed by
+the unlocking script, which the current `EncodeUnlockingScript` layout
+does not do. Only then should the compile-time refusal be lifted, with
+the corruption matrix in §6 (and the crafted garbage-openings proof in
+`sp1_fri_f007_fail_closed_test.go`) rejected by the real checks and the
+canonical fixture accepted again.
+
+The history below records how the PoC got here; statements in it that
+the compiled script "accepts" describe the pre-F-007 body.
 
 **Landed (Phase 1 scaffold — Go only):**
 - This doc and `docs/sp1-proof-format.md`.
@@ -460,7 +530,8 @@ whitepaper's trust-model language (per handoff §3 step 3).
   `default_koalabear_poseidon2_16()`) plus reproducible Rust
   generator under `minimal-guest/regen/`. Scaffolding for `evm-guest/`
   and the eight `corruptions/` variants pinned in their READMEs.
-- The frontend-acceptance gate now lives in
+- (Superseded by F-007: this gate is now
+  `TestSp1FriVerifierPoc_CompileRefused`.) The frontend-acceptance gate lived in
   `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`
   — with `EmitFullSP1FriVerifierBody` wired into `lowerVerifySP1FRI`,
   the PoC contract compiles cleanly through the full pipeline (parse →
@@ -520,8 +591,8 @@ whitepaper's trust-model language (per handoff §3 step 3).
   (proofBlob, publicValues, sp1VKeyHash) are parked on the alt-stack
   so the unlocking-script field pushes sit contiguous beneath them.
 - `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`
-  is now the canonical acceptance gate; the older
-  `TestSp1FriVerifierPoc_CodegenRefuses` guard is gone.
+  was the canonical acceptance gate (F-007: rewritten as
+  `TestSp1FriVerifierPoc_CompileRefused`).
 - Production-scale measurements + Mainnet readiness section in
   `docs/fri-verifier-measurements.md`. See that document for the
   canonical "Status — Not production-ready" disclaimer that governs

@@ -551,8 +551,10 @@ fn unlock_with_external_signer(
 
 Connected variants exist as well: `prepare_call_connected` and
 `finalize_call_connected`. The key fields on `PreparedCall` for external
-signing are `sighash`, `preimage`, `op_push_tx_sig`, `tx_hex`, and
-`sig_indices`. The remaining fields are opaque — `finalize_call` consumes them.
+signing are `sighash`, `preimage`, `tx_hex`, and `sig_indices`. There is no
+`op_push_tx_sig` field: post-BUG-100 the OP_PUSH_TX signature is derived
+ON-CHAIN, so there is no spender-supplied signature to expose. The remaining
+fields are opaque — `finalize_call` consumes them.
 
 `prepared.sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the
 BIP-143 digest `OP_CHECKSIG` verifies against. External signers (including
@@ -1173,7 +1175,7 @@ mod counter_integration_example {
 [`conformance/sdk-output/`](../../conformance/sdk-output/) cross-validates
 that this SDK emits **byte-identical deployed locking scripts** as every
 other Rúnar SDK (TS, Go, Python, Zig, Ruby, Java) for the same artifact +
-constructor args. The Counter contract is one of the 70 fixtures.
+constructor args. The Counter contract is one of the 80 fixtures.
 
 ---
 
@@ -1800,6 +1802,8 @@ Methods include `get_balance() -> Result<i64, String>` and
 `transfer(recipient_addr: &str, amount: i64) -> Result<String, String>`. Use
 when the artifact's state field is named `balance`, `supply`, or `amount`
 and the contract has a `transfer` method.
+
+> **Deprecated and unsafe (N-239):** `transfer` and `merge` drive a `transfer(sig, to: Addr)` / `merge(sig, otherSupply, otherHolder)` ABI that cannot be made sound. `merge` cannot authenticate its companion input, so a holder can call it on one input with a made-up `otherSupply` (supply inflation); `transfer` cannot re-key the `PubKey` holder from an `Addr`, so the token does not move to the recipient. Each warns once at runtime on first use. They are kept, not removed. For a real token use the token-ft example (`FungibleTokenExample`, `examples/rust/token-ft/`); `examples/ts/token-wallet-naive-INSECURE/` is the documented counter-example these methods target.
 
 #### `pub struct Transaction = TransactionData`
 Backward-compat alias.

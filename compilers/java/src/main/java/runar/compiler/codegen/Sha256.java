@@ -388,11 +388,32 @@ public final class Sha256 {
         em.swap(); em.roll(4); em.roll(4); em.roll(4); em.roll(3);
     }
 
-    private static List<StackOp> generateCompressOps() {
+    /**
+     * {@code guardOperands} (F-114): abort unless the block is exactly 64 bytes
+     * and the state exactly 32 bytes. Without it a mis-sized operand (a 5-byte
+     * or short last word) is truncated / zero-extended by the 32-bit word
+     * arithmetic and yields the same digest as a different 64-byte block.
+     * sha256Finalize builds its blocks itself and checks its state once at
+     * entry, so its compressions run unguarded.
+     */
+    private static List<StackOp> generateCompressOps(boolean guardOperands) {
         Emitter em = new Emitter(2);
+
+        if (guardOperands) {
+            // [state, block] -> abort unless len(block) == 64
+            em.oc("OP_SIZE"); em.depth += 1;
+            em.pushI(64);
+            em.oc("OP_EQUALVERIFY"); em.depth -= 2;
+        }
 
         // Phase 1: Save init state, unpack block into 16 LE words
         em.swap();
+        if (guardOperands) {
+            // [block, state] -> abort unless len(state) == 32
+            em.oc("OP_SIZE"); em.depth += 1;
+            em.pushI(32);
+            em.oc("OP_EQUALVERIFY"); em.depth -= 2;
+        }
         em.dup(); em.toAlt();
         em.toAlt();
         em.assertDepth(1, "compress: after state save");
@@ -461,6 +482,7 @@ public final class Sha256 {
 
     // Cache the compression ops
     private static volatile List<StackOp> compressOpsCache = null;
+    private static volatile List<StackOp> guardedCompressOpsCache = null;
 
     private static List<StackOp> getCompressOps() {
         List<StackOp> local = compressOpsCache;
@@ -468,8 +490,22 @@ public final class Sha256 {
             synchronized (Sha256.class) {
                 local = compressOpsCache;
                 if (local == null) {
-                    local = List.copyOf(generateCompressOps());
+                    local = List.copyOf(generateCompressOps(false));
                     compressOpsCache = local;
+                }
+            }
+        }
+        return local;
+    }
+
+    private static List<StackOp> getGuardedCompressOps() {
+        List<StackOp> local = guardedCompressOpsCache;
+        if (local == null) {
+            synchronized (Sha256.class) {
+                local = guardedCompressOpsCache;
+                if (local == null) {
+                    local = List.copyOf(generateCompressOps(true));
+                    guardedCompressOpsCache = local;
                 }
             }
         }
@@ -484,9 +520,10 @@ public final class Sha256 {
      * Emit SHA-256 compression.
      * Stack on entry: [..., state(32 BE), block(64 BE)]
      * Stack on exit:  [..., newState(32 BE)]
+     * Aborts unless the state is 32 bytes and the block 64 bytes (F-114).
      */
     public static void emitSha256Compress(Consumer<StackOp> emit) {
-        for (StackOp op : getCompressOps()) emit.accept(op);
+        for (StackOp op : getGuardedCompressOps()) emit.accept(op);
     }
 
     /**
@@ -510,6 +547,14 @@ public final class Sha256 {
         em.binOp("OP_CAT");
         em.toAlt();
         em.assertDepth(2, "finalize: after bitLen conversion");
+
+        // F-114: abort unless len(state) == 32 (remaining is variable-length; a
+        // remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+        em.swap(); // [remaining, state]
+        em.oc("OP_SIZE"); em.depth += 1;
+        em.pushI(32);
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2;
+        em.swap(); // [state, remaining]
 
         // ---- Step 2: Pad remaining ----
         em.pushB(new byte[]{(byte) 0x80});

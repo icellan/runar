@@ -202,6 +202,16 @@ export interface CodeSepIndexSlot {
   codeSepIndex: number;
 }
 
+/**
+ * N-051 — a `verify_code_part_len` length field the SDK patches at deploy time
+ * with the deployed code-part length (4 bytes, little-endian, overwritten in
+ * place). Present only when the length is not known at compile time.
+ */
+export interface CodePartLenSlot {
+  /** Byte offset, in the TEMPLATE script, of the first of the 4 length bytes. */
+  byteOffset: number;
+}
+
 // ---------------------------------------------------------------------------
 // Template digest (slot-excised script identity)
 // ---------------------------------------------------------------------------
@@ -327,6 +337,8 @@ export interface RunarArtifact {
   /** Byte offsets of codeSepIndex placeholders in the script (OP_0 placeholders
    *  that the SDK must replace with the adjusted codeSeparatorIndex). */
   codeSepIndexSlots?: CodeSepIndexSlot[];
+  /** N-051 — deploy-time `verify_code_part_len` length fields (see CodePartLenSlot). */
+  codePartLenSlots?: CodePartLenSlot[];
 
   /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash) */
   codeSeparatorIndex?: number;
@@ -352,6 +364,8 @@ export interface RunarArtifact {
    * and every SDK funded it without a word. Present here, the fact travels with
    * the artifact, and each SDK's deploy path refuses to fund it unless the
    * caller acknowledges the same list.
+   * F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+   * outright, so this gate only matters for artifacts from older compilers.
    *
    * Absent (not empty) on every artifact that reaches no such builtin, so
    * nothing else in the repo is affected.

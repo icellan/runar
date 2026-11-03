@@ -2,6 +2,7 @@ package runar.lang.sdk;
 
 import java.math.BigInteger;
 import java.security.MessageDigest;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +47,11 @@ class AnfInterpreterRealCryptoTest {
         return sha256(message.getBytes("UTF-8"));
     }
 
-    /** Sign a 32-byte digest with BouncyCastle's secp256k1 + RFC 6979 + low-S. */
+    /**
+     * Sign a 32-byte digest with BouncyCastle's secp256k1 + RFC 6979 + low-S,
+     * in checksig format: DER plus a 0x41 (SIGHASH_ALL|FORKID) sighash-type
+     * byte. On-chain mode aborts on bare DER, as OP_CHECKSIG does (N-255).
+     */
     private static byte[] signDigest(BigInteger priv, byte[] digest) throws Exception {
         ECDSASigner signer = new ECDSASigner(new HMacDSAKCalculator(new SHA256Digest()));
         signer.init(true, new ECPrivateKeyParameters(priv, LocalSigner.DOMAIN));
@@ -58,7 +63,10 @@ class AnfInterpreterRealCryptoTest {
         ASN1EncodableVector v = new ASN1EncodableVector();
         v.add(new ASN1Integer(r));
         v.add(new ASN1Integer(s));
-        return new DERSequence(v).getEncoded("DER");
+        byte[] der = new DERSequence(v).getEncoded("DER");
+        byte[] sig = Arrays.copyOf(der, der.length + 1);
+        sig[der.length] = 0x41;
+        return sig;
     }
 
     private static String pubKeyHex(BigInteger priv) {
@@ -165,11 +173,14 @@ class AnfInterpreterRealCryptoTest {
         BigInteger priv = new BigInteger(1, HEX.parseHex(TEST_PRIV_HEX));
         byte[] sighash = sighashFor("runar-java-anf-real-crypto-test");
         byte[] sig = signDigest(priv, sighash);
-        sig[sig.length - 1] ^= (byte) 0xff;  // corrupt last byte
+        sig[sig.length - 2] ^= (byte) 0xff;  // corrupt the last byte of s
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighash);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-198: a NON-EMPTY signature that does not verify aborts the script
+        // under NULLFAIL (BIP146) on a node, so this is an opcode abort, not an
+        // assert on a pushed false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 sigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -178,6 +189,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("OP_CHECKSIG aborts"), e.getMessage());
     }
 
     @Test
@@ -189,7 +201,10 @@ class AnfInterpreterRealCryptoTest {
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighashClaimed);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-198: a NON-EMPTY signature that does not verify aborts the script
+        // under NULLFAIL (BIP146) on a node, so this is an opcode abort, not an
+        // assert on a pushed false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 sigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -198,6 +213,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("does not verify (NULLFAIL)"), e.getMessage());
     }
 
     // ---- checkPreimage ---------------------------------------------------
@@ -271,12 +287,16 @@ class AnfInterpreterRealCryptoTest {
         byte[] sighash = sighashFor("runar-java-multisig-test");
         byte[] sig1 = signDigest(priv1, sighash);
         byte[] sig2 = signDigest(priv2, sighash);
-        sig2[sig2.length - 1] ^= (byte) 0xff;
+        sig2[sig2.length - 2] ^= (byte) 0xff;  // the last byte of s
 
         AnfInterpreter.OnChainCryptoContext ctx =
             new AnfInterpreter.OnChainCryptoContext(sighash);
 
-        assertThrows(AnfInterpreter.AssertionFailureException.class, () ->
+        // N-259: OP_CHECKMULTISIG aborts on a corrupted signature, either on
+        // its encoding or, once the check fails with a non-empty signature,
+        // under NULLFAIL (BIP146) on a node; it is not an assert on a pushed
+        // false.
+        AnfInterpreter.InterpreterException e = assertThrows(AnfInterpreter.InterpreterException.class, () ->
             AnfInterpreter.executeOnChainAuthoritative(
                 multisigGuardAnf(), "unlock",
                 Map.of("value", BigInteger.ZERO),
@@ -288,6 +308,7 @@ class AnfInterpreterRealCryptoTest {
                 ctx
             )
         );
+        assertTrue(e.getMessage().contains("OP_CHECKMULTISIG aborts"), e.getMessage());
     }
 
     // ---- Mode parity (no regression in lenient/strict mocks) ------------

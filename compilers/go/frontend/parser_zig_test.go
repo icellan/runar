@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +130,49 @@ pub const Counter = struct {
 	}
 	if result.Contract.Methods[1].Name != "decrement" {
 		t.Errorf("expected 'decrement', got %s", result.Contract.Methods[1].Name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: runar.BigintBig (N-182 / R93)
+// ---------------------------------------------------------------------------
+
+// Proves: the 256-bit native spelling runar.BigintBig (u256 in
+// packages/runar-zig, used for EC coordinates) lowers to the same AST bigint
+// as runar.Bigint, for a property and a parameter. Does NOT prove the native
+// u256 runtime or any codegen.
+func TestParseZig_BigintBigMapsToBigint(t *testing.T) {
+	source := []byte(`const runar = @import("runar");
+
+pub const BigCoord = struct {
+    pub const Contract = runar.SmartContract;
+
+    x: runar.BigintBig,
+
+    pub fn init(x: runar.BigintBig) BigCoord {
+        return .{ .x = x };
+    }
+
+    pub fn check(self: *const BigCoord, y: runar.BigintBig) void {
+        runar.assert(self.x == y);
+    }
+};
+`)
+	result := ParseSource(source, "BigCoord.runar.zig")
+	if result.Contract == nil {
+		t.Fatalf("expected contract, got nil (errors: %v)", result.ErrorStrings())
+	}
+	if len(result.Contract.Properties) != 1 {
+		t.Fatalf("expected 1 property, got %d", len(result.Contract.Properties))
+	}
+	if pt, ok := result.Contract.Properties[0].Type.(PrimitiveType); !ok || pt.Name != "bigint" {
+		t.Errorf("expected property type bigint, got %#v", result.Contract.Properties[0].Type)
+	}
+	if len(result.Contract.Methods) != 1 || len(result.Contract.Methods[0].Params) != 1 {
+		t.Fatalf("expected one method with one param, got %#v", result.Contract.Methods)
+	}
+	if pt, ok := result.Contract.Methods[0].Params[0].Type.(PrimitiveType); !ok || pt.Name != "bigint" {
+		t.Errorf("expected param type bigint, got %#v", result.Contract.Methods[0].Params[0].Type)
 	}
 }
 
@@ -591,7 +635,8 @@ pub const Hex = struct {
 		t.Fatalf("expected contract, got nil (errors: %v)", result.ErrorStrings())
 	}
 
-	// Verify 0xaabb was parsed as ByteStringLiteral
+	// F-026: `0xaabb` is a Zig integer literal (0xaabb = 43707), as in Zig
+	// and in the TS reference, not a ByteString.
 	body := result.Contract.Methods[0].Body
 	if len(body) == 0 {
 		t.Fatalf("expected at least 1 statement")
@@ -602,9 +647,9 @@ pub const Hex = struct {
 		if call, ok := exprStmt.Expr.(CallExpr); ok {
 			if len(call.Args) > 0 {
 				if binExpr, ok := call.Args[0].(BinaryExpr); ok {
-					if bs, ok := binExpr.Right.(ByteStringLiteral); ok {
-						if bs.Value != "aabb" {
-							t.Errorf("expected hex value 'aabb', got %s", bs.Value)
+					if lit, ok := binExpr.Right.(BigIntLiteral); ok {
+						if lit.Value.Int64() != 0xaabb {
+							t.Errorf("expected 0xaabb = 43707, got %s", lit.Value)
 						}
 						found = true
 					}
@@ -613,7 +658,7 @@ pub const Hex = struct {
 		}
 	}
 	if !found {
-		t.Error("did not find ByteStringLiteral for hex literal 0xaabb")
+		t.Error("did not find BigIntLiteral for hex literal 0xaabb")
 	}
 }
 
@@ -842,5 +887,220 @@ pub const BytesEq = struct {
 				}
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-090: runar.hexToBytes("...") lowers to a ByteString literal
+// ---------------------------------------------------------------------------
+//
+// Proves: the Go Zig-surface parser lowers `runar.hexToBytes("<hex>")` to a
+// ByteStringLiteral carrying the hex verbatim (as 01-parse-zig.ts, the Zig
+// tier and Python do), so it is accepted as a property initializer; a
+// non-literal argument is a parse error with TS's diagnostic rather than an
+// ordinary call.
+// Does NOT prove: byte identity with TS (pinned by the
+// conformance/tests/hex-to-bytes-initializer fixture), or that the hex
+// payload is well-formed (TS does not check that in the parser either).
+
+const zigHexToBytesSource = `const runar = @import("runar");
+
+pub const H = struct {
+    pub const Contract = runar.SmartContract;
+
+    prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    x: runar.ByteString,
+
+    pub fn init(x: runar.ByteString) H {
+        return .{ .x = x };
+    }
+
+    pub fn verify(self: *const H, b: runar.ByteString) void {
+        runar.assert(runar.bytesEq(runar.cat(self.prefix, self.x), b));
+    }
+};
+`
+
+func TestParseZig_HexToBytesInitializer(t *testing.T) {
+	result := ParseSource([]byte(zigHexToBytesSource), "H.runar.zig")
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+	}
+	if result.Contract == nil {
+		t.Fatal("expected contract, got nil")
+	}
+	var prefix *PropertyNode
+	for i := range result.Contract.Properties {
+		if result.Contract.Properties[i].Name == "prefix" {
+			prefix = &result.Contract.Properties[i]
+		}
+	}
+	if prefix == nil {
+		t.Fatal("property 'prefix' not found")
+	}
+	lit, ok := prefix.Initializer.(ByteStringLiteral)
+	if !ok {
+		t.Fatalf("expected ByteStringLiteral initializer, got %T (%v)", prefix.Initializer, prefix.Initializer)
+	}
+	if lit.Value != "1976a914" {
+		t.Errorf("expected value 1976a914, got %q", lit.Value)
+	}
+}
+
+func TestParseZig_HexToBytesNonLiteralRefused(t *testing.T) {
+	source := strings.Replace(zigHexToBytesSource, `runar.hexToBytes("1976a914")`, `runar.hexToBytes(x)`, 1)
+	result := ParseSource([]byte(source), "H.runar.zig")
+	for _, e := range result.ErrorStrings() {
+		if strings.Contains(e, "runar.hexToBytes expects a string literal argument") {
+			return
+		}
+	}
+	t.Fatalf("expected 'runar.hexToBytes expects a string literal argument', got %v", result.ErrorStrings())
+}
+
+// ---------------------------------------------------------------------------
+// F-207: bare `&`, `[_]T{...}`, and the stale property-initializer strip
+// ---------------------------------------------------------------------------
+
+func TestParseZig_BareAmpersandStripsToOperand(t *testing.T) {
+	// F-207: a bare `&` (not part of `&.{...}`) is Zig's address-of
+	// operator used for slice coercion. It must be stripped and the real
+	// operand parsed -- exactly like `&.{...}`, like the TS reference, and
+	// like parse_zig.zig -- never leave a stray '&' token or an
+	// unconsumed 'x' behind.
+	source := []byte(`const runar = @import("runar");
+
+pub const AmpPrefix = struct {
+    pub const Contract = runar.SmartContract;
+
+    t: i64,
+
+    pub fn init(t: i64) AmpPrefix {
+        return .{ .t = t };
+    }
+
+    pub fn unlock(self: AmpPrefix, x: i64) void {
+        runar.assert(&x == self.t);
+    }
+};
+`)
+	result := ParseSource(source, "AmpPrefix.runar.zig")
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+	}
+	if result.Contract == nil {
+		t.Fatalf("expected contract, got nil")
+	}
+	unlock := result.Contract.Methods[0]
+	call, ok := unlock.Body[0].(ExpressionStmt).Expr.(CallExpr)
+	if !ok {
+		t.Fatalf("expected CallExpr, got %T", unlock.Body[0])
+	}
+	cond, ok := call.Args[0].(BinaryExpr)
+	if !ok {
+		t.Fatalf("expected BinaryExpr, got %T", call.Args[0])
+	}
+	ident, ok := cond.Left.(Identifier)
+	if !ok || ident.Name != "x" {
+		t.Fatalf("expected Identifier(x), got %v", cond.Left)
+	}
+}
+
+func TestParseZig_InferredLengthArrayLiteral(t *testing.T) {
+	// F-207: `[_]T{...}` is Zig's typed array literal with inferred
+	// length. It must parse as a single ArrayLiteralExpr with the given
+	// elements -- not decompose into unrelated garbage statements.
+	source := []byte(`const runar = @import("runar");
+
+pub const InferredArray = struct {
+    pub const Contract = runar.SmartContract;
+
+    pk1: runar.PubKey,
+    pk2: runar.PubKey,
+    pk3: runar.PubKey,
+
+    pub fn init(pk1: runar.PubKey, pk2: runar.PubKey, pk3: runar.PubKey) InferredArray {
+        return .{ .pk1 = pk1, .pk2 = pk2, .pk3 = pk3 };
+    }
+
+    pub fn unlock(self: *const InferredArray, sig1: runar.Sig, sig2: runar.Sig) void {
+        runar.assert(runar.checkMultiSig(
+            &[_]runar.Sig{ sig1, sig2 },
+            &.{ self.pk1, self.pk2, self.pk3 },
+        ));
+    }
+};
+`)
+	result := ParseSource(source, "InferredArray.runar.zig")
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+	}
+	if result.Contract == nil {
+		t.Fatalf("expected contract, got nil")
+	}
+	unlock := result.Contract.Methods[0]
+	if len(unlock.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(unlock.Body))
+	}
+	call := unlock.Body[0].(ExpressionStmt).Expr.(CallExpr)
+	multisigCall := call.Args[0].(CallExpr)
+	sigArray, ok := multisigCall.Args[0].(ArrayLiteralExpr)
+	if !ok {
+		t.Fatalf("expected ArrayLiteralExpr, got %T", multisigCall.Args[0])
+	}
+	if len(sigArray.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(sigArray.Elements))
+	}
+}
+
+func TestParseZig_CtorParamNameCollisionDoesNotStripUnrelatedProperty(t *testing.T) {
+	// F-207: the parser must not strip a property's initializer merely
+	// because its NAME matches some constructor PARAMETER name. The
+	// centralized rule (anf_lower.go's constructorAssignedProperties) is
+	// keyed on the actual constructor ASSIGNMENT, not a name coincidence
+	// -- matching the TS reference, which removed this parser-level strip
+	// for exactly this reason. Here ctor param `lo` is assigned to the
+	// DIFFERENT property `renamed`; the `lo` PROPERTY is never touched by
+	// the constructor at all and must keep its own literal initializer.
+	source := []byte(`const runar = @import("runar");
+
+pub const InitSurvives = struct {
+    pub const Contract = runar.StatefulSmartContract;
+
+    lo: i64 = 99,
+    renamed: i64 = 0,
+
+    pub fn init(lo: i64) InitSurvives {
+        return .{ .renamed = lo };
+    }
+
+    pub fn bump(self: *InitSurvives, delta: i64) void {
+        self.renamed = self.renamed + delta;
+        self.addOutput(1000, self.lo, self.renamed);
+    }
+};
+`)
+	result := ParseSource(source, "InitSurvives.runar.zig")
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+	}
+	if result.Contract == nil {
+		t.Fatalf("expected contract, got nil")
+	}
+	var loProp *PropertyNode
+	for i := range result.Contract.Properties {
+		if result.Contract.Properties[i].Name == "lo" {
+			loProp = &result.Contract.Properties[i]
+		}
+	}
+	if loProp == nil {
+		t.Fatalf("expected a 'lo' property")
+	}
+	if loProp.Initializer == nil {
+		t.Fatalf("expected 'lo' to keep its initializer")
+	}
+	lit, ok := loProp.Initializer.(BigIntLiteral)
+	if !ok || lit.Value.Cmp(big.NewInt(99)) != 0 {
+		t.Errorf("expected initializer BigIntLiteral(99), got %v", loProp.Initializer)
 	}
 }

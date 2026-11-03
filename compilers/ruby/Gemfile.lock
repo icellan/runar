@@ -1,0 +1,23 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    minitest (5.26.1)
+    ostruct (0.6.0)
+    rake (13.1.0)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  minitest (= 5.26.1)
+  ostruct (= 0.6.0)
+  rake (= 13.1.0)
+
+CHECKSUMS
+  minitest (5.26.1) sha256=f16a63d4278e230bba342c3bda3006a69c5216d46461b77dd57f7c7c529b5a96
+  ostruct (0.6.0) sha256=3b1736c99f4d985de36bde1155be5e22aaf6e564b30ff9bd481e2ef7c2d9ba85
+  rake (13.1.0) sha256=be6a3e1aa7f66e6c65fa57555234eb75ce4cf4ada077658449207205474199c6
+
+BUNDLED WITH
+  4.0.8

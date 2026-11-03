@@ -10,16 +10,88 @@ use super::stack::{PushValue, StackOp};
 const MAX_ITERATIONS: usize = 100;
 
 /// Apply peephole optimization to a list of stack ops.
+/// Optimize `ops`, nested if-blocks bottom-up: every if-arm before the list
+/// holding it.
+///
+/// N-264: bottom-up on an explicit stack, not by recursion. Private methods are
+/// inlined, so a chain of D helpers that each call the next under K nested ifs
+/// nests D*K if-ops here, too deep to recurse on. Each list is optimized
+/// exactly as the recursive version optimized it.
 pub fn optimize_stack_ops(ops: &[StackOp]) -> Vec<StackOp> {
-    // First, recursively optimize nested if-blocks
-    let mut current: Vec<StackOp> = ops.iter().map(optimize_nested_if).collect();
+    /// An op list being rebuilt: its next op, the rebuilt ops so far, and —
+    /// while an if-op's else-arm is being optimized — that if-op's finished
+    /// then-arm.
+    struct Frame<'o> {
+        ops: &'o [StackOp],
+        next: usize,
+        out: Vec<StackOp>,
+        then_done: Option<Vec<StackOp>>,
+    }
+    fn new_frame(ops: &[StackOp]) -> Frame<'_> {
+        Frame { ops, next: 0, out: Vec::with_capacity(ops.len()), then_done: None }
+    }
+    let mut stack: Vec<Frame> = vec![new_frame(ops)];
+    // A just-optimized arm, on its way to the if-op that holds it.
+    let mut arm: Option<Vec<StackOp>> = None;
+    loop {
+        let top = stack.len() - 1;
+        if let Some(done) = arm.take() {
+            let frame = &mut stack[top];
+            let else_ops = match &frame.ops[frame.next - 1] {
+                StackOp::If { else_ops, .. } => else_ops,
+                _ => unreachable!("an arm returns to its if-op"),
+            };
+            match frame.then_done.take() {
+                Some(then_ops) => frame.out.push(StackOp::If {
+                    then_ops,
+                    else_ops: done,
+                    then_locs: Vec::new(),
+                    else_locs: Vec::new(),
+                }),
+                None if else_ops.is_empty() => frame.out.push(StackOp::If {
+                    then_ops: done,
+                    else_ops: Vec::new(),
+                    then_locs: Vec::new(),
+                    else_locs: Vec::new(),
+                }),
+                None => {
+                    frame.then_done = Some(done);
+                    let child = new_frame(else_ops);
+                    stack.push(child);
+                }
+            }
+            continue;
+        }
+        let frame = &mut stack[top];
+        if frame.next < frame.ops.len() {
+            let op = &frame.ops[frame.next];
+            frame.next += 1;
+            match op {
+                StackOp::If { then_ops, .. } => {
+                    let child = new_frame(then_ops);
+                    stack.push(child);
+                }
+                other => frame.out.push(other.clone()),
+            }
+            continue;
+        }
+        let done = stack.pop().unwrap();
+        let optimized = optimize_one_level(done.out);
+        if stack.is_empty() {
+            return optimized;
+        }
+        arm = Some(optimized);
+    }
+}
 
+/// The fixed-point rule loop over one op list whose if-arms are done.
+fn optimize_one_level(mut current: Vec<StackOp>) -> Vec<StackOp> {
     for _ in 0..MAX_ITERATIONS {
-        let (result, changed) = apply_one_pass(&current);
+        let (result, changed) = apply_one_pass(current);
+        current = result;
         if !changed {
             break;
         }
-        current = result;
     }
 
     current
@@ -38,27 +110,111 @@ pub fn optimize_stack_ops_with_locs(
     ops: &[StackOp],
     source_locs: &[Option<crate::ir::SourceLocation>],
 ) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>) {
-    // Recursive nested-if optimization: inside an If, we keep the outer
-    // location for the IfOp itself; nested ops are optimised without their
-    // own locs (the analyzer treats nested-if peephole as best-effort).
-    let mut current_ops: Vec<StackOp> = ops.iter().map(optimize_nested_if).collect();
-    let mut current_locs: Vec<Option<crate::ir::SourceLocation>> =
-        if source_locs.len() == ops.len() { source_locs.to_vec() } else { vec![None; ops.len()] };
+    // N-222: the same bottom-up, explicit-stack walk as `optimize_stack_ops`
+    // (N-264), but every list — the top level AND each if-arm — is optimized
+    // together with its locations, so an arm op keeps its own statement's
+    // location instead of losing it. A list whose locations are missing or of
+    // the wrong length is treated as unlocated, as the top level always was.
+    type Loc = Option<crate::ir::SourceLocation>;
+    struct Frame<'o> {
+        ops: &'o [StackOp],
+        locs: Vec<Loc>,
+        next: usize,
+        out: Vec<StackOp>,
+        out_locs: Vec<Loc>,
+        then_done: Option<(Vec<StackOp>, Vec<Loc>)>,
+    }
+    fn new_frame<'o>(ops: &'o [StackOp], locs: &[Loc]) -> Frame<'o> {
+        Frame {
+            ops,
+            locs: if locs.len() == ops.len() { locs.to_vec() } else { vec![None; ops.len()] },
+            next: 0,
+            out: Vec::with_capacity(ops.len()),
+            out_locs: Vec::with_capacity(ops.len()),
+            then_done: None,
+        }
+    }
+    let mut stack: Vec<Frame> = vec![new_frame(ops, source_locs)];
+    let mut arm: Option<(Vec<StackOp>, Vec<Loc>)> = None;
+    loop {
+        let top = stack.len() - 1;
+        if let Some((done, done_locs)) = arm.take() {
+            let frame = &mut stack[top];
+            let frame_ops = frame.ops;
+            let idx = frame.next - 1;
+            let (else_ops, else_locs) = match &frame_ops[idx] {
+                StackOp::If { else_ops, else_locs, .. } => (else_ops, else_locs),
+                _ => unreachable!("an arm returns to its if-op"),
+            };
+            let if_loc = frame.locs[idx].clone();
+            match frame.then_done.take() {
+                Some((then_ops, then_locs)) => {
+                    frame.out.push(StackOp::If { then_ops, else_ops: done, then_locs, else_locs: done_locs });
+                    frame.out_locs.push(if_loc);
+                }
+                None if else_ops.is_empty() => {
+                    frame.out.push(StackOp::If {
+                        then_ops: done,
+                        else_ops: Vec::new(),
+                        then_locs: done_locs,
+                        else_locs: Vec::new(),
+                    });
+                    frame.out_locs.push(if_loc);
+                }
+                None => {
+                    frame.then_done = Some((done, done_locs));
+                    let child = new_frame(else_ops, else_locs);
+                    stack.push(child);
+                }
+            }
+            continue;
+        }
+        let frame = &mut stack[top];
+        if frame.next < frame.ops.len() {
+            let frame_ops = frame.ops;
+            let i = frame.next;
+            frame.next += 1;
+            match &frame_ops[i] {
+                StackOp::If { then_ops, then_locs, .. } => {
+                    let child = new_frame(then_ops, then_locs);
+                    stack.push(child);
+                }
+                other => {
+                    frame.out.push(other.clone());
+                    frame.out_locs.push(frame.locs[i].clone());
+                }
+            }
+            continue;
+        }
+        let done = stack.pop().unwrap();
+        let optimized = optimize_one_level_with_locs(done.out, done.out_locs);
+        if stack.is_empty() {
+            return optimized;
+        }
+        arm = Some(optimized);
+    }
+}
 
+/// The fixed-point rule loop over one located op list whose if-arms are done.
+fn optimize_one_level_with_locs(
+    mut ops: Vec<StackOp>,
+    mut locs: Vec<Option<crate::ir::SourceLocation>>,
+) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>) {
     for _ in 0..MAX_ITERATIONS {
-        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(&current_ops, &current_locs);
+        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(ops, &locs);
+        ops = result_ops;
+        locs = result_locs;
         if !changed {
             break;
         }
-        current_ops = result_ops;
-        current_locs = result_locs;
     }
-
-    (current_ops, current_locs)
+    (ops, locs)
 }
 
+/// N-264: takes `ops` by value and MOVES each unmatched op into the result.
+/// Cloning one deep-cloned an if-op's whole subtree, recursively.
 fn apply_one_pass_with_locs(
-    ops: &[StackOp],
+    mut ops: Vec<StackOp>,
     source_locs: &[Option<crate::ir::SourceLocation>],
 ) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>, bool) {
     let mut result_ops = Vec::new();
@@ -112,7 +268,8 @@ fn apply_one_pass_with_locs(
             }
         }
 
-        result_ops.push(ops[i].clone());
+        // Every later window starts past `i`, so the placeholder is never read.
+        result_ops.push(std::mem::replace(&mut ops[i], StackOp::Drop));
         result_locs.push(source_locs.get(i).cloned().flatten());
         i += 1;
     }
@@ -120,28 +277,8 @@ fn apply_one_pass_with_locs(
     (result_ops, result_locs, changed)
 }
 
-fn optimize_nested_if(op: &StackOp) -> StackOp {
-    match op {
-        StackOp::If {
-            then_ops,
-            else_ops,
-        } => {
-            let optimized_then = optimize_stack_ops(then_ops);
-            let optimized_else = if else_ops.is_empty() {
-                Vec::new()
-            } else {
-                optimize_stack_ops(else_ops)
-            };
-            StackOp::If {
-                then_ops: optimized_then,
-                else_ops: optimized_else,
-            }
-        }
-        other => other.clone(),
-    }
-}
-
-fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
+/// N-264: takes `ops` by value; see `apply_one_pass_with_locs`.
+fn apply_one_pass(mut ops: Vec<StackOp>) -> (Vec<StackOp>, bool) {
     let mut result = Vec::new();
     let mut changed = false;
     let mut i = 0;
@@ -177,7 +314,8 @@ fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
             }
         }
 
-        result.push(ops[i].clone());
+        // Every later window starts past `i`, so the placeholder is never read.
+        result.push(std::mem::replace(&mut ops[i], StackOp::Drop));
         i += 1;
     }
 
@@ -233,6 +371,14 @@ fn produces_canonical_bool(op: &StackOp) -> bool {
 fn match_window_3(a: &StackOp, b: &StackOp, c: &StackOp) -> Option<Vec<StackOp>> {
     if is_raw_bytes(a) || is_raw_bytes(b) || is_raw_bytes(c) {
         return None;
+    }
+
+    // ROT, ROT, ROT → remove all three (N-376). OP_ROT is a 3-cycle on the
+    // top three items, so three in a row are the identity; the fixed-point
+    // loop leaves a run of n as n mod 3. Matches the opcode-string form too
+    // (F-392 convention), as every tier does.
+    if is_rot(a) && is_rot(b) && is_rot(c) {
+        return Some(vec![]);
     }
 
     // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
@@ -337,24 +483,16 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
         return Some(vec![StackOp::Opcode("OP_1SUB".to_string())]);
     }
 
-    // PUSH 0, OP_ADD -> remove both
-    if is_push_int(a, 0) && is_opcode(b, "OP_ADD") {
-        return Some(vec![]);
-    }
-
-    // PUSH 0, OP_SUB -> remove both
-    if is_push_int(a, 0) && is_opcode(b, "OP_SUB") {
-        return Some(vec![]);
-    }
+    // NOTE (F-001): no `PUSH 0, OP_ADD`, `PUSH 0, OP_SUB` or
+    // `OP_NEGATE, OP_NEGATE -> []` rule. x+0, x-0 and -(-x) are identities over
+    // integers, not over stack elements: the opcode decodes its operand as a
+    // CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // pushes back the minimal re-encoding. Deleting it changes accept/reject
+    // and the value for a witness-supplied operand.
 
     // NOTE: `OP_NOT, OP_NOT -> []` used to live here as an unguarded 2-op rule.
     // It is unsound (C17) and now lives in `match_window_3`, which takes the
     // PRODUCER of the negated value into the window.
-
-    // OP_NEGATE, OP_NEGATE -> remove both
-    if is_opcode(a, "OP_NEGATE") && is_opcode(b, "OP_NEGATE") {
-        return Some(vec![]);
-    }
 
     // OP_EQUAL, OP_VERIFY -> OP_EQUALVERIFY
     if is_opcode(a, "OP_EQUAL") && is_opcode(b, "OP_VERIFY") {
@@ -451,6 +589,11 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
 fn is_push_int(op: &StackOp, n: i128) -> bool {
     use num_traits::ToPrimitive;
     matches!(op, StackOp::Push(PushValue::Int(v)) if v.to_i128() == Some(n))
+}
+
+/// A typed `Rot` or the opcode-string `OP_ROT` (N-376).
+fn is_rot(op: &StackOp) -> bool {
+    matches!(op, StackOp::Rot) || is_opcode(op, "OP_ROT")
 }
 
 fn is_opcode(op: &StackOp, code: &str) -> bool {
@@ -603,14 +746,18 @@ mod tests {
         );
     }
 
+    // F-001: -(-x) = x over integers, but OP_NEGATE decodes its operand as a
+    // CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // re-encodes it minimally; deleting the pair changes accept/reject and
+    // value for a witness operand. Proves the pair survives; does not execute.
     #[test]
-    fn test_negate_negate_removed() {
+    fn test_negate_negate_kept() {
         let ops = vec![
             StackOp::Opcode("OP_NEGATE".to_string()),
             StackOp::Opcode("OP_NEGATE".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "NEGATE NEGATE should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "NEGATE NEGATE must survive (F-001)");
     }
 
     #[test]
@@ -668,24 +815,26 @@ mod tests {
         assert!(matches!(&result[0], StackOp::Opcode(c) if c == "OP_1SUB"));
     }
 
+    // F-001: PUSH(0) ADD / PUSH(0) SUB must survive — OP_ADD / OP_SUB
+    // validate and normalise their operand (see test_negate_negate_kept).
     #[test]
-    fn test_push0_add_removed() {
+    fn test_push0_add_kept() {
         let ops = vec![
             StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "PUSH(0) ADD should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) ADD must survive (F-001)");
     }
 
     #[test]
-    fn test_push0_sub_removed() {
+    fn test_push0_sub_kept() {
         let ops = vec![
             StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "PUSH(0) SUB should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) SUB must survive (F-001)");
     }
 
     #[test]
@@ -976,10 +1125,12 @@ mod tests {
                 StackOp::Opcode("OP_VERIFY".to_string()),
             ],
             else_ops: vec![StackOp::Swap, StackOp::Swap],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         }];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 1);
-        if let StackOp::If { then_ops, else_ops } = &result[0] {
+        if let StackOp::If { then_ops, else_ops, .. } = &result[0] {
             assert_eq!(then_ops.len(), 1, "then branch should be optimized");
             assert!(matches!(&then_ops[0], StackOp::Opcode(c) if c == "OP_EQUALVERIFY"));
             assert!(else_ops.is_empty(), "else branch SWAP SWAP should be eliminated");
@@ -994,15 +1145,16 @@ mod tests {
 
     #[test]
     fn test_iterative_optimization() {
-        // After first pass: PUSH(0) ADD is removed, leaving DUP DROP which is
-        // removed on the second pass
+        // After first pass: PUSH(7) DROP is removed, leaving DUP DROP which is
+        // removed on the second pass. (Was PUSH(0) ADD, which F-001 no longer
+        // eliminates.)
         let ops = vec![
             StackOp::Dup,
-            StackOp::Push(PushValue::Int(BigInt::from(0))),
-            StackOp::Opcode("OP_ADD".to_string()),
+            StackOp::Push(PushValue::Int(BigInt::from(7))),
+            StackOp::Drop,
             StackOp::Drop,
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "iterative optimization should remove DUP (PUSH0 ADD -> empty) DROP -> DUP DROP -> empty, got {:?}", result);
+        assert!(result.is_empty(), "iterative optimization should remove DUP (PUSH7 DROP -> empty) DROP -> DUP DROP -> empty, got {:?}", result);
     }
 }

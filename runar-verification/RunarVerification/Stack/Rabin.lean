@@ -8,13 +8,13 @@ import RunarVerification.Crypto.Spec
 `packages/runar-compiler/src/passes/rabin-codegen.ts` ⇒ `emitVerifyRabinSig`)
 
 Rabin signature verification checks the modular identity
-`(sig² + padding) mod pubKey == SHA256(msg)` using a fixed 15-opcode
+`(sig² + padding) mod pubKey == SHA256(msg)` using a fixed 34-op
 script body.
 
 BUG-010 (see `_review/BUG-010-rfc.md`) added a 5-opcode `OP_WITHIN`
 range check enforcing `0 ≤ padding < 65536` on-chain, closing the forgery
 exploit documented in `_review/BUG-004-finding.md`. It is modelled here as
-of 2026-08-16 — `rabinBodyOps` is the 15-opcode body, and
+of 2026-08-16 — `rabinBodyOps` is the 34-op body (as of F-368), and
 `runOps_rabinBodyOps_eq` carries the two bounds as hypotheses and consumes
 them at the `OP_VERIFY` step (outside the range the gate evaluates FALSE
 and the run is `.error .assertFailed`, which IS the intended behaviour).
@@ -34,11 +34,18 @@ defined here.
   `bottom→top: ..., msg, sig, padding, pubKey`  (`pubKey` = TOS)
 * On exit: `bottom→top: ..., bool`  (`true` on a valid Rabin signature)
 
-The body is the fixed 15-opcode sequence
+The body is the fixed 34-op sequence
 
+  `<0x00> OP_CAT OP_BIN2NUM`                  (pubKey as unsigned, F-144)
   `OP_SWAP`
+  `<0x00> OP_CAT OP_BIN2NUM`                  (padding as unsigned, F-144)
   `OP_DUP OP_0 <65536> OP_WITHIN OP_VERIFY`   (BUG-010 padding gate)
-  `OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL`
+  `OP_ROT`
+  `<0x00> OP_CAT OP_BIN2NUM`                  (sig as unsigned, F-144)
+  `OP_DUP OP_3 OP_PICK OP_LESSTHAN OP_VERIFY` (sig < pubKey, F-368)
+  `OP_DUP OP_MUL OP_ADD OP_OVER OP_MOD`
+  `OP_ROT OP_SHA256 <0x00> OP_CAT OP_BIN2NUM`
+  `OP_ROT OP_MOD OP_NUMEQUAL`                 (digest mod pubKey, F-047)
 
 ## Source of truth
 
@@ -92,13 +99,23 @@ entry: msg sig padding pubKey
 ```
 -/
 
-/-- The 15-opcode Rabin verification body emitted *after* the four args
+/-- The 34-op Rabin verification body emitted *after* the four args
 have been loaded by `loadRefLive`. Mirrors the body section of
 `Stack.lowerVerifyRabinSigOpsLive` one-to-one, which in turn mirrors
 `emitVerifyRabinSig` (`packages/runar-compiler/src/passes/rabin-codegen.ts:53-70`).
 -/
 def rabinBodyOps : List StackOp :=
-  [ .swap
+  -- F-144: read pubKey as an UNSIGNED little-endian integer (append a 0x00
+  -- sign byte, collapse with OP_BIN2NUM). A raw unsigned push keeps its
+  -- unsigned value; a non-negative Script number is unchanged.
+  [ .push (.bytes (ByteArray.mk #[0x00]))
+  , rOpc "OP_CAT"
+  , rOpc "OP_BIN2NUM"
+  , .swap
+  -- F-144: padding as unsigned.
+  , .push (.bytes (ByteArray.mk #[0x00]))
+  , rOpc "OP_CAT"
+  , rOpc "OP_BIN2NUM"
   -- BUG-010 padding range check: assert `0 ≤ padding < 65536`
   -- (`rabin-codegen.ts:54-60`). Without it a spender can supply a padding
   -- large enough to force `sig² + padding` past the modulus and forge a
@@ -109,12 +126,26 @@ def rabinBodyOps : List StackOp :=
   , rOpc "OP_WITHIN"
   , rOpc "OP_VERIFY"
   , .rot
+  -- F-144: sig as unsigned.
+  , .push (.bytes (ByteArray.mk #[0x00]))
+  , rOpc "OP_CAT"
+  , rOpc "OP_BIN2NUM"
+  -- F-368: canonical-signature gate `sig < pubKey` (`rabin-codegen.ts`).
+  -- `(sig + k·n)² ≡ sig² (mod n)`, so without it `sig + n` is a malleated
+  -- re-encoding of an honest spend. `sig ≥ 0` already holds after the F-144
+  -- normalization (the appended 0x00 clears the sign bit).
+  , .dup
+  , .push (.bigint 3)
+  , rOpc "OP_PICK"
+  , rOpc "OP_LESSTHAN"
+  , rOpc "OP_VERIFY"
   , .dup
   , rOpc "OP_MUL"
   , rOpc "OP_ADD"
-  , .swap
+  -- F-047: `.over` (not `.swap`) keeps pubKey for the digest reduction.
+  , .over
   , rOpc "OP_MOD"
-  , .swap
+  , .rot
   , rOpc "OP_SHA256"
   -- BUG-011 digest-encoding normalization (`rabin-codegen.ts`). `OP_MOD` leaves
   -- a MINIMAL Script number, which carries a trailing 0x00 sign byte whenever
@@ -126,6 +157,10 @@ def rabinBodyOps : List StackOp :=
   , .push (.bytes (ByteArray.mk #[0x00]))
   , rOpc "OP_CAT"
   , rOpc "OP_BIN2NUM"
+  -- F-047: reduce the digest mod pubKey (`SHA256(msg) mod n`), matching every
+  -- off-chain verifier.
+  , .rot
+  , rOpc "OP_MOD"
   , rOpc "OP_NUMEQUAL"
   ]
 
@@ -138,7 +173,7 @@ suffix of the emitted op-list to `rabinBodyOps`, which is the
 load-bearing fact for any future `runOps`-level reasoning.
 -/
 
-/-- The 15-opcode body emitted by `lowerVerifyRabinSigOpsLive` is
+/-- The 34-op body emitted by `lowerVerifyRabinSigOpsLive` is
 byte-identical to `rabinBodyOps`. The four leading `loadRefOperand`
 blocks (operand-gated over `[msg, sig, padding, pubKey]`) are
 quotiented out by `arg loaders` — they are pure ref-loads that vary
@@ -181,10 +216,12 @@ theorem lowerVerifyRabinSigOpsLive_body
         ++ rabinBodyOps := by
   rfl
 
-/-- The body is exactly 18 opcodes long (10 + BUG-010's 5-opcode gate
+/-- The body is exactly 34 opcodes long (10 + BUG-010's 5-opcode gate
 + BUG-011's 4-opcode digest normalization, less the `OP_EQUAL` that
-`OP_NUMEQUAL` replaced). -/
-theorem rabinBodyOps_length : rabinBodyOps.length = 18 := rfl
+`OP_NUMEQUAL` replaced, + F-047's 2-opcode digest reduction + F-144's
+three 3-opcode operand normalizations + F-368's 5-opcode `sig < pubKey`
+gate). -/
+theorem rabinBodyOps_length : rabinBodyOps.length = 34 := rfl
 
 /-! ## Codegen-to-spec equivalence (theorem, Phase B10)
 
@@ -235,6 +272,14 @@ private theorem applySwap_cons
     (hStk : s.stack = b :: a :: rest) :
     applySwap s = Except.ok { s with stack := a :: b :: rest } := by
   unfold applySwap
+  rw [hStk]
+
+/-- `applyOver` on a 2-element prefix. -/
+private theorem applyOver_cons
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    applyOver s = Except.ok { s with stack := b :: a :: b :: rest } := by
+  unfold applyOver
   rw [hStk]
 
 /-- `applyRot` on a 3-element prefix. -/
@@ -401,6 +446,38 @@ private theorem runOpcode_BIN2NUM_bytesLocal
   rw [hStk]
   rfl
 
+/-- `OP_LESSTHAN` on a 2-int prefix: pushes `decide (a < b)` (`b` = TOS). -/
+private theorem runOpcode_LESSTHAN_ints
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_LESSTHAN" s
+    = Except.ok ({ s with stack := rest }.push (.vBool (decide (a < b)))) := by
+  have h : runOpcode "OP_LESSTHAN" s
+      = liftIntBinNum s (fun a b => .vBool (decide (a < b))) := rfl
+  rw [h]
+  unfold liftIntBinNum
+  rw [popN_two_local s _ _ rest hStk]
+  simp
+
+/-- `<3> OP_PICK` (parsed-bytecode form): pops the depth 3 and copies the
+element at depth 3 of the remaining stack to the top. -/
+private theorem runOpcode_PICK_three
+    (s : StackState) (a b c d : Value) (rest : List Value)
+    (hStk : s.stack = .vBigint 3 :: a :: b :: c :: d :: rest) :
+    runOpcode "OP_PICK" s
+    = Except.ok { s with stack := d :: a :: b :: c :: d :: rest } := by
+  show (match s.pop? with
+        | none => _
+        | some (v, s') =>
+            match asNonNegativeNat? v with
+            | some d => applyPick s' d
+            | none => _) = _
+  unfold StackState.pop?
+  rw [hStk]
+  simp only [asNonNegativeNat?, asInt?]
+  unfold applyPick StackState.push
+  simp
+
 /-- `OP_NUMEQUAL` on a 2-int prefix: pushes `decide (a = b)`. -/
 private theorem runOpcode_NUMEQUAL_ints
     (s : StackState) (a b : Int) (rest : List Value)
@@ -513,6 +590,9 @@ private theorem notIfOp_rot : ∀ thn els, (StackOp.rot : StackOp) ≠ .ifOp thn
 private theorem notIfOp_dup : ∀ thn els, (StackOp.dup : StackOp) ≠ .ifOp thn els := by
   intro thn els h; cases h
 
+private theorem notIfOp_over : ∀ thn els, (StackOp.over : StackOp) ≠ .ifOp thn els := by
+  intro thn els h; cases h
+
 private theorem notIfOp_opcode (code : String) :
     ∀ thn els, (StackOp.opcode code : StackOp) ≠ .ifOp thn els := by
   intro thn els h; cases h
@@ -526,175 +606,293 @@ constructor; the `.rot` arm immediately delegates to `applyRot`). -/
 private theorem stepNonIf_rot (s : StackState) :
     stepNonIf .rot s = applyRot s := rfl
 
+/-- `stepNonIf .over s = applyOver s` (same shape as `stepNonIf_rot`). -/
+private theorem stepNonIf_over (s : StackState) :
+    stepNonIf .over s = applyOver s := rfl
+
 end Internal
 
 open Internal
 
-/-- **B10 — Rabin codegen-to-spec.** Running the 15-opcode
-`rabinBodyOps` on a stack whose top four elements are
-`pubKey, padding, sig, msg` (TOS first; `vBigint pubKey` is on top)
-yields `.vBool (verifyRabinSig_spec msg sig padding pubKey)` on top
-with the rest of the state preserved.
+/-- F-144: the integer the body reads from an operand's stack bytes `b`:
+`b ++ 0x00` decoded as a Script number, i.e. `b` read as an UNSIGNED
+little-endian integer. For the minimal encoding of a non-negative Script
+number this is that number; a raw unsigned push keeps its unsigned value. -/
+def unsignedOperand (b : ByteArray) : Int := decodeMinimalLE (b ++ ByteArray.mk #[0x00])
 
-The `pubKey ≠ 0` hypothesis is an input-side domain fact: it gates
-the runtime `OP_MOD` step (which errors on a zero divisor); real
-Rabin moduli are large primes products, so the restriction is
-harmless. Per `PATH2_PLAN.md §2.1`, this is an input invariant, not
-a conclusion-restating hypothesis. -/
-theorem runOps_rabinBodyOps_eq (msg : ByteArray)
-    (sig padding pubKey : Int) (s : StackState)
-    (hPubKey : pubKey ≠ 0)
-    (hPadLo : 0 ≤ padding) (hPadHi : padding < Lower.rabinPaddingLimit) :
+/-- **B10 — Rabin codegen-to-spec.** Running the 34-opcode
+`rabinBodyOps` on a stack whose top four elements are the byte vectors
+`pkB, padB, sigB, msg` (TOS first) yields
+`.vBool (verifyRabinSig_spec msg (unsignedOperand sigB) (unsignedOperand padB)
+(unsignedOperand pkB))` on top with the rest of the state preserved.
+
+F-144: the operands are stated as the BYTE VECTORS a spender or the
+constructor pushes (on a real Script stack every element is one), and the
+spec is applied to their unsigned reading — exactly what the three
+`<0x00> OP_CAT OP_BIN2NUM` normalizations compute. The spec itself is
+unchanged.
+
+`unsignedOperand pkB ≠ 0` gates both `OP_MOD` steps (a zero divisor errors)
+and BUG-010's `0 ≤ padding < 65536` is consumed at the `OP_VERIFY` step, as
+is F-368's canonical-signature bound `sig < pubKey` at its own `OP_VERIFY`
+(outside it the run is `.error .assertFailed`, the intended behaviour; `sig ≥ 0`
+needs no hypothesis — the F-144 reading is non-negative by construction).
+These are input-side domain facts per `PATH2_PLAN.md §2.1`, not
+conclusion-restating hypotheses. -/
+theorem runOps_rabinBodyOps_eq (msg sigB padB pkB : ByteArray) (s : StackState)
+    (hPubKey : unsignedOperand pkB ≠ 0)
+    (hPadLo : 0 ≤ unsignedOperand padB)
+    (hPadHi : unsignedOperand padB < Lower.rabinPaddingLimit)
+    (hSigLt : unsignedOperand sigB < unsignedOperand pkB) :
     runOps rabinBodyOps
         { s with stack :=
-            .vBigint pubKey
-              :: .vBigint padding
-              :: .vBigint sig
+            .vBytes pkB
+              :: .vBytes padB
+              :: .vBytes sigB
               :: .vBytes msg
               :: s.stack }
       = .ok { s with stack :=
                 .vBool (RunarVerification.Crypto.Spec.verifyRabinSig_spec
-                          msg sig padding pubKey) :: s.stack } := by
-  -- Step 1: OP_SWAP.
+                          msg (unsignedOperand sigB) (unsignedOperand padB)
+                          (unsignedOperand pkB)) :: s.stack } := by
+  -- Step 0: push the 0x00 sign byte under pubKey (F-144).
   rw [show (rabinBodyOps : List StackOp)
-        = .swap :: (rabinBodyOps.drop 1) from rfl,
+        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 1) from rfl,
+      runOps_cons_nonIf_eq (.push _) _ _ (notIfOp_push _),
+      stepNonIf_push_bytes]
+  simp only [StackState.push]
+  -- Step 1: OP_CAT — pubKey ++ 0x00.
+  rw [show (rabinBodyOps.drop 1 : List StackOp)
+        = .opcode "OP_CAT" :: (rabinBodyOps.drop 2) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_CAT") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_CAT_bytes _ pkB (ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 2: OP_BIN2NUM — pubKey read as an unsigned integer.
+  rw [show (rabinBodyOps.drop 2 : List StackOp)
+        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 3) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_BIN2NUM") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_BIN2NUM_bytesLocal _ (pkB ++ ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 3: OP_SWAP.
+  rw [show (rabinBodyOps.drop 3 : List StackOp)
+        = .swap :: (rabinBodyOps.drop 4) from rfl,
       runOps_cons_nonIf_eq .swap _ _ notIfOp_swap, stepNonIf_swap,
       applySwap_cons _ _ _ _ rfl]
   simp only []
-  -- Steps 2-6: BUG-010's `0 ≤ padding < 65536` gate.
-  -- Step 2: OP_DUP (copy the padding for the range test).
-  rw [show (rabinBodyOps.drop 1 : List StackOp)
-        = .dup :: (rabinBodyOps.drop 2) from rfl,
-      runOps_cons_nonIf_eq .dup _ _ notIfOp_dup, stepNonIf_dup,
-      applyDup_cons _ _ _ rfl]
-  simp only []
-  -- Step 3: push 0 (the inclusive lower bound).
-  rw [show (rabinBodyOps.drop 2 : List StackOp)
-        = .push (.bigint 0) :: (rabinBodyOps.drop 3) from rfl,
-      runOps_cons_nonIf_eq (.push (.bigint 0)) _ _ (notIfOp_push _),
-      stepNonIf_push_bigint]
-  simp only [StackState.push]
-  -- Step 4: push 65536 (the exclusive upper bound).
-  rw [show (rabinBodyOps.drop 3 : List StackOp)
-        = .push (.bigint Lower.rabinPaddingLimit) :: (rabinBodyOps.drop 4) from rfl,
-      runOps_cons_nonIf_eq (.push (.bigint Lower.rabinPaddingLimit)) _ _
-        (notIfOp_push _),
-      stepNonIf_push_bigint]
-  simp only [StackState.push]
-  -- Step 5: OP_WITHIN.
+  -- Step 4: push the 0x00 sign byte under padding (F-144).
   rw [show (rabinBodyOps.drop 4 : List StackOp)
-        = .opcode "OP_WITHIN" :: (rabinBodyOps.drop 5) from rfl,
-      runOps_cons_nonIf_eq (.opcode "OP_WITHIN") _ _ (notIfOp_opcode _),
-      stepNonIf_opcode,
-      runOpcode_WITHIN_ints _ padding 0 Lower.rabinPaddingLimit _ rfl]
+        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 5) from rfl,
+      runOps_cons_nonIf_eq (.push _) _ _ (notIfOp_push _),
+      stepNonIf_push_bytes]
   simp only [StackState.push]
-  -- Step 6: OP_VERIFY. This is where the two padding bounds are consumed —
-  -- without them the gate evaluates FALSE and the whole run is
-  -- `.error .assertFailed`, which is precisely the forgery BUG-010 closes.
-  rw [show (decide (0 ≤ padding ∧ padding < Lower.rabinPaddingLimit)) = true from
-        decide_eq_true ⟨hPadLo, hPadHi⟩]
+  -- Step 5: OP_CAT — padding ++ 0x00.
   rw [show (rabinBodyOps.drop 5 : List StackOp)
-        = .opcode "OP_VERIFY" :: (rabinBodyOps.drop 6) from rfl,
-      runOps_cons_nonIf_eq (.opcode "OP_VERIFY") _ _ (notIfOp_opcode _),
+        = .opcode "OP_CAT" :: (rabinBodyOps.drop 6) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_CAT") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_VERIFY_true _ _ rfl]
-  simp only []
-  -- Step 7: OP_ROT.
+      runOpcode_CAT_bytes _ padB (ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 6: OP_BIN2NUM — padding read as an unsigned integer.
   rw [show (rabinBodyOps.drop 6 : List StackOp)
-        = .rot :: (rabinBodyOps.drop 7) from rfl,
-      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
-      applyRot_cons _ _ _ _ _ rfl]
-  simp only []
-  -- Step 8: OP_DUP.
+        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 7) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_BIN2NUM") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_BIN2NUM_bytesLocal _ (padB ++ ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Steps 7-11: BUG-010's `0 ≤ padding < 65536` gate.
+  -- Step 7: OP_DUP (copy the padding for the range test).
   rw [show (rabinBodyOps.drop 7 : List StackOp)
         = .dup :: (rabinBodyOps.drop 8) from rfl,
       runOps_cons_nonIf_eq .dup _ _ notIfOp_dup, stepNonIf_dup,
       applyDup_cons _ _ _ rfl]
   simp only []
-  -- Step 9: OP_MUL.
+  -- Step 8: push 0 (the inclusive lower bound).
   rw [show (rabinBodyOps.drop 8 : List StackOp)
-        = .opcode "OP_MUL" :: (rabinBodyOps.drop 9) from rfl,
+        = .push (.bigint 0) :: (rabinBodyOps.drop 9) from rfl,
+      runOps_cons_nonIf_eq (.push (.bigint 0)) _ _
+        (notIfOp_push _),
+      stepNonIf_push_bigint]
+  simp only [StackState.push]
+  -- Step 9: push 65536 (the exclusive upper bound).
+  rw [show (rabinBodyOps.drop 9 : List StackOp)
+        = .push (.bigint Lower.rabinPaddingLimit) :: (rabinBodyOps.drop 10) from rfl,
+      runOps_cons_nonIf_eq (.push (.bigint Lower.rabinPaddingLimit)) _ _
+        (notIfOp_push _),
+      stepNonIf_push_bigint]
+  simp only [StackState.push]
+  -- Step 10: OP_WITHIN.
+  rw [show (rabinBodyOps.drop 10 : List StackOp)
+        = .opcode "OP_WITHIN" :: (rabinBodyOps.drop 11) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_WITHIN") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_WITHIN_ints _ (decodeMinimalLE (padB ++ ByteArray.mk #[0x00])) 0 Lower.rabinPaddingLimit _ rfl]
+  simp only [StackState.push]
+  -- Step 11: OP_VERIFY. The two padding bounds are consumed here — without
+  -- them the gate evaluates FALSE and the run is `.error .assertFailed`.
+  rw [show (decide (0 ≤ decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) ∧ decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) < Lower.rabinPaddingLimit)) = true from
+        decide_eq_true ⟨hPadLo, hPadHi⟩]
+  rw [show (rabinBodyOps.drop 11 : List StackOp)
+        = .opcode "OP_VERIFY" :: (rabinBodyOps.drop 12) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_VERIFY") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_VERIFY_true _ _ rfl]
+  simp only []
+  -- Step 12: OP_ROT.
+  rw [show (rabinBodyOps.drop 12 : List StackOp)
+        = .rot :: (rabinBodyOps.drop 13) from rfl,
+      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
+      applyRot_cons _ _ _ _ _ rfl]
+  simp only []
+  -- Step 13: push the 0x00 sign byte under sig (F-144).
+  rw [show (rabinBodyOps.drop 13 : List StackOp)
+        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 14) from rfl,
+      runOps_cons_nonIf_eq (.push _) _ _ (notIfOp_push _),
+      stepNonIf_push_bytes]
+  simp only [StackState.push]
+  -- Step 14: OP_CAT — sig ++ 0x00.
+  rw [show (rabinBodyOps.drop 14 : List StackOp)
+        = .opcode "OP_CAT" :: (rabinBodyOps.drop 15) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_CAT") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_CAT_bytes _ sigB (ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 15: OP_BIN2NUM — sig read as an unsigned integer.
+  rw [show (rabinBodyOps.drop 15 : List StackOp)
+        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 16) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_BIN2NUM") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_BIN2NUM_bytesLocal _ (sigB ++ ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Steps 16-20: F-368's `sig < pubKey` gate.
+  -- Step 16: OP_DUP (copy sig for the range test).
+  rw [show (rabinBodyOps.drop 16 : List StackOp)
+        = .dup :: (rabinBodyOps.drop 17) from rfl,
+      runOps_cons_nonIf_eq .dup _ _ notIfOp_dup, stepNonIf_dup,
+      applyDup_cons _ _ _ rfl]
+  simp only []
+  -- Step 17: push the pick depth 3.
+  rw [show (rabinBodyOps.drop 17 : List StackOp)
+        = .push (.bigint 3) :: (rabinBodyOps.drop 18) from rfl,
+      runOps_cons_nonIf_eq (.push (.bigint 3)) _ _ (notIfOp_push _),
+      stepNonIf_push_bigint]
+  simp only [StackState.push]
+  -- Step 18: OP_PICK — copy pubKey (depth 3) to the top.
+  rw [show (rabinBodyOps.drop 18 : List StackOp)
+        = .opcode "OP_PICK" :: (rabinBodyOps.drop 19) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_PICK") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_PICK_three _ _ _ _ _ _ rfl]
+  simp only []
+  -- Step 19: OP_LESSTHAN — sig < pubKey.
+  rw [show (rabinBodyOps.drop 19 : List StackOp)
+        = .opcode "OP_LESSTHAN" :: (rabinBodyOps.drop 20) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_LESSTHAN") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_LESSTHAN_ints _ (decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) (decodeMinimalLE (pkB ++ ByteArray.mk #[0x00])) _ rfl]
+  simp only [StackState.push]
+  -- Step 20: OP_VERIFY. `sig < pubKey` is consumed here — without it the gate
+  -- evaluates FALSE and the run is `.error .assertFailed` (F-368).
+  rw [show (decide (decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) < decodeMinimalLE (pkB ++ ByteArray.mk #[0x00]))) = true from decide_eq_true hSigLt]
+  rw [show (rabinBodyOps.drop 20 : List StackOp)
+        = .opcode "OP_VERIFY" :: (rabinBodyOps.drop 21) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_VERIFY") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_VERIFY_true _ _ rfl]
+  simp only []
+  -- Step 21: OP_DUP.
+  rw [show (rabinBodyOps.drop 21 : List StackOp)
+        = .dup :: (rabinBodyOps.drop 22) from rfl,
+      runOps_cons_nonIf_eq .dup _ _ notIfOp_dup, stepNonIf_dup,
+      applyDup_cons _ _ _ rfl]
+  simp only []
+  -- Step 22: OP_MUL.
+  rw [show (rabinBodyOps.drop 22 : List StackOp)
+        = .opcode "OP_MUL" :: (rabinBodyOps.drop 23) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_MUL") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_MUL_intInt _ sig sig _ rfl]
+      runOpcode_MUL_intInt _ (decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) (decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) _ rfl]
   simp only [StackState.push]
-  -- Step 10: OP_ADD.
-  rw [show (rabinBodyOps.drop 9 : List StackOp)
-        = .opcode "OP_ADD" :: (rabinBodyOps.drop 10) from rfl,
+  -- Step 23: OP_ADD.
+  rw [show (rabinBodyOps.drop 23 : List StackOp)
+        = .opcode "OP_ADD" :: (rabinBodyOps.drop 24) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_ADD") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_ADD_intInt _ padding (sig * sig) _ rfl]
+      runOpcode_ADD_intInt _ (decodeMinimalLE (padB ++ ByteArray.mk #[0x00])) (decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) * decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) _ rfl]
   simp only [StackState.push]
-  -- Step 11: OP_SWAP.
-  rw [show (rabinBodyOps.drop 10 : List StackOp)
-        = .swap :: (rabinBodyOps.drop 11) from rfl,
-      runOps_cons_nonIf_eq .swap _ _ notIfOp_swap, stepNonIf_swap,
-      applySwap_cons _ _ _ _ rfl]
+  -- Step 24: OP_OVER (F-047: keep pubKey for the digest reduction).
+  rw [show (rabinBodyOps.drop 24 : List StackOp)
+        = .over :: (rabinBodyOps.drop 25) from rfl,
+      runOps_cons_nonIf_eq .over _ _ notIfOp_over, stepNonIf_over,
+      applyOver_cons _ _ _ _ rfl]
   simp only []
-  -- Step 12: OP_MOD (gated by `pubKey ≠ 0`).
-  rw [show (rabinBodyOps.drop 11 : List StackOp)
-        = .opcode "OP_MOD" :: (rabinBodyOps.drop 12) from rfl,
+  -- Step 25: OP_MOD (gated by `pubKey ≠ 0`).
+  rw [show (rabinBodyOps.drop 25 : List StackOp)
+        = .opcode "OP_MOD" :: (rabinBodyOps.drop 26) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_MOD") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_MOD_intInt_nonzero _ (padding + sig * sig) pubKey _ rfl hPubKey]
+      runOpcode_MOD_intInt_nonzero _ (decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) + decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) * decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) (decodeMinimalLE (pkB ++ ByteArray.mk #[0x00])) _ rfl hPubKey]
   simp only [StackState.push]
-  -- Step 13: OP_SWAP.
-  rw [show (rabinBodyOps.drop 12 : List StackOp)
-        = .swap :: (rabinBodyOps.drop 13) from rfl,
-      runOps_cons_nonIf_eq .swap _ _ notIfOp_swap, stepNonIf_swap,
-      applySwap_cons _ _ _ _ rfl]
+  -- Step 26: OP_ROT (brings msg up; pubKey stays below the residue).
+  rw [show (rabinBodyOps.drop 26 : List StackOp)
+        = .rot :: (rabinBodyOps.drop 27) from rfl,
+      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
+      applyRot_cons _ _ _ _ _ rfl]
   simp only []
-  -- Step 14: OP_SHA256.
-  rw [show (rabinBodyOps.drop 13 : List StackOp)
-        = .opcode "OP_SHA256" :: (rabinBodyOps.drop 14) from rfl,
+  -- Step 27: OP_SHA256.
+  rw [show (rabinBodyOps.drop 27 : List StackOp)
+        = .opcode "OP_SHA256" :: (rabinBodyOps.drop 28) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_SHA256") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
       runOpcode_SHA256_bytes _ msg _ rfl]
   simp only [StackState.push]
-  -- Steps 15-18: BUG-011 digest-encoding normalization, replacing the single
-  -- OP_EQUAL byte compare. The digest gets an explicit 0x00 sign byte
-  -- (OP_CAT), collapses to a minimal Script number (OP_BIN2NUM), and is
-  -- compared NUMERICALLY (OP_NUMEQUAL) against OP_MOD's residue.
-  --
-  -- Step 15: push the 0x00 sign byte.
-  rw [show (rabinBodyOps.drop 14 : List StackOp)
-        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 15) from rfl,
+  -- Step 28: push the BUG-011 digest sign byte.
+  rw [show (rabinBodyOps.drop 28 : List StackOp)
+        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 29) from rfl,
       runOps_cons_nonIf_eq (.push _) _ _ (notIfOp_push _),
       stepNonIf_push_bytes]
   simp only [StackState.push]
-  -- Step 16: OP_CAT — digest ++ 0x00.
-  rw [show (rabinBodyOps.drop 15 : List StackOp)
-        = .opcode "OP_CAT" :: (rabinBodyOps.drop 16) from rfl,
+  -- Step 29: OP_CAT — digest ++ 0x00.
+  rw [show (rabinBodyOps.drop 29 : List StackOp)
+        = .opcode "OP_CAT" :: (rabinBodyOps.drop 30) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_CAT") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_CAT_bytes _
-        (RunarVerification.ANF.Eval.Crypto.sha256 msg)
-        (ByteArray.mk #[0x00]) _ rfl]
+      runOpcode_CAT_bytes _ (RunarVerification.ANF.Eval.Crypto.sha256 msg) (ByteArray.mk #[0x00]) _ rfl]
   simp only [StackState.push]
-  -- Step 17: OP_BIN2NUM — read those bytes as a minimal Script number.
-  rw [show (rabinBodyOps.drop 16 : List StackOp)
-        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 17) from rfl,
+  -- Step 30: OP_BIN2NUM — the digest as a minimal Script number.
+  rw [show (rabinBodyOps.drop 30 : List StackOp)
+        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 31) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_BIN2NUM") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_BIN2NUM_bytesLocal _
-        (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]) _ rfl]
+      runOpcode_BIN2NUM_bytesLocal _ ((RunarVerification.ANF.Eval.Crypto.sha256 msg) ++ ByteArray.mk #[0x00]) _ rfl]
   simp only [StackState.push]
-  -- Step 18: OP_NUMEQUAL — the numeric compare the spec now states.
-  rw [show (rabinBodyOps.drop 17 : List StackOp)
-        = .opcode "OP_NUMEQUAL" :: (rabinBodyOps.drop 18) from rfl,
+  -- Step 31: OP_ROT (F-047) — bring pubKey up over the decoded digest.
+  rw [show (rabinBodyOps.drop 31 : List StackOp)
+        = .rot :: (rabinBodyOps.drop 32) from rfl,
+      runOps_cons_nonIf_eq .rot _ _ notIfOp_rot, stepNonIf_rot,
+      applyRot_cons _ _ _ _ _ rfl]
+  simp only []
+  -- Step 32: OP_MOD (F-047) — digest mod pubKey.
+  rw [show (rabinBodyOps.drop 32 : List StackOp)
+        = .opcode "OP_MOD" :: (rabinBodyOps.drop 33) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_MOD") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_MOD_intInt_nonzero _ (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00])) (decodeMinimalLE (pkB ++ ByteArray.mk #[0x00])) _ rfl hPubKey]
+  simp only [StackState.push]
+  -- Step 33: OP_NUMEQUAL — the numeric compare the spec states.
+  rw [show (rabinBodyOps.drop 33 : List StackOp)
+        = .opcode "OP_NUMEQUAL" :: (rabinBodyOps.drop 34) from rfl,
       runOps_cons_nonIf_eq (.opcode "OP_NUMEQUAL") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_NUMEQUAL_ints _
-        ((padding + sig * sig) % pubKey)
-        (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
-        _ rfl]
-  rw [show (rabinBodyOps.drop 18 : List StackOp) = [] from rfl]
+      runOpcode_NUMEQUAL_ints _ ((decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) + decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) * decodeMinimalLE (sigB ++ ByteArray.mk #[0x00])) % (decodeMinimalLE (pkB ++ ByteArray.mk #[0x00]))) (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]) % (decodeMinimalLE (pkB ++ ByteArray.mk #[0x00]))) _ rfl]
+  rw [show (rabinBodyOps.drop 34 : List StackOp) = [] from rfl]
   simp only []
   rw [runOps_nil]
   -- Reconcile algebraic form: `padding + sig*sig = sig*sig + padding`.
-  have hAddComm : padding + sig * sig = sig * sig + padding :=
-    Int.add_comm padding (sig * sig)
-  simp [StackState.push,
+  have hAddComm : decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) + decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) * decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) = decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) * decodeMinimalLE (sigB ++ ByteArray.mk #[0x00]) + decodeMinimalLE (padB ++ ByteArray.mk #[0x00]) :=
+    Int.add_comm _ _
+  simp [StackState.push, unsignedOperand,
         RunarVerification.Crypto.Spec.verifyRabinSig_spec,
         hAddComm]
 

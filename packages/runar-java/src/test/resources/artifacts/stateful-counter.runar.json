@@ -2,6 +2,7 @@
   "version": "runar-v1.0.0-rc.1",
   "compilerVersion": "1.0.0-rc.1",
   "contractName": "Counter",
+  "parentClass": "StatefulSmartContract",
   "abi": {
     "constructor": {
       "params": [
@@ -32,7 +33,8 @@
             "type": "SigHashPreimage"
           }
         ],
-        "isPublic": true
+        "isPublic": true,
+        "usesCodePart": true
       },
       {
         "name": "decrement",
@@ -54,65 +56,12 @@
             "type": "SigHashPreimage"
           }
         ],
-        "isPublic": true
+        "isPublic": true,
+        "usesCodePart": true
       }
     ]
   },
-  "script": "76009c637576ab557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f758258947f7781768b77547a547a041976a9147b7e0288ac7e7c58807c7e7c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877767519d76ab557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f758258947f77817600a069768c77547a547a041976a9147b7e0288ac7e7c58807c7e7c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877768",
-  "asm": "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_DUP OP_CODESEPARATOR OP_5 OP_ROLL <0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798> OP_CHECKSIGVERIFY OP_VERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP OP_4 OP_ROLL OP_4 OP_ROLL <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_2 OP_PICK OP_4 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_3 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ELSE OP_1 OP_NUMEQUALVERIFY OP_DUP OP_CODESEPARATOR OP_5 OP_ROLL <0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798> OP_CHECKSIGVERIFY OP_VERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_DUP OP_1SUB OP_NIP OP_4 OP_ROLL OP_4 OP_ROLL <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_2 OP_PICK OP_4 OP_ROLL OP_SWAP OP_DROP OP_8 OP_NUM2BIN OP_TOALTSTACK OP_3 OP_PICK <6a> OP_CAT OP_SWAP OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_FROMALTSTACK OP_SWAP OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_SWAP OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_ENDIF",
-  "buildTimestamp": "2026-04-24T23:04:17.060Z",
-  "sourceMap": {
-    "mappings": [
-      {
-        "opcodeIndex": 32,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 12,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 34,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 12,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 164,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 16,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 165,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 16,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 166,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 16,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 167,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 16,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 168,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 17,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 170,
-        "sourceFile": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-        "line": 17,
-        "column": 4
-      }
-    ]
-  },
+  "script": "61ab76009c63757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781768b7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877767519d7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686856798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f77817600a069768c7778820134947f77587f758153797ca269547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877768",
   "stateFields": [
     {
       "name": "count",
@@ -120,81 +69,409 @@
       "index": 0
     }
   ],
+  "codeSeparatorIndex": 1,
+  "codeSeparatorIndices": [
+    1
+  ],
+  "rawScriptSpans": [
+    {
+      "offset": 8,
+      "length": 428,
+      "inArity": 1,
+      "outArity": 1
+    },
+    {
+      "offset": 706,
+      "length": 428,
+      "inArity": 1,
+      "outArity": 1
+    }
+  ],
+  "buildTimestamp": "2026-10-12T17:36:27Z",
   "anf": {
     "contractName": "Counter",
-    "properties": [
-      {
-        "name": "count",
-        "type": "bigint",
-        "readonly": false
-      }
-    ],
     "methods": [
       {
+        "body": [
+          {
+            "name": "t0",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 35
+            },
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t1",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 35
+            },
+            "value": {
+              "args": [
+                "t0"
+              ],
+              "func": "super",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t2",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 36
+            },
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t3",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 36
+            },
+            "value": {
+              "kind": "update_prop",
+              "name": "count",
+              "value": "t2"
+            }
+          }
+        ],
+        "isPublic": false,
         "name": "constructor",
         "params": [
           {
             "name": "count",
             "type": "bigint"
           }
-        ],
+        ]
+      },
+      {
         "body": [
           {
             "name": "t0",
             "value": {
-              "kind": "load_prop",
-              "name": "count"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 7,
-              "column": 4
+              "kind": "load_param",
+              "name": "txPreimage"
             }
           },
           {
             "name": "t1",
             "value": {
-              "kind": "call",
-              "func": "super",
-              "args": [
-                "t0"
-              ]
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 7,
-              "column": 4
+              "kind": "check_preimage",
+              "preimage": "t0"
             }
           },
           {
             "name": "t2",
             "value": {
-              "kind": "load_prop",
-              "name": "count"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 8,
-              "column": 4
+              "kind": "assert",
+              "value": "t1"
             }
           },
           {
             "name": "t3",
             "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t4",
+            "value": {
+              "args": [
+                "t3"
+              ],
+              "func": "extractSigHashType",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t5",
+            "value": {
+              "kind": "load_const",
+              "value": 65
+            }
+          },
+          {
+            "name": "t6",
+            "value": {
+              "kind": "bin_op",
+              "left": "t4",
+              "op": "===",
+              "right": "t5"
+            }
+          },
+          {
+            "name": "t7",
+            "value": {
+              "kind": "assert",
+              "value": "t6"
+            }
+          },
+          {
+            "name": "t8",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t9",
+            "value": {
+              "kind": "deserialize_state",
+              "preimage": "t8"
+            }
+          },
+          {
+            "name": "t10",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 42
+            },
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t11",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 42
+            },
+            "value": {
+              "kind": "load_const",
+              "value": 1
+            }
+          },
+          {
+            "name": "t12",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 42
+            },
+            "value": {
+              "kind": "bin_op",
+              "left": "t10",
+              "op": "+",
+              "right": "t11"
+            }
+          },
+          {
+            "name": "t13",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 42
+            },
+            "value": {
               "kind": "update_prop",
               "name": "count",
-              "value": "t2"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 8,
-              "column": 4
+              "value": "t12"
+            }
+          },
+          {
+            "name": "t14",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t15",
+            "value": {
+              "args": [
+                "t14"
+              ],
+              "func": "extractAmount",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t16",
+            "value": {
+              "kind": "load_param",
+              "name": "_newAmount"
+            }
+          },
+          {
+            "name": "t17",
+            "value": {
+              "kind": "bin_op",
+              "left": "t16",
+              "op": ">=",
+              "right": "t15"
+            }
+          },
+          {
+            "name": "t18",
+            "value": {
+              "kind": "assert",
+              "value": "t17"
+            }
+          },
+          {
+            "name": "t19",
+            "value": {
+              "kind": "load_param",
+              "name": "_changePKH"
+            }
+          },
+          {
+            "name": "t20",
+            "value": {
+              "kind": "load_param",
+              "name": "_changeAmount"
+            }
+          },
+          {
+            "name": "t21",
+            "value": {
+              "kind": "load_const",
+              "value": 0
+            }
+          },
+          {
+            "name": "t22",
+            "value": {
+              "kind": "bin_op",
+              "left": "t20",
+              "op": "!==",
+              "right": "t21"
+            }
+          },
+          {
+            "name": "t25",
+            "value": {
+              "cond": "t22",
+              "else": [
+                {
+                  "name": "t24",
+                  "value": {
+                    "kind": "load_const",
+                    "value": ""
+                  }
+                }
+              ],
+              "kind": "if",
+              "then": [
+                {
+                  "name": "t23",
+                  "value": {
+                    "args": [
+                      "t19",
+                      "t20"
+                    ],
+                    "func": "buildChangeOutput",
+                    "kind": "call"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "t26",
+            "value": {
+              "kind": "get_state_script"
+            }
+          },
+          {
+            "name": "t27",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t28",
+            "value": {
+              "kind": "load_param",
+              "name": "_newAmount"
+            }
+          },
+          {
+            "name": "t29",
+            "value": {
+              "args": [
+                "t27",
+                "t26",
+                "t28"
+              ],
+              "func": "computeStateOutput",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t30",
+            "value": {
+              "args": [
+                "t29",
+                "t25"
+              ],
+              "func": "cat",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t31",
+            "value": {
+              "args": [
+                "t30"
+              ],
+              "func": "hash256",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t32",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t33",
+            "value": {
+              "args": [
+                "t32"
+              ],
+              "func": "extractOutputHash",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t34",
+            "value": {
+              "kind": "bin_op",
+              "left": "t31",
+              "op": "===",
+              "result_type": "bytes",
+              "right": "t33"
+            }
+          },
+          {
+            "name": "t35",
+            "value": {
+              "isAutoInjectedStateCheck": true,
+              "kind": "assert",
+              "value": "t34"
             }
           }
         ],
-        "isPublic": false
-      },
-      {
+        "isPublic": true,
         "name": "increment",
         "params": [
           {
@@ -213,7 +490,9 @@
             "name": "txPreimage",
             "type": "SigHashPreimage"
           }
-        ],
+        ]
+      },
+      {
         "body": [
           {
             "name": "t0",
@@ -246,137 +525,149 @@
           {
             "name": "t4",
             "value": {
-              "kind": "deserialize_state",
-              "preimage": "t3"
+              "args": [
+                "t3"
+              ],
+              "func": "extractSigHashType",
+              "kind": "call"
             }
           },
           {
             "name": "t5",
             "value": {
-              "kind": "load_prop",
-              "name": "count"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 12,
-              "column": 4
+              "kind": "load_const",
+              "value": 65
             }
           },
           {
             "name": "t6",
             "value": {
-              "kind": "load_const",
-              "value": "1n"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 12,
-              "column": 4
+              "kind": "bin_op",
+              "left": "t4",
+              "op": "===",
+              "right": "t5"
             }
           },
           {
             "name": "t7",
             "value": {
-              "kind": "bin_op",
-              "op": "+",
-              "left": "t5",
-              "right": "t6"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 12,
-              "column": 4
+              "kind": "assert",
+              "value": "t6"
             }
           },
           {
             "name": "t8",
-            "value": {
-              "kind": "update_prop",
-              "name": "count",
-              "value": "t7"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 12,
-              "column": 4
-            }
-          },
-          {
-            "name": "t9",
-            "value": {
-              "kind": "load_param",
-              "name": "_changePKH"
-            }
-          },
-          {
-            "name": "t10",
-            "value": {
-              "kind": "load_param",
-              "name": "_changeAmount"
-            }
-          },
-          {
-            "name": "t11",
-            "value": {
-              "kind": "call",
-              "func": "buildChangeOutput",
-              "args": [
-                "t9",
-                "t10"
-              ]
-            }
-          },
-          {
-            "name": "t12",
-            "value": {
-              "kind": "get_state_script"
-            }
-          },
-          {
-            "name": "t13",
             "value": {
               "kind": "load_param",
               "name": "txPreimage"
             }
           },
           {
-            "name": "t14",
+            "name": "t9",
             "value": {
-              "kind": "load_param",
-              "name": "_newAmount"
+              "kind": "deserialize_state",
+              "preimage": "t8"
+            }
+          },
+          {
+            "name": "t10",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 51
+            },
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t11",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 51
+            },
+            "value": {
+              "kind": "load_const",
+              "value": 0
+            }
+          },
+          {
+            "name": "t12",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 51
+            },
+            "value": {
+              "kind": "bin_op",
+              "left": "t10",
+              "op": ">",
+              "right": "t11"
+            }
+          },
+          {
+            "name": "t13",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 51
+            },
+            "value": {
+              "kind": "assert",
+              "value": "t12"
+            }
+          },
+          {
+            "name": "t14",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 52
+            },
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
             }
           },
           {
             "name": "t15",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 52
+            },
             "value": {
-              "kind": "call",
-              "func": "computeStateOutput",
-              "args": [
-                "t13",
-                "t12",
-                "t14"
-              ]
+              "kind": "load_const",
+              "value": 1
             }
           },
           {
             "name": "t16",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 52
+            },
             "value": {
-              "kind": "call",
-              "func": "cat",
-              "args": [
-                "t15",
-                "t11"
-              ]
+              "kind": "bin_op",
+              "left": "t14",
+              "op": "-",
+              "right": "t15"
             }
           },
           {
             "name": "t17",
+            "sourceLoc": {
+              "column": 8,
+              "file": "examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java",
+              "line": 52
+            },
             "value": {
-              "kind": "call",
-              "func": "hash256",
-              "args": [
-                "t16"
-              ]
+              "kind": "update_prop",
+              "name": "count",
+              "value": "t16"
             }
           },
           {
@@ -389,34 +680,185 @@
           {
             "name": "t19",
             "value": {
-              "kind": "call",
-              "func": "extractOutputHash",
               "args": [
                 "t18"
-              ]
+              ],
+              "func": "extractAmount",
+              "kind": "call"
             }
           },
           {
             "name": "t20",
             "value": {
-              "kind": "bin_op",
-              "op": "===",
-              "left": "t17",
-              "right": "t19",
-              "result_type": "bytes"
+              "kind": "load_param",
+              "name": "_newAmount"
             }
           },
           {
             "name": "t21",
             "value": {
+              "kind": "bin_op",
+              "left": "t20",
+              "op": ">=",
+              "right": "t19"
+            }
+          },
+          {
+            "name": "t22",
+            "value": {
               "kind": "assert",
-              "value": "t20"
+              "value": "t21"
+            }
+          },
+          {
+            "name": "t23",
+            "value": {
+              "kind": "load_param",
+              "name": "_changePKH"
+            }
+          },
+          {
+            "name": "t24",
+            "value": {
+              "kind": "load_param",
+              "name": "_changeAmount"
+            }
+          },
+          {
+            "name": "t25",
+            "value": {
+              "kind": "load_const",
+              "value": 0
+            }
+          },
+          {
+            "name": "t26",
+            "value": {
+              "kind": "bin_op",
+              "left": "t24",
+              "op": "!==",
+              "right": "t25"
+            }
+          },
+          {
+            "name": "t29",
+            "value": {
+              "cond": "t26",
+              "else": [
+                {
+                  "name": "t28",
+                  "value": {
+                    "kind": "load_const",
+                    "value": ""
+                  }
+                }
+              ],
+              "kind": "if",
+              "then": [
+                {
+                  "name": "t27",
+                  "value": {
+                    "args": [
+                      "t23",
+                      "t24"
+                    ],
+                    "func": "buildChangeOutput",
+                    "kind": "call"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "t30",
+            "value": {
+              "kind": "get_state_script"
+            }
+          },
+          {
+            "name": "t31",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t32",
+            "value": {
+              "kind": "load_param",
+              "name": "_newAmount"
+            }
+          },
+          {
+            "name": "t33",
+            "value": {
+              "args": [
+                "t31",
+                "t30",
+                "t32"
+              ],
+              "func": "computeStateOutput",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t34",
+            "value": {
+              "args": [
+                "t33",
+                "t29"
+              ],
+              "func": "cat",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t35",
+            "value": {
+              "args": [
+                "t34"
+              ],
+              "func": "hash256",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t36",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t37",
+            "value": {
+              "args": [
+                "t36"
+              ],
+              "func": "extractOutputHash",
+              "kind": "call"
+            }
+          },
+          {
+            "name": "t38",
+            "value": {
+              "kind": "bin_op",
+              "left": "t35",
+              "op": "===",
+              "result_type": "bytes",
+              "right": "t37"
+            }
+          },
+          {
+            "name": "t39",
+            "value": {
+              "isAutoInjectedStateCheck": true,
+              "kind": "assert",
+              "value": "t38"
             }
           }
         ],
-        "isPublic": true
-      },
-      {
+        "isPublic": true,
         "name": "decrement",
         "params": [
           {
@@ -435,836 +877,16 @@
             "name": "txPreimage",
             "type": "SigHashPreimage"
           }
-        ],
-        "body": [
-          {
-            "name": "t0",
-            "value": {
-              "kind": "load_param",
-              "name": "txPreimage"
-            }
-          },
-          {
-            "name": "t1",
-            "value": {
-              "kind": "check_preimage",
-              "preimage": "t0"
-            }
-          },
-          {
-            "name": "t2",
-            "value": {
-              "kind": "assert",
-              "value": "t1"
-            }
-          },
-          {
-            "name": "t3",
-            "value": {
-              "kind": "load_param",
-              "name": "txPreimage"
-            }
-          },
-          {
-            "name": "t4",
-            "value": {
-              "kind": "deserialize_state",
-              "preimage": "t3"
-            }
-          },
-          {
-            "name": "t5",
-            "value": {
-              "kind": "load_prop",
-              "name": "count"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 16,
-              "column": 4
-            }
-          },
-          {
-            "name": "t6",
-            "value": {
-              "kind": "load_const",
-              "value": "0n"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 16,
-              "column": 4
-            }
-          },
-          {
-            "name": "t7",
-            "value": {
-              "kind": "bin_op",
-              "op": ">",
-              "left": "t5",
-              "right": "t6"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 16,
-              "column": 4
-            }
-          },
-          {
-            "name": "t8",
-            "value": {
-              "kind": "assert",
-              "value": "t7"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 16,
-              "column": 4
-            }
-          },
-          {
-            "name": "t9",
-            "value": {
-              "kind": "load_prop",
-              "name": "count"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 17,
-              "column": 4
-            }
-          },
-          {
-            "name": "t10",
-            "value": {
-              "kind": "load_const",
-              "value": "1n"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 17,
-              "column": 4
-            }
-          },
-          {
-            "name": "t11",
-            "value": {
-              "kind": "bin_op",
-              "op": "-",
-              "left": "t9",
-              "right": "t10"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 17,
-              "column": 4
-            }
-          },
-          {
-            "name": "t12",
-            "value": {
-              "kind": "update_prop",
-              "name": "count",
-              "value": "t11"
-            },
-            "sourceLoc": {
-              "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-              "line": 17,
-              "column": 4
-            }
-          },
-          {
-            "name": "t13",
-            "value": {
-              "kind": "load_param",
-              "name": "_changePKH"
-            }
-          },
-          {
-            "name": "t14",
-            "value": {
-              "kind": "load_param",
-              "name": "_changeAmount"
-            }
-          },
-          {
-            "name": "t15",
-            "value": {
-              "kind": "call",
-              "func": "buildChangeOutput",
-              "args": [
-                "t13",
-                "t14"
-              ]
-            }
-          },
-          {
-            "name": "t16",
-            "value": {
-              "kind": "get_state_script"
-            }
-          },
-          {
-            "name": "t17",
-            "value": {
-              "kind": "load_param",
-              "name": "txPreimage"
-            }
-          },
-          {
-            "name": "t18",
-            "value": {
-              "kind": "load_param",
-              "name": "_newAmount"
-            }
-          },
-          {
-            "name": "t19",
-            "value": {
-              "kind": "call",
-              "func": "computeStateOutput",
-              "args": [
-                "t17",
-                "t16",
-                "t18"
-              ]
-            }
-          },
-          {
-            "name": "t20",
-            "value": {
-              "kind": "call",
-              "func": "cat",
-              "args": [
-                "t19",
-                "t15"
-              ]
-            }
-          },
-          {
-            "name": "t21",
-            "value": {
-              "kind": "call",
-              "func": "hash256",
-              "args": [
-                "t20"
-              ]
-            }
-          },
-          {
-            "name": "t22",
-            "value": {
-              "kind": "load_param",
-              "name": "txPreimage"
-            }
-          },
-          {
-            "name": "t23",
-            "value": {
-              "kind": "call",
-              "func": "extractOutputHash",
-              "args": [
-                "t22"
-              ]
-            }
-          },
-          {
-            "name": "t24",
-            "value": {
-              "kind": "bin_op",
-              "op": "===",
-              "left": "t21",
-              "right": "t23",
-              "result_type": "bytes"
-            }
-          },
-          {
-            "name": "t25",
-            "value": {
-              "kind": "assert",
-              "value": "t24"
-            }
-          }
-        ],
-        "isPublic": true
+        ]
+      }
+    ],
+    "parentClass": "StatefulSmartContract",
+    "properties": [
+      {
+        "name": "count",
+        "readonly": false,
+        "type": "bigint"
       }
     ]
-  },
-  "codeSeparatorIndex": 195,
-  "codeSeparatorIndices": [
-    6,
-    195
-  ],
-  "ir": {
-    "anf": {
-      "contractName": "Counter",
-      "properties": [
-        {
-          "name": "count",
-          "type": "bigint",
-          "readonly": false
-        }
-      ],
-      "methods": [
-        {
-          "name": "constructor",
-          "params": [
-            {
-              "name": "count",
-              "type": "bigint"
-            }
-          ],
-          "body": [
-            {
-              "name": "t0",
-              "value": {
-                "kind": "load_prop",
-                "name": "count"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 7,
-                "column": 4
-              }
-            },
-            {
-              "name": "t1",
-              "value": {
-                "kind": "call",
-                "func": "super",
-                "args": [
-                  "t0"
-                ]
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 7,
-                "column": 4
-              }
-            },
-            {
-              "name": "t2",
-              "value": {
-                "kind": "load_prop",
-                "name": "count"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 8,
-                "column": 4
-              }
-            },
-            {
-              "name": "t3",
-              "value": {
-                "kind": "update_prop",
-                "name": "count",
-                "value": "t2"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 8,
-                "column": 4
-              }
-            }
-          ],
-          "isPublic": false
-        },
-        {
-          "name": "increment",
-          "params": [
-            {
-              "name": "_changePKH",
-              "type": "Ripemd160"
-            },
-            {
-              "name": "_changeAmount",
-              "type": "bigint"
-            },
-            {
-              "name": "_newAmount",
-              "type": "bigint"
-            },
-            {
-              "name": "txPreimage",
-              "type": "SigHashPreimage"
-            }
-          ],
-          "body": [
-            {
-              "name": "t0",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t1",
-              "value": {
-                "kind": "check_preimage",
-                "preimage": "t0"
-              }
-            },
-            {
-              "name": "t2",
-              "value": {
-                "kind": "assert",
-                "value": "t1"
-              }
-            },
-            {
-              "name": "t3",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t4",
-              "value": {
-                "kind": "deserialize_state",
-                "preimage": "t3"
-              }
-            },
-            {
-              "name": "t5",
-              "value": {
-                "kind": "load_prop",
-                "name": "count"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 12,
-                "column": 4
-              }
-            },
-            {
-              "name": "t6",
-              "value": {
-                "kind": "load_const",
-                "value": "1n"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 12,
-                "column": 4
-              }
-            },
-            {
-              "name": "t7",
-              "value": {
-                "kind": "bin_op",
-                "op": "+",
-                "left": "t5",
-                "right": "t6"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 12,
-                "column": 4
-              }
-            },
-            {
-              "name": "t8",
-              "value": {
-                "kind": "update_prop",
-                "name": "count",
-                "value": "t7"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 12,
-                "column": 4
-              }
-            },
-            {
-              "name": "t9",
-              "value": {
-                "kind": "load_param",
-                "name": "_changePKH"
-              }
-            },
-            {
-              "name": "t10",
-              "value": {
-                "kind": "load_param",
-                "name": "_changeAmount"
-              }
-            },
-            {
-              "name": "t11",
-              "value": {
-                "kind": "call",
-                "func": "buildChangeOutput",
-                "args": [
-                  "t9",
-                  "t10"
-                ]
-              }
-            },
-            {
-              "name": "t12",
-              "value": {
-                "kind": "get_state_script"
-              }
-            },
-            {
-              "name": "t13",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t14",
-              "value": {
-                "kind": "load_param",
-                "name": "_newAmount"
-              }
-            },
-            {
-              "name": "t15",
-              "value": {
-                "kind": "call",
-                "func": "computeStateOutput",
-                "args": [
-                  "t13",
-                  "t12",
-                  "t14"
-                ]
-              }
-            },
-            {
-              "name": "t16",
-              "value": {
-                "kind": "call",
-                "func": "cat",
-                "args": [
-                  "t15",
-                  "t11"
-                ]
-              }
-            },
-            {
-              "name": "t17",
-              "value": {
-                "kind": "call",
-                "func": "hash256",
-                "args": [
-                  "t16"
-                ]
-              }
-            },
-            {
-              "name": "t18",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t19",
-              "value": {
-                "kind": "call",
-                "func": "extractOutputHash",
-                "args": [
-                  "t18"
-                ]
-              }
-            },
-            {
-              "name": "t20",
-              "value": {
-                "kind": "bin_op",
-                "op": "===",
-                "left": "t17",
-                "right": "t19",
-                "result_type": "bytes"
-              }
-            },
-            {
-              "name": "t21",
-              "value": {
-                "kind": "assert",
-                "value": "t20"
-              }
-            }
-          ],
-          "isPublic": true
-        },
-        {
-          "name": "decrement",
-          "params": [
-            {
-              "name": "_changePKH",
-              "type": "Ripemd160"
-            },
-            {
-              "name": "_changeAmount",
-              "type": "bigint"
-            },
-            {
-              "name": "_newAmount",
-              "type": "bigint"
-            },
-            {
-              "name": "txPreimage",
-              "type": "SigHashPreimage"
-            }
-          ],
-          "body": [
-            {
-              "name": "t0",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t1",
-              "value": {
-                "kind": "check_preimage",
-                "preimage": "t0"
-              }
-            },
-            {
-              "name": "t2",
-              "value": {
-                "kind": "assert",
-                "value": "t1"
-              }
-            },
-            {
-              "name": "t3",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t4",
-              "value": {
-                "kind": "deserialize_state",
-                "preimage": "t3"
-              }
-            },
-            {
-              "name": "t5",
-              "value": {
-                "kind": "load_prop",
-                "name": "count"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 16,
-                "column": 4
-              }
-            },
-            {
-              "name": "t6",
-              "value": {
-                "kind": "load_const",
-                "value": "0n"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 16,
-                "column": 4
-              }
-            },
-            {
-              "name": "t7",
-              "value": {
-                "kind": "bin_op",
-                "op": ">",
-                "left": "t5",
-                "right": "t6"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 16,
-                "column": 4
-              }
-            },
-            {
-              "name": "t8",
-              "value": {
-                "kind": "assert",
-                "value": "t7"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 16,
-                "column": 4
-              }
-            },
-            {
-              "name": "t9",
-              "value": {
-                "kind": "load_prop",
-                "name": "count"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 17,
-                "column": 4
-              }
-            },
-            {
-              "name": "t10",
-              "value": {
-                "kind": "load_const",
-                "value": "1n"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 17,
-                "column": 4
-              }
-            },
-            {
-              "name": "t11",
-              "value": {
-                "kind": "bin_op",
-                "op": "-",
-                "left": "t9",
-                "right": "t10"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 17,
-                "column": 4
-              }
-            },
-            {
-              "name": "t12",
-              "value": {
-                "kind": "update_prop",
-                "name": "count",
-                "value": "t11"
-              },
-              "sourceLoc": {
-                "file": "/Users/siggioskarsson/gitcheckout/runar/.claude/worktrees/java-tier/conformance/.tmp/stateful-counter.runar.ts",
-                "line": 17,
-                "column": 4
-              }
-            },
-            {
-              "name": "t13",
-              "value": {
-                "kind": "load_param",
-                "name": "_changePKH"
-              }
-            },
-            {
-              "name": "t14",
-              "value": {
-                "kind": "load_param",
-                "name": "_changeAmount"
-              }
-            },
-            {
-              "name": "t15",
-              "value": {
-                "kind": "call",
-                "func": "buildChangeOutput",
-                "args": [
-                  "t13",
-                  "t14"
-                ]
-              }
-            },
-            {
-              "name": "t16",
-              "value": {
-                "kind": "get_state_script"
-              }
-            },
-            {
-              "name": "t17",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t18",
-              "value": {
-                "kind": "load_param",
-                "name": "_newAmount"
-              }
-            },
-            {
-              "name": "t19",
-              "value": {
-                "kind": "call",
-                "func": "computeStateOutput",
-                "args": [
-                  "t17",
-                  "t16",
-                  "t18"
-                ]
-              }
-            },
-            {
-              "name": "t20",
-              "value": {
-                "kind": "call",
-                "func": "cat",
-                "args": [
-                  "t19",
-                  "t15"
-                ]
-              }
-            },
-            {
-              "name": "t21",
-              "value": {
-                "kind": "call",
-                "func": "hash256",
-                "args": [
-                  "t20"
-                ]
-              }
-            },
-            {
-              "name": "t22",
-              "value": {
-                "kind": "load_param",
-                "name": "txPreimage"
-              }
-            },
-            {
-              "name": "t23",
-              "value": {
-                "kind": "call",
-                "func": "extractOutputHash",
-                "args": [
-                  "t22"
-                ]
-              }
-            },
-            {
-              "name": "t24",
-              "value": {
-                "kind": "bin_op",
-                "op": "===",
-                "left": "t21",
-                "right": "t23",
-                "result_type": "bytes"
-              }
-            },
-            {
-              "name": "t25",
-              "value": {
-                "kind": "assert",
-                "value": "t24"
-              }
-            }
-          ],
-          "isPublic": true
-        }
-      ]
-    }
   }
 }

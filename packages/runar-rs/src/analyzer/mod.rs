@@ -68,7 +68,7 @@ pub fn analyze_script_with_options(
         });
     }
 
-    let mut opcodes = parse_script(&normalized);
+    let mut opcodes = parse_script(&normalized)?;
     if !options.raw_script_spans.is_empty() {
         opcodes = collapse_raw_script_spans(opcodes, &options.raw_script_spans);
     }

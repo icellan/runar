@@ -1093,6 +1093,122 @@ class Bad extends SmartContract {
             f"expected 'unknown' in error message, got: {tc_result.errors}"
         )
 
+    def test_typecheck_local_variable_called_as_function_rejected(self):
+        """F-208: Rúnar has no first-class functions. A bound local variable
+        used as a callee used to fall into the "local variable" branch and
+        return "<unknown>" with NO diagnostic, silently accepting the call."""
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class Bad extends SmartContract {
+  readonly a: bigint;
+
+  constructor(a: bigint) {
+    super(a);
+    this.a = a;
+  }
+
+  public check(a: bigint): void {
+    const f: bigint = a;
+    const r = f(a, a, a);
+    assert(this.a >= 0n);
+  }
+}
+"""
+        result = parse_source(source, "Bad.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert len(tc_result.errors) > 0, (
+            "expected type error for calling local variable 'f' as a function"
+        )
+        assert any("not callable" in e.message.lower() for e in tc_result.errors), (
+            f"expected 'not callable' in error message, got: {tc_result.errors}"
+        )
+
+    # N-234: a property initializer of the wrong literal family compiled
+    # without complaint. Proves only the Python tier's
+    # check_property_initializers; the 7-tier cross-compiler shape is
+    # conformance/negatives/N233-*.
+
+    def test_n234_rejects_bytestring_initializer_for_bigint_property(self):
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = 'ab';
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "BadScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert any(
+            "type 'ByteString' is not assignable to type 'bigint'" in e.message
+            for e in tc_result.errors
+        ), f"expected the not-assignable diagnostic, got: {tc_result.errors}"
+
+    def test_n234_rejects_to_bytestring_call_initializer_for_bigint_property(self):
+        source = """
+import { SmartContract, assert, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = toByteString('ab');
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "BadScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert any(
+            "type 'ByteString' is not assignable to type 'bigint'" in e.message
+            for e in tc_result.errors
+        ), f"expected the not-assignable diagnostic, got: {tc_result.errors}"
+
+    def test_n234_still_accepts_well_typed_scalar_initializer(self):
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+  readonly x: bigint = 1n;
+
+  constructor() {
+    super();
+  }
+
+  public check(): void {
+    assert(this.x === 1n);
+  }
+}
+"""
+        result = parse_source(source, "GoodScalarInit.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert len(tc_result.errors) == 0, (
+            f"expected no type errors, got: {tc_result.errors}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # ANF lowering
@@ -2137,6 +2253,174 @@ class DoublePreimage extends SmartContract {
         assert any("affine" in e.message.lower() or "consumed" in e.message.lower() for e in tc_result.errors), (
             f"expected affine/consumed error for SigHashPreimage used twice, got: {tc_result.errors}"
         )
+
+
+_F110_CASES = [
+    ("sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+    ("preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"),
+    ("sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", None),
+    ("sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", None),
+]
+
+
+@pytest.mark.parametrize("params,body,want", _F110_CASES)
+def test_f110_affine_consumption_in_repeating_loop(params, body, want):
+    """F-110: a bounded loop is unrolled ``count`` times, so an affine value
+    bound outside a loop that runs two or more times and consumed in its body
+    is consumed once per iteration and must get the same diagnostic as a
+    sequential double use. Single-iteration loops stay legal. Proves the type
+    checker's verdict only; consumption inside private helpers is out of scope
+    (the affine check is intra-method)."""
+    source = (
+        "class C extends SmartContract {\n"
+        "  readonly pk: PubKey;\n"
+        "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n"
+        f"  public m({params}) {{\n    {body}\n    assert(true);\n  }}\n"
+        "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
+_F222_DOUBLE = "affine value 'sig' has already been consumed"
+_F222_CASES = [
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", None),
+    ("if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", None),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", None),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", _F222_DOUBLE),
+    ("assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", _F222_DOUBLE),
+    ("if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", _F222_DOUBLE),
+    ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", _F222_DOUBLE),
+    ("for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", _F222_DOUBLE),
+]
+
+
+@pytest.mark.parametrize("body,want", _F222_CASES)
+def test_f222_affine_consumption_across_if_else_arms(body, want):
+    """F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    consumed once in each arm is consumed once on every path and must
+    typecheck. Every shape where some path consumes twice (an arm plus after
+    the if, before plus an arm, twice in one arm, once per arm inside a
+    2-iteration loop) must still be refused. Proves the type checker's verdict
+    only; the ternary form is not an if statement and is untouched."""
+    source = (
+        "class C extends SmartContract {\n"
+        "  readonly pk: PubKey;\n"
+        "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n"
+        f"  public m(sig: Sig, flag: boolean) {{\n    {body}\n    assert(true);\n  }}\n"
+        "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
+_N109_H = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }"
+_N109_DOUBLE = "affine value 'sig' has already been consumed"
+_N109_CASES = [
+    (_N109_H, "sig: Sig", "this.h(sig); this.h(sig);", _N109_DOUBLE),
+    (_N109_H, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", _N109_DOUBLE),
+    (_N109_H, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", _N109_DOUBLE),
+    (_N109_H + " private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }", "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", _N109_DOUBLE),
+    ("private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", _N109_DOUBLE),
+    ("private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"),
+    (_N109_H, "sig: Sig", "this.h(sig);", None),
+    (_N109_H, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", None),
+    (_N109_H, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", None),
+    ("private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", None),
+]
+
+
+@pytest.mark.parametrize("helpers,params,body,want", _N109_CASES)
+def test_n109_affine_consumption_through_helpers(helpers, params, body, want):
+    """N-109: private helpers are inlined, so a call consumes the arguments at
+    the parameter positions the helper consumes (directly, through an alias, or
+    transitively through another helper). ``this.h(sig)`` twice, or once in a
+    2-iteration loop, must get the same diagnostic as a sequential double use;
+    a single call, one call per if/else arm, and a helper that takes a Sig
+    without consuming it stay legal. Proves the type checker's verdict only; a
+    helper consuming a PROPERTY is not covered."""
+    source = (
+        "class C extends SmartContract {\n"
+        "  readonly pk: PubKey;\n"
+        "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n"
+        f"  {helpers}\n"
+        f"  public m({params}) {{\n    {body}\n    assert(true);\n  }}\n"
+        "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
+_N288_H = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+_N288_DOUBLE = "affine value 'this.sig' has already been consumed"
+_N288_STATELESS = (
+    "class C extends SmartContract {\n"
+    "  readonly pk: PubKey;\n"
+    "  readonly sig: Sig;\n"
+    "  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n"
+)
+_N288_STATEFUL = (
+    "class C extends StatefulSmartContract {\n"
+    "  count: bigint;\n"
+    "  constructor(count: bigint) { super(count); this.count = count; }\n"
+)
+_N288_CASES = [
+    (_N288_STATELESS, _N288_H, "", "this.h(); this.h();", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H, "", "assert(checkSig(this.sig, this.pk)); this.h();", _N288_DOUBLE),
+    (_N288_STATELESS, _N288_H + " private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", _N288_DOUBLE),
+    (_N288_STATELESS, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", _N288_DOUBLE),
+    (_N288_STATEFUL, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"),
+    (_N288_STATELESS, _N288_H, "", "this.h();", None),
+    (_N288_STATELESS, _N288_H, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", None),
+    (_N288_STATELESS, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", None),
+]
+
+
+@pytest.mark.parametrize("header,helpers,params,body,want", _N288_CASES)
+def test_n288_affine_property_consumption_through_helpers(header, helpers, params, body, want):
+    """N-288: the N-109 summary covered parameters only. A helper that consumes
+    a PROPERTY (``checkSig(this.sig, ..)``, ``checkPreimage(this.txPreimage)``)
+    is inlined at every call site, so calling it twice must get the diagnostic a
+    direct double use of the property gets, also per loop iteration, after a
+    direct consume, through an alias and transitively; a single call, one call
+    per if/else arm, and a helper that only reads the property stay legal.
+    Proves the type checker's verdict only, not the emitted script."""
+    source = (
+        header
+        + f"  {helpers}\n"
+        + f"  public m({params}) {{\n    {body}\n    assert(true);\n  }}\n"
+        + "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
 
 
 # ---------------------------------------------------------------------------
@@ -3446,3 +3730,113 @@ class Counter extends StatefulSmartContract {
             f"expected no '_newAmount' param when addOutput is used explicitly, "
             f"got params: {list(param_names)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-063: array-literal elements are walked by every validator / typecheck walker
+# ---------------------------------------------------------------------------
+#
+# ArrayLiteralExpr was missing from _validate_expression, _walk_expr,
+# _collect_method_calls_in_expr, _sub_expressions and _infer_expr_type, so a
+# construct written inside ``[...]`` -- the only place checkMultiSig's
+# arguments can be written -- escaped the rule those walkers enforce. Pre-fix
+# the recursion shape died with "maximum recursion depth exceeded" in ANF
+# inlining, and the type-mismatch shapes compiled to a locking script.
+#
+# Proves: validate()/type_check() refuse each shape with the diagnostic the
+# un-nested form gets (the TS reference's wording for the element mismatch).
+# Does not prove: CLI exit status or cross-tier parity (conformance/negatives).
+
+_F063_HEADER = """
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+"""
+
+
+def _f063_validate(body: str, header: str = _F063_HEADER) -> list[str]:
+    result = parse_source(header + body + "\n}\n", "C.runar.ts")
+    assert result.contract is not None, result.errors
+    return [e.message for e in validate(result.contract).errors]
+
+
+def _f063_type_errors(body: str) -> list[str]:
+    result = parse_source(_F063_HEADER + body + "\n}\n", "C.runar.ts")
+    assert result.contract is not None, result.errors
+    v = validate(result.contract)
+    assert not v.errors, v.errors
+    return [e.message for e in type_check(result.contract).errors]
+
+
+class TestF063ArrayLiteralWalkers:
+    def test_recursion_inside_array_literal_detected(self):
+        errs = _f063_validate(
+            "  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }\n"
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }"
+        )
+        assert any("recursion detected: method 'h'" in m for m in errs), errs
+
+    def test_odd_length_hex_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }"
+        )
+        assert any("ByteString literal 'abc' has odd length (3)" in m for m in errs), errs
+
+    def test_non_hex_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }"
+        )
+        assert any("ByteString literal 'zz' contains non-hex characters" in m for m in errs), errs
+
+    def test_readonly_increment_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }",
+            header="""
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+""",
+        )
+        assert any("cannot assign to readonly property 'n'" in m for m in errs), errs
+
+    def test_output_intrinsic_inside_array_literal_in_loop_rejected(self):
+        errs = _f063_validate(
+            "  public step() {\n"
+            "    for (let i = 0n; i < 2n; i++) { const a = [this.addOutput(1000n, this.count)]; }\n"
+            "    assert(true);\n"
+            "  }",
+            header="""
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+""",
+        )
+        assert any("Output intrinsic 'addOutput'" in m for m in errs), errs
+
+    def test_unknown_function_inside_array_literal_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }"
+        )
+        assert any("unknown function 'totallyBogusFunction'" in m for m in errs), errs
+
+    def test_array_element_type_mismatch_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }"
+        )
+        assert any(
+            "Array element type mismatch: expected 'PubKey', got 'bigint'" in m for m in errs
+        ), errs
+
+    def test_check_multisig_wrong_array_types_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }"
+        )
+        assert any("expected 'Sig[]', got 'bigint[]'" in m for m in errs), errs
+        assert any("expected 'PubKey[]', got 'bigint[]'" in m for m in errs), errs
+
+    def test_well_typed_check_multisig_accepted(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk])); }"
+        )
+        assert errs == [], errs

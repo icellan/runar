@@ -14,7 +14,7 @@ class TicTacToe < Runar::StatefulSmartContract
   prop :p2pkh_prefix,  ByteString, readonly: true, default: '1976a914'
   prop :p2pkh_suffix,  ByteString, readonly: true, default: '88ac'
 
-  prop :player_o, PubKey,              default: '00' * 33
+  prop :player_o, PubKey,              default: '000000000000000000000000000000000000000000000000000000000000000000'
   prop :board,    FixedArray[Bigint, 9], default: [0, 0, 0, 0, 0, 0, 0, 0, 0]
   prop :turn,     Bigint,              default: 0
   prop :status,   Bigint,              default: 0
@@ -29,6 +29,11 @@ class TicTacToe < Runar::StatefulSmartContract
   def join(opponent_pk, sig)
     assert @status == 0
     assert check_sig(sig, opponent_pk)
+    # Player O must pay exactly the bet (N-027): the continuation holds the
+    # input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+    # payout methods pay out. The compiler's own `>= input` floor alone would
+    # let O join for free.
+    assert continuation_amount() == extract_amount(@tx_preimage) + @bet_amount
     @player_o = opponent_pk
     @status   = 1
     @turn     = 1

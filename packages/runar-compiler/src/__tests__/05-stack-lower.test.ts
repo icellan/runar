@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
+import { compile } from '../index.js';
 import type { ContractNode } from '../ir/index.js';
 import type { StackProgram, StackMethod, StackOp } from '../ir/index.js';
 
@@ -338,6 +339,34 @@ describe('Pass 5: Stack Lower', () => {
       const allOps = flattenOps(method.ops);
       const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
       expect(opcodes).toContain('OP_VERIFY');
+    });
+
+    // F-072: exit()'s OP_VERIFY leaves nothing on the stack, so the lowering
+    // must not record a result slot for it. It used to, and every later read
+    // was addressed one item too deep. Proves the stack model after exit()
+    // (the ops that read b, a, y); the spend-level proof is
+    // packages/runar-testing/src/__tests__/f072-exit-phantom-slot-spend.test.ts.
+    it('exit() followed by more code reads the right stack slots (F-072)', () => {
+      const source = `
+        class C extends SmartContract {
+          constructor() { super(); }
+          public check(b: bigint, a: bigint, x: bigint, y: bigint) {
+            exit(x > 0n);
+            assert(y === 1n);
+            assert(a > 5n);
+            assert(b === 0n);
+          }
+        }
+      `;
+      const r = compile(source, { fileName: 'C.runar.ts', disableConstantFolding: true });
+      expect(r.success, JSON.stringify(r.diagnostics)).toBe(true);
+      // [b a x y]: SWAP brings x up; after the verify y is ALREADY on top, then
+      // a, then b — no SWAP between the guards and no trailing NIP.
+      // Pre-fix (one-too-deep reads): 7c00a0697c519d7c55a0697c9177.
+      expect(r.artifact!.asm).toBe(
+        'OP_SWAP OP_0 OP_GREATERTHAN OP_VERIFY OP_1 OP_NUMEQUALVERIFY OP_5 OP_GREATERTHAN OP_VERIFY OP_NOT',
+      );
+      expect(r.scriptHex).toBe('7c00a069519d55a06991');
     });
 
     it('unpack() compiles to OP_BIN2NUM', () => {
@@ -866,11 +895,15 @@ describe('Pass 5: Stack Lower', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Fix #5: log2() uses bit-scanning (not byte-size approximation)
+  // N-103: log2() is an exact read of the minimal encoding. Fix #5 replaced a
+  // byte-size approximation with a 64-iteration halving loop, which capped
+  // log2 at 64; N-103 (user decision R86, 2026-10-21) replaced that loop with
+  // the exact, branch-free sequence pinned here. Execution is covered by
+  // conformance/negatives/n103-log2-exact-parity.test.ts.
   // ---------------------------------------------------------------------------
 
-  describe('log2() bit-scanning (Fix #5)', () => {
-    it('emits OP_DIV and OP_GREATERTHAN for proper bit scanning', () => {
+  describe('log2() exact encoding read (N-103)', () => {
+    it('emits the N-103 sequence and no branch', () => {
       const source = `
         class C extends SmartContract {
           readonly x: bigint;
@@ -883,17 +916,18 @@ describe('Pass 5: Stack Lower', () => {
       `;
       const program = compileToStack(source);
       const method = findStackMethod(program, 'm');
-      const allOps = flattenOps(method.ops);
-      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
-
-      // The bit-scanning loop should use OP_DIV and OP_GREATERTHAN
-      expect(opcodes).toContain('OP_DIV');
-      expect(opcodes).toContain('OP_GREATERTHAN');
-      expect(opcodes).toContain('OP_1ADD');
-
-      // The old byte-size approximation used OP_SIZE and OP_MUL — those should NOT be present
-      // for the log2 computation itself
-      expect(opcodes).not.toContain('OP_MUL');
+      const tokens = method.ops.map((o) =>
+        o.op === 'opcode' ? o.code : o.op === 'push' ? `PUSH(${String(o.value)})` : o.op);
+      const want = [
+        'OP_BIN2NUM', 'OP_DUP', 'PUSH(0)', 'OP_GREATERTHAN', 'OP_VERIFY',
+        'OP_SIZE', 'OP_1SUB', 'OP_TUCK', 'OP_SPLIT', 'OP_NIP', 'OP_BIN2NUM',
+        'OP_SWAP', 'PUSH(8)', 'OP_MUL', 'OP_1SUB',
+        ...[1, 2, 4, 8, 16, 32, 64].flatMap((c) => ['OP_OVER', `PUSH(${c})`, 'OP_GREATERTHANOREQUAL', 'OP_ADD']),
+        'OP_NIP',
+      ];
+      const at = tokens.findIndex((_, i) => want.every((w, j) => tokens[i + j] === w));
+      expect(at, `log2 sequence not found in ${tokens.join(' ')}`).toBeGreaterThanOrEqual(0);
+      expect(flattenOps(method.ops).some((o) => o.op === 'if')).toBe(false);
     });
   });
 

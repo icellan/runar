@@ -16,6 +16,7 @@ import {
   Script,
   Hash,
   Utils,
+  PublicKey,
   type SecurityLevel,
 } from '@bsv/sdk';
 
@@ -53,10 +54,10 @@ export class WalletSigner implements Signer {
   }
 
   async getAddress(): Promise<string> {
+    // Signer contract: Base58Check P2PKH address, mainnet like LocalSigner
+    // (F-146; was the raw hex hash160, which address-keyed providers miss).
     const pubKeyHex = await this.getPublicKey();
-    const pubKeyBytes = Utils.toArray(pubKeyHex, 'hex');
-    const hash160 = Hash.hash160(pubKeyBytes);
-    return Utils.toHex(hash160);
+    return PublicKey.fromString(pubKeyHex).toAddress();
   }
 
   async sign(
@@ -66,6 +67,11 @@ export class WalletSigner implements Signer {
     satoshis: number,
     sigHashType: number = SIGHASH_ALL_FORKID,
   ): Promise<string> {
+    // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+    // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+    if (!subscript) {
+      throw new Error(`WalletSigner.sign: refusing to sign input ${inputIndex} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent`);
+    }
     // 1. Compute BIP-143 sighash from the transaction context
     const tx = Transaction.fromHex(txHex);
     const input = tx.inputs[inputIndex]!;

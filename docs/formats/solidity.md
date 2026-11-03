@@ -249,6 +249,8 @@ contract Auction is StatefulSmartContract {
     function bid(Sig sig, PubKey bidder, bigint bidAmount) public {
         require(checkSig(sig, bidder));
         require(bidAmount > this.highestBid);
+        // The bid must be paid into the pot (continuation = prior pot + bid).
+        require(continuationAmount() >= extractAmount(this.txPreimage) + bidAmount);
         require(extractLocktime(this.txPreimage) < this.deadline);
 
         this.highestBidder = bidder;
@@ -425,6 +427,38 @@ contract SimpleNFT is StatefulSmartContract {
 | Loops | Unbounded `for`/`while` | Bounded `for` only; unrolled at compile time |
 
 ---
+
+## Compiler Directives
+
+Both directives are modifiers, in any order with the ones they sit beside:
+
+```solidity
+contract Directives is SmartContract {
+    Addr immutable pubKeyHash;
+    ByteString immutable embedAlways deployTag;   // @embedAlways
+
+    function spendSingle(Sig sig, PubKey pubKey) public sighash(SINGLE | FORKID) {   // @sighash
+        ...
+    }
+}
+```
+
+- `embedAlways` is a property modifier, written before the name next to
+  `immutable`. A property NAMED `embedAlways` still works: the word is the name
+  when `;` or `=` follows it.
+- `sighash(FLAGS)` is a function modifier next to `public`. Inside the
+  parentheses only flag names and `|` may appear.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/sol/compiler-directives/` for a worked
+port of both (N-093).
 
 ## Type Mapping
 

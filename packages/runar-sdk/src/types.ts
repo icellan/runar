@@ -64,9 +64,19 @@ export interface DeployOptions {
  * Result of `prepareCall()` — contains everything needed for external signing
  * and subsequent `finalizeCall()`.
  *
- * Public fields (`sighash`, `preimage`, `opPushTxSig`, `tx`, `sigIndices`)
- * are for external signer coordination. Fields prefixed with `_` are opaque
- * internals consumed by `finalizeCall()`.
+ * Public fields (`sighash`, `preimage`, `tx`, `sigIndices`) are for external
+ * signer coordination. Fields prefixed with `_` are opaque internals
+ * consumed by `finalizeCall()`.
+ *
+ * F-369: there is deliberately NO `opPushTxSig` field. Post-BUG-100 the
+ * OP_PUSH_TX signature is derived ON-CHAIN from `preimage` — the unlocking
+ * script has no stack slot for a spender-supplied signature, so there is
+ * nothing for an external signer to produce or push here. An earlier
+ * revision exposed such a field "for external signer coordination"; nothing
+ * ever consumed it, and a caller who took the docs at face value and
+ * prepended it to the unlock would have produced an INVALID unlock (one
+ * extra stack item). See `buildStatefulPrefix`'s docstring for the real
+ * (signature-free) layout.
  */
 export interface PreparedCall {
   /**
@@ -77,8 +87,6 @@ export interface PreparedCall {
   sighash: string;
   /** Full BIP-143 preimage (hex). */
   preimage: string;
-  /** OP_PUSH_TX DER signature + sighash byte (hex). Empty if not needed. */
-  opPushTxSig: string;
   /** Built transaction (P2PKH funding signed, primary contract input uses placeholder sigs). */
   tx: BsvTransaction;
   /** User-visible arg positions that need external Sig values. */

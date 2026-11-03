@@ -23,10 +23,7 @@ import (
 // intrinsic call is present in the `verify` method's bindings.
 //
 // This test deliberately stops at ANF so frontend-only regressions surface
-// with a focused error message (parse / validate / typecheck / ANF). The
-// end-to-end gate that the `EmitFullSP1FriVerifierBody` orchestrator is
-// wired and the contract compiles cleanly through stack lowering and emit
-// lives just below in `TestSp1FriVerifierPoc_CodegenAccepts`.
+// with a focused error message (parse / validate / typecheck / ANF).
 func TestSp1FriVerifierPoc_Compile(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	contractPath := filepath.Join(filepath.Dir(thisFile), "contracts", "Sp1FriVerifierPoc.runar.go")
@@ -47,12 +44,18 @@ func TestSp1FriVerifierPoc_Compile(t *testing.T) {
 		t.Fatal("parse returned no contract")
 	}
 
+	// F-007: rewritten to expect refusal — Validate refuses verifySP1FRI in v1 (not implemented); the later frontend
+	// stages are still checked so the builtin's typing and ANF shape stay pinned.
 	validResult := frontend.Validate(parseResult.Contract)
-	if len(validResult.Errors) > 0 {
-		for _, e := range validResult.Errors {
-			t.Logf("validation error: %s", e.FormatMessage())
+	refused := false
+	for _, e := range validResult.Errors {
+		if strings.Contains(e.Message, "not implemented for v1") {
+			refused = true
 		}
-		t.Fatalf("validation failed with %d errors", len(validResult.Errors))
+	}
+	if !refused {
+		t.Fatalf("F-007: Validate must refuse verifySP1FRI; got %d errors: %v",
+			len(validResult.Errors), validResult.ErrorStrings())
 	}
 
 	tcResult := frontend.TypeCheck(parseResult.Contract)
@@ -93,55 +96,21 @@ func TestSp1FriVerifierPoc_Compile(t *testing.T) {
 	}
 }
 
-// TestSp1FriVerifierPoc_CodegenAccepts is the dispatch-wired acceptance gate.
-// It confirms that with the `EmitFullSP1FriVerifierBody` orchestrator wired
-// into `lowerVerifySP1FRI` (compilers/go/codegen/sp1_fri.go), the PoC contract
-// compiles cleanly through the full pipeline (parse → validate → typecheck
-// → ANF → stack → emit) and produces a non-empty hex-encoded locking script.
-//
-// This replaces the previous `TestSp1FriVerifierPoc_CodegenRefuses` guard
-// which intentionally panicked at stack lowering until the dispatch was
-// wired.
-//
-// Holistic script-VM execution against the canonical fixture (assembling an
-// unlocking script with all the structured field pushes + the typed args +
-// running through the go-sdk interpreter) is validated end-to-end at the
-// codegen-package level by
-// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture`,
-// which exercises `EmitFullSP1FriVerifierBody` against the same Plonky3
-// minimal-guest FRI fixture and asserts the script accepts. That test is
-// the meaningful end-to-end gate; this contract-level test asserts only
-// that the dispatch wiring produces a deployable locking script.
-//
-// Producing a full deployable unlocking-script encoder for the Sp1VKeyHash
-// constructor-slot mechanism + the structured field-push prelude is a
-// follow-up — see docs/sp1-fri-verifier.md §10 for the per-query layout
-// (each guest-program param tuple needs its own deployed verifier with a
-// matching unlocking-script encoder).
-func TestSp1FriVerifierPoc_CodegenAccepts(t *testing.T) {
+// Was TestSp1FriVerifierPoc_CodegenAccepts (the contract compiled to a
+// deployable locking script).
+// F-007: rewritten to expect refusal — the SP1 FRI verifier is not implemented for v1; its body is fail-closed and
+// the compiler refuses verifySP1FRI, so there is no artifact.
+func TestSp1FriVerifierPoc_CompileRefused(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	contractPath := filepath.Join(filepath.Dir(thisFile), "contracts", "Sp1FriVerifierPoc.runar.go")
 
 	artifact, err := compiler.CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("expected compilation to succeed (dispatch wired via EmitFullSP1FriVerifierBody); "+
-			"got error: %v", err)
+	if err == nil {
+		t.Fatalf("F-007: Sp1FriVerifierPoc compiled (|Script|=%d hex chars); v1 must refuse verifySP1FRI",
+			len(artifact.Script))
 	}
-	if artifact == nil {
-		t.Fatal("expected non-nil artifact from successful compilation")
+	if !strings.Contains(err.Error(), "not implemented for v1") {
+		t.Fatalf("F-007: unexpected refusal text: %v", err)
 	}
-	if artifact.ContractName != "Sp1FriVerifierPoc" {
-		t.Errorf("expected contract name Sp1FriVerifierPoc, got %s", artifact.ContractName)
-	}
-	if artifact.Script == "" {
-		t.Error("expected non-empty Script (hex-encoded locking script)")
-	}
-	if !strings.HasPrefix(artifact.Script, "00") && len(artifact.Script) < 2 {
-		// Locking script should be substantial — the SP1 FRI orchestrator
-		// emits ~280 KB worth of opcodes for the PoC param tuple.
-		t.Errorf("expected substantial locking script, got %d hex chars", len(artifact.Script))
-	}
-
-	t.Logf("Sp1FriVerifierPoc compiled successfully: |Script|=%d hex chars (~%d KB), "+
-		"ABI methods=%d", len(artifact.Script), len(artifact.Script)/2/1024, len(artifact.ABI.Methods))
+	t.Logf("Sp1FriVerifierPoc refused as required: %v", err)
 }

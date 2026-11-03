@@ -10,16 +10,23 @@ export interface ConformanceReport {
   passed: number;
   failed: number;
   skipped: number;
+  /**
+   * Rows that ran without error but verified nothing — fewer than two tiers
+   * compared and no golden checked (F-049). Never included in `passed`.
+   */
+  vacuous: number;
   results: TestResult[];
   compilers: CompilerInfo[];
 }
 
 export interface TestResult {
   testName: string;
-  status: 'pass' | 'fail' | 'skip';
+  status: 'pass' | 'fail' | 'skip' | 'vacuous';
   irMatch: boolean;
   scriptMatch: boolean;
   errors: string[];
+  /** Why a 'vacuous' row verified nothing (F-049). */
+  vacuousReason?: string;
   timings: {
     ts?: number;
     go?: number;
@@ -42,6 +49,17 @@ export interface CompilerInfo {
 // ---------------------------------------------------------------------------
 // Report generation
 // ---------------------------------------------------------------------------
+
+/**
+ * N-374: a tier is "available" only if it actually ran. A result is not
+ * evidence of that when the child could not even be spawned (`spawn java
+ * ENOENT`): every fixture then carries a defined-but-failed result, and
+ * "has any result" used to read as available.
+ */
+const SPAWN_ENOENT_RE = /\bspawn \S+ ENOENT\b/;
+function tierRan(outputs: CompilerOutput[]): boolean {
+  return outputs.some((o) => o.success || !SPAWN_ENOENT_RE.test(o.error ?? ''));
+}
 
 /** Build a structured ConformanceReport from raw runner results. */
 export function generateReport(results: ConformanceResult[]): ConformanceReport {
@@ -72,6 +90,11 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
       status = 'fail';
     } else if (allCompilersSkipped) {
       status = 'skip';
+    } else if (r.vacuous !== undefined) {
+      // F-049: no error, but nothing was compared either. Reporting this as
+      // 'pass' made a compile-success check indistinguishable from a
+      // cross-validated one.
+      status = 'vacuous';
     } else {
       status = 'pass';
     }
@@ -82,6 +105,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
       irMatch: r.irMatch,
       scriptMatch: r.scriptMatch,
       errors: r.errors,
+      ...(status === 'vacuous' ? { vacuousReason: r.vacuous } : {}),
       timings: {
         ts: r.tsCompiler.durationMs,
         go: r.goCompiler?.durationMs,
@@ -115,7 +139,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const goDurations = goSuccess.map((r) => r.goCompiler!.durationMs);
   compilers.push({
     name: 'Go',
-    available: goResults.length > 0,
+    available: tierRan(goResults.map((r) => r.goCompiler!)),
     testsRun: goResults.length,
     testsSucceeded: goSuccess.length,
     averageDurationMs: goDurations.length > 0
@@ -129,7 +153,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const rustDurations = rustSuccess.map((r) => r.rustCompiler!.durationMs);
   compilers.push({
     name: 'Rust',
-    available: rustResults.length > 0,
+    available: tierRan(rustResults.map((r) => r.rustCompiler!)),
     testsRun: rustResults.length,
     testsSucceeded: rustSuccess.length,
     averageDurationMs: rustDurations.length > 0
@@ -143,7 +167,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const pythonDurations = pythonSuccess.map((r) => r.pythonCompiler!.durationMs);
   compilers.push({
     name: 'Python',
-    available: pythonResults.length > 0,
+    available: tierRan(pythonResults.map((r) => r.pythonCompiler!)),
     testsRun: pythonResults.length,
     testsSucceeded: pythonSuccess.length,
     averageDurationMs: pythonDurations.length > 0
@@ -157,7 +181,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const zigDurations = zigSuccess.map((r) => r.zigCompiler!.durationMs);
   compilers.push({
     name: 'Zig',
-    available: zigResults.length > 0,
+    available: tierRan(zigResults.map((r) => r.zigCompiler!)),
     testsRun: zigResults.length,
     testsSucceeded: zigSuccess.length,
     averageDurationMs: zigDurations.length > 0
@@ -171,7 +195,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const rubyDurations = rubySuccess.map((r) => r.rubyCompiler!.durationMs);
   compilers.push({
     name: 'Ruby',
-    available: rubyResults.length > 0,
+    available: tierRan(rubyResults.map((r) => r.rubyCompiler!)),
     testsRun: rubyResults.length,
     testsSucceeded: rubySuccess.length,
     averageDurationMs: rubyDurations.length > 0
@@ -194,7 +218,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const javaDurations = javaSuccess.map((r) => r.javaCompiler!.durationMs);
   compilers.push({
     name: 'Java',
-    available: javaResults.length > 0,
+    available: tierRan(javaResults.map((r) => r.javaCompiler!)),
     testsRun: javaResults.length,
     testsSucceeded: javaSuccess.length,
     averageDurationMs: javaDurations.length > 0
@@ -208,6 +232,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
     passed: testResults.filter((r) => r.status === 'pass').length,
     failed: testResults.filter((r) => r.status === 'fail').length,
     skipped: testResults.filter((r) => r.status === 'skip').length,
+    vacuous: testResults.filter((r) => r.status === 'vacuous').length,
     results: testResults,
     compilers,
   };
@@ -224,7 +249,7 @@ export function formatReportAsMarkdown(report: ConformanceReport): string {
   lines.push('# Rúnar Conformance Test Report');
   lines.push('');
   lines.push(`**Date:** ${report.timestamp}`);
-  lines.push(`**Total:** ${report.totalTests} | **Passed:** ${report.passed} | **Failed:** ${report.failed} | **Skipped:** ${report.skipped}`);
+  lines.push(`**Total:** ${report.totalTests} | **Passed:** ${report.passed} | **Failed:** ${report.failed} | **Skipped:** ${report.skipped} | **Vacuous:** ${report.vacuous}`);
   lines.push('');
 
   // Compiler availability table
@@ -245,7 +270,7 @@ export function formatReportAsMarkdown(report: ConformanceReport): string {
   lines.push('| Test | Status | IR Match | Script Match | Errors |');
   lines.push('|------|--------|----------|-------------|--------|');
   for (const r of report.results) {
-    const statusIcon = r.status === 'pass' ? 'PASS' : r.status === 'fail' ? 'FAIL' : 'SKIP';
+    const statusIcon = r.status === 'pass' ? 'PASS' : r.status === 'fail' ? 'FAIL' : r.status === 'vacuous' ? 'VACUOUS' : 'SKIP';
     const irMatch = r.irMatch ? 'Yes' : 'No';
     const scriptMatch = r.scriptMatch ? 'Yes' : 'No';
     const errors = r.errors.length > 0 ? r.errors.join('; ') : '-';
@@ -338,9 +363,16 @@ export function printReportToConsole(report: ConformanceReport): void {
         icon = 'SKIP';
         color = YELLOW;
         break;
+      case 'vacuous':
+        icon = 'VACUOUS';
+        color = YELLOW;
+        break;
     }
     const timing = r.timings.ts !== undefined ? `${DIM}(${r.timings.ts.toFixed(0)}ms)${RESET}` : '';
     console.log(`  ${color}${icon}${RESET} ${r.testName} ${timing}`);
+    if (r.vacuousReason) {
+      console.log(`       ${YELLOW}${r.vacuousReason}${RESET}`);
+    }
 
     if (r.errors.length > 0) {
       for (const err of r.errors) {
@@ -354,11 +386,13 @@ export function printReportToConsole(report: ConformanceReport): void {
   const passColor = report.passed > 0 ? GREEN : DIM;
   const failColor = report.failed > 0 ? RED : DIM;
   const skipColor = report.skipped > 0 ? YELLOW : DIM;
+  const vacuousColor = report.vacuous > 0 ? YELLOW : DIM;
   console.log(
     `${BOLD}Summary:${RESET} ` +
     `${passColor}${report.passed} passed${RESET}, ` +
     `${failColor}${report.failed} failed${RESET}, ` +
-    `${skipColor}${report.skipped} skipped${RESET} ` +
+    `${skipColor}${report.skipped} skipped${RESET}, ` +
+    `${vacuousColor}${report.vacuous} vacuous${RESET} ` +
     `(${report.totalTests} total)`,
   );
 
@@ -375,7 +409,7 @@ export function printReportToConsole(report: ConformanceReport): void {
       `${BOLD}${absent.join(', ')}${RESET}.`,
     );
     console.log(
-      `  This PASS covers ${report.compilers.length - absent.length} tiers, not ${report.compilers.length}. ` +
+      `  This run covers ${report.compilers.length - absent.length} tiers, not ${report.compilers.length}. ` +
       `Set RUNAR_CONFORMANCE_STRICT=1 to exit non-zero instead.`,
     );
   }

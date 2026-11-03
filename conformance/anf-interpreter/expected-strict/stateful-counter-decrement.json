@@ -1,5 +1,7 @@
 {
-    "error": "AssertionFailureError",
-    "methodName": "decrement",
-    "bindingName": "t2"
+  "state": {
+    "count": "4n"
+  },
+  "dataOutputs": [],
+  "rawOutputs": []
 }

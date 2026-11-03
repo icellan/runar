@@ -13,7 +13,7 @@
 module TicTacToe {
     use runar::StatefulSmartContract;
     use runar::types::{PubKey, Sig, ByteString};
-    use runar::crypto::{check_sig, hash256, hash160, extract_output_hash, num2bin, cat};
+    use runar::crypto::{check_sig, hash256, hash160, extract_output_hash, extract_amount, num2bin, cat};
 
     resource struct TicTacToe {
         player_x: PubKey,
@@ -30,6 +30,11 @@ module TicTacToe {
     public fun join(opponent_pk: PubKey, sig: Sig) {
         assert!(self.status == 0, 0);
         assert!(check_sig(sig, opponent_pk), 0);
+        // Player O must pay exactly the bet (N-027): the continuation holds the
+        // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        // payout methods pay out. The compiler's own `>= input` floor alone would
+        // let O join for free.
+        assert!(continuation_amount() == extract_amount(self.tx_preimage) + self.bet_amount, 0);
         self.player_o = opponent_pk;
         self.status = 1;
         self.turn = 1;

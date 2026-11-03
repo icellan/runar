@@ -608,7 +608,7 @@ impl<'a> AffineSelectTracker for ECTracker<'a> {
     }
 }
 
-fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
+fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams, abort_on_y0_tangent: bool) {
     // The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
     // denominator is zero and the correct slope is the TANGENT,
     // (3px^2 + a)/(2py) — and a = -3 on both NIST curves, so the numerator is
@@ -666,6 +666,29 @@ fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
         e(StackOp::Opcode("OP_SUB".into()));
         e(StackOp::Opcode("OP_NOT".into()));
     });
+
+    // N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+    // when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+    // silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+    // order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+    //   ok = NOT(cond AND px != 0 AND py == 0)
+    // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    // Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+    // total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+    // cond = 1 with py == 0 there already means px == 0, the exempt case.
+    if abort_on_y0_tangent {
+        t.copy_to_top("px", "_px_g");
+        t.copy_to_top("py", "_py_g");
+        t.copy_to_top("_cond", "_cond_g");
+        t.raw_block(&["_px_g", "_py_g", "_cond_g"], None, |e| {
+            e(StackOp::Opcode("OP_SWAP".into()));
+            e(StackOp::Opcode("OP_NOT".into()));
+            e(StackOp::Opcode("OP_BOOLAND".into()));
+            e(StackOp::Opcode("OP_BOOLAND".into()));
+            e(StackOp::Opcode("OP_NOT".into()));
+            e(StackOp::Opcode("OP_VERIFY".into()));
+        });
+    }
 
     // chord numerator / denominator
     t.copy_to_top("qy", "_qy1");
@@ -1138,6 +1161,8 @@ fn c_emit_mul(
         (t.e)(StackOp::If {
             then_ops: add_ops,
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
     }
 
@@ -1317,7 +1342,7 @@ fn c_decompress_pub_key(
 
     let then_ops = vec![StackOp::Drop]; // remove neg_y, leaving y_cand
     let else_ops = vec![StackOp::Nip];  // remove y_cand, leaving neg_y
-    (t.e)(StackOp::If { then_ops, else_ops });
+    (t.e)(StackOp::If { then_ops, else_ops, then_locs: Vec::new(), else_locs: Vec::new() });
 
     // Remove one from tracker and rename the surviving item
     if let Some(neg_idx) = t.nm.iter().rposition(|n| n == "_dk_neg_y") {
@@ -1628,7 +1653,7 @@ fn c_emit_verify_ecdsa(
     if let Some(idx) = t.nm.iter().rposition(|n| n == "_rqx") { t.nm[idx] = "qx".to_string(); }
     if let Some(idx) = t.nm.iter().rposition(|n| n == "_rqy") { t.nm[idx] = "qy".to_string(); }
 
-    c_affine_add(&mut t, c);
+    c_affine_add(&mut t, c, false);
 
     // Step 8: x_R mod n == r
     t.to_top("ry");
@@ -1669,7 +1694,7 @@ pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp)) {
     // R-117: c_affine_add's selectors compare these four values RAW.
     c_emit_coord_canon_verify(&mut t, "px", "py", &P256_CURVE);
     c_emit_coord_canon_verify(&mut t, "qx", "qy", &P256_CURVE);
-    c_affine_add(&mut t, &P256_CURVE);
+    c_affine_add(&mut t, &P256_CURVE, true);
     c_compose_point(&mut t, "rx", "ry", "_result", &P256_CURVE);
 }
 
@@ -1765,6 +1790,8 @@ pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);
@@ -1788,7 +1815,7 @@ pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp)) {
     // R-117: c_affine_add's selectors compare these four values RAW.
     c_emit_coord_canon_verify(&mut t, "px", "py", &P384_CURVE);
     c_emit_coord_canon_verify(&mut t, "qx", "qy", &P384_CURVE);
-    c_affine_add(&mut t, &P384_CURVE);
+    c_affine_add(&mut t, &P384_CURVE, true);
     c_compose_point(&mut t, "rx", "ry", "_result", &P384_CURVE);
 }
 
@@ -1884,6 +1911,8 @@ pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
         else_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x02]))],
+        then_locs: Vec::new(),
+        else_locs: Vec::new(),
     });
     // Stack: [x_bytes, prefix_byte]
     emit(StackOp::Swap);

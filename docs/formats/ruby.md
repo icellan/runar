@@ -112,6 +112,10 @@ Special cases:
 - `verify_wots` maps to `verifyWOTS` (not `verifyWots`)
 - All SLH-DSA variants have explicit mappings (e.g., `verify_slh_dsa_sha2_128s` → `verifySLHDSA_SHA2_128s`)
 
+### Identifier Collision Rule
+
+The snake_case to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `k` and `k_` both become `k`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling, or one identifier that maps to a different name (`sum_` → `sum`), is fine.
+
 ### Property Access
 
 Ruby contracts use instance variables (`@var`) to access properties:
@@ -123,6 +127,40 @@ assert hash160(pub_key) == @pub_key_hash    # reads property
 ```
 
 ---
+
+## Compiler Directives
+
+```ruby
+class Directives < Runar::SmartContract
+  prop :pub_key_hash, Addr
+  prop :deploy_tag, ByteString, embed_always: true     # @embedAlways
+
+  runar_sighash 'SINGLE|FORKID'                        # @sighash
+  runar_public sig: Sig, pub_key: PubKey
+  def spend_single(sig, pub_key)
+    ...
+  end
+end
+```
+
+- `embed_always: true` is a `prop` option like `readonly: true`.
+- `runar_sighash 'FLAGS'` is a class macro that applies to the next `def`. It
+  may come before or after that method's `runar_public` line, and takes exactly
+  one string literal. (It is a separate macro, not a `runar_public` keyword,
+  because `runar_public`'s keywords are parameter names.) A `runar_sighash`
+  with no `def` after it is an error.
+- Both are understood by the `runar` gem, so the contract still runs as Ruby.
+
+The flag list is the same as the `.runar.ts` `@sighash` directive: `|`-separated
+names from `ALL`, `NONE`, `SINGLE`, `FORKID`, `ANYONECANPAY`, exactly one base
+type (`ALL`/`NONE`/`SINGLE`), and `FORKID` is mandatory. Every tier refuses — it
+never ignores — a sighash spelling on a non-public method, two on one method, a
+malformed argument, a bad flag set, and either directive on the wrong kind of
+member. A `@sighash` / `@embedAlways` COMMENT is rejected on this surface
+(the parser does not read comments), with an error naming the spelling above.
+See [Compiler Directives](../language-reference.md#compiler-directives) for what
+the two directives do, and `examples/ruby/compiler-directives/` for a worked
+port of both (N-093).
 
 ## Type Mappings
 

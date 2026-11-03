@@ -216,6 +216,34 @@ pub enum Statement {
     },
 }
 
+impl Statement {
+    /// The statement's own source location (every variant carries one).
+    pub fn source_location(&self) -> &SourceLocation {
+        match self {
+            Statement::VariableDecl { source_location, .. }
+            | Statement::Assignment { source_location, .. }
+            | Statement::IfStatement { source_location, .. }
+            | Statement::ForStatement { source_location, .. }
+            | Statement::ReturnStatement { source_location, .. }
+            | Statement::ExpressionStatement { source_location, .. } => source_location,
+        }
+    }
+
+    /// Mutable access to the statement's own source location (every variant
+    /// carries one). Parsers that build a statement after consuming it use
+    /// this to stamp the position of its first token (F-337).
+    pub fn source_location_mut(&mut self) -> &mut SourceLocation {
+        match self {
+            Statement::VariableDecl { source_location, .. }
+            | Statement::Assignment { source_location, .. }
+            | Statement::IfStatement { source_location, .. }
+            | Statement::ForStatement { source_location, .. }
+            | Statement::ReturnStatement { source_location, .. }
+            | Statement::ExpressionStatement { source_location, .. } => source_location,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
@@ -295,10 +323,17 @@ pub enum Expression {
         op: BinaryOp,
         left: Box<Expression>,
         right: Box<Expression>,
+        /// Where the expression starts, including a leading `(` (N-472).
+        /// Every surface parser sets it, as the TS reference does; a node a
+        /// parser synthesizes carries `None` and the type checker falls back
+        /// to the leftmost leaf.
+        source_location: Option<SourceLocation>,
     },
     UnaryExpr {
         op: UnaryOp,
         operand: Box<Expression>,
+        /// The operator token (N-472); every surface parser sets it.
+        source_location: Option<SourceLocation>,
     },
     CallExpr {
         callee: Box<Expression>,
@@ -315,6 +350,10 @@ pub enum Expression {
     },
     Identifier {
         name: String,
+        /// The identifier's token (N-463). Every surface parser sets it, as
+        /// the TS reference does; a synthesized identifier carries `None`. The
+        /// type checker derives a composite expression's position from it.
+        source_location: Option<SourceLocation>,
     },
     BigIntLiteral {
         /// Arbitrary-precision integer literal.
@@ -331,6 +370,10 @@ pub enum Expression {
     },
     ByteStringLiteral {
         value: String, // hex-encoded
+        /// The literal's opening quote (N-432). Only the `.runar.ts` parser
+        /// sets it, as the TS reference does; elsewhere it is `None` and the
+        /// hex diagnostics print no location.
+        source_location: Option<SourceLocation>,
     },
     TernaryExpr {
         condition: Box<Expression>,
@@ -339,6 +382,8 @@ pub enum Expression {
     },
     PropertyAccess {
         property: String, // this.x -> property = "x"
+        /// The `this` token (N-463); `.runar.ts` parser only.
+        source_location: Option<SourceLocation>,
     },
     IndexAccess {
         object: Box<Expression>,

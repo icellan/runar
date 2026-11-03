@@ -51,10 +51,15 @@ import runar.compiler.ir.anf.UpdateProp;
  * arms happened to be pure, and the merged locals kept their pre-branch
  * values. See {@code conformance/dce/live-if.test.ts}.
  *
- * <p>This module is the canonical, standalone DCE pass for the Java
- * compiler. It mirrors the Zig reference implementation in
- * {@code compilers/zig/src/passes/dce.zig}. The earlier inline
- * implementation in {@code AnfOptimize.java} has been surgically
+ * <p>This module is the canonical DEFINITION of DCE for the Java compiler —
+ * one extracted implementation, mirroring the Zig reference in
+ * {@code compilers/zig/src/passes/dce.zig} — but it is NOT a standalone
+ * pipeline pass (F-275). Its only caller is {@code AnfOptimize.run()},
+ * which runs it over every method once {@code AnfOptimize.optimizeEcMethod}
+ * has rewritten them, and only when a rewrite fired (N-097: the TS reference
+ * gate) behind the {@code anyChanged}/{@code hasEcCalls} fast path, so
+ * a program in which no EC rewrite fires is never DCE'd. The earlier
+ * inline implementation in {@code AnfOptimize.java} has been surgically
  * extracted here.
  *
  * <p>Behaviour: byte-for-byte identical, at the time of that extraction, to
@@ -62,8 +67,9 @@ import runar.compiler.ir.anf.UpdateProp;
  * conformance suite (cross-tier hex parity) and the unknown-kind
  * exhaustiveness tests.
  *
- * <p>N-140 is the one deliberate behaviour change since: liveness considers
- * the names a binding DEFINES, not only its own {@code name}.
+ * <p>N-140 is a deliberate behaviour change since: liveness considers
+ * the names a binding DEFINES, not only its own {@code name}. F-108 is the
+ * other: a private method's last binding (its return value) is a liveness root.
  */
 public final class Dce {
 
@@ -77,10 +83,10 @@ public final class Dce {
     public static AnfProgram run(AnfProgram program) {
         List<AnfMethod> newMethods = new ArrayList<>(program.methods().size());
         for (AnfMethod m : program.methods()) {
-            List<AnfBinding> cleaned = eliminateDead(m.body());
-            newMethods.add(new AnfMethod(m.name(), m.params(), cleaned, m.isPublic()));
+            List<AnfBinding> cleaned = eliminateDead(m);
+            newMethods.add(m.withBody(cleaned));
         }
-        return new AnfProgram(program.contractName(), program.properties(), newMethods);
+        return program.withMethods(newMethods);
     }
 
     /**
@@ -89,6 +95,125 @@ public final class Dce {
      * the EC rewrite's post-cleanup phase.
      */
     public static List<AnfBinding> eliminateDead(List<AnfBinding> body) {
+        return eliminateDead(body, false);
+    }
+
+    /**
+     * Dead-binding elimination for a whole method body: {@link #eliminateDead(List)}
+     * plus the F-108 root. Stack lowering inlines a private method at each
+     * {@code method_call} and takes its LAST binding as the call's result, so
+     * that binding is live even though nothing inside the method references
+     * it; without the root a pure return expression ({@code return n + 1n})
+     * was deleted and the helper emptied. The predicate is the one stack
+     * lowering uses to collect inlinable private methods. A public method's
+     * last binding is never a return value.
+     */
+    public static List<AnfBinding> eliminateDead(AnfMethod method) {
+        boolean keepLast = !method.isPublic() && !"constructor".equals(method.name());
+        return eliminateDead(method.body(), keepLast);
+    }
+
+    /**
+     * N-138: {@link #eliminateDead(AnfMethod)} restricted to bindings whose
+     * name is in {@code candidates}; every other binding is kept as if live.
+     * The constant folder uses it to drop the operand bindings its own
+     * rewrites orphaned (the {@code 1} under a folded {@code -1n}) without
+     * also deleting bindings that were already dead before folding, so
+     * fold-ON output does not move for a program the folder did not change.
+     */
+    public static List<AnfBinding> eliminateDeadAmong(AnfMethod method, Set<String> candidates) {
+        boolean keepLast = !method.isPublic() && !"constructor".equals(method.name());
+        List<AnfBinding> body = eliminateDead(method.body(), keepLast, candidates);
+        // N-446: the fold also orphans operands INSIDE `if` arms and loop
+        // bodies (`-5n` in an else arm). Filtering only the top level left
+        // them there, stack lowering pushed them, and the arms ended at
+        // different depths. Prune the nested scopes too, then re-filter the
+        // top level, to a fixed point (a nested removal can orphan a
+        // top-level operand).
+        while (true) {
+            List<AnfBinding> nested = pruneNestedOrphans(body, candidates);
+            if (nested == body) return body;
+            body = eliminateDead(nested, keepLast, candidates);
+        }
+    }
+
+    /**
+     * N-446: remove fold-orphaned pure bindings from every nested scope
+     * ({@code if} arms, {@code loop} bodies, recursively). Returns
+     * {@code bindings} itself when nothing was removed.
+     *
+     * <p>A nested binding is removed only if it is a candidate (referenced
+     * before folding), is referenced by NO binding anywhere in the method now
+     * (arm bindings can be read after the {@code if} by name, so an arm is
+     * never filtered against its own references alone), is not one of its
+     * {@code if}'s declared {@code results} (stack lowering requires those
+     * slots in both arms), is side-effect free, and is not itself an
+     * {@code if} / {@code loop} (those are recursed into instead). Only the
+     * candidate-restricted fold prune calls this; the EC-gated DCE stays
+     * top-level, so fold-OFF output cannot move.
+     */
+    private static List<AnfBinding> pruneNestedOrphans(
+        List<AnfBinding> bindings, Set<String> candidates) {
+        List<AnfBinding> current = bindings;
+        while (true) {
+            Set<String> refs = new HashSet<>();
+            for (AnfBinding b : current) collectRefs(b.value(), refs);
+            List<AnfBinding> next = pruneScope(current, false, Set.of(), refs, candidates);
+            if (next == current) return current;
+            current = next;
+        }
+    }
+
+    private static List<AnfBinding> pruneScope(
+        List<AnfBinding> scope, boolean nested, Set<String> protect,
+        Set<String> refs, Set<String> candidates) {
+        List<AnfBinding> out = new ArrayList<>(scope.size());
+        boolean changed = false;
+        for (AnfBinding b : scope) {
+            AnfValue v = b.value();
+            if (v instanceof If ifv) {
+                Set<String> res = new HashSet<>(orEmpty(ifv.results()));
+                List<AnfBinding> thenSrc = orEmpty(ifv.thenBranch());
+                List<AnfBinding> elseSrc = orEmpty(ifv.elseBranch());
+                List<AnfBinding> thenB = pruneScope(thenSrc, true, res, refs, candidates);
+                List<AnfBinding> elseB = pruneScope(elseSrc, true, res, refs, candidates);
+                if (thenB != thenSrc || elseB != elseSrc) {
+                    out.add(new AnfBinding(b.name(),
+                        new If(ifv.cond(),
+                            thenB != thenSrc ? thenB : ifv.thenBranch(),
+                            elseB != elseSrc ? elseB : ifv.elseBranch(),
+                            ifv.results()), b.sourceLoc()));
+                    changed = true;
+                } else {
+                    out.add(b);
+                }
+            } else if (v instanceof Loop loop) {
+                List<AnfBinding> bodySrc = orEmpty(loop.body());
+                List<AnfBinding> body = pruneScope(bodySrc, true, Set.of(), refs, candidates);
+                if (body != bodySrc) {
+                    out.add(new AnfBinding(b.name(),
+                        new Loop(loop.count(), body, loop.iterVar(), loop.start(), loop.step()),
+                        b.sourceLoc()));
+                    changed = true;
+                } else {
+                    out.add(b);
+                }
+            } else if (nested && candidates.contains(b.name()) && !refs.contains(b.name())
+                && !protect.contains(b.name()) && !hasSideEffect(v)) {
+                changed = true;
+            } else {
+                out.add(b);
+            }
+        }
+        return changed ? out : scope;
+    }
+
+    private static List<AnfBinding> eliminateDead(List<AnfBinding> body, boolean keepLast) {
+        return eliminateDead(body, keepLast, null);
+    }
+
+    private static List<AnfBinding> eliminateDead(
+        List<AnfBinding> body, boolean keepLast, Set<String> candidates) {
         List<AnfBinding> current = body;
         while (true) {
             List<Set<String>> ownRefs = new ArrayList<>(current.size());
@@ -104,7 +229,10 @@ public final class Dce {
             boolean removed = false;
             for (int i = 0; i < current.size(); i++) {
                 AnfBinding b = current.get(i);
-                if (isReferencedExternally(b, ownRefs.get(i), refCount) || hasSideEffect(b.value())) {
+                if ((keepLast && i == current.size() - 1)
+                    || (candidates != null && !candidates.contains(b.name()))
+                    || isReferencedExternally(b, ownRefs.get(i), refCount)
+                    || hasSideEffect(b.value())) {
                     kept.add(b);
                 } else {
                     removed = true;
@@ -173,7 +301,14 @@ public final class Dce {
      * {@code compilers/python/runar_compiler/frontend/dce.py}.
      */
     public static void collectRefs(AnfValue v, Set<String> used) {
-        if (v instanceof LoadParam || v instanceof LoadProp || v instanceof GetStateScript) {
+        if (v instanceof LoadParam lp) {
+            // N-356: a reassigned parameter is bound under its own name and
+            // read back as `load_param <name>`; count the read so DCE keeps
+            // the rebinding. Matches TS collectRefsFromValue.
+            if (lp.name() != null) used.add(lp.name());
+            return;
+        }
+        if (v instanceof LoadProp || v instanceof GetStateScript) {
             return;
         }
         if (v instanceof LoadConst lc) {

@@ -37,6 +37,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Move-style ({@code .runar.move}) parser for the Rúnar Java compiler.
@@ -56,9 +57,22 @@ public final class MoveParser {
 
     /** Parse a {@code .runar.move} source file into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser p = new Parser(tokens, filename);
-        ContractNode contract = p.parseModule();
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(p::parseModule, ParseException::new);
+        String collision = p.idents.message();
+        if (collision != null) p.errors.add(collision);
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("; ", p.errors));
         }
@@ -82,8 +96,17 @@ public final class MoveParser {
         PLUSPLUS, MINUSMINUS,
         PLUSEQ, MINUSEQ, STAREQ, SLASHEQ, PERCENTEQ,
         QUESTION, ARROW,
-        SHL, SHR
+        SHL, SHR,
+        /** N-093: {@code #} directly before {@code [} (an attribute opener). */
+        HASH
     }
+
+    /**
+     * N-093: one parsed {@code #[...]} attribute (see {@code parseAttributes}).
+     * {@code kind} is {@code "embed_always"} or {@code "sighash"}; {@code flags}
+     * is the sighash flag text, {@code null} when malformed.
+     */
+    private record MoveAttribute(String kind, String flags) {}
 
     private record Token(Kind kind, String value, int line, int column) {}
 
@@ -91,7 +114,7 @@ public final class MoveParser {
     // Tokenizer
     // ---------------------------------------------------------------
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> out = new ArrayList<>();
         int i = 0;
         int n = source.length();
@@ -160,8 +183,11 @@ public final class MoveParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
@@ -169,9 +195,14 @@ public final class MoveParser {
                     col++;
                 }
                 String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
+                if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                    // N-019: this surface has no quoted literal; a terminated one
+                    // is refused as an unexpected character (as the TS reference).
+                    lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + quote + "'"));
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 out.add(new Token(Kind.STRING, val, line, startCol));
                 continue;
@@ -179,39 +210,24 @@ public final class MoveParser {
 
             // Numbers
             if (ch >= '0' && ch <= '9') {
-                int start = i;
-                boolean isHex = false;
-                if (ch == '0' && i + 1 < n
-                    && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    isHex = true;
+                if (ch == '0' && i + 1 < n && source.charAt(i + 1) == 'x') {
+                    // F-026: a lowercase `0x` is a ByteString literal on this
+                    // surface, whatever its length (as the TS reference).
                     i += 2;
                     col += 2;
+                    int hexStart = i;
                     while (i < n && isHexDigit(source.charAt(i))) {
                         i++;
                         col++;
                     }
-                } else {
-                    while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                        i++;
-                        col++;
-                    }
+                    out.add(new Token(Kind.STRING, source.substring(hexStart, i), line, startCol));
+                    continue;
                 }
-                if (!isHex && i < n && source.charAt(i) == 'u') {
-                    i++;
-                    col++;
-                    while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                        i++;
-                        col++;
-                    }
-                }
-                if (isHex) {
-                    String hexDigits = source.substring(start + 2, i);
-                    if (!hexDigits.isEmpty() && hexDigits.length() % 2 == 0) {
-                        out.add(new Token(Kind.STRING, hexDigits, line, startCol));
-                        continue;
-                    }
-                }
-                out.add(new Token(Kind.NUMBER, source.substring(start, i), line, startCol));
+                // F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+                IntLiteral.Scan sc = IntLiteral.lex("move", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                out.add(new Token(Kind.NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -229,6 +245,16 @@ public final class MoveParser {
                     continue;
                 }
                 out.add(new Token(Kind.IDENT, source.substring(start, i), line, startCol));
+                continue;
+            }
+
+            // N-093: `#[` opens an attribute (`#[embed_always]`,
+            // `#[sighash(...)]`). A `#` not followed by `[` is refused below
+            // like any unknown character.
+            if (ch == '#' && i + 1 < n && source.charAt(i + 1) == '[') {
+                out.add(new Token(Kind.HASH, "#", line, startCol));
+                i++;
+                col++;
                 continue;
             }
 
@@ -253,7 +279,9 @@ public final class MoveParser {
                 continue;
             }
 
-            // Skip unknown characters
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -269,11 +297,13 @@ public final class MoveParser {
     }
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_';
+        // N-424: ASCII only, as the TS reference; a non-ASCII letter is refused
+        // as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_';
     }
 
     private static final Map<String, Kind> TWO_CHAR_OPS = Map.ofEntries(
@@ -328,7 +358,10 @@ public final class MoveParser {
     // ---------------------------------------------------------------
 
     private static String snakeToCamel(String s) {
-        String[] parts = s.split("_");
+        // `-1` keeps trailing empty fields: without it `tmp_` split to ["tmp"]
+        // and came back as `tmp_`, where the reference and the other five
+        // tiers say `tmp` (F-017).
+        String[] parts = s.split("_", -1);
         if (parts.length <= 1) {
             return s;
         }
@@ -464,6 +497,10 @@ public final class MoveParser {
         final String filename;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         Parser(List<Token> tokens, String filename) {
             this.tokens = tokens;
@@ -548,6 +585,11 @@ public final class MoveParser {
             // before.
             boolean isUnsafe = matchIdent("unsafe");
 
+            // N-490: the synthesized constructor is anchored at the first
+            // struct's `struct` keyword (the `resource` token when it stands
+            // alone), or at `module` when the contract declares no struct.
+            SourceLocation ctorLoc = loc();
+            boolean sawStruct = false;
             if (!matchIdent("module")) {
                 throw new ParseException("expected 'module' keyword");
             }
@@ -564,6 +606,14 @@ public final class MoveParser {
                 : ParentClass.SMART_CONTRACT;
 
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
+                // N-093: attributes before a function (`#[sighash(...)]`).
+                // Anything else they precede reads neither directive, so each
+                // one is refused.
+                List<MoveAttribute> attrs = parseAttributes();
+                if (!attrs.isEmpty() && !checkIdent("public") && !checkIdent("fun")) {
+                    reportLostAttributes(attrs);
+                }
+
                 if (checkIdent("use")) {
                     skipUseDecl();
                     continue;
@@ -571,8 +621,14 @@ public final class MoveParser {
 
                 if (checkIdent("resource") || checkIdent("struct")) {
                     boolean isResource = checkIdent("resource");
+                    SourceLocation kindLoc = loc();
                     if (isResource) {
                         advance();
+                        if (checkIdent("struct")) kindLoc = loc();
+                    }
+                    if (!sawStruct) {
+                        sawStruct = true;
+                        ctorLoc = kindLoc;
                     }
                     List<PropertyNode> props = parseStruct();
                     boolean anyMutable = false;
@@ -590,7 +646,7 @@ public final class MoveParser {
                 }
 
                 if (checkIdent("public") || checkIdent("fun")) {
-                    FnResult r = parseFunction();
+                    FnResult r = parseFunction(attrs);
                     if (r.hasMut && !isUnsafe) {
                         parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                     }
@@ -603,7 +659,7 @@ public final class MoveParser {
 
             expect(Kind.RBRACE);
 
-            MethodNode constructor = buildConstructor(properties);
+            MethodNode constructor = buildConstructor(properties, ctorLoc);
 
             return new ContractNode(
                 moduleName,
@@ -640,8 +696,16 @@ public final class MoveParser {
 
             List<PropertyNode> props = new ArrayList<>();
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
+                // N-093: `#[embed_always]` before a field is the native
+                // spelling of `@embedAlways`; `#[sighash(...)]` here annotates
+                // nothing.
+                boolean embedAlways = false;
+                for (MoveAttribute attr : parseAttributes()) {
+                    if (attr.kind().equals("embed_always")) embedAlways = true;
+                    else reportLostAttributes(List.of(attr));
+                }
                 Token nameTok = expect(Kind.IDENT);
-                String fieldName = snakeToCamel(nameTok.value());
+                String fieldName = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
                 expect(Kind.COLON);
 
@@ -665,7 +729,8 @@ public final class MoveParser {
                     readonly,
                     initializer,
                     loc(),
-                    null
+                    null,
+                    embedAlways
                 ));
 
                 match(Kind.COMMA);
@@ -737,7 +802,7 @@ public final class MoveParser {
 
             if (name.equals("FixedArray") && check(Kind.LT)) {
                 advance(); // <
-                TypeNode inner = parseTypeNode();
+                TypeNode inner = nest.nested(this::parseTypeNode);
                 expect(Kind.COMMA);
                 Token sizeTok = expect(Kind.NUMBER);
                 int length;
@@ -755,7 +820,7 @@ public final class MoveParser {
 
             if (name.equals("vector") && check(Kind.LT)) {
                 advance();
-                parseTypeNode();
+                nest.nested(this::parseTypeNode);
                 consumeGenericClose();
                 return new PrimitiveType(PrimitiveTypeName.BYTE_STRING);
             }
@@ -810,7 +875,62 @@ public final class MoveParser {
 
         private record FnResult(MethodNode method, boolean hasMut) {}
 
-        FnResult parseFunction() {
+        /**
+         * N-093: parse {@code #[...]} attributes. Only {@code #[embed_always]}
+         * and {@code #[sighash(FLAGS)]} exist; any other attribute is refused
+         * (it would otherwise be ignored). For {@code sighash}, the flags are
+         * the {@code |}-joined identifier list, or {@code null} when the
+         * parentheses hold anything else or are missing. Mirrors
+         * parseAttributes in the TS reference (01-parse-move.ts).
+         */
+        List<MoveAttribute> parseAttributes() {
+            List<MoveAttribute> attrs = new ArrayList<>();
+            while (check(Kind.HASH)) {
+                advance();
+                expect(Kind.LBRACKET);
+                String name = check(Kind.IDENT) ? advance().value() : "";
+                String flags = null;
+                boolean hasArgs = false;
+                if (check(Kind.LPAREN)) {
+                    hasArgs = true;
+                    advance();
+                    StringBuilder text = new StringBuilder();
+                    boolean ok = true;
+                    int depth = 1;
+                    while (!check(Kind.EOF)) {
+                        Token t = peek();
+                        if (t.kind() == Kind.LPAREN) depth++;
+                        if (t.kind() == Kind.RPAREN && --depth == 0) break;
+                        if (t.kind() == Kind.IDENT) text.append(t.value());
+                        else if (t.kind() == Kind.PIPE) text.append('|');
+                        else ok = false;
+                        advance();
+                    }
+                    expect(Kind.RPAREN);
+                    flags = ok ? text.toString() : null;
+                }
+                while (!check(Kind.RBRACKET) && !check(Kind.EOF)) advance();
+                expect(Kind.RBRACKET);
+                if (name.equals("embed_always") && !hasArgs) {
+                    attrs.add(new MoveAttribute("embed_always", null));
+                } else if (name.equals("sighash")) {
+                    attrs.add(new MoveAttribute("sighash", flags));
+                } else {
+                    errors.add(SighashDirective.unknownMoveAttributeMessage(name + (hasArgs ? "(...)" : "")));
+                }
+            }
+            return attrs;
+        }
+
+        /** N-093: refuse each attribute that annotates nothing that reads it. */
+        void reportLostAttributes(List<MoveAttribute> attrs) {
+            for (MoveAttribute attr : attrs) {
+                errors.add(SighashDirective.lostDirectiveMessage(
+                    attr.kind().equals("sighash") ? "@sighash" : "@embedAlways"));
+            }
+        }
+
+        FnResult parseFunction(List<MoveAttribute> attrs) {
             SourceLocation location = loc();
             Visibility visibility = Visibility.PRIVATE;
 
@@ -828,7 +948,7 @@ public final class MoveParser {
             expectIdent("fun");
 
             Token nameTok = expect(Kind.IDENT);
-            String name = snakeToCamel(nameTok.value());
+            String name = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
             ParamsResult pr = parseParams();
             List<ParamNode> params = pr.params;
@@ -836,7 +956,9 @@ public final class MoveParser {
 
             boolean hasReturnType = false;
             if (match(Kind.COLON)) {
-                parseTypeName();
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                String unknownReturn = LexDiag.unknownReturnType(parseTypeNode(), name, visibility == Visibility.PUBLIC);
+                if (unknownReturn != null) errors.add(unknownReturn);
                 hasReturnType = true;
             }
 
@@ -858,8 +980,24 @@ public final class MoveParser {
                 }
             }
 
+            // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]`
+            // here annotates nothing.
+            List<MoveAttribute> lost = new ArrayList<>();
+            List<String> sighashSpecs = new ArrayList<>();
+            for (MoveAttribute a : attrs) {
+                if (a.kind().equals("sighash")) sighashSpecs.add(a.flags());
+                else lost.add(a);
+            }
+            reportLostAttributes(lost);
+            SighashDirective.Result sighash =
+                SighashDirective.resolveNativeSighash(name, visibility == Visibility.PUBLIC, sighashSpecs);
+            if (sighash != null && sighash.isError()) {
+                errors.add(sighash.error());
+            }
+
             return new FnResult(
-                new MethodNode(name, params, body, visibility, location),
+                new MethodNode(name, params, body, visibility, location,
+                    sighash == null || sighash.isError() ? null : sighash.value()),
                 hasMut
             );
         }
@@ -909,7 +1047,7 @@ public final class MoveParser {
                     break;
                 }
 
-                String camelName = snakeToCamel(paramName);
+                String camelName = idents.declare(paramName, snakeToCamel(paramName));
                 params.add(new ParamNode(camelName, mapType(typeName)));
 
                 if (!match(Kind.COMMA)) break;
@@ -938,6 +1076,10 @@ public final class MoveParser {
         // -- statements ------------------------------------------------------
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("let")) return parseLetDecl(location);
@@ -954,7 +1096,7 @@ public final class MoveParser {
 
             matchIdent("mut");
             Token nameTok = expect(Kind.IDENT);
-            String varName = snakeToCamel(nameTok.value());
+            String varName = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
             TypeNode typeNode = null;
             if (match(Kind.COLON)) {
@@ -1023,7 +1165,8 @@ public final class MoveParser {
             List<Statement> elseBlock = null;
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
-                    Statement nested = parseIf(loc());
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement nested = nest.nested(() -> parseIf(loc()));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(nested);
                 } else {
@@ -1118,63 +1261,69 @@ public final class MoveParser {
         // -- expressions (precedence climbing) ------------------------------
 
         Expression parseExpression() {
-            return parseOr();
+            return nest.nested(this::parseOr);
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(Kind.PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitOr();
             while (match(Kind.AMPAMP)) {
                 Expression right = parseBitOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitOr() {
+            SourceLocation start = loc();
             Expression left = parseBitXor();
             while (match(Kind.PIPE)) {
                 Expression right = parseBitXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitXor() {
+            SourceLocation start = loc();
             Expression left = parseBitAnd();
             while (match(Kind.CARET)) {
                 Expression right = parseBitAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(Kind.AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(Kind.EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(Kind.NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1183,20 +1332,21 @@ public final class MoveParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(Kind.LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(Kind.LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(Kind.GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(Kind.GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1205,14 +1355,15 @@ public final class MoveParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(Kind.SHL)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(Kind.SHR)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1221,14 +1372,15 @@ public final class MoveParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(Kind.PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(Kind.MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1237,17 +1389,18 @@ public final class MoveParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(Kind.STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(Kind.SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(Kind.PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1256,22 +1409,23 @@ public final class MoveParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(Kind.BANG)) {
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.MINUS)) {
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.TILDE)) {
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Kind.AMP)) {
                 matchIdent("mut");
-                return parseUnary();
+                return nest.nested(this::parseUnary);
             }
             if (check(Kind.STAR) && isDeref()) {
                 advance();
-                return parseUnary();
+                return nest.nested(this::parseUnary);
             }
             return parsePostfix();
         }
@@ -1335,7 +1489,7 @@ public final class MoveParser {
 
             if (tok.kind() == Kind.STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value());
+                return new ByteStringLiteral(tok.value(), new SourceLocation(filename, tok.line(), tok.column()));
             }
 
             if (tok.kind() == Kind.IDENT) {
@@ -1370,10 +1524,10 @@ public final class MoveParser {
                         && (id.name().equals("contract") || id.name().equals("self"))) {
                         args = new ArrayList<>(args.subList(1, args.size()));
                     }
-                    return new CallExpr(new Identifier(mappedName), args);
+                    return new CallExpr(new Identifier(mappedName, new SourceLocation(filename, tok.line(), tok.column())), args);
                 }
 
-                return new Identifier(mappedName);
+                return new Identifier(mappedName, new SourceLocation(filename, tok.line(), tok.column()));
             }
 
             if (tok.kind() == Kind.LPAREN) {
@@ -1419,7 +1573,7 @@ public final class MoveParser {
 
         // -- constructor synthesis ------------------------------------------
 
-        MethodNode buildConstructor(List<PropertyNode> properties) {
+        MethodNode buildConstructor(List<PropertyNode> properties, SourceLocation loc) {
             List<PropertyNode> uninit = new ArrayList<>();
             for (PropertyNode p : properties) {
                 if (p.initializer() == null) uninit.add(p);
@@ -1432,7 +1586,6 @@ public final class MoveParser {
                 superArgs.add(new Identifier(p.name()));
             }
 
-            SourceLocation loc = new SourceLocation(filename, 1, 0);
             List<Statement> body = new ArrayList<>();
             body.add(new ExpressionStatement(
                 new CallExpr(new Identifier("super"), superArgs),
@@ -1530,7 +1683,8 @@ public final class MoveParser {
      */
     private static Statement foldCountingWhile(VariableDeclStatement decl, ForStatement stub) {
         String iterName = decl.name();
-        if (!(stub.condition() instanceof BinaryExpr cond)) return null;
+        // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+        if (!(LoopCondition.normalize(stub.condition(), iterName) instanceof BinaryExpr cond)) return null;
         if (!(cond.left() instanceof Identifier condLeft) || !condLeft.name().equals(iterName)) {
             return null;
         }

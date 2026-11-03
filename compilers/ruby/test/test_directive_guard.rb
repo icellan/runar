@@ -65,7 +65,7 @@ class TestDirectiveGuard < Minitest::Test
   end
 
   def test_non_directive_identifier_does_not_trip_guard
-    # A field named `sighashType` must NOT trip the word-boundary guard.
+    # A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard.
     source = <<~TS
       class Counter extends SmartContract {
         readonly sighashType: bigint;

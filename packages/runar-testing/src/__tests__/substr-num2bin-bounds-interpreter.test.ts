@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { compile } from 'runar-compiler';
 import { runStatelessSigned } from '../oracle/real-crypto-execution.js';
 
 /**
@@ -89,6 +90,17 @@ const B4 = new Uint8Array([1, 2, 3, 4]);
 const splitCase = (imports: string, expr: string): string =>
   edge(`${imports}, len`, 'b: ByteString', `    assert(len(${expr}) >= 0n);`);
 
+/**
+ * CK16-FU3: F-265 (03-typecheck.ts) refuses a LITERAL negative `substr` start
+ * at compile time, so a `substr(b, -1n, 1n)` case no longer reaches OP_SPLIT's
+ * runtime bounds check (NEW-010) -- it now fails `compile()` before either
+ * engine runs. To keep exercising the runtime check, `start` is taken as a
+ * method ARGUMENT here: the compiler sees only `start: bigint`, never the
+ * concrete `-1n`, so F-265's literal-only guard cannot see it either.
+ */
+const splitCaseRuntimeStart = (imports: string, startName: string, expr: string): string =>
+  edge(`${imports}, len`, `b: ByteString, ${startName}: bigint`, `    assert(len(${expr}) >= 0n);`);
+
 const numCase = (imports: string, body: string): string =>
   edge(imports, 'p: bigint', body);
 
@@ -109,7 +121,12 @@ const SPLIT_CASES: Case[] = [
   { label: 'substr(b, 5, 0) — start > len', source: splitCase('substr', 'substr(b, 5n, 0n)'), args: [B4], accepts: false },
   { label: 'substr(b, 0, 9) — start + len > len', source: splitCase('substr', 'substr(b, 0n, 9n)'), args: [B4], accepts: false },
   { label: 'substr(b, 3, 2) — start + len > len, start in range', source: splitCase('substr', 'substr(b, 3n, 2n)'), args: [B4], accepts: false },
-  { label: 'substr(b, -1, 1) — negative start', source: splitCase('substr', 'substr(b, -1n, 1n)'), args: [B4], accepts: false },
+  {
+    label: 'substr(b, -1, 1) — negative start (runtime arg; F-265 blocks the literal at compile time)',
+    source: splitCaseRuntimeStart('substr', 'start', 'substr(b, start, 1n)'),
+    args: [B4, -1n],
+    accepts: false,
+  },
   { label: 'substr(b, 0, -1) — negative length', source: splitCase('substr', 'substr(b, 0n, -1n)'), args: [B4], accepts: false },
 
   // --- left ---------------------------------------------------------------
@@ -230,6 +247,28 @@ describe('NEW-010 — the OP_SPLIT family is bounds-checked', () => {
       }
     });
   }
+
+  // CK16-FU3: F-265 added a compile-time refusal for a LITERAL negative
+  // `substr` start (03-typecheck.ts), on top of the runtime OP_SPLIT guard
+  // exercised above. Pin that it fires BEFORE either engine runs, so a
+  // regression that silently drops the compile-time check (letting the
+  // literal back through to codegen) is caught here even though the case
+  // above no longer uses a literal to reach the runtime path.
+  //
+  // What this proves: `substr(b, -1n, 1n)` — a literal negative start — is a
+  // typecheck error with the exact diagnostic text F-265 introduced.
+  // What this does NOT prove: that the runtime bounds check still rejects a
+  // negative start reaching codegen by other means — that is the case above.
+  it('substr(b, -1n, 1n) — literal negative start is a compile-time error (F-265)', () => {
+    const source = splitCase('substr', 'substr(b, -1n, 1n)');
+    const result = compile(source, { fileName: FILE });
+    expect(result.success).toBe(false);
+    expect(
+      result.diagnostics.some(
+        (d) => d.severity === 'error' && d.message.includes('substr() argument 2 (start) must be >= 0; got -1'),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('NEW-011 — num2bin rejects a width too small for the value', () => {

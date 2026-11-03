@@ -248,17 +248,25 @@ class TestMathBuiltinsCodegen < Minitest::Test
                  'divmod must emit canonical 2DUP DIV ROT ROT MOD DROP tail')
   end
 
-  # -- log2: 64-iter bit-scan under IF guard --------------------------------
+  # -- log2: exact read of the minimal encoding (N-103) ----------------------
+  #
+  # N-103 (user decision R86, 2026-10-21): this used to pin the 64-iteration
+  # bit-scan (>= 64 IF blocks, OP_1ADD), which capped log2 at 64. The lowering
+  # is now an exact, branch-free read of the operand's minimal encoding; this
+  # pins the whole sequence. Execution is covered by
+  # conformance/negatives/n103-log2-exact-parity.test.ts.
 
-  def test_log2_unrolls_64_bit_scan_iterations
+  def test_log2_reads_the_minimal_encoding_exactly
     artifact = compile_call_artifact('log2', 1)
     asm = artifact.asm
-    # 64 unrolled iterations: each guarded by an IF block.
-    op_if_count = asm.scan(/\bOP_IF\b/).length
-    assert_operator op_if_count, :>=, 64,
-                    "log2 must unroll ≥ 64 IF blocks for the 64-bit scan, got #{op_if_count}"
-    assert_includes asm, 'OP_1ADD',
-                    'log2 must emit OP_1ADD inside the bit-scan loop'
+    window = 'OP_BIN2NUM OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY ' \
+             'OP_SIZE OP_1SUB OP_TUCK OP_SPLIT OP_NIP OP_BIN2NUM ' \
+             'OP_SWAP OP_8 OP_MUL OP_1SUB ' +
+             %w[OP_1 OP_2 OP_4 OP_8 OP_16 <20> <40>]
+               .map { |c| "OP_OVER #{c} OP_GREATERTHANOREQUAL OP_ADD " }.join +
+             'OP_NIP'
+    assert_includes asm, window, 'log2 must emit the N-103 sequence'
+    assert_equal 0, asm.scan(/\bOP_IF\b/).length, 'log2 must be branch-free'
   end
 
   # -- Determinism: same source must produce byte-identical script ---------

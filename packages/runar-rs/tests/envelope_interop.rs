@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use runar_lang::sdk::{
     canonical_json, verify_envelope, SignedEnvelope, VerifyEnvelopeOpts, VerifyEnvelopeReason,
-    MAX_ENVELOPE_PAYLOAD_DEPTH,
+    MAX_ENVELOPE_FIELD_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES, MAX_ENVELOPE_PAYLOAD_DEPTH,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -241,6 +241,42 @@ fn payload_depth_vectors() {
     }
 }
 
+/// F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+/// signature, and the TS reference accepts it: BIP-62's low-S rule is
+/// transaction-script policy, not part of the envelope protocol. Ruby used to
+/// reject it as bad-sig. Proves this tier reaches the TS verdict on the
+/// fixture's high-S envelope; it does not prove anything about signing (every
+/// tier's signer still emits low-S).
+#[test]
+fn malleability_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["malleability_vectors"]
+        .as_array()
+        .expect("malleability_vectors missing");
+    assert!(!vectors.is_empty(), "malleability_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "bad-sig" => VerifyEnvelopeReason::BadSig,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
+    }
+}
+
 /// The bound is part of the wire contract, so the fixture pins it and every
 /// tier asserts its own constant against the fixture's number.
 #[test]
@@ -250,6 +286,57 @@ fn payload_depth_limit_matches_fixture() {
         fixture["payload_depth_limit"].as_u64().unwrap() as usize,
         MAX_ENVELOPE_PAYLOAD_DEPTH
     );
+}
+
+/// F-296. The DoS size bound is hard-coded per tier; the fixture's
+/// `size_limits` is the shared source of truth and every tier pins its own
+/// constants to it. Does not prove the other six tiers agree -- each replays
+/// this same fixture.
+#[test]
+fn size_limits_match_fixture() {
+    let fixture = load_fixture();
+    assert_eq!(
+        fixture["size_limits"]["max_payload_bytes"].as_u64().unwrap() as usize,
+        MAX_ENVELOPE_PAYLOAD_BYTES
+    );
+    assert_eq!(
+        fixture["size_limits"]["max_field_bytes"].as_u64().unwrap() as usize,
+        MAX_ENVELOPE_FIELD_BYTES
+    );
+}
+
+/// F-296. Replays `size_vectors`: one byte over each limit must be
+/// `too-large`; exactly at the limit must be rejected for a LATER reason (so
+/// the guard is not off by one). Proves this tier returns the fixture reason;
+/// says nothing about the sig/pubkey being well-formed.
+#[test]
+fn size_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["size_vectors"]
+        .as_array()
+        .expect("size_vectors missing");
+    assert!(vectors.len() >= 6, "size_vectors short");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap();
+        let big = "x".repeat(v["length"].as_u64().unwrap() as usize);
+        let mut env = envelope_from_value(&fixture["valid_envelope"]);
+        match v["field"].as_str().unwrap() {
+            "payload" => env.payload = big,
+            "sig" => env.sig = big,
+            "pubkey" => env.pubkey = big,
+            other => panic!("{id}: unknown field {other}"),
+        }
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        assert!(!r.ok, "{id}: expected ok=false");
+        let too_large = r.reason == Some(VerifyEnvelopeReason::TooLarge);
+        assert_eq!(too_large, v["expect_too_large"].as_bool().unwrap(), "{id}: {:?}", r.reason);
+    }
 }
 
 /// R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six

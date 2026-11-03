@@ -20,9 +20,10 @@
 //! `lowerMethodCall` immediately drops it again, so a trivial helper (`return x`)
 //! leaves exactly `push_int 0, OP_DROP` -- peephole rule 1, `PUSH(x) + DROP ->
 //! (removed)`. Any other body the peephole erases triggers the same divergence,
-//! which is why `p + 0n` (rule 6) and `p - 0n` (rule 7) are pinned here
+//! which is why `p + 0n` (rule 6) and `p - 0n` (rule 7) were pinned here
 //! alongside the helper calls: the trigger is "the else arm optimizes to
-//! nothing", not "the else arm contains a call".
+//! nothing", not "the else arm contains a call". (F-001 removed rules 6 and 7,
+//! so those two cases now pin the non-empty arm -- see ELSE_ARM_ADD_ZERO.)
 //!
 //! Every `want` below is the hex that ALL SIX other tiers (ts, go, rust, python,
 //! ruby, java) produce for that source, in both constant-folding modes.
@@ -91,9 +92,11 @@ const NESTED_TERNARY_IN_THEN_ARM = PRELUDE ++ ID_HELPER ++
     \\}
 ;
 
-/// No call anywhere -- the erasable body comes from peephole rule 6
-/// (`PUSH(0) + OP_ADD -> (removed)`). Proves the trigger is the ERASURE, not
-/// the private method.
+/// No call anywhere -- the erasable body USED TO come from peephole rule 6
+/// (`PUSH(0) + OP_ADD -> (removed)`). F-001 removed that rule (OP_ADD
+/// validates and normalises its CScriptNum operand), so the arm is no longer
+/// empty and all seven tiers now emit `OP_ELSE OP_0 OP_ADD`: this case now
+/// pins that a NON-empty else arm keeps its `OP_ELSE`.
 const ELSE_ARM_ADD_ZERO = PRELUDE ++
     \\
     \\  public m(f: boolean, p: bigint): void {
@@ -102,7 +105,7 @@ const ELSE_ARM_ADD_ZERO = PRELUDE ++
     \\}
 ;
 
-/// Same, via peephole rule 7 (`PUSH(0) + OP_SUB -> (removed)`).
+/// Same, via the former peephole rule 7 (`PUSH(0) + OP_SUB`; also F-001).
 const ELSE_ARM_SUB_ZERO = PRELUDE ++
     \\
     \\  public m(f: boolean, p: bigint): void {
@@ -203,8 +206,8 @@ const REGRESSION_CASES = [_]Case{
     .{ .label = "both-arms/private-call", .source = BOTH_ARMS_PRIVATE_CALL, .want = "787600877c51879b697c6368009c" },
     .{ .label = "nested-ternary/inner-else", .source = NESTED_TERNARY_INNER_ELSE, .want = "52797600877c51879b69787600877c51879b697b63007b7577677c6300776868009c" },
     .{ .label = "nested-ternary/in-then-arm", .source = NESTED_TERNARY_IN_THEN_ARM, .want = "52797600877c51879b69787600877c51879b697b637c6300776867007b757768009c" },
-    .{ .label = "else-arm/p+0n", .source = ELSE_ARM_ADD_ZERO, .want = "787600877c51879b697c63007768009c" },
-    .{ .label = "else-arm/p-0n", .source = ELSE_ARM_SUB_ZERO, .want = "787600877c51879b697c63007768009c" },
+    .{ .label = "else-arm/p+0n", .source = ELSE_ARM_ADD_ZERO, .want = "787600877c51879b697c63007767009368009c" },
+    .{ .label = "else-arm/p-0n", .source = ELSE_ARM_SUB_ZERO, .want = "787600877c51879b697c63007767009468009c" },
 };
 
 /// The shapes N-100 must leave alone. `want` is the hex Zig already emitted
@@ -213,7 +216,8 @@ const CONTROL_CASES = [_]Case{
     .{ .label = "ctl/ternary-no-call", .source = CTL_TERNARY_NO_CALL, .want = "787600877c51879b697c63007768009c" },
     .{ .label = "ctl/then-arm-private-call", .source = CTL_THEN_ARM_PRIVATE_CALL, .want = "787600877c51879b697c6367007768009c" },
     .{ .label = "ctl/statement-private-call", .source = CTL_STATEMENT_PRIVATE_CALL, .want = "76009c77" },
-    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "787600877c51879b69007b630076537a7577677c767676537a75777768517a75009c" },
+    // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff vs the old pin is folds only (Go agrees).
+    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "787600877c51879b69007b630076537a7577677c767676537a757777687c75009c" },
     .{ .label = "ctl/else-arm-builtin-call", .source = CTL_ELSE_ARM_BUILTIN_CALL, .want = "787600877c51879b697c630077679068009c" },
     .{ .label = "ctl/else-arm-nontrivial-helper", .source = CTL_ELSE_ARM_NONTRIVIAL_HELPER, .want = "787600877c51879b697c630077678b68009c" },
     .{ .label = "ctl/if-statement-both-arms-call", .source = CTL_IF_STATEMENT_BOTH_ARMS_CALL, .want = "787600877c51879b697c6300009c7767767c9c68" },

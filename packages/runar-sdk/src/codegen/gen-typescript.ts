@@ -39,7 +39,7 @@ export function generateTypescript(artifact: RunarArtifact): string {
 
   // Imports
   emit("import { RunarContract, buildP2PKHScript } from 'runar-sdk';");
-  emit("import type { Provider, Signer, TransactionData, DeployOptions, RunarArtifact, PreparedCall } from 'runar-sdk';");
+  emit("import type { Provider, Signer, TransactionData, DeployOptions, RunarArtifact, PreparedCall, Inscription } from 'runar-sdk';");
   blank();
 
   // Result type alias
@@ -116,6 +116,13 @@ export function generateTypescript(artifact: RunarArtifact): string {
   emit(`    const instance = Object.create(${name}Contract.prototype) as ${name}Contract;`);
   emit('    (instance as any).inner = await RunarContract.fromTxId(artifact, txid, outputIndex, provider);');
   emit('    return instance;');
+  emit('  }');
+  blank();
+
+  // attachInscription
+  emit('  attachInscription(insc: Inscription): this {');
+  emit('    this.inner.withInscription(insc);');
+  emit('    return this;');
   emit('  }');
   blank();
 

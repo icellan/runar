@@ -5,7 +5,6 @@ package compiler
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -16,14 +15,15 @@ import (
 // These tests compile .runar.ts files through the TS compiler to produce IR,
 // then verify the Go compiler can process the IR and produce valid output.
 // Run with: go test -tags integration -v
+//
+// TestGoBinaryCompilation (the CLI-level `--ir` test, F-313) lives in
+// cli_ir_test.go instead, with no build tag: CI's default go-compiler job
+// runs `go test ./compiler` without `-tags integration`, so a test gated
+// here would never execute there.
 // ---------------------------------------------------------------------------
 
 func tsCompilerDir() string {
 	return filepath.Join("..", "..", "..", "compiler")
-}
-
-func integrationConformanceDir() string {
-	return filepath.Join("..", "..", "..", "conformance", "tests")
 }
 
 // TestTStoGoIntegration compiles conformance test expected-ir.json files
@@ -44,9 +44,7 @@ func TestTStoGoIntegration(t *testing.T) {
 			irPath := filepath.Join(integrationConformanceDir(), dir, "expected-ir.json")
 
 			// Verify the IR file exists
-			if _, err := os.Stat(irPath); os.IsNotExist(err) {
-				t.Skipf("conformance IR not found: %s", irPath)
-			}
+			requireFixtureFile(t, irPath)
 
 			// Read the IR and compile with the Go compiler
 			irData, err := os.ReadFile(irPath)
@@ -75,40 +73,4 @@ func TestTStoGoIntegration(t *testing.T) {
 			t.Logf("OK: %s -> %s (hex=%d bytes)", dir, artifact.ContractName, len(artifact.Script)/2)
 		})
 	}
-}
-
-// TestGoBinaryCompilation verifies that the Go compiler binary can be built
-// and invoked from the command line with a conformance test IR.
-func TestGoBinaryCompilation(t *testing.T) {
-	// Build the Go compiler binary
-	tmpBin := filepath.Join(t.TempDir(), "runar-go")
-	cmd := exec.Command("go", "build", "-o", tmpBin, ".")
-	cmd.Dir = filepath.Join("..")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to build Go compiler binary: %v\n%s", err, output)
-	}
-
-	// Run against a conformance test IR
-	irPath := filepath.Join(integrationConformanceDir(), "basic-p2pkh", "expected-ir.json")
-	if _, err := os.Stat(irPath); os.IsNotExist(err) {
-		t.Skipf("conformance IR not found: %s", irPath)
-	}
-
-	absIRPath, err := filepath.Abs(irPath)
-	if err != nil {
-		t.Fatalf("failed to get absolute path: %v", err)
-	}
-
-	cmd = exec.Command(tmpBin, "--ir", absIRPath)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Go compiler binary failed: %v\n%s", err, output)
-	}
-
-	if len(output) == 0 {
-		t.Error("expected non-empty output from Go compiler binary")
-	}
-
-	t.Logf("Binary output length: %d bytes", len(output))
 }

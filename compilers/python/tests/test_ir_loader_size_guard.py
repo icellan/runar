@@ -55,9 +55,13 @@ def test_load_ir_accepts_minimal_program() -> None:
     # public method => empty locking script => spendable with OP_1). The test's
     # subject is the DoS caps, not the schema, so the fix is a fixture that is
     # genuinely minimal AND valid rather than a weaker assertion.
+    # F-014: and a public method must end with an assert, so the body is one
+    # constant plus the assert on it.
     minimal = (
         '{"contractName":"X","properties":[],'
-        '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}'
+        '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":['
+        '{"name":"t0","value":{"kind":"load_const","value":true}},'
+        '{"name":"t1","value":{"kind":"assert","value":"t0"}}]}]}'
     )
     program = load_ir(minimal)
     assert program is not None

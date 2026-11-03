@@ -62,6 +62,15 @@ public final class AnfInterpreter {
         "_changePKH", "_changeAmount", "_newAmount", "txPreimage"
     );
 
+    /** F-024 (R14): true for the integer shapes a caller may pass as the input amount. */
+    private static boolean isInteger(Object v) {
+        return v instanceof BigInteger || v instanceof Long || v instanceof Integer;
+    }
+
+    private static BigInteger toBigIntegerValue(Object v) {
+        return v instanceof BigInteger b ? b : BigInteger.valueOf(((Number) v).longValue());
+    }
+
     /**
      * The on-disk ANF spelling of a bigint literal: decimal digits with a
      * trailing {@code n}. Unambiguous against a hex ByteString literal, which
@@ -189,7 +198,26 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null, null);
+        return computeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs, null);
+    }
+
+    /**
+     * R67: like {@link #computeNewStateAndDataOutputs(Map, String, Map, Map, List)},
+     * but additionally supplies a {@link WitnessContext} so
+     * {@code extractScriptCode(txPreimage)} can return the contract's own
+     * real codePart (set via {@code witness.setMockPreimageBytes("scriptCode",
+     * ...)}) instead of the historical empty dummy. {@code RunarContract}'s
+     * call path always supplies one now.
+     */
+    public static ExecutionResult computeNewStateAndDataOutputs(
+        Map<String, Object> anf,
+        String methodName,
+        Map<String, Object> currentState,
+        Map<String, Object> args,
+        List<Object> constructorArgs,
+        WitnessContext witness
+    ) {
+        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null, witness);
         return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs, r.outputs);
     }
 
@@ -317,10 +345,12 @@ public final class AnfInterpreter {
      * verification through BouncyCastle. Failure trips the enclosing
      * {@code assert(...)} and throws {@link AssertionFailureException}.
      *
-     * <p>{@code checkMultiSig(sigs, pks)} iterates signatures left-to-right
-     * and consumes pubkeys greedily, mirroring Bitcoin's
-     * {@code OP_CHECKMULTISIG}. {@code sigs} and {@code pks} must be
-     * {@code List<?>} of hex strings or byte arrays.
+     * <p>{@code checkMultiSig(sigs, pks)} runs {@code OP_CHECKMULTISIG} as
+     * {@code Spend} does: last signature against last key first, the same
+     * encoding gates on every examined pair, NULLFAIL on a failing check with
+     * a non-empty signature (N-259, see {@link #verifyMultiSigReal}).
+     * {@code sigs} and {@code pks} must be {@code List<?>} of hex strings or
+     * byte arrays.
      *
      * <p>{@code checkPreimage(preimage)} computes
      * {@code SHA256(SHA256(preimage))} and compares to {@code ctx.sighash}
@@ -496,7 +526,14 @@ public final class AnfInterpreter {
         List<Map<String, Object>> params = listOfObjects(method.get("params"));
         for (Map<String, Object> param : params) {
             String pname = (String) param.get("name");
-            if (IMPLICIT_PARAMS.contains(pname)) continue;
+            // F-024 (R14): a caller that knows the continuation's satoshis
+            // binds `_newAmount` (what `continuationAmount()` reads), and one
+            // that knows the spent UTXO's satoshis passes them as an INTEGER
+            // `txPreimage` (a real preimage is bytes), which `extractAmount`
+            // then returns.
+            boolean callerBound = ("_newAmount".equals(pname) && args.containsKey(pname))
+                || ("txPreimage".equals(pname) && isInteger(args.get(pname)));
+            if (IMPLICIT_PARAMS.contains(pname) && !callerBound) continue;
             if (pname != null && pname.startsWith("_prevOutScript_")) {
                 int idx;
                 try {
@@ -542,7 +579,27 @@ public final class AnfInterpreter {
             }
             if (args.containsKey(pname)) {
                 env.put(pname, args.get(pname));
+            } else if (pname != null && pname.endsWith("@local")) {
+                // N-360: a property-named public param the method reassigns is
+                // bound in the ANF under its `<name>@local` slot; the caller's
+                // args (and the ABI) use the source name.
+                String source = pname.substring(0, pname.length() - "@local".length());
+                if (args.containsKey(source)) {
+                    env.put(pname, args.get(source));
+                }
             }
+        }
+        // F-024 (R14): with no caller-supplied `_newAmount`, model the honest
+        // continuation — it keeps the input's value, i.e. whatever
+        // `extractAmount(txPreimage)` answers in this run — so the injected
+        // `_newAmount >= extractAmount(txPreimage)` check (enforced in strict
+        // mode) and `continuationAmount()` reads see a defined amount.
+        boolean hasNewAmountParam = params.stream().anyMatch(p -> "_newAmount".equals(p.get("name")));
+        if (hasNewAmountParam && !env.containsKey("_newAmount")) {
+            Object txp = env.get("txPreimage");
+            env.put("_newAmount", isInteger(txp)
+                ? toBigIntegerValue(txp)
+                : (witness != null ? witness.mockBigInt("amount", BigInteger.valueOf(10_000)) : BigInteger.valueOf(10_000)));
         }
 
         Map<String, Object> stateDelta = new LinkedHashMap<>();
@@ -581,7 +638,91 @@ public final class AnfInterpreter {
         // so each private method gets its own map — matching the TS/Go/Python
         // references, which pass no scriptBytes across the private-method
         // boundary.
-        evalBindings(anf, bindings, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, new java.util.HashSet<>(), new HashMap<>());
+        // F-164 (round 2): compute the mocked-prologue-assert identity set
+        // once per bindings list (fresh for the top-level method body AND
+        // for each private-method-call body — both route through this
+        // overload), for plain strict mode only (on-chain mode keeps
+        // enforcing both prologue asserts for real, unchanged).
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts = (strict && realCrypto == null)
+            ? detectAutoInjectedPrologueAsserts(bindings)
+            : java.util.Collections.emptySet();
+        evalBindings(anf, bindings, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, new java.util.HashSet<>(), new HashMap<>(), mockedPrologueAsserts);
+    }
+
+    /**
+     * F-164 (round 2): Java port of the TS reference's
+     * {@code detectAutoInjectedPrologueAsserts}
+     * (packages/runar-sdk/src/anf-interpreter.ts) — see that function's doc
+     * comment for the full rationale. Structural (shape/position-based,
+     * NOT binding-name-based) detection of the fixed 8-binding sequence
+     * {@code compilers/java/.../passes/AnfLower.java}'s stateful-prologue
+     * emitter injects at the START of every public StatefulSmartContract
+     * method:
+     *
+     * <pre>
+     * [0] load_param txPreimage
+     * [1] check_preimage(preimage: [0])
+     * [2] assert([1])                              &lt;- mocked in strict mode
+     * [3] load_param txPreimage
+     * [4] call extractSigHashType([3])
+     * [5] load_const &lt;declared sighash mode&gt;
+     * [6] bin_op === ([4], [5])
+     * [7] assert([6])                              &lt;- mocked in strict mode
+     * </pre>
+     *
+     * This sequence can only appear at index 0 of a bindings list — the
+     * compiler emits it before a single line of developer code, so a
+     * user-written assert (even one that also calls
+     * {@code extractSigHashType}) is lowered AFTER it, at a later index,
+     * and is never matched here.
+     *
+     * <p>We don't mark these two ANF nodes with the existing
+     * {@code isAutoInjectedStateCheck} field the way the exit-time
+     * continuation-hash assert is marked: that field is part of the
+     * serialized ANF IR, and setting it on the prologue asserts would add
+     * a key to {@code conformance/tests/*&#47;expected-ir.json} for every
+     * stateful fixture — a compiler-golden move this item must not cause.
+     * An {@link java.util.IdentityHashMap}-backed set is used so membership
+     * is by object REFERENCE, not by structural equality (two developer-
+     * written asserts with identical content must never collide with the
+     * prologue's own nodes).
+     */
+    private static java.util.Set<Map<String, Object>> detectAutoInjectedPrologueAsserts(
+        List<Map<String, Object>> body
+    ) {
+        java.util.Set<Map<String, Object>> result =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        if (body.size() < 8) return result;
+        Map<String, Object> b0 = body.get(0);
+        Map<String, Object> b1 = body.get(1);
+        Map<String, Object> b2 = body.get(2);
+        Map<String, Object> b3 = body.get(3);
+        Map<String, Object> b4 = body.get(4);
+        Map<String, Object> b5 = body.get(5);
+        Map<String, Object> b6 = body.get(6);
+        Map<String, Object> b7 = body.get(7);
+        Map<String, Object> v0 = asObject(b0.get("value"));
+        Map<String, Object> v1 = asObject(b1.get("value"));
+        Map<String, Object> v2 = asObject(b2.get("value"));
+        Map<String, Object> v3 = asObject(b3.get("value"));
+        Map<String, Object> v4 = asObject(b4.get("value"));
+        Map<String, Object> v5 = asObject(b5.get("value"));
+        Map<String, Object> v6 = asObject(b6.get("value"));
+        Map<String, Object> v7 = asObject(b7.get("value"));
+        if (v0 == null || !"load_param".equals(v0.get("kind")) || !"txPreimage".equals(v0.get("name"))) return result;
+        if (v1 == null || !"check_preimage".equals(v1.get("kind"))) return result;
+        if (v2 == null || !"assert".equals(v2.get("kind")) || !b1.get("name").equals(v2.get("value"))) return result;
+        if (v3 == null || !"load_param".equals(v3.get("kind")) || !"txPreimage".equals(v3.get("name"))) return result;
+        if (v4 == null || !"call".equals(v4.get("kind")) || !"extractSigHashType".equals(v4.get("func"))) return result;
+        List<String> args4 = stringList(v4.get("args"));
+        if (args4.isEmpty() || !args4.get(0).equals(b3.get("name"))) return result;
+        if (v5 == null || !"load_const".equals(v5.get("kind"))) return result;
+        if (v6 == null || !"bin_op".equals(v6.get("kind")) || !"===".equals(v6.get("op"))
+            || !b4.get("name").equals(v6.get("left")) || !b5.get("name").equals(v6.get("right"))) return result;
+        if (v7 == null || !"assert".equals(v7.get("kind")) || !b6.get("name").equals(v7.get("value"))) return result;
+        result.add(v2);
+        result.add(v7);
+        return result;
     }
 
     /**
@@ -611,12 +752,19 @@ public final class AnfInterpreter {
         // non-minimal) length of a prior op's result instead of re-minimising
         // its numeric value. `env` stays pure (decoded values) so state
         // serialization is unaffected.
-        Map<String, byte[]> scriptBytes
+        Map<String, byte[]> scriptBytes,
+        // F-164 (round 2): identity set of the auto-injected prologue's two
+        // assert VALUE nodes (checkPreimage's assert + the sighash-type
+        // assert) — see detectAutoInjectedPrologueAsserts. Computed once
+        // per bindings list by the short evalBindings overload; threaded
+        // unchanged through nested if/loop recursion here so object
+        // identity keeps working regardless of nesting depth.
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts
     ) {
         for (Map<String, Object> binding : bindings) {
             String bindingName = (String) binding.get("name");
             Map<String, Object> valueNode = asObject(binding.get("value"));
-            Object val = evalValue(anf, valueNode, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, bindingName, continuationTaint, scriptBytes);
+            Object val = evalValue(anf, valueNode, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, bindingName, continuationTaint, scriptBytes, mockedPrologueAsserts);
             env.put(bindingName, val);
             if (isContinuationOrigin(valueNode) || refsTainted(valueNode, continuationTaint)) {
                 continuationTaint.add(bindingName);
@@ -690,7 +838,8 @@ public final class AnfInterpreter {
         String methodName,
         String bindingName,
         java.util.Set<String> continuationTaint,
-        Map<String, byte[]> scriptBytes
+        Map<String, byte[]> scriptBytes,
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts
     ) {
         String kind = String.valueOf(value.getOrDefault("kind", ""));
 
@@ -845,7 +994,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes, mockedPrologueAsserts);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     String lastName = (String) branch.get(branch.size() - 1).get("name");
@@ -869,7 +1018,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, start.add(step.multiply(BigInteger.valueOf(i))));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes, mockedPrologueAsserts);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         String lastName = (String) body.get(body.size() - 1).get("name");
@@ -897,6 +1046,19 @@ public final class AnfInterpreter {
                     if (Boolean.TRUE.equals(value.get("isAutoInjectedStateCheck"))) {
                         return null;
                     }
+                    // F-164 (round 2): the auto-injected prologue's
+                    // checkPreimage assert and sighash-type assert
+                    // (detected structurally — see
+                    // detectAutoInjectedPrologueAsserts) are mocked in
+                    // plain strict mode, matching PROTOCOL.md's documented
+                    // "crypto built-ins still mock-return true" contract.
+                    // Always empty when realCrypto is set (computed by the
+                    // short evalBindings overload), so
+                    // executeOnChainAuthoritative keeps enforcing both for
+                    // real.
+                    if (mockedPrologueAsserts.contains(value)) {
+                        return null;
+                    }
                     String predRef = (String) value.get("value");
                     Object cond = env.get(predRef);
                     if (!isTruthy(cond)) {
@@ -906,18 +1068,13 @@ public final class AnfInterpreter {
                 return null;
             }
             case "check_preimage": {
-                // On-chain-only: the on-chain script enforces sighash
-                // equality. Off-chain we can only mock it once the caller has
-                // supplied witness bytes (i.e. is genuinely simulating a
-                // concrete spend) — then mock-return TRUE so the wrapping
-                // `assert(check_preimage(...))` in the stateful-contract
-                // prologue doesn't trip strict mode. With no WitnessContext
-                // the preimage is unverifiable off-chain, so we return a
-                // falsy value and let strict mode report the failure at the
-                // prologue assert — matching the TS/Go/Rust/Ruby/Zig tiers
-                // (and the pinned cross-interpreter strict goldens). Real
-                // preimage verification belongs in executeOnChainAuthoritative.
-                return witness != null ? Boolean.TRUE : null;
+                // F-164: mirrors the "checkPreimage" call-path case below
+                // (mock TRUE unless a real-crypto context is active) — same
+                // mock/real split, regardless of whether a WitnessContext
+                // is also present.
+                if (realCrypto == null) return Boolean.TRUE;
+                String preRef = (String) value.get("preimage");
+                return verifyPreimageReal(env.get(preRef), realCrypto.sighash());
             }
             case "update_prop": {
                 String pname = (String) value.get("name");
@@ -974,6 +1131,19 @@ public final class AnfInterpreter {
                 // index (finding G1).
                 outputs.add(new OrderedOutput("raw", sats, script));
                 return null;
+            }
+            case "array_literal": {
+                // N-259: the element values, in order. Its only consumer is
+                // checkMultiSig, which lenient mode mocks to true and on-chain
+                // mode verifies over these lists; returning null made on-chain
+                // checkMultiSig answer false for every input, a valid multisig
+                // included.
+                List<Object> out = new ArrayList<>();
+                Object elems = value.get("elements");
+                if (elems instanceof List<?> refs) {
+                    for (Object ref : refs) out.add(env.get((String) ref));
+                }
+                return out;
             }
             default:
                 if (CHAIN_ONLY_KINDS.contains(kind)) return null;
@@ -1045,8 +1215,14 @@ public final class AnfInterpreter {
             case "+":  return l.add(r);
             case "-":  return l.subtract(r);
             case "*":  return l.multiply(r);
-            case "/":  return r.signum() == 0 ? BigInteger.ZERO : l.divide(r);
-            case "%":  return r.signum() == 0 ? BigInteger.ZERO : l.remainder(r);
+            // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so
+            // there is no post-state to compute (same refusal as safediv).
+            case "/":
+                if (r.signum() == 0) throw new InterpreterException("OP_DIV: division by zero (the script aborts here)");
+                return l.divide(r);
+            case "%":
+                if (r.signum() == 0) throw new InterpreterException("OP_MOD: modulo by zero (the script aborts here)");
+                return l.remainder(r);
             case "==": case "===": return l.compareTo(r) == 0;
             case "!=": case "!==": return l.compareTo(r) != 0;
             case "<":  return l.compareTo(r) < 0;
@@ -1285,7 +1461,28 @@ public final class AnfInterpreter {
             // Mocked crypto unless real-crypto context is supplied.
             case "checkSig": {
                 if (realCrypto == null) return Boolean.TRUE;
-                return verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
+                // N-197: OP_CHECKSIG ABORTS on a malformed signature or
+                // public-key encoding; it does not push false. Answering false
+                // let `checkSig(a, A) || checkSig(b, B)` take the other arm and
+                // accept a spend the chain aborts on.
+                String reason = checkSigEncodingError(args.get(0), args.get(1));
+                if (reason != null) {
+                    throw new InterpreterException("checkSig: " + reason
+                        + " \u2014 OP_CHECKSIG aborts the script on a malformed signature or public key encoding, it does not push false");
+                }
+                boolean ok = verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
+                // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature
+                // that does not verify aborts the script; only an empty one
+                // pushes false. So the arm of `checkSig(a, A) || checkSig(b, B)`
+                // that must fail takes an empty signature (EMPTY_SIG, issue
+                // #106). Spend has no NULLFAIL.
+                byte[] sigBytes = toBytes(args.get(0));
+                if (!ok && sigBytes != null && sigBytes.length > 0) {
+                    throw new InterpreterException("checkSig: the signature is non-empty and does not verify (NULLFAIL)"
+                        + " \u2014 OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false;"
+                        + " the arm that must fail takes an empty signature (EMPTY_SIG)");
+                }
+                return ok;
             }
             case "checkMultiSig": {
                 if (realCrypto == null) return Boolean.TRUE;
@@ -1312,22 +1509,27 @@ public final class AnfInterpreter {
             }
             case "bin2num":    return bin2numBigInt(asString(args.get(0)));
             case "cat":        return asString(args.get(0)) + asString(args.get(1));
+            // R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP
+            // <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the
+            // second against the REMAINDER `size(data) - start`. It
+            // ABORTS whenever `start` is outside [0, size(data)] or
+            // `length` is outside [0, size(data) - start], which
+            // collapses to: start<0, length<0, or start+length>size(data).
+            // This used to clamp -- the comment here used to say "Empty
+            // extractScriptCode (SDK mock) + substr(sc, 0, len-49) produces
+            // a negative length ... match Go", but Go's own clamp was
+            // ITSELF the bug (N-171). `extractScriptCode` now supplies a
+            // realistic scriptCode (R67) so the one caller that fed this an
+            // empty placeholder (FungibleToken.merge) no longer hits the
+            // abort path either.
             case "substr": {
                 String h = asString(args.get(0));
                 int s = toBigInt(args.get(1)).intValueExact();
                 int len = toBigInt(args.get(2)).intValueExact();
-                // Empty extractScriptCode (SDK mock) + substr(sc, 0, len-49)
-                // produces a negative length. String.substring throws; Bitcoin
-                // Script and the TS interpreter yield empty. Match Go.
-                if (s < 0 || len <= 0) {
-                    return "";
+                if (s < 0 || len < 0 || (long) s * 2 + (long) len * 2 > h.length()) {
+                    throw new ArithmeticException("substr: start " + s + ", length " + len + " is outside a " + h.length() / 2 + "-byte value");
                 }
-                int lo = Math.min(s * 2, h.length());
-                int hi = Math.min((s + len) * 2, h.length());
-                if (hi < lo) {
-                    return "";
-                }
-                return h.substring(lo, hi);
+                return h.substring(s * 2, s * 2 + len * 2);
             }
             case "reverseBytes": {
                 String h = asString(args.get(0));
@@ -1339,46 +1541,105 @@ public final class AnfInterpreter {
             }
             case "len":        return BigInteger.valueOf(asString(args.get(0)).length() / 2);
 
+            // F-274: `left`/`right` compile to an OP_SPLIT-based script that
+            // ABORTS whenever the computed split position is outside
+            // [0, size(data)] -- `left` splits at `length` directly, `right`
+            // splits at `size(data) - length` (05-stack-lower.ts:
+            // BUILTIN_OPCODES.left, lowerRight). A negative or past-the-end
+            // `length` must throw, never return a clamped value.
+            case "left": {
+                String h = asString(args.get(0));
+                int len = toBigInt(args.get(1)).intValueExact();
+                if (len < 0 || len * 2 > h.length()) {
+                    throw new ArithmeticException("left: length " + len + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(0, len * 2);
+            }
+            case "right": {
+                String h = asString(args.get(0));
+                int len = toBigInt(args.get(1)).intValueExact();
+                if (len < 0 || len * 2 > h.length()) {
+                    throw new ArithmeticException("right: length " + len + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(h.length() - len * 2);
+            }
+
+            // N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds
+            // the RIGHT half. It ABORTS whenever `index` is outside
+            // [0, size(data)]. Unmodelled before this (fell through to the
+            // `default` arm's `null`), the same bug shape F-274 fixed for
+            // `left`/`right`.
+            //
+            // `substr` is deliberately NOT fixed here: its default
+            // `extractScriptCode` mock is empty, and FungibleToken's `merge`
+            // method computes `substr(sc, 0, 1)` on that placeholder during
+            // off-chain state derivation -- a POSITIVE overflow this check
+            // would have to reject, breaking state derivation for every
+            // token-ft-shaped contract (escalated, not fixed here).
+            case "split": {
+                String h = asString(args.get(0));
+                int index = toBigInt(args.get(1)).intValueExact();
+                if (index < 0 || index * 2 > h.length()) {
+                    throw new ArithmeticException("split: index " + index + " is outside a " + h.length() / 2 + "-byte value");
+                }
+                return h.substring(index * 2);
+            }
+
             // Math built-ins (delegate to MockCrypto where possible)
             case "abs":        return MockCrypto.abs(toBigInt(args.get(0)));
             case "min":        return MockCrypto.min(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "max":        return MockCrypto.max(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "within":     return MockCrypto.within(toBigInt(args.get(0)), toBigInt(args.get(1)), toBigInt(args.get(2)));
+            // The division-shaped builtins and pow/sqrt ABORT where the
+            // compiled script aborts (zero divisor in OP_DIV/OP_MOD, the pow
+            // exponent guard, the sqrt domain guards) instead of inventing a
+            // value, like the other opcode-abort paths here (F-134).
             case "safediv": {
                 BigInteger d = toBigInt(args.get(1));
-                if (d.signum() == 0) return BigInteger.ZERO;
+                if (d.signum() == 0) throw new InterpreterException("safediv: division by zero");
                 return toBigInt(args.get(0)).divide(d);
             }
             case "safemod": {
                 BigInteger d = toBigInt(args.get(1));
-                if (d.signum() == 0) return BigInteger.ZERO;
+                if (d.signum() == 0) throw new InterpreterException("safemod: modulo by zero");
                 return toBigInt(args.get(0)).remainder(d);
             }
             case "clamp":      return MockCrypto.clamp(toBigInt(args.get(0)), toBigInt(args.get(1)), toBigInt(args.get(2)));
             case "sign":       return MockCrypto.sign(toBigInt(args.get(0)));
             case "pow": {
                 BigInteger e = toBigInt(args.get(1));
-                if (e.signum() < 0) return BigInteger.ZERO;
+                if (e.signum() < 0) throw new InterpreterException("pow: negative exponent");
+                if (e.compareTo(BigInteger.valueOf(32)) > 0) {
+                    throw new InterpreterException("pow: exponent outside the supported domain (exp > 32)");
+                }
                 return MockCrypto.pow(toBigInt(args.get(0)), e);
             }
             case "sqrt": {
                 BigInteger v = toBigInt(args.get(0));
-                if (v.signum() <= 0) return BigInteger.ZERO;
+                if (v.signum() < 0) throw new InterpreterException("sqrt: negative input");
+                if (v.bitLength() > 495) {
+                    throw new InterpreterException("sqrt: input outside the supported domain (n >= 2^495)");
+                }
                 return v.sqrt();
             }
             case "gcd":        return MockCrypto.gcd(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "divmod": {
                 BigInteger b = toBigInt(args.get(1));
-                if (b.signum() == 0) return BigInteger.ZERO;
+                if (b.signum() == 0) throw new InterpreterException("divmod: division by zero");
                 return toBigInt(args.get(0)).divide(b);
             }
             case "log2": {
                 BigInteger v = toBigInt(args.get(0));
-                if (v.signum() <= 0) return BigInteger.ZERO;
+                // The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+                if (v.signum() <= 0) throw new InterpreterException("log2: non-positive input");
                 return BigInteger.valueOf(v.bitLength() - 1);
             }
             case "bool":       return isTruthy(args.get(0)) ? BigInteger.ONE : BigInteger.ZERO;
-            case "mulDiv":     return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(toBigInt(args.get(2)));
+            case "mulDiv": {
+                BigInteger c = toBigInt(args.get(2));
+                if (c.signum() == 0) throw new InterpreterException("mulDiv: division by zero");
+                return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(c);
+            }
             case "percentOf":  return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(BigInteger.valueOf(10000));
 
             // Preimage extractors. When a WitnessContext is supplied, read
@@ -1390,6 +1651,8 @@ public final class AnfInterpreter {
                     ? witness.mockBigInt("locktime", BigInteger.ZERO)
                     : BigInteger.ZERO;
             case "extractAmount":
+                // F-024 (R14): an integer txPreimage is the caller-supplied input amount.
+                if (!args.isEmpty() && isInteger(args.get(0))) return toBigIntegerValue(args.get(0));
                 return witness != null
                     ? witness.mockBigInt("amount", BigInteger.valueOf(10_000))
                     : BigInteger.valueOf(10_000);
@@ -1422,8 +1685,15 @@ public final class AnfInterpreter {
                 return HEX.formatHex(
                     witness != null ? witness.mockBytes("outpoint", new byte[36]) : new byte[36]
                 );
+            // R67: the contract's own real codePart when the caller
+            // supplied it via `WitnessContext.setMockPreimageBytes("scriptCode",
+            // ...)` -- `RunarContract`'s call path always supplies it now.
+            // Falls back to the historical empty dummy otherwise (e.g. a
+            // bare `computeNewState` call with no witness in a test).
             case "extractScriptCode":
-                return "";
+                return witness != null
+                    ? HEX.formatHex(witness.mockBytes("scriptCode", new byte[0]))
+                    : "";
 
             // Post-quantum / proof-system primitives — delegate to MockCrypto
             // so they raise UnsupportedOperationException loudly. Never silently
@@ -1538,11 +1808,60 @@ public final class AnfInterpreter {
     }
 
     /**
+     * N-197: why {@code OP_CHECKSIG} would ABORT the whole script on these
+     * operands, or {@code null} when it would run and push a boolean. Mirrors
+     * {@code @bsv/sdk} {@code Spend}'s {@code checkSignatureEncoding} then
+     * {@code checkPublicKeyEncoding} (version-1 rules): a non-empty signature
+     * must be strict DER (BIP66) with a low S; the public key -- checked even
+     * when the signature is empty -- must be 33 bytes behind 0x02/0x03 or 65
+     * bytes behind 0x04 and decode to a curve point (the shape is checked
+     * first: BouncyCastle's decodePoint also accepts 0x06/0x07 hybrid keys).
+     * An empty signature, or a well-formed one that does not verify, is not an
+     * encoding abort ({@code Spend} has no NULLFAIL; it pushes false); the
+     * {@code checkSig} call site applies NULLFAIL after verification (N-198).
+     * A non-empty
+     * signature is in checksig format, DER followed by exactly one sighash-type
+     * byte, as {@code Spend} requires: bare DER with no sighash byte aborts
+     * (N-255). Operands that are not bytes at all are left to
+     * {@link #verifyEcdsaReal}.
+     */
+    static String checkSigEncodingError(Object sigVal, Object pkVal) {
+        byte[] sig = toBytes(sigVal);
+        byte[] pk = toBytes(pkVal);
+        if (sig == null || pk == null) return null;
+        if (sig.length > 0) {
+            if (sig.length < 2 || sig.length != (sig[1] & 0xff) + 3) {
+                return "the signature is not strict DER";
+            }
+            byte[] der = Arrays.copyOf(sig, sig.length - 1);
+            if (!StrictDer.isStrictDerSignature(der)) return "the signature is not strict DER";
+            int rLen = der[3] & 0xff;
+            BigInteger s = new BigInteger(1, Arrays.copyOfRange(der, 6 + rLen, der.length));
+            if (s.signum() < 1 || s.compareTo(LocalSigner.DOMAIN.getN().shiftRight(1)) > 0) {
+                return "the signature does not have a low S value";
+            }
+        }
+        int prefix = pk.length > 0 ? pk[0] & 0xff : -1;
+        boolean shapeOk = ((prefix == 0x02 || prefix == 0x03) && pk.length == 33)
+            || (prefix == 0x04 && pk.length == 65);
+        if (!shapeOk) return "the public key is not a 33-byte compressed or 65-byte uncompressed key";
+        try {
+            LocalSigner.DOMAIN.getCurve().decodePoint(pk);
+        } catch (RuntimeException e) {
+            return "the public key is not a point on secp256k1";
+        }
+        return null;
+    }
+
+    /**
      * Verify an ECDSA signature against a 32-byte digest using BouncyCastle
      * (same secp256k1 curve as {@link LocalSigner}). Pubkey is SEC1
      * (compressed 33 bytes or uncompressed 65 bytes); signature is DER with
      * an optional trailing sighash type byte stripped. Returns false on any
-     * decode error so the enclosing assert fires.
+     * decode error so the enclosing assert fires. The {@code checkSig} call
+     * site first applies {@link #checkSigEncodingError} and aborts on a
+     * malformed encoding, as {@code OP_CHECKSIG} does (N-197); so does
+     * {@code checkMultiSig}, per examined pair (N-259).
      */
     static boolean verifyEcdsaReal(Object sigVal, Object pkVal, byte[] sighash) {
         byte[] sigBytes = toBytes(sigVal);
@@ -1557,6 +1876,10 @@ public final class AnfInterpreter {
             if (der.length == declared + 1) {
                 der = Arrays.copyOf(der, declared);
             }
+        }
+        // F-242: strict DER (BIP66), as OP_CHECKSIG on a node.
+        if (!StrictDer.isStrictDerSignature(der)) {
+            return false;
         }
         try {
             ECPoint q = LocalSigner.DOMAIN.getCurve().decodePoint(pkBytes);
@@ -1573,9 +1896,16 @@ public final class AnfInterpreter {
     }
 
     /**
-     * Verify a list of signatures against a list of pubkeys. Mirrors
-     * Bitcoin's {@code OP_CHECKMULTISIG}: iterate sigs left-to-right,
-     * consume pubkeys greedily.
+     * N-259: {@code OP_CHECKMULTISIG} as {@code @bsv/sdk} {@code Spend} runs it
+     * over the compiled layout {@code 0 <sig1..sigN> N <pk1..pkM> M}. The LAST
+     * signature is examined against the LAST key first and both lists are
+     * walked toward the first. Each examined pair passes the N-197 encoding
+     * gates first and a malformed one aborts (a pair never reached is never
+     * checked); a signature that verifies consumes its key, a key is consumed
+     * either way, and the check fails once fewer keys remain than signatures.
+     * N &gt; M aborts, as in {@code Spend}. NULLFAIL (BIP146, N-198): a failing
+     * check with ANY non-empty signature aborts on a node ({@code Spend} has
+     * no NULLFAIL); only an all-empty one returns false.
      */
     @SuppressWarnings("unchecked")
     static boolean verifyMultiSigReal(Object sigsVal, Object pksVal, byte[] sighash) {
@@ -1584,18 +1914,37 @@ public final class AnfInterpreter {
         }
         List<Object> sigs = (List<Object>) rawSigs;
         List<Object> pks  = (List<Object>) rawPks;
-        if (sigs.size() > pks.size()) return false;
-        int pkIdx = 0;
-        for (Object sig : sigs) {
-            boolean matched = false;
-            while (pkIdx < pks.size()) {
-                boolean ok = verifyEcdsaReal(sig, pks.get(pkIdx), sighash);
-                pkIdx++;
-                if (ok) { matched = true; break; }
-            }
-            if (!matched) return false;
+        if (sigs.size() > pks.size()) {
+            throw new InterpreterException("checkMultiSig: " + sigs.size() + " signatures for " + pks.size()
+                + " public keys \u2014 OP_CHECKMULTISIG aborts the script when there are more signatures than keys");
         }
-        return true;
+        int isig = sigs.size() - 1;
+        int ikey = pks.size() - 1;
+        boolean success = true;
+        while (success && isig >= 0) {
+            String reason = checkSigEncodingError(sigs.get(isig), pks.get(ikey));
+            if (reason != null) {
+                throw new InterpreterException("checkMultiSig: " + reason
+                    + " \u2014 OP_CHECKMULTISIG aborts the script on a malformed signature or public key encoding, it does not push false");
+            }
+            byte[] sigBytes = toBytes(sigs.get(isig));
+            if (sigBytes != null && sigBytes.length > 0 && verifyEcdsaReal(sigs.get(isig), pks.get(ikey), sighash)) {
+                isig--;
+            }
+            ikey--;
+            if (isig > ikey) success = false; // fewer keys left than signatures
+        }
+        if (!success) {
+            for (Object sig : sigs) {
+                byte[] b = toBytes(sig);
+                if (b != null && b.length > 0) {
+                    throw new InterpreterException("checkMultiSig: a signature is non-empty and the check fails (NULLFAIL)"
+                        + " \u2014 OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push false;"
+                        + " a multisig that must fail takes empty signatures (EMPTY_SIG)");
+                }
+            }
+        }
+        return success;
     }
 
     /**

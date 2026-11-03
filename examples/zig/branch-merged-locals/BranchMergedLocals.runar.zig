@@ -15,7 +15,7 @@ pub const BranchMergedLocals = struct {
         return .{ .a = a, .b = b };
     }
 
-    pub fn bid(self: *BranchMergedLocals, amount: i64, toFirst: i64) void {
+    pub fn bid(self: *BranchMergedLocals, ctx: runar.StatefulContext, amount: i64, toFirst: i64) void {
         var na = self.a;
         var nb = self.b;
         if (toFirst > 0) {
@@ -23,6 +23,6 @@ pub const BranchMergedLocals = struct {
         } else {
             nb = amount;
         }
-        self.addOutput(1000, na, nb);
+        ctx.addOutput(1000, .{ na, nb });
     }
 };

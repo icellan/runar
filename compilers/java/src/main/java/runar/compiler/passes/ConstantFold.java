@@ -65,13 +65,38 @@ public final class ConstantFold {
         for (AnfMethod m : program.methods()) {
             folded.add(foldMethod(m));
         }
-        return new AnfProgram(program.contractName(), program.properties(), folded);
+        return program.withMethods(folded);
+    }
+
+    /**
+     * {@link #run} followed by removal of the operand bindings the fold
+     * orphaned (N-138).
+     *
+     * <p>{@code run} rewrites {@code t1 = -t0} to the constant {@code t1 = -1}
+     * but leaves {@code t0 = 1} in place, and stack lowering then pushes it and
+     * drops it again ({@code 51 4f 7b 7c a0 77} for {@code a > -1n}). Only
+     * names that some binding referenced BEFORE folding are removal
+     * candidates, so a binding that was already dead is left exactly as it
+     * was. {@code run} itself stays a pure rewrite.
+     */
+    public static AnfProgram runAndPrune(AnfProgram program) {
+        AnfProgram folded = run(program);
+        List<AnfMethod> pruned = new ArrayList<>(folded.methods().size());
+        for (int i = 0; i < folded.methods().size(); i++) {
+            java.util.Set<String> candidates = new java.util.HashSet<>();
+            for (AnfBinding b : program.methods().get(i).body()) {
+                Dce.collectRefs(b.value(), candidates);
+            }
+            AnfMethod m = folded.methods().get(i);
+            pruned.add(m.withBody(Dce.eliminateDeadAmong(m, candidates)));
+        }
+        return folded.withMethods(pruned);
     }
 
     private static AnfMethod foldMethod(AnfMethod method) {
         Map<String, ConstSlot> env = new HashMap<>();
         List<AnfBinding> body = foldBindings(method.body(), env);
-        return new AnfMethod(method.name(), method.params(), body, method.isPublic());
+        return method.withBody(body);
     }
 
     // ---------------------------------------------------------------
@@ -99,11 +124,39 @@ public final class ConstantFold {
         return out;
     }
 
+    /** Drop from {@code env} every name bound in {@code bindings}, including inside nested if arms and loop bodies. */
+    private static void removeBoundNames(Map<String, ConstSlot> env, List<AnfBinding> bindings) {
+        for (AnfBinding b : bindings) {
+            env.remove(b.name());
+            if (b.value() instanceof If ifv) {
+                removeBoundNames(env, orEmpty(ifv.thenBranch()));
+                removeBoundNames(env, orEmpty(ifv.elseBranch()));
+            } else if (b.value() instanceof Loop lp) {
+                removeBoundNames(env, orEmpty(lp.body()));
+            }
+        }
+    }
+
     private static AnfBinding foldBinding(AnfBinding binding, Map<String, ConstSlot> env) {
         AnfValue folded = foldValue(binding.value(), env);
         ConstSlot slot = anfValueToConst(folded);
+        // A name may be bound more than once (reassignment, or a user local that
+        // shares a compiler temp's name). The env must track the LATEST binding:
+        // a rebinding to a non-constant drops the old constant, or later uses
+        // would fold with a value the name no longer holds.
+        //
+        // N-397: an `@ref:<t>` alias (what `const x = 7n` lowers to) is not
+        // itself a constant, but when its target currently holds one the alias
+        // holds the same value, so later uses of the alias fold too. The
+        // binding stays an alias; the prune removes it if the fold orphaned it.
+        if (slot == null && folded instanceof LoadConst lc && lc.value() instanceof BytesConst bs
+            && bs.hex() != null && bs.hex().startsWith("@ref:")) {
+            slot = env.get(bs.hex().substring(5));
+        }
         if (slot != null) {
             env.put(binding.name(), slot);
+        } else {
+            env.remove(binding.name());
         }
         return new AnfBinding(binding.name(), folded, binding.sourceLoc());
     }
@@ -197,6 +250,11 @@ public final class ConstantFold {
             Map<String, ConstSlot> elseEnv = new HashMap<>(env);
             List<AnfBinding> foldedThen = foldBindings(orEmpty(ifv.thenBranch()), thenEnv);
             List<AnfBinding> foldedElse = foldBindings(orEmpty(ifv.elseBranch()), elseEnv);
+            // N-064: a name either arm rebinds may hold the arm's value after the
+            // if (that is how a branch reassigns a local), so the enclosing env's
+            // constant for it is stale past this point.
+            removeBoundNames(env, orEmpty(ifv.thenBranch()));
+            removeBoundNames(env, orEmpty(ifv.elseBranch()));
             // The declared result list survives folding untouched: folding an
             // arm's bindings cannot change WHICH slots the arm leaves, and
             // dropping the list would silently return the `if` to the
@@ -205,8 +263,13 @@ public final class ConstantFold {
         }
 
         if (value instanceof Loop lp) {
+            // N-064: the body runs once per iteration, so a name it rebinds holds
+            // the entry constant only in iteration 0 — it is not a constant inside
+            // the body, nor after the loop.
             Map<String, ConstSlot> bodyEnv = new HashMap<>(env);
+            removeBoundNames(bodyEnv, orEmpty(lp.body()));
             List<AnfBinding> foldedBody = foldBindings(orEmpty(lp.body()), bodyEnv);
+            removeBoundNames(env, orEmpty(lp.body()));
             return new Loop(lp.count(), foldedBody, lp.iterVar(), lp.start(), lp.step());
         }
 
@@ -332,8 +395,10 @@ public final class ConstantFold {
                 case "+":
                     if (!isValidHex(left.strVal()) || !isValidHex(right.strVal())) return null;
                     return ConstSlot.ofStr(left.strVal() + right.strVal());
-                case "===": return ConstSlot.ofBool(left.strVal().equals(right.strVal()));
-                case "!==": return ConstSlot.ofBool(!left.strVal().equals(right.strVal()));
+                // F-160: OP_EQUAL compares the DECODED bytes and hex decoding
+                // ignores case, so 'aa' === 'AA' is true on-chain.
+                case "===": return ConstSlot.ofBool(hexEqual(left.strVal(), right.strVal()));
+                case "!==": return ConstSlot.ofBool(!hexEqual(left.strVal(), right.strVal()));
                 default: return null;
             }
         }
@@ -342,6 +407,13 @@ public final class ConstantFold {
         if ("===".equals(op)) return ConstSlot.ofBool(false);
         if ("!==".equals(op)) return ConstSlot.ofBool(true);
         return null;
+    }
+
+    /** Compares two ByteString literals as bytes: case-insensitively when both
+     *  are hex, by exact text otherwise. */
+    private static boolean hexEqual(String a, String b) {
+        if (isValidHex(a) && isValidHex(b)) return a.equalsIgnoreCase(b);
+        return a.equals(b);
     }
 
     private static boolean isValidHex(String s) {
@@ -394,6 +466,14 @@ public final class ConstantFold {
     private static final BigInteger POW_FOLD_EXPONENT_LIMIT =
             BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT);
 
+    /**
+     * Unroll count of the emitted {@code gcd} loop ({@link StackLower}). Past
+     * it the script returns a partial value, not the mathematical one, so the
+     * folder declines there (N-029). {@code log2} is exact for every n > 0
+     * since N-103.
+     */
+    private static final int GCD_FOLD_ITERATIONS = 256;
+
     private static ConstSlot evalBuiltinCall(String funcName, List<ConstSlot> args) {
         // All math builtins require integer args.
         List<BigInteger> ints = new ArrayList<>(args.size());
@@ -425,10 +505,10 @@ public final class ConstantFold {
             }
             case "clamp": {
                 if (ints.size() != 3) return null;
+                // The script is `<val> <lo> OP_MAX <hi> OP_MIN`: min(max(val, lo), hi).
+                // That differs from `val < lo ? lo : ...` once lo > hi (N-029).
                 BigInteger val = ints.get(0), lo = ints.get(1), hi = ints.get(2);
-                if (val.compareTo(lo) < 0) return ConstSlot.ofInt(lo);
-                if (val.compareTo(hi) > 0) return ConstSlot.ofInt(hi);
-                return ConstSlot.ofInt(val);
+                return ConstSlot.ofInt(val.max(lo).min(hi));
             }
             case "sign": {
                 if (ints.size() != 1) return null;
@@ -479,7 +559,17 @@ public final class ConstantFold {
             }
             case "gcd": {
                 if (ints.size() != 2) return null;
-                return ConstSlot.ofInt(ints.get(0).gcd(ints.get(1)));
+                // The script runs at most GCD_FOLD_ITERATIONS Euclid steps; if
+                // that is not enough it returns a partial remainder, not the
+                // gcd. Decline there (N-029).
+                BigInteger a = ints.get(0).abs(), b = ints.get(1).abs();
+                for (int i = 0; i < GCD_FOLD_ITERATIONS && b.signum() != 0; i++) {
+                    BigInteger t = b;
+                    b = a.remainder(b);
+                    a = t;
+                }
+                if (b.signum() != 0) return null;
+                return ConstSlot.ofInt(a);
             }
             case "divmod": {
                 if (ints.size() != 2 || ints.get(1).signum() == 0) return null;
@@ -488,7 +578,8 @@ public final class ConstantFold {
             case "log2": {
                 if (ints.size() != 1) return null;
                 BigInteger n = ints.get(0);
-                if (n.signum() <= 0) return ConstSlot.ofInt(BigInteger.ZERO);
+                // The script aborts for n <= 0 (N-103): decline, so the abort survives.
+                if (n.signum() <= 0) return null;
                 return ConstSlot.ofInt(BigInteger.valueOf(n.bitLength() - 1));
             }
             case "bool": {

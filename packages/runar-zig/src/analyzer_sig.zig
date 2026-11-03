@@ -32,14 +32,14 @@ pub fn analyzeSigHygiene(
         }
     }
 
-    // CHECKSIG_RESULT_DROPPED: OP_CHECKSIG/OP_CHECKMULTISIG followed by OP_DROP.
+    // CHECKSIG_RESULT_DROPPED: OP_CHECKSIG/OP_CHECKMULTISIG followed by OP_DROP or OP_2DROP.
     if (ops.len >= 2) {
         var i: usize = 0;
         while (i + 1 < ops.len) : (i += 1) {
             const cur = ops[i];
             const nxt = ops[i + 1];
             const is_check = cur.opcode == 0xac or cur.opcode == 0xae;
-            if (is_check and nxt.opcode == 0x75) {
+            if (is_check and (nxt.opcode == 0x75 or nxt.opcode == 0x6d)) {
                 const msg = try std.fmt.allocPrint(
                     allocator,
                     "{s} result is dropped by {s} — signature check has no effect",

@@ -73,7 +73,9 @@ class N131IrLoopStartStringTest {
      * The {@code bounded-loop} shape, parameterised on the {@code start} token
      * alone so each case differs from its control in exactly one JSON token.
      * The token is spliced in raw, so a caller passes {@code "0"} for the
-     * integer form and {@code "\"0n\""} for the string form.
+     * integer form and {@code "\"0n\""} for the string form. N-071: the body
+     * ends with {@code _ok = true; assert(_ok)}, because a public method must
+     * end with an assert.
      */
     private static String ir(String startToken) {
         return """
@@ -81,7 +83,7 @@ class N131IrLoopStartStringTest {
               {"name":"unlock","params":[],"isPublic":true,"body":[
                 {"name":"t0","value":{"kind":"loop","count":3,"start":%s,"step":1,"iterVar":"i","body":[
                   {"name":"t1","value":{"kind":"load_const","value":0}}
-                ]}}
+                ]}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
               ]}
             ]}
             """.formatted(startToken);
@@ -133,7 +135,7 @@ class N131IrLoopStartStringTest {
               {"name":"unlock","params":[],"isPublic":true,"body":[
                 {"name":"t0","value":{"kind":"loop","count":3,"step":1,"iterVar":"i","body":[
                   {"name":"t1","value":{"kind":"load_const","value":0}}
-                ]}}
+                ]}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
               ]}
             ]}
             """;

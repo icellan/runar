@@ -81,12 +81,16 @@ pub fn analyze_opcode_concerns(opcodes: &[ParsedOp], script_size_bytes: usize) -
     out
 }
 
-/// Format `n / 1024` to exactly one decimal place using IEEE-754
-/// round-half-to-even semantics on the tenths digit. Matches JS
-/// `(n/1024).toFixed(1)`.
+/// Format `n / 1024` to exactly one decimal place matching JS
+/// `(n/1024).toFixed(1)` semantics. Per ECMA-262, `toFixed` picks the
+/// integer `k` for which `k/10 - value` is closest to zero, and on an
+/// exact tie picks the LARGER `k` — round-half-up (ties away from zero
+/// for our non-negative `n`), not IEEE-754 round-half-to-even. Verified
+/// live: `node -e "console.log((500992/1024).toFixed(1))"` prints
+/// `"489.3"`, where round-half-to-even would give `"489.2"`.
 pub fn format_kb(n: usize) -> String {
-    // Canonical formula from spec §5.1: round_half_to_even(n * 10 / 1024) / 10
-    // Use a direct integer-banker's-rounding to avoid f64 surprises.
+    // Canonical formula from spec §5.1: round_half_up(n * 10 / 1024) / 10
+    // Use exact integer arithmetic to avoid f64 surprises.
     let num = (n as u128) * 10;
     let denom: u128 = 1024;
     let q = num / denom;
@@ -95,15 +99,7 @@ pub fn format_kb(n: usize) -> String {
     let twice = r * 2;
     let rounded: u128 = match twice.cmp(&denom) {
         std::cmp::Ordering::Less => q,
-        std::cmp::Ordering::Greater => q + 1,
-        std::cmp::Ordering::Equal => {
-            // Half — round to even.
-            if q.is_multiple_of(2) {
-                q
-            } else {
-                q + 1
-            }
-        }
+        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => q + 1,
     };
     let integer = rounded / 10;
     let tenths = rounded % 10;

@@ -397,7 +397,7 @@ public final class Envelope {
      *
      * 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
      * so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
-     * also far above what the wire needs: the deepest of the 165 checked-in
+     * also far above what the wire needs: the deepest of the 199 checked-in
      * conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
      * tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
      * bound: if parse were the smaller of the two, a tier could emit a legal,
@@ -647,6 +647,10 @@ public final class Envelope {
         try {
             byte[] sigBytes = fromHex(env.sig);
             byte[] pkBytes = fromHex(env.pubkey);
+            // F-242: one signature, one byte string — strict DER before parsing.
+            if (!StrictDer.isStrictDerSignature(sigBytes)) {
+                return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_SIG, parsed);
+            }
             ECPoint q = LocalSigner.DOMAIN.getCurve().decodePoint(pkBytes);
             ECPublicKeyParameters params = new ECPublicKeyParameters(q, LocalSigner.DOMAIN);
             ECDSASigner verifier = new ECDSASigner();

@@ -297,7 +297,9 @@ fn jsonValueToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{
         .float => |f| .{ .int = @intFromFloat(f) },
         .string => |s| blk: {
             if (matchBigintString(s)) |digits| {
-                const parsed = std.fmt.parseInt(i64, digits, 10) catch break :blk .{ .bytes = s };
+                // N-163: digits that don't fit i64 are a wide value (design B:
+                // refuse on use, pass through otherwise), not bytes.
+                const parsed = std.fmt.parseInt(i64, digits, 10) catch break :blk .{ .wide = digits };
                 break :blk .{ .int = parsed };
             }
             break :blk .{ .bytes = s };
@@ -371,6 +373,14 @@ fn writeAnfValueAsJson(w: *std.Io.Writer, v: ANFValue) !void {
             try w.writeAll(if (b) "true" else "false");
         },
         .bytes => |b| try writeJsonString(w, b),
+        // N-163: a wide (outside-i64) integer, carried as its decimal digits.
+        // Encode exactly like `.int` above, as "<digits>n", so it round-trips
+        // byte-identically to the other drivers.
+        .wide => |digits| {
+            try w.writeAll("\"");
+            try w.writeAll(digits);
+            try w.writeAll("n\"");
+        },
         .array => |items| {
             try w.writeAll("[");
             for (items, 0..) |item, i| {

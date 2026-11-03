@@ -32,7 +32,40 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.sighash_directive import lost_directive_message, resolve_native_sighash
+from runar_compiler.frontend.input_limits import NestingCounter, assert_body_nesting, with_nesting_limit  # F-213
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
+from runar_compiler.frontend.diagnostic import (  # F-011
+    ZIG_LIST_COMMA,
+    ZIG_STRUCT_INIT_DOT,
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    zig_bare_string_literal_message,
+    lex_error,
+    static_method_message,
+    unexpected_struct_body_token_message,
+    unknown_return_type_message,
+    with_lex_errors,
+)
 
+# The `ctx.<member>` intrinsics a StatefulContext handle exposes.
+_STATEFUL_CONTEXT_MEMBERS = frozenset(
+    ("txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput")
+)
+
+
+# N-009: the `while (cond) : (upd) { ... }` desugaring's merge placeholder.
+# `_parse_while_statement` always synthesizes this name as the ForStmt's
+# init; `_parse_block_statements` replaces it with the real preceding
+# declaration when one matches the update target. A LEADING SPACE makes the
+# name unspellable in `.runar.zig` source (no surface's identifier lexer
+# produces a token containing whitespace), so a developer local can never
+# collide with it -- a plain-identifier placeholder would let a local
+# literally named "__while_no_init" that is not adjacent to its while alias
+# the placeholder by string equality, and the ANF lowerer's
+# condition-iterator check would then compare equal and silently unroll from
+# this placeholder's start of 0 instead of the developer's real start.
+WHILE_NO_INIT_PLACEHOLDER = " __while_no_init"
 
 # ---------------------------------------------------------------------------
 # Token types
@@ -158,6 +191,7 @@ _ZIG_TYPE_MAP: dict[str, str] = {
     "bool": "boolean",
     "void": "void",
     "Bigint": "bigint",
+    "BigintBig": "bigint",
     "ByteString": "ByteString",
     "PubKey": "PubKey",
     "Sig": "Sig",
@@ -189,19 +223,22 @@ def _make_type_node(name: str) -> TypeNode:
 # ---------------------------------------------------------------------------
 
 def _is_ident_start(ch: str) -> bool:
-    return ch.isalpha() or ch == "_"
+    # N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+    # as an unexpected character.
+    return ch.isascii() and (ch.isalpha() or ch == "_")
 
 
 def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isascii() and (ch.isalnum() or ch == "_")
 
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenize a Zig Runar source file."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     pos = 0
     line = 1
-    col = 1
+    col = 0
     length = len(source)
 
     while pos < length:
@@ -218,7 +255,7 @@ def _tokenize(source: str) -> list[Token]:
         if ch == "\n":
             pos += 1
             line += 1
-            col = 1
+            col = 0
             continue
 
         # Line comment: //
@@ -238,7 +275,7 @@ def _tokenize(source: str) -> list[Token]:
                     break
                 if source[pos] == "\n":
                     line += 1
-                    col = 1
+                    col = 0
                 else:
                     col += 1
                 pos += 1
@@ -320,7 +357,11 @@ def _tokenize(source: str) -> list[Token]:
             pos += 1
             col += 1
             val_chars: list[str] = []
-            while pos < length and source[pos] != '"':
+            # F-011: a Zig string literal cannot span lines; one that reaches
+            # a line break (escaped or not) or end of file is unterminated.
+            while pos < length and source[pos] != '"' and source[pos] not in "\r\n":
+                if source[pos] == "\\" and (pos + 1 >= length or source[pos + 1] in "\r\n"):
+                    break
                 if source[pos] == "\\" and pos + 1 < length:
                     pos += 1
                     col += 1
@@ -331,31 +372,22 @@ def _tokenize(source: str) -> list[Token]:
                     val_chars.append(source[pos])
                     pos += 1
                     col += 1
-            if pos < length:
+            if pos < length and source[pos] == '"':
                 pos += 1  # skip closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, tok_line, tok_col))
             tokens.append(Token(TOK_STRING, "".join(val_chars), tok_line, tok_col))
             continue
 
-        # Number literal
-        if ch.isdigit():
-            num_chars: list[str] = []
-            if ch == "0" and pos + 1 < length and source[pos + 1] in ("x", "X"):
-                num_chars.append("0x")
-                pos += 2
-                col += 2
-                while pos < length and source[pos] in "0123456789abcdefABCDEF_":
-                    if source[pos] != "_":
-                        num_chars.append(source[pos])
-                    pos += 1
-                    col += 1
-            else:
-                while pos < length and (source[pos].isdigit() or source[pos] == "_"):
-                    if source[pos] != "_":
-                        num_chars.append(source[pos])
-                    pos += 1
-                    col += 1
-            tokens.append(Token(TOK_NUMBER, "".join(num_chars), tok_line, tok_col))
+        # Number literal (F-026): the whole glued [0-9A-Za-z_] run is one Zig
+        # integer literal. Stopping at the first non-digit read `0b1010` as
+        # `0` + `b1010`.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("zig", source, pos, lex, file_name, tok_line, tok_col)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, num_str, tok_line, tok_col))
             continue
 
         # Identifiers and keywords
@@ -372,7 +404,9 @@ def _tokenize(source: str) -> list[Token]:
                 tokens.append(Token(TOK_IDENT, word, tok_line, tok_col))
             continue
 
-        # Skip unrecognized character
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex.append(lex_error("Unexpected character '%s'" % ch, file_name, tok_line, tok_col))
         pos += 1
         col += 1
 
@@ -487,13 +521,21 @@ class _ZigParser:
         self._pos = 0
         self._file = file_name
         self._errors: list[str] = []
+        # N-448: token indexes of string literals whose bare use is legal.
+        self._bare_literal_ok: set[int] = set()
         self._contract_name = "UnnamedContract"
         self._parent_class = "SmartContract"
         self._properties: list[PropertyNode] = []
         self._methods: list[MethodNode] = []
         self._constructor: MethodNode | None = None
+        # N-490: where the constructor statements the source does not write
+        # (the implied super() and property assignments) are anchored: the
+        # contract struct's `struct` keyword once it is parsed.
+        self._ctor_loc = SourceLocation(file=file_name, line=1, column=0)
         self._self_names: set[str] = set()
         self._stateful_context_names: set[str] = set()
+        # F-213 measure (A): parse nesting (see input_limits.NestingCounter).
+        self._nest = NestingCounter()
 
     # -----------------------------------------------------------------------
     # Token navigation
@@ -625,6 +667,7 @@ class _ZigParser:
         self._methods = []
         self._constructor = None
 
+        self._ctor_loc = self._loc()
         self._expect(TOK_STRUCT, "struct")
         self._expect(TOK_LBRACE, "{")
 
@@ -657,7 +700,9 @@ class _ZigParser:
                 self._properties.append(self._parse_field())
                 continue
 
-            self._advance()
+            # N-410: any other token is refused, never skipped.
+            stray = self._advance()
+            self._errors.append(f"{self._file}:{stray.line}:{stray.col}: {unexpected_struct_body_token_message(stray.value)}")
 
         self._expect(TOK_RBRACE, "}")
         self._match(TOK_SEMICOLON)
@@ -665,20 +710,25 @@ class _ZigParser:
         # Collect property names mutated in any method body so we can
         # determine readonly flags in stateful contracts.
         mutated: set[str] = set()
+        # F-213: measure (B) before the recursive passes below walk the bodies.
+        for method in self._methods:
+            assert_body_nesting(method.body)
+        if self._constructor is not None:
+            assert_body_nesting(self._constructor.body)
         for method in self._methods:
             _collect_mutated_properties(method.body, mutated)
 
-        # Constructor param names (used to strip property initializers whose
-        # value is overridden by an explicit ctor param — matches the Zig
-        # compiler reference behaviour of omitting `initialValue`).
-        ctor_param_names: set[str] = set()
-        if self._constructor is not None:
-            ctor_param_names = {p.name for p in self._constructor.params}
-
+        # The initializer of a property the constructor assigns is no longer
+        # stripped here. `anf_lower.py` now applies that rule to EVERY
+        # surface (see `_constructor_assigned_properties`), keyed on the
+        # constructor assignment rather than on a name match, so the Zig
+        # surface no longer needs -- and must not keep -- a private copy
+        # that only fired when the struct field and the `init` parameter
+        # happened to share a name. `readonly` inference still reads the
+        # ORIGINAL initializer, exactly as it did when the strip ran in the
+        # same expression.
         for prop in self._properties:
             had_initializer = prop.initializer is not None
-            if prop.name in ctor_param_names:
-                prop.initializer = None
             if self._parent_class in ("SmartContract", "UnsafeSmartContract"):
                 prop.readonly = True
             elif (not prop.readonly
@@ -716,13 +766,21 @@ class _ZigParser:
         if self._current().kind == TOK_IDENT and self._current().value == "runar":
             self._advance()
             self._expect(TOK_DOT, ".")
-            parent = self._expect(TOK_IDENT, "identifier").value
+            parent_tok = self._expect(TOK_IDENT, "identifier")
+            parent = parent_tok.value
             if parent == "StatefulSmartContract":
                 self._parent_class = "StatefulSmartContract"
             elif parent == "UnsafeSmartContract":
                 self._parent_class = "UnsafeSmartContract"
             else:
                 self._parent_class = "SmartContract"
+                if parent != "SmartContract":
+                    # N-014: an unknown base is refused, never folded to SmartContract.
+                    self._errors.append(
+                        f"{self._file}:{parent_tok.line}:{parent_tok.col}: "
+                        f"unknown parent class: '{parent}', expected SmartContract, "
+                        "StatefulSmartContract, or UnsafeSmartContract"
+                    )
 
         self._match(TOK_SEMICOLON)
 
@@ -740,13 +798,15 @@ class _ZigParser:
             self._advance()
             initializer = self._parse_expression()
 
-        self._match(TOK_COMMA)
+        # N-033: fields are separated by `,`; only the last before `}` may omit it.
+        self._expect_list_separator(TOK_RBRACE)
 
         return PropertyNode(
             name=name,
             type=parsed_type[0],
             readonly=is_readonly,
             initializer=initializer,
+            embed_always=parsed_type[3],
             source_location=loc,
         )
 
@@ -760,9 +820,48 @@ class _ZigParser:
 
         params, receiver_name, stateful_ctx_names = self._parse_param_list()
 
-        # Parse optional return type (before the body block)
-        if self._current().kind != TOK_LBRACE:
-            self._parse_type()
+        # N-050: a `pub fn` without a receiver of the contract type is a
+        # namespace (static) function, not a contract method. A private one
+        # stays a helper (the multi-method golden's computeThreshold), like R9.
+        if is_public and receiver_name is None and name != "init":
+            self._errors.append(static_method_message(name))
+
+        # Parse optional return type (before the body block). N-093:
+        # `runar.Sighash("FLAGS")` in its place is the native spelling of the
+        # `@sighash` directive (natively it is `void`).
+        sighash_specs: list[str | None] = []
+        if (self._current().kind == TOK_IDENT and self._current().value == "runar"
+                and self._peek_ahead(1).kind == TOK_DOT
+                and self._peek_ahead(2).kind == TOK_IDENT
+                and self._peek_ahead(2).value == "Sighash"):
+            self._advance()
+            self._advance()
+            self._advance()
+            self._expect(TOK_LPAREN, "(")
+            arg = self._current()
+            count = 0
+            depth = 0
+            while self._current().kind != TOK_EOF:
+                k = self._current().kind
+                if k == TOK_RPAREN and depth == 0:
+                    break
+                if k == TOK_LPAREN:
+                    depth += 1
+                if k == TOK_RPAREN:
+                    depth -= 1
+                self._advance()
+                count += 1
+            self._expect(TOK_RPAREN, ")")
+            sighash_specs.append(arg.value if count == 1 and arg.kind == TOK_STRING else None)
+        elif self._current().kind != TOK_LBRACE:
+            # The AST keeps no return type; N-331 refuses an unknown name.
+            # `init` returns the contract struct itself, which is not a type
+            # to check.
+            ret_type = self._parse_type()[0]
+            if name != "init":
+                ret_msg = unknown_return_type_message(ret_type, name, is_public)
+                if ret_msg is not None:
+                    self._errors.append(ret_msg)
 
         prev_self_names = self._self_names
         prev_stateful_ctx_names = self._stateful_context_names
@@ -770,6 +869,9 @@ class _ZigParser:
         self._stateful_context_names = stateful_ctx_names
 
         if name == "init":
+            # N-093: the constructor is not a spending entry point.
+            if sighash_specs:
+                self._errors.append(lost_directive_message("@sighash"))
             self._constructor = self._parse_constructor(loc, params)
             self._self_names = prev_self_names
             self._stateful_context_names = prev_stateful_ctx_names
@@ -779,11 +881,16 @@ class _ZigParser:
         self._self_names = prev_self_names
         self._stateful_context_names = prev_stateful_ctx_names
 
+        sighash = resolve_native_sighash(name, is_public, sighash_specs)
+        if sighash is not None and sighash.error is not None:
+            self._errors.append(sighash.error)
+
         return MethodNode(
             name=name,
             params=params,
             body=body,
             visibility="public" if is_public else "private",
+            sighash_type=sighash.value if sighash is not None else None,
             source_location=loc,
         )
 
@@ -825,12 +932,14 @@ class _ZigParser:
                 ))
 
             index += 1
-            self._match(TOK_COMMA)
+            # N-033: parameters are separated by `,` (a trailing one is allowed).
+            if not self._expect_list_separator(TOK_RPAREN):
+                break
 
         self._expect(TOK_RPAREN, ")")
         return params, receiver_name, stateful_ctx_names
 
-    def _parse_param_type(self) -> tuple[TypeNode, str, bool]:
+    def _parse_param_type(self) -> tuple[TypeNode, str, bool, bool]:
         """Parse a parameter type, skipping pointer/const qualifiers."""
         # Skip pointer qualifiers: *, &, const
         while self._current().kind in (TOK_STAR, TOK_AMP):
@@ -839,13 +948,15 @@ class _ZigParser:
             self._advance()
         return self._parse_type()
 
-    def _parse_type(self) -> tuple[TypeNode, str, bool]:
-        """Parse a type and return (TypeNode, rawName, readonly).
+    def _parse_type(self) -> tuple[TypeNode, str, bool, bool]:
+        """Parse a type and return (TypeNode, rawName, readonly, embedAlways).
 
         Handles:
         - ``[N]Type`` → FixedArrayType
         - ``runar.TypeName`` → mapped primitive or custom
         - ``runar.Readonly(Type)`` → inner type with readonly=True
+        - ``runar.EmbedAlways(Type)`` → inner type with embedAlways=True
+          (N-093, the native spelling of ``@embedAlways``)
         - ``void`` → void primitive
         - bare ident → mapped type
         """
@@ -855,10 +966,12 @@ class _ZigParser:
             length_tok = self._expect(TOK_NUMBER, "array length")
             length = int(length_tok.value, 0) if length_tok.value else 0
             self._expect(TOK_RBRACKET, "]")
-            elem = self._parse_type()
+            with self._nest.nested(self._loc):
+                elem = self._parse_type()
             return (
                 FixedArrayType(element=elem[0], length=length),
                 elem[1],
+                False,
                 False,
             )
 
@@ -872,26 +985,33 @@ class _ZigParser:
 
             if name == "Readonly" and self._current().kind == TOK_LPAREN:
                 self._expect(TOK_LPAREN, "(")
-                inner = self._parse_type()
+                with self._nest.nested(self._loc):
+                    inner = self._parse_type()
                 self._expect(TOK_RPAREN, ")")
-                return (inner[0], inner[1], True)
+                return (inner[0], inner[1], True, inner[3])
+            if name == "EmbedAlways" and self._current().kind == TOK_LPAREN:
+                self._expect(TOK_LPAREN, "(")
+                with self._nest.nested(self._loc):
+                    inner = self._parse_type()
+                self._expect(TOK_RPAREN, ")")
+                return (inner[0], inner[1], inner[2], True)
 
             mapped = _map_zig_type(name)
-            return (_make_type_node(mapped), name, False)
+            return (_make_type_node(mapped), name, False, False)
 
         # void keyword
         if self._current().kind == TOK_VOID:
             self._advance()
-            return (PrimitiveType(name="void"), "void", False)
+            return (PrimitiveType(name="void"), "void", False, False)
 
         # Bare identifier type
         if self._current().kind == TOK_IDENT:
             name = self._advance().value
             mapped = _map_zig_type(name)
-            return (_make_type_node(mapped), name, False)
+            return (_make_type_node(mapped), name, False, False)
 
         fallback = self._advance()
-        return (CustomType(name="unknown"), fallback.value or "unknown", False)
+        return (CustomType(name="unknown"), fallback.value or "unknown", False, False)
 
     def _parse_constructor(self, loc: SourceLocation, params: list[ParamNode]) -> MethodNode:
         """Parse a constructor body (``fn init(...)``)."""
@@ -940,13 +1060,19 @@ class _ZigParser:
         self._expect(TOK_LBRACE, "{")
 
         while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
+            # N-410: Zig requires the leading `.` of a struct-init field.
             if self._current().kind == TOK_DOT:
                 self._advance()
+            else:
+                t = self._current()
+                self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_STRUCT_INIT_DOT}")
             field = self._expect(TOK_IDENT, "field name").value
             self._expect(TOK_ASSIGN, "=")
             value = self._parse_expression()
             assignments.append(self._create_property_assignment(field, value))
-            self._match(TOK_COMMA)
+            # N-033: struct-init fields are separated by `,` (a trailing one is allowed).
+            if not self._expect_list_separator(TOK_RBRACE):
+                break
 
         self._expect(TOK_RBRACE, "}")
         return assignments
@@ -968,7 +1094,7 @@ class _ZigParser:
                 if (isinstance(stmt, ForStmt)
                         and stmt.init is not None
                         and isinstance(stmt.init, VariableDeclStmt)
-                        and stmt.init.name == "__while_no_init"
+                        and stmt.init.name == WHILE_NO_INIT_PLACEHOLDER
                         and body):
                     last = body[-1]
                     update_name = self._get_loop_update_target_name(stmt)
@@ -990,6 +1116,10 @@ class _ZigParser:
         return None
 
     def _parse_statement(self) -> Statement | None:
+        with self._nest.nested(self._loc):
+            return self._parse_statement_inner()
+
+    def _parse_statement_inner(self) -> Statement | None:
         loc = self._loc()
 
         # return [expr];
@@ -1009,15 +1139,21 @@ class _ZigParser:
         if self._current().kind in (TOK_CONST, TOK_VAR):
             return self._parse_variable_decl()
 
-        # _ = expr; (discard)
+        # _ = expr; (discard). N-053: Zig's discard drops the VALUE, not the
+        # evaluation -- a helper called for its asserts must keep them, so
+        # `expr` lowers as an expression statement. Only a bare name (the
+        # unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+        # reading a name has no effect.
         if (self._current().kind == TOK_IDENT
                 and self._current().value == "_"
                 and self._peek_ahead(1).kind == TOK_ASSIGN):
             self._advance()  # '_'
             self._advance()  # '='
-            self._parse_expression()
+            expr = self._parse_expression()
             self._match(TOK_SEMICOLON)
-            return None
+            if isinstance(expr, Identifier):
+                return None
+            return ExpressionStmt(expr=expr, source_location=loc)
 
         # while loop
         if self._current().kind == TOK_WHILE:
@@ -1095,7 +1231,8 @@ class _ZigParser:
         if self._current().kind == TOK_ELSE:
             self._advance()
             if self._current().kind == TOK_IF:
-                else_branch = [self._parse_if_statement()]
+                with self._nest.nested(self._loc):
+                    else_branch = [self._parse_if_statement()]
             else:
                 else_branch = self._parse_block_statements()
 
@@ -1149,7 +1286,7 @@ class _ZigParser:
         # by _parse_block_statements if a preceding var decl matches.
         return ForStmt(
             init=VariableDeclStmt(
-                name="__while_no_init",
+                name=WHILE_NO_INIT_PLACEHOLDER,
                 mutable=True,
                 init=BigIntLiteral(value=0),
                 source_location=loc,
@@ -1195,7 +1332,8 @@ class _ZigParser:
     # -----------------------------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_ternary()
+        with self._nest.nested(self._loc):
+            return self._parse_ternary()
 
     def _parse_ternary(self) -> Expression:
         # Zig does not have ternary `? :` but the TS reference parser still
@@ -1204,148 +1342,174 @@ class _ZigParser:
         return expr
 
     def _parse_or(self) -> Expression:
+        start = self._loc()
         left = self._parse_and()
         while self._current().kind == TOK_PIPEPIPE:
             self._advance()
             right = self._parse_and()
-            left = BinaryExpr(op="||", left=left, right=right)
+            left = BinaryExpr(op="||", left=left, right=right, source_location=start)
         return left
 
     def _parse_and(self) -> Expression:
+        start = self._loc()
         left = self._parse_bitwise_or()
         while self._current().kind == TOK_AMPAMP:
             self._advance()
             right = self._parse_bitwise_or()
-            left = BinaryExpr(op="&&", left=left, right=right)
+            left = BinaryExpr(op="&&", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_or(self) -> Expression:
+        start = self._loc()
         left = self._parse_bitwise_xor()
         while self._current().kind == TOK_PIPE:
             self._advance()
             right = self._parse_bitwise_xor()
-            left = BinaryExpr(op="|", left=left, right=right)
+            left = BinaryExpr(op="|", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_xor(self) -> Expression:
+        start = self._loc()
         left = self._parse_bitwise_and()
         while self._current().kind == TOK_CARET:
             self._advance()
             right = self._parse_bitwise_and()
-            left = BinaryExpr(op="^", left=left, right=right)
+            left = BinaryExpr(op="^", left=left, right=right, source_location=start)
         return left
 
     def _parse_bitwise_and(self) -> Expression:
+        start = self._loc()
         left = self._parse_equality()
         while self._current().kind == TOK_AMP:
             self._advance()
             right = self._parse_equality()
-            left = BinaryExpr(op="&", left=left, right=right)
+            left = BinaryExpr(op="&", left=left, right=right, source_location=start)
         return left
 
     def _parse_equality(self) -> Expression:
+        start = self._loc()
         left = self._parse_comparison()
         while True:
             kind = self._current().kind
             if kind == TOK_EQEQ:
                 self._advance()
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = BinaryExpr(op="===", left=left, right=right, source_location=start)
             elif kind == TOK_NOTEQ:
                 self._advance()
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = BinaryExpr(op="!==", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_comparison(self) -> Expression:
+        start = self._loc()
         left = self._parse_shift()
         while True:
             kind = self._current().kind
             if kind == TOK_LT:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = BinaryExpr(op="<", left=left, right=right, source_location=start)
             elif kind == TOK_LTEQ:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = BinaryExpr(op="<=", left=left, right=right, source_location=start)
             elif kind == TOK_GT:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = BinaryExpr(op=">", left=left, right=right, source_location=start)
             elif kind == TOK_GTEQ:
                 self._advance()
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = BinaryExpr(op=">=", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_shift(self) -> Expression:
+        start = self._loc()
         left = self._parse_add_sub()
         while True:
             kind = self._current().kind
             if kind == TOK_LSHIFT:
                 self._advance()
                 right = self._parse_add_sub()
-                left = BinaryExpr(op="<<", left=left, right=right)
+                left = BinaryExpr(op="<<", left=left, right=right, source_location=start)
             elif kind == TOK_RSHIFT:
                 self._advance()
                 right = self._parse_add_sub()
-                left = BinaryExpr(op=">>", left=left, right=right)
+                left = BinaryExpr(op=">>", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_add_sub(self) -> Expression:
+        start = self._loc()
         left = self._parse_mul_div()
         while True:
             kind = self._current().kind
             if kind == TOK_PLUS:
                 self._advance()
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="+", left=left, right=right)
+                left = BinaryExpr(op="+", left=left, right=right, source_location=start)
             elif kind == TOK_MINUS:
                 self._advance()
                 right = self._parse_mul_div()
-                left = BinaryExpr(op="-", left=left, right=right)
+                left = BinaryExpr(op="-", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_mul_div(self) -> Expression:
+        start = self._loc()
         left = self._parse_unary()
         while True:
             kind = self._current().kind
             if kind == TOK_STAR:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="*", left=left, right=right)
+                left = BinaryExpr(op="*", left=left, right=right, source_location=start)
             elif kind == TOK_SLASH:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="/", left=left, right=right)
+                left = BinaryExpr(op="/", left=left, right=right, source_location=start)
             elif kind == TOK_PERCENT:
                 self._advance()
                 right = self._parse_unary()
-                left = BinaryExpr(op="%", left=left, right=right)
+                left = BinaryExpr(op="%", left=left, right=right, source_location=start)
             else:
                 break
         return left
 
     def _parse_unary(self) -> Expression:
+        op_loc = self._loc()
         kind = self._current().kind
         if kind == TOK_BANG:
             self._advance()
-            return UnaryExpr(op="!", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="!", operand=self._parse_unary(), source_location=op_loc)
         if kind == TOK_MINUS:
             self._advance()
-            return UnaryExpr(op="-", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="-", operand=self._parse_unary(), source_location=op_loc)
         if kind == TOK_TILDE:
             self._advance()
-            return UnaryExpr(op="~", operand=self._parse_unary())
+            with self._nest.nested(self._loc):
+                return UnaryExpr(op="~", operand=self._parse_unary(), source_location=op_loc)
+
+        # Zig's `&` is the address-of operator used for slice coercion at
+        # call sites like `&.{sig1, sig2}` (an anonymous-struct literal
+        # coerced to a slice) and typed forms like `&[_]T{...}`. Slices have
+        # no Rúnar IR analogue -- the inner array literal IS the IR node --
+        # so we simply skip the `&` and parse the operand. Recurse into
+        # `_parse_primary` directly, mirroring 01-parse-zig.ts and
+        # parse_zig.zig: `&.foo()` is not legal Zig and `&` never pairs with
+        # a postfix chain in practice.
+        if kind == TOK_AMP:
+            self._advance()
+            return self._parse_primary()
 
         expr = self._parse_primary()
         return self._parse_postfix_chain(expr)
@@ -1366,10 +1530,7 @@ class _ZigParser:
             self._advance()  # '&'
             self._advance()  # '.'
             self._advance()  # '{'
-            elements: list[Expression] = []
-            while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACE)
             self._expect(TOK_RBRACE, "}")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1377,10 +1538,7 @@ class _ZigParser:
         if tok.kind == TOK_DOT and self._peek_ahead(1).kind == TOK_LBRACE:
             self._advance()  # '.'
             self._advance()  # '{'
-            elements: list[Expression] = []
-            while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACE)
             self._expect(TOK_RBRACE, "}")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1391,8 +1549,17 @@ class _ZigParser:
 
         # String literal → ByteString
         if tok.kind == TOK_STRING:
+            idx = self._pos
             self._advance()
-            return ByteStringLiteral(value=tok.value)
+            # N-448: a bare non-empty literal is refused (natively ASCII text,
+            # to the compiler hex). Exempt: "", the argument of
+            # runar.hexToBytes and the body of runar.asm.
+            if tok.value != "" and idx not in self._bare_literal_ok:
+                self._errors.append(
+                    f"{self._file}:{tok.line}:{tok.col}: "
+                    + zig_bare_string_literal_message(tok.value)
+                )
+            return ByteStringLiteral(value=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Boolean literals
         if tok.kind == TOK_TRUE:
@@ -1409,13 +1576,30 @@ class _ZigParser:
             self._expect(TOK_RPAREN, ")")
             return expr
 
+        # `[_]T{...}` — typed array literal with inferred length. The
+        # element type is parsed and discarded; Rúnar infers element types
+        # from the literal contents. The element list is the same `{...}`
+        # form used by `.{...}` anon-struct literals. Mirrors
+        # 01-parse-zig.ts and parse_zig.zig.
+        if (
+            tok.kind == TOK_LBRACKET
+            and self._peek_ahead(1).kind == TOK_IDENT
+            and self._peek_ahead(1).value == "_"
+            and self._peek_ahead(2).kind == TOK_RBRACKET
+        ):
+            self._advance()  # '['
+            self._advance()  # '_'
+            self._advance()  # ']'
+            self._parse_type()  # discard element type
+            self._expect(TOK_LBRACE, "{")
+            elements = self._parse_list_elements(TOK_RBRACE)
+            self._expect(TOK_RBRACE, "}")
+            return ArrayLiteralExpr(elements=elements)
+
         # Array literal: [elem, ...]
         if tok.kind == TOK_LBRACKET:
             self._advance()
-            elements = []
-            while self._current().kind != TOK_RBRACKET and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACKET)
             self._expect(TOK_RBRACKET, "]")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1426,6 +1610,7 @@ class _ZigParser:
 
             if builtin_name in ("divTrunc", "mod", "shlExact", "shrExact"):
                 self._expect(TOK_LPAREN, "(")
+                start = self._loc()
                 left = self._parse_expression()
                 self._expect(TOK_COMMA, ",")
                 right = self._parse_expression()
@@ -1501,13 +1686,62 @@ class _ZigParser:
                     self._expect(TOK_RPAREN, ")")
                     return BinaryExpr(op="===", left=left, right=right)
 
+                # runar.hexToBytes("deadbeef") → ByteString literal "deadbeef".
+                # Mirrors 01-parse-zig.ts and parse_zig.zig (F-094).
+                if builtin == "hexToBytes" and self._current().kind == TOK_LPAREN:
+                    self._advance()
+                    if self._current().kind == TOK_STRING:
+                        self._bare_literal_ok.add(self._pos)  # N-448: the explicit hex spelling
+                    arg = self._parse_expression()
+                    self._expect(TOK_RPAREN, ")")
+                    if isinstance(arg, ByteStringLiteral):
+                        return ByteStringLiteral(value=arg.value, source_location=arg.source_location)
+                    self._errors.append(
+                        f"{self._file}:{tok.line}:{tok.col}: "
+                        "runar.hexToBytes expects a string literal argument"
+                    )
+                    return ByteStringLiteral(value="")
+
+                # N-448: the first argument of runar.asm(...) is an opcode body.
+                if (builtin == "asm" and self._current().kind == TOK_LPAREN
+                        and self._pos + 1 < len(self._tokens)
+                        and self._tokens[self._pos + 1].kind == TOK_STRING):
+                    self._bare_literal_ok.add(self._pos + 1)
+
                 return Identifier(name=builtin)
 
-            return Identifier(name=tok.value)
+            return Identifier(name=tok.value, source_location=SourceLocation(file=self._file, line=tok.line, column=tok.col))
 
         # Fallback
         self._advance()
         return Identifier(name=tok.value or "unknown")
+
+    def _parse_list_elements(self, close: int) -> list[Expression]:
+        """F-026: the elements of a call argument list or array literal up to
+        (not including) ``close``. Zig requires ``,`` between elements (a
+        trailing one is allowed); without it a stray token after a literal
+        used to become an extra element."""
+        elements: list[Expression] = []
+        while self._current().kind != close and self._current().kind != TOK_EOF:
+            elements.append(self._parse_expression())
+            if self._match(TOK_COMMA):
+                continue
+            if self._current().kind != close:
+                t = self._current()
+                self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_LIST_COMMA}")
+            break
+        return elements
+
+    def _expect_list_separator(self, close: int) -> bool:
+        """N-033: after a field, parameter or struct-init entry, consume the
+        ``,`` that separates it from the next one. Reports ZIG_LIST_COMMA at
+        the current token and returns False when that token is neither ``,``
+        nor ``close``; never consumes ``close``."""
+        if self._match(TOK_COMMA) or self._current().kind == close:
+            return True
+        t = self._current()
+        self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_LIST_COMMA}")
+        return False
 
     def _parse_postfix_chain(self, expr: Expression) -> Expression:
         """Parse postfix operations (call, member access, index access)."""
@@ -1515,11 +1749,19 @@ class _ZigParser:
             # Function/method call: expr(args...)
             if self._current().kind == TOK_LPAREN:
                 self._advance()
-                args: list[Expression] = []
-                while self._current().kind != TOK_RPAREN and self._current().kind != TOK_EOF:
-                    args.append(self._parse_expression())
-                    self._match(TOK_COMMA)
+                args = self._parse_list_elements(TOK_RPAREN)
                 self._expect(TOK_RPAREN, ")")
+                # N-453: the StatefulContext parameter is elided from every
+                # method's parameter list, so a `self.helper(ctx, ...)` call
+                # drops the bare handle too and the arities agree. Anywhere
+                # else (including the output intrinsics) a bare `ctx` stays an
+                # identifier and is refused as an undefined variable.
+                if (isinstance(expr, PropertyAccessExpr)
+                        and expr.property not in _STATEFUL_CONTEXT_MEMBERS):
+                    args = [
+                        a for a in args
+                        if not (isinstance(a, Identifier) and a.name in self._stateful_context_names)
+                    ]
                 expr = CallExpr(callee=expr, args=args)
                 continue
 
@@ -1557,7 +1799,7 @@ class _ZigParser:
     # -----------------------------------------------------------------------
 
     def _create_super_call(self, params: list[ParamNode]) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = self._ctor_loc
         return ExpressionStmt(
             expr=CallExpr(
                 callee=Identifier(name="super"),
@@ -1567,7 +1809,7 @@ class _ZigParser:
         )
 
     def _create_property_assignment(self, name: str, value: Expression) -> Statement:
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = self._ctor_loc
         return AssignmentStmt(
             target=PropertyAccessExpr(property=name),
             value=value,
@@ -1578,7 +1820,7 @@ class _ZigParser:
         """Generate a default constructor from property declarations."""
         required_props = [p for p in self._properties if p.initializer is None]
         params = [ParamNode(name=p.name, type=p.type) for p in required_props]
-        loc = SourceLocation(file=self._file, line=1, column=1)
+        loc = self._ctor_loc
 
         body: list[Statement] = [self._create_super_call(params)]
         body.extend(
@@ -1665,7 +1907,19 @@ def _collect_mutated_in_expr(expr, out):
 # ---------------------------------------------------------------------------
 
 def parse_zig(source: str, file_name: str = "Contract.runar.zig") -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+    lex: list = []
+    return with_lex_errors(
+        with_nesting_limit(file_name, lambda: _parse_zig_tokens(source, file_name, lex)), lex
+    )
+
+
+def _parse_zig_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Zig-format Runar contract (.runar.zig) and return a ParseResult."""
-    tokens = _tokenize(source)
+    tokens = _tokenize(source, lex, file_name)
     parser = _ZigParser(tokens, file_name)
     return parser.parse()

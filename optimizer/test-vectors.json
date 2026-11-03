@@ -1,5 +1,89 @@
 [
   {
+    "name": "push-drop",
+    "before": [{ "op": "push", "value": 7 }, { "op": "drop" }],
+    "after": [],
+    "bytes_saved": 2
+  },
+  {
+    "name": "dup-drop",
+    "before": [{ "op": "dup" }, { "op": "drop" }],
+    "after": [],
+    "bytes_saved": 2
+  },
+  {
+    "name": "swap-swap",
+    "before": [{ "op": "swap" }, { "op": "swap" }],
+    "after": [],
+    "bytes_saved": 2
+  },
+  {
+    "name": "rot-rot-rot",
+    "before": [{ "op": "rot" }, { "op": "rot" }, { "op": "rot" }],
+    "after": [],
+    "bytes_saved": 3
+  },
+  {
+    "name": "1-add-to-1add",
+    "before": [{ "op": "push", "value": 1 }, { "op": "opcode", "code": "OP_ADD" }],
+    "after": [{ "op": "opcode", "code": "OP_1ADD" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "1-sub-to-1sub",
+    "before": [{ "op": "push", "value": 1 }, { "op": "opcode", "code": "OP_SUB" }],
+    "after": [{ "op": "opcode", "code": "OP_1SUB" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "not-not-elim",
+    "before": [{ "op": "opcode", "code": "OP_NUMEQUAL" }, { "op": "opcode", "code": "OP_NOT" }, { "op": "opcode", "code": "OP_NOT" }],
+    "after": [{ "op": "opcode", "code": "OP_NUMEQUAL" }],
+    "bytes_saved": 2
+  },
+  {
+    "name": "equal-verify",
+    "before": [{ "op": "opcode", "code": "OP_EQUAL" }, { "op": "opcode", "code": "OP_VERIFY" }],
+    "after": [{ "op": "opcode", "code": "OP_EQUALVERIFY" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "checksig-verify",
+    "before": [{ "op": "opcode", "code": "OP_CHECKSIG" }, { "op": "opcode", "code": "OP_VERIFY" }],
+    "after": [{ "op": "opcode", "code": "OP_CHECKSIGVERIFY" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "numequal-verify",
+    "before": [{ "op": "opcode", "code": "OP_NUMEQUAL" }, { "op": "opcode", "code": "OP_VERIFY" }],
+    "after": [{ "op": "opcode", "code": "OP_NUMEQUALVERIFY" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "checkmultisig-verify",
+    "before": [{ "op": "opcode", "code": "OP_CHECKMULTISIG" }, { "op": "opcode", "code": "OP_VERIFY" }],
+    "after": [{ "op": "opcode", "code": "OP_CHECKMULTISIGVERIFY" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "op-dup-op-drop",
+    "before": [{ "op": "opcode", "code": "OP_DUP" }, { "op": "opcode", "code": "OP_DROP" }],
+    "after": [],
+    "bytes_saved": 2
+  },
+  {
+    "name": "over-over-to-2dup",
+    "before": [{ "op": "over" }, { "op": "over" }],
+    "after": [{ "op": "opcode", "code": "OP_2DUP" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "drop-drop-to-2drop",
+    "before": [{ "op": "drop" }, { "op": "drop" }],
+    "after": [{ "op": "opcode", "code": "OP_2DROP" }],
+    "bytes_saved": 1
+  },
+  {
     "name": "roll0-noop",
     "before": [{ "op": "push", "value": 0 }, { "op": "roll", "depth": 0 }],
     "after": [],
@@ -30,7 +114,7 @@
     "bytes_saved": 1
   },
   {
-    "name": "sha256-sha256-to-hash256",
+    "name": "sha256-sha256",
     "before": [{ "op": "opcode", "code": "OP_SHA256" }, { "op": "opcode", "code": "OP_SHA256" }],
     "after": [{ "op": "opcode", "code": "OP_HASH256" }],
     "bytes_saved": 1

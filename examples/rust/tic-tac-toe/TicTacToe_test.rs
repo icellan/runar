@@ -34,6 +34,16 @@ fn player_x_sig() -> Sig { ALICE.sign_test_message() }
 fn player_o_sig() -> Sig { BOB.sign_test_message() }
 fn zero_pk() -> PubKey { vec![0u8; 33] }
 
+/// Pads a 32-byte hash so `extract_output_hash`'s end-relative
+/// `bytes[len-40..len-8]` slice (N-246) reads it back, mirroring where
+/// hashOutputs sits in a real BIP-143 preimage (40 bytes before the end: 8
+/// trailing bytes for locktime + sighashType).
+fn wrap_hash_outputs_n246(hash: Sha256) -> SigHashPreimage {
+    let mut buf = vec![0u8; 72];
+    buf[32..64].copy_from_slice(&hash);
+    buf
+}
+
 /// Build a game the way the contract does: the constructor supplies only the
 /// readonly `player_x` / `bet_amount`, and `init()` — the contract's OWN
 /// property initializers — supplies everything else. Nothing here restates a
@@ -82,6 +92,15 @@ fn playing_game() -> TicTacToe {
     g
 }
 
+/// Player O joins paying exactly the bet: `extract_amount` (the input, player
+/// X's bet) is 10000 off-chain, so the continuation is 10000 + bet_amount
+/// (N-027).
+fn join_paying(game: &mut TicTacToe) {
+    let prev = set_mock_continuation_amount(10000 + game.bet_amount);
+    game.join(player_o(), &player_o_sig());
+    set_mock_continuation_amount(prev);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -89,7 +108,7 @@ fn playing_game() -> TicTacToe {
 #[test]
 fn test_join() {
     let mut game = new_game();
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
     assert_eq!(game.player_o, player_o());
     assert_eq!(game.status, 1);
     assert_eq!(game.turn, 1);
@@ -99,7 +118,25 @@ fn test_join() {
 #[should_panic]
 fn test_join_rejects_when_already_playing() {
     let mut game = playing_game();
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
+}
+
+/// N-027: a join must pay exactly the bet. Carrying the input forward unpaid
+/// (10000) passes F-024's `>= input` floor but not join's rule, and neither
+/// does a continuation one satoshi short or over.
+#[test]
+fn test_join_rejects_wrong_payment() {
+    for extra in [0, -1, 1] {
+        let bet = new_game().bet_amount;
+        let amount = if extra == 0 { 10000 } else { 10000 + bet + extra };
+        let caught = std::panic::catch_unwind(|| {
+            set_mock_continuation_amount(amount);
+            let mut game = new_game();
+            game.join(player_o(), &player_o_sig());
+        });
+        set_mock_continuation_amount(10000);
+        assert!(caught.is_err(), "join with continuation {amount} must be rejected");
+    }
 }
 
 #[test]
@@ -163,7 +200,7 @@ fn test_full_game_join_and_moves() {
     let mut game = new_game();
 
     // Join
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
     assert_eq!(game.status, 1);
 
     // X@0, O@3, X@1, O@4 — set up X to win with position 2 (top row)
@@ -184,7 +221,7 @@ fn test_full_game_join_and_moves() {
     // Pre-compute the payout hash so extract_output_hash returns the right value.
     let total_payout = game.bet_amount * 2;
     let payout = cat(&cat(&cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix), &hash160(&player_x())), &game.p2pkh_suffix);
-    game.tx_preimage = hash256(&payout);
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&payout));
     game.move_and_win(2, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
@@ -208,7 +245,7 @@ fn arm_win_payout(game: &mut TicTacToe, winner: &PubKey) {
         &cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix),
         &cat(&hash160(winner), &game.p2pkh_suffix),
     );
-    game.tx_preimage = hash256(&payout);
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&payout));
 }
 
 /// Set `tx_preimage` so `extract_output_hash` returns the hash of the equal
@@ -222,7 +259,7 @@ fn arm_tie_payout(game: &mut TicTacToe) {
         &cat(&num2bin(&game.bet_amount, 8), &game.p2pkh_prefix),
         &cat(&hash160(&game.player_o), &game.p2pkh_suffix),
     );
-    game.tx_preimage = hash256(&cat(&out1, &out2));
+    game.tx_preimage = wrap_hash_outputs_n246(hash256(&cat(&out1, &out2)));
 }
 
 #[test]

@@ -46,7 +46,7 @@ class Blake3Test {
     void compressOpCount() {
         List<StackOp> ops = new ArrayList<>();
         Blake3.emitBlake3Compress(ops::add);
-        assertEquals(10373, ops.size(), "blake3Compress op count drift");
+        assertEquals(10379, ops.size(), "blake3Compress op count drift");
     }
 
     @Test
@@ -62,12 +62,20 @@ class Blake3Test {
 
     @Test
     void compressOpcodesStartCorrectly() {
-        // Compression starts by splitting the 64-byte block into 16x4-byte
-        // LE words. First 30 ops alternate (push 4, OP_SPLIT) x15.
+        // F-114: the block size guard (OP_SIZE, push 64, OP_EQUALVERIFY)
+        // comes first. Then compression splits the 64-byte block into
+        // 16x4-byte LE words: the next 30 ops alternate (push 4, OP_SPLIT) x15.
         List<StackOp> ops = new ArrayList<>();
         Blake3.emitBlake3Compress(ops::add);
 
-        for (int i = 0; i < 30; i += 2) {
+        assertTrue(ops.get(0) instanceof OpcodeOp
+            && "OP_SIZE".equals(((OpcodeOp) ops.get(0)).code()), "op[0] must be OP_SIZE");
+        assertEquals(BigInteger.valueOf(64),
+            ((BigIntPushValue) ((PushOp) ops.get(1)).value()).value(), "op[1] must push 64");
+        assertTrue(ops.get(2) instanceof OpcodeOp
+            && "OP_EQUALVERIFY".equals(((OpcodeOp) ops.get(2)).code()), "op[2] must be OP_EQUALVERIFY");
+
+        for (int i = 3; i < 33; i += 2) {
             StackOp push = ops.get(i);
             StackOp split = ops.get(i + 1);
             assertTrue(push instanceof PushOp, "op[" + i + "] must be push");
@@ -152,12 +160,13 @@ class Blake3Test {
         String hex = Emit.run(prog);
         assertFalse(hex.isEmpty(), "hex must not be empty");
 
-        // LE port: compress hex byte length = 11186.
-        assertEquals(11186, hex.length() / 2, "compress hex byte count drift");
+        // LE port + F-114 operand guards (+8 bytes): compress hex byte length = 11194.
+        assertEquals(11194, hex.length() / 2, "compress hex byte count drift");
 
-        // LE port: first 32 bytes of compress hex.
+        // First 32 bytes of compress hex: 82 0140 88 = OP_SIZE <64>
+        // OP_EQUALVERIFY (F-114 block guard), then the 4-byte word splits.
         assertEquals(
-            "547f547f547f547f547f547f547f547f547f547f547f547f547f547f547f607a",
+            "82014088547f547f547f547f547f547f547f547f547f547f547f547f547f547f",
             hex.substring(0, 64));
     }
 

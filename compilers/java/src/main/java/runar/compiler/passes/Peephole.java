@@ -43,10 +43,39 @@ public final class Peephole {
         return new StackProgram(program.contractName(), optimised);
     }
 
+    /**
+     * Optimizes {@code ops} bottom-up: every if-arm before the list holding it.
+     *
+     * <p>N-264: bottom-up by an explicit list, not recursion. Private methods
+     * are inlined, so a chain of D helpers that each call the next under K
+     * nested ifs nests D*K IfOps here, and the recursive walk overflowed the
+     * thread stack. Every op list reachable through if arms is collected
+     * parents first, then optimized in reverse — children before parents, each
+     * list exactly as the recursive version optimized it.
+     */
     public static List<StackOp> optimize(List<StackOp> ops) {
-        List<StackOp> current = new ArrayList<>(ops.size());
-        for (StackOp op : ops) current.add(optimizeNestedIf(op));
+        List<List<StackOp>> lists = new ArrayList<>();
+        lists.add(ops);
+        for (int k = 0; k < lists.size(); k++) {
+            for (StackOp op : lists.get(k)) {
+                if (op instanceof IfOp i) {
+                    lists.add(i.thenBranch());
+                    if (i.elseBranch() != null) lists.add(i.elseBranch());
+                }
+            }
+        }
+        java.util.IdentityHashMap<List<StackOp>, List<StackOp>> optimized = new java.util.IdentityHashMap<>();
+        for (int k = lists.size() - 1; k >= 0; k--) {
+            List<StackOp> list = lists.get(k);
+            List<StackOp> current = new ArrayList<>(list.size());
+            for (StackOp op : list) current.add(withOptimizedArms(op, optimized));
+            optimized.put(list, optimizeOneLevel(current));
+        }
+        return optimized.get(ops);
+    }
 
+    /** The fixed-point rule loop over one op list whose if-arms are already done. */
+    private static List<StackOp> optimizeOneLevel(List<StackOp> current) {
         for (int it = 0; it < MAX_ITERATIONS; it++) {
             Pass pass = applyOnePass(current);
             if (!pass.changed) break;
@@ -55,12 +84,13 @@ public final class Peephole {
         return current;
     }
 
-    private static StackOp optimizeNestedIf(StackOp op) {
+    private static StackOp withOptimizedArms(
+            StackOp op, java.util.IdentityHashMap<List<StackOp>, List<StackOp>> optimized) {
         if (op instanceof IfOp i) {
-            List<StackOp> thenB = optimize(i.thenBranch());
-            List<StackOp> elseB = i.elseBranch() != null ? optimize(i.elseBranch()) : null;
-            if (elseB == null) return new IfOp(thenB);
-            return new IfOp(thenB, elseB);
+            List<StackOp> thenB = optimized.get(i.thenBranch());
+            List<StackOp> elseB = i.elseBranch() != null ? optimized.get(i.elseBranch()) : null;
+            // N-158: keep the IfOp's own loc; Emit maps OP_IF from it.
+            return new IfOp(thenB, elseB, i.sourceLoc());
         }
         return op;
     }
@@ -192,14 +222,14 @@ public final class Peephole {
         if (isPushBigInt(a, 1) && isOpcode(b, "OP_ADD")) return List.of(new OpcodeOp("OP_1ADD"));
         // PUSH 1, OP_SUB → OP_1SUB
         if (isPushBigInt(a, 1) && isOpcode(b, "OP_SUB")) return List.of(new OpcodeOp("OP_1SUB"));
-        // PUSH 0, OP_ADD → identity
-        if (isPushBigInt(a, 0) && isOpcode(b, "OP_ADD")) return List.of();
-        // PUSH 0, OP_SUB → identity
-        if (isPushBigInt(a, 0) && isOpcode(b, "OP_SUB")) return List.of();
+        // NOTE (F-001): no PUSH 0 + OP_ADD, PUSH 0 + OP_SUB or
+        // OP_NEGATE + OP_NEGATE elimination. x+0, x-0 and -(-x) are identities
+        // over integers, not over stack elements: the opcode decodes its
+        // operand as a CScriptNum (rejecting a non-minimal encoding under
+        // strict rules) and pushes back the minimal re-encoding. Deleting it
+        // changes accept/reject and the value for a witness-supplied operand.
 
         // OP_NOT, OP_NOT is NOT a 2-op rule — see matchWindow3 (C17).
-        // OP_NEGATE, OP_NEGATE → remove both
-        if (isOpcode(a, "OP_NEGATE") && isOpcode(b, "OP_NEGATE")) return List.of();
 
         // OP_EQUAL + OP_VERIFY → OP_EQUALVERIFY
         if (isOpcode(a, "OP_EQUAL") && isOpcode(b, "OP_VERIFY")) return List.of(new OpcodeOp("OP_EQUALVERIFY"));
@@ -219,15 +249,20 @@ public final class Peephole {
         if (a instanceof DropOp && b instanceof DropOp) return List.of(new OpcodeOp("OP_2DROP"));
 
         // PUSH 0 + Roll{0} → remove both
-        if (isPushBigInt(a, 0) && isRoll(b, 0)) return List.of();
+        // F-392: also matches the opcode-string form (OpcodeOp("OP_ROLL")/
+        // ("OP_PICK")) that some codegen paths emit instead of the typed
+        // node; the depth comes from the preceding PUSH either way. Matches
+        // compilers/python/.../optimizer.py and compilers/ruby/.../
+        // optimizer.rb, which already accept both forms.
+        if (isPushBigInt(a, 0) && (isRoll(b, 0) || isOpcode(b, "OP_ROLL"))) return List.of();
         // PUSH 1 + Roll{1} → SWAP
-        if (isPushBigInt(a, 1) && isRoll(b, 1)) return List.of(new SwapOp());
+        if (isPushBigInt(a, 1) && (isRoll(b, 1) || isOpcode(b, "OP_ROLL"))) return List.of(new SwapOp());
         // PUSH 2 + Roll{2} → ROT
-        if (isPushBigInt(a, 2) && isRoll(b, 2)) return List.of(new RotOp());
+        if (isPushBigInt(a, 2) && (isRoll(b, 2) || isOpcode(b, "OP_ROLL"))) return List.of(new RotOp());
         // PUSH 0 + Pick{0} → DUP
-        if (isPushBigInt(a, 0) && isPick(b, 0)) return List.of(new DupOp());
+        if (isPushBigInt(a, 0) && (isPick(b, 0) || isOpcode(b, "OP_PICK"))) return List.of(new DupOp());
         // PUSH 1 + Pick{1} → OVER
-        if (isPushBigInt(a, 1) && isPick(b, 1)) return List.of(new OverOp());
+        if (isPushBigInt(a, 1) && (isPick(b, 1) || isOpcode(b, "OP_PICK"))) return List.of(new OverOp());
 
         // OP_SHA256 + OP_SHA256 → OP_HASH256
         if (isOpcode(a, "OP_SHA256") && isOpcode(b, "OP_SHA256")) return List.of(new OpcodeOp("OP_HASH256"));
@@ -242,6 +277,12 @@ public final class Peephole {
 
     static List<StackOp> matchWindow3(StackOp a, StackOp b, StackOp c) {
         if (isRawBytes(a) || isRawBytes(b) || isRawBytes(c)) return null;
+
+        // ROT, ROT, ROT → remove all three (N-376). OP_ROT is a 3-cycle on the
+        // top three items, so three in a row are the identity; the fixed-point
+        // loop leaves a run of n as n mod 3. Matches the opcode-string form too
+        // (F-392 convention), as every tier does.
+        if (isRot(a) && isRot(b) && isRot(c)) return List.of();
 
         // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
         //
@@ -291,6 +332,11 @@ public final class Peephole {
     }
 
     // ---------- predicates ----------
+
+    /** A typed {@link RotOp} or the opcode-string {@code OP_ROT} (N-376). */
+    private static boolean isRot(StackOp op) {
+        return op instanceof RotOp || isOpcode(op, "OP_ROT");
+    }
 
     private static boolean isOpcode(StackOp op, String code) {
         return op instanceof OpcodeOp o && code.equals(o.code());

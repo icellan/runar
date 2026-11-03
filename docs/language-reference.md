@@ -465,6 +465,10 @@ for (let i: bigint = 0n; i < 10n; i++) {
 
 - The bound (right side of the comparison) must be a compile-time constant.
 - The **left** side of the comparison must be the loop variable itself.
+  The reversed spelling is accepted and means the same loop: `10n > i` is
+  read as `i < 10n`, `10n >= i` as `i <= 10n`, `0n < i` as `i > 0n` and
+  `0n <= i` as `i >= 0n`. Every compiler rewrites it to that form before
+  checking the rules below, on every input format (N-115).
 - Only simple increment (`++`) or decrement (`--`) is allowed, and the
   comparison direction must agree with it (`<`/`<=` with `++`, `>`/`>=` with
   `--`).
@@ -597,7 +601,7 @@ private helper(x: bigint): bigint {
 | `sqrt` | `(n: bigint) => bigint` | 256-round Newton's method with a convergence break: `next = (guess + n/guess) / 2; guess = min(guess, next)`. `OP_MIN` is the break — integer Newton reaches `floor(sqrt(n))` and then oscillates between it and `floor+1`, so clamping to the running minimum makes `floor(sqrt(n))` a fixed point. **Domain: `0 <= n < 2^495`, enforced.** A negative `n`, or one needing more than 62 script bytes, makes the script FAIL rather than return a wrong root (`OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY` and `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
-| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
+| `log2` | `(n: bigint) => bigint` | Exact floor(log2(n)) for **every** `n > 0`, with no width cap, read off the operand's minimal Script-number encoding (`OP_SIZE` plus a scan of the top byte; branch-free, 46 bytes). **Domain: `n > 0`, enforced.** `n <= 0` makes the script FAIL (`OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 
 > **Note on `pow`:** The compiler emits 32 unrolled conditional multiplies, so **32 is the largest exponent it can compute**, and that bound is ENFORCED rather than documented: `pow(base, exp)` with `exp < 0` or `exp > 32` makes the script FAIL. It does **not** return `base ** 32`.
 >
@@ -607,7 +611,7 @@ private helper(x: bigint): bigint {
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
-> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that halves the input (via `PUSH 2 OP_DIV`) until it reaches 1, counting iterations. Uses `OP_DIV` rather than `OP_RSHIFT` because `OP_RSHIFT` has byte-array semantics on BSV that are incompatible with script number halving.
+> **Note on `log2`:** The script normalises `n` (`OP_BIN2NUM`), aborts unless `n > 0`, splits off the top byte `t` of the minimal little-endian encoding of size `s`, and returns `8(s-1) - 1 + #{c in 1,2,4,…,64 : t >= c}`. A top byte of `0x00` is the sign-padding byte, and then the bit length is exactly `8(s-1)`, which the same formula gives. So `log2(1n)` is `0n`, `log2(1024n)` is `10n` and `log2(2n ** 70n)` is `70n`; `log2(0n)` and `log2(-1n)` fail the script. Until N-103 the compiler emitted a 64-iteration halving loop that saturated at 64 (`log2(2n ** 70n)` was `64n`) and returned `0n` for `n <= 0`.
 
 ### Control
 
@@ -634,6 +638,42 @@ In `StatefulSmartContract`, `checkPreimage` and state continuation are handled a
 | `extractLocktime` | `(preimage: SigHashPreimage) => bigint` | Extract nLocktime (4 bytes) |
 | `extractSigHashType` | `(preimage: SigHashPreimage) => bigint` | Extract sighash type (4 bytes, e.g. 0x41 for ALL\|FORKID) |
 | `extractInputIndex` | `(preimage: SigHashPreimage) => bigint` | Extract prevout index (vout) from the outpoint field |
+| `continuationAmount` | `() => bigint` | Satoshis of the default state continuation output (read-only; see below) |
+
+#### Value of the state continuation
+
+A public stateful method that mutates state (or emits a data output) and does
+**not** call `addOutput` / `addRawOutput` continues through the default
+single-output continuation. Its satoshis come from the compiler-injected
+`_newAmount` witness, which the spender chooses. The compiler therefore also
+injects
+
+```ts
+assert(_newAmount >= extractAmount(this.txPreimage));
+```
+
+before the continuation output is built, so the contract's value may grow (a
+deposit paid by a funding input) but never shrink: a spender cannot keep the
+state chain alive at 1 sat and pay the rest of the input to their own change
+output. Methods that size their outputs with `addOutput` / `addRawOutput`, and
+terminal methods, get no such check — the author owns those amounts.
+
+`continuationAmount()` is a read-only view of that same `_newAmount`, so a
+contract can state a stricter rule, for example a join that must add a bet:
+
+```ts
+public join(bet: bigint) {
+  assert(continuationAmount() == extractAmount(this.txPreimage) + bet);
+  this.count = this.count + 1n;
+}
+```
+
+It is valid only directly in a public method that has a default continuation
+(not in private helpers, terminal methods, or `addOutput` methods, and not in
+`SmartContract`), and it cannot be assigned. Each surface spells it like its
+other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
+(Python, Ruby, Rust, Move), `runar.continuationAmount()` (Zig),
+`continuationAmount()` (TypeScript, Solidity, Java).
 
 ### Oracle
 
@@ -653,7 +693,7 @@ In `StatefulSmartContract`, `checkPreimage` and state continuation are handled a
 | `verifySLHDSA_SHA2_192s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192s. 192-bit security. Sig: 16,224 B. |
 | `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192f. Fast variant. Sig: 35,664 B. |
 | `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256s. 256-bit security. Sig: 29,792 B. |
-| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 48,736 B. |
+| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 49,856 B. |
 
 ### Elliptic Curve (secp256k1)
 
@@ -709,7 +749,9 @@ These can be combined with bitwise OR (e.g., `SigHash.ALL | SigHash.FORKID` = `0
 >
 > This is also why `ecAdd(P, -P)` returns `O` rather than the tangent's `2P`: the answer must agree with the `ec-mulgen-linear` optimizer rewrite, which turns `ecAdd(ecMulGen(k1), ecMulGen(k2))` with `k1 + k2 ≡ 0 (mod n)` into `ecMulGen(0)` — the all-zero point. The same source must not compile to two different answers depending on whether the optimizer fired.
 >
-> **`O` is a sentinel, not a group identity — never feed it back in.** `ecAdd` / `p256Add` / `p384Add` implement the chord-and-tangent formulas, which have no case for an operand at infinity: `ecAdd(O, Q)` compares `0 == Q.x`, takes the chord path, and returns an **off-curve blob**, not `Q`. Likewise `ecMul(O, k)` is meaningless. The all-zero point is only ever a value to *test and reject*, so put the `assert(ecOnCurve(...))` immediately after the operation that could produce it, before the result reaches another EC builtin.
+> **`O` is the identity of `ecAdd`, and it is safe to feed back in** (R-053 / CL-BUG-096). `ecAdd` / `p256Add` / `p384Add` select over an operand at infinity, so on all three curves `P + O = P`, `O + P = P`, `O + O = O` and `P + (-P) = O`; the optimizer's `ec-add-identity-*` rewrites agree with that answer. `ecMul(O, k)` / `p256Mul(O, k)` / `p384Mul(O, k)` is `O`: the scalar-multiply builtins gate their point operand on "on the curve, or exactly `O`" (R-157) and abort on anything else, and `O` passes that gate by design. The identity being well-defined does not make `O` a valid *key*: `ecOnCurve(O)` is still `false`, so where a result must be a real point — a public key, a signature nonce point — keep the `assert(ecOnCurve(...))` above.
+>
+> **The optimizer never weakens an operand check.** Each EC builtin validates its point operands before computing anything: `ecAdd` aborts unless an operand is exactly 64 bytes with both coordinates below `p` (it does NOT require the point to be on the curve), and `ecMul` aborts unless it is on the curve or `O`. When the optimizer folds `ecAdd(q, O)`, `ecAdd(O, q)`, `ecMul(q, 1n)` or `ecMul(q, 0n)` away, it keeps that same validation of `q` in place of the call (N-104), so a malformed or off-curve `q` is rejected whether or not the rewrite fired.
 
 > **Note on `ecOnCurve` / `p256OnCurve` / `p384OnCurve`:** these also reject **non-canonical** coordinates (`x >= p` or `y >= p`). Coordinates decode as unsigned integers and the field arithmetic reduces mod `p`, so `(x + p)‖y` would otherwise be a second accepted encoding of the same point — and `ecAdd` / `pNNNAdd` detect doubling by comparing the *raw* x-coordinates, so two accepted encodings of one point take the chord path and return an off-curve result. Gate every untrusted `Point` on the on-curve check before doing arithmetic with it.
 
@@ -765,10 +807,31 @@ The BSV node default is `DEFAULT_MAX_SCRIPT_SIZE_POLICY_AFTER_GENESIS = 500 * ON
 
 ## Compiler Directives
 
-Two comment directives change what the compiler emits. Both are read **only on
-the `.runar.ts` surface** — the other eight parsers reject a source carrying
-either one rather than ignoring it, because silently dropping a directive would
-change signing or dead-code semantics without saying so.
+Two directives change what the compiler emits. On the `.runar.ts` surface they
+are comments, shown below. The other eight surfaces spell each one as a native
+modifier that mirrors how that surface spells `readonly` (N-093); every tier
+reads all nine spellings into the same AST, so the bytes are identical:
+
+| Surface | `@embedAlways` (readonly property) | `@sighash` (public method) |
+|---|---|---|
+| `.runar.ts` | `/** @embedAlways */` above the field | `/** @sighash SINGLE\|FORKID */` above the method |
+| `.runar.sol` | property modifier: `ByteString immutable embedAlways deployTag;` | function modifier: `function f(...) public sighash(SINGLE \| FORKID) {` |
+| `.runar.move` | attribute: `#[embed_always]` before the field | attribute: `#[sighash(SINGLE \| FORKID)]` before `public fun` |
+| `.runar.go` | struct-tag option: `` `runar:"readonly,embedAlways"` `` | directive comment directly above the func: `//runar:sighash SINGLE\|FORKID` |
+| `.runar.rs` | attribute: `#[embed_always]` (with `#[readonly]`) | attribute: `#[sighash(SINGLE \| FORKID)]` before `pub fn` |
+| `.runar.py` | wrapper type: `deploy_tag: EmbedAlways[ByteString]` | decorator argument: `@public(sighash="SINGLE\|FORKID")` |
+| `.runar.zig` | type function: `deployTag: runar.EmbedAlways(runar.ByteString)` | return type: `pub fn f(...) runar.Sighash("SINGLE\|FORKID") {` |
+| `.runar.rb` | prop option: `prop :deploy_tag, ByteString, embed_always: true` | class macro before the `def`: `runar_sighash 'SINGLE\|FORKID'` |
+| `.runar.java` | annotation: `@EmbedAlways` | annotation: `@Sighash("SINGLE\|FORKID")` |
+
+The non-TS parsers drop comments, so a COMMENT directive (`// @sighash ...`) on
+one of those eight surfaces is rejected rather than ignored — silently dropping
+it would change signing or dead-code semantics without saying so — and the
+error names that surface's native spelling. Each native spelling is validated
+exactly like the comment: the same flag grammar, and the same errors for a
+directive on a non-public method, two directives on one method, a malformed
+argument, or a directive on the wrong kind of member. See the format guides in
+[`docs/formats/`](formats/) for each surface's details.
 
 ### `@embedAlways`
 
@@ -779,7 +842,7 @@ deploy-time metadata you intend to read back off the script later.
 
 ```typescript
 class Directives extends SmartContract {
-  readonly ownerPKH: Addr;
+  readonly pubKeyHash: Addr;
 
   /** @embedAlways */
   readonly deployTag: ByteString;
@@ -791,9 +854,12 @@ Without the directive the compiler emits a warning naming it:
 
 ```
 warning: readonly field 'deployTag' is not referenced in any method body
-and was eliminated by DCE; annotate it /** @embedAlways */ to preserve it
-in the on-chain script
+and may be eliminated by DCE; mark it with the embedAlways directive to preserve
+it in the on-chain script
 ```
+
+The wording is the same on every surface; use that surface's native spelling
+from the table above.
 
 The effect is visible in the artifact's `constructorSlots` — the byte offsets
 deploy-time values are spliced into — and **not** in `abi.constructor.params`,
@@ -801,8 +867,8 @@ which lists the declared signature and keeps the parameter either way:
 
 | | `constructorSlots` |
 |---|---|
-| with `@embedAlways` | `["deployTag", "ownerPKH", "ownerPKH"]` |
-| without | `["ownerPKH", "ownerPKH"]` |
+| with `@embedAlways` | `["deployTag", "pubKeyHash", "pubKeyHash"]` |
+| without | `["pubKeyHash", "pubKeyHash"]` |
 
 So the constructor still takes the argument; the value just never reaches the
 script.
@@ -824,12 +890,44 @@ combined value is published on the method's ABI entry as `sigHashType`; the
 default is omitted rather than written out, so a method with no directive has no
 `sigHashType` field.
 
+A method may carry at most one `@sighash` directive, and once the marker is
+present the rest of the line must be a well-formed flag list: whitespace, then
+flag names separated by `|`. Anything else is a compile error in every tier,
+not a silent fall-back to the default. That includes trailing punctuation
+(`@sighash SINGLE|FORKID!`), a missing space (`@sighash:SINGLE`), a `,`
+separator, or an empty flag list. `@sighash` directly followed by any other
+character is refused the same way, so `@sighashSINGLE|FORKID` (no space) and
+`@sighashType` are errors, not prose.
+
+Inside the contract class body, a `@sighash` that is not in a method's leading
+comments, or an `@embedAlways` that is not in a property's, is a compile error
+in every tier (N-199): it would otherwise be silently ignored. That covers a
+comment sharing a line with the preceding code (`foo() {} // @sighash
+SINGLE|FORKID` belongs to `foo`'s closing brace, not to the next method), one
+above the constructor, one at the end of the class, one inside a method body,
+and one on the wrong kind of member. Mentions outside the class braces (file or
+class doc comments) are prose and are not checked.
+
 `SINGLE|FORKID` commits to only the output at the same index as the input being
 signed, which is what lets one party fix their own output and leave the rest of
 the transaction open for a counterparty to complete.
 
+On a `StatefulSmartContract` method, `SINGLE` changes the auto-injected
+continuation too: it hashes only the method's own output, the one SINGLE
+commits, so the method takes no `_changePKH` / `_changeAmount` parameters. A
+caller may still add a change output after the continuation. The covenant does
+not cover it; the funding input's own signature does. Because SINGLE does not
+pin the continuation's value, such a method must emit exactly one explicit
+`addOutput` / `addRawOutput` carrying the full protected amount (for example
+`extractAmount(this.txPreimage)`); a mutate-only SINGLE method is a compile
+error. See
+[`conformance/sdk-call/SingleCounter.runar.ts`](../conformance/sdk-call/SingleCounter.runar.ts).
+
 Worked example, with both directives and their falsifications:
-[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/).
+[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/), with a
+port in every other surface under `examples/<format>/compiler-directives/`. The
+conformance fixtures `compiler-directives` and `embed-always-fixed-array` pin
+the bytes across all seven compilers.
 
 ---
 

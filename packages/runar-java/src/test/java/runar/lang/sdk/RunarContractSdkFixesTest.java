@@ -114,6 +114,48 @@ class RunarContractSdkFixesTest {
     }
 
     // ------------------------------------------------------------------
+    // N-144 — CallOptions.satoshis (continuation-amount override)
+    //
+    // Before this fix, CallOptions had no `satoshis` field at all: the
+    // generated typed wrapper's {Contract}StatefulCallOptions.satoshis was
+    // read nowhere, so setting it silently did nothing — the continuation
+    // always carried forward the spent UTXO's value. TS parity:
+    // `options?.satoshis ?? singleExplicitStateSats ?? currentUtxo.satoshis`
+    // (packages/runar-sdk/src/contract.ts).
+    // ------------------------------------------------------------------
+
+    @Test
+    void explicitSatoshisOverridesContinuationAmount() throws Exception {
+        MockProvider provider = new MockProvider();
+        LocalSigner signer = new LocalSigner(PRIV);
+        RunarContract contract = statefulCounter(provider, signer, 200_000L, 1);
+
+        CallOptions opts = new CallOptions(Map.of("count", BigInteger.ONE), null, null)
+            .withSatoshis(9_999L);
+        RunarContract.CallOutcome out =
+            contract.callWithOptions("increment", List.of(), opts, provider, signer);
+
+        assertEquals(9_999L, out.nextContractUtxo().satoshis(),
+            "CallOptions.satoshis must override the continuation amount — this used to be a "
+                + "silent no-op because the field did not exist on CallOptions at all");
+    }
+
+    @Test
+    void defaultOptionsKeepContinuationAtSpentUtxoSatoshis() throws Exception {
+        MockProvider provider = new MockProvider();
+        LocalSigner signer = new LocalSigner(PRIV);
+        // statefulCounter() deploys the spendable UTXO at 5_000 sats.
+        RunarContract contract = statefulCounter(provider, signer, 200_000L, 1);
+
+        RunarContract.CallOutcome out = contract.call(
+            "increment", List.of(), Map.of("count", BigInteger.ONE), provider, signer);
+
+        assertEquals(5_000L, out.nextContractUtxo().satoshis(),
+            "with no satoshis override, the continuation must keep the spent UTXO's value "
+                + "(TS parity default) — unaffected by N-144, asserted as a companion guard");
+    }
+
+    // ------------------------------------------------------------------
     // #133 — coin-select funding + maxFundingInputs cap
     // ------------------------------------------------------------------
 

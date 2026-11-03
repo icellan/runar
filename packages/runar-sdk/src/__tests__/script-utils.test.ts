@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Hash, Utils } from '@bsv/sdk';
-import { buildP2PKHScript, extractConstructorArgs } from '../script-utils.js';
+import { buildP2PKHScript, extractConstructorArgs, matchesArtifact } from '../script-utils.js';
+import { MalformedScriptError } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // buildP2PKHScript — single consolidated P2PKH script builder
@@ -126,5 +127,54 @@ describe('extractConstructorArgs with repeated slot references', () => {
     const args = extractConstructorArgs(artifact as never, resolved);
     expect(args.alpha).toBe(5n);
     expect(args.beta).toBe(7n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-238 — readScriptElement must refuse malformed provider-supplied scripts
+// ---------------------------------------------------------------------------
+//
+// This is the TS reference `readScriptElement` (not exported) that the
+// Python port (`_read_script_element`) mirrors. Before this fix it was
+// ALSO fail-open: an empty/out-of-range offset produced `opcode = NaN` and
+// fell through to the single-byte-opcode default instead of throwing, and a
+// push whose declared length ran past the end of the hex string was handed
+// to `.slice()`, which silently returns whatever is left instead of erroring.
+//
+// PROVES: every malformed vector below throws MalformedScriptError via the
+// public entry points (extractConstructorArgs / matchesArtifact — the only
+// two callers), and a valid push of every flavour still decodes unchanged.
+// DOES NOT PROVE: fail-closed behaviour of any OTHER script reader in the
+// SDK (e.g. the OP_RETURN state-section decoder has its own tests).
+describe('extractConstructorArgs / matchesArtifact refuse malformed scripts (F-238)', () => {
+  const oneSlotArtifact = {
+    script: '00' + 'ac',
+    constructorSlots: [{ paramIndex: 0, byteOffset: 0, name: 'x', type: 'bigint' }],
+    abi: { constructor: { params: [{ name: 'x', type: 'bigint' }] } },
+  };
+
+  const malformedVectors = [
+    '',             // no opcode byte at all
+    'f',            // odd-length hex, can't even form an opcode byte
+    '05aabb',       // direct push declares 5 bytes, only 2 remain
+    '4c',           // OP_PUSHDATA1 with no length byte
+    '4c05aa',       // OP_PUSHDATA1 declares 5 bytes, only 1 remains
+    '4d0100',       // OP_PUSHDATA2 length prefix present, 0 of the 1 declared bytes remain
+    '4e01000000',   // OP_PUSHDATA4 length prefix present, 0 of the 1 declared bytes remain
+  ];
+
+  it.each(malformedVectors)('extractConstructorArgs throws MalformedScriptError for %j', (hex) => {
+    expect(() => extractConstructorArgs(oneSlotArtifact as never, hex)).toThrow(MalformedScriptError);
+  });
+
+  it.each(malformedVectors)('matchesArtifact throws MalformedScriptError for %j', (hex) => {
+    expect(() => matchesArtifact(oneSlotArtifact as never, hex)).toThrow(MalformedScriptError);
+  });
+
+  it('still extracts a valid OP_PUSHDATA1/2/4 push with an exact length', () => {
+    const pd1 = { script: '00ac', constructorSlots: [{ paramIndex: 0, byteOffset: 0, name: 'x', type: 'ByteString' }], abi: { constructor: { params: [{ name: 'x', type: 'ByteString' }] } } };
+    expect(extractConstructorArgs(pd1 as never, '4c012a' + 'ac').x).toBe('2a');
+    expect(extractConstructorArgs(pd1 as never, '4d01002a' + 'ac').x).toBe('2a');
+    expect(extractConstructorArgs(pd1 as never, '4e010000002a' + 'ac').x).toBe('2a');
   });
 });

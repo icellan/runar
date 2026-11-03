@@ -194,10 +194,16 @@ class TestParserGoEdges < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_garbage_input_does_not_crash
-    # The parser may recover (skip non-struct content) or report errors.
-    # Either is acceptable; the contract just must not crash.
+    # The TS reference (01-parse-go.ts) rejects this input outright: no
+    # contract struct is found, so it returns contract: null plus a
+    # "no Rúnar contract struct found in Go source" error. Ruby must agree
+    # on both halves of that outcome, not merely avoid raising.
+    # Does not prove: error message text parity with TS (only that both
+    # tiers refuse to produce a contract, with diagnostics attached).
     begin
-      parse('@@@ not go !!!', 'garbage.runar.go')
+      result = parse('@@@ not go !!!', 'garbage.runar.go')
+      assert_nil result.contract, 'expected no contract for garbage input'
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed on garbage input: #{e.class}: #{e.message}"
     end
@@ -213,8 +219,23 @@ class TestParserGoEdges < Minitest::Test
       }
     GO
 
+    # Unlike garbage input, this is a legitimate Go DSL surface: the TS
+    # reference (01-parse-go.ts) does not require a package declaration and
+    # parses this as a valid, error-free contract named `Bad`. This test
+    # asserts the full successful-parse shape, which is what distinguishes
+    # "did not crash" from "parsed correctly" — a stub that always returns
+    # an empty/wrong-named contract would still pass the old assertion-free
+    # body but fails these checks.
+    # Does not prove: anything about methods/behavior beyond struct shape
+    # (this fixture declares none).
     begin
-      parse(source, 'bad.runar.go')
+      result = parse(source, 'bad.runar.go')
+      assert_empty result.errors
+      refute_nil result.contract
+      assert_equal 'Bad', result.contract.name
+      assert_equal 'SmartContract', result.contract.parent_class
+      assert_empty result.contract.properties
+      assert_empty result.contract.methods
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end

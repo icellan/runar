@@ -12,12 +12,12 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered (Lean-recognised) | 82/82 (dynamic readDir) |
-| ANF parse + well-formedness | 64/64 |
-| ANF JSON round-trip | 64/64 |
-| Default byte-exact gate (`pipelineGolden`) | 64/82 byte-exact (61 baseline + 3 live-regenerated crypto anchors; see note) |
-| Formal-evidence gate (`pipelineConformance`) | **0/64 VERIFIED-direct**, **64/64 VERIFIED-modulo-codegen-axioms** (Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
-| Crypto-heavy fixtures | 20 `cryptoAxiomPending` (8 byte-exact via stored constants) |
+| Conformance fixtures discovered (Lean-recognised) | 99/99 (dynamic readDir) |
+| ANF parse + well-formedness | 99/99 |
+| ANF JSON round-trip | 99/99 |
+| Default byte-exact gate (`pipelineGolden`) | 79/99 byte-exact (76 baseline + 3 live-regenerated crypto anchors; see note) |
+| Formal-evidence gate (`pipelineConformance`) | **0/99 VERIFIED-direct**, **98/99 VERIFIED-modulo-codegen-axioms** (34 crypto-call + 18 dispatch + 45 stateful), **1/99 DEFERRED-compile-safe-error** (`bn254-pairing`: Go-only BN254 pairing, no Lean lowering) (Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
+| Crypto-heavy fixtures | 22 `cryptoAxiomPending` (3 byte-exact via live-regenerated anchors; 19 inert) |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
 | Project axioms | 70 (current; was 125 at the start of Path 2 — see `TRUST_MANIFEST.md` for per-axiom breakdown and trajectory) |
@@ -29,13 +29,12 @@ pipeline. The package is useful in two roles:
 | End-to-end capstone — multi-method dispatch | `Pipeline.compileSafe_multi_public_observational_correct` (Phase D) |
 | Crypto codegen-to-spec links | 13 primitive families (SHA-256 / RIPEMD-160 / hash160 / hash256 / BLAKE3 / secp256k1 / P-256 / P-384 / ECDSA / BabyBear / Merkle / WOTS+ / SLH-DSA × 6 / Rabin) |
 
-Default `pipelineGolden` is the fast gate and currently reports 64/82
-fixtures byte-exact (61 baseline + 3 live-regenerated crypto anchors).
-Three fixtures — `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` —
-sit in `lowerDivergencePending`: the real compilers emit a minimality
-normalisation (OP_BIN2NUM at numeric reads of byte-array results) that this
-model does not, so it correctly fails to match their goldens. The compilers
-are right and the model lags.
+Default `pipelineGolden` is the fast gate and currently reports 79/99
+fixtures byte-exact (76 baseline + 3 live-regenerated crypto anchors).
+`lowerDivergencePending` is empty (`tests/PipelineGolden.lean:1150`): `shift-ops`,
+`bitwise-ops` and `oversize-bigint-shift` are in `baselineMatches` (listed at
+lines 869, 903, 916) and are byte-exact. They were once tracked as a
+minimality-normalisation (OP_BIN2NUM) divergence; that is historical.
 The crypto-heavy fixtures are counted only through stored
 Lean-produced constants, not by comparing `expected-script.hex` to
 itself. They remain visible as the `cryptoAxiomPending` bucket because
@@ -59,10 +58,10 @@ stored constant was regenerated from the model's genuine output.
 Unlike the discovery-driven gates below, `pipelineGolden` carries a
 **hand-curated fixture inventory** (the `baselineMatches` /
 `cryptoAxiomPending` / `lowerDivergencePending` bucket lists in
-`tests/PipelineGolden.lean`). All 74 discovered fixtures are bucketed
-(52 baseline + 20 crypto-pending + 0 lower-divergence — the last
+`tests/PipelineGolden.lean`). All 99 discovered fixtures are bucketed
+(76 baseline + 1 Go-only + 22 crypto-pending + 0 lower-divergence — the last
 divergence, `multisig`, closed on 2026-08-16); the gate byte-checks the
-60 the Lean model reproduces exactly. The discovered
+78 the Lean model reproduces exactly. The discovered
 counts in the status table come from the dynamic `readDir` gates
 (`goldenLoad` / `roundtrip` / `pipelineConformance`), which auto-track
 the corpus.
@@ -121,8 +120,8 @@ twins, not a larger stack. The re-derived bytes matched the stored
 constants exactly: the constants had been honest all along.
 
 `pipelineConformance` is the formal-evidence gate. It reports
-**0/64 VERIFIED-direct** and **64/64 VERIFIED-modulo-codegen-axioms**
-today. The two-tier classification means:
+**0/99 VERIFIED-direct** and **98/99 VERIFIED-modulo-codegen-axioms**
+(+ 1/99 DEFERRED-compile-safe-error, `bn254-pairing`) today. The two-tier classification means:
 
 - **VERIFIED-direct** — the fixture lies inside the structural-ref
   fragment for which the A15 capstone is an unconditional Lean
@@ -137,7 +136,7 @@ today. The two-tier classification means:
   we expect 0 fixtures at this tier until Path 2's Stage C wrapper
   widening + Phase D wrapper soundness + omnibus split (milestone O1)
   land. The harness discovers fixtures dynamically via `readDir`, so
-  this numerator/denominator auto-tracks the corpus (currently 63).
+  this numerator/denominator auto-tracks the corpus (currently 99).
 
 - **VERIFIED-modulo-codegen-axioms** — the fixture passes the
   permissive premises of the Phase D harness omnibus axiom
@@ -148,10 +147,10 @@ today. The two-tier classification means:
   per-primitive codegen-to-spec assumptions + the Phase D harness
   omnibus, which collapses the runtime-side Stage C composition for
   non-structural-const ANF constructors into one trust footprint).
-  All 63 fixtures land here today.
+  98 of the 99 fixtures land here today (`bn254-pairing` is DEFERRED).
 
 This is an accurate, honest measurement — not a test failure. The
-0/64 → N/64 visible flip requires either the omnibus to be split
+0/99 → N/99 visible flip requires either the omnibus to be split
 into per-family sub-omnibuses (Tier 1 milestone **O1** in
 `PATH2_PLAN.md` §5.23) or the harness's structural classifier to
 be widened to `SupportedANFBody`. Wrapper widening alone in
@@ -159,14 +158,14 @@ be widened to `SupportedANFBody`. Wrapper widening alone in
 checks `structuralRefBodyBool`. See `PATH2_PLAN.md` and `TODO.md`
 for the tiered execution plan.
 
-`conformance/tests/` contains 63 fixtures, all of which `goldenLoad`
+`conformance/tests/` contains 99 fixtures, all of which `goldenLoad`
 and `roundtrip` recognise — both walk the tree with `readDir` and have
 no hardcoded allowlist, so the count is discovered dynamically and
 auto-tracks new fixtures (the `goldenLoad` binary prints `found N
 expected-ir.json files` and asserts all N parse + satisfy WF; the
 `asm-raw-script` fixture parses cleanly after the `raw_script` ANF kind
 landed; only its codegen-to-Stack-IR simulation discharge is deferred).
-`pipelineGolden` reports 58/74 byte-exact across its tracked
+`pipelineGolden` reports 79/99 byte-exact across its tracked
 inventory (see the note above); the crypto stored-constant fixtures whose
 emit hex is regenerated rather than compared live in the
 `cryptoAxiomPending` bucket.
@@ -184,7 +183,7 @@ lake env ./.lake/build/bin/pipelineGolden
 
 `scripts/lean-verify.sh` builds every tracked Lean module, including
 standalone test modules that are outside the default root import closure.
-`pipelineGolden` is the default fast byte-exact gate (58/74).
+`pipelineGolden` is the default fast byte-exact gate (79/99).
 
 Full and scheduled checks:
 
@@ -270,7 +269,7 @@ a proof.
 
 Two end-to-end capstones are complete for single-public-method
 `compileSafe` programs. Neither covers a real Rúnar conformance
-fixture from the 63-fixture corpus today — that gap is the primary
+fixture from the 99-fixture corpus today — that gap is the primary
 active work item. The capstones compose:
 
 * **M5** (`Pipeline.compileSafe_single_public_observational_correct_unconditional`)
@@ -284,16 +283,17 @@ active work item. The capstones compose:
   outer capstone. Hypotheses remain genuine domain/structural
   predicates; none restate the conclusion.
 
-No real Rúnar contract in the 63-fixture corpus satisfies
+No real Rúnar contract in the 99-fixture corpus satisfies
 `structuralRefBody`. Every fixture body contains at least one
 `binOp`, `call`, `assert`, `update_prop`, `if_val`, `loop`, or
 `method_call` binding. The `tests/PipelineConformance.lean` harness
 measures this with a two-tier classification:
-**0/64 VERIFIED-direct** + **64/64 VERIFIED-modulo-codegen-axioms**.
-All 63 fixtures pass the permissive premises of the Phase D harness
+**0/99 VERIFIED-direct** + **98/99 VERIFIED-modulo-codegen-axioms**
+(+ 1/99 DEFERRED-compile-safe-error, `bn254-pairing`).
+98 of the 99 fixtures pass the permissive premises of the Phase D harness
 omnibus (well-formed, `compileSafe = .ok`, at least one public
 method) and are sound conditional on the codegen-soundness axioms
-documented in `TRUST_MANIFEST.md`. The 0/64 VERIFIED-direct number
+documented in `TRUST_MANIFEST.md`. The 0/99 VERIFIED-direct number
 is correct and honest, not a defect in the harness — it reflects
 the structural-ref fragment's intentional narrowness.
 
@@ -337,9 +337,9 @@ predicate + Decidable (E1), `extractVersion_buildPreimage_eq` and
 `runOpcode_CHECKSIGVERIFY_ValidTxContext` (E3).
 
 Phase F complete: `tests/PipelineConformance.lean` harness runs all
-64 fixtures (discovered dynamically via `readDir`); current report is
-**0/64 VERIFIED-direct** +
-**64/64 VERIFIED-modulo-codegen-axioms** (Phase D harness omnibus
+99 fixtures (discovered dynamically via `readDir`); current report is
+**0/99 VERIFIED-direct** +
+**98/99 VERIFIED-modulo-codegen-axioms** (+ 1/99 DEFERRED, `bn254-pairing`) (Phase D harness omnibus
 tier — sound conditional on the codegen-soundness axioms in
 `TRUST_MANIFEST.md`). Every
 domain predicate the harness checks (`structuralConstBody`,
@@ -466,8 +466,8 @@ modulo the documented 70-axiom trust base (see TRUST_MANIFEST.md §"v1
 Trust Boundary", the authoritative statement of what this verification
 does and does not establish), backed by
 the project's 7-tier cross-compiler conformance suite. The result is
-64/64 fixtures (discovered dynamically) classified
-`VERIFIED-modulo-codegen-axioms` by
+98/99 fixtures (discovered dynamically) classified
+`VERIFIED-modulo-codegen-axioms` (the 98th, `bn254-pairing`, is DEFERRED) by
 `tests/PipelineConformance.lean`, gated in CI on every PR.
 
 Concretely:

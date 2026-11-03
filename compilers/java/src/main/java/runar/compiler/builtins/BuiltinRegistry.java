@@ -56,7 +56,6 @@ public final class BuiltinRegistry {
 
         // ---------------- cryptographic hashes ----------------
         add(m, "sha256",          new String[][]{{"data", "ByteString"}}, "Sha256");
-        add(m, "Sha256Hash",      new String[][]{{"data", "ByteString"}}, "Sha256");
         add(m, "ripemd160",       new String[][]{{"data", "ByteString"}}, "Ripemd160");
         add(m, "hash160",         new String[][]{{"data", "ByteString"}}, "Ripemd160");
         add(m, "hash256",         new String[][]{{"data", "ByteString"}}, "Sha256");
@@ -205,6 +204,9 @@ public final class BuiltinRegistry {
         add(m, "bn254G1ScalarMul",new String[][]{{"p", "Point"}, {"s", "bigint"}}, "Point");
         add(m, "bn254G1Negate",   new String[][]{{"p", "Point"}}, "Point");
         add(m, "bn254G1OnCurve",  new String[][]{{"p", "Point"}}, "boolean");
+        add(m, "bn254Pairing",       new String[][]{{"p1", "Point"}, {"q1x0", "bigint"}, {"q1x1", "bigint"}, {"q1y0", "bigint"}, {"q1y1", "bigint"}}, "bigint");
+        add(m, "bn254MultiPairing3", new String[][]{{"p1", "Point"}, {"q1x0", "bigint"}, {"q1x1", "bigint"}, {"q1y0", "bigint"}, {"q1y1", "bigint"}, {"p2", "Point"}, {"q2x0", "bigint"}, {"q2x1", "bigint"}, {"q2y0", "bigint"}, {"q2y1", "bigint"}, {"p3", "Point"}, {"q3x0", "bigint"}, {"q3x1", "bigint"}, {"q3y0", "bigint"}, {"q3y1", "bigint"}, {"f0", "bigint"}, {"f1", "bigint"}, {"f2", "bigint"}, {"f3", "bigint"}, {"f4", "bigint"}, {"f5", "bigint"}, {"f6", "bigint"}, {"f7", "bigint"}, {"f8", "bigint"}, {"f9", "bigint"}, {"f10", "bigint"}, {"f11", "bigint"}}, "boolean");
+        add(m, "bn254MultiPairing4", new String[][]{{"p1", "Point"}, {"q1x0", "bigint"}, {"q1x1", "bigint"}, {"q1y0", "bigint"}, {"q1y1", "bigint"}, {"p2", "Point"}, {"q2x0", "bigint"}, {"q2x1", "bigint"}, {"q2y0", "bigint"}, {"q2y1", "bigint"}, {"p3", "Point"}, {"q3x0", "bigint"}, {"q3x1", "bigint"}, {"q3y0", "bigint"}, {"q3y1", "bigint"}, {"p4", "Point"}, {"q4x0", "bigint"}, {"q4x1", "bigint"}, {"q4y0", "bigint"}, {"q4y1", "bigint"}}, "boolean");
 
         // ---------------- Merkle ------------------------------
         add(m, "merkleRootSha256",  new String[][]{{"leaf", "ByteString"}, {"proof", "ByteString"}, {"index", "bigint"}, {"depth", "bigint"}}, "ByteString");
@@ -242,6 +244,9 @@ public final class BuiltinRegistry {
         add(m, "extractPrevOutputScript", new String[][]{{"inputIndex", "bigint"}, {"expectedScriptHash", "ByteString"}}, "ByteString");
         add(m, "requireOutputP2PKH",      new String[][]{{"outputIndex", "bigint"}, {"pubkeyHash", "ByteString"}, {"amount", "bigint"}}, "void");
         add(m, "currentBlockHeight",      new String[0][0], "bigint");
+        // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+        // satoshis of the default single-output state continuation.
+        add(m, "continuationAmount",      new String[0][0], "bigint");
 
         SIGNATURES = Collections.unmodifiableMap(m);
     }

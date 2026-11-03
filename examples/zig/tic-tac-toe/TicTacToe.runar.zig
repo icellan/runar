@@ -7,7 +7,7 @@ pub const TicTacToe = struct {
     betAmount: i64,
     p2pkhPrefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
     p2pkhSuffix: runar.Readonly(runar.ByteString) = runar.hexToBytes("88ac"),
-    playerO: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    playerO: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     c0: i64 = 0,
     c1: i64 = 0,
     c2: i64 = 0,
@@ -27,9 +27,14 @@ pub const TicTacToe = struct {
         };
     }
 
-    pub fn join(self: *TicTacToe, opponentPK: runar.PubKey, sig: runar.Sig) void {
+    pub fn join(self: *TicTacToe, ctx: runar.StatefulContext, opponentPK: runar.PubKey, sig: runar.Sig) void {
         runar.assert(self.status == 0);
         runar.assert(runar.checkSig(sig, opponentPK));
+        // Player O must pay exactly the bet (N-027): the continuation holds the
+        // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        // payout methods pay out. The compiler's own `>= input` floor alone would
+        // let O join for free.
+        runar.assert(runar.continuationAmount() == runar.extractAmount(ctx.txPreimage) + self.betAmount);
         self.playerO = opponentPK;
         self.status = 1;
         self.turn = 1;

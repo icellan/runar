@@ -12,10 +12,14 @@ import runar.lang.types.ByteString;
  * preimage is constructed by the transaction signer and pushed onto the
  * stack as a ByteString; the contract then calls {@code checkPreimage}
  * and extracts fields via the opcode-backed extractors. Under the
- * simulator, {@code checkPreimage} always succeeds, extractors return
+ * simulator, {@code checkPreimage} holds only for the preimage of the
+ * spending transaction the {@link ContractSimulator} call describes (and
+ * throws when the call describes none), extractors return
  * sensible defaults (version = 1, sequence = 0xfffffffe, sighash =
- * SIGHASH_ALL | FORKID, etc.), and {@code extractOutputHash} echoes the
- * first 32 bytes of whatever preimage blob the test built.
+ * SIGHASH_ALL | FORKID, etc.), and {@code extractOutputHash} returns the
+ * preimage's {@code hashOutputs} field (N-188; it used to echo the first
+ * 32 bytes of the raw preimage, which is {@code nVersion} plus 28 bytes of
+ * {@code hashPrevouts}, not {@code hashOutputs}).
  *
  * <p>Mirrors {@code packages/runar-lang/src/runtime/preimage.ts}.
  *
@@ -157,7 +161,39 @@ public final class Preimage {
     // Mock extractors — mirror runtime/preimage.ts defaults.
     // -----------------------------------------------------------------
 
-    public static boolean checkPreimage(Preimage p) { return true; }
+    /**
+     * The off-chain {@code checkPreimage}: true only when {@code p} is the
+     * BIP-143 preimage of the spending transaction the active
+     * {@link ContractSimulator} call describes ({@code callWithSpend} for a
+     * stateless contract, {@code callStateful} for a stateful one). N-099: it
+     * never passes without that transaction; it throws.
+     */
+    public static boolean checkPreimage(Preimage p) {
+        return checkPreimage(p == null ? null : p.toBytes());
+    }
+
+    /** As {@link #checkPreimage(Preimage)}, for the raw bytes a contract holds as a {@code SigHashPreimage}. */
+    public static boolean checkPreimage(byte[] supplied) {
+        Preimage expected = SimulatorContext.currentPreimage();
+        if (expected == null) {
+            throw new IllegalStateException("checkPreimage has no spending transaction to check the preimage "
+                + "against: call a stateless method through ContractSimulator.callWithSpend (simulator built "
+                + "with an artifact), or a stateful one through callStateful");
+        }
+        if (supplied == null) throw new AssertionError("checkPreimage failed: the preimage is null");
+        if (Arrays.equals(expected.toBytes(), supplied)) return true;
+        Preimage parsed;
+        try {
+            parsed = parse(supplied);
+        } catch (RuntimeException e) {
+            throw new AssertionError("checkPreimage failed: " + supplied.length
+                + " bytes are not a BIP-143 preimage");
+        }
+        ContractSimulator.requireMatches(expected, parsed);
+        // Every field matched, so the supplied bytes carry trailing data.
+        throw new AssertionError("checkPreimage failed: " + supplied.length
+            + " bytes are a BIP-143 preimage followed by trailing bytes");
+    }
 
     public static BigInteger extractVersion(Preimage p) {
         return p == null ? BigInteger.ONE : BigInteger.valueOf(p.version);
@@ -190,13 +226,14 @@ public final class Preimage {
     }
 
     /**
-     * Returns the first 32 bytes of the raw preimage; tests that need
+     * N-188: returns {@code hashOutputs}, same as {@link #extractOutputs}
+     * (the compiler lowers both to the same byte-window opcode sequence —
+     * see {@code StackLower#lowerExtractor}). Tests that need
      * hash256(outputs) == extractOutputHash(preimage) to succeed should
      * pre-set hashOutputs = hash256(expectedOutputs) via the builder.
      */
     public static ByteString extractOutputHash(Preimage p) {
-        if (p == null || p.rawBytes.length < 32) return new ByteString(ZERO_32);
-        return new ByteString(Arrays.copyOfRange(p.rawBytes, 0, 32));
+        return new ByteString(p == null ? ZERO_32 : p.hashOutputs);
     }
 
     public static ByteString extractOutputs(Preimage p) {

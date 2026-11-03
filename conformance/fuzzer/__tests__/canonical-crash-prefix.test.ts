@@ -35,6 +35,7 @@ import {
   CRASH_PREFIX,
   normaliseOutcome,
 } from '../canonical-json-differential.js';
+import { isCiEnv } from '../../env.js';
 
 const REPO = resolve(__dirname, '../../..');
 const read = (rel: string) => readFileSync(resolve(REPO, rel), 'utf8');
@@ -57,7 +58,7 @@ const haveRuby = have('ruby', ['--version']);
  * the arm is skipped with a warning so a developer without ruby can still work.
  */
 const TOOLCHAINS_REQUIRED =
-  process.env.RUNAR_REQUIRE_TOOLCHAINS === '1' || process.env.CI === 'true';
+  process.env.RUNAR_REQUIRE_TOOLCHAINS === '1' || isCiEnv(process.env);
 
 function requireTool(present: boolean, name: string): boolean {
   if (present) return true;

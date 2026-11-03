@@ -22,14 +22,16 @@ require 'runar/sdk'
 RSpec.describe 'Runar::SDK::ANFInterpreter intent intrinsics' do
   # rubocop:enable RSpec/DescribeClass
 
-  # Namespaced under the describe block so the constants don't collide
-  # with same-named globals defined in other spec files (e.g.
-  # +spec/sdk/compile_check_spec.rb+'s top-level REPO_ROOT).
-  REPO = File.expand_path('../../../../..', __dir__).freeze
-  IR   = File.join(REPO, 'conformance', 'tests').freeze
-
   def load_ir(name)
-    JSON.parse(File.read(File.join(IR, name, 'expected-ir.json')))
+    # Local, not a constant: `CONST = value` written directly inside an
+    # RSpec.describe block binds a top-level Object constant (a block
+    # opens no constant scope), which can collide with a same-named bare
+    # constant in another spec file (N-269;
+    # packages/runar-rb/spec/lint/bare_describe_constants_spec.rb guards
+    # against it). Only this method needs the path, so it's computed here
+    # rather than kept as a describe-level constant.
+    repo = File.expand_path('../../../../..', __dir__)
+    JSON.parse(File.read(File.join(repo, 'conformance', 'tests', name, 'expected-ir.json')))
   end
 
   # Double-SHA256 (Bitcoin hash256) of a raw 8-bit byte string, returned

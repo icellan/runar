@@ -235,6 +235,12 @@ pub fn rabin_verify(msg: &[u8], sig: &[u8], padding: &[u8], pubkey: &[u8]) -> bo
         return false;
     }
 
+    // Enforce sig < n, mirroring the on-chain F-368 gate: sig + k*n squares to
+    // the same residue but the deployed script aborts on it.
+    if sig_bn.cmp(&n) != std::cmp::Ordering::Less {
+        return false;
+    }
+
     let sig_sq = sig_bn.mul(&sig_bn);
     let lhs_sum = sig_sq.add(&pad_bn);
     let lhs = lhs_sum.rem(&n);
@@ -392,6 +398,37 @@ mod tests {
             rabin_verify(msg, &sig_bytes, &pad_bytes, &n_bytes),
             "honestly-signed signature with padding < 65536 must verify true"
         );
+    }
+
+    // N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts
+    // on chain. Proves: canonical sig and n - sig accepted; sig + n, sig + 2n
+    // rejected. Does not prove the verdict equals the consensus interpreter's.
+    #[test]
+    fn test_rabin_verify_rejects_non_canonical_sig_ge_n() {
+        let msg = b"test message";
+        let hash = Sha256::digest(msg);
+        let n_val: u64 = 997;
+        let n_bytes = n_val.to_le_bytes();
+        let rhs = BigUint::from_le_bytes(&hash)
+            .rem(&BigUint::from_le_bytes(&n_bytes))
+            .limbs[0];
+        let sig_val: u64 = 42;
+        let padding_val = (rhs + n_val - (sig_val * sig_val) % n_val) % n_val;
+        let pad_bytes = padding_val.to_le_bytes();
+
+        for s in [sig_val, n_val - sig_val] {
+            assert!(
+                rabin_verify(msg, &s.to_le_bytes(), &pad_bytes, &n_bytes),
+                "canonical sig {s} must verify"
+            );
+        }
+        for k in 1..=2u64 {
+            let s = sig_val + k * n_val;
+            assert!(
+                !rabin_verify(msg, &s.to_le_bytes(), &pad_bytes, &n_bytes),
+                "sig + {k}*n must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -100,13 +100,17 @@ const CASES: FoldCase[] = [
   { kind: 'pure', fixture: 'if-without-else', ctor: { threshold: 5n }, method: 'check', args: [10n, 3n], expect: true },
   { kind: 'pure', fixture: 'if-without-else', ctor: { threshold: 5n }, method: 'check', args: [2n, 3n], expect: false },
 
-  // bitwise-ops: ctor bakes a,b as constants so `a & b` etc. are foldable; guards
-  // are tautologies (always accept) — exercises fold on bitwise/shift constants.
-  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testBitwise', args: [], expect: true },
-  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testShift', args: [], expect: true },
+  // bitwise-ops: ctor bakes a,b as constants so `a & b` etc. are foldable; the
+  // caller supplies the expected results (F-167), so each method has a
+  // discriminating accept/reject pair — exercises fold on bitwise/shift constants.
+  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testBitwise', args: [8n, 14n, 6n], expect: true },
+  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testBitwise', args: [14n, 8n, 6n], expect: false },
+  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testShift', args: [48n, 6n], expect: true },
+  { kind: 'pure', fixture: 'bitwise-ops', ctor: { a: 12n, b: 10n }, method: 'testShift', args: [49n, 6n], expect: false },
 
-  // shift-ops: ctor bakes a; `a << k` / `a >> k` foldable; tautology-guarded.
-  { kind: 'pure', fixture: 'shift-ops', ctor: { a: 8n }, method: 'testShift', args: [], expect: true },
+  // shift-ops: ctor bakes a; `a << k` / `a >> k` foldable; caller-supplied results.
+  { kind: 'pure', fixture: 'shift-ops', ctor: { a: 8n }, method: 'testShift', args: [64n, 2n], expect: true },
+  { kind: 'pure', fixture: 'shift-ops', ctor: { a: 8n }, method: 'testShift', args: [64n, 3n], expect: false },
 
   // if-without-else-multi-temp: `other(x)` asserts x === x — always accepts.
   { kind: 'pure', fixture: 'if-without-else-multi-temp', ctor: {}, method: 'other', args: ['00'], expect: true },

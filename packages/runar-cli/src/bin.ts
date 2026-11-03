@@ -43,6 +43,8 @@ program
   .option('--ir', 'include IR in artifact')
   .option('--asm', 'print ASM to stdout')
   .option('--disable-constant-folding', 'disable ANF constant folding pass')
+  .option('--disable-peephole', 'disable the Stack-IR peephole optimizer')
+  .option('--disable-ec-optimizer', 'disable the ANF EC algebraic optimizer')
   .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
   .option('--hex', 'print only the script hex to stdout (no artifact JSON)')
   .option('--parse-only', 'stop after parse + validate; print "parser ok" on success (requires source input)')

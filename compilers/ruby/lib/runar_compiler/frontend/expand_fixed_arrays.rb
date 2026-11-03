@@ -45,6 +45,7 @@
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "typecheck"
+require_relative "validator"
 
 module RunarCompiler
   module Frontend
@@ -125,6 +126,16 @@ module RunarCompiler
 
     # Internal rewriter state.  @api private
     class ExpandContext
+      # N-048: the one diagnostic every tier emits when hoisting a computed
+      # FixedArray index would reorder evaluation. Shared verbatim with the TS
+      # reference.
+      HOIST_ORDER_DIAGNOSTIC =
+        'FixedArray index would be evaluated out of source order: hoisting it ' \
+        'would move it past an earlier side effect in the same statement, move ' \
+        'its own side effect past an earlier read, or lift it out of a ' \
+        'conditionally-evaluated operand of &&, || or ?:. Compute the index into ' \
+        'a local variable in a separate statement first'
+
       attr_reader :contract, :errors, :array_map, :synthetic_arrays
 
       def initialize(contract)
@@ -134,6 +145,21 @@ module RunarCompiler
         @synthetic_scalars = {}   # synthetic scalar name => element type node
         @synthetic_arrays = {}    # synthetic intermediate array name => ArrayMeta
         @temp_counter = 0
+        # N-048: evaluation-order state for the statement being rewritten. A
+        # computed index is hoisted to a `const __idx_K` in front of its whole
+        # statement, which is only sound when nothing the statement evaluates
+        # earlier can observe or be observed by the move. @order_effect: a
+        # side effect (`++`/`--`, a non-builtin call) was already evaluated;
+        # @order_read: a non-literal value was already read; @order_cond:
+        # inside an operand that is only conditionally evaluated (right of
+        # &&/||, a ternary arm).
+        reset_order
+      end
+
+      def reset_order
+        @order_effect = false
+        @order_read = false
+        @order_cond = 0
       end
 
       def fresh_idx_name
@@ -228,7 +254,8 @@ module RunarCompiler
         init_elements = extract_array_literal_elements(prop, meta)
         return [] if init_elements == :error
 
-        expand_array_meta(meta, prop.readonly, prop.source_location, init_elements, [])
+        # F-098 (R35): +@embedAlways+ on a FixedArray propagates to every slot.
+        expand_array_meta(meta, prop.readonly, prop.source_location, init_elements, [], prop.embed_always)
       end
 
       # Returns the element-wise initializer list, +nil+ if the property has
@@ -289,7 +316,15 @@ module RunarCompiler
       end
 
       # The literal family of an initializer element, or +nil+.  N-133.
+      #
+      # N-234: `toByteString('<hex>')` IS the ByteStringLiteral production
+      # (see validator.rb's `to_byte_string_literal?` and
+      # spec/grammar.md section 11). Checking only the bare
+      # +ByteStringLiteral+ AST node let a call-wrapped ByteString element
+      # (`FixedArray<bigint, 2> = [toByteString('ab'), 0n]`) slip past this
+      # family check.
       def family_of_literal(expr)
+        return "ByteString" if Frontend.to_byte_string_literal?(expr)
         return "bigint" if expr.is_a?(BigIntLiteral)
         return "boolean" if expr.is_a?(BoolLiteral)
         return "ByteString" if expr.is_a?(ByteStringLiteral)
@@ -301,7 +336,7 @@ module RunarCompiler
       # non-array-literal element at a nested level is a compile error.  Each
       # leaf PropertyNode receives the full +synthetic_array_chain+,
       # outermost first.
-      def expand_array_meta(meta, readonly, loc, initializer, parent_chain)
+      def expand_array_meta(meta, readonly, loc, initializer, parent_chain, embed_always)
         out = []
 
         meta.slot_names.each_with_index do |slot, i|
@@ -332,7 +367,7 @@ module RunarCompiler
               end
               nested_init = elems
             end
-            out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here))
+            out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here, embed_always))
           else
             # N-133: the element-type check. typecheck's array-literal branch
             # never sees a property initializer -- it is consumed here -- so
@@ -359,7 +394,8 @@ module RunarCompiler
               readonly: readonly,
               initializer: slot_init,
               source_location: loc,
-              synthetic_array_chain: chain_here
+              synthetic_array_chain: chain_here,
+              embed_always: embed_always
             )
           end
         end
@@ -398,6 +434,7 @@ module RunarCompiler
       end
 
       def rewrite_statement(stmt)
+        reset_order
         case stmt
         when VariableDeclStmt
           rewrite_variable_decl(stmt)
@@ -479,6 +516,14 @@ module RunarCompiler
           new_index = rewrite_expression(stmt.target.index, prelude)
           new_obj = rewrite_expression(target_object, prelude)
           new_value = rewrite_expression(stmt.value, prelude)
+          # `this.grid[1][i] = v`: see the matching check in rewrite_index_access (N-036).
+          if new_obj.is_a?(PropertyAccessExpr) && @synthetic_arrays.key?(new_obj.property)
+            add_error(
+              "Runtime index assignment on a nested FixedArray is not supported",
+              loc: stmt.source_location
+            )
+            return prelude
+          end
           return prelude + [
             AssignmentStmt.new(
               target: IndexAccessExpr.new(object: new_obj, index: new_index),
@@ -533,6 +578,7 @@ module RunarCompiler
         prelude = []
         new_cond = rewrite_expression(stmt.condition, prelude)
 
+        reset_order
         init_prelude = []
         new_init_init = rewrite_expression(stmt.init.init, init_prelude)
         prelude.concat(init_prelude) if init_prelude.any?
@@ -652,17 +698,25 @@ module RunarCompiler
         when IndexAccessExpr
           rewrite_index_access(expr, prelude)
         when BinaryExpr
-          BinaryExpr.new(
-            op: expr.op,
-            left: rewrite_expression(expr.left, prelude),
-            right: rewrite_expression(expr.right, prelude)
-          )
+          left = rewrite_expression(expr.left, prelude)
+          # spec §3.7: the right operand of && / || is conditional.
+          short_circuit = ['&&', '||'].include?(expr.op)
+          @order_cond += 1 if short_circuit
+          right = rewrite_expression(expr.right, prelude)
+          @order_cond -= 1 if short_circuit
+          BinaryExpr.new(op: expr.op, left: left, right: right)
         when UnaryExpr
           UnaryExpr.new(op: expr.op, operand: rewrite_expression(expr.operand, prelude))
         when CallExpr
+          # The callee names a function; it is not a value read.
+          read_before_callee = @order_read
+          callee = rewrite_expression(expr.callee, prelude)
+          @order_read = read_before_callee
+          args = expr.args.map { |a| rewrite_expression(a, prelude) }
+          @order_effect = true if effectful_call?(expr)
           CallExpr.new(
-            callee: rewrite_expression(expr.callee, prelude),
-            args: expr.args.map { |a| rewrite_expression(a, prelude) },
+            callee: callee,
+            args: args,
             # R-026: the captured return type of an expression-form `asm<T>()`
             # decides whether `+` lowers to OP_CAT or OP_ADD. Dropping it here
             # turned a byte concat into a numeric add for any contract that
@@ -670,32 +724,64 @@ module RunarCompiler
             asm_return_type: expr.asm_return_type
           )
         when MethodCallExpr
-          MethodCallExpr.new(
-            object: rewrite_expression(expr.object, prelude),
-            method: expr.method,
-            args: expr.args.map { |a| rewrite_expression(a, prelude) }
-          )
+          # The receiver names the method; it is not a value read. A method
+          # call (output intrinsic, inlined private method) is a side effect.
+          read_before_callee = @order_read
+          object = rewrite_expression(expr.object, prelude)
+          @order_read = read_before_callee
+          args = expr.args.map { |a| rewrite_expression(a, prelude) }
+          @order_effect = true
+          MethodCallExpr.new(object: object, method: expr.method, args: args)
         when MemberExpr
           MemberExpr.new(object: rewrite_expression(expr.object, prelude), property: expr.property)
         when TernaryExpr
-          TernaryExpr.new(
-            condition: rewrite_expression(expr.condition, prelude),
-            consequent: rewrite_expression(expr.consequent, prelude),
-            alternate: rewrite_expression(expr.alternate, prelude)
-          )
+          condition = rewrite_expression(expr.condition, prelude)
+          @order_cond += 1
+          consequent = rewrite_expression(expr.consequent, prelude)
+          alternate = rewrite_expression(expr.alternate, prelude)
+          @order_cond -= 1
+          TernaryExpr.new(condition: condition, consequent: consequent, alternate: alternate)
         when IncrementExpr
           reject_array_element_mutation_in_expression(expr.operand, "++")
-          IncrementExpr.new(operand: rewrite_expression(expr.operand, prelude), prefix: expr.prefix)
+          operand = rewrite_expression(expr.operand, prelude)
+          @order_effect = true
+          IncrementExpr.new(operand: operand, prefix: expr.prefix)
         when DecrementExpr
           reject_array_element_mutation_in_expression(expr.operand, "--")
-          DecrementExpr.new(operand: rewrite_expression(expr.operand, prelude), prefix: expr.prefix)
+          operand = rewrite_expression(expr.operand, prelude)
+          @order_effect = true
+          DecrementExpr.new(operand: operand, prefix: expr.prefix)
         when ArrayLiteralExpr
           ArrayLiteralExpr.new(elements: expr.elements.map { |e| rewrite_expression(e, prelude) })
+        when Identifier, PropertyAccessExpr
+          @order_read = true
+          expr
         else
-          # BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
-          # PropertyAccessExpr — pass through unchanged.
+          # BigIntLiteral, BoolLiteral, ByteStringLiteral — pass through
+          # unchanged.
           expr
         end
+      end
+
+      # Rewrite a runtime FixedArray index and hoist it if impure, refusing the
+      # hoist when it would change evaluation order (N-048). The binding lands
+      # in front of the whole statement, so it is refused when the read sits in
+      # a conditionally-evaluated operand, when an earlier part of the
+      # statement already had a side effect, or when the index's own side
+      # effect would move ahead of an earlier read. The AST has no
+      # let-expression, so binding the index at the read's own position is not
+      # expressible here.
+      def rewrite_and_hoist_index(index, prelude, loc)
+        effect_before = @order_effect
+        read_before = @order_read
+        rewritten = rewrite_expression(index, prelude)
+        unless pure_reference?(rewritten)
+          effect_in_index = @order_effect && !effect_before
+          if @order_cond.positive? || effect_before || (effect_in_index && read_before)
+            add_error(HOIST_ORDER_DIAGNOSTIC, loc: loc)
+          end
+        end
+        hoist_if_impure(rewritten, prelude, loc, :idx)
       end
 
       def rewrite_index_access(expr, prelude)
@@ -705,12 +791,25 @@ module RunarCompiler
         # rejected below.
         nested = try_resolve_literal_index_chain(expr)
         return BigIntLiteral.new(value: 0) if nested == :error
-        return PropertyAccessExpr.new(property: nested) unless nested.nil?
+        unless nested.nil?
+          @order_read = true
+          return PropertyAccessExpr.new(property: nested)
+        end
 
         base_name = try_resolve_array_base(expr.object)
         if base_name.nil?
           object = rewrite_expression(expr.object, prelude)
           index = rewrite_expression(expr.index, prelude)
+          # `this.grid[1][i]`: the literal outer hop has become the synthetic
+          # sub-array `grid__1`, and indexing it at runtime has no slot to
+          # address. Refuse here rather than in stack lowering (N-036).
+          if object.is_a?(PropertyAccessExpr) && @synthetic_arrays.key?(object.property)
+            add_error(
+              "Runtime index access on a nested FixedArray is not supported",
+              loc: expr_source_location(expr)
+            )
+            return BigIntLiteral.new(value: 0)
+          end
           return IndexAccessExpr.new(object: object, index: index)
         end
 
@@ -724,6 +823,7 @@ module RunarCompiler
         loc = expr_source_location(expr)
         literal = as_literal_index(expr.index)
         unless literal.nil?
+          @order_read = true
           if literal < 0 || literal >= meta.type.length
             add_error(
               "Index #{literal} is out of range for FixedArray of length #{meta.type.length}",
@@ -735,8 +835,8 @@ module RunarCompiler
           return PropertyAccessExpr.new(property: slot)
         end
 
-        rewritten_index = rewrite_expression(expr.index, prelude)
-        index_ref = hoist_if_impure(rewritten_index, prelude, loc, :idx)
+        index_ref = rewrite_and_hoist_index(expr.index, prelude, loc)
+        @order_read = true
 
         if meta.slot_is_array
           add_error(
@@ -767,8 +867,7 @@ module RunarCompiler
         return nil if meta.slot_is_array
 
         prelude = []
-        rewritten_index = rewrite_expression(init_expr.index, prelude)
-        index_ref = hoist_if_impure(rewritten_index, prelude, loc, :idx)
+        index_ref = rewrite_and_hoist_index(init_expr.index, prelude, loc)
 
         n = meta.slot_names.length
         if n < 2
@@ -839,7 +938,14 @@ module RunarCompiler
         meta = @array_map[base_name]
         return [stmt] if meta.nil?
 
+        # Source order is index THEN value, but the value is rewritten first so
+        # hoisted names are allocated as before; for the N-048 order checks the
+        # value's nested reads are judged as if the target index had already
+        # been evaluated. The target index itself is evaluated first.
+        @order_effect = expr_has_effect?(index_access.index)
+        @order_read = expr_has_read?(index_access.index)
         rewritten_value = rewrite_expression(stmt.value, prelude)
+        reset_order
         rewritten_index = rewrite_expression(index_access.index, prelude)
         loc = stmt.source_location
 
@@ -869,6 +975,13 @@ module RunarCompiler
         if meta.slot_is_array
           add_error("Runtime index assignment on a nested FixedArray is not supported", loc: loc)
           return prelude.dup
+        end
+
+        # A side-effecting value is hoisted to `__val_K` in front of the
+        # dispatch, which reads a pure (unhoisted) index only afterwards: that
+        # would move the value's effect ahead of the index read (N-048).
+        if pure_reference?(rewritten_index) && expr_has_effect?(stmt.value)
+          add_error(HOIST_ORDER_DIAGNOSTIC, loc: loc)
         end
 
         index_ref = hoist_if_impure(rewritten_index, prelude, loc, :idx)
@@ -991,6 +1104,63 @@ module RunarCompiler
         Identifier.new(name: name)
       end
 
+      # A call is side-effecting unless its callee is a bare identifier (a
+      # built-in function). Method calls — output intrinsics and inlined
+      # private methods, which may write state — count as effects.
+      def effectful_call?(expr)
+        !expr.callee.is_a?(Identifier)
+      end
+
+      # Syntactic: does evaluating +expr+ perform a side effect?
+      def expr_has_effect?(expr)
+        case expr
+        when IncrementExpr, DecrementExpr, MethodCallExpr
+          true
+        when CallExpr
+          effectful_call?(expr) || expr.args.any? { |a| expr_has_effect?(a) }
+        when BinaryExpr
+          expr_has_effect?(expr.left) || expr_has_effect?(expr.right)
+        when UnaryExpr
+          expr_has_effect?(expr.operand)
+        when MemberExpr
+          expr_has_effect?(expr.object)
+        when TernaryExpr
+          expr_has_effect?(expr.condition) || expr_has_effect?(expr.consequent) ||
+            expr_has_effect?(expr.alternate)
+        when IndexAccessExpr
+          expr_has_effect?(expr.object) || expr_has_effect?(expr.index)
+        when ArrayLiteralExpr
+          expr.elements.any? { |e| expr_has_effect?(e) }
+        else
+          false
+        end
+      end
+
+      # Syntactic: does evaluating +expr+ read a non-literal value?
+      def expr_has_read?(expr)
+        case expr
+        when Identifier, PropertyAccessExpr
+          true
+        when CallExpr, MethodCallExpr
+          expr.args.any? { |a| expr_has_read?(a) }
+        when BinaryExpr
+          expr_has_read?(expr.left) || expr_has_read?(expr.right)
+        when UnaryExpr, IncrementExpr, DecrementExpr
+          expr_has_read?(expr.operand)
+        when MemberExpr
+          expr_has_read?(expr.object)
+        when TernaryExpr
+          expr_has_read?(expr.condition) || expr_has_read?(expr.consequent) ||
+            expr_has_read?(expr.alternate)
+        when IndexAccessExpr
+          expr_has_read?(expr.object) || expr_has_read?(expr.index)
+        when ArrayLiteralExpr
+          expr.elements.any? { |e| expr_has_read?(e) }
+        else
+          false
+        end
+      end
+
       def pure_reference?(expr)
         case expr
         when Identifier, BigIntLiteral, BoolLiteral, ByteStringLiteral, PropertyAccessExpr
@@ -1015,7 +1185,7 @@ module RunarCompiler
         when BoolLiteral
           BoolLiteral.new(value: expr.value)
         when ByteStringLiteral
-          ByteStringLiteral.new(value: expr.value)
+          ByteStringLiteral.new(value: expr.value, source_location: expr.source_location)
         when Identifier
           Identifier.new(name: expr.name)
         when PropertyAccessExpr

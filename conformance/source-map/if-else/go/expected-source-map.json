@@ -13,6 +13,12 @@
       "column": 1
     },
     {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 12,
+      "column": 1
+    },
+    {
       "opcodeIndex": 12,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 13,
@@ -63,17 +69,11 @@
     {
       "opcodeIndex": 26,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
-      "line": 12,
-      "column": 1
-    },
-    {
-      "opcodeIndex": 27,
-      "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 17,
       "column": 1
     },
     {
-      "opcodeIndex": 28,
+      "opcodeIndex": 27,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 17,
       "column": 1

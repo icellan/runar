@@ -69,17 +69,11 @@
     {
       "opcodeIndex": 26,
       "sourceFile": "examples/ruby/if-else/IfElse.runar.rb",
-      "line": 14,
-      "column": 4
-    },
-    {
-      "opcodeIndex": 27,
-      "sourceFile": "examples/ruby/if-else/IfElse.runar.rb",
       "line": 19,
       "column": 4
     },
     {
-      "opcodeIndex": 28,
+      "opcodeIndex": 27,
       "sourceFile": "examples/ruby/if-else/IfElse.runar.rb",
       "line": 19,
       "column": 4

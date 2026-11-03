@@ -84,7 +84,10 @@ class RPCProvider(Provider):
 
     def get_transaction(self, txid: str) -> TransactionData:
         raw = self._rpc_call('getrawtransaction', txid, True)
-        assert isinstance(raw, dict)
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f'RPC getrawtransaction: expected an object response, got {type(raw).__name__}'
+            )
         raw_hex = raw.get('hex', '')
 
         outputs: list[TxOutput] = []
@@ -109,14 +112,20 @@ class RPCProvider(Provider):
         else:
             raw_tx = tx.hex()
         txid = self._rpc_call('sendrawtransaction', raw_tx)
-        assert isinstance(txid, str)
+        if not isinstance(txid, str):
+            raise RuntimeError(
+                f'RPC sendrawtransaction: expected a string response, got {type(txid).__name__}'
+            )
         if self._auto_mine:
             self._mine(1)
         return txid
 
     def get_utxos(self, address: str) -> list[Utxo]:
         result = self._rpc_call('listunspent', 0, 9999999, [address])
-        assert isinstance(result, list)
+        if not isinstance(result, list):
+            raise RuntimeError(
+                f'RPC listunspent: expected an array response, got {type(result).__name__}'
+            )
         utxos: list[Utxo] = []
         for u in result:
             utxos.append(Utxo(
@@ -143,7 +152,10 @@ class RPCProvider(Provider):
 
     def get_raw_transaction(self, txid: str) -> str:
         raw_hex = self._rpc_call('getrawtransaction', txid, False)
-        assert isinstance(raw_hex, str)
+        if not isinstance(raw_hex, str):
+            raise RuntimeError(
+                f'RPC getrawtransaction: expected a string response, got {type(raw_hex).__name__}'
+            )
         return raw_hex
 
     def get_fee_rate(self) -> int:

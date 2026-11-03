@@ -847,6 +847,83 @@ describe('Pass 3: Type-Check', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // F-265: substr() literal negative start is a compile-time error
+  //
+  // substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+  // enforced start >= 0: a literal negative start (`substr(a, -5n, 3n)`)
+  // type-checked as 'bigint' (the standard subtype loop never inspects a
+  // literal's VALUE) and compiled to a script that aborts at runtime --
+  // `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects as out of range.
+  //
+  // Proves: a literal (bare or unary-negated BigIntLiteral) negative start
+  // is now a compile-time diagnostic, mirroring the existing
+  // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+  // pattern above. Does not prove: anything about a NON-literal negative
+  // start (e.g. a variable or computed expression) -- that remains a
+  // runtime abort, same as before, because the stack model has no static
+  // value range for a non-literal; that is unchanged pre-existing scope.
+  // ---------------------------------------------------------------------------
+
+  describe('F-265: substr() literal start bound', () => {
+    it('rejects a literal negative start', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock() {
+            assert(substr(this.a, -5n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, 'substr() argument 2 (start) must be >= 0; got -5')).toBe(true);
+    });
+
+    it('accepts a non-negative literal start', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock() {
+            assert(substr(this.a, 0n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('accepts a non-literal (variable) start unchanged', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: ByteString;
+
+          constructor(a: ByteString) {
+            super(a);
+            this.a = a;
+          }
+
+          public unlock(n: bigint) {
+            assert(substr(this.a, n, 3n) === this.a);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Affine type enforcement
   // ---------------------------------------------------------------------------
 
@@ -953,6 +1030,368 @@ describe('Pass 3: Type-Check', () => {
       const result = typecheckSource(source);
       expect(result.errors).toEqual([]);
     });
+
+    // F-110: a bounded loop is unrolled `count` times (04-anf-lower
+    // `lowerForStatement`), so a consumption written once in the body is
+    // executed once per iteration. The checker used to walk the body once and
+    // accept a Sig consumed inside a 2-iteration loop while refusing the same
+    // two consumptions written out sequentially.
+    //
+    // Proves: a consumption inside a loop that runs two or more times, of an
+    // affine value bound OUTSIDE that loop (param, alias of a param, property),
+    // gets the same diagnostic as a sequential double use — including through a
+    // count-1 loop nested in a repeating one — while count-0/1 loops and
+    // per-iteration values (`sigs[i]`, a local bound inside the body) stay legal.
+    // Does not prove: anything about consumption inside private helpers called
+    // from the loop (the affine checker is intra-method; that is a separate gap),
+    // nor what the emitted script does at runtime.
+    describe('F-110: affine consumption inside repeating loops', () => {
+      const wrap = (params: string, body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          public m(${params}) {
+            ${body}
+          }
+        }
+      `;
+
+      it('refuses a Sig consumed in a 2-iteration loop body', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('refuses a SigHashPreimage consumed in a counting-down loop', () => {
+        const result = typecheckSource(wrap('preimage: SigHashPreimage',
+          'for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }'));
+        expect(hasError(result, "affine value 'preimage' has already been consumed")).toBe(true);
+      });
+
+      it('refuses an alias of an outer Sig declared inside the loop body', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }'));
+        expect(hasError(result, "affine value 's' has already been consumed")).toBe(true);
+      });
+
+      it('refuses a count-1 inner loop nested in a 2-iteration outer loop', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('allows a Sig consumed in a single-iteration loop', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows nested single-iteration loops', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('still refuses a single-iteration loop that follows an earlier consumption', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('allows a distinct Sig per iteration via an indexed array', () => {
+        const result = typecheckSource(wrap('sigs: FixedArray<Sig, 2>',
+          'for (let i = 0n; i < 2n; i++) { assert(checkSig(sigs[i], this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a Sig bound inside the loop body and consumed once per iteration', () => {
+        const result = typecheckSource(wrap('sigs: FixedArray<Sig, 2>',
+          'for (let i = 0n; i < 2n; i++) { const s: Sig = sigs[i]; assert(checkSig(s, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+    });
+
+    // F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    // consumed once in each arm is consumed once on every path. The checker
+    // used to walk both arms against one shared consumed set and flag the
+    // else-arm use as a double consumption.
+    //
+    // Proves: a value consumed once per arm (directly, through an alias, or in
+    // nested ifs) typechecks clean, and every shape where SOME path consumes
+    // twice is still refused: consumed in an arm and again after the if (then
+    // arm, else arm, both arms, nested arm, via an alias), consumed before and
+    // again inside an arm, twice inside one arm, and once per arm inside a
+    // 2-iteration loop.
+    // Does not prove: the ternary expression form (`c ? checkSig(..) :
+    // checkSig(..)`), which is not an if_statement and is still refused; nor
+    // anything about the emitted script (see the F-222 execution test).
+    describe('F-222: affine consumption across mutually exclusive if/else arms', () => {
+      const wrap = (body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          public m(sig: Sig, flag: boolean) {
+            ${body}
+          }
+        }
+      `;
+      const DOUBLE = "affine value 'sig' has already been consumed";
+
+      it('allows a Sig consumed once in each of the then and else arms', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows an alias consumed in one arm and the original in the other', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows one consumption per arm across nested if/else', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('refuses a Sig consumed in the then arm and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in the else arm and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in both arms and again after the if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed in a nested arm and again after the outer if', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses an alias consumed in an arm and the original again after the if', () => {
+        const result = typecheckSource(wrap(
+          'const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed before the if and again inside an arm', () => {
+        const result = typecheckSource(wrap(
+          'assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed twice inside the then arm', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed twice inside the else arm', () => {
+        const result = typecheckSource(wrap(
+          'if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed once per arm inside a 2-iteration loop', () => {
+        const result = typecheckSource(wrap(
+          'for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+    });
+
+    // N-109: private helpers are inlined (04-anf-lower), so a helper that
+    // consumes its Sig parameter consumes the caller's argument at every call
+    // site. The checker was intra-method: `this.h(sig); this.h(sig);` and
+    // `this.h(sig)` in a 2-iteration loop typechecked although the inlined
+    // script runs checkSig on the same Sig twice.
+    //
+    // Proves: a call to a contract method consumes the arguments at the
+    // parameter positions that method consumes (directly, through an alias, in
+    // an if arm, or transitively through another helper), with the same
+    // diagnostic as a sequential double use, including per loop iteration; a
+    // single call, and a helper that takes a Sig without consuming it, stay legal.
+    // Does not prove: a helper consuming a PROPERTY (`checkSig(this.sig, ..)` in
+    // a helper called twice) — the summary covers parameters only; nor
+    // untracked argument expressions (`this.h(sigs[i])`), nor the emitted script.
+    describe('N-109: affine consumption through private helper calls', () => {
+      const wrap = (helpers: string, params: string, body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          ${helpers}
+          public m(${params}) {
+            ${body}
+          }
+        }
+      `;
+      const H = 'private h(s: Sig): void { assert(checkSig(s, this.pk)); }';
+      const DOUBLE = "affine value 'sig' has already been consumed";
+
+      it('refuses the same Sig passed to a consuming helper twice', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig', 'this.h(sig); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a consuming helper called once in a 2-iteration loop', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { this.h(sig); } assert(true);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a Sig consumed directly and again through a helper', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig',
+          'assert(checkSig(sig, this.pk)); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes transitively through another helper', () => {
+        const result = typecheckSource(wrap(
+          `${H} private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }`,
+          'sig: Sig', 'this.g(1n, sig); this.g(2n, sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes an alias of its parameter', () => {
+        const result = typecheckSource(wrap(
+          'private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }',
+          'sig: Sig', 'this.h(sig); this.h(sig);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a SigHashPreimage consumed by a helper twice', () => {
+        const result = typecheckSource(wrap(
+          'private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }',
+          'preimage: SigHashPreimage', 'this.p(preimage); this.p(preimage);'));
+        expect(hasError(result, "affine value 'preimage' has already been consumed")).toBe(true);
+      });
+
+      it('allows a single call to a consuming helper', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig', 'this.h(sig);'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a consuming helper called once per if/else arm', () => {
+        const result = typecheckSource(wrap(H, 'sig: Sig, flag: boolean',
+          'if (flag) { this.h(sig); } else { this.h(sig); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows two different Sigs through the same consuming helper', () => {
+        const result = typecheckSource(wrap(H, 'sig1: Sig, sig2: Sig', 'this.h(sig1); this.h(sig2);'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a helper that takes a Sig without consuming it to be called twice', () => {
+        const result = typecheckSource(wrap(
+          'private n(s: Sig): bigint { return len(s); }',
+          'sig: Sig', 'assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));'));
+        expect(result.errors).toEqual([]);
+      });
+    });
+
+    // N-288: the N-109 summary covered PARAMETERS only. A helper that consumes
+    // a PROPERTY (`checkSig(this.sig, ..)`, `checkPreimage(this.txPreimage)`)
+    // is inlined at every call site, so calling it twice consumes the property
+    // twice, yet `this.h(); this.h();` typechecked while the direct
+    // `checkSig(this.sig, ..)` twice was refused.
+    //
+    // Proves: a call to a contract method consumes every property that method
+    // consumes (directly, through an alias, or transitively through another
+    // helper), refused with the diagnostic a direct double use of the property
+    // gets, including per loop iteration and after a direct consume; a single
+    // call, one call per if/else arm, and a helper that only reads the property
+    // stay legal.
+    // Does not prove: the emitted script; untracked argument expressions.
+    describe('N-288: affine consumption of a property through private helper calls', () => {
+      const wrap = (helpers: string, params: string, body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          readonly sig: Sig;
+          constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }
+          ${helpers}
+          public m(${params}) {
+            ${body}
+            assert(true);
+          }
+        }
+      `;
+      const H = 'private h(): void { assert(checkSig(this.sig, this.pk)); }';
+      const DOUBLE = "affine value 'this.sig' has already been consumed";
+
+      it('refuses a helper that consumes this.sig called twice', () => {
+        const result = typecheckSource(wrap(H, '', 'this.h(); this.h();'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes this.sig called once in a 2-iteration loop', () => {
+        const result = typecheckSource(wrap(H, '', 'for (let i = 0n; i < 2n; i++) { this.h(); }'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses this.sig consumed directly and again through a helper', () => {
+        const result = typecheckSource(wrap(H, '', 'assert(checkSig(this.sig, this.pk)); this.h();'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes this.sig transitively through another helper', () => {
+        const result = typecheckSource(wrap(
+          `${H} private g(t: bigint): void { assert(t > 0n); this.h(); }`,
+          '', 'this.g(1n); this.g(2n);'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a helper that consumes an alias of this.sig called twice', () => {
+        const result = typecheckSource(wrap(
+          'private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }',
+          '', 'this.h(); this.h();'));
+        expect(hasError(result, DOUBLE)).toBe(true);
+      });
+
+      it('refuses a stateful helper that consumes this.txPreimage called twice', () => {
+        const result = typecheckSource(`
+          class C extends StatefulSmartContract {
+            count: bigint;
+            constructor(count: bigint) { super(count); this.count = count; }
+            private h(): void { assert(checkPreimage(this.txPreimage)); }
+            public inc() {
+              this.h();
+              this.h();
+              this.count = this.count + 1n;
+            }
+          }
+        `);
+        expect(hasError(result, "affine value 'this.txPreimage' has already been consumed")).toBe(true);
+      });
+
+      it('allows a single call to a helper that consumes this.sig', () => {
+        const result = typecheckSource(wrap(H, '', 'this.h();'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a helper that consumes this.sig called once per if/else arm', () => {
+        const result = typecheckSource(wrap(H, 'flag: boolean',
+          'if (flag) { this.h(); } else { this.h(); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a helper that only reads this.sig to be called twice', () => {
+        const result = typecheckSource(wrap(
+          'private n(): bigint { return len(this.sig); }',
+          '', 'assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));'));
+        expect(result.errors).toEqual([]);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1003,6 +1442,25 @@ describe('Pass 3: Type-Check', () => {
       `;
       const result = typecheckSource(source);
       expect(hasError(result, "Unknown function 'someRandomFunc'")).toBe(true);
+    });
+
+    // F-208: Rúnar has no first-class functions. A bound local variable used
+    // as a callee used to fall into the "local variable" branch and return
+    // '<unknown>' with NO diagnostic, silently accepting the call.
+    it('rejects a local variable used as a function call', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: bigint;
+          constructor(a: bigint) { super(a); this.a = a; }
+          public m(a: bigint) {
+            const f: bigint = a;
+            const r = f(a, a, a);
+            assert(this.a >= 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, "is not callable")).toBe(true);
     });
 
     it('allows known Rúnar builtins', () => {

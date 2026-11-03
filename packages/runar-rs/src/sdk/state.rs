@@ -384,6 +384,12 @@ pub fn extract_state_from_script(
     artifact: &RunarArtifact,
     script_hex: &str,
 ) -> Result<Option<HashMap<String, SdkValue>>, String> {
+    // N-320: the script is untrusted (from_utxo / from_txid). Refuse anything
+    // that is not whole bytes of ASCII hex before any reader slices it — the
+    // N-317 rule; a non-ASCII char panicked the `&str` slicing below.
+    if !crate::sdk::script_utils::is_hex_bytes(script_hex) {
+        return Err("extract_state_from_script: script is not an even-length hex string".to_string());
+    }
     let Some(state_fields) = artifact.state_fields.as_ref() else {
         return Ok(None);
     };
@@ -400,17 +406,35 @@ pub fn extract_state_from_script(
     deserialize_state(state_fields, state_hex).map(Some)
 }
 
-/// Walk the script hex as Bitcoin Script opcodes to find the last OP_RETURN
-/// (0x6a) at a real opcode boundary. Unlike `rfind("6a")`, this properly
-/// skips push data so it won't match 0x6a bytes inside data payloads.
+/// Walk the script hex as Bitcoin Script opcodes and return the first
+/// OP_RETURN (0x6a) found at a real opcode boundary. Unlike `find("6a")`,
+/// this properly skips push data so it won't match 0x6a bytes inside data
+/// payloads. The walk stops immediately on the first match rather than
+/// continuing to look for a later one — that is correct here, not a
+/// shortcut: the on-chain interpreter itself stops at the first OP_RETURN
+/// it executes, and the compiler emits exactly one separator (codePart +
+/// OP_RETURN + stateBytes), so "first" and "last" coincide for every script
+/// this function will ever see. The name is kept for parity with the other
+/// six SDKs, which all implement the same first-match walk.
 ///
-/// Returns the hex-char offset of the last OP_RETURN, or None.
+/// Returns the hex-char offset of the OP_RETURN, or None.
 pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
+    // N-320: read bytes, not `&str` slices — slicing off a UTF-8 char
+    // boundary panicked on a non-ASCII script. A non-hex pair reads as 0, as
+    // `from_str_radix(..).unwrap_or(0)` did.
+    let hex = script_hex.as_bytes();
+    let byte_at = |i: usize| -> usize {
+        let digit = |b: u8| (b as char).to_digit(16);
+        match (digit(hex[i]), digit(hex[i + 1])) {
+            (Some(h), Some(l)) => (h * 16 + l) as usize,
+            _ => 0,
+        }
+    };
     let mut offset = 0;
-    let len = script_hex.len();
+    let len = hex.len();
 
     while offset + 2 <= len {
-        let opcode = u8::from_str_radix(&script_hex[offset..offset + 2], 16).unwrap_or(0);
+        let opcode = byte_at(offset);
 
         if opcode == 0x6a {
             // OP_RETURN at a real opcode boundary. Everything after is
@@ -418,26 +442,26 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
             return Some(offset);
         } else if opcode >= 0x01 && opcode <= 0x4b {
             // Direct push: opcode is the number of bytes
-            offset += 2 + opcode as usize * 2;
+            offset += 2 + opcode * 2;
         } else if opcode == 0x4c {
             // OP_PUSHDATA1: next 1 byte is the length
             if offset + 4 > len { break; }
-            let push_len = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
+            let push_len = byte_at(offset + 2);
             offset += 4 + push_len * 2;
         } else if opcode == 0x4d {
             // OP_PUSHDATA2: next 2 bytes (LE) are the length
             if offset + 6 > len { break; }
-            let lo = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
-            let hi = u8::from_str_radix(&script_hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
+            let lo = byte_at(offset + 2);
+            let hi = byte_at(offset + 4);
             let push_len = lo | (hi << 8);
             offset += 6 + push_len * 2;
         } else if opcode == 0x4e {
             // OP_PUSHDATA4: next 4 bytes (LE) are the length
             if offset + 10 > len { break; }
-            let b0 = u8::from_str_radix(&script_hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
-            let b1 = u8::from_str_radix(&script_hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
-            let b2 = u8::from_str_radix(&script_hex[offset + 6..offset + 8], 16).unwrap_or(0) as usize;
-            let b3 = u8::from_str_radix(&script_hex[offset + 8..offset + 10], 16).unwrap_or(0) as usize;
+            let b0 = byte_at(offset + 2);
+            let b1 = byte_at(offset + 4);
+            let b2 = byte_at(offset + 6);
+            let b3 = byte_at(offset + 8);
             let push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
             offset += 10 + push_len * 2;
         } else {
@@ -457,11 +481,13 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
 /// compiler's OP_NUM2BIN-based fixed-width serialization.
 fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String {
     match field_type {
-        "int" | "bigint" => {
+        // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+        // stores them as the same 8-byte OP_NUM2BIN word.
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => {
             // Defensively handle SdkValue::Bytes containing a BigInt string
             // (e.g. "0n", "1000n") that may have slipped through from JSON
             // artifacts loaded without a BigInt reviver.
-            let n = state_field_i64(value, label, 8);
+            let n = state_field_i64(value, label, field_type, 8);
             encode_num2bin(n, 8)
         }
         // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that
@@ -484,6 +510,13 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
             // cast constructors hard-assert those widths and all seven compilers
             // emit them as fixed raw slices; framing them instead deploys a state
             // section 1-2 bytes long and the first spend fails.
+            //
+            // N-045: a wrong-width value shifts every later field for the reader.
+            if let Err(e) = check_fixed_width_value(
+                value, field_type, &format!("serialize_state: state field {:?}", label),
+            ) {
+                panic!("{}", e);
+            }
             value.as_bytes().to_string()
         }
         _ => {
@@ -528,28 +561,47 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
 /// signature; this is the same "the value cannot be represented, so every
 /// result would be wrong" contract as `SdkValue::as_int` and the `i64 overflow`
 /// panics in `prelude.rs`.
-fn state_field_i64(value: &SdkValue, label: &str, width: usize) -> i64 {
+fn state_field_i64(value: &SdkValue, label: &str, field_type: &str, width: usize) -> i64 {
     use num_bigint::BigInt;
 
     // Resolve the value at ARBITRARY precision first — narrowing is what used
     // to destroy it.
+    //
+    // N-084: only an integer, or a decimal integer string with the optional
+    // JSON "n" suffix (e.g. "0n", "1000n" — slipped through from JSON
+    // artifacts loaded without a BigInt reviver), is a num2bin value. A hex
+    // string / "" / any other variant used to encode as 0 (or reach `as_int`'s
+    // unnamed panic).
     let wide: Option<BigInt> = match value {
         SdkValue::Int(i) => Some(BigInt::from(*i)),
         SdkValue::BigInt(bi) => Some(bi.clone()),
-        // Defensively handle SdkValue::Bytes containing a BigInt string
-        // (e.g. "0n", "1000n") that may have slipped through from JSON
-        // artifacts loaded without a BigInt reviver.
         SdkValue::Bytes(s) => {
-            let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
-            num_str.parse::<BigInt>().ok()
+            let num_str = s.strip_suffix('n').unwrap_or(s.as_str());
+            let digits = num_str.strip_prefix('-').unwrap_or(num_str);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                num_str.parse::<BigInt>().ok()
+            } else {
+                None
+            }
         }
-        _ => Some(BigInt::from(value.as_int())),
+        _ => None,
     };
 
-    // A non-numeric byte string keeps the historical lenient behaviour (0).
     let n = match wide {
         Some(n) => n,
-        None => return 0,
+        None => {
+            let got = match value {
+                SdkValue::Bytes(_) => "a non-decimal string",
+                SdkValue::Bool(_) => "a boolean",
+                _ => "a non-integer value",
+            };
+            panic!(
+                "serialize_state: state field \"{}\" ({}) must be an integer or a decimal \
+                 integer string, got {}. Serializing anything else would write a number the \
+                 caller never supplied into the state section",
+                label, field_type, got
+            );
+        }
     };
 
     let limit = BigInt::from(1) << (8 * width - 1);
@@ -693,7 +745,7 @@ fn to_little_endian_32(n: u32) -> String {
 pub(crate) fn state_field_byte_width(field_type: &str) -> Option<usize> {
     match field_type {
         "bool" | "boolean" => Some(1),
-        "int" | "bigint" => Some(8),
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => Some(8),
         "PubKey" => Some(33),
         "Addr" | "Ripemd160" => Some(20),
         "Sha256" => Some(32),
@@ -701,6 +753,47 @@ pub(crate) fn state_field_byte_width(field_type: &str) -> Option<usize> {
         "P384Point" => Some(96),
         _ => None,
     }
+}
+
+/// N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+/// Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+/// that is not a hex string of exactly its declared width. The on-chain reader
+/// slices each such field at its declared width, so a wrong-width value in a
+/// state section (or an argument a covenant copies into one) shifts every
+/// later field. The compiled covenant refuses such a continuation on chain
+/// (`OP_SIZE <width> OP_NUMEQUALVERIFY`); this is the off-chain refusal.
+/// `Ok(())` for every other type.
+pub(crate) fn check_fixed_width_value(value: &SdkValue, field_type: &str, what: &str) -> Result<(), String> {
+    if !matches!(
+        field_type,
+        "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" | "P256Point" | "P384Point"
+    ) {
+        return Ok(());
+    }
+    let width = state_field_byte_width(field_type).unwrap_or(0);
+    let hex = match value {
+        SdkValue::Bytes(h) => h,
+        other => {
+            return Err(format!(
+                "runar: {} ({}) must be exactly {} bytes of hex, got {:?}",
+                what, field_type, width, other
+            ))
+        }
+    };
+    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "runar: {} ({}) must be exactly {} bytes of hex, got a non-hex string",
+            what, field_type, width
+        ));
+    }
+    if hex.len() != width * 2 {
+        return Err(format!(
+            "runar: {} ({}) must be exactly {} bytes of hex, got {} bytes. A wrong-width {} \
+             shifts every later state field when the contract's on-chain reader slices it at {} bytes",
+            what, field_type, width, hex.len() / 2, field_type, width
+        ));
+    }
+    Ok(())
 }
 
 fn decode_state_value(
@@ -732,7 +825,9 @@ fn decode_state_value(
         // boolean field as push data and desynchronises every field after it.
         "bool" | "boolean" => Ok((SdkValue::Bool(data != "00"), hex_width)),
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
-        "int" | "bigint" => Ok((SdkValue::Int(decode_num2bin(data)), hex_width)),
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => {
+            Ok((SdkValue::Int(decode_num2bin(data)), hex_width))
+        }
         // Raw fixed-size byte types.
         _ => Ok((SdkValue::Bytes(data.to_string()), hex_width)),
     }
@@ -1193,6 +1288,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1217,6 +1313,7 @@ mod tests {
             state_fields: Some(vec![]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1242,6 +1339,7 @@ mod tests {
             state_fields: Some(fields),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1276,6 +1374,7 @@ mod tests {
             state_fields: Some(fields),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1316,6 +1415,7 @@ mod tests {
             state_fields: Some(fields),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1349,6 +1449,7 @@ mod tests {
             state_fields: Some(fields),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -1379,6 +1480,63 @@ mod tests {
     #[test]
     fn find_op_return_returns_none() {
         assert_eq!(find_last_op_return("5193885187"), None);
+    }
+
+    // N-167 (sibling of F-367): find_last_op_return's doc comment must
+    // describe the first-match walk it actually performs, not a "last
+    // OP_RETURN" search.
+    //
+    // Proves: the doc comment above `pub fn find_last_op_return` in this
+    // file no longer claims to find the LAST OP_RETURN. All seven SDKs
+    // implement the same "stop at the first opcode-boundary 0x6a" walk,
+    // which is correct here (the on-chain interpreter stops at the first
+    // OP_RETURN it executes, and the compiler emits exactly one separator),
+    // so "first" and "last" coincide for every script this function will
+    // ever see.
+    // Does not prove: runtime behaviour — that is already pinned by
+    // find_op_return_simple / _skips_push_data / _returns_none above,
+    // unchanged by this fix.
+    #[test]
+    fn find_last_op_return_doc_does_not_claim_last() {
+        // Self-embed: slicing stops BEFORE this function's own source (the
+        // function definition precedes these test functions in the file),
+        // so this literal never shadows the assertion below.
+        let source = include_str!("state.rs");
+
+        let fn_marker = "pub fn find_last_op_return";
+        let fn_index = source
+            .find(fn_marker)
+            .expect("pub fn find_last_op_return not found in state.rs");
+        let doc_block = &source[..fn_index];
+
+        // Walk backward over contiguous `///` lines directly above the fn
+        // to collect just its doc comment, not unrelated earlier code.
+        let mut doc_lines: Vec<&str> = Vec::new();
+        for line in doc_block.lines().rev() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("///") {
+                doc_lines.push(line);
+            } else if trimmed.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = doc_lines.join("\n");
+
+        // Anchor: fails loudly (empty/short doc) if the slicing above ever
+        // points at the wrong comment instead of silently passing.
+        assert!(
+            doc.contains("OP_RETURN"),
+            "doc slice does not mention OP_RETURN, wrong slice captured: {doc:?}"
+        );
+
+        let lower = doc.to_lowercase();
+        assert!(
+            !lower.contains("last op_return"),
+            "doc comment still claims to find the 'last' OP_RETURN:\n{doc}"
+        );
     }
 
     // -------------------------------------------------------------------

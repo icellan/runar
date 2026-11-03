@@ -154,6 +154,16 @@ export interface CodeSepIndexSlot {
   codeSepIndex: number;
 }
 
+/**
+ * N-051 — a `verify_code_part_len` length field the SDK patches at deploy time
+ * with the deployed code-part length (4 bytes, little-endian, overwritten in
+ * place). Present only when the length is not known at compile time.
+ */
+export interface CodePartLenSlot {
+  /** Byte offset, in the TEMPLATE script, of the first of the 4 length bytes. */
+  byteOffset: number;
+}
+
 // ---------------------------------------------------------------------------
 // Template digest (slot-excised script identity)
 // ---------------------------------------------------------------------------
@@ -248,6 +258,8 @@ export interface RunarArtifact {
   /** Byte offsets of codeSepIndex placeholders in the script (OP_0 placeholders
    *  that the SDK must replace with the adjusted codeSeparatorIndex). */
   codeSepIndexSlots?: CodeSepIndexSlot[];
+  /** N-051 — deploy-time `verify_code_part_len` length fields (see CodePartLenSlot). */
+  codePartLenSlots?: CodePartLenSlot[];
 
   /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash) */
   codeSeparatorIndex?: number;

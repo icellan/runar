@@ -400,7 +400,8 @@ class ValidateTest {
             () -> Validate.run(c)
         );
         assertTrue(
-            e.errors().stream().anyMatch(m -> m.contains("compile-time constant")),
+            e.errors().stream().anyMatch(m -> m.contains(
+                "Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")),
             "expected for-loop-bound error, got " + e.errors()
         );
     }
@@ -612,6 +613,41 @@ class ValidateTest {
         assertTrue(
             e.errors().stream().anyMatch(m -> m.contains("must end with an assert")),
             "expected trailing-assert error, got " + e.errors()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // F-063: array-literal elements are walked by the output-intrinsic search
+    // ------------------------------------------------------------------
+    //
+    // subExpressions (the loop-body output-intrinsic search) had no
+    // ArrayLiteralExpr arm, so an addOutput written inside `[...]` in a loop
+    // body escaped the "cannot be called inside a loop body" rule. The other
+    // Java validator walkers already descend into array literals.
+    //
+    // Proves: Validate refuses the nested shape exactly as it does the bare
+    // one. Does not prove: CLI exit status or cross-tier parity.
+
+    @Test
+    void f063RejectsOutputIntrinsicInsideArrayLiteralInLoop() throws Exception {
+        String src = """
+            class C extends StatefulSmartContract {
+              count: bigint;
+              constructor(count: bigint) { super(count); this.count = count; }
+              public step() {
+                for (let i = 0n; i < 2n; i++) { const a = [this.addOutput(1000n, this.count)]; }
+                assert(true);
+              }
+            }
+            """;
+        ContractNode c = runar.compiler.frontend.ParserDispatch.parse(src, "C.runar.ts");
+        Validate.ValidationException e = assertThrows(
+            Validate.ValidationException.class,
+            () -> Validate.run(c)
+        );
+        assertTrue(
+            e.errors().stream().anyMatch(m -> m.contains("Output intrinsic 'addOutput'")),
+            "expected output-intrinsic-in-loop error, got " + e.errors()
         );
     }
 }

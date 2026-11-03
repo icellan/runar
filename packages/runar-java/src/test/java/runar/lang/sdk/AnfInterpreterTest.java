@@ -90,6 +90,44 @@ class AnfInterpreterTest {
             "increment must move count from 0 to 1; got newState=" + newState);
     }
 
+    /**
+     * N-157: {@code artifacts/stateful-counter.runar.json} used to predate
+     * issue #123's sighash-type prologue check and carried no
+     * {@code isAutoInjectedStateCheck} marker on its exit continuation-hash
+     * assert either. {@link AnfInterpreter#executeStrict} structurally
+     * detects and mocks exactly the CURRENT compiler's 8-binding prologue
+     * (see {@code detectAutoInjectedPrologueAsserts}'s doc comment) and
+     * skips the exit assert ONLY via that marker — so against the stale
+     * fixture, neither mock applied: the un-marked exit assert fell
+     * through to real evaluation and threw for a reason having nothing to
+     * do with the method logic under test (an un-computable
+     * {@code hash256(continuation) === extractOutputHash(preimage)} off
+     * -chain). {@link F164PrologueStrictTest} worked around exactly this
+     * by hand-building its own ANF instead of loading this fixture (see
+     * its class doc). Now that the fixture is regenerated from the
+     * CURRENT Java compiler (byte-identical to
+     * {@code conformance/tests/stateful-counter/expected-script.hex}),
+     * {@code executeStrict} must run the REAL fixture's prologue end to
+     * end, not a hand-built stand-in.
+     */
+    @Test
+    void executeStrictRunsTheRealPrologueShapeAgainstTheFixture() throws Exception {
+        Map<String, Object> anf = loadFixtureAnf("stateful-counter.runar.json");
+
+        AnfInterpreter.ExecutionResult result = AnfInterpreter.executeStrict(
+            anf,
+            "increment",
+            Map.of("count", BigInteger.ZERO),
+            Map.of(),
+            List.of()
+        );
+
+        assertEquals(BigInteger.ONE, asBigInt(result.newState.get("count")),
+            "executeStrict must run the fixture's real auto-injected prologue "
+                + "(checkPreimage + sighash-type + exit continuation-hash "
+                + "asserts, all mocked) and still move count from 0 to 1");
+    }
+
     @Test
     void computeNewStateIncrementsCounterFromArbitrarySeed() throws Exception {
         Map<String, Object> anf = loadFixtureAnf("stateful-counter.runar.json");
@@ -357,32 +395,37 @@ class AnfInterpreterTest {
     }
 
     /**
-     * W8 merge: extractScriptCode is empty in the SDK mock, so
-     * {@code substr(sc, 0, len(sc)-49)} has length -49. Java's
-     * {@code String.substring} throws {@code StringIndexOutOfBoundsException}
-     * on a negative end ({@code begin 0, end -98, length 0}); Bitcoin Script
-     * and the TS interpreter's {@code String.slice} yield empty instead.
-     * Pin matching {@code TestAnfEvalCall_SubstrNegativeLength_NoPanic} in Go.
+     * R67: these two used to pin the W8 merge walk's historical clamp --
+     * extractScriptCode was empty in the SDK mock, so
+     * {@code substr(sc, 0, len(sc)-49)} had a negative length, and the OLD
+     * substr clamped that to {@code ""} instead of aborting. That was
+     * ITSELF the bug (N-171): OP_SPLIT aborts on a negative or
+     * past-the-end position, it does not clamp. {@code extractScriptCode}
+     * now returns the contract's own REAL codePart
+     * ({@code RunarContract}'s call path), so {@code merge}'s own
+     * scriptCode reads no longer go negative in practice -- but
+     * {@code substr(data, start, length)} with a literal negative
+     * start/length, as pinned directly here, must still abort on its own
+     * terms regardless of where the data came from. Mirrors
+     * {@code TestAnfEvalCall_SubstrNegativeLength_Panics} in Go.
      */
     @Test
-    void substrNegativeLengthYieldsEmptyNotBoundsError() {
-        Object got = AnfInterpreter.evalCall(
+    void substrNegativeLengthThrowsNotEmpty() {
+        assertThrows(ArithmeticException.class, () -> AnfInterpreter.evalCall(
             "substr",
             List.of("", BigInteger.ZERO, BigInteger.valueOf(-49)),
             null,
             null
-        );
-        assertEquals("", got);
+        ));
     }
 
     @Test
-    void substrNegativeStartYieldsEmptyNotBoundsError() {
-        Object got = AnfInterpreter.evalCall(
+    void substrNegativeStartThrowsNotEmpty() {
+        assertThrows(ArithmeticException.class, () -> AnfInterpreter.evalCall(
             "substr",
             List.of("aabb", BigInteger.valueOf(-1), BigInteger.ONE),
             null,
             null
-        );
-        assertEquals("", got);
+        ));
     }
 }

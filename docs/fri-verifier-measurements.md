@@ -1,10 +1,21 @@
 # FRI Verifier Measurements
 
+> **v1 (F-007): `verifySP1FRI` is refused by the compiler, and the emitted
+> verifier body is fail-closed (`OP_0 OP_VERIFY`) — it accepts no proof.**
+> Every "accepted" / "accepts" / "compile + execute" statement and every
+> deploy/spend row on this page was measured on the pre-F-007 PoC body,
+> which ended in `OP_1` and never checked the per-query MMCS openings, the
+> FRI fold chain, the final-poly equality or the Steps 6/7 OOD constraint
+> check — so those acceptances are not evidence of verification. Script
+> sizes and op counts remain representative (the fail-closed change moves
+> the body by two opcodes). See `docs/sp1-fri-verifier.md` §8.0 for the
+> missing pieces and the post-v1 plan.
+
 > **⚠ Status — Not production-ready.**
 > SP1 FRI verifier codegen is shipped on the **Go tier only** (`compilers/go/codegen/sp1_fri.go`). The other six tiers (TS / Rust / Python / Zig / Ruby / Java) carry the parser surface but have no Stack-IR codegen — contracts that call `verifySP1FRI` from a non-Go tier will fail at the codegen stage with a clear panic pointing here. The Go-native runtime intrinsic (`packages/runar-go/runar.go::VerifySP1FRI`) is a **simulation mock** that always returns `true` — it does NOT verify the proof off-chain. On-chain enforcement happens only in compiled Bitcoin Script.
 >
 > **Status snapshot:**
-> * **Landed**: Go-tier codegen body + measurements below + the `evm-guest` production preset (`compiler.SP1FriPresetMust("evm-guest")`) compile + execute under the script VM at the natural production tuple (`degreeBits=10, log_blowup=1, log_final_poly_len=0`).
+> * **Landed (pre-F-007; superseded — see above)**: Go-tier codegen body + measurements below + the `evm-guest` production preset (`compiler.SP1FriPresetMust("evm-guest")`) compiled + executed under the script VM at the natural production tuple (`degreeBits=10, log_blowup=1, log_final_poly_len=0`).
 > * **Mocked / deferred**: native off-chain proof verification, codegen ports to TS / Rust / Python / Zig / Ruby / Java, mainnet broadcast validation at scale.
 > * **Next deliverable**: full off-chain native verifier (so SDK simulators can validate proofs without going to chain) — tracked outside this branch.
 

@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::codegen::emit::{CodeSepIndexSlot, ConstructorSlot, RawScriptSpan, SourceMapping};
+use crate::codegen::emit::{
+    CodePartLenSlot, CodeSepIndexSlot, ConstructorSlot, RawScriptSpan, SourceMapping,
+};
 use crate::ir::{ANFProgram, ANFProperty, ANFSyntheticArrayLevel};
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,10 @@ pub struct RunarArtifact {
     pub constructor_slots: Vec<ConstructorSlot>,
     #[serde(rename = "codeSepIndexSlots", skip_serializing_if = "Vec::is_empty", default)]
     pub code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — deploy-time `verify_code_part_len` length fields. Omitted when
+    /// every pin is exact at compile time.
+    #[serde(rename = "codePartLenSlots", skip_serializing_if = "Vec::is_empty", default)]
+    pub code_part_len_slots: Vec<CodePartLenSlot>,
     #[serde(rename = "codeSeparatorIndex", skip_serializing_if = "Option::is_none")]
     pub code_separator_index: Option<usize>,
     #[serde(rename = "codeSeparatorIndices", skip_serializing_if = "Option::is_none")]
@@ -150,6 +156,7 @@ pub fn assemble_artifact(
     script_asm: &str,
     constructor_slots: Vec<ConstructorSlot>,
     code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    code_part_len_slots: Vec<CodePartLenSlot>,
     code_separator_index: i64,
     code_separator_indices: Vec<usize>,
     include_anf: bool,
@@ -201,7 +208,14 @@ pub fn assemble_artifact(
             fixed_array: e.fixed_array.clone(),
         })
         .collect();
-    let is_stateful = !state_fields.is_empty();
+    // N-139: statefulness follows parent_class (the TS reference rule for
+    // isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    // keeps both. An IR input without parentClass falls back to state_fields.
+    let is_stateful = if program.parent_class.is_empty() {
+        !state_fields.is_empty()
+    } else {
+        program.parent_class == "StatefulSmartContract"
+    };
 
     // Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
     let methods: Vec<ABIMethod> = program
@@ -211,7 +225,13 @@ pub fn assemble_artifact(
         .map(|m| {
             // For stateful contracts, mark public methods without _changePKH as terminal
             let is_terminal = if is_stateful && m.is_public {
-                let has_change = m.params.iter().any(|p| p.name == "_changePKH");
+                let mut has_change = m.params.iter().any(|p| p.name == "_changePKH");
+                // N-038: a SIGHASH_SINGLE method continues the contract without
+                // declaring `_changePKH` (the change output is not committed),
+                // so its continuation is read from the method body instead.
+                if !has_change && m.sighash_type.map_or(false, |t| (t & 0x1f) == 0x03) {
+                    has_change = crate::stateful_scaffold::shape(program, m).0;
+                }
                 if !has_change { Some(true) } else { None }
             } else {
                 None
@@ -242,7 +262,13 @@ pub fn assemble_artifact(
                     .params
                     .iter()
                     .map(|p| ABIParam {
-                        name: p.name.clone(),
+                        // N-360: a reassigned property-named public param is
+                        // bound in the ANF under its `<name>@local` slot; the
+                        // ABI keeps the source name the caller passes.
+                        name: match p.name.strip_suffix("@local") {
+                            Some(source) if m.is_public => source.to_string(),
+                            _ => p.name.clone(),
+                        },
                         param_type: p.param_type.clone(),
                         fixed_array: None,
                     })
@@ -269,8 +295,15 @@ pub fn assemble_artifact(
         Some(code_separator_indices)
     };
 
-    let anf = if include_anf {
-        Some(program.clone())
+    let anf = if include_anf && is_stateful {
+        // N-499: the compiler carries 1-based columns internally (diagnostics
+        // and the source map subtract one when printing); the artifact's ANF
+        // sourceLoc is 0-based like TS, so convert on the embedded copy only.
+        let mut embedded = program.clone();
+        for m in &mut embedded.methods {
+            zero_base_source_columns(&mut m.body);
+        }
+        Some(embedded)
     } else {
         None
     };
@@ -283,13 +316,12 @@ pub fn assemble_artifact(
         })
     };
 
-    let ir = if include_anf {
-        Some(IRDebug {
-            anf: Some(program.clone()),
-        })
-    } else {
-        None
-    };
+    // N-152: spec/artifact-format.md section 3.8 - the `ir` debug snapshot is
+    // written only on request, and TS/Go/Python/Zig/Ruby/Java never write it
+    // by default. It used to be embedded whenever `include_anf` was set, which
+    // duplicated the whole ANF program on every artifact (the stateful ones
+    // already carry it at top level as `anf`). Nothing reads it.
+    let ir = None;
 
     Ok(RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
@@ -309,6 +341,7 @@ pub fn assemble_artifact(
         state_fields,
         constructor_slots,
         code_sep_index_slots,
+        code_part_len_slots,
         code_separator_index: cs_index,
         code_separator_indices: cs_indices,
         raw_script_spans,
@@ -428,7 +461,9 @@ fn regroup_synthetic_runs(entries: Vec<RegroupEntry>) -> Result<Vec<RegroupEntry
             return Ok(current);
         }
     }
-    panic!("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)");
+    // F-105: reachable from a hostile --ir chain deeper than the cap, and
+    // assembly runs outside every catch_unwind — refuse, never panic.
+    Err("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)".to_string())
 }
 
 /// Run one pass of the iterative regrouper.
@@ -545,4 +580,24 @@ fn regroup_one_pass(entries: Vec<RegroupEntry>) -> Result<(Vec<RegroupEntry>, bo
         changed = true;
     }
     Ok((out, changed))
+}
+
+/// N-499: rewrite every binding's `sourceLoc.column` from the compiler's
+/// internal 1-based convention to the artifact's 0-based one, recursing into
+/// `if` branches and `loop` bodies.
+fn zero_base_source_columns(bindings: &mut [crate::ir::ANFBinding]) {
+    use crate::ir::ANFValue;
+    for b in bindings {
+        if let Some(loc) = b.source_loc.as_mut() {
+            loc.column = loc.column.saturating_sub(1);
+        }
+        match &mut b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                zero_base_source_columns(then);
+                zero_base_source_columns(else_branch);
+            }
+            ANFValue::Loop { body, .. } => zero_base_source_columns(body),
+            _ => {}
+        }
+    }
 }

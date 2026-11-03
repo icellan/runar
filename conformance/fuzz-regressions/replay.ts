@@ -49,6 +49,7 @@
  * `npm run fuzz:replay` from `conformance/`.
  */
 
+import { execFileSync } from 'node:child_process';
 import {
   readdirSync,
   readFileSync,
@@ -57,7 +58,7 @@ import {
   statSync,
   mkdirSync,
 } from 'node:fs';
-import { join, resolve, dirname, basename } from 'node:path';
+import { join, resolve, relative, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -238,6 +239,17 @@ export function loadCorpus(entriesDir: string = ENTRIES_DIR): LoadedEntry[] {
     requireField(entry.expect, id, 'expect');
     requireField(entry.expect?.interpreterAccepted, id, 'expect.interpreterAccepted');
     requireField(entry.expect?.vmAccepted, id, 'expect.vmAccepted');
+    // `entry.oracle` is only a compile-time union (`'execute' | 'tri-modal'`);
+    // the cast above does not check it at runtime. Reject anything else here —
+    // a missing, misspelt, or future value must never silently fall through
+    // `replayEntry`'s dispatch into the weaker `execute`/bare-ScriptVM path.
+    if (entry.oracle !== 'execute' && entry.oracle !== 'tri-modal') {
+      throw new Error(
+        `corpus entry ${id}: "oracle" must be "execute" or "tri-modal", got ` +
+          `${JSON.stringify(entry.oracle)} — an unrecognised value would silently fall ` +
+          `through to the weaker execute/ScriptVM-only oracle`,
+      );
+    }
     if (!Array.isArray(entry.requiredOpcodes) || entry.requiredOpcodes.length === 0) {
       throw new Error(
         `corpus entry ${id}: requiredOpcodes must be a non-empty array — an entry that ` +
@@ -398,7 +410,19 @@ export interface ReplayOptions {
 
 export function runReplay(opts: ReplayOptions = {}): ReplayReport {
   const started = Date.now();
-  let corpus = loadCorpus(opts.entriesDir);
+  const fullCorpus = loadCorpus(opts.entriesDir);
+  // An empty corpus (entriesDir missing, or present but with zero entries) is
+  // not a passing run — it is "entries are never deleted" (README.md rule 3)
+  // having been violated. Checked against the UNFILTERED corpus so a
+  // `--filter` that happens to match nothing stays its own, separate case.
+  if (fullCorpus.length === 0) {
+    throw new Error(
+      `fuzzer regression corpus at ${opts.entriesDir ?? ENTRIES_DIR} is empty — entries are ` +
+        'never deleted (see conformance/fuzz-regressions/README.md rule 3); a corpus with no ' +
+        'entries must fail loudly, not replay as a green 0/0/0 run',
+    );
+  }
+  let corpus = fullCorpus;
   if (opts.filter) corpus = corpus.filter((c) => c.entry.id.includes(opts.filter!));
 
   const outcomes = corpus.map((loaded) => {
@@ -571,6 +595,11 @@ Options:
   --note <text>           Provenance note for --promote
   --issue <ref>           Issue/PR reference for --promote
   --fixed-by <shas>       Comma-separated fixing commits for --promote
+  --check-no-deletions    Fail if any entries/ id present at the merge-base
+                          with --base (default origin/main) is gone now
+                          (README.md rule 3: entries are never deleted)
+  --base <ref>            Base ref for --check-no-deletions (default origin/main)
+  --root <path>           Repo root for --check-no-deletions (default: git rev-parse --show-toplevel)
   --help, -h              Show this message
 
 Examples:
@@ -579,6 +608,7 @@ Examples:
   npx tsx conformance/fuzz-regressions/replay.ts \\
       --promote conformance/fuzz-findings-execute/2026-07-12T08-02-20-043Z-Foo-bar \\
       --id 2026-07-12-foo-bar --title "OP_AND length mismatch" --fixed-by abc1234
+  npx tsx conformance/fuzz-regressions/replay.ts --check-no-deletions --base origin/main
 `.trim(),
   );
 }
@@ -594,6 +624,9 @@ async function main(): Promise<void> {
   let note: string | undefined;
   let issue: string | undefined;
   let fixedBy: string[] | undefined;
+  let checkNoDeletions = false;
+  let base: string | undefined;
+  let root: string | undefined;
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -607,6 +640,9 @@ async function main(): Promise<void> {
       case '--note': note = argv[++i]; break;
       case '--issue': issue = argv[++i]; break;
       case '--fixed-by': fixedBy = (argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--check-no-deletions': checkNoDeletions = true; break;
+      case '--base': base = argv[++i]; break;
+      case '--root': root = argv[++i]; break;
       case '--help':
       case '-h': printHelp(); process.exit(0);
       // eslint-disable-next-line no-fallthrough
@@ -614,6 +650,10 @@ async function main(): Promise<void> {
         console.error(`Unknown option: ${arg}`);
         process.exit(1);
     }
+  }
+
+  if (checkNoDeletions) {
+    process.exit(runCheckNoDeletions({ baseRef: base ?? 'origin/main', root }));
   }
 
   if (promote) {
@@ -649,7 +689,10 @@ export function runReplayAndReport(opts: ReplayOptions = {}): ReplayReport {
   const report = runReplay(opts);
 
   if (report.total === 0) {
-    console.log('  (corpus is empty)');
+    // runReplay() throws before returning when the corpus itself is empty
+    // (see its own guard), so the only way to reach this with total === 0 is
+    // a `--filter` that matched nothing.
+    console.log('  (no entries matched the filter)');
   }
   console.log('');
   console.log(`  Entries: ${report.total}`);
@@ -665,6 +708,132 @@ export function runReplayAndReport(opts: ReplayOptions = {}): ReplayReport {
     console.error('A previously fixed fuzzer finding has come back. See conformance/fuzz-regressions/README.md.');
   }
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// README.md rule 3 — "Entries are never deleted" (N-230)
+// ---------------------------------------------------------------------------
+//
+// `runReplay`'s empty-corpus guard above only catches the corpus being wiped
+// to ZERO entries (F-250). Deleting ONE entry out of a corpus that still has
+// several left is a passing, non-empty run — nothing else in this file
+// notices that an id which existed on the base branch is simply gone. That
+// needs a base-ref diff of `entries/`, which is what this section adds.
+
+/** Entry ids present in `baseIds` but missing from `currentIds` — a deletion. */
+export function findDeletedEntryIds(baseIds: string[], currentIds: string[]): string[] {
+  const current = new Set(currentIds);
+  return baseIds.filter((id) => !current.has(id)).sort();
+}
+
+/** The merge-base commit of `baseRef` and HEAD, in `repoRoot`. */
+export function resolveMergeBase(baseRef: string, repoRoot: string): string {
+  return execFileSync('git', ['-C', repoRoot, 'merge-base', baseRef, 'HEAD'], {
+    encoding: 'utf-8',
+  }).trim();
+}
+
+/**
+ * Directory names directly under `relEntriesDir` as they existed at git ref
+ * `ref`, in `repoRoot`. Returns `[]` — not an error — when `relEntriesDir` did
+ * not exist at `ref` at all (e.g. the corpus postdates that commit): there is
+ * nothing to have deleted relative to a point before it existed.
+ */
+export function listEntryIdsAtRef(ref: string, repoRoot: string, relEntriesDir: string): string[] {
+  let out: string;
+  try {
+    out = execFileSync(
+      'git',
+      ['-C', repoRoot, 'ls-tree', '-d', '--name-only', `${ref}:${relEntriesDir}`],
+      { encoding: 'utf-8' },
+    );
+  } catch {
+    return [];
+  }
+  return out.split('\n').map((s) => s.trim()).filter(Boolean).sort();
+}
+
+export interface CheckNoDeletionsOptions {
+  /** The repository root `git` is run in. */
+  repoRoot: string;
+  /** The ref to diff against — e.g. `origin/main`. Compared at its MERGE-BASE
+   * with HEAD, not its live tip, so a base branch that gains new entries
+   * after this branch forked is never mistaken for a deletion on this branch
+   * (same three-dot-from-merge-base convention as
+   * `conformance/scripts/check-golden-provenance.mjs`). */
+  baseRef: string;
+  /** Local filesystem path to the current `entries/` directory. */
+  entriesDir?: string;
+}
+
+/**
+ * Entry ids that existed under `entries/` at the merge-base of `baseRef` and
+ * HEAD, but are gone from disk now. A non-empty result is rule 3 violated.
+ *
+ * Deliberately independent of `loadCorpus`'s validation: this check's job is
+ * only "did a directory disappear", not "is every remaining entry well
+ * formed" — an unrelated malformed entry must not mask a real deletion
+ * behind a schema error.
+ */
+export function checkEntriesNotDeleted(opts: CheckNoDeletionsOptions): string[] {
+  // Default relative to `repoRoot`, NOT the real repo's `ENTRIES_DIR` — this
+  // check is exercised against throwaway git repos in tests, whose entries/
+  // lives at the same repo-relative path but under a different root.
+  const entriesDir =
+    opts.entriesDir ?? join(opts.repoRoot, 'conformance', 'fuzz-regressions', 'entries');
+  const mergeBase = resolveMergeBase(opts.baseRef, opts.repoRoot);
+  const relEntriesDir = relative(opts.repoRoot, entriesDir);
+  const baseIds = listEntryIdsAtRef(mergeBase, opts.repoRoot, relEntriesDir);
+  const currentIds = existsSync(entriesDir)
+    ? readdirSync(entriesDir)
+        .filter((n) => !n.startsWith('.') && statSync(join(entriesDir, n)).isDirectory())
+        .sort()
+    : [];
+  return findDeletedEntryIds(baseIds, currentIds);
+}
+
+/** Resolve the repo root for the `--check-no-deletions` CLI path. */
+function resolveCliRepoRoot(explicit?: string): string {
+  if (explicit) return resolve(explicit);
+  try {
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (top) return top;
+  } catch {
+    /* not a git work tree — fall through */
+  }
+  return resolve(__dirname, '..', '..');
+}
+
+/** Runs the rule-3 check and reports it; returns the process exit code. */
+export function runCheckNoDeletions(opts: { baseRef?: string; root?: string } = {}): number {
+  const repoRoot = resolveCliRepoRoot(opts.root);
+  const baseRef = opts.baseRef || 'origin/main';
+  let deleted: string[];
+  try {
+    deleted = checkEntriesNotDeleted({ repoRoot, baseRef });
+  } catch (e) {
+    console.error(
+      `fuzz-regressions --check-no-deletions failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return 1;
+  }
+  if (deleted.length > 0) {
+    console.error(
+      `RULE 3 VIOLATED: ${deleted.length} corpus entr${deleted.length === 1 ? 'y' : 'ies'} deleted ` +
+        `since the merge-base with ${baseRef}: ${deleted.join(', ')}`,
+    );
+    console.error(
+      'Entries are never deleted (conformance/fuzz-regressions/README.md rule 3). Removing one ' +
+        'requires an explicit rationale in the PR description — this check has no allowlist or ' +
+        'override; that rationale is the only way past it.',
+    );
+    return 1;
+  }
+  console.log(`Fuzz regression corpus: no entries deleted since the merge-base with ${baseRef}.`);
+  return 0;
 }
 
 // Only run the CLI when invoked directly, not when imported by the fuzzer CLI.

@@ -54,7 +54,7 @@ func n070Script(flagOpcode string) string {
 
 func TestN070_RabinSlotsExtractAsNumbers(t *testing.T) {
 	for _, typeName := range []string{"RabinPubKey", "RabinSig"} {
-		args := ExtractConstructorArgs(n070Artifact(typeName, "boolean"), n070Script("51"))
+		args := mustExtractConstructorArgs(t, n070Artifact(typeName, "boolean"), n070Script("51"))
 		got, ok := args["modulus"].(int64)
 		if !ok {
 			t.Fatalf("%s: modulus extracted as %T (%v), want int64", typeName, args["modulus"], args["modulus"])
@@ -71,7 +71,7 @@ func TestN070_CanonicalBooleanSlotExtractsAsBool(t *testing.T) {
 		want   bool
 	}{{"51", true}, {"00", false}}
 	for _, c := range cases {
-		args := ExtractConstructorArgs(n070Artifact("RabinPubKey", "boolean"), n070Script(c.opcode))
+		args := mustExtractConstructorArgs(t, n070Artifact("RabinPubKey", "boolean"), n070Script(c.opcode))
 		got, ok := args["flag"].(bool)
 		if !ok {
 			t.Fatalf("opcode %s: flag extracted as %T (%v), want bool", c.opcode, args["flag"], args["flag"])
@@ -84,8 +84,8 @@ func TestN070_CanonicalBooleanSlotExtractsAsBool(t *testing.T) {
 
 func TestN070_BooleanAndBoolSpellingsAgree(t *testing.T) {
 	for _, opcode := range []string{"51", "00"} {
-		canonical := ExtractConstructorArgs(n070Artifact("RabinPubKey", "boolean"), n070Script(opcode))
-		alias := ExtractConstructorArgs(n070Artifact("RabinPubKey", "bool"), n070Script(opcode))
+		canonical := mustExtractConstructorArgs(t, n070Artifact("RabinPubKey", "boolean"), n070Script(opcode))
+		alias := mustExtractConstructorArgs(t, n070Artifact("RabinPubKey", "bool"), n070Script(opcode))
 		if canonical["flag"] != alias["flag"] {
 			t.Errorf("opcode %s: boolean -> %v (%T) but bool -> %v (%T)",
 				opcode, canonical["flag"], canonical["flag"], alias["flag"], alias["flag"])
@@ -96,20 +96,20 @@ func TestN070_BooleanAndBoolSpellingsAgree(t *testing.T) {
 // CONTROL: the classes that already worked must not move.
 func TestN070_ControlOtherTypesUnchanged(t *testing.T) {
 	for _, typeName := range []string{"bigint", "int"} {
-		args := ExtractConstructorArgs(n070Artifact(typeName, "bool"), n070Script("51"))
+		args := mustExtractConstructorArgs(t, n070Artifact(typeName, "bool"), n070Script("51"))
 		if args["modulus"] != n070Modulus {
 			t.Errorf("%s: modulus = %v, want %d", typeName, args["modulus"], n070Modulus)
 		}
 	}
 	// A ByteString slot still comes back as its hex payload, NOT a number, and
 	// the offset walk past the wide Rabin push still lands on it.
-	args := ExtractConstructorArgs(n070Artifact("RabinPubKey", "boolean"), n070Script("51"))
+	args := mustExtractConstructorArgs(t, n070Artifact("RabinPubKey", "boolean"), n070Script("51"))
 	if args["blob"] != "deadbeef" {
 		t.Errorf("blob = %v, want deadbeef", args["blob"])
 	}
 	// S1: a 1-byte ByteString MINIMALDATA-encoded as OP_5 is still
 	// reconstructed from the opcode.
-	s1 := ExtractConstructorArgs(n070Artifact("RabinPubKey", "boolean"),
+	s1 := mustExtractConstructorArgs(t, n070Artifact("RabinPubKey", "boolean"),
 		n070RabinPush+"7c"+"51"+"7c"+"55"+"ac")
 	if s1["blob"] != "05" {
 		t.Errorf("S1 blob = %v, want 05", s1["blob"])

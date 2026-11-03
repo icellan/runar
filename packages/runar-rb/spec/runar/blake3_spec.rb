@@ -43,6 +43,23 @@ RSpec.describe 'Runar::Builtins BLAKE3' do
     expect(blake3_hash(msg)).to eq(direct)
   end
 
+  # F-128: the compiled blake3Hash script aborts on >64-byte input (`64 - len`
+  # goes negative and OP_NUM2BIN refuses a negative size), so the runtime must
+  # fail the same way instead of hashing only the first 64 bytes.
+  # Proves: blake3_hash raises for 65/100/128 bytes and is unchanged at 64.
+  # Does not prove the script behaviour itself (pinned by execution in
+  # packages/runar-testing blake3.test.ts).
+  it 'rejects messages longer than 64 bytes, matching the on-chain script' do
+    [65, 100, 128].each do |n|
+      expect { blake3_hash('cd' * n) }.to raise_error(ArgumentError, /64 bytes/)
+    end
+    expect(blake3_hash('cd' * 64)).to eq(
+      Runar::Builtins._blake3_compress_impl(
+        Runar::Builtins::BLAKE3_IV_BYTES, ['cd' * 64].pack('H*'), 64
+      ).unpack1('H*')
+    )
+  end
+
   it 'is deterministic across invocations' do
     cv    = '00' * 32
     block = 'ff' * 64

@@ -223,6 +223,11 @@ module Runar
     # total message length in bits across all blocks. Returns a 32-byte hex string.
     def sha256_finalize(state, remaining, msg_bit_len)
       remaining_bytes = [remaining].pack('H*')
+      # The compiled script's two-block path pads to 120 bytes and aborts on a
+      # longer tail; a truncated digest here would never match it (F-142).
+      if remaining_bytes.bytesize > 119
+        raise ArgumentError, "sha256_finalize: remaining must be 0-119 bytes, got #{remaining_bytes.bytesize}"
+      end
 
       # Append the 0x80 padding byte
       padded = remaining_bytes + "\x80".b
@@ -352,10 +357,14 @@ module Runar
     end
 
     def blake3_hash(message)
-      msg_bytes = Builtins._hex_to_bytes(message)
-      truncated = msg_bytes.byteslice(0, 64).to_s
-      block_len = truncated.bytesize # real message length (0..64) = v[14]
-      padded = truncated
+      msg_bytes = Builtins._hex_to_bytes(message).to_s
+      # The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+      # padding size), so the runtime must fail too rather than truncate.
+      if msg_bytes.bytesize > 64
+        raise ArgumentError, "blake3Hash: message must be <= 64 bytes, got #{msg_bytes.bytesize}"
+      end
+      block_len = msg_bytes.bytesize # real message length (0..64) = v[14]
+      padded = msg_bytes
       padded = padded + ("\x00".b * (64 - padded.bytesize)) if padded.bytesize < 64
       Builtins._blake3_compress_impl(BLAKE3_IV_BYTES, padded, block_len).unpack1('H*')
     end
@@ -425,14 +434,18 @@ module Runar
       0
     end
 
-    # Returns the first 32 bytes of the preimage as a hex string.
-    # Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
-    # hash256(outputs) == extract_output_hash(tx_preimage) passes.
-    # Falls back to 32 zero bytes when the preimage is shorter than 32 bytes.
+    # Returns the preimage's hashOutputs field as a hex string in test
+    # mode: the 32 bytes ending 8 bytes before the end (end-relative,
+    # matching the compiled opcode sequence OP_SIZE 40 OP_SUB OP_SPLIT
+    # OP_NIP 32 OP_SPLIT OP_DROP). Falls back to 32 zero bytes when the
+    # preimage is shorter than 40 bytes (80 hex chars).
+    # N-246: this used to echo the leading 32 bytes (nVersion + most of
+    # hashPrevouts in a real preimage), ported from the TS/Java fix
+    # (N-245/N-188).
     def extract_output_hash(preimage)
       preimage = preimage.to_s
-      if preimage.length >= 64 # 32 bytes = 64 hex chars
-        preimage[0, 64]
+      if preimage.length >= 80 # 40 bytes = 80 hex chars
+        preimage[preimage.length - 80, 64]
       else
         '00' * 32
       end
@@ -499,33 +512,75 @@ module Runar
       0
     end
 
+    # continuation_amount: read-only view of the satoshis the call puts in the
+    # next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+    # injected _newAmount witness, already bound to
+    # >= extract_amount(tx_preimage). Mock returns 10_000 -- the mock input
+    # amount extract_amount returns, i.e. an honest continuation -- unless a
+    # test has set Runar::Builtins.mock_continuation_amount.
+    def continuation_amount
+      Builtins.mock_continuation_amount
+    end
+
+    # What continuation_amount returns in test mode (N-027). extract_amount
+    # stays 10_000, so a native test of an author rule such as
+    # continuation_amount() == extract_amount(@tx_preimage) + bet sets
+    # 10_000 + bet for the paying call and anything else for a non-paying one.
+    @mock_continuation_amount = 10_000
+    class << self
+      attr_accessor :mock_continuation_amount
+    end
+
     # -- Math Utilities --------------------------------------------------------
 
+    # Ruby's `/` and `%` floor; Bitcoin Script's OP_DIV / OP_MOD truncate
+    # toward zero and abort on a zero divisor. Every division-shaped builtin
+    # goes through these so a native run computes what the deployed script
+    # computes (F-134).
+    def _script_div(a, b, name)
+      # OP_DIV by zero fails the script; there is no value to return.
+      raise ZeroDivisionError, "#{name}: division by zero" if b == 0
+
+      q = a.abs / b.abs
+      (a < 0) != (b < 0) ? -q : q
+    end
+
+    def _script_mod(a, b, name)
+      raise ZeroDivisionError, "#{name}: modulo by zero" if b == 0
+
+      a - _script_div(a, b, name) * b
+    end
+    private :_script_div, :_script_mod
+
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV -- a zero divisor aborts.
     def safediv(a, b)
-      return 0 if b == 0
-
-      # Bitcoin Script truncates toward zero, unlike Ruby's floor division.
-      if (a < 0) != (b < 0) && a % b != 0
-        -(a.abs / b.abs)
-      else
-        a / b
-      end
+      _script_div(a, b, 'safediv')
     end
 
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD -- the remainder takes the
+    # dividend's sign; a zero divisor aborts.
     def safemod(a, b)
-      return 0 if b == 0
-
-      r = a % b
-      # Ensure sign matches dividend (Bitcoin Script behavior)
-      r -= b if r != 0 && (a < 0) != (r < 0)
-      r
+      _script_mod(a, b, 'safemod')
     end
 
+    # Script: <value> <lo> OP_MAX <hi> OP_MIN, i.e. min(max(value, lo), hi);
+    # with lo > hi, hi wins (N-030).
     def clamp(value, lo, hi)
-      return lo if value < lo
-      return hi if value > hi
+      [[value, lo].max, hi].min
+    end
 
-      value
+    # abs/min/max are Runar builtins a .runar.rb contract calls bare
+    # (`abs(@value)`); they compile to OP_ABS / OP_MIN / OP_MAX (N-030).
+    def abs(n)
+      n.abs
+    end
+
+    def min(a, b)
+      a < b ? a : b
+    end
+
+    def max(a, b)
+      a > b ? a : b
     end
 
     def sign(n)
@@ -535,21 +590,30 @@ module Runar
       0
     end
 
+    # Script: OP_DUP 0 33 OP_WITHIN OP_VERIFY, then 32 unrolled multiplies --
+    # any exponent outside 0..32 aborts.
     def pow(base, exp)
+      raise ArgumentError, 'pow: negative exponent' if exp < 0
+      raise ArgumentError, 'pow: exponent outside the supported domain (exp > 32)' if exp > 32
+
       base**exp
     end
 
+    # Script: <a> <b> OP_MUL <c> OP_DIV -- truncated; a zero divisor aborts.
     def mul_div(a, b, c)
-      (a * b) / c
+      _script_div(a * b, c, 'mulDiv')
     end
 
+    # Script: <amount> <bps> OP_MUL 10000 OP_DIV -- truncated toward zero.
     def percent_of(amount, bps)
-      (amount * bps) / 10_000
+      _script_div(amount * bps, 10_000, 'percentOf')
     end
 
     # Integer square root using Newton's method.
+    # Script: n >= 0 and OP_SIZE(n) < 63 are VERIFIED, i.e. 0 <= n < 2^495.
     def sqrt(n)
-      raise ArgumentError, 'sqrt of negative number' if n < 0
+      raise ArgumentError, 'sqrt: negative input' if n < 0
+      raise ArgumentError, 'sqrt: input outside the supported domain (n >= 2^495)' if n >= 1 << 495
       return 0 if n == 0
 
       x = n
@@ -561,20 +625,28 @@ module Runar
       x
     end
 
+    # The script unrolls exactly 256 Euclid steps and returns the partial
+    # remainder when they are not enough (N-030).
     def gcd(a, b)
       a = a.abs
       b = b.abs
-      a, b = b, a % b while b != 0
+      256.times do
+        break if b.zero?
+
+        a, b = b, a % b
+      end
       a
     end
 
     # Returns quotient only (matching Runar's divmod which returns quotient).
+    # Script: OP_2DUP OP_DIV ... OP_MOD OP_DROP -- truncated; zero aborts.
     def divmod(a, b)
-      a / b
+      _script_div(a, b, 'divmod')
     end
 
     def log2(n)
-      return 0 if n <= 0
+      # The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+      raise ArgumentError, 'log2: non-positive input' if n <= 0
 
       n.bit_length - 1
     end
@@ -602,18 +674,43 @@ module Runar
 
     # Extract a substring of bytes from a hex string.
     # start and length are in bytes, not hex characters.
+    # N-171 (sibling of F-274): `substr` compiles to `<data> <start> OP_SPLIT
+    # OP_NIP <length> OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second
+    # against the REMAINDER `size(data) - start`. It ABORTS whenever `start`
+    # is outside [0, size(data)] or `length` is outside
+    # [0, size(data) - start], which collapses to: start < 0, length < 0, or
+    # start + length > size(data). `data[start*2, length*2]` on a native Ruby
+    # String never aborts -- it clamps a too-large range and returns `nil`
+    # for a negative `start` or `length` -- so the bound is checked here.
     def substr(data, start, length)
+      raise ArgumentError, "substr: start #{start}, length #{length} is outside a #{data.length / 2}-byte value" if start.negative? || length.negative? || (start + length) * 2 > data.length
+
       data[start * 2, length * 2]
     end
 
     # Left-most bytes of a hex string.
+    # Script: OP_SPLIT OP_DROP -- the split index is `length`; OP_SPLIT aborts
+    # when it is negative or past the end of `data` (F-274). `data[0, n]` on a
+    # native Ruby String never aborts -- it clamps a too-large `n` and returns
+    # the whole string for a negative one -- so the bound is checked here.
     def left(data, length)
+      raise ArgumentError, "left: length #{length} is outside a #{data.length / 2}-byte value" if length.negative? || length * 2 > data.length
+
       data[0, length * 2]
     end
 
     # Right-most bytes of a hex string.
+    # Script: OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP -- the split index
+    # is `size(data) - length`, so the same bound applies (F-274).
+    # `data[-(length * 2)..]` fails open at both ends: `length == 0` indexes
+    # with Ruby's `-0`, which native `String#[]` resolves to `0` and returns
+    # the WHOLE string instead of the empty one OP_SPLIT produces, and a
+    # `length` past the end returns `nil` instead of raising.
     def right(data, length)
-      data[-(length * 2)..]
+      raise ArgumentError, "right: length #{length} is outside a #{data.length / 2}-byte value" if length.negative? || length * 2 > data.length
+
+      n = length * 2
+      n.zero? ? '' : data[-n..]
     end
 
     # Reverse the byte order of a hex string.

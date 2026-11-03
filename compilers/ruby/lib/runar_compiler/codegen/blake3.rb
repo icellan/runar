@@ -466,8 +466,22 @@ module RunarCompiler
       # block_len_from_alt: when true, v[14] (block_len) is popped from the alt
       # stack (blake3Hash provides the real message length); otherwise it is the
       # constant 64 (blake3Compress operates on a full 64-byte block).
-      def self._generate_compress_ops(block_len_from_alt: false)
+      #
+      # guard_operands (F-114): abort unless the block is exactly 64 bytes and
+      # the chaining value exactly 32 bytes. Without it a 65-byte block B || x
+      # (the extra byte lands above bit 32 of an addend and is truncated away)
+      # or a 60..63-byte block (the short last word is zero-extended) yields
+      # the same digest as a different 64-byte block. blake3Hash builds its own
+      # operands, so only the blake3Compress builtin needs the check.
+      def self._generate_compress_ops(block_len_from_alt: false, guard_operands: false)
         em = Emitter.new(2)
+
+        if guard_operands
+          # [CV, block] -> abort unless len(block) == 64
+          em.oc("OP_SIZE"); em.depth += 1
+          em.push_i(64)
+          em.oc("OP_EQUALVERIFY"); em.depth -= 2
+        end
 
         # Phase 1: Unpack block into 16 LE message words (raw chunks are LE words)
         15.times { em.split4 }
@@ -475,6 +489,12 @@ module RunarCompiler
 
         # Phase 2: Initialize 16-word state on top of message words
         em.roll(16)
+        if guard_operands
+          # [m0..m15, CV] -> abort unless len(CV) == 32
+          em.oc("OP_SIZE"); em.depth += 1
+          em.push_i(32)
+          em.oc("OP_EQUALVERIFY"); em.depth -= 2
+        end
         em.to_alt
         em.assert_depth(16, "after CV to alt")
 
@@ -575,7 +595,7 @@ module RunarCompiler
       @blake3_compress_ops_cache = nil
 
       def self._get_compress_ops
-        @blake3_compress_ops_cache ||= _generate_compress_ops
+        @blake3_compress_ops_cache ||= _generate_compress_ops(guard_operands: true)
       end
       private_class_method :_get_compress_ops
 
@@ -587,10 +607,11 @@ module RunarCompiler
       # Stack on entry: [..., chainingValue(32 BE), block(64 BE)]
       # Stack on exit:  [..., hash(32 BE)]
       # Net depth: -1
+      # Aborts unless the chaining value is 32 bytes and the block 64 bytes (F-114).
       #
       # @param emit [Proc] callback that receives a StackOp
       def self.emit_blake3_compress(emit)
-        _get_compress_ops.each { |op| emit.call(op) }
+        _get_compress_ops.each { |op| emit.call(op.dup) } # copy: emit_op stamps :source_loc in place (N-351)
       end
 
       # Emit BLAKE3 hash for a message up to 64 bytes.

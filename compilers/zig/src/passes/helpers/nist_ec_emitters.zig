@@ -816,7 +816,7 @@ fn emitCoordCanonVerify(t: *NistTracker, x_name: []const u8, y_name: []const u8,
 ///
 /// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
 /// and notinf is 0 or 1, so the product is canonical either way.
-fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
+fn affineAdd(t: *NistTracker, p_be: []const u8, abort_on_y0_tangent: bool) !void {
     try t.copyToTop("px", "_px_eq");
     try t.copyToTop("qx", "_qx_eq");
     t.popNames(2);
@@ -842,6 +842,28 @@ fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
     try t.emitOpcode("OP_SUB");
     try t.emitOpcode("OP_NOT");
     try t.names.append(t.allocator, "_notinf");
+
+    // N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+    // when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+    // silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+    // order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+    //   ok = NOT(cond AND px != 0 AND py == 0)
+    // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+    // Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+    // total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+    // cond = 1 with py == 0 there already means px == 0, the exempt case.
+    if (abort_on_y0_tangent) {
+        try t.copyToTop("px", "_px_g");
+        try t.copyToTop("py", "_py_g");
+        try t.copyToTop("_cond", "_cond_g");
+        t.popNames(3);
+        try t.emitOpcode("OP_SWAP");
+        try t.emitOpcode("OP_NOT");
+        try t.emitOpcode("OP_BOOLAND");
+        try t.emitOpcode("OP_BOOLAND");
+        try t.emitOpcode("OP_NOT");
+        try t.emitOpcode("OP_VERIFY");
+    }
 
     // chord numerator / denominator
     try t.copyToTop("qy", "_qy1");
@@ -1888,7 +1910,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try decomposePoint(t, "_R1_point", "px", "py");
     try decomposePoint(t, "_R2_point", "qx", "qy");
 
-    try affineAdd(t, p_be);
+    try affineAdd(t, p_be, false);
 
     // Step 8: x_R mod n == r
     try t.toTop("ry");
@@ -1937,7 +1959,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             // R-117: affineAdd's selectors compare these four values RAW.
             try emitCoordCanonVerify(&t, "px", "py", p256_field_p_be[0..]);
             try emitCoordCanonVerify(&t, "qx", "qy", p256_field_p_be[0..]);
-            try affineAdd(&t, p256_field_p_be[0..]);
+            try affineAdd(&t, p256_field_p_be[0..], true);
             try composePoint(&t, "rx", "ry", "_result");
             return t.takeBundle();
         },
@@ -2036,7 +2058,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             // R-117: affineAdd's selectors compare these four values RAW.
             try emitCoordCanonVerify(&t, "px", "py", p384_field_p_be[0..]);
             try emitCoordCanonVerify(&t, "qx", "qy", p384_field_p_be[0..]);
-            try affineAdd(&t, p384_field_p_be[0..]);
+            try affineAdd(&t, p384_field_p_be[0..], true);
             try composePoint(&t, "rx", "ry", "_result");
             return t.takeBundle();
         },
@@ -2187,14 +2209,19 @@ test "nist_ec helper op-count goldens" {
     // measured here, the weighted counts go 6669 -> 6719 and 11475 -> 11525,
     // exactly +50 each. p256Mul / p384Mul / *MulGen / *Negate / p256OnCurve do
     // not move.
+    // p256Add 6695 -> 6704 and p384Add 11501 -> 11510 (+9 each): N-252, the
+    // y = 0 tangent guard — three picks (one `.pick` StackOp each here) +
+    // OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY. The peers book it
+    // as +12 OPS (deep pick = two ops); +12 script BYTES in every tier.
+    // verifyECDSA_* does not take the guard.
     const cases = .{
-        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6695) },
+        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6704) },
         .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129771) },
         .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129773) },
         .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 956) },
         .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 570) },
         .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 16) },
-        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11501) },
+        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11510) },
         .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 195761) },
         .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 195763) },
         .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1404) },

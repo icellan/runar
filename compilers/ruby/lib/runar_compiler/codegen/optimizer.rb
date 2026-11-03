@@ -12,9 +12,37 @@ module RunarCompiler
   module Codegen
     MAX_OPTIMIZATION_ITERATIONS = 100
 
+    # Nested if-blocks are optimized bottom-up: every if-arm before the list
+    # holding it. N-264: by an explicit list, not recursion -- private methods
+    # are inlined, so a chain of D helpers that each call the next under K
+    # nested ifs nests D*K if-ops here, too deep for the VM stack. Every op
+    # list reachable through if arms is collected parents first, then
+    # optimized in reverse (children before parents), each list exactly as the
+    # recursive version optimized it.
     def self.optimize_stack_ops(ops)
-      current = ops.map { |op| _optimize_nested_if(op) }
+      lists = [ops]
+      arms = {}.compare_by_identity
+      k = 0
+      while k < lists.length
+        lists[k].each do |op|
+          next unless op[:op] == "if"
 
+          pair = [op[:then] || op[:then_ops] || [], op[:else_ops] || []]
+          arms[op] = pair
+          lists.push(pair[0], pair[1])
+        end
+        k += 1
+      end
+      optimized = {}.compare_by_identity
+      lists.reverse_each do |list|
+        current = list.map { |op| _with_optimized_arms(op, arms, optimized) }
+        optimized[list] = _optimize_one_level(current)
+      end
+      optimized[ops]
+    end
+
+    # The fixed-point rule loop over one op list whose if-arms are done.
+    def self._optimize_one_level(current)
       MAX_OPTIMIZATION_ITERATIONS.times do
         result, changed = _apply_one_pass(current)
         break unless changed
@@ -23,16 +51,16 @@ module RunarCompiler
 
       current
     end
+    private_class_method :_optimize_one_level
 
-    def self._optimize_nested_if(op)
+    def self._with_optimized_arms(op, arms, optimized)
       if op[:op] == "if"
-        optimized_then = optimize_stack_ops(op[:then] || op[:then_ops] || [])
-        optimized_else = optimize_stack_ops(op[:else_ops] || [])
-        return { op: "if", then: optimized_then, else_ops: optimized_else, source_loc: op[:source_loc] }
+        then_ops, else_ops = arms[op]
+        return { op: "if", then: optimized[then_ops], else_ops: optimized[else_ops], source_loc: op[:source_loc] }
       end
       op
     end
-    private_class_method :_optimize_nested_if
+    private_class_method :_with_optimized_arms
 
     def self._propagate_source_loc(original, replacements)
       sl = original[:source_loc]
@@ -113,11 +141,14 @@ module RunarCompiler
       if _is_push_bigint(a, 1) && _is_opcode(b, "OP_SUB")
         return [{ op: "opcode", code: "OP_1SUB" }]
       end
-      if _is_push_bigint(a, 0) && _is_opcode(b, "OP_ADD") then return [] end
-      if _is_push_bigint(a, 0) && _is_opcode(b, "OP_SUB") then return [] end
+      # NOTE (F-001): no push(0)+OP_ADD, push(0)+OP_SUB or OP_NEGATE+OP_NEGATE
+      # elimination. x+0, x-0 and -(-x) are identities over integers, not over
+      # stack elements: the opcode decodes its operand as a CScriptNum
+      # (rejecting a non-minimal encoding under strict rules) and pushes back
+      # the minimal re-encoding. Deleting it changes accept/reject and the
+      # value for a witness-supplied operand.
 
       # OP_NOT + OP_NOT is NOT a 2-op rule -- see _match_window3 (C17).
-      if _is_opcode(a, "OP_NEGATE") && _is_opcode(b, "OP_NEGATE") then return [] end
 
       if _is_opcode(a, "OP_EQUAL") && _is_opcode(b, "OP_VERIFY")
         return [{ op: "opcode", code: "OP_EQUALVERIFY" }]
@@ -176,6 +207,12 @@ module RunarCompiler
 
     def self._match_window3(a, b, c)
       return nil if _raw_bytes?(a) || _raw_bytes?(b) || _raw_bytes?(c)
+
+      # ROT + ROT + ROT -> remove all three (N-376). OP_ROT is a 3-cycle on the
+      # top three items, so three in a row are the identity; the fixed-point
+      # loop leaves a run of n as n mod 3. Matches the opcode-string form too
+      # (F-392 convention), as every tier does.
+      return [] if _rot?(a) && _rot?(b) && _rot?(c)
 
       # <canonical-bool producer> + OP_NOT + OP_NOT -> <canonical-bool producer>
       #
@@ -258,6 +295,12 @@ module RunarCompiler
       _push_bigint_value(op) == n
     end
     private_class_method :_is_push_bigint
+
+    # A typed rot or the opcode-string OP_ROT (N-376).
+    def self._rot?(op)
+      op[:op] == "rot" || _is_opcode(op, "OP_ROT")
+    end
+    private_class_method :_rot?
 
     def self._is_opcode(op, code)
       op[:op] == "opcode" && op[:code] == code

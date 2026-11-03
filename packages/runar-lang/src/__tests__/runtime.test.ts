@@ -54,6 +54,8 @@ import {
   extractVersion,
   extractLocktime,
   extractSigHashType,
+  extractOutputHash,
+  extractOutputs,
   // Post-quantum
   verifyWOTS,
   verifySLHDSA_SHA2_128s,
@@ -72,6 +74,29 @@ import {
   SmartContract,
   StatefulSmartContract,
 } from '../runtime/index.js';
+
+// Test-only helpers for the F-155 Rabin padding-bound vectors below. These
+// mirror the byte<->bigint interpretation `verifyRabinSig` itself uses
+// (unsigned little-endian), so the vectors line up with what the function
+// actually computes.
+function hexToUnsignedLE(hex: string): bigint {
+  let result = 0n;
+  for (let i = 0; i < hex.length; i += 2) {
+    result += BigInt(parseInt(hex.slice(i, i + 2), 16)) << BigInt((i / 2) * 8);
+  }
+  return result;
+}
+
+function leBigIntToHex(value: bigint): string {
+  if (value === 0n) return '00';
+  const bytes: number[] = [];
+  let v = value;
+  while (v > 0n) {
+    bytes.push(Number(v & 0xffn));
+    v >>= 8n;
+  }
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 describe('runtime builtins', () => {
   // ---- Crypto hashes ----
@@ -297,6 +322,48 @@ describe('runtime builtins', () => {
     });
   });
 
+  // N-245: extractOutputHash must return the preimage's actual hashOutputs
+  // field, not the leading 32 bytes (which cover nVersion + most of
+  // hashPrevouts in a real BIP-143 preimage).
+  describe('extractOutputHash (N-245)', () => {
+    // Builds a syntactically valid BIP-143 preimage with a zero-length
+    // scriptCode, so every field lands at its fixed offset:
+    //   version(4) hashPrevouts(32) hashSequence(32) outpoint(36)
+    //   scriptCodeLen(1=0x00) amount(8) sequence(4) hashOutputs(32)
+    //   locktime(4) sighashType(4)
+    function buildPreimageHex(hashPrevoutsByte: string, hashOutputsByte: string): string {
+      const version = '01000000';
+      const hashPrevouts = hashPrevoutsByte.repeat(32);
+      const hashSequence = '00'.repeat(32);
+      const outpoint = '00'.repeat(36);
+      const scriptCodeLen = '00';
+      const amount = '1027000000000000'; // 10000 satoshis, LE int64
+      const sequence = 'feffffff';
+      const hashOutputs = hashOutputsByte.repeat(32);
+      const locktime = '00000000';
+      const sighashType = '41000000';
+      return (
+        version + hashPrevouts + hashSequence + outpoint + scriptCodeLen +
+        amount + sequence + hashOutputs + locktime + sighashType
+      );
+    }
+
+    it('returns hashOutputs, not the leading bytes of the preimage', () => {
+      const preimage = SigHashPreimage(buildPreimageHex('aa', 'bb'));
+      const result = extractOutputHash(preimage);
+      // The bug: echoing the first 32 bytes returns version + most of
+      // hashPrevouts (all 'aa' after the version bytes), not hashOutputs.
+      expect(result).toBe('bb'.repeat(32));
+      expect(result).not.toBe('aa'.repeat(32));
+    });
+
+    it('extractOutputs (alias) agrees with extractOutputHash', () => {
+      const preimage = SigHashPreimage(buildPreimageHex('cc', 'dd'));
+      expect(extractOutputs(preimage)).toBe(extractOutputHash(preimage));
+      expect(extractOutputHash(preimage)).toBe('dd'.repeat(32));
+    });
+  });
+
   // ---- Post-quantum / Rabin mocks ----
 
   describe('verification mocks', () => {
@@ -315,6 +382,116 @@ describe('runtime builtins', () => {
 
     it('verifyRabinSig returns false for zero pubkey', () => {
       expect(verifyRabinSig(toByteString(''), 0n, toByteString(''), 0n)).toBe(false);
+    });
+
+    // F-155: verifyRabinSig must enforce the on-chain padding bound
+    // 0 <= padding < 65536 (the same bound EmitVerifyRabinSig asserts via
+    // OP_WITHIN/OP_VERIFY, and that packages/runar-testing's rabinVerify and
+    // Go's rabin.go already enforce). Without it, sig=0 with
+    // padding=SHA256(msg) is a universal forgery: for ANY n,
+    // (0^2 + SHA256(msg)) mod n == SHA256(msg) mod n trivially.
+    describe('verifyRabinSig padding bound (F-155)', () => {
+      const n = 1361129467683753853853498429727072846227n * 1361129467683753853853498429727082846007n;
+
+      it('rejects the sig=0 universal-forgery vector regardless of n', () => {
+        const msg = toByteString('deadbeef');
+        const padding = sha256(msg) as unknown as import('../types.js').ByteString;
+        // This proves: the specific GK-GAP-012 forgery (sig=0, padding=SHA256(msg))
+        // is rejected. It does not prove the verifier is sound for every
+        // sig/padding/n combination outside this bound.
+        expect(verifyRabinSig(msg, 0n, padding, n)).toBe(false);
+      });
+
+      it('rejects padding at exactly the 65536 boundary even when the equation otherwise holds', () => {
+        const msg = toByteString('deadbeef');
+        const hashHex = sha256(msg) as unknown as string;
+        const hashBN = hexToUnsignedLE(hashHex);
+        const padBN = 65536n;
+        // Choose a modulus so (0^2 + padBN) % nn === hashBN % nn holds exactly,
+        // isolating the boundary check from the forgery arithmetic.
+        const nn = hashBN - padBN;
+        const paddingHex = leBigIntToHex(padBN);
+        expect(verifyRabinSig(msg, 0n, paddingHex as unknown as import('../types.js').ByteString, nn)).toBe(false);
+      });
+
+      it('accepts padding just under the boundary (65535) when the equation otherwise holds', () => {
+        const msg = toByteString('deadbeef');
+        const hashHex = sha256(msg) as unknown as string;
+        const hashBN = hexToUnsignedLE(hashHex);
+        const padBN = 65535n;
+        const nn = hashBN - padBN;
+        const paddingHex = leBigIntToHex(padBN);
+        expect(verifyRabinSig(msg, 0n, paddingHex as unknown as import('../types.js').ByteString, nn)).toBe(true);
+      });
+
+      // N-380 (F-368 follow-up): the script asserts sig < n, so sig + k*n aborts
+      // on chain. Proves: with a crafted modulus nn = H - 7, (sig=0, padding=7)
+      // is accepted and sig = nn, 2*nn (the same residue, out of range) are
+      // rejected. Does not prove the verdict equals Spend's (f368 negatives do).
+      it('rejects non-canonical sig >= n that the on-chain gate aborts on (N-380)', () => {
+        const msg = toByteString('deadbeef');
+        const hashBN = hexToUnsignedLE(sha256(msg) as unknown as string);
+        const nn = hashBN - 7n;
+        const pad = leBigIntToHex(7n) as unknown as import('../types.js').ByteString;
+        expect(verifyRabinSig(msg, 0n, pad, nn)).toBe(true);
+        expect(verifyRabinSig(msg, nn, pad, nn)).toBe(false);
+        expect(verifyRabinSig(msg, 2n * nn, pad, nn)).toBe(false);
+      });
+
+      it('control: an honest signature from the vendored test key still verifies', () => {
+        // Vendored from packages/runar-testing/src/crypto/rabin.ts RABIN_TEST_KEY
+        // and its rabinSign algorithm, inlined here because runar-lang must not
+        // depend on runar-testing (wrong direction of the package graph).
+        const p = 1361129467683753853853498429727072846227n;
+        const q = 1361129467683753853853498429727082846007n;
+        const msg = toByteString('cafebabe');
+        const hashHex = sha256(msg) as unknown as string;
+        const hashBN = hexToUnsignedLE(hashHex);
+
+        const modPow = (base: bigint, exp: bigint, mod: bigint): bigint => {
+          let result = 1n;
+          base = ((base % mod) + mod) % mod;
+          while (exp > 0n) {
+            if (exp & 1n) result = (result * base) % mod;
+            exp >>= 1n;
+            base = (base * base) % mod;
+          }
+          return result;
+        };
+        const isQR = (a: bigint, pp: bigint): boolean =>
+          a % pp === 0n || modPow(a, (pp - 1n) / 2n, pp) === 1n;
+        const crt = (a1: bigint, m1: bigint, a2: bigint, m2: bigint): bigint => {
+          const m = m1 * m2;
+          const p1 = modPow(m2, m1 - 2n, m1);
+          const p2 = modPow(m1, m2 - 2n, m2);
+          return ((a1 * m2 * p1 + a2 * m1 * p2) % m + m) % m;
+        };
+
+        let found: { sig: bigint; padding: bigint } | undefined;
+        for (let padding = 0n; padding < 1000n && !found; padding++) {
+          let target = (hashBN - padding) % n;
+          if (target < 0n) target += n;
+          if (isQR(target, p) && isQR(target, q)) {
+            const sp = modPow(target, (p + 1n) / 4n, p);
+            const sq = modPow(target, (q + 1n) / 4n, q);
+            const sig = crt(sp, p, sq, q);
+            if ((sig * sig + padding) % n === hashBN % n) {
+              found = { sig, padding };
+            } else {
+              const sigAlt = n - sig;
+              if ((sigAlt * sigAlt + padding) % n === hashBN % n) {
+                found = { sig: sigAlt, padding };
+              }
+            }
+          }
+        }
+        if (!found) throw new Error('test setup failed: no honest signature found in range');
+
+        const paddingHex = leBigIntToHex(found.padding);
+        expect(
+          verifyRabinSig(msg, found.sig, paddingHex as unknown as import('../types.js').ByteString, n),
+        ).toBe(true);
+      });
     });
   });
 

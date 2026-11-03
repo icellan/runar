@@ -265,6 +265,8 @@ fn typecheckErrorCount(a: std.mem.Allocator, src: []const u8) !usize {
 fn compileHex(a: std.mem.Allocator, src: []const u8, file_name: []const u8) ![]const u8 {
     const result = try compiler_api.compileSource(a, src, file_name);
     if (result.artifact_json) |j| a.free(j);
+    for (result.warnings) |line| a.free(line);
+    a.free(result.warnings);
     return result.script_hex;
 }
 
@@ -387,7 +389,8 @@ test "R-073 control: correct element writes and an element read still compile" {
     const hex = try compileHex(a, GOOD_BIGINT_CELLS, "PosIdx.runar.ts");
     defer a.free(hex);
     // Byte-for-byte pin, captured from the pre-fix binary.
-    try std.testing.expectEqual(@as(usize, 2560), hex.len); // W1: +12, four zero-pad sites
+    // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 2560).
+    try std.testing.expectEqual(@as(usize, 2594), hex.len); // W1: +12, four zero-pad sites
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab76009c63757676aa517f"));
 }
 
@@ -396,7 +399,10 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, GOOD_BYTESTRING_WORDS));
     const hex = try compileHex(a, GOOD_BYTESTRING_WORDS, "PosWords.runar.ts");
     defer a.free(hex);
-    try std.testing.expectEqual(@as(usize, 1784), hex.len); // W1: +6, two zero-pad sites
+    // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 1784).
+    // N-044: +134 hex for the two ByteString slots' PUSHDATA4 writer arm and the unsigned-length reader.
+    // N-216: -2 hex, one branch-reconcile `OP_2 OP_ROLL` now folds to OP_ROT (code-part length literal follows).
+    try std.testing.expectEqual(@as(usize, 1950), hex.len); // W1: +6, two zero-pad sites
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

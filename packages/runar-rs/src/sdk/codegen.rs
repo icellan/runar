@@ -3,6 +3,7 @@
 //! Generates typed Rust wrapper structs from compiled Runar artifacts,
 //! using an embedded Mustache template and a minimal template renderer.
 
+use super::contract::is_sdk_supplied_param;
 use super::types::*;
 use std::collections::HashMap;
 
@@ -28,6 +29,19 @@ fn rust_sdk_value_expr(abi_type: &str, var_name: &str) -> String {
         "bigint" => format!("SdkValue::BigInt({})", var_name),
         "boolean" => format!("SdkValue::Bool({})", var_name),
         _ => format!("SdkValue::Bytes({})", var_name),
+    }
+}
+
+/// Match arms (over `Option<&SdkValue>`) that read a state value of the given
+/// ABI type as the Rust type `map_type_to_rust` returns for it. Anything that
+/// does not fit yields `None` through the template's `_ => None` arm.
+fn rust_state_read_arms(abi_type: &str) -> &'static str {
+    match abi_type {
+        "bigint" => "Some(SdkValue::BigInt(v)) => Some(v.clone()), Some(SdkValue::Int(v)) => Some(BigInt::from(*v)),",
+        "boolean" => "Some(SdkValue::Bool(v)) => Some(*v),",
+        "Sig" | "PubKey" | "ByteString" | "Addr" | "Ripemd160" | "Sha256" | "Point"
+        | "SigHashPreimage" => "Some(SdkValue::Bytes(v)) => Some(v.clone()),",
+        _ => "Some(v) => Some(v.clone()),",
     }
 }
 
@@ -80,12 +94,32 @@ fn to_pascal_case(name: &str) -> String {
 }
 
 /// Reserved method names on the generated wrapper struct.
-const RESERVED_NAMES: &[&str] = &["connect", "deploy", "contract", "get_locking_script"];
+const RESERVED_NAMES: &[&str] = &["connect", "deploy", "contract", "get_locking_script", "attach_inscription"];
+
+/// Rust strict + reserved keywords (2021 edition); a bare `pub fn <kw>(` does not parse.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+];
+
+/// snake_case parameter / field identifier that is not a Rust keyword
+/// (`type` becomes `arg_type`; same prefix style as `call_` / `state_`).
+fn safe_rust_param_name(name: &str) -> String {
+    let snake = to_snake_case(name);
+    if RUST_KEYWORDS.contains(&snake.as_str()) {
+        format!("arg_{}", snake)
+    } else {
+        snake
+    }
+}
 
 /// Generate a safe method name (snake_case), avoiding collisions with wrapper methods.
 fn safe_rust_method_name(name: &str) -> String {
     let snake = to_snake_case(name);
-    if RESERVED_NAMES.contains(&snake.as_str()) {
+    if RESERVED_NAMES.contains(&snake.as_str()) || RUST_KEYWORDS.contains(&snake.as_str()) {
         format!("call_{}", snake)
     } else {
         snake
@@ -118,6 +152,12 @@ fn is_terminal_method(method: &AbiMethod, is_stateful: bool) -> bool {
     if let Some(terminal) = method.is_terminal {
         return terminal;
     }
+    // N-038: a SIGHASH_SINGLE method continues the contract without a
+    // `_changePKH` param (the change output is not committed), and the
+    // compiler marks it terminal explicitly when it is.
+    if method.sig_hash_type.map_or(false, |t| (t & 0x1f) == 0x03) {
+        return false;
+    }
     // Fallback for older artifacts without is_terminal:
     // check for the absence of _changePKH in params
     !method.params.iter().any(|p| p.name == "_changePKH")
@@ -125,29 +165,14 @@ fn is_terminal_method(method: &AbiMethod, is_stateful: bool) -> bool {
 
 /// Whether a param is hidden (auto-computed by SDK).
 fn is_hidden_param(p: &AbiParam, is_stateful: bool) -> bool {
-    if p.param_type == "Sig" {
-        return true;
-    }
-    if is_stateful {
-        if p.param_type == "SigHashPreimage" {
-            return true;
-        }
-        if p.name == "_changePKH" || p.name == "_changeAmount" || p.name == "_newAmount" {
-            return true;
-        }
-    }
-    false
+    p.param_type == "Sig" || is_sdk_supplied_param(p, is_stateful)
 }
 
 /// Whether a param should be excluded from the SDK args array entirely.
+/// Same predicate as `RunarContract::prepare_call`'s arity check, so the
+/// generated args can never drift from what the SDK accepts.
 fn is_excluded_from_sdk_args(p: &AbiParam, is_stateful: bool) -> bool {
-    if !is_stateful {
-        return false;
-    }
-    p.param_type == "SigHashPreimage"
-        || p.name == "_changePKH"
-        || p.name == "_changeAmount"
-        || p.name == "_newAmount"
+    is_sdk_supplied_param(p, is_stateful)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +211,15 @@ struct CtxMethod {
     prepare_user_params: Vec<CtxParam>,
 }
 
+/// A mutable state field exposed as a typed accessor on the wrapper (N-278).
+#[derive(Debug, Clone)]
+struct CtxStateField {
+    original_name: String,
+    name: String,
+    param_type: String,
+    read_arms: String,
+}
+
 #[derive(Debug, Clone)]
 struct CodegenContext {
     contract_name: String,
@@ -197,6 +231,7 @@ struct CodegenContext {
     constructor_params: Vec<CtxParam>,
     constructor_args_expr: String,
     methods: Vec<CtxMethod>,
+    state_fields: Vec<CtxStateField>,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +249,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
         .iter()
         .enumerate()
         .map(|(i, p)| CtxParam {
-            name: to_snake_case(&p.name),
+            name: safe_rust_param_name(&p.name),
             param_type: map_type_to_rust(&p.param_type).to_string(),
             abi_type: p.param_type.clone(),
             is_last: i == ctor_len - 1,
@@ -257,7 +292,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| CtxParam {
-                    name: to_snake_case(&p.name),
+                    name: safe_rust_param_name(&p.name),
                     param_type: map_type_to_rust(&p.param_type).to_string(),
                     abi_type: p.param_type.clone(),
                     is_last: i == user_len - 1,
@@ -268,7 +303,8 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
                 has_big_int_params = true;
             }
 
-            // SDK args (all params except SigHashPreimage/_changePKH/_changeAmount/_newAmount for stateful)
+            // SDK args (all params except the SDK-supplied ones: intent witnesses,
+            // plus SigHashPreimage/_changePKH/_changeAmount/_newAmount for stateful)
             let sdk_args_raw: Vec<&AbiParam> = method
                 .params
                 .iter()
@@ -281,7 +317,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
                     if is_hidden_param(p, is_stateful) {
                         "SdkValue::Auto".to_string()
                     } else {
-                        let param_name = to_snake_case(&p.name);
+                        let param_name = safe_rust_param_name(&p.name);
                         rust_sdk_value_expr(&p.param_type, &param_name)
                     }
                 })
@@ -300,7 +336,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
                 .iter()
                 .enumerate()
                 .map(|(j, (arg_idx, p))| CtxSigParam {
-                    name: to_snake_case(&p.name),
+                    name: safe_rust_param_name(&p.name),
                     arg_index: *arg_idx,
                     is_last: j == sig_len - 1,
                 })
@@ -349,6 +385,35 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
         })
         .collect();
 
+    // State accessors. A field whose accessor name would collide with another
+    // member of the wrapper is exposed as `state_<name>` instead.
+    let mut taken: Vec<String> = RESERVED_NAMES.iter().map(|n| n.to_string()).collect();
+    taken.extend(RUST_KEYWORDS.iter().map(|n| n.to_string()));
+    taken.extend(
+        ["new", "from_txid", "from_utxo", "contract_mut"].iter().map(|n| n.to_string()),
+    );
+    for m in &methods {
+        taken.push(m.name.clone());
+        taken.push(format!("prepare_{}", m.name));
+        taken.push(format!("finalize_{}", m.name));
+    }
+    let state_fields: Vec<CtxStateField> = artifact
+        .state_fields
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|f| {
+            let snake = to_snake_case(&f.name);
+            let name = if taken.contains(&snake) { format!("state_{}", snake) } else { snake };
+            CtxStateField {
+                original_name: f.name.clone(),
+                name,
+                param_type: map_type_to_rust(&f.field_type).to_string(),
+                read_arms: rust_state_read_arms(&f.field_type).to_string(),
+            }
+        })
+        .collect();
+
     CodegenContext {
         contract_name: artifact.contract_name.clone(),
         is_stateful,
@@ -359,6 +424,7 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
         constructor_params,
         constructor_args_expr,
         methods,
+        state_fields,
     }
 }
 
@@ -662,6 +728,20 @@ fn context_to_mustache(ctx: &CodegenContext) -> HashMap<String, MustacheValue> {
         MustacheValue::Str(ctx.constructor_args_expr.clone()),
     );
 
+    let state_field_maps: Vec<HashMap<String, MustacheValue>> = ctx
+        .state_fields
+        .iter()
+        .map(|f| {
+            let mut fm = HashMap::new();
+            fm.insert("originalName".to_string(), MustacheValue::Str(f.original_name.clone()));
+            fm.insert("name".to_string(), MustacheValue::Str(f.name.clone()));
+            fm.insert("type".to_string(), MustacheValue::Str(f.param_type.clone()));
+            fm.insert("readArms".to_string(), MustacheValue::Str(f.read_arms.clone()));
+            fm
+        })
+        .collect();
+    m.insert("stateFields".to_string(), MustacheValue::List(state_field_maps));
+
     // Methods are rendered as a list section
     let method_maps: Vec<HashMap<String, MustacheValue>> = ctx
         .methods
@@ -686,6 +766,7 @@ use num_bigint::BigInt;
 use runar::sdk::{
     RunarContract, RunarArtifact, SdkValue, Provider, Signer,
     TransactionData, DeployOptions, CallOptions, PreparedCall,
+    OutputSpec, Utxo, Inscription,
 };
 use runar::sdk::deployment::build_p2pkh_script_from_address;
 
@@ -716,6 +797,7 @@ pub struct {{contractName}}StatefulCallOptions {
     pub change_address: Option<String>,
     pub change_pub_key: Option<String>,
     pub new_state: Option<HashMap<String, SdkValue>>,
+    pub outputs: Option<Vec<OutputSpec>>,
 }
 
 impl {{contractName}}StatefulCallOptions {
@@ -725,6 +807,7 @@ impl {{contractName}}StatefulCallOptions {
             change_address: self.change_address.clone(),
             change_pub_key: self.change_pub_key.clone(),
             new_state: self.new_state.clone(),
+            outputs: self.outputs.clone(),
             ..Default::default()
         }
     }
@@ -771,6 +854,18 @@ impl {{contractName}}Contract {
         Ok(Self { inner })
     }
 
+    /// Reconnect to an existing contract from a known UTXO.
+    pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo) -> Result<Self, String> {
+        let inner = RunarContract::from_utxo(artifact, utxo)?;
+        Ok(Self { inner })
+    }
+
+    /// Attach a 1sat ordinals inscription to the contract.
+    pub fn attach_inscription(&mut self, insc: Inscription) -> Result<&mut Self, String> {
+        self.inner.with_inscription(insc)?;
+        Ok(self)
+    }
+
     /// Store a provider and signer for implicit use.
     pub fn connect(&mut self, provider: Box<dyn Provider>, signer: Box<dyn Signer>) {
         self.inner.connect(provider, signer);
@@ -801,6 +896,16 @@ impl {{contractName}}Contract {
         &mut self.inner
     }
 
+{{#stateFields}}
+    /// Decoded state field `{{originalName}}`, or `None` when it is absent or holds another shape.
+    pub fn {{name}}(&self) -> Option<{{type}}> {
+        match self.inner.state().get("{{originalName}}") {
+            {{readArms}}
+            _ => None,
+        }
+    }
+
+{{/stateFields}}
 {{#methods}}
     /// Call the {{originalName}} method.
     pub fn {{name}}(
@@ -925,6 +1030,7 @@ mod tests {
             state_fields,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -935,6 +1041,26 @@ mod tests {
     // -----------------------------------------------------------------------
     // Name conversion
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn n038_single_continuation_method_is_not_terminal() {
+        // N-038: a SIGHASH_SINGLE continuation method has no `_changePKH`
+        // (BIP-143 SINGLE does not commit the change output) and no explicit
+        // isTerminal; the typed wrapper must still treat it as a continuation.
+        let m = |sig: Option<i64>, term: Option<bool>, params: Vec<AbiParam>| AbiMethod {
+            name: "bump".to_string(),
+            params,
+            is_public: true,
+            is_terminal: term,
+            uses_code_part: None,
+            sig_hash_type: sig,
+        };
+        let pre = || vec![AbiParam { name: "txPreimage".to_string(), param_type: "SigHashPreimage".to_string(), fixed_array: None }];
+        assert!(!is_terminal_method(&m(Some(0x43), None, pre()), true));
+        assert!(!is_terminal_method(&m(Some(0xc3), None, pre()), true));
+        assert!(is_terminal_method(&m(Some(0x43), Some(true), pre()), true));
+        assert!(is_terminal_method(&m(None, None, pre()), true));
+    }
 
     #[test]
     fn test_to_snake_case() {
@@ -1152,6 +1278,127 @@ mod tests {
         // Hidden params should not appear as user params
         assert!(!output.contains("tx_preimage: String"));
         assert!(!output.contains("_change_pkh"));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-245: intent-intrinsic witness params are SDK-supplied
+    // -----------------------------------------------------------------------
+
+    /// Proves: the generated wrapper neither declares nor forwards the
+    /// auto-injected `_prevOutScript_<i>` / `_serialisedOutputs` witness params
+    /// (RunarContract::prepare_call excludes them from its arity check and
+    /// fills them from set_prev_out_script / set_serialised_outputs), and the
+    /// only user arg forwarded is `amount`.
+    /// Does not prove: that the generated wrapper compiles or that a call
+    /// through it spends on-chain.
+    #[test]
+    fn test_generate_excludes_intent_witness_params() {
+        let p = |name: &str, ty: &str| AbiParam {
+            name: name.to_string(),
+            param_type: ty.to_string(), fixed_array: None,
+        };
+        let artifact = make_artifact(
+            "IntentWitnessTest",
+            vec![p("count", "bigint")],
+            vec![AbiMethod {
+                name: "advance".to_string(),
+                params: vec![
+                    p("amount", "bigint"),
+                    p("_changePKH", "Ripemd160"),
+                    p("_changeAmount", "bigint"),
+                    p("_newAmount", "bigint"),
+                    p("txPreimage", "SigHashPreimage"),
+                    p("_prevOutScript_0", "ByteString"),
+                    p("_serialisedOutputs", "ByteString"),
+                ],
+                is_public: true,
+                is_terminal: Some(false), uses_code_part: None,
+                sig_hash_type: None,
+            }],
+            Some(vec![StateField {
+                name: "count".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: None, fixed_array: None ,
+            }]),
+        );
+        let output = generate_rust(&artifact);
+        assert!(output.contains("pub fn advance("), "{}", output);
+        assert!(!output.contains("prev_out_script"), "witness forwarded/declared:\n{}", output);
+        assert!(!output.contains("serialised_outputs"), "witness forwarded/declared:\n{}", output);
+        assert!(output.contains("let args = vec![SdkValue::BigInt(amount)];"), "{}", output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rust keyword method names (N-149)
+    // -----------------------------------------------------------------------
+
+    /// Proves: a contract method named after a Rust keyword (`move`, `type`,
+    /// `match`) is not emitted as `pub fn <keyword>(` -- it takes the same
+    /// `call_` prefix as the other reserved names. Does not prove the whole
+    /// generated file compiles under rustc.
+    #[test]
+    fn n149_rust_keyword_method_names_are_escaped() {
+        for kw in ["move", "type", "match"] {
+            let artifact = make_artifact(
+                "MyContract",
+                vec![],
+                vec![AbiMethod {
+                    name: kw.to_string(),
+                    params: vec![],
+                    is_public: true,
+                    is_terminal: None, uses_code_part: None,
+                    sig_hash_type: None,
+                }],
+                None,
+            );
+            let output = generate_rust(&artifact);
+            assert!(
+                !output.contains(&format!("pub fn {}(", kw)),
+                "keyword `{}` emitted as a bare method name:\n{}",
+                kw,
+                output
+            );
+            assert!(output.contains(&format!("pub fn call_{}(", kw)), "{}", output);
+        }
+    }
+
+    /// Proves: constructor params and method params named after Rust keywords
+    /// (`type`, `match`) are not emitted as bare identifiers (`type: ...`,
+    /// `let ... = type`); they take an `arg_` prefix, consistently between the
+    /// declaration and every use. Does not prove the whole generated file
+    /// compiles under rustc.
+    #[test]
+    fn n149_rust_keyword_param_names_are_escaped() {
+        let artifact = make_artifact(
+            "MyContract",
+            vec![AbiParam {
+                name: "type".to_string(),
+                param_type: "bigint".to_string(),
+ fixed_array: None,
+            }],
+            vec![AbiMethod {
+                name: "spend".to_string(),
+                params: vec![
+                    AbiParam {
+                        name: "match".to_string(),
+                        param_type: "bigint".to_string(),
+ fixed_array: None,
+                    },
+                ],
+                is_public: true,
+                is_terminal: None, uses_code_part: None,
+                sig_hash_type: None,
+            }],
+            None,
+        );
+        let output = generate_rust(&artifact);
+        for kw in ["type", "match"] {
+            assert!(!output.contains(&format!("{}: i64", kw)), "bare `{}` param:\n{}", kw, output);
+            assert!(!output.contains(&format!("args.{}", kw)), "bare `args.{}`:\n{}", kw, output);
+            assert!(!output.contains(&format!("SdkValue::BigInt({})", kw)), "bare `{}` value:\n{}", kw, output);
+            assert!(output.contains(&format!("arg_{}", kw)), "{}", output);
+        }
     }
 
     // -----------------------------------------------------------------------

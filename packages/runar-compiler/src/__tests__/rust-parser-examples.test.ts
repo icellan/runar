@@ -531,6 +531,28 @@ pub struct Early {
     expect(result.contract!.methods.map(m => m.name)).toEqual(['check']);
   });
 
+  it('N-284: refuses a source with no contract struct instead of inventing UnnamedContract', () => {
+    // No #[runar::contract] struct anywhere in the source — just a bare impl
+    // block. Go, Rust, Zig and Ruby already refuse this shape (nil/null
+    // contract + a "no Rúnar contract struct found in Rust source"
+    // diagnostic). Before this fix, the TS .runar.rs parser silently built a
+    // full contract named 'UnnamedContract' (the `this.contractName ||
+    // 'UnnamedContract'` fallback in 01-parse-rust.ts) with no diagnostic at
+    // all — a fail-open parser bug, not merely an inconsistency.
+    const source = `
+impl Foo {
+    pub fn bar(&self, x: i64) {
+        assert!(x == 1);
+    }
+}
+`;
+    const result = parseRustSource(source, 'NoContract.runar.rs');
+    expect(result.contract).toBeNull();
+    expect(result.errors.map(e => e.message)).toEqual([
+      'no Rúnar contract struct found in Rust source',
+    ]);
+  });
+
   it('rejects the removed #[runar::methods] attribute', () => {
     const source = `
 use runar::prelude::*;

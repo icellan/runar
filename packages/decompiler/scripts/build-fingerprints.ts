@@ -37,6 +37,10 @@
  * extractor emits a hard error — silent truncation hides probe regressions.
  *
  * Run: pnpm --filter runar-decompiler run fingerprints:build
+ *
+ * `--out <path>` overrides the target file (test hook). `--check` regenerates
+ * in memory, byte-compares against the target, never writes, and exits 1
+ * naming the file on drift (N-420: wired into check-derived-artifacts).
  */
 
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -305,7 +309,13 @@ function fingerprintFor(probe: Probe): Fingerprint | null {
   };
 }
 
+function argValue(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
 function main() {
+  const checkOnly = process.argv.includes('--check');
   const entries: Fingerprint[] = [];
   for (const p of PROBES) {
     const fp = fingerprintFor(p);
@@ -317,7 +327,7 @@ function main() {
     }
   }
 
-  const out = resolve(__dirname, '..', 'fingerprints.json');
+  const out = resolve(argValue('--out') ?? resolve(__dirname, '..', 'fingerprints.json'));
 
   // Preserve generatedAt when entries are semantically unchanged, so the
   // drift gate fires only on real DB changes, not on timestamp churn.
@@ -339,7 +349,21 @@ function main() {
     entries,
   };
 
-  writeFileSync(out, JSON.stringify(db, null, 2) + '\n', 'utf8');
+  const text = JSON.stringify(db, null, 2) + '\n';
+  if (checkOnly) {
+    const committed = existsSync(out) ? readFileSync(out, 'utf8') : null;
+    if (committed !== text) {
+      console.error(
+        `[fingerprints] ${out} is stale: it differs from a fresh build of the live compiler. ` +
+          'Run `pnpm --filter runar-decompiler run fingerprints:build` and commit fingerprints.json.',
+      );
+      process.exit(1);
+    }
+    console.log(`[fingerprints] ${out} is up to date`);
+    return;
+  }
+
+  writeFileSync(out, text, 'utf8');
   console.log(
     `[fingerprints] wrote ${entries.length} entries → ${out}${
       preservedTimestamp ? ' (timestamp preserved)' : ''

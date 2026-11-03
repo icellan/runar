@@ -11,6 +11,7 @@ import re
 from typing import Any, Dict, List, Union
 
 from runar.sdk.types import RunarArtifact, AbiMethod, AbiParam
+from runar.sdk.contract import is_sdk_supplied_param
 
 # ---------------------------------------------------------------------------
 # Minimal Mustache renderer
@@ -142,7 +143,7 @@ def _to_pascal_case(name: str) -> str:
     return name[0].upper() + name[1:] if name else name
 
 
-_SNAKE_RESERVED = {'connect', 'deploy', 'contract', 'get_locking_script'}
+_SNAKE_RESERVED = {'connect', 'deploy', 'contract', 'get_locking_script', 'attach_inscription'}
 
 
 def _safe_method_name(name: str) -> str:
@@ -161,15 +162,7 @@ def _classify_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any
     """Classify method params into user-visible and hidden (auto-computed)."""
     result: List[Dict[str, Any]] = []
     for p in method.params:
-        hidden = (
-            p.type == 'Sig' or
-            (is_stateful and (
-                p.type == 'SigHashPreimage' or
-                p.name == '_changePKH' or
-                p.name == '_changeAmount' or
-                p.name == '_newAmount'
-            ))
-        )
+        hidden = p.type == 'Sig' or is_sdk_supplied_param(p.name, p.type, is_stateful)
         result.append({
             'name': p.name,
             'abi_type': p.type,
@@ -187,18 +180,14 @@ def _get_user_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any
 def _get_sdk_arg_params(method: AbiMethod, is_stateful: bool) -> List[Dict[str, Any]]:
     """Get params that match the SDK's args array.
 
-    All params except SigHashPreimage, _changePKH, _changeAmount, _newAmount
-    for stateful contracts.  Sig params ARE included (passed as None).
+    All params except the SDK-supplied ones (``is_sdk_supplied_param``, the
+    same predicate ``prepare_call``'s arity check uses): the intent witnesses,
+    plus SigHashPreimage, _changePKH, _changeAmount, _newAmount for stateful
+    contracts.  Sig params ARE included (passed as None).
     """
-    classified = _classify_params(method, is_stateful)
-    if not is_stateful:
-        return classified
     return [
-        p for p in classified
-        if p['abi_type'] != 'SigHashPreimage'
-        and p['name'] != '_changePKH'
-        and p['name'] != '_changeAmount'
-        and p['name'] != '_newAmount'
+        p for p in _classify_params(method, is_stateful)
+        if not is_sdk_supplied_param(p['name'], p['abi_type'], is_stateful)
     ]
 
 
@@ -217,7 +206,12 @@ def _is_terminal_method(method: AbiMethod, is_stateful: bool) -> bool:
     # Check for explicit is_terminal attribute
     if hasattr(method, 'is_terminal') and method.is_terminal is not None:  # type: ignore[attr-defined]
         return method.is_terminal  # type: ignore[attr-defined]
-    # Fallback: terminal if no _changePKH param
+    # Fallback: terminal if no _changePKH param. N-038: a SIGHASH_SINGLE
+    # method continues without _changePKH (BIP-143 SINGLE does not commit the
+    # change output); the compiler omits isTerminal for it.
+    sig_hash_type = getattr(method, 'sig_hash_type', None)
+    if sig_hash_type is not None and (sig_hash_type & 0x1F) == 0x03:
+        return False
     return not any(p.name == '_changePKH' for p in method.params)
 
 
@@ -368,7 +362,7 @@ _PYTHON_TEMPLATE = (
     'from runar.sdk import (\n'
     '    RunarContract, RunarArtifact, Provider, Signer,\n'
     '    TransactionData, DeployOptions, CallOptions, PreparedCall,\n'
-    '    TerminalOutput as SdkTerminalOutput,\n'
+    '    TerminalOutput as SdkTerminalOutput, Utxo, Inscription,\n'
     ')\n'
     'from runar.sdk.deployment import build_p2pkh_script\n'
     '\n'
@@ -403,7 +397,7 @@ _PYTHON_TEMPLATE = (
     '\n'
     '    def _to_call_options(self) -> CallOptions:\n'
     '        return CallOptions(\n'
-    '            satoshis=self.satoshis or None,\n'
+    '            satoshis=self.satoshis,\n'
     '            change_address=self.change_address or None,\n'
     '            change_pub_key=self.change_pub_key or None,\n'
     '            new_state=self.new_state,\n'
@@ -436,6 +430,21 @@ _PYTHON_TEMPLATE = (
     '        instance = cls.__new__(cls)\n'
     '        instance._inner = inner\n'
     '        return instance\n'
+    '\n'
+    '    @classmethod\n'
+    '    def from_utxo(\n'
+    '        cls,\n'
+    '        artifact: RunarArtifact,\n'
+    '        utxo: Utxo,\n'
+    '    ) -> {{contractName}}Contract:\n'
+    '        inner = RunarContract.from_utxo(artifact, utxo)\n'
+    '        instance = cls.__new__(cls)\n'
+    '        instance._inner = inner\n'
+    '        return instance\n'
+    '\n'
+    '    def attach_inscription(self, insc: Inscription) -> {{contractName}}Contract:\n'
+    '        self._inner.with_inscription(insc)\n'
+    '        return self\n'
     '\n'
     '    def connect(self, provider: Provider, signer: Signer) -> None:\n'
     '        self._inner.connect(provider, signer)\n'

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, statSync } from 'fs';
 import { join, dirname, resolve } from 'path';
@@ -9,6 +9,18 @@ import type { ANFProgram } from '../ir/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// This file iterates conformance/example fixtures and tier binaries to
+// generate its `it()` cases, the same shape that let
+// `rust-parser-examples.test.ts` go vacuously green (see its own comment):
+// a per-fixture test body that returns early on a missing path executes
+// zero `expect()` calls and still reports PASSED. `expect.hasAssertions()`
+// makes a future reintroduction of that pattern fail loudly instead. See
+// `multi-format.test.ts`'s copy of this guard for a permanent regression
+// test proving the mechanism (F-391).
+beforeEach(() => {
+  expect.hasAssertions();
+});
 
 // ---------------------------------------------------------------------------
 // CI vs. local behavior switch.
@@ -1118,7 +1130,29 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
     }
   });
 
-  const conformanceTests = findConformanceTests('go');
+  // N-314 (R144): this case compiles the source with the TS frontend first,
+  // so a fixture whose allowlist excludes ts AND which TS has no codegen for
+  // (today the Go-only BN254 pairing) cannot run here. Skipped BY NAME, only
+  // when also allowlisted away from ts; the skipped set is pinned below so a
+  // new one fails loudly. Its Go golden is gated by the conformance runner and
+  // executed by conformance/witnesses/real-crypto/bn254-pairing.json.
+  const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+  const excludesTs = (name: string): boolean => {
+    const sj = join(CONFORMANCE_DIR, name, 'source.json');
+    if (!existsSync(sj)) return false;
+    const cfg = JSON.parse(readFileSync(sj, 'utf-8')) as { compilers?: string[] };
+    return Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts');
+  };
+  const allGoTests = findConformanceTests('go');
+  const skippedNotTs = allGoTests
+    .filter(t => excludesTs(t.name) && EXPECTED_NOT_TS_COMPILABLE.includes(t.name))
+    .map(t => t.name)
+    .sort();
+  const conformanceTests = allGoTests.filter(t => !skippedNotTs.includes(t.name));
+
+  it('skips exactly the expected fixtures whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
+  });
 
   for (const test of conformanceTests) {
     it(`${test.name}: Go hex output matches expected-script.hex`, () => {
@@ -1711,4 +1745,90 @@ describe('Cross-compiler: a terminal read sees live state despite a var-length s
       expect(hex).not.toContain(LIVE_STATE_MARKER_HEX);
     }
   }, 180_000);
+});
+
+// ---------------------------------------------------------------------------
+// Mixed add/sub constant chain — 7 tiers, both fold modes
+// ---------------------------------------------------------------------------
+//
+// N-001. Zig alone carried peephole reassociation rules 29/30
+// (`PUSH a OP_ADD PUSH b OP_SUB -> PUSH(a-b) OP_ADD` and the sub/add mirror).
+// No other tier, TS included, has them, so `x + 5n - 3n` compiled to
+// `5293009c` in Zig and `55935394009c` in the other six. No conformance
+// fixture has the shape, which is why the golden suite stayed green.
+//
+// What this proves: for each mixed add/sub shape, every tier lowers the same
+// TS-produced ANF to the TS reference bytes, with the IR generated under fold
+// OFF and fold ON. The TS hex is also pinned literally so that all seven
+// drifting together still fails.
+// What it does not prove: that the shapes behave correctly on-chain (the
+// unrewritten opcodes are what every tier already emitted for these shapes),
+// or parity of the source-level frontends (covered by the conformance runner).
+// ---------------------------------------------------------------------------
+
+function reassocProbeSource(expr: string): string {
+  return `import { SmartContract, assert } from 'runar-lang';
+class Reassoc extends SmartContract {
+  readonly target: bigint;
+  constructor(target: bigint) { super(target); this.target = target; }
+  public unlock(x: bigint) { assert(${expr} == this.target); }
+}
+`;
+}
+
+const REASSOC_SHAPES = [
+  // PUSH5 ADD PUSH3 SUB <target> NUMEQUAL — Zig's removed rule 29 gave 52 93 (PUSH2 ADD).
+  { label: 'add then sub', expr: 'x + 5n - 3n', hex: '55935394009c' },
+  // PUSH3 SUB PUSH7 ADD — Zig's removed rule 30 gave PUSH4 ADD.
+  { label: 'sub then add', expr: 'x - 3n + 7n', hex: '53945793009c' },
+  // PUSH7 SUB PUSH3 ADD — Zig's removed rule 30 gave PUSH4 SUB.
+  { label: 'sub then add, a > b', expr: 'x - 7n + 3n', hex: '57945393009c' },
+] as const;
+
+const REASSOC_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: a mixed add/sub constant chain is byte-identical in all 7 tiers', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-reassoc-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { label, expr, hex } of REASSOC_SHAPES) {
+    for (const foldOff of [true, false]) {
+      const mode = foldOff ? 'fold OFF' : 'fold ON';
+      it(`${label} (\`${expr}\`, ${mode}) matches the TS reference in every tier`, () => {
+        const name = `Reassoc-${label.replace(/[^a-z]+/gi, '-')}-${foldOff ? 'off' : 'on'}`;
+        const tsResult = compile(reassocProbeSource(expr), { disableConstantFolding: foldOff });
+        if (!tsResult.success) {
+          throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+        }
+        const tsHex = (tsResult.scriptHex as string).toLowerCase();
+        expect(tsHex, 'TS reference bytes moved').toBe(hex);
+
+        const irPath = join(tempDir, `${name}.anf.json`);
+        writeFileSync(irPath, anfToJson(tsResult.anf!));
+        for (const tier of REASSOC_TIERS) {
+          if (tier.skip) continue;
+          const tierHex = requireHex(tier.run(irPath), tier.name, name).toLowerCase();
+          expect(tierHex, `${tier.name} diverges from the TS reference`).toBe(tsHex);
+        }
+      }, 180_000);
+    }
+  }
 });

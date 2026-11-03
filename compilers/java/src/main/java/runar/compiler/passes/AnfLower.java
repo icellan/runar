@@ -64,6 +64,7 @@ import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PropertyAccessExpr;
 import runar.compiler.ir.ast.PropertyNode;
 import runar.compiler.ir.ast.ReturnStatement;
+import runar.compiler.ir.ast.SourceLocation;
 import runar.compiler.ir.ast.Statement;
 import runar.compiler.ir.ast.TernaryExpr;
 import runar.compiler.ir.ast.TypeNode;
@@ -83,6 +84,12 @@ import runar.compiler.ir.ast.Visibility;
  * conformance boundary for this pass.
  */
 public final class AnfLower {
+
+    /** F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount(). */
+    public static final String CONTINUATION_AMOUNT_UNAVAILABLE =
+        "continuationAmount() is only available in a public StatefulSmartContract method whose state "
+            + "continues through the default single-output continuation (it mutates state or emits a data "
+            + "output, and does not call addOutput/addRawOutput)";
 
     private AnfLower() {}
 
@@ -104,47 +111,6 @@ public final class AnfLower {
         return Typecheck.isByteStringFamily(typeName);
     }
 
-    /**
-     * Preimage field extractors that return BYTES ({@code ByteString} /
-     * {@code Sha256}).
-     *
-     * <p>N-054: this list is a transcription of the return type the type
-     * checker already records for these builtins in {@code TypeCheck.java},
-     * and the stack lowerer agrees with it byte for byte: {@code lowerExtractor}
-     * ends the split sequence with OP_BIN2NUM for exactly the SIX extractors
-     * that are NOT listed here, and for none of the ones that are.
-     *
-     * <p>So an extractor listed here leaves a byte string on the stack and must
-     * be compared with OP_EQUAL and concatenated with OP_CAT; every other
-     * extractor leaves a minimally-encoded script NUMBER and must be compared
-     * with OP_NUMEQUAL and added with OP_ADD.
-     *
-     * <p>Getting it backwards is a correctness defect in both directions.
-     * OP_EQUAL on a number is over-strict — it rejects a witness that encodes
-     * the same value with different bytes ({@code 0400} for 4), i.e. it refuses
-     * a valid spend. OP_NUMEQUAL on a hash or a scriptCode is under-strict —
-     * trailing high-order zero bytes and negative zero compare equal to values
-     * they are not byte-equal to, i.e. a covenant bypass.
-     *
-     * <p>This replaces a {@code name.startsWith("extract")} prefix test that
-     * swept the six numeric extractors in with the byte ones.
-     */
-    private static final Set<String> BYTE_RETURNING_EXTRACTORS = Set.of(
-        "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
-        "extractScriptCode", "extractOutputHash", "extractOutputs",
-        "extractPrevOutputScript"
-    );
-
-    private static final Set<String> BYTE_RETURNING_FUNCTIONS = Set.of(
-        "sha256", "ripemd160", "hash160", "hash256",
-        "cat", "substr", "num2bin", "reverseBytes", "left", "right",
-        "int2str", "toByteString", "pack",
-        "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
-        "blake3Compress", "blake3Hash",
-        "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",
-        "p384Add", "p384Mul", "p384MulGen", "p384Negate", "p384EncodeCompressed"
-    );
-
     // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------
@@ -161,10 +127,12 @@ public final class AnfLower {
         List<AnfMethod> lifted = new ArrayList<>(methods.size());
         for (AnfMethod m : methods) {
             List<AnfBinding> newBody = liftBranchUpdateProps(m.body());
-            lifted.add(new AnfMethod(m.name(), m.params(), newBody, m.isPublic()));
+            if (m.isPublic()) newBody = dropTerminalIfResults(newBody);
+            lifted.add(m.withBody(newBody));
         }
 
-        return new AnfProgram(contract.name(), properties, lifted);
+        return new AnfProgram(contract.name(), properties, lifted,
+            contract.parentClass() == null ? null : contract.parentClass().canonical());
     }
 
     // ------------------------------------------------------------------
@@ -378,6 +346,17 @@ public final class AnfLower {
             // property_access branch (isProperty checked before isParam).
             for (ParamNode p : method.params()) {
                 ctx.addParam(p.name());
+                // N-016: a private helper's parameter is not part of any ABI, so
+                // one that shadows a property is bound under the collision-proof
+                // local name. (A PUBLIC parameter keeps its ABI name.) N-360: a
+                // public one the body REASSIGNS is renamed too — its rebinding is
+                // merged out of an if by name, where a property result of the
+                // same name would capture it. The ABI keeps the source name.
+                if (ctx.isProperty(p.name())
+                    && (method.visibility() != Visibility.PUBLIC
+                        || statementsReassign(method.body(), p.name()))) {
+                    ctx.renamedPrivateParams.put(p.name(), ctx.localName(p.name()));
+                }
             }
 
             // Issue #123: a non-default @sighash mode drives the OP_PUSH_TX
@@ -397,7 +376,12 @@ public final class AnfLower {
                 boolean hasDataOutput = methodHasAddDataOutput(method, contract);
                 boolean hasAddOutput = methodHasAddOutput(method, contract);
                 boolean mutates = methodMutatesState(method, contract);
-                boolean needsChange = mutates || hasAddOutput || hasDataOutput;
+                // N-038: under a SIGHASH_SINGLE base the change output is not
+                // committed (hashOutputs = hash256(output[inputIndex])), so the
+                // method takes no _changePKH / _changeAmount and the
+                // continuation hash has no change segment.
+                boolean needsChange = StatefulScaffold.includesChange(
+                    mutates || hasAddOutput || hasDataOutput, method.sighashType());
                 boolean needsNewAmount = (mutates || hasDataOutput) && !hasAddOutput;
 
                 if (needsChange) {
@@ -459,6 +443,24 @@ public final class AnfLower {
                 List<String> addOutputRefs = ctx.addOutputRefs;
                 List<String> addDataOutputRefs = ctx.addDataOutputRefs;
                 if (!addOutputRefs.isEmpty() || !addDataOutputRefs.isEmpty() || mutates) {
+                    // F-024 (R14): the default single-output continuation
+                    // carries the spender-chosen `_newAmount` into the new
+                    // state UTXO. Without this check a spender sets
+                    // `_newAmount = 1` and pays the rest of the input value to
+                    // their own change output — the committed outputs then
+                    // match the covenant's hash exactly. Value may grow (a
+                    // deposit) but never shrink below the input amount.
+                    // addOutput/addRawOutput methods size their outputs
+                    // explicitly and terminal methods have no continuation.
+                    // Mirrors 04-anf-lower.ts binding for binding.
+                    if (addOutputRefs.isEmpty()) {
+                        String amountPreimageRef = ctx.emit(new LoadParam("txPreimage"));
+                        String inputAmountRef = ctx.emit(new Call("extractAmount", List.of(amountPreimageRef)));
+                        String newAmountCheckRef = ctx.emit(new LoadParam("_newAmount"));
+                        String amountOkRef = ctx.emit(new BinOp(">=", newAmountCheckRef, inputAmountRef, null));
+                        ctx.emit(new Assert(amountOkRef));
+                    }
+
                     // Build the P2PKH change output for hashOutputs verification.
                     //
                     // Issue #116: the SDK's buildCallTransaction OMITS the change
@@ -470,18 +472,21 @@ public final class AnfLower {
                     // with empty is a no-op) when zero, reproducing the omission.
                     // For any change > 0 the hashed bytes are unchanged; only the
                     // emitted script gains the guard.
-                    String changePkhRef = ctx.emit(new LoadParam("_changePKH"));
-                    String changeAmountRef = ctx.emit(new LoadParam("_changeAmount"));
-                    String zeroRef = ctx.emit(makeLoadConstInt(BigInteger.ZERO));
-                    String changeNonZeroRef = ctx.emit(new BinOp("!==", changeAmountRef, zeroRef, null));
-                    LowerCtx changeThenCtx = ctx.subContext();
-                    changeThenCtx.emit(new Call("buildChangeOutput", List.of(changePkhRef, changeAmountRef)));
-                    ctx.syncCounter(changeThenCtx);
-                    LowerCtx changeElseCtx = ctx.subContext();
-                    changeElseCtx.emit(makeLoadConstString(""));
-                    ctx.syncCounter(changeElseCtx);
-                    String changeOutputRef = ctx.emit(new If(
-                        changeNonZeroRef, changeThenCtx.bindings, changeElseCtx.bindings));
+                    String changeOutputRef = null;
+                    if (needsChange) {
+                        String changePkhRef = ctx.emit(new LoadParam("_changePKH"));
+                        String changeAmountRef = ctx.emit(new LoadParam("_changeAmount"));
+                        String zeroRef = ctx.emit(makeLoadConstInt(BigInteger.ZERO));
+                        String changeNonZeroRef = ctx.emit(new BinOp("!==", changeAmountRef, zeroRef, null));
+                        LowerCtx changeThenCtx = ctx.subContext();
+                        changeThenCtx.emit(new Call("buildChangeOutput", List.of(changePkhRef, changeAmountRef)));
+                        ctx.syncCounter(changeThenCtx);
+                        LowerCtx changeElseCtx = ctx.subContext();
+                        changeElseCtx.emit(makeLoadConstString(""));
+                        ctx.syncCounter(changeElseCtx);
+                        changeOutputRef = ctx.emit(new If(
+                            changeNonZeroRef, changeThenCtx.bindings, changeElseCtx.bindings));
+                    }
 
                     if (!addOutputRefs.isEmpty()) {
                         String accumulated = addOutputRefs.get(0);
@@ -491,7 +496,9 @@ public final class AnfLower {
                         for (String dref : addDataOutputRefs) {
                             accumulated = ctx.emit(new Call("cat", List.of(accumulated, dref)));
                         }
-                        accumulated = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        if (changeOutputRef != null) {
+                            accumulated = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        }
                         String hashRef = ctx.emit(new Call("hash256", List.of(accumulated)));
                         String preimageRef2 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef2)));
@@ -506,7 +513,9 @@ public final class AnfLower {
                         for (String dref : addDataOutputRefs) {
                             accumulated = ctx.emit(new Call("cat", List.of(accumulated, dref)));
                         }
-                        String allOutputs = ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
+                        String allOutputs = changeOutputRef == null
+                            ? accumulated
+                            : ctx.emit(new Call("cat", List.of(accumulated, changeOutputRef)));
                         String hashRef = ctx.emit(new Call("hash256", List.of(allOutputs)));
                         String preimageRef4 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef4)));
@@ -515,7 +524,10 @@ public final class AnfLower {
                     }
                 }
 
-                List<AnfParam> augmented = new ArrayList<>(lowerParams(method.params()));
+                List<AnfParam> augmented = new ArrayList<>();
+                for (AnfParam ap : lowerParams(method.params())) {
+                    augmented.add(new AnfParam(ctx.paramSlot(ap.name()), ap.type()));
+                }
                 if (needsChange) {
                     augmented.add(new AnfParam("_changePKH", "Ripemd160"));
                     augmented.add(new AnfParam("_changeAmount", "bigint"));
@@ -533,7 +545,7 @@ public final class AnfLower {
                 // adjacent to the preimage. Mirrors Go reference compiler.
                 augmented.addAll(ctx.methodScope.autoInjectedParams);
 
-                out.add(new AnfMethod(method.name(), augmented, ctx.bindings, true));
+                out.add(new AnfMethod(method.name(), augmented, ctx.bindings, true, method.sighashType()));
             } else {
                 // Issue #109: stateless public methods (and non-stateful
                 // spending entry points) are lowered here — inject @embedAlways
@@ -544,7 +556,10 @@ public final class AnfLower {
                     embedInjected = true;
                 }
                 ctx.lowerStatements(method.body());
-                List<AnfParam> privAugmented = new ArrayList<>(lowerParams(method.params()));
+                List<AnfParam> privAugmented = new ArrayList<>();
+                for (AnfParam ap : lowerParams(method.params())) {
+                    privAugmented.add(new AnfParam(ctx.paramSlot(ap.name()), ap.type()));
+                }
                 // Private methods can also call the intent intrinsics; capture
                 // their auto-injected witness params on the private's own ABI.
                 // (When the private is inlined into a public via
@@ -555,12 +570,108 @@ public final class AnfLower {
                     method.name(),
                     privAugmented,
                     ctx.bindings,
-                    method.visibility() == Visibility.PUBLIC
+                    method.visibility() == Visibility.PUBLIC,
+                    method.sighashType()
                 ));
             }
         }
 
         return out;
+    }
+
+    /** N-016: suffix of the binding name of a local that shadows a property. */
+    private static final String SHADOW_LOCAL_SUFFIX = "@local";
+
+    /**
+     * N-016 / N-046: the source spelling of a local's binding name (undoes
+     * localName and declareLocal: everything before the first {@code @}).
+     */
+    private static String sourceLocalName(String bindingName) {
+        int at = bindingName.indexOf('@');
+        return at < 0 ? bindingName : bindingName.substring(0, at);
+    }
+
+    /**
+     * N-360: whether any statement writes the bare identifier {@code name} — an
+     * assignment to it, or a {@code ++} / {@code --} of it — anywhere, nested
+     * blocks included.
+     */
+    private static boolean statementsReassign(List<Statement> stmts, String name) {
+        if (stmts == null) {
+            return false;
+        }
+        for (Statement s : stmts) {
+            if (statementReassigns(s, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean statementReassigns(Statement stmt, String name) {
+        if (stmt instanceof VariableDeclStatement v) {
+            return expressionReassigns(v.init(), name);
+        } else if (stmt instanceof AssignmentStatement a) {
+            return (a.target() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(a.target(), name)
+                || expressionReassigns(a.value(), name);
+        } else if (stmt instanceof IfStatement i) {
+            return expressionReassigns(i.condition(), name)
+                || statementsReassign(i.thenBody(), name)
+                || statementsReassign(i.elseBody(), name);
+        } else if (stmt instanceof ForStatement f) {
+            return (f.init() != null && statementReassigns(f.init(), name))
+                || expressionReassigns(f.condition(), name)
+                || (f.update() != null && statementReassigns(f.update(), name))
+                || statementsReassign(f.body(), name);
+        } else if (stmt instanceof ReturnStatement r) {
+            return expressionReassigns(r.value(), name);
+        } else if (stmt instanceof ExpressionStatement e) {
+            return expressionReassigns(e.expression(), name);
+        }
+        return false;
+    }
+
+    private static boolean expressionReassigns(Expression expr, String name) {
+        if (expr == null) {
+            return false;
+        }
+        if (expr instanceof BinaryExpr b) {
+            return expressionReassigns(b.left(), name) || expressionReassigns(b.right(), name);
+        } else if (expr instanceof UnaryExpr u) {
+            return expressionReassigns(u.operand(), name);
+        } else if (expr instanceof CallExpr c) {
+            if (expressionReassigns(c.callee(), name)) {
+                return true;
+            }
+            for (Expression a : c.args()) {
+                if (expressionReassigns(a, name)) {
+                    return true;
+                }
+            }
+            return false;
+        } else if (expr instanceof MemberExpr m) {
+            return expressionReassigns(m.object(), name);
+        } else if (expr instanceof TernaryExpr t) {
+            return expressionReassigns(t.condition(), name)
+                || expressionReassigns(t.consequent(), name)
+                || expressionReassigns(t.alternate(), name);
+        } else if (expr instanceof IndexAccessExpr ia) {
+            return expressionReassigns(ia.object(), name) || expressionReassigns(ia.index(), name);
+        } else if (expr instanceof IncrementExpr inc) {
+            return (inc.operand() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(inc.operand(), name);
+        } else if (expr instanceof DecrementExpr dec) {
+            return (dec.operand() instanceof Identifier id && id.name().equals(name))
+                || expressionReassigns(dec.operand(), name);
+        } else if (expr instanceof ArrayLiteralExpr al) {
+            for (Expression e : al.elements()) {
+                if (expressionReassigns(e, name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static List<AnfParam> lowerParams(List<ParamNode> params) {
@@ -596,6 +707,18 @@ public final class AnfLower {
                 autoInjectedParams.add(new AnfParam(name, type));
             }
         }
+
+        /**
+         * N-046 / N-047: the last {@code <name>@<n>} suffix handed out in this
+         * method, shared by every sub-context and inlined helper body.
+         */
+        int shadowSeq = 0;
+
+        /** N-046: a method-unique {@code <name>@<n>} binding name. */
+        String nextShadowName(String name) {
+            shadowSeq += 1;
+            return name + "@" + shadowSeq;
+        }
     }
 
     private static final class LowerCtx {
@@ -607,6 +730,18 @@ public final class AnfLower {
         final List<String> addOutputRefs = new ArrayList<>();
         final List<String> addDataOutputRefs = new ArrayList<>();
         final Map<String, String> localAliases = new HashMap<>();
+        // N-016: private-helper params renamed because they shadow a property,
+        // and loop variables in scope whose name is a property's.
+        final Map<String, String> renamedPrivateParams = new HashMap<>();
+        final Set<String> shadowingLoopVars = new HashSet<>();
+        // N-046 / N-047: source name -> binding name of a declaration that
+        // reused a name already bound in an enclosing scope (an outer local, a
+        // parameter, a loop variable, or, inside an inlined helper, a caller
+        // local). Copied by value into sub-contexts, so the rename ends with
+        // the declaring block.
+        Map<String, String> scopeRenames = new HashMap<>();
+        // N-046: source names of the loop variables in scope.
+        final Set<String> loopVars = new HashSet<>();
         final Set<String> localByteVars = new HashSet<>();
         // GAP-002: source location of the AST statement currently being
         // lowered. Stamped onto every AnfBinding the helpers below emit so
@@ -664,6 +799,16 @@ public final class AnfLower {
          * invented bytes.
          */
         boolean didEmitHashOutputsCheck = false;
+
+        /**
+         * N-202: the product of the counts of every for-loop enclosing the
+         * block this context lowers (1 at method top level). Copied unchanged
+         * into if / ternary arms; a loop body gets {@code enclosing * count}.
+         * The per-loop {@code MAX_LOOP_COUNT} check bounds one loop; this
+         * bounds the unrolled work along a nesting path, the rule the
+         * {@code --ir} loader applies (F-283).
+         */
+        long enclosingLoopCount = 1;
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
@@ -747,7 +892,12 @@ public final class AnfLower {
         boolean shouldInlinePrivate(String name) {
             MethodNode m = getPrivateMethod(name);
             if (m == null) return false;
-            return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract);
+            // N-070: a helper that calls requireOutputP2PKH is inlined too, so
+            // the _serialisedOutputs witness lands on the public method.
+            // N-315: the same for extractPrevOutputScript and _prevOutScript_<i>.
+            return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract)
+                || methodCallsRequireOutputP2PKH(m, contract, false)
+                || methodCallsExtractPrevOutputScript(m, contract);
         }
 
         // Inline a private method's body directly into this context. Used
@@ -772,16 +922,40 @@ public final class AnfLower {
                 return emit(new MethodCall(thisRef, methodName, argRefs));
             }
 
+            // N-362: a parameter the body reassigns is not aliased -- a write
+            // cannot rebind an alias, so the helper read the caller's argument
+            // after it and the write landed on the caller's same-named variable.
+            // It is bound as a local of the helper below.
             List<String> aliasedParams = new ArrayList<>();
+            List<Integer> reassigned = new ArrayList<>();
             int n = Math.min(method.params().size(), argRefs.size());
             for (int i = 0; i < n; i++) {
                 String paramName = method.params().get(i).name();
+                if (statementsReassign(method.body(), paramName)) {
+                    reassigned.add(i);
+                    continue;
+                }
                 pushParamAlias(paramName, argRefs.get(i));
                 aliasedParams.add(paramName);
             }
 
+            // N-047: the helper body is its own lexical scope. Its locals are
+            // declared against the caller's (a collision is alpha-renamed by
+            // declareLocal) and go out of scope when it returns.
+            InlinedScopeState callerScope = enterInlinedScope();
+            // N-362: `let <param> = <arg>` for each reassigned parameter (spec 6.3).
+            for (int i : reassigned) {
+                var param = method.params().get(i);
+                String bindingName = declareLocal(param.name());
+                addLocal(bindingName);
+                if (isByteType(typeToString(param.type()))) {
+                    localByteVars.add(bindingName);
+                }
+                emitNamed(bindingName, makeLoadConstString("@ref:" + argRefs.get(i)));
+            }
             int startIndex = bindings.size();
             lowerStatements(method.body());
+            leaveInlinedScope(callerScope);
             int endIndex = bindings.size();
 
             for (int i = aliasedParams.size() - 1; i >= 0; i--) {
@@ -849,6 +1023,113 @@ public final class AnfLower {
             return false;
         }
 
+        /**
+         * N-016: the ANF binding name for a source-level local (or loop
+         * variable, or private-helper parameter) called {@code name}. Binding
+         * names and property names share one namespace downstream — stack
+         * lowering resolves load_prop / update_prop / the state continuation /
+         * an if's results by name — so a local bound as {@code x} next to a
+         * property {@code x} made {@code this.x} read the local. A
+         * property-named local is bound under {@code <name>@local} ({@code @} is
+         * in no surface's identifiers, so it cannot collide with a property,
+         * another local or a temp); every other name is unchanged, keeping
+         * non-shadowing ANF byte-identical.
+         */
+        String localName(String name) {
+            String renamed = scopeRenames.get(name);
+            if (renamed != null) return renamed;
+            return isProperty(name) ? name + SHADOW_LOCAL_SUFFIX : name;
+        }
+
+        /**
+         * N-046 / N-047: the binding name of a block-scoped declaration of
+         * {@code name}. A declaration that reuses a name already bound in an
+         * enclosing scope (an outer local, a parameter, a loop variable, an
+         * inlined helper's parameter) is bound under the fresh
+         * {@code <name>@<n>} and recorded in this scope, so it can never be
+         * mistaken for a reassignment of the outer binding (if-arm
+         * reconciliation matches arm bindings to outer locals BY NAME). A
+         * declaration that collides with nothing keeps {@code localName(name)},
+         * which keeps non-shadowing ANF byte-identical.
+         */
+        String declareLocal(String name) {
+            boolean inScope = scopeRenames.containsKey(name)
+                || isLocal(localName(name))
+                || isParam(name)
+                || getParamAlias(name) != null
+                || loopVars.contains(name);
+            if (!inScope) return localName(name);
+            String fresh = methodScope.nextShadowName(name);
+            scopeRenames.put(name, fresh);
+            return fresh;
+        }
+
+        /** N-047: the caller scope saved around an inlined helper body. */
+        private record InlinedScopeState(
+            Map<String, String> scopeRenames,
+            Set<String> localNames,
+            Set<String> localByteVars,
+            Map<String, String> localAliases,
+            Set<String> loopVars
+        ) {}
+
+        /**
+         * N-047: an inlined private helper's body is its own lexical scope:
+         * none of the caller's renames apply inside it, and none of its locals
+         * outlive it. Returns the state {@link #leaveInlinedScope} restores.
+         */
+        InlinedScopeState enterInlinedScope() {
+            InlinedScopeState saved = new InlinedScopeState(
+                scopeRenames,
+                new HashSet<>(localNames),
+                new HashSet<>(localByteVars),
+                new HashMap<>(localAliases),
+                new HashSet<>(loopVars));
+            scopeRenames = new HashMap<>();
+            return saved;
+        }
+
+        void leaveInlinedScope(InlinedScopeState saved) {
+            scopeRenames = saved.scopeRenames();
+            localNames.clear();
+            localNames.addAll(saved.localNames());
+            localByteVars.clear();
+            localByteVars.addAll(saved.localByteVars());
+            localAliases.clear();
+            localAliases.putAll(saved.localAliases());
+            loopVars.clear();
+            loopVars.addAll(saved.loopVars());
+        }
+
+        /**
+         * N-016: the binding a write to the bare identifier {@code name}
+         * rebinds — the local's (possibly renamed) binding when a local of that
+         * name is in scope, otherwise the name itself, exactly as before.
+         */
+        String localTarget(String name) {
+            String local = localName(name);
+            if (isLocal(local)) {
+                return local;
+            }
+            // N-360: a renamed parameter is read from its slot, so it is rebound there.
+            return isParam(name) ? paramSlot(name) : name;
+        }
+
+        /** N-360: whether {@code name} is the load_param slot of one of this method's parameters. */
+        boolean isParamSlot(String name) {
+            for (String p : paramNames) {
+                if (paramSlot(p).equals(name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** N-016: the load_param name a source parameter resolves to. */
+        String paramSlot(String name) {
+            return renamedPrivateParams.getOrDefault(name, name);
+        }
+
         boolean isPrivateMethod(String name) {
             for (MethodNode m : contract.methods()) {
                 if (m.name().equals(name) && !m.name().equals("constructor")
@@ -878,6 +1159,12 @@ public final class AnfLower {
             sub.localNames.addAll(this.localNames);
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);
+            sub.renamedPrivateParams.putAll(this.renamedPrivateParams);
+            sub.shadowingLoopVars.addAll(this.shadowingLoopVars);
+            // N-046: the block inherits the enclosing renames and loop
+            // variables by value, so a rename made inside it ends with it.
+            sub.scopeRenames = new HashMap<>(this.scopeRenames);
+            sub.loopVars.addAll(this.loopVars);
             sub.localByteVars.addAll(this.localByteVars);
             // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
             // pushes the caller's argument refs onto the CURRENT context before
@@ -909,10 +1196,13 @@ public final class AnfLower {
             // block, but one emitted inside it must not flow back out to a
             // sibling arm.
             sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
-            // GAP-002: inherit the outer statement's source location so
-            // bindings emitted inside an if/else / loop branch are still
-            // mapped back to the originating AST statement.
-            sub.currentSourceLoc = this.currentSourceLoc;
+            // N-202: if / ternary arms inherit the enclosing loop product.
+            sub.enclosingLoopCount = this.enclosingLoopCount;
+            // N-468: a sub-context starts with NO source location, as TS
+            // subContext() does. Statements inside the block stamp their own;
+            // bindings no statement owns (short-circuit / ternary arms,
+            // FixedArray index dispatch) stay unmapped.
+            sub.currentSourceLoc = null;
             sub.nested = true;
             return sub;
         }
@@ -1078,11 +1368,11 @@ public final class AnfLower {
             // GAP-002: pick up the statement's source location so every
             // AnfBinding emitted during the lowering of this statement
             // carries it forward.
-            runar.compiler.ir.ast.SourceLocation prevLoc = currentSourceLoc;
+            // N-471: as 04-anf-lower.ts lowerStatement, the location is set
+            // unconditionally (a statement with none clears the inherited
+            // one) and cleared, not restored, once the statement is done.
             try {
-                if (stmt.sourceLocation() != null) {
-                    currentSourceLoc = stmt.sourceLocation();
-                }
+                currentSourceLoc = stmt.sourceLocation();
                 // R-144: the same position, published for the error path. The
                 // field above only reaches bindings that are successfully
                 // emitted; a refusal emits none.
@@ -1109,17 +1399,23 @@ public final class AnfLower {
                     }
                 }
             } finally {
-                currentSourceLoc = prevLoc;
+                currentSourceLoc = null;
             }
         }
 
         void lowerVariableDecl(VariableDeclStatement stmt) {
             String valueRef = lowerExprToRef(stmt.init());
-            addLocal(stmt.name());
-            if (isByteTypedExpr(stmt.init())) {
-                localByteVars.add(stmt.name());
+            // Byte-typedness of the initialiser is judged before the new name
+            // is in scope (the initialiser reads the OUTER binding).
+            boolean isBytes = isByteTypedExpr(stmt.init());
+            // N-046 / N-047: a declaration reusing an enclosing binding's name
+            // is alpha-renamed (see declareLocal).
+            String bindingName = declareLocal(stmt.name());
+            addLocal(bindingName);
+            if (isBytes) {
+                localByteVars.add(bindingName);
             }
-            emitNamed(stmt.name(), makeLoadConstString("@ref:" + valueRef));
+            emitNamed(bindingName, makeLoadConstString("@ref:" + valueRef));
         }
 
         void lowerAssignment(AssignmentStatement stmt) {
@@ -1129,7 +1425,7 @@ public final class AnfLower {
                 return;
             }
             if (stmt.target() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + valueRef));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + valueRef));
                 return;
             }
             // Fallback
@@ -1363,7 +1659,8 @@ public final class AnfLower {
             LinkedHashMap<String, Integer> lastIndex = new LinkedHashMap<>();
             for (int i = 0; i < branch.bindings.size(); i++) {
                 String name = branch.bindings.get(i).name();
-                if (isLocal(name)) {
+                // N-360: a reassigned parameter merges like a local (by its slot name).
+                if (isLocal(name) || isParamSlot(name)) {
                     lastIndex.put(name, i);
                 }
             }
@@ -1395,6 +1692,10 @@ public final class AnfLower {
          */
         private void appendBranchResults(LowerCtx branchCtx, List<String> resultNames,
                                          List<String> props) {
+            // N-158: the result-materialisation bindings are not program
+            // logic and get no location, as in TS (whose arm context has none
+            // once its last statement is lowered).
+            branchCtx.currentSourceLoc = null;
             for (int i = 0; i < resultNames.size(); i++) {
                 String name = resultNames.get(i);
                 String temp = AnfValue.MERGED_LOCAL_TEMP_PREFIX + i;
@@ -1518,7 +1819,7 @@ public final class AnfLower {
             //    lowerIf accounts for.
             List<String> liveMerged = new ArrayList<>();
             for (String name : mergedLocals) {
-                if (readsAfter.contains(name)) {
+                if (readsAfter.contains(sourceLocalName(name))) {
                     liveMerged.add(name);
                 }
             }
@@ -1561,6 +1862,18 @@ public final class AnfLower {
             // all three must be statically determinable (issue #121).
             LoopShape shape = extractLoopShape(stmt);
 
+            // N-202: bound the PRODUCT along the nesting path, not just this
+            // loop. Both operands are already <= MAX_LOOP_COUNT, so the long
+            // product cannot overflow.
+            long totalLoopCount = enclosingLoopCount * shape.count();
+            if (totalLoopCount > Loop.MAX_LOOP_COUNT) {
+                throw new IllegalStateException(
+                    "For loop unrolls to " + shape.count() + " iterations nested inside an "
+                        + "enclosing loop of total count " + enclosingLoopCount + ", producing "
+                        + totalLoopCount + " total iterations, exceeding the maximum loop count of "
+                        + Loop.MAX_LOOP_COUNT + ".");
+            }
+
             // The body repeats, so every read anywhere in it is a read that
             // happens after any given statement inside it.
             Set<String> bodyReads = new HashSet<>(readsAfter);
@@ -1569,11 +1882,58 @@ public final class AnfLower {
             }
 
             LowerCtx bodyCtx = subContext();
+            bodyCtx.enclosingLoopCount = totalLoopCount;
+            if (stmt.init() != null && isProperty(stmt.init().name())) {
+                bodyCtx.shadowingLoopVars.add(stmt.init().name());
+            }
+            // N-046: a loop variable reusing an enclosing binding's name is
+            // alpha-renamed in the body's scope (see declareLocal).
+            String iterVar = "";
+            if (stmt.init() != null) {
+                iterVar = bodyCtx.declareLocal(stmt.init().name());
+                bodyCtx.loopVars.add(stmt.init().name());
+            }
             bodyCtx.lowerStatements(stmt.body(), bodyReads);
             syncCounter(bodyCtx);
 
-            String iterVar = stmt.init() != null ? stmt.init().name() : "";
+            // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+            // intrinsic in the body registered its ref on bodyCtx, which is
+            // dropped here, so the continuation hash would not commit to that
+            // output. Merging the refs cannot work (one body name denotes N
+            // unrolled slots), so refuse. AnfLower.run is public, so this
+            // cannot rely on the validator having run.
+            if (!bodyCtx.addOutputRefs.isEmpty() || !bodyCtx.addDataOutputRefs.isEmpty()) {
+                String intrinsic = firstOutputIntrinsic(bodyCtx.bindings);
+                throw new IllegalStateException(Validate.loopOutputIntrinsicMessage(
+                    intrinsic != null ? intrinsic : "addOutput", null));
+            }
+
             emit(new Loop(shape.count, bodyCtx.bindings, iterVar, shape.start, shape.step));
+        }
+
+        /**
+         * Name the source intrinsic of the first output node in {@code bindings},
+         * searching nested if/loop bodies, for the N-006 refusal.
+         */
+        private static String firstOutputIntrinsic(List<AnfBinding> bindings) {
+            for (AnfBinding b : bindings) {
+                AnfValue v = b.value();
+                String name = null;
+                if (v instanceof AddOutput) {
+                    name = "addOutput";
+                } else if (v instanceof AddRawOutput) {
+                    name = "addRawOutput";
+                } else if (v instanceof AddDataOutput) {
+                    name = "addDataOutput";
+                } else if (v instanceof If i) {
+                    name = firstOutputIntrinsic(i.thenBranch());
+                    if (name == null) name = firstOutputIntrinsic(i.elseBranch());
+                } else if (v instanceof Loop l) {
+                    name = firstOutputIntrinsic(l.body());
+                }
+                if (name != null) return name;
+            }
+            return null;
         }
 
         // -----------------------------------------------------------
@@ -1717,6 +2077,19 @@ public final class AnfLower {
                 return emit(makeLoadConstString("@this"));
             }
 
+            // N-046 / N-047: a declaration that shadowed an enclosing binding is
+            // the innermost binding of its name, ahead of params and param
+            // aliases. A renamed loop variable is not a local; it is read with
+            // load_param like every loop variable.
+            String renamed = scopeRenames.get(name);
+            if (renamed != null) {
+                if (isLocal(renamed)) {
+                    String alias = getLocalAlias(renamed);
+                    return alias != null ? alias : renamed;
+                }
+                return emit(new LoadParam(renamed));
+            }
+
             // Param alias takes precedence over normal param lookup. Set when a
             // private method's body is being inlined into this context — the
             // private's param names map to the caller's arg refs.
@@ -1726,13 +2099,20 @@ public final class AnfLower {
             }
 
             if (isParam(name)) {
-                return emit(new LoadParam(name));
+                return emit(new LoadParam(paramSlot(name)));
             }
 
-            if (isLocal(name)) {
-                String alias = getLocalAlias(name);
+            String local = localName(name);
+            if (isLocal(local)) {
+                String alias = getLocalAlias(local);
                 if (alias != null) return alias;
-                return name;
+                return local;
+            }
+
+            // N-016: a loop variable named like a property is the loop
+            // variable, not the property (it used to fall through to load_prop).
+            if (shadowingLoopVars.contains(name)) {
+                return emit(new LoadParam(local));
             }
 
             if (isProperty(name)) {
@@ -1955,6 +2335,20 @@ public final class AnfLower {
                 return emit(new Assert(outEqRef));
             }
 
+            // continuationAmount() -> bigint. F-024 (R14): a read-only view of
+            // the auto-injected `_newAmount` witness. It exists only in a
+            // public StatefulSmartContract method that continues through the
+            // default single-output continuation; anywhere else (private
+            // helpers, terminal methods, addOutput methods) it is refused.
+            // Mirrors 04-anf-lower.ts.
+            if (callee instanceof Identifier caId
+                && "continuationAmount".equals(caId.name())) {
+                if (!isParam("_newAmount")) {
+                    throw new IllegalStateException(CONTINUATION_AMOUNT_UNAVAILABLE);
+                }
+                return emit(new LoadParam("_newAmount"));
+            }
+
             // currentBlockHeight() -> bigint. Pure source-level desugar to
             // extractLocktime(txPreimage). Only valid in StatefulSmartContract
             // methods (typecheck enforces). No new ANF kind needed.
@@ -2151,6 +2545,18 @@ public final class AnfLower {
             elseCtx.lowerTernaryArm(e.alternate());
             syncCounter(elseCtx);
 
+            // N-049 backstop: an output intrinsic in an arm registered its ref
+            // on the arm's sub-context, which is dropped here, so the
+            // continuation hash would not commit to that output. AnfLower.run
+            // is public, so this cannot rely on the validator having run.
+            for (LowerCtx armCtx : new LowerCtx[] {thenCtx, elseCtx}) {
+                if (!armCtx.addOutputRefs.isEmpty() || !armCtx.addDataOutputRefs.isEmpty()) {
+                    String intrinsic = firstOutputIntrinsic(armCtx.bindings);
+                    throw new IllegalStateException(Validate.ternaryOutputIntrinsicMessage(
+                        intrinsic != null ? intrinsic : "addOutput", null));
+                }
+            }
+
             return emit(new If(condRef, thenCtx.bindings, elseCtx.bindings));
         }
 
@@ -2160,7 +2566,7 @@ public final class AnfLower {
             String result = emit(new BinOp("+", operandRef, oneRef, null));
 
             if (e.operand() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + result));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + result));
             }
             if (e.operand() instanceof PropertyAccessExpr pa) {
                 emit(new UpdateProp(pa.property(), result));
@@ -2174,7 +2580,7 @@ public final class AnfLower {
             String result = emit(new BinOp("-", operandRef, oneRef, null));
 
             if (e.operand() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + result));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + result));
             }
             if (e.operand() instanceof PropertyAccessExpr pa) {
                 emit(new UpdateProp(pa.property(), result));
@@ -2191,11 +2597,15 @@ public final class AnfLower {
             if (expr == null) return false;
             if (expr instanceof ByteStringLiteral) return true;
             if (expr instanceof Identifier id) {
+                // N-046 / N-047: a renamed (shadowing) declaration is judged by
+                // its own binding, never by the parameter or property it shadows.
+                String renamed = scopeRenames.get(id.name());
+                if (renamed != null) return localByteVars.contains(renamed);
                 String t = getParamType(id.name());
                 if (t != null && isByteType(t)) return true;
                 t = getPropertyType(id.name());
                 if (t != null && isByteType(t)) return true;
-                if (localByteVars.contains(id.name())) return true;
+                if (localByteVars.contains(localName(id.name()))) return true;
                 return false;
             }
             if (expr instanceof PropertyAccessExpr pa) {
@@ -2214,8 +2624,12 @@ public final class AnfLower {
                     if ("asm".equals(cid.name())) {
                         return "ByteString".equals(ce.asmReturnType());
                     }
-                    if (BYTE_RETURNING_FUNCTIONS.contains(cid.name())) return true;
-                    if (BYTE_RETURNING_EXTRACTORS.contains(cid.name())) return true;
+                    // N-347: the type checker's return table decides, NOT a
+                    // second hand-written list here (two such lists drifted:
+                    // N-054 swept numeric extractors in, N-345 / N-347 left
+                    // byte-returning builtins out, so === on them compiled to
+                    // OP_NUMEQUAL).
+                    if (Typecheck.isByteReturningBuiltin(cid.name())) return true;
                 }
                 return false;
             }
@@ -2393,6 +2807,23 @@ public final class AnfLower {
         return out;
     }
 
+    /**
+     * N-264: the private-method bodies a cross-call predicate below still has
+     * to scan, each at most once.
+     */
+    private static final class CalleeQueue {
+        final Set<String> visited;
+        final java.util.ArrayDeque<List<Statement>> pending = new java.util.ArrayDeque<>();
+
+        CalleeQueue(Set<String> seen) {
+            this.visited = new HashSet<>(seen);
+        }
+
+        void enqueue(MethodNode target) {
+            if (target != null && visited.add(target.name())) pending.add(target.body());
+        }
+    }
+
     static boolean methodMutatesState(MethodNode method, ContractNode contract) {
         Set<String> mutable = new HashSet<>();
         for (PropertyNode p : contract.properties()) {
@@ -2404,30 +2835,37 @@ public final class AnfLower {
 
     private static boolean bodyMutatesState(
             List<Statement> stmts, Set<String> mutable, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) {
-            if (stmtMutatesState(s, mutable, contract, seen)) return true;
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtMutatesState(s, mutable, contract, q)) return true;
         }
         return false;
     }
 
     private static boolean stmtMutatesState(
-            Statement stmt, Set<String> mutable, ContractNode contract, Set<String> seen) {
+            Statement stmt, Set<String> mutable, ContractNode contract, CalleeQueue q) {
         if (stmt instanceof AssignmentStatement a
             && a.target() instanceof PropertyAccessExpr pa
             && mutable.contains(pa.property())) {
             return true;
         }
         for (Expression e : statementExpressions(stmt)) {
-            if (exprMutatesState(e, mutable, contract, seen)) return true;
+            if (exprMutatesState(e, mutable, contract, q)) return true;
         }
         for (Statement s : childStatements(stmt)) {
-            if (stmtMutatesState(s, mutable, contract, seen)) return true;
+            if (stmtMutatesState(s, mutable, contract, q)) return true;
         }
         return false;
     }
 
     private static boolean exprMutatesState(
-            Expression expr, Set<String> mutable, ContractNode contract, Set<String> seen) {
+            Expression expr, Set<String> mutable, ContractNode contract, CalleeQueue q) {
         if (expr == null) return false;
         // The reference stops here — it does not descend into the operand.
         if (expr instanceof IncrementExpr ie) {
@@ -2439,14 +2877,10 @@ public final class AnfLower {
         if (expr instanceof CallExpr c) {
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyMutatesState(target.body(), mutable, contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(expr)) {
-            if (exprMutatesState(child, mutable, contract, seen)) return true;
+            if (exprMutatesState(child, mutable, contract, q)) return true;
         }
         return false;
     }
@@ -2459,22 +2893,32 @@ public final class AnfLower {
         return bodyHasAddOutput(m.body(), contract, new HashSet<>());
     }
 
-    private static boolean bodyHasAddOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) if (stmtHasAddOutput(s, contract, seen)) return true;
+    private static boolean bodyHasAddOutput(
+            List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtHasAddOutput(s, contract, q)) return true;
+        }
         return false;
     }
 
-    private static boolean stmtHasAddOutput(Statement s, ContractNode contract, Set<String> seen) {
+    private static boolean stmtHasAddOutput(Statement s, ContractNode contract, CalleeQueue q) {
         for (Expression e : statementExpressions(s)) {
-            if (exprHasAddOutput(e, contract, seen)) return true;
+            if (exprHasAddOutput(e, contract, q)) return true;
         }
         for (Statement inner : childStatements(s)) {
-            if (stmtHasAddOutput(inner, contract, seen)) return true;
+            if (stmtHasAddOutput(inner, contract, q)) return true;
         }
         return false;
     }
 
-    private static boolean exprHasAddOutput(Expression e, ContractNode contract, Set<String> seen) {
+    private static boolean exprHasAddOutput(Expression e, ContractNode contract, CalleeQueue q) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -2489,14 +2933,10 @@ public final class AnfLower {
             }
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyHasAddOutput(target.body(), contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(e)) {
-            if (exprHasAddOutput(child, contract, seen)) return true;
+            if (exprHasAddOutput(child, contract, q)) return true;
         }
         return false;
     }
@@ -2505,22 +2945,32 @@ public final class AnfLower {
         return bodyHasAddDataOutput(m.body(), contract, new HashSet<>());
     }
 
-    private static boolean bodyHasAddDataOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
-        for (Statement s : stmts) if (stmtHasAddDataOutput(s, contract, seen)) return true;
+    private static boolean bodyHasAddDataOutput(
+            List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtHasAddDataOutput(s, contract, q)) return true;
+        }
         return false;
     }
 
-    private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, Set<String> seen) {
+    private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, CalleeQueue q) {
         for (Expression e : statementExpressions(s)) {
-            if (exprHasAddDataOutput(e, contract, seen)) return true;
+            if (exprHasAddDataOutput(e, contract, q)) return true;
         }
         for (Statement inner : childStatements(s)) {
-            if (stmtHasAddDataOutput(inner, contract, seen)) return true;
+            if (stmtHasAddDataOutput(inner, contract, q)) return true;
         }
         return false;
     }
 
-    private static boolean exprHasAddDataOutput(Expression e, ContractNode contract, Set<String> seen) {
+    private static boolean exprHasAddDataOutput(Expression e, ContractNode contract, CalleeQueue q) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -2535,14 +2985,115 @@ public final class AnfLower {
             }
             String name = calleeName(c.callee());
             MethodNode target = lookupPrivateMethod(contract, name);
-            if (target != null && !seen.contains(target.name())) {
-                Set<String> nextSeen = new HashSet<>(seen);
-                nextSeen.add(target.name());
-                if (bodyHasAddDataOutput(target.body(), contract, nextSeen)) return true;
-            }
+            q.enqueue(target);
         }
         for (Expression child : childExpressions(e)) {
-            if (exprHasAddDataOutput(child, contract, seen)) return true;
+            if (exprHasAddDataOutput(child, contract, q)) return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // requireOutputP2PKH detection (recursive across private calls)
+    // ------------------------------------------------------------------
+    // F-075: consumed by Typecheck's requireOutputP2PKH output-layout guards so
+    // they see the same transitive effects as the continuation predicates above.
+
+    /**
+     * True if {@code m} (or a private helper it reaches) calls
+     * {@code requireOutputP2PKH(...)}; with {@code zeroOnly}, only a call whose
+     * output index is the literal {@code 0} counts.
+     */
+    static boolean methodCallsRequireOutputP2PKH(MethodNode m, ContractNode contract, boolean zeroOnly) {
+        return bodyCallsRequireOutputP2PKH(m.body(), contract, zeroOnly, new HashSet<>());
+    }
+
+    private static boolean bodyCallsRequireOutputP2PKH(
+            List<Statement> stmts, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+        // N-264: a called private method's body is QUEUED, not recursed into
+        // from the middle of the caller's statement walk. A chain of D helpers
+        // that each call the next under K nested ifs held D*K frames at once
+        // and overflowed. Plain reachability, exactly what the recursive walk
+        // (which pruned a method only when already on the current call path)
+        // answered.
+        CalleeQueue q = new CalleeQueue(seen);
+        for (List<Statement> next = stmts; next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtCallsRequireOutputP2PKH(s, contract, zeroOnly, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean stmtCallsRequireOutputP2PKH(
+            Statement s, ContractNode contract, boolean zeroOnly, CalleeQueue q) {
+        for (Expression e : statementExpressions(s)) {
+            if (exprCallsRequireOutputP2PKH(e, contract, zeroOnly, q)) return true;
+        }
+        for (Statement inner : childStatements(s)) {
+            if (stmtCallsRequireOutputP2PKH(inner, contract, zeroOnly, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean exprCallsRequireOutputP2PKH(
+            Expression e, ContractNode contract, boolean zeroOnly, CalleeQueue q) {
+        if (e == null) return false;
+        if (e instanceof CallExpr c) {
+            if (c.callee() instanceof Identifier id && "requireOutputP2PKH".equals(id.name())) {
+                if (!zeroOnly) return true;
+                if (!c.args().isEmpty() && c.args().get(0) instanceof BigIntLiteral idx
+                        && idx.value().signum() == 0) {
+                    return true;
+                }
+            }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            q.enqueue(target);
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprCallsRequireOutputP2PKH(child, contract, zeroOnly, q)) return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // extractPrevOutputScript detection (recursive across private calls)
+    // ------------------------------------------------------------------
+    // N-315: consumed by shouldInlinePrivate so the auto-injected
+    // _prevOutScript_<i> witness lands on the public method.
+
+    /** True if {@code m} (or a private helper it reaches) calls {@code extractPrevOutputScript(...)}. */
+    static boolean methodCallsExtractPrevOutputScript(MethodNode m, ContractNode contract) {
+        CalleeQueue q = new CalleeQueue(new HashSet<>());
+        for (List<Statement> next = m.body(); next != null; next = q.pending.poll()) {
+            for (Statement s : next) if (stmtCallsExtractPrevOutputScript(s, contract, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean stmtCallsExtractPrevOutputScript(
+            Statement s, ContractNode contract, CalleeQueue q) {
+        for (Expression e : statementExpressions(s)) {
+            if (exprCallsExtractPrevOutputScript(e, contract, q)) return true;
+        }
+        for (Statement inner : childStatements(s)) {
+            if (stmtCallsExtractPrevOutputScript(inner, contract, q)) return true;
+        }
+        return false;
+    }
+
+    private static boolean exprCallsExtractPrevOutputScript(
+            Expression e, ContractNode contract, CalleeQueue q) {
+        if (e == null) return false;
+        if (e instanceof CallExpr c) {
+            if (c.callee() instanceof Identifier id && "extractPrevOutputScript".equals(id.name())) {
+                return true;
+            }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            q.enqueue(target);
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprCallsExtractPrevOutputScript(child, contract, q)) return true;
         }
         return false;
     }
@@ -2710,13 +3261,17 @@ public final class AnfLower {
         final String propName;
         final List<AnfBinding> valueBindings;
         final String valueRef;
+        /** F-188: location of the branch's original update_prop statement (may be null). */
+        final SourceLocation updateLoc;
 
-        UpdateBranch(List<AnfBinding> csb, String cr, String pn, List<AnfBinding> vb, String vr) {
+        UpdateBranch(List<AnfBinding> csb, String cr, String pn, List<AnfBinding> vb, String vr,
+                     SourceLocation updateLoc) {
             this.condSetupBindings = csb;
             this.condRef = cr;
             this.propName = pn;
             this.valueBindings = vb;
             this.valueRef = vr;
+            this.updateLoc = updateLoc;
         }
     }
 
@@ -2760,7 +3315,8 @@ public final class AnfLower {
         return true;
     }
 
-    private record BranchUpdate(String propName, List<AnfBinding> valueBindings, String valueRef) {}
+    private record BranchUpdate(String propName, List<AnfBinding> valueBindings, String valueRef,
+                                SourceLocation updateLoc) {}
 
     private static BranchUpdate extractBranchUpdate(List<AnfBinding> bindings) {
         if (bindings.isEmpty()) return null;
@@ -2768,7 +3324,7 @@ public final class AnfLower {
         if (!(last.value() instanceof UpdateProp up)) return null;
         List<AnfBinding> valueBindings = new ArrayList<>(bindings.subList(0, bindings.size() - 1));
         if (!allBindingsSideEffectFree(valueBindings)) return null;
-        return new BranchUpdate(up.name(), valueBindings, up.value());
+        return new BranchUpdate(up.name(), valueBindings, up.value(), last.sourceLoc());
     }
 
     private static boolean isAssertFalseElse(List<AnfBinding> bindings) {
@@ -2814,7 +3370,7 @@ public final class AnfLower {
         List<UpdateBranch> branches = new ArrayList<>();
         branches.add(new UpdateBranch(
             new ArrayList<>(), ifCond, thenUpdate.propName(),
-            thenUpdate.valueBindings(), thenUpdate.valueRef()
+            thenUpdate.valueBindings(), thenUpdate.valueRef(), thenUpdate.updateLoc()
         ));
 
         if (elseBindings.isEmpty()) return null;
@@ -2836,7 +3392,7 @@ public final class AnfLower {
             newSetup.addAll(inner.get(0).condSetupBindings);
             UpdateBranch first = inner.get(0);
             inner.set(0, new UpdateBranch(newSetup, first.condRef, first.propName,
-                first.valueBindings, first.valueRef));
+                first.valueBindings, first.valueRef, first.updateLoc));
             branches.addAll(inner);
             return branches;
         }
@@ -2845,7 +3401,7 @@ public final class AnfLower {
         if (elseUpdate != null) {
             branches.add(new UpdateBranch(
                 new ArrayList<>(), null, elseUpdate.propName(),
-                elseUpdate.valueBindings(), elseUpdate.valueRef()
+                elseUpdate.valueBindings(), elseUpdate.valueRef(), elseUpdate.updateLoc()
             ));
             return branches;
         }
@@ -2940,6 +3496,57 @@ public final class AnfLower {
         return nameMap.getOrDefault(s, s);
     }
 
+    /**
+     * N-261: mirrors the TS reference's {@code dropTerminalIfResults}. A
+     * TERMINAL {@code if} (the last binding of a public method body, or
+     * recursively of an arm of a terminal {@code if} -- the rule stack lowering
+     * uses for terminalAssert) carries no results. Its arms' final asserts are
+     * the script's verdict, so nothing reads a merged local afterwards, but the
+     * {@code appendBranchResults} block sat AFTER the assert and every tier
+     * refused the legal
+     * {@code let k = 0n; if (c) { k = 1n; assert(a); } else { k = 2n; assert(b); }}.
+     * Strips exactly that block (N {@code __merge$i} copies then N rebinds of
+     * LOCAL results) and the results list; any other shape is left alone.
+     * Returns the rewritten list (records are immutable).
+     */
+    static List<AnfBinding> dropTerminalIfResults(List<AnfBinding> bindings) {
+        if (bindings == null || bindings.isEmpty()) return bindings;
+        AnfBinding last = bindings.get(bindings.size() - 1);
+        if (!(last.value() instanceof If node)) return bindings;
+        List<AnfBinding> thenArm = node.thenBranch();
+        List<AnfBinding> elseArm = node.elseBranch();
+        List<String> results = node.results();
+        if (results != null && !results.isEmpty()
+                && isTerminalResultBlock(thenArm, results) && isTerminalResultBlock(elseArm, results)) {
+            int n = results.size();
+            thenArm = new ArrayList<>(thenArm.subList(0, thenArm.size() - 2 * n));
+            elseArm = new ArrayList<>(elseArm.subList(0, elseArm.size() - 2 * n));
+            results = null;
+        }
+        If rewritten = new If(node.cond(), dropTerminalIfResults(thenArm), dropTerminalIfResults(elseArm), results);
+        List<AnfBinding> out = new ArrayList<>(bindings.subList(0, bindings.size() - 1));
+        out.add(new AnfBinding(last.name(), rewritten, last.sourceLoc()));
+        return out;
+    }
+
+    /** True iff {@code arm} ends with exactly the block {@code appendBranchResults} emits for LOCAL results. */
+    private static boolean isTerminalResultBlock(List<AnfBinding> arm, List<String> results) {
+        int n = results.size();
+        if (arm == null || arm.size() < 2 * n) return false;
+        List<AnfBinding> block = arm.subList(arm.size() - 2 * n, arm.size());
+        for (int i = 0; i < n; i++) {
+            String name = results.get(i);
+            String temp = AnfValue.MERGED_LOCAL_TEMP_PREFIX + i;
+            if (!block.get(i).name().equals(temp) || !isConstStringRef(block.get(i).value(), "@ref:" + name)) return false;
+            if (!block.get(n + i).name().equals(name) || !isConstStringRef(block.get(n + i).value(), "@ref:" + temp)) return false;
+        }
+        return true;
+    }
+
+    private static boolean isConstStringRef(AnfValue value, String want) {
+        return value instanceof LoadConst lc && lc.value() instanceof BytesConst bc && want.equals(bc.hex());
+    }
+
     static List<AnfBinding> liftBranchUpdateProps(List<AnfBinding> bindings) {
         final int[] nextIdx = { maxTempIndex(bindings) + 1 };
         List<AnfBinding> result = new ArrayList<>();
@@ -2961,6 +3568,11 @@ public final class AnfLower {
                 continue;
             }
 
+            // F-188: the rewrite replaces this located `if`; keep its location
+            // on the shared condition temporaries, and each branch's own update
+            // statement location on that branch's synthesized bindings.
+            final SourceLocation ifLoc = binding.sourceLoc();
+
             // Transform: flatten into conditional assignments.
             Map<String, String> nameMap = new LinkedHashMap<>();
             List<String> condRefs = new ArrayList<>();
@@ -2969,7 +3581,8 @@ public final class AnfLower {
                 for (AnfBinding csb : branch.condSetupBindings) {
                     String newName = "t" + (nextIdx[0]++);
                     nameMap.put(csb.name(), newName);
-                    result.add(new AnfBinding(newName, remapValueRefs(csb.value(), nameMap), null));
+                    result.add(new AnfBinding(newName, remapValueRefs(csb.value(), nameMap),
+                        csb.sourceLoc() != null ? csb.sourceLoc() : ifLoc));
                 }
                 if (branch.condRef != null) {
                     condRefs.add(nameMap.getOrDefault(branch.condRef, branch.condRef));
@@ -2990,7 +3603,7 @@ public final class AnfLower {
                     if (condRefs.get(j) == null) continue;
                     String negName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(negName,
-                        new UnaryOp("!", condRefs.get(j), null), null));
+                        new UnaryOp("!", condRefs.get(j), null), ifLoc));
                     negatedConds.add(negName);
                 }
                 String andRef = negatedConds.get(0);
@@ -2998,13 +3611,13 @@ public final class AnfLower {
                 for (int j = 1; j < limit; j++) {
                     String andName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(andName,
-                        new BinOp("&&", andRef, negatedConds.get(j), null), null));
+                        new BinOp("&&", andRef, negatedConds.get(j), null), ifLoc));
                     andRef = andName;
                 }
                 if (condRefs.get(i) != null) {
                     String finalName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(finalName,
-                        new BinOp("&&", andRef, condRefs.get(i), null), null));
+                        new BinOp("&&", andRef, condRefs.get(i), null), ifLoc));
                     effectiveConds.add(finalName);
                 } else {
                     effectiveConds.add(andRef);
@@ -3033,26 +3646,28 @@ public final class AnfLower {
                 for (int i = 1; i < condRefs.size(); i++) {
                     String orName = "t" + (nextIdx[0]++);
                     result.add(new AnfBinding(orName,
-                        new BinOp("||", orRef, condRefs.get(i), null), null));
+                        new BinOp("||", orRef, condRefs.get(i), null), ifLoc));
                     orRef = orName;
                 }
                 result.add(new AnfBinding("t" + (nextIdx[0]++),
-                    new Assert(orRef), null));
+                    new Assert(orRef), ifLoc));
             }
 
             // Emit load_old, conditional if-expression, update_prop per branch.
             for (int i = 0; i < branches.size(); i++) {
                 UpdateBranch branch = branches.get(i);
+                final SourceLocation branchLoc = branch.updateLoc != null ? branch.updateLoc : ifLoc;
 
                 String oldPropRef = "t" + (nextIdx[0]++);
-                result.add(new AnfBinding(oldPropRef, new LoadProp(branch.propName), null));
+                result.add(new AnfBinding(oldPropRef, new LoadProp(branch.propName), branchLoc));
 
                 Map<String, String> branchMap = new LinkedHashMap<>(nameMap);
                 List<AnfBinding> thenBindings = new ArrayList<>();
                 for (AnfBinding vb : branch.valueBindings) {
                     String newName = "t" + (nextIdx[0]++);
                     branchMap.put(vb.name(), newName);
-                    thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap), null));
+                    thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap),
+                        vb.sourceLoc() != null ? vb.sourceLoc() : branchLoc));
                 }
 
                 // An arm's VALUE is its LAST binding. valueBindings is
@@ -3075,21 +3690,21 @@ public final class AnfLower {
                     || !thenBindings.get(thenBindings.size() - 1).name().equals(mappedValueRef)) {
                     String valueName = "t" + (nextIdx[0]++);
                     thenBindings.add(new AnfBinding(valueName,
-                        makeLoadConstString("@ref:" + mappedValueRef), null));
+                        makeLoadConstString("@ref:" + mappedValueRef), branchLoc));
                 }
 
                 String keepName = "t" + (nextIdx[0]++);
                 List<AnfBinding> elseBindings = new ArrayList<>();
                 elseBindings.add(new AnfBinding(keepName,
-                    new LoadConst(new BytesConst("@ref:" + oldPropRef)), null));
+                    new LoadConst(new BytesConst("@ref:" + oldPropRef)), branchLoc));
 
                 String condIfRef = "t" + (nextIdx[0]++);
                 result.add(new AnfBinding(condIfRef,
-                    new If(effectiveConds.get(i), thenBindings, elseBindings), null));
+                    new If(effectiveConds.get(i), thenBindings, elseBindings), branchLoc));
 
                 String updateName = "t" + (nextIdx[0]++);
                 result.add(new AnfBinding(updateName,
-                    new UpdateProp(branch.propName, condIfRef), null));
+                    new UpdateProp(branch.propName, condIfRef), branchLoc));
             }
         }
 

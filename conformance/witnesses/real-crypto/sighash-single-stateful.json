@@ -1,0 +1,62 @@
+{
+  "fixture": "sighash-single-stateful",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "N-179 (N-038 / F-348): bump() is @sighash SINGLE|FORKID, so the SDK signs the call under 0x43 and the on-chain OP_PUSH_TX binding re-derives the sighash under 0x43; the continuation commits only output 0 (no change segment, no _changePKH/_changeAmount params). The harness funds each call from a separate P2PKH UTXO, so every call tx carries a change output the SINGLE covenant does not commit. reset() keeps ALL|FORKID. Real secp256k1 + real BIP-143 on the @bsv/sdk Spend engine.",
+  "constructorArgs": [
+    "5n"
+  ],
+  "spends": [
+    {
+      "method": "bump",
+      "args": [],
+      "deploySatoshis": 10000,
+      "satoshis": 10000,
+      "expect": "accept",
+      "note": "SINGLE|FORKID: continuation re-created at the full input amount, count 5->6, with an uncommitted change output alongside (rejected before N-038: the continuation hashed the change too)",
+      "expectedState": {
+        "count": "6n"
+      }
+    },
+    {
+      "method": "bump",
+      "args": [],
+      "deploySatoshis": 10000,
+      "satoshis": 10000,
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered output 0: SINGLE still commits the same-index output, so the recomputed sighash no longer matches the on-stack preimage"
+    },
+    {
+      "method": "bump",
+      "args": [],
+      "deploySatoshis": 10000,
+      "satoshis": 1,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "SINGLE value skim: the continuation keeps 1 of the 10000 input sats; addOutput(extractAmount(txPreimage), ...) pins the full amount, so the hashOutputs binding rejects it"
+    },
+    {
+      "method": "reset",
+      "args": [],
+      "expect": "accept",
+      "note": "default ALL|FORKID method on the same contract: count 5->0",
+      "expectedState": {
+        "count": "0n"
+      }
+    },
+    {
+      "method": "reset",
+      "args": [],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output under ALL|FORKID"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "622a468fe91c7a1430caa622cbb6f7d54404be1ef3bf27b1eea408d201f7446b",
+    "expected-ir.json": "4aeea707ef9fdc88247a1c13009111fecd27b79dc7121a7ae52e05924974715d"
+  }
+}

@@ -111,3 +111,33 @@ def test_terminal_call_dict_format():
 
     assert len(txid) == 64
     assert contract.get_utxo() is None
+
+
+def test_terminal_call_with_additional_contract_inputs_fails_closed():
+    """N-271: terminal_outputs + additional_contract_inputs must refuse with
+    a named error. _prepare_terminal lays out exactly one contract input
+    (plus an optional fee/funding input) and never reads
+    opts.additional_contract_inputs at all. Before the fix this proves the
+    extra UTXO is silently dropped instead of being rejected or spent -- the
+    call succeeds and reports a txid, but the broadcast tx has only one
+    input, not two.
+
+    This does NOT prove additional_contract_inputs could ever be made to
+    work on the terminal path (merging it validly) -- only that dropping it
+    silently is unacceptable and must become a refusal.
+    """
+    contract, provider, signer = setup_funded_contract()
+
+    payout_script = '76a914' + 'bb' * 20 + '88ac'
+    extra_utxo = Utxo(
+        txid='ee' * 32,
+        output_index=0,
+        satoshis=1_000,
+        script='51',
+    )
+
+    with pytest.raises(ValueError, match='additional_contract_inputs'):
+        contract.call('cancel', [], provider, signer, CallOptions(
+            terminal_outputs=[TerminalOutput(script_hex=payout_script, satoshis=49_000)],
+            additional_contract_inputs=[extra_utxo],
+        ))

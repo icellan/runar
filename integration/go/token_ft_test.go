@@ -582,8 +582,8 @@ func TestFungibleToken_TransferWrongSigner(t *testing.T) {
 		[]interface{}{nil, bob.PubKeyHex(), amount, outputSatoshis},
 		provider, attackerSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
-				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": amount}},
-				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": remainder}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": amount, "mergeBalance": int64(0)}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": remainder, "mergeBalance": int64(0)}},
 			},
 		})
 	if err == nil {

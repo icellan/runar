@@ -9,8 +9,8 @@ import static runar.lang.Builtins.assertThat;
 
 /**
  * ShiftOps -- exercises bigint shift operators ({@code <<}, {@code >>}).
- * The asserts are tautological; the goal is to compile real shift
- * opcodes into the locking script.
+ * The caller supplies the expected results and the contract checks them;
+ * see the TS source for the byte-array semantics of the shift opcodes.
  */
 class ShiftOps extends SmartContract {
 
@@ -22,10 +22,10 @@ class ShiftOps extends SmartContract {
     }
 
     @Public
-    void testShift() {
+    void testShift(Bigint expectedLeft, Bigint expectedRight) {
         Bigint left = this.a.shl(Bigint.of(3));
         Bigint right = this.a.shr(Bigint.of(2));
-        assertThat(left.ge(Bigint.ZERO) || left.lt(Bigint.ZERO));
-        assertThat(right.ge(Bigint.ZERO) || right.lt(Bigint.ZERO));
+        assertThat(left.eq(expectedLeft));
+        assertThat(right.eq(expectedRight));
     }
 }

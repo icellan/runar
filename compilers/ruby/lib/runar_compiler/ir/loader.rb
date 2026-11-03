@@ -14,6 +14,12 @@ require_relative "types"
 require_relative "../frontend/typecheck"
 require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
+require_relative "required_fields"
+require_relative "../frontend/reserved_names"
+require_relative "../frontend/input_limits"
+require_relative "stateful_scaffold"
+require_relative "synthetic_array_chain"
+require_relative "rabin_key_provenance"
 
 module RunarCompiler
   module IR
@@ -87,6 +93,13 @@ module RunarCompiler
         raise ArgumentError, e.message
       end
 
+      # N-069: required fields present and correctly typed, with the field
+      # path in the diagnostic, before anf_program_from_hash defaults anything.
+      RequiredFields.assert!(d)
+
+      # N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+      Frontend::ReservedNames.assert_no_reserved_ir_names!(d)
+
       program = anf_program_from_hash(d)
 
       # Decode typed constant values from raw JSON
@@ -100,6 +113,14 @@ module RunarCompiler
       unless errors.empty?
         raise ArgumentError, "IR validation: #{errors[0]}"
       end
+
+      # N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+      # written (shared rule and diagnostic, 7 tiers).
+      SyntheticArrayChain.assert!(program)
+
+      # N-205: F-286's verifyRabinSig key provenance, and the write rule for a
+      # mutable key property (shared rule and diagnostics, 7 tiers).
+      RabinKeyProvenance.assert!(program)
 
       program
     end
@@ -127,38 +148,56 @@ module RunarCompiler
     def self.validate_ir(program)
       errors = []
 
-      if program.contract_name.nil? || program.contract_name.empty?
-        errors << "contractName is required"
-      end
+      # N-207 / N-408: an empty contractName, property / method / param name or
+      # type, or binding name is refused by RequiredFields (required_fields.rb)
+      # with one shared diagnostic, before this runs.
 
       # R-126 / CL-BUG-164: an add_output must name exactly one state value per
       # MUTABLE property. Counted once, up front.
       mutable_count = program.properties.count { |p| !p.readonly }
 
-      program.methods.each_with_index do |m, i|
-        if m.name.nil? || m.name.empty?
-          errors << "method[#{i}] has empty name"
-        end
-
-        m.params.each_with_index do |param, j|
-          if param.name.nil? || param.name.empty?
-            errors << "method #{m.name} param[#{j}] has empty name"
-          end
-          if param.type.nil? || param.type.empty?
-            errors << "method #{m.name} param #{param.name} has empty type"
-          end
-        end
-
-        errors.concat(_validate_bindings(m.body, m.name, mutable_count))
+      program.methods.each do |m|
+        errors.concat(_validate_bindings(m.body, m.name, mutable_count, 1))
       end
 
-      program.properties.each_with_index do |prop, i|
-        if prop.name.nil? || prop.name.empty?
-          errors << "property[#{i}] has empty name"
-        end
-        if prop.type.nil? || prop.type.empty?
-          errors << "property #{prop.name} has empty type"
-        end
+      # N-265: --ir never runs frontend/validator.rb's recursion + N-180
+      # MAX_CALL_DEPTH check. Stack lowering (codegen/stack.rb's method_call
+      # inlining) inlines every method_call to a private method by lowering
+      # its body in place, with no cycle or depth guard, so a
+      # self/mutually-recursive method recurses the host call stack until a
+      # SystemStackError, and an acyclic chain past the bound recurses it
+      # just as deep. Checked first, same order as Go's F-004
+      # checkIRFrontendRules (recursion before parentClass).
+      recursion_err = _recursion_error(program)
+      errors << recursion_err if recursion_err
+
+      # N-087: the source validator's parentClass rules, then Go F-004's
+      # readonly / undeclared-property write rule. See _parent_class_error and
+      # _write_error.
+      pc_err = _parent_class_error(program) || _write_error(program)
+      errors << pc_err if pc_err
+
+      # N-071: --ir skips frontend/validator.rb, whose ends-with-assert rule
+      # is what makes a public method's script a covenant. Stack lowering
+      # leaves the method's last binding as the script result, so
+      # `"body": []` compiled to an EMPTY (anyone-can-spend) script. Same rule
+      # and words as Go's F-004 check; see _ends_with_terminal_assert.
+      program.methods.each do |m|
+        next unless m.is_public && m.name != "constructor"
+        next if _ends_with_terminal_assert(m.body)
+
+        errors << "public method '#{m.name}' must end with an assert() call " \
+                  "(or an if/else whose arms both do, or a terminal raw_script " \
+                  "with out_arity 1); otherwise the value its last binding " \
+                  "leaves on the stack decides the spend"
+      end
+
+      # N-101: a StatefulSmartContract (declared or inferred) must carry
+      # exactly the scaffolding the frontend injects into each public method.
+      # Runs only on IR every check above accepted. See stateful_scaffold.rb.
+      if errors.empty? && _effective_parent_class(program) == "StatefulSmartContract"
+        scaffold_err = StatefulScaffold.error(program)
+        errors << scaffold_err if scaffold_err
       end
 
       # N-113 / R-081: a contract with no public method has no spending entry
@@ -191,6 +230,248 @@ module RunarCompiler
       end
 
       errors
+    end
+
+    STATEFUL_ONLY_KINDS = %w[
+      add_output add_raw_output add_data_output get_state_script deserialize_state
+    ].freeze
+
+    # Every ANF value in +bindings+, nested if arms and loop bodies included.
+    def self._each_value(bindings, &blk)
+      (bindings || []).each do |b|
+        v = b.value
+        blk.call(v)
+        _each_value(v.then, &blk)
+        _each_value(v.else_, &blk)
+        _each_value(v.body, &blk)
+      end
+    end
+
+    # -------------------------------------------------------------------
+    # N-265: IR method_call graph -- recursion + N-180 call-depth bound
+    # -------------------------------------------------------------------
+    #
+    # Ported from Go's F-071 checkIRNoRecursion (compilers/go/compiler/
+    # ir_frontend_rules.go), made iterative there too under this item, and
+    # extended with N-180's depth bound -- Go's existing IR-path check was
+    # cycle-only, and this tier had no IR-path recursion check at all. Two
+    # passes, cycles checked before depth (a cyclic graph has no finite
+    # depth to measure), both iterative (explicit stack, no host recursion
+    # -- the Ruby fiber/thread stack's own limit is exactly what an
+    # unbounded chain or cycle hit before this).
+
+    # The first ANF method_call cycle or call-depth violation, or nil.
+    #
+    # Reports a cycle (a method strictly ON it, the exact "hit" a recursive
+    # depth-first search would report the moment it finds a back edge)
+    # before a depth violation, since a cyclic graph has no finite depth to
+    # measure.
+    def self._recursion_error(program)
+      callees = {}
+      program.methods.each do |m|
+        next if m.name == "constructor"
+
+        calls = []
+        _each_value(m.body) { |v| calls << v.method if v.kind == "method_call" && v.method }
+        callees[m.name] = calls
+      end
+
+      cycle = _ir_cycle_method(program.methods, callees)
+      if cycle
+        return "recursion detected: method '#{cycle}' calls itself directly or indirectly. " \
+               "Private methods are inlined at every call site, so a cyclic call graph has " \
+               "no finite lowering"
+      end
+      _ir_call_depth_error(program.methods, callees)
+    end
+
+    # Iterative (explicit-stack), three-state DFS over the IR method_call
+    # graph. Declaration order only decides which root the search starts
+    # from; the name returned is whichever back edge is found first.
+    def self._ir_cycle_method(methods, callees)
+      unvisited, on_stack, done_state = 0, 1, 2
+      state = {}
+
+      methods.each do |root_m|
+        root = root_m.name
+        next if root == "constructor"
+        next if (state[root] || unvisited) != unvisited
+
+        stack = [{ name: root, next: 0 }]
+        state[root] = on_stack
+        until stack.empty?
+          top = stack[-1]
+          calls = callees[top[:name]] || []
+          if top[:next] >= calls.length
+            state[top[:name]] = done_state
+            stack.pop
+            next
+          end
+          callee = calls[top[:next]]
+          top[:next] += 1
+          next unless callees.key?(callee)
+
+          callee_state = state[callee] || unvisited
+          return callee if callee_state == on_stack
+
+          if callee_state == unvisited
+            state[callee] = on_stack
+            stack.push({ name: callee, next: 0 })
+          end
+        end
+      end
+      nil
+    end
+
+    # Iterative longest-path walk over the (by this point known-acyclic) IR
+    # call graph, no host recursion. Returns the diagnostic for the first
+    # method (declaration order) past MAX_CALL_DEPTH, or nil.
+    def self._ir_call_depth_error(methods, callees)
+      depth = {}
+      done = {}
+
+      methods.each do |root_m|
+        root = root_m.name
+        next if root == "constructor"
+        next if done[root]
+
+        stack = [{ name: root, next: 0, depth: 0 }]
+        until stack.empty?
+          top = stack[-1]
+          calls = callees[top[:name]] || []
+          if top[:next] < calls.length
+            callee = calls[top[:next]]
+            top[:next] += 1
+            next unless callees.key?(callee)
+
+            if done[callee]
+              d = 1 + (depth[callee] || 0)
+              top[:depth] = d if d > top[:depth]
+            else
+              stack.push({ name: callee, next: 0, depth: 0 })
+            end
+            next
+          end
+          finished = stack.pop
+          done[finished[:name]] = true
+          depth[finished[:name]] = finished[:depth]
+          unless stack.empty?
+            parent = stack[-1]
+            d = 1 + finished[:depth]
+            parent[:depth] = d if d > parent[:depth]
+          end
+        end
+      end
+
+      methods.each do |m|
+        next if m.name == "constructor"
+
+        d = depth[m.name] || 0
+        if d > RunarCompiler::Frontend::InputLimits::MAX_CALL_DEPTH
+          return RunarCompiler::Frontend::InputLimits.call_depth_message(m.name)
+        end
+      end
+      nil
+    end
+
+    # The declared parentClass, or the N-087 fail-closed inference for IR
+    # without one (see _parent_class_error).
+    def self._effective_parent_class(program)
+      pc = program.parent_class.to_s
+      return pc unless pc.empty?
+
+      flat = []
+      program.methods.each { |m| _each_value(m.body) { |v| flat << v.kind } }
+      if flat.any? { |k| STATEFUL_ONLY_KINDS.include?(k) }
+        "StatefulSmartContract"
+      elsif flat.include?("raw_script")
+        "UnsafeSmartContract"
+      else
+        "SmartContract"
+      end
+    end
+
+    # N-087: the source validator's parentClass rules, which --ir never ran. A
+    # SmartContract property declared readonly:false got no constructor slot,
+    # so `update_prop owner = x; assert(owner == x)` compiled to 76767b8777,
+    # which any key spends. Checked in this order, with the diagnostics all
+    # seven tiers share (conformance/negatives/ir-parent-class-cases.json):
+    # (1) SmartContract / UnsafeSmartContract properties must be readonly;
+    # (2) stateful-only nodes require StatefulSmartContract; (3) raw_script
+    # (asm) requires UnsafeSmartContract. An absent parentClass (IR older than
+    # F-038) is inferred fail-closed: StatefulSmartContract only from a
+    # stateful-only node, else UnsafeSmartContract from a raw_script, else
+    # SmartContract.
+    def self._parent_class_error(program)
+      kinds = program.methods.map do |m|
+        ks = []
+        _each_value(m.body) { |v| ks << v.kind }
+        ks
+      end
+      pc = _effective_parent_class(program)
+      if pc != "StatefulSmartContract"
+        prop = program.properties.find { |p| !p.readonly }
+        if prop
+          return "Property '#{prop.name}' in #{pc} must be readonly. " \
+                 "Use StatefulSmartContract for mutable state."
+        end
+        program.methods.zip(kinds).each do |m, ks|
+          k = ks.find { |kind| STATEFUL_ONLY_KINDS.include?(kind) }
+          return "'#{k}' in method '#{m.name}' is only available in StatefulSmartContract; got #{pc}" if k
+        end
+      end
+      if pc != "UnsafeSmartContract"
+        program.methods.zip(kinds).each do |m, ks|
+          if ks.include?("raw_script")
+            return "'raw_script' in method '#{m.name}' is only available in " \
+                   "contracts extending UnsafeSmartContract; got #{pc}"
+          end
+        end
+      end
+      nil
+    end
+
+    # N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
+    # only be written in the constructor, and an update_prop must name a
+    # declared property. Otherwise a later load_prop reads the written value
+    # instead of the one baked into the locking script. Go's sentences.
+    def self._write_error(program)
+      readonly = program.properties.to_h { |p| [p.name, p.readonly] }
+      program.methods.each do |m|
+        next if m.name == "constructor"
+
+        _each_value(m.body) do |v|
+          next unless v.kind == "update_prop"
+
+          unless readonly.key?(v.name)
+            return "method '#{m.name}' assigns to undeclared property '#{v.name}'"
+          end
+          if readonly[v.name]
+            return "cannot assign to readonly property '#{v.name}' in method '#{m.name}'. " \
+                   "readonly properties may only be assigned in the constructor; a later " \
+                   "load_prop would read the assigned value instead of the one baked into " \
+                   "the locking script"
+          end
+        end
+      end
+      nil
+    end
+
+    # N-071: ANF form of the source validator's ends-with-assert rule -- the
+    # last binding is an `assert`, or an `if` whose then AND else arms both end
+    # that way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+    # asm() terminal) is also accepted, because ANF carries no parentClass.
+    def self._ends_with_terminal_assert(bindings)
+      last = (bindings || []).last
+      return false if last.nil?
+
+      v = last.value
+      case v.kind
+      when "assert" then true
+      when "if" then _ends_with_terminal_assert(v.then) && _ends_with_terminal_assert(v.else_)
+      when "raw_script" then v.out_arity == 1
+      else false
+      end
     end
 
     # Validate a list of ANF bindings, including nested ones.
@@ -236,14 +517,22 @@ module RunarCompiler
         "#{got} argument(s); it takes #{wanted}"
     end
 
-    def self._validate_bindings(bindings, method_name, mutable_count)
+    # +enclosing_loop_count+ is the product of every loop count already
+    # entered on the path from the method body down to +bindings+ (1 at the
+    # top). F-283 / CL-GAP-164: the per-binding MAX_LOOP_COUNT check below
+    # bounds a single loop's own count but never the PRODUCT across nesting --
+    # two loops of 10_000 each, one inside the other, each pass that check
+    # independently while the real unrolled work is 10_000 x 10_000 =
+    # 100_000_000. A 1,175-byte payload shaped that way loaded in 0.0s and then
+    # drove compile_from_ir to 5m07s / 3.7GB RSS and climbing. The new check
+    # below catches that: it fires only when the single binding's own count is
+    # already within MAX_LOOP_COUNT (otherwise the existing per-binding error
+    # already names the problem) but the product with everything enclosing it
+    # is not.
+    def self._validate_bindings(bindings, method_name, mutable_count, enclosing_loop_count = 1)
       errors = []
 
-      bindings.each_with_index do |binding, i|
-        if binding.name.nil? || binding.name.empty?
-          errors << "method #{method_name} binding[#{i}] has empty name"
-        end
-
+      bindings.each do |binding|
         kind = binding.value.kind
         if kind.nil? || kind.empty?
           errors << "method #{method_name} binding #{binding.name} has empty kind"
@@ -314,10 +603,10 @@ module RunarCompiler
         # Validate nested bindings
         if kind == "if"
           if binding.value.then
-            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count, enclosing_loop_count))
           end
           if binding.value.else_
-            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count, enclosing_loop_count))
           end
         end
 
@@ -331,8 +620,20 @@ module RunarCompiler
             errors << "method #{method_name} binding #{binding.name} " \
                       "has loop count #{count} exceeding maximum #{MAX_LOOP_COUNT}"
           end
+          # F-283 / CL-GAP-164: the product check. Only meaningful once the
+          # per-binding count is itself sane (non-negative and within
+          # MAX_LOOP_COUNT) -- otherwise the checks above already named the
+          # problem and this would just be a confusing second diagnostic for
+          # the same single binding.
+          effective_count = count.negative? ? 0 : count
+          total_loop_count = enclosing_loop_count * effective_count
+          if count >= 0 && count <= MAX_LOOP_COUNT && total_loop_count > MAX_LOOP_COUNT
+            errors << "method #{method_name} binding #{binding.name} has loop count #{count} " \
+                      "nested inside an enclosing loop of total count #{enclosing_loop_count}, " \
+                      "producing #{total_loop_count} total iterations, exceeding maximum #{MAX_LOOP_COUNT}"
+          end
           if binding.value.body
-            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count))
+            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count, total_loop_count))
           end
         end
 
@@ -384,5 +685,6 @@ module RunarCompiler
       errors
     end
     private_class_method :_validate_bindings
+    private_class_method :_ends_with_terminal_assert
   end
 end

@@ -58,6 +58,40 @@ pub fn assertScriptHexUnderLimit(
     }
 }
 
+/// N-426: a stateful call whose `change_address` is not the key the
+/// covenant's `_changePKH` enforces (hash160 of `change_pub_key`, or of the
+/// signer's key when unset) builds a spend the network rejects. Refused before
+/// any signing or broadcast. Zig errors carry no payload, so the shared
+/// cross-SDK message (byte-identical in all seven SDKs,
+/// conformance/sdk-call/n426-change-address-guard.json) is stashed in
+/// `last_change_address_error`.
+pub const ChangeAddressError = error{ChangeAddressMismatch};
+
+pub var last_change_address_error: ?LastChangeAddressError = null;
+
+pub const LastChangeAddressError = struct {
+    message_buf: [512]u8,
+    message_len: usize,
+
+    pub fn messageSlice(self: *const LastChangeAddressError) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+};
+
+pub fn raiseChangeAddressMismatch(change_address: []const u8) ChangeAddressError {
+    var rec = LastChangeAddressError{ .message_buf = undefined, .message_len = 0 };
+    const msg = @import("std").fmt.bufPrint(
+        &rec.message_buf,
+        "changeAddress {s} does not match the change key the covenant enforces " ++
+            "(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " ++
+            "pass changePubKey for that address",
+        .{change_address},
+    ) catch rec.message_buf[0..0];
+    rec.message_len = msg.len;
+    last_change_address_error = rec;
+    return error.ChangeAddressMismatch;
+}
+
 /// Distinct typed error returned when a method call requires a caller-supplied
 /// intent-intrinsic witness value (auto-injected `_prevOutScript_<i>` or
 /// `_serialisedOutputs`) that has not been set on the `RunarContract`.
@@ -131,6 +165,8 @@ pub fn raiseWitnessValueMissing(
 // `--acknowledge-unsound-sp1-fri` (R-012). That acknowledgement stopped at
 // whoever ran the compiler: the artifact handed on afterwards looked like any
 // other, carried no marker of the gap, and every SDK funded it in silence.
+// F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+// outright, so this gate only matters for artifacts from older compilers.
 //
 // The compiler now stamps `unsoundPrimitives` into the artifact; this is the
 // SDK half. Deploy only, deliberately — spending an already-deployed contract
@@ -243,3 +279,16 @@ pub fn raiseCodePartLengthPinViolated(
     last_codepart_pin_error = rec;
     return error.CodePartLengthPinViolated;
 }
+
+// ---------------------------------------------------------------------------
+// N-260 / R100 -- fail-closed refusal of WalletProvider's raw-broadcast gap
+// ---------------------------------------------------------------------------
+//
+// `WalletProvider.broadcast` (sdk_wallet.zig) has no BRC-100 primitive that
+// relays an already-built, already-signed raw transaction verbatim --
+// `createAction` builds and signs a NEW action from wallet-composed outputs.
+// Per user decision R100 it refuses rather than silently submit an unrelated
+// action, so there is no txid to carry forward -- the refusal message is the
+// only diagnostic. Zig errors carry no payload, so this is a message literal
+// pointer (not a formatted/owned buffer like the other side channels above).
+pub var last_broadcast_refusal: ?[]const u8 = null;

@@ -69,17 +69,11 @@
     {
       "opcodeIndex": 26,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 13,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 27,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 17,
       "column": 8
     },
     {
-      "opcodeIndex": 28,
+      "opcodeIndex": 27,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 17,
       "column": 8

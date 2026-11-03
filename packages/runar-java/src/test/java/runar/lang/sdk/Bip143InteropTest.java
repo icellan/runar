@@ -172,4 +172,56 @@ class Bip143InteropTest {
                 name + ": TS reference signature does not verify under this tier's digest");
         }
     }
+
+    // N-170: the test above only exercises OpPushTx.preimage (the on-chain
+    // OP_PUSH_TX codegen path). RawTx.sighashBIP143 + LocalSigner.sign is a
+    // DIFFERENT pair -- the off-chain SDK signing path used by
+    // TransactionBuilder, WalletSigner and RunarContract's call/deploy flow
+    // (RawTx.java computes the digest, LocalSigner.java signs a caller-
+    // supplied digest) -- and neither had ever been replayed against this
+    // fixture, so a divergence in RawTx's own hand-rolled zeroing rules, or in
+    // LocalSigner producing a signature for the wrong digest, would not have
+    // been caught.
+    //
+    // Proves: for every fixture scenario, including all six FORKID modes
+    // (0x41/42/43/c1/c2/c3) on the shared 2-in/2-out tx signing input 1,
+    // RawTx.sighashBIP143's digest plus LocalSigner.sign's signature (with the
+    // sighash byte appended, as every caller of LocalSigner does) is
+    // byte-identical to the TS reference sigHex.
+    // Does not prove: that a node accepts the signature (the fixture is TS +
+    // OpPushTx-preimage cross-checked above, not re-broadcast here), or
+    // anything about WalletSigner / BRC100Wallet's own call sites.
+    @Test
+    @SuppressWarnings("unchecked")
+    void localSignerDigestPathMatchesFixtureSigHex() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        String privHex = (String) fixture.get("signer_priv_hex");
+        String pubHex = (String) fixture.get("signer_pub_hex");
+        List<Map<String, Object>> scenarios = (List<Map<String, Object>>) fixture.get("scenarios");
+        assertFalse(scenarios.isEmpty(), "fixture has no scenarios");
+
+        LocalSigner signer = new LocalSigner(privHex);
+        assertEquals(pubHex, ScriptUtils.bytesToHex(signer.pubKey()), "signer pubkey mismatch");
+
+        for (Map<String, Object> s : scenarios) {
+            String name = (String) s.get("scenario");
+            String txHex = (String) s.get("unsignedTxHex");
+            int inputIndex = asInt(s.get("inputIndex"));
+            String prevScriptHex = (String) s.get("prevScriptHex");
+            long prevValueSats = asLong(s.get("prevValueSats"));
+            String wantSigHex = (String) s.get("sigHex");
+            int sighashFlags = asInt(s.get("sighashFlags"));
+
+            RawTx tx = parseRawTx(txHex);
+            byte[] digest = tx.sighashBIP143(inputIndex, prevScriptHex, prevValueSats, sighashFlags);
+            byte[] der = signer.sign(digest, null);
+            byte[] sigFull = new byte[der.length + 1];
+            System.arraycopy(der, 0, sigFull, 0, der.length);
+            sigFull[der.length] = (byte) sighashFlags;
+            String gotSigHex = ScriptUtils.bytesToHex(sigFull);
+
+            assertEquals(wantSigHex, gotSigHex,
+                name + ": RawTx.sighashBIP143 + LocalSigner.sign diverges from TS reference");
+        }
+    }
 }

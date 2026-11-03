@@ -73,6 +73,8 @@ pub fn canonicalOpcodeName(allocator: std.mem.Allocator, byte: u8) ![]u8 {
         0x88 => "OP_EQUALVERIFY",
         0x8b => "OP_1ADD",
         0x8c => "OP_1SUB",
+        0x8d => "OP_2MUL", // Chronicle
+        0x8e => "OP_2DIV", // Chronicle
         0x8f => "OP_NEGATE",
         0x90 => "OP_ABS",
         0x91 => "OP_NOT",
@@ -106,6 +108,12 @@ pub fn canonicalOpcodeName(allocator: std.mem.Allocator, byte: u8) ![]u8 {
         0xad => "OP_CHECKSIGVERIFY",
         0xae => "OP_CHECKMULTISIG",
         0xaf => "OP_CHECKMULTISIGVERIFY",
+        // Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+        0xb3 => "OP_SUBSTR",
+        0xb4 => "OP_LEFT",
+        0xb5 => "OP_RIGHT",
+        0xb6 => "OP_LSHIFTNUM",
+        0xb7 => "OP_RSHIFTNUM",
         else => null,
     };
     if (fixed) |s| return try allocator.dupe(u8, s);
@@ -119,20 +127,63 @@ pub fn canonicalOpcodeName(allocator: std.mem.Allocator, byte: u8) ![]u8 {
     return try std.fmt.allocPrint(allocator, "OP_UNKNOWN(0x{x:0>2})", .{byte});
 }
 
-/// Normalize a hex script: strip ASCII whitespace, lowercase. Caller
-/// owns the result.
+/// Normalize a hex script: strip whitespace, lowercase. "Whitespace"
+/// here is exactly what JS's `/\s/g` matches (what the TS reference
+/// strips) — a fixed 25-codepoint set per ECMA-262 (WhiteSpace +
+/// LineTerminator), not just the ASCII run. Caller owns the result.
 pub fn normalizeHex(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try out.ensureTotalCapacity(allocator, hex.len);
-    for (hex) |c| {
-        switch (c) {
-            ' ', '\t', '\n', '\r' => {},
-            'A'...'Z' => try out.append(allocator, c + ('a' - 'A')),
-            else => try out.append(allocator, c),
+
+    if (std.unicode.Utf8View.init(hex)) |view| {
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| {
+            if (isJsWhitespace(cp)) continue;
+            if (cp >= 'A' and cp <= 'Z') {
+                try out.append(allocator, @intCast(cp + ('a' - 'A')));
+                continue;
+            }
+            if (cp < 0x80) {
+                try out.append(allocator, @intCast(cp));
+            } else {
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+                try out.appendSlice(allocator, buf[0..n]);
+            }
+        }
+    } else |_| {
+        // Invalid UTF-8: fall back to the previous ASCII-only byte loop
+        // rather than fail outright — the downstream hex decoder will
+        // reject non-hex bytes on its own.
+        for (hex) |c| {
+            switch (c) {
+                ' ', '\t', '\n', '\r' => {},
+                'A'...'Z' => try out.append(allocator, c + ('a' - 'A')),
+                else => try out.append(allocator, c),
+            }
         }
     }
     return try out.toOwnedSlice(allocator);
+}
+
+/// True iff `cp` is matched by JS's regex `\s` class. Written with hex
+/// codepoint literals (rather than `'\u{XXXX}'` escapes) to keep this
+/// file plain ASCII; verified by enumerating every BMP codepoint against
+/// a live `node` `/\s/` regex.
+fn isJsWhitespace(cp: u21) bool {
+    return switch (cp) {
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20 => true, // TAB,LF,VT,FF,CR,SPACE
+        0xA0 => true, // NBSP
+        0x1680 => true, // OGHAM SPACE MARK
+        0x2000...0x200A => true, // EN QUAD..HAIR SPACE
+        0x2028, 0x2029 => true, // LINE/PARAGRAPH SEPARATOR
+        0x202F => true, // NARROW NBSP
+        0x205F => true, // MEDIUM MATHEMATICAL SPACE
+        0x3000 => true, // IDEOGRAPHIC SPACE
+        0xFEFF => true, // ZERO WIDTH NO-BREAK SPACE (BOM)
+        else => false,
+    };
 }
 
 /// Decode `hex` (already normalized) into an opcode list. Caller owns
@@ -419,6 +470,35 @@ test "normalize hex strips whitespace + lowercases" {
     const out = try normalizeHex(a, "  76A9 88AC\n");
     defer a.free(out);
     try std.testing.expectEqualStrings("76a988ac", out);
+}
+
+test "normalize hex strips js whitespace set (NBSP, BOM)" {
+    // The TS reference strips exactly what JS's /\s/g matches: a fixed
+    // 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator). NBSP
+    // (U+00A0) and the BOM (U+FEFF) are both in that set; the previous
+    // normalizeHex only matched a handful of ASCII whitespace bytes and
+    // passed every other byte through unchanged. Verified against the
+    // live TS analyzer: both inputs below normalize to "76a988ac".
+    const a = std.testing.allocator;
+    const out1 = try normalizeHex(a, "76\xc2\xa0a9\xc2\xa088\xc2\xa0ac");
+    defer a.free(out1);
+    try std.testing.expectEqualStrings("76a988ac", out1);
+
+    const out2 = try normalizeHex(a, "\xef\xbb\xbf76a988ac");
+    defer a.free(out2);
+    try std.testing.expectEqualStrings("76a988ac", out2);
+}
+
+test "normalize hex does not strip C0 separators" {
+    // U+001C-U+001F are not matched by JS /\s/g, so the TS reference
+    // keeps them in the normalized string (and then rejects them as
+    // non-hex characters - verified live: the TS analyzer throws
+    // "Invalid hex character" on this exact input). normalizeHex must
+    // not strip them either.
+    const a = std.testing.allocator;
+    const out = try normalizeHex(a, "76\x1ca9");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("76\x1ca9", out);
 }
 
 test "parseScript basic p2pkh" {

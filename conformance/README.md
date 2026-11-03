@@ -164,6 +164,8 @@ The runner's `--ir-parity` mode (CI step "Run IR -> hex cross-tier parity") comp
 
 Unlike `--parser-only`, this gate **is** scoped by the per-fixture `compilers` allowlist — hex parity is exactly what the allowlist governs. A fixture whose allowlist has no overlap with the six non-TS tiers is skipped. The mode always runs fold-OFF (`--disable-constant-folding`), regardless of `RUNAR_DISABLE_CONSTANT_FOLDING`, because the goldens were stamped fold-OFF; fold-ON parity is `--multi-format`'s job.
 
+`--ir-roundtrip` (F-038) is its companion: per non-TS tier it compiles every fixture with `--source`, and again through that tier's own `--emit-ir` -> `--ir`, and requires the two artifacts to agree on `script`, `parentClass`, `abi` and `stateFields` — the fields the SDKs sign by, which hex parity cannot see. Same allowlist scoping.
+
 This replaces ~180 lines of inline bash/jq that `.github/workflows/ci.yml` used to carry, which held its **own** copy of the allowlist rule and could drift from the runner's. The workflow step is now a thin caller. `runar-verification/scripts/cross-compiler-diff.sh` remains a separate implementation — it is the Tier-6.1 verification gate and additionally drives the Lean reference tier, which this runner does not know about. **If you change parity or allowlist semantics, change `runner/runner.ts` first and mirror it there.**
 
 Run locally:
@@ -181,13 +183,14 @@ The complete set of fixtures with a `compilers` allowlist is enumerated and pinn
 
 ##### Go-only crypto family
 
-These fixtures exercise the Baby Bear / KoalaBear / Poseidon2 / BN254-witness / FRI / Merkle / FiatShamir-KB Stack-IR codegen modules, which currently ship in the Go compiler only (Mode-3 STARK / FRI verification flows). See CLAUDE.md ("Go-only crypto codegen modules").
+These fixtures exercise the Baby Bear / Merkle / BN254 Stack-IR codegen modules (BabyBear base field and Ext4, `merkleRootSha256`, and the BN254 four-pair pairing check `bn254MultiPairing4`). The Go-only policy (see CLAUDE.md, "EVM/STARK proof-system primitives") covers more families than that, but no conformance fixture calls KoalaBear, Poseidon2, the Groth16 verifier shape (prepared-input `bn254G1ScalarMul` / `bn254G1Add` plus the pairing), the SP1 FRI verifier (`verifySP1FRI`) or FiatShamir-KB. The `checkFriFold` method in `babybear-ext4` is a FRI colinearity relation written in contract source over BabyBear Ext4. It is not the SP1 FRI verifier codegen. Those families are covered only by Go unit and integration tests, and no conformance golden pins their bytes. For the Groth16 verifier that means `compilers/go/codegen/bn254_generic_test.go`, `bn254_pairing_validation_test.go` and `bn254_groth16_test.go`, `packages/runar-go/bn254_real_pairing_test.go`, and `integration/go/groth16_test.go`, which runs the pipeline on `integration/go/contracts/Groth16Verifier.runar.go`. `bn254-pairing` (N-314) pins the pairing itself: a ~4.7 MB script whose committed golden is executed on `@bsv/sdk` Spend by the precompiled-hex spec `witnesses/real-crypto/bn254-pairing.json` (a valid Groth16-shaped instance accepts; a wrong proof point, a wrong public input and a one-bit G2 flip reject). It is pairing-only on purpose: every pair is a spend argument and there is no constructor, so the golden is the whole locking script and nothing has to be spliced into it before it runs. `tests/f278-go-only-coverage-claims.test.ts` fails if this list names a family that no fixture calls.
 
 | Fixture | Allowlist | Rationale |
 |---|---|---|
 | `babybear` | `["go"]` | BabyBear prime-field arithmetic; Stack-IR codegen ships in Go only. |
 | `babybear-ext4` | `["go"]` | BabyBear Ext4 extension-field operations; Stack-IR codegen ships in Go only. |
 | `merkle-proof` | `["go"]` | SHA-256 Merkle-root verification using the Go-only Merkle codegen helpers. |
+| `bn254-pairing` | `["go"]` | BN254 four-pair pairing-product check (`bn254MultiPairing4`); the pairing codegen ships in Go only. |
 
 ##### EVM/STARK proof-system primitives (Go-only by project policy)
 
@@ -206,6 +209,10 @@ CI runs the multi-format conformance suite **twice**: once with `--disable-const
 A fixture (or a specific format variant of a fixture) that is known to fail the fold-ON cross-tier check must be listed in `conformance/fold-on-allowlist.json` with a per-entry `reason` (and ideally a `tracking` ref). The runner refuses to load entries that lack a non-empty `reason` — there is no "bare list" mode. The fold-OFF run is unaffected, so allowlisting only relaxes the dual-mode parity check, not the canonical golden coverage.
 
 The allowlist is currently **empty** (`"skip": []`): there are no fold-ON exemptions, so every fixture is enforced across all 7 tiers under both fold modes. If a fold-ON-only divergence is ever introduced, add an entry here (with a `reason`) and to `conformance/fold-on-allowlist.json` in the same commit.
+
+**Vacuous rows (F-049).** A row that ran without error but compared nothing — fewer than two tiers' outputs compared with each other AND no output compared with a golden — is reported `VACUOUS`, not `PASS`, and counted separately: `Summary: N passed, F failed, S skipped, V vacuous (T total)`. Under fold-ON this is every format of a single-tier (`"compilers": ["go"]`) fixture, since its only other check, the golden, is skipped; in either mode it is also a row whose only allowlisted tier was unavailable, and a fold-ON allowlist entry. A vacuous row does not fail the run, but it is never counted in `passed`, so a gate on the pass count (e.g. `scripts/release.sh`) treats it as not passed.
+
+**Single-tier fixtures under fold-ON: `foldOnMatchesGolden` (N-473).** A `"compilers"`-allowlisted fixture whose fold-ON output is byte-identical to its fold-OFF golden declares `"foldOnMatchesGolden": true` in `source.json`. Under fold-ON the runner then compares that fixture's output against the existing `expected-ir.json` / `expected-script.hex` (in both golden and `--multi-format` modes), so the row checks something real and is not vacuous. Because every format is compared with the same golden, the nine surface formats are also held to each other under fold-ON. No new golden file is involved: the reference is the already provenance-gated fold-OFF golden. The vacuity rule itself is unchanged; a flagged row is non-vacuous only because the comparison actually ran. If folding ever moves a flagged fixture's bytes, its fold-ON rows fail. That forces a real decision (fix the compiler, or drop the flag and add a separately gated fold-ON reference); the flag never hides the change. The runner refuses the flag unless it is literally `true`, and refuses it on a fixture without a `compilers` allowlist, because every-tier fixtures are already cross-validated tier against tier under fold-ON. All five Go-only fixtures (`babybear`, `babybear-ext4`, `bn254-pairing`, `merkle-proof`, `state-covenant`) carry the flag. At 2f2b78f5b the Go tier's fold-ON IR and hex were measured equal to the golden in all nine formats. Gated by `runner/__tests__/single-tier-vacuous.test.ts`.
 
 ### File Roles
 
@@ -511,6 +518,8 @@ Golden files (`expected-ir.json`, `expected-script.hex`) are checked into versio
 pnpm run update-golden
 ```
 
+   This stamps goldens from TypeScript compiler output. A fixture whose `source.json` `compilers` allowlist excludes `ts` (the Go-only fixtures) is refused and reported as `Failed`; its golden is never overwritten from TS.
+
 4. Review the diffs to verify the changes are expected.
 5. Commit the updated golden files alongside the compiler changes.
 
@@ -530,6 +539,8 @@ Goldens are **self-produced** by the very implementation under test — `pnpm ru
 - `conformance/sdk-vertical/artifacts/*.json` (the compiled artifacts those cases splice; `constructorSlots[].byteOffset` and `codeSeparatorIndices` live here)
 - `conformance/analyzer/**/expected-analyzer-report.json`
 - `conformance/source-map/**/expected-source-map.json`
+- `conformance/anf-interpreter/expected-strict/*.json` (strict-mode ANF-interpreter execution goldens, registered F-164 round 2)
+- `conformance/sdk-call/*.{json,hex}` (cross-SDK call vectors and the compiler pins they are derived from, registered N-038; the `.runar.ts` contract source beside them is input and not guarded)
 - `conformance/script-size-baseline.json`
 - `packages/decompiler/coverage-baseline.json`
 
@@ -575,7 +586,7 @@ node conformance/scripts/check-golden-provenance.mjs --print-hashes --base origi
 node conformance/scripts/check-golden-provenance.mjs --self-test
 ```
 
-**CI wiring.** The `golden-provenance-gate` job in `.github/workflows/ci.yml` runs on `pull_request` (no `continue-on-error`), checks out with `fetch-depth: 0`, and passes the PR base commit SHA via `$GOLDEN_GATE_BASE` (through `env:`, never interpolated into a shell command). It runs the checker in auto-detect mode and then `--self-test` so the gate cannot rot into a silent no-op. The script is dependency-light (Node built-ins + `git`; no `pnpm install`).
+**CI wiring.** The `golden-provenance-gate` job in `.github/workflows/ci.yml` runs on every event — `pull_request`, `merge_group`, `push` and dispatch — (no `continue-on-error`), checks out with `fetch-depth: 0`, and passes a base commit SHA via `$GOLDEN_GATE_BASE`: the PR base SHA, the merge-group base SHA, or the pre-push tip (falling back to `HEAD^` for a new branch, tag, force-push or dispatch). Event values go through `env:`, never interpolated into a shell command. It runs the checker in auto-detect mode and then `--self-test` so the gate cannot rot into a silent no-op. The script is dependency-light (Node built-ins + `git`; no `pnpm install`).
 
 ### Provenance discipline — the rule for regenerating a golden (plan §F3)
 
@@ -810,7 +821,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **82 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **99 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
@@ -823,6 +834,7 @@ The suite currently contains **82 fixtures** under `tests/` — that directory i
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
 | `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on **bigint** operands. The ByteString half of the language rule is NOT here — the fixture's two properties are both `bigint` (R-197); it is covered instead by `conformance/closed-findings/BitwiseBytes.runar.ts`, which requires all seven tiers to accept it and agree byte for byte | Yes |
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
+| `bn254-pairing` | BN254 four-pair pairing-product check (`bn254MultiPairing4`, Go-only) | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
 | `byte-builtins` | `split`, `int2str`, `reverseBytes`, `ripemd160` and the `Sha256Hash` alias — five builtins that appeared in no fixture's ANF. Four of them the fuzzer still cannot generate; `split` it now can (`SPLIT_ARM_ENABLED` in `packages/runar-testing/src/fuzzer/generator.ts`), and the arm's first seeded run found the lowering defect that left the split's unnameable left half orphaned on the stack model. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go`, including the two hash methods' "the digest itself must not unlock it" rows. `ripemd160` arrived last: its only `.runar.go` spelling, `runar.Ripemd160`, is both a Rúnar type name and a Rúnar builtin name, and two tiers resolved the call as a type cast until that was fixed | Yes |
@@ -831,7 +843,7 @@ The suite currently contains **82 fixtures** under `tests/` — that directory i
 | `cross-covenant` | Cross-contract covenant validation | Yes |
 | `ec-demo` | EC point operation demos | Yes |
 | `ec-primitives` | EC point operations (ecAdd, ecMul, ecMulGen, etc.) | Yes |
-| `ec-unit` | Fine-grained EC unit tests | Yes |
+| `ec-unit` | Fine-grained EC unit tests. Since F-269 the EC optimizer resolves `@ref:` aliases, so its `assert(!ecOnCurve(ecAdd(g, neg)))` (P + (-P)) and `ecMul(g, 2n)` (specialized to `ecMulGen(2n)`) are folded at compile time in every tier: the golden no longer runs the adder's point-at-infinity path or the ladder's k = 2 path with runtime operands (N-354, user decision R125: the fixture and its goldens are deliberately unchanged). Those paths are executed on `@bsv/sdk` with operands pushed at runtime by `packages/runar-testing/src/__tests__/ec-degenerate-add.test.ts` (P + (-P) is the all-zero point, rejected by `ecOnCurve`), `ec-add-doubling.test.ts` (`ecAdd(P, P)`) and `ec-mul-k2.test.ts` (`ecMul(P, 2n)`); the fold itself is pinned in all 7 tiers by `packages/runar-compiler/src/__tests__/r034-ec-negate-cancel-parity.test.ts` | Yes |
 | `escrow` | Multi-party escrow with multiple spending paths | Yes |
 | `function-patterns` | Private helper methods and function call patterns | Yes |
 | `go-dsl-bytestring-literal` | `.runar.go` DSL `ByteString` literal grammar | Yes |
@@ -871,9 +883,9 @@ Gated in CI by the `Script Execution Oracle` job. It is a curated family list
 (not a completeness gate over every fixture); the TS `witnesses/differential.test.ts`
 ScriptVM also executes fold-ON bytes against a script engine.
 
-### SDK-output conformance (70 fixtures, 7 SDKs)
+### SDK-output conformance (80 fixtures, 7 SDKs)
 
-`sdk-output/tests/` contains 70 fixtures (one `input.json` + one
+`sdk-output/tests/` contains 80 fixtures (one `input.json` + one
 `expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
 compiles each fixture through all seven SDK tools in `sdk-output/tools/` (TypeScript,
 Go, Python, Ruby, Rust, Zig, Java) and asserts byte-identical locking-script hex

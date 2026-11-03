@@ -246,6 +246,58 @@ class StackLowerTest {
             "checkPreimage must emit the 428-byte OP_PUSH_TX sig-derivation raw_bytes blob");
     }
 
+    // F-284: statefulCounterIncludesCodeSeparator above recognises the BUG-100
+    // binding blob by its LENGTH only (rb.bytes().length == 428). Length is not
+    // a security property: a 428-byte blob with one opcode changed (OP_HASH256
+    // -> OP_NOP at byte 1) has the same length, and the @bsv/sdk Spend
+    // interpreter ACCEPTS that forged blob with a 32-byte non-preimage while
+    // rejecting the genuine preimage.
+    //
+    // This pins the exact bytes. The literal is copied from the TS reference
+    // (CHECK_PREIMAGE_BINDING_HEX in packages/runar-compiler/src/passes/
+    // oppushtx-codegen.ts) -- the blob oppushtx-binding.test.ts exploit-tests
+    // against forged/decoupled/zeroed preimages -- NOT from StackLower's own
+    // constant, so a mutation there cannot also move the expectation.
+    //
+    // Proves: the stateful increment method emits that exact blob, once.
+    // Does NOT prove: the blob is binding on-chain (Java ships no Script VM;
+    // that is proven once for these bytes in TS), nor non-default @sighash
+    // variants.
+    private static final String TS_REFERENCE_PREIMAGE_BINDING_HEX =
+        "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+        + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
+        + "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
+        + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
+        + "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
+        + "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        + "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
+        + "bf66a71ae74a1e83b0ad";
+    private static final String TS_REFERENCE_PREIMAGE_BINDING_SHA256 =
+        "5784cfa33516fe07e8c0466c2608a9f812e5ecc8a35283a23700832fbe2144d5";
+
+    @Test
+    void statefulPreimageBindingBlobIsByteIdenticalToTsReference() throws Exception {
+        byte[] reference = java.util.HexFormat.of().parseHex(TS_REFERENCE_PREIMAGE_BINDING_HEX);
+        // Guard the literal itself against a silent edit.
+        assertEquals(428, reference.length);
+        assertEquals(TS_REFERENCE_PREIMAGE_BINDING_SHA256, java.util.HexFormat.of().formatHex(
+            java.security.MessageDigest.getInstance("SHA-256").digest(reference)));
+
+        StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
+        StackMethod inc = findMethod(p, "increment");
+        int exact = 0;
+        for (StackOp op : inc.ops()) {
+            if (op instanceof RawBytesOp rb && java.util.Arrays.equals(rb.bytes(), reference)) exact++;
+        }
+        assertEquals(1, exact,
+            "stateful increment must emit the TS-reference OP_PUSH_TX binding blob (sha256 "
+                + TS_REFERENCE_PREIMAGE_BINDING_SHA256 + ") exactly once");
+    }
+
     @Test
     void collectRefsHandlesAtRefAliases() {
         StackProgram p = compile(ARITH_SRC, "Arith.runar.java");

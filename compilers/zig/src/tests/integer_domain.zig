@@ -67,6 +67,10 @@ fn expectHexFoldOff(comptime source: []const u8, expected: []const u8) !void {
     );
     if (result.artifact_json) |json| std.testing.allocator.free(json);
     defer std.testing.allocator.free(result.script_hex);
+    defer {
+        for (result.warnings) |line| std.testing.allocator.free(line);
+        std.testing.allocator.free(result.warnings);
+    }
     try std.testing.expectEqualStrings(expected, result.script_hex);
 }
 
@@ -90,7 +94,7 @@ test "D1: product of two i64-max literals compiles instead of aborting" {
         \\  }
         \\}
     ,
-        "08ffffffffffffff7f08ffffffffffffff7f100100000000000000ffffffffffffff3f009c7777",
+        "100100000000000000ffffffffffffff3f009c",
     );
 }
 
@@ -120,7 +124,7 @@ test "D3: pow(256n, 32n) folds to 2^256, not the mod-2^128 residue" {
         \\  }
         \\}
     ,
-        "020001012021000000000000000000000000000000000000000000000000000000000000000001009c7777",
+        "21000000000000000000000000000000000000000000000000000000000000000001009c",
     );
 }
 
@@ -165,7 +169,7 @@ test "D3: mulDiv over above-i64 operands folds without wrapping" {
         \\  }
         \\}
     ,
-        "090000000000000000010900000000000000000152110000000000000000000000000000008000009c777777",
+        "110000000000000000000000000000008000009c",
     );
 }
 
@@ -189,7 +193,7 @@ test "D4: product of two above-i64 literals is folded, not emitted as OP_MUL" {
     // and defer the multiply to spend time; the other six tiers fold it.
     try expectHex(
         source,
-        "090000000000000000400900000000000000004012000000000000000000000000000000000010009c7777",
+        "12000000000000000000000000000000000010009c",
     );
 }
 
@@ -206,7 +210,7 @@ test "D4: sum of two above-i64 literals is folded, not emitted as OP_ADD" {
         \\  }
         \\}
     ,
-        "090000000000000000010900000000000000000109000000000000000002009c7777",
+        "09000000000000000002009c",
     );
 }
 

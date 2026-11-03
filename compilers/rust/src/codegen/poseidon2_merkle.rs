@@ -38,6 +38,12 @@ fn emit_roll(emit: &mut dyn FnMut(StackOp), d: usize) {
     emit(StackOp::Roll { depth: d });
 }
 
+/// Largest Merkle depth `emit_poseidon2_merkle_root` can emit (Go R-172's
+/// `poseidon2MerkleMaxDepth`). Higher depths produce quadratically larger
+/// scripts because of the roll operations at each level. The stack lowering
+/// reads it too, so the author-facing gate and the emitter's bound agree.
+pub const POSEIDON2_MERKLE_MAX_DEPTH: usize = 32;
+
 /// emit_poseidon2_merkle_root emits Poseidon2 Merkle root computation.
 ///
 /// Stack in:  [..., leaf(8 elems), proof(depth*8 elems), index]
@@ -46,8 +52,9 @@ fn emit_roll(emit: &mut dyn FnMut(StackOp), d: usize) {
 /// depth is a compile-time constant (unrolled loop). Must be in [1, 32].
 pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
     assert!(
-        depth >= 1 && depth <= 32,
-        "emit_poseidon2_merkle_root: depth must be in [1, 32], got {}",
+        depth >= 1 && depth <= POSEIDON2_MERKLE_MAX_DEPTH,
+        "emit_poseidon2_merkle_root: depth must be in [1, {}], got {}",
+        POSEIDON2_MERKLE_MAX_DEPTH,
         depth
     );
 
@@ -147,6 +154,8 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
             ],
             // bit==0: already in correct order [current(8), sibling(8)]
             else_ops: vec![],
+            then_locs: Vec::new(),
+            else_locs: Vec::new(),
         });
         // Stack: [..., future_sibs, left(8), right(8)]
 
@@ -171,4 +180,29 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
     // After all levels: [..., root(8), index]
     emit(StackOp::Drop);
     // Stack: [..., root_0..root_7]
+}
+
+/// emit_poseidon2_root_pack folds the 8-element Poseidon2 KoalaBear root that
+/// `emit_poseidon2_merkle_root` leaves on the stack into ONE Script integer.
+/// Port of Go's `EmitPoseidon2RootPack` (R-056 / CL-BUG-099), byte for byte.
+///
+/// Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+/// Stack out: [..., packed]   where packed = sum(root_i * (2^32)^i)
+///
+/// `merkleRootPoseidon2KB` is typed as returning one `bigint`. Every KoalaBear
+/// element is < p < 2^32, so base-2^32 packing is injective over the whole
+/// root: equality on the packed value is equality on all eight limbs, rather
+/// than on root_7 alone (the seven-OP_NIP truncation Go and Python fixed).
+///
+/// Deliberately NOT applied inside `emit_poseidon2_merkle_root`: Go's SP1 FRI
+/// verifier consumes the eight raw limbs and compares each one itself.
+pub fn emit_poseidon2_root_pack(emit: &mut dyn FnMut(StackOp)) {
+    // Horner from the top of the stack down: after step k the top holds the
+    // packed suffix and the next-lower limb sits directly below it, so OP_ADD
+    // folds it in with no rolls.
+    for _ in 0..7 {
+        emit(StackOp::Push(PushValue::Int(BigInt::from(1u64 << 32))));
+        emit(StackOp::Opcode("OP_MUL".into()));
+        emit(StackOp::Opcode("OP_ADD".into()));
+    }
 }

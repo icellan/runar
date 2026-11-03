@@ -49,34 +49,75 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
            "expected OP_CHECKSIG or OP_CHECKSIGVERIFY in ASM, got: #{asm[0, 200]}"
   end
 
-  def test_checksig_terminal_assert_folds_to_verify
-    # When checkSig is the sole assertion in a stateless contract, the
-    # peephole optimizer should fold the trailing OP_VERIFY into the opcode
-    # itself, producing OP_CHECKSIGVERIFY (0xac → 0xad).
+  def test_checksig_nonterminal_assert_folds_to_verify
+    # F-378: renamed from `test_checksig_terminal_assert_folds_to_verify`.
+    # The old name and comment claimed that a checkSig assert, when it is
+    # the SOLE/terminal statement in the method, gets its trailing
+    # OP_VERIFY folded by the peephole optimizer into OP_CHECKSIGVERIFY.
+    # That premise is wrong: a terminal assert's OP_VERIFY is elided
+    # entirely by `_lower_assert` in compilers/ruby/lib/runar_compiler/
+    # codegen/stack.rb:3156-3167 (TS reference: 05-stack-lower.ts's
+    # `terminalAssert` path) BEFORE the peephole optimizer ever runs,
+    # because Bitcoin Script's own success rule (truthy top-of-stack at
+    # script end) already enforces it. Compiling the OLD single-statement
+    # contract produces only `OP_0 OP_CHECKSIG` -- verified byte-identical
+    # against the TS reference compiler -- with no OP_VERIFY ever emitted
+    # to fold, so the old assertion could never have observed a fold for
+    # that contract shape, on top of being vacuous in its own right:
+    # `asm.include?('OP_CHECKSIG') || asm.include?('OP_CHECKSIGVERIFY')` is
+    # always true regardless of fold state, because
+    # 'OP_CHECKSIGVERIFY'.include?('OP_CHECKSIG') is itself true (substring
+    # match) -- so the first disjunct alone is satisfied by the folded form.
+    #
+    # To actually exercise the fold, checkSig's assert must NOT be the
+    # method's terminal statement (a second assert follows it), which forces
+    # stack-lowering to emit a real, foldable OP_CHECKSIG + OP_VERIFY pair --
+    # verified byte-identical to the TS reference compiler
+    # (`OP_SWAP OP_0 OP_CHECKSIGVERIFY OP_0 OP_NUMEQUAL`).
+    #
+    # Proves: for this non-terminal-assert shape, the Ruby peephole
+    # optimizer (compilers/ruby/lib/runar_compiler/codegen/optimizer.rb:
+    # 128-130) actually folds an adjacent OP_CHECKSIG + OP_VERIFY pair into
+    # OP_CHECKSIGVERIFY, and that no bare OP_CHECKSIG token survives the
+    # fold -- disabling the fold rule makes this exact test fail (verified
+    # during remediation).
+    # Does NOT prove: that the fold (or the terminal-assert elision it is
+    # distinguished from) is correct on-chain -- Ruby ships no ScriptVM, so
+    # on-chain semantic equivalence of OP_CHECKSIG+OP_VERIFY vs.
+    # OP_CHECKSIGVERIFY is established once, in TS, not here. Nor does it
+    # prove cross-tier byte parity for this shape generically -- that is
+    # the conformance suite's job, not this unit test.
     source = <<~TS
       import { SmartContract, assert, checkSig } from 'runar-lang';
       import type { PubKey, Sig } from 'runar-lang';
 
-      class TerminalSig extends SmartContract {
+      class NonTerminalSig extends SmartContract {
         readonly pk: PubKey;
+        readonly x: bigint;
 
-        constructor(pk: PubKey) {
-          super(pk);
+        constructor(pk: PubKey, x: bigint) {
+          super(pk, x);
           this.pk = pk;
+          this.x = x;
         }
 
-        public unlock(sig: Sig): void {
+        public unlock(sig: Sig, y: bigint): void {
           assert(checkSig(sig, this.pk));
+          assert(y == this.x);
         }
       }
     TS
 
-    artifact = compile_ts_source(source, 'TerminalSig.runar.ts')
+    artifact = compile_ts_source(source, 'NonTerminalSig.runar.ts')
     asm = artifact.asm
-    # Either the folded VERIFY form (preferred) or the unfolded sequence is
-    # acceptable. We just require that the opcode appears somewhere.
-    assert(asm.include?('OP_CHECKSIG') || asm.include?('OP_CHECKSIGVERIFY'),
-           "expected a CHECKSIG[VERIFY] opcode, got: #{asm[0, 200]}")
+    # Tokenize the space-joined ASM and check the exact mnemonic (not a
+    # substring) so the test fails if the fold regresses.
+    tokens = asm.split(/\s+/)
+    assert_includes tokens, 'OP_CHECKSIGVERIFY',
+                    "expected the peephole optimizer to fold the non-terminal checkSig's " \
+                    "OP_CHECKSIG + OP_VERIFY into OP_CHECKSIGVERIFY, got: #{asm[0, 200]}"
+    refute_includes tokens, 'OP_CHECKSIG',
+                    "expected no standalone OP_CHECKSIG left after the fold, got: #{asm[0, 200]}"
   end
 
   # ---------------------------------------------------------------------------
@@ -123,6 +164,65 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
                     "stateful contracts must emit OP_CODESEPARATOR before the state continuation"
   end
 
+  # F-284: the test above pins the BUG-100 binding blob by its LENGTH only
+  # (`<raw 428 bytes>`). Length is not a security property: a 428-byte blob
+  # with one opcode changed (OP_HASH256 -> OP_NOP at byte 1) still renders as
+  # `<raw 428 bytes>`, and the @bsv/sdk Spend interpreter ACCEPTS that forged
+  # blob with a 32-byte non-preimage while rejecting the genuine preimage.
+  #
+  # This pins the exact bytes. The literal below is copied from the TS
+  # reference (`CHECK_PREIMAGE_BINDING_HEX`, packages/runar-compiler/src/passes/
+  # oppushtx-codegen.ts) -- the blob oppushtx-binding.test.ts exploit-tests
+  # against forged/decoupled/zeroed preimages -- NOT from this tier's own
+  # constant, so a mutation of stack.rb cannot also move the expectation.
+  #
+  # Proves: the compiled stateful script contains that exact blob, once.
+  # Does NOT prove: the blob is binding on-chain (Ruby ships no Script VM; that
+  # is proven once for these bytes in TS), nor non-default @sighash variants.
+  TS_REFERENCE_PREIMAGE_BINDING_HEX =
+    "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f" \
+    "517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e" \
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5e" \
+    "d2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f7692" \
+    "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692" \
+    "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e" \
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e" \
+    "7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e82" \
+    "7c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad"
+  TS_REFERENCE_PREIMAGE_BINDING_SHA256 =
+    "5784cfa33516fe07e8c0466c2608a9f812e5ecc8a35283a23700832fbe2144d5"
+
+  def test_stateful_preimage_binding_blob_is_byte_identical_to_ts_reference
+    require 'digest'
+    reference = [TS_REFERENCE_PREIMAGE_BINDING_HEX].pack("H*")
+    # Guard the literal itself against a silent edit.
+    assert_equal 428, reference.bytesize
+    assert_equal TS_REFERENCE_PREIMAGE_BINDING_SHA256, Digest::SHA256.hexdigest(reference)
+
+    source = <<~TS
+      import { StatefulSmartContract } from 'runar-lang';
+
+      class Counter extends StatefulSmartContract {
+        count: bigint;
+
+        constructor(count: bigint) {
+          super(count);
+          this.count = count;
+        }
+
+        public bump(): void {
+          this.count = this.count + 1n;
+        }
+      }
+    TS
+
+    script_hex = compile_ts_source(source, 'Counter.runar.ts').script
+    occurrences = script_hex.scan(TS_REFERENCE_PREIMAGE_BINDING_HEX).length
+    assert_equal 1, occurrences,
+                 "stateful script must contain the TS-reference OP_PUSH_TX binding blob " \
+                 "(sha256 #{TS_REFERENCE_PREIMAGE_BINDING_SHA256}) exactly once; found #{occurrences}"
+  end
+
   def test_stateful_codeseparator_index_is_recorded
     source = <<~TS
       import { StatefulSmartContract } from 'runar-lang';
@@ -142,12 +242,36 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
     TS
 
     artifact = compile_ts_source(source, 'Counter.runar.ts')
-    # The artifact must expose the code-separator byte index for the SDK
-    # to compute correct preimage signatures.
-    assert artifact.respond_to?(:code_separator_index) ||
-           artifact.respond_to?(:codeSeparatorIndex) ||
-           artifact.respond_to?(:code_separator_indices),
-           'stateful artifact must expose codeSeparatorIndex'
+
+    # F-331: the previous version of this test only asserted
+    # `artifact.respond_to?(:code_separator_index) || ...`. `Artifact` is a
+    # `Struct`, so every declared member always responds_to? true regardless
+    # of its value -- the assertion passed even when `code_separator_index`
+    # was hard-coded wrong. It never checked the SDK-relevant thing: the
+    # actual byte offset, which the SDK uses to slice `scriptCode` out of the
+    # locking script before hashing the BIP-143 preimage. A wrong offset
+    # produces a preimage over the wrong bytes, so `checkSig`/`checkPreimage`
+    # verify against a signature the spender never actually signed.
+    #
+    # Pin to the TS reference compiler's value for this exact contract
+    # (verified directly against packages/runar-compiler's `compile()`):
+    # for a single-public-method stateful contract, codegen emits
+    # `OP_NOP OP_CODESEPARATOR ...` so OP_CODESEPARATOR sits at byte
+    # offset 1 (see packages/runar-compiler/src/passes/06-emit.ts
+    # `codeSeparatorIndex = this.byteLength` right after the OP_NOP, and
+    # compilers/ruby/lib/runar_compiler/codegen/emit.rb which mirrors it).
+    assert_equal 1, artifact.code_separator_index,
+                 'codeSeparatorIndex must be the actual OP_CODESEPARATOR byte offset, ' \
+                 'not merely present on the artifact'
+    assert_equal [1], artifact.code_separator_indices,
+                 'codeSeparatorIndices must list the actual OP_CODESEPARATOR byte offset(s)'
+
+    # Cross-check against the emitted bytes themselves: the byte at
+    # code_separator_index must really be OP_CODESEPARATOR (0xab). This is
+    # what ties the recorded index to the thing an SDK actually signs with.
+    script_bytes = [artifact.script].pack('H*').bytes
+    assert_equal 0xab, script_bytes[artifact.code_separator_index],
+                 'the byte at codeSeparatorIndex must be OP_CODESEPARATOR (0xab)'
   end
 
   # ---------------------------------------------------------------------------

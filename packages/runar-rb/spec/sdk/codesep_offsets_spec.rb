@@ -88,14 +88,14 @@ RSpec.describe Runar::SDK::RunarContract, '#get_code_sep_index (issue #132)' do
   let(:real_code_script) { "5114#{'aa' * 20}abac" }
 
   it 'byte-walks @code_script and ignores 0 placeholder constructor args' do
-    contract = described_class.new(artifact, [0]) # placeholder ctor arg
+    contract = described_class.new(artifact, [0], restoring: true) # placeholder ctor arg (restore path; N-330)
     contract.instance_variable_set(:@code_script, real_code_script)
     # Byte-walk recovers the true OP_CODESEPARATOR byte offset (22)...
     expect(contract.send(:get_code_sep_index, 0)).to eq(22)
   end
 
   it 'falls back to the args-derived template offset when @code_script is nil' do
-    contract = described_class.new(artifact, [0])
+    contract = described_class.new(artifact, [0], restoring: true)
     # ...whereas the template path (no @code_script) returns the base offset (2).
     expect(contract.send(:get_code_sep_index, 0)).to eq(2)
     expect(contract.send(:get_code_sep_index, 0)).not_to eq(22)

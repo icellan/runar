@@ -3,7 +3,9 @@ package runar.lang.analyzer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Top-level entry point for the Bitcoin Script static analyzer (spec §11).
@@ -63,7 +65,25 @@ public final class Analyzer {
         // orchestration, opcode-concern findings are appended last. Place
         // the parser-emitted push findings inside that bucket so they sort
         // alongside the other opcode concerns.
-        all.addAll(parserFindings);
+        //
+        // The parser runs BEFORE raw_script spans are collapsed (:38-44), so
+        // a push finding's offset may point at a byte range that a span later
+        // swallows into a single synthetic RAW_SPAN step. TS/Python only run
+        // their push-encoding check AFTER collapsing, so a push entirely
+        // inside a span never gets a finding there; keep parity by dropping
+        // any parser finding whose offset no longer corresponds to a real
+        // (non-raw-span) push op in the collapsed `ops` list.
+        Set<Integer> survivingPushOffsets = new HashSet<>();
+        for (OpStep op : ops) {
+            if (op.pushEncoding != null) {
+                survivingPushOffsets.add(op.offset);
+            }
+        }
+        for (Finding f : parserFindings) {
+            if (f.offset != null && survivingPushOffsets.contains(f.offset)) {
+                all.add(f);
+            }
+        }
 
         // Sort (stable) by (severityRank, offsetRank). Optional-offset findings
         // sort to the end within their severity bucket. Ties are broken by
@@ -96,17 +116,53 @@ public final class Analyzer {
     /**
      * Strip whitespace and lowercase. Spec §2: "Whitespace is permitted and
      * stripped; the canonical normalized form is lowercase-hex with no
-     * whitespace."
+     * whitespace." The TS reference strips exactly what JS's
+     * {@code /\s/g} matches — a fixed 25-codepoint set per ECMA-262
+     * (WhiteSpace + LineTerminator) — which is NOT the same set as
+     * {@link Character#isWhitespace}: the JDK excludes the "non-breaking"
+     * spaces (U+00A0, U+2007, U+202F) and the BOM (U+FEFF) that JS strips,
+     * and includes the C0 separators U+001C-U+001F that JS does not. Use
+     * {@link #isJsWhitespace} instead so both directions match the TS
+     * reference byte-for-byte.
      */
     private static String normalize(String hex) {
         StringBuilder sb = new StringBuilder(hex.length());
         for (int i = 0; i < hex.length(); i++) {
             char c = hex.charAt(i);
-            if (Character.isWhitespace(c)) continue;
+            if (isJsWhitespace(c)) continue;
             if (c >= 'A' && c <= 'F') c = (char) (c - 'A' + 'a');
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    /**
+     * True iff {@code c} is matched by JS's regex {@code \s} class. This is
+     * the fixed character class ECMA-262 assigns to {@code \s}: TAB, LF,
+     * VT, FF, CR, SPACE, NBSP, OGHAM SPACE MARK, the EN QUAD..HAIR SPACE
+     * run, LINE/PARAGRAPH SEPARATOR, NARROW NBSP, MEDIUM MATHEMATICAL
+     * SPACE, IDEOGRAPHIC SPACE, and ZERO WIDTH NO-BREAK SPACE (BOM).
+     * Verified against a live `node` by enumerating every BMP codepoint
+     * against {@code /\s/}.
+     */
+    private static boolean isJsWhitespace(char c) {
+        switch (c) {
+            case '\t': case '\n': case '\u000B': case '\f': case '\r':
+            case ' ':
+            case ' ':
+            case ' ':
+            case ' ': case ' ': case ' ': case ' ':
+            case ' ': case ' ': case ' ': case ' ':
+            case ' ': case ' ': case ' ':
+            case ' ': case ' ':
+            case ' ':
+            case ' ':
+            case '　':
+            case '﻿':
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static void sortFindings(List<Finding> findings) {

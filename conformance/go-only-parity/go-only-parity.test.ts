@@ -30,9 +30,15 @@
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { LockingScript, UnlockingScript } from '@bsv/sdk';
+import {
+  CONSENSUS_SPEND_CONTEXT,
+  newConsensusSpend,
+} from '../../packages/runar-testing/src/consensus-spend.js';
 import {
   findGoBinary,
   findJavaJarPath,
@@ -41,6 +47,7 @@ import {
   findRustBinary,
   findZigBinary,
 } from '../runner/runner.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * Cross-tier ACCEPTANCE parity. Started as the subtype-lattice gate (N-104) and
@@ -296,6 +303,16 @@ const FAMILIES = [
   // surface, so the coordinate-canonicity and OP_SIZE-64 gates on
   // bn254G1OnCurve / bn254G1Negate had no cross-tier gate at all.
   { file: 'GoOnlyBn254G1.runar.ts', family: 'BN254 G1', builtin: 'bn254G1OnCurve' },
+  // F-091: the G1 ADD surface, which neither probe above reaches. Its
+  // execution leg is the describe block at the bottom of this file.
+  { file: 'GoOnlyBn254G1Add.runar.ts', family: 'BN254 G1 add', builtin: 'bn254G1Add' },
+  // F-092: every non-Go tier refuses this one on source; its `--ir` leg — where
+  // the Python port used to compile it with 7 of 8 root limbs dropped — is the
+  // describe block below.
+  { file: 'GoOnlyPoseidon2Merkle.runar.ts', family: 'Poseidon2 Merkle', builtin: 'merkleRootPoseidon2KB' },
+  // F-196: all five scalar-field entry points, which GoOnlyBn254 (Mul only)
+  // does not reach. Its execution leg is the F-196 describe block below.
+  { file: 'GoOnlyBn254Field.runar.ts', family: 'BN254 field', builtin: 'bn254FieldAdd' },
 ] as const;
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -308,7 +325,7 @@ describe('R-037: Go-only families — refuse, or match Go byte for byte', () => 
 
   it('every tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(missing, `CI=true but these tiers have no toolchain: ${missing.join(', ')}`).toEqual([]);
     }
     expect(available.length).toBeGreaterThanOrEqual(2);
@@ -370,6 +387,438 @@ describe('R-037: Go-only families — refuse, or match Go byte for byte', () => 
               `  go:   ${goHex.slice(0, 60)}... (${goHex.length / 2} bytes)\n` +
               `  ${tier.id}: ${v.hex.slice(0, 60)}... (${v.hex.length / 2} bytes)`,
           ).toBe(goHex);
+        });
+      }
+    });
+  }
+});
+
+/**
+ * F-092 — merkleRootPoseidon2KB through the `--ir` entry point.
+ *
+ * The source leg above cannot see this: every non-Go tier refuses the builtin
+ * in its typechecker. But `--ir` runs no frontend, and the Python tier's stack
+ * lowering carried a live port that reconciled the eight root limbs with seven
+ * OP_NIPs — keeping root_7 alone, so `merkleRootPoseidon2KB(...) === expected`
+ * authenticated one ~31-bit field element. Go had fixed the same truncation in
+ * R-056 (EmitPoseidon2RootPack).
+ *
+ * What this proves: on Go's own ANF IR for the probe, every tier either refuses
+ * (a real diagnostic, per `verdict`) or emits hex byte-identical to Go's.
+ * Execution of the Python script against Plonky3 vectors lives in
+ * compilers/python/tests/test_f092_poseidon2_merkle_root_binds_every_limb.py;
+ * Go's in compilers/go/compiler/poseidon2_merkle_root_binding_test.go.
+ * What it does not prove: that a refusing tier's diagnostic names the
+ * builtin -- no tier refuses this probe any more. Rust (N-237), Ruby
+ * (N-248) and Zig (N-254) all match Go byte for byte at depth 1, the same
+ * way Python's port already did. Nor does it prove depths other than 1.
+ */
+describe('F-092: merkleRootPoseidon2KB via --ir — refuse, or match Go byte for byte', () => {
+  const src = join(DIR, 'GoOnlyPoseidon2Merkle.runar.ts');
+  const irArgs = (id: string, f: string): string[] =>
+    id === 'ts' ? ['--from-ir', f, '--hex'] : id === 'zig' ? ['compile-ir', f, '--hex'] : ['--ir', f, '--hex'];
+
+  for (const tier of available.filter((t) => t.id !== 'go')) {
+    it(`${tier.id} refuses Go's IR, or matches Go exactly`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'f092-p2kb-ir-'));
+      try {
+        const emitted = spawnSync(goTier.cmd!, [...goTier.prefix, '--source', src, '--emit-ir'], {
+          cwd: goTier.cwd,
+          encoding: 'utf-8',
+          timeout: goTier.timeoutMs,
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        expect(emitted.status, `go --emit-ir failed:\n${emitted.stderr}`).toBe(0);
+        const irFile = join(dir, 'GoOnlyPoseidon2Merkle.anf.json');
+        writeFileSync(irFile, emitted.stdout);
+
+        const goResult = verdict({ ...goTier, argsFor: () => irArgs('go', irFile) }, src);
+        expect(goResult.ok, 'Go must compile its own IR').toBe(true);
+        const goHex = (goResult as Accepted).hex;
+
+        const v = verdict({ ...tier, argsFor: () => irArgs(tier.id, irFile) }, src);
+        if (!v.ok) return; // a refusal is allowed; `verdict` already rejected a crash-less silence
+        expect(
+          v.hex,
+          `${tier.id} COMPILES merkleRootPoseidon2KB from IR and emits different bytes than Go ` +
+            `(${v.hex.length / 2} vs ${goHex.length / 2} bytes). Either match Go or refuse.`,
+        ).toBe(goHex);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+/**
+ * F-091 — bn254G1Add on the omega-partner pair, EXECUTED in every tier.
+ *
+ * BN254 has j-invariant 0 and p = 1 mod 3, so for P = (x, y) the points
+ * (w*x, -y) and (w^2*x, -y) are on the curve, have px != qx, and zero the
+ * unified slope's denominator py + qy. The slope is then 0/0, Fermat gives
+ * inv(0) = 0, and every tier's script used to return (-(px+qx), -py): an
+ * ON-curve point that is NOT P + Q. Measured before the fix on @bsv/sdk's
+ * Spend: `bn254G1Add(G, (w, -2)) === (w^2, -2)` was ACCEPTED and the true sum
+ * was REJECTED, byte-identically in go / python / rust / zig / ruby / ts.
+ *
+ * What this proves: for each tier that compiles the probe, the omega case
+ * ABORTS inside the builtin (an OP_VERIFY failure, not a mismatch on the final
+ * equality) whatever `expected` the spender supplies — including the old wrong
+ * answer and the true sum from an independent chord/tangent reference below —
+ * while general addition, doubling and P + (-P) -> all-zero O are ACCEPTED
+ * against that same reference. What it does not prove: anything about the
+ * Groth16 MSM path, which shares the affine adder and is deliberately left
+ * unchanged; nor about tiers that refuse the probe (Java), which the parity
+ * leg above already scores.
+ */
+describe('F-091: bn254G1Add omega-partner pair — executed on @bsv/sdk Spend', () => {
+  const P: bigint = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
+  const W: bigint = 0x30644e72e131a0295e6dd9e7e0acccb0c28f069fbb966e3de4bd44e5607cfd48n;
+  const mod = (a: bigint) => ((a % P) + P) % P;
+  const inv = (a: bigint) => {
+    // Extended Euclid — deliberately NOT Fermat, so a zero input throws.
+    let [r0, r1, s0, s1] = [mod(a), P, 1n, 0n];
+    if (r0 === 0n) throw new Error('inverse of 0');
+    while (r1 !== 0n) {
+      const q = r0 / r1;
+      [r0, r1] = [r1, r0 - q * r1];
+      [s0, s1] = [s1, s0 - q * s1];
+    }
+    return mod(s0);
+  };
+  type Pt = [bigint, bigint] | null; // null = point at infinity
+  /** Independent chord/tangent reference. */
+  const add = (a: Pt, b: Pt): Pt => {
+    if (a === null) return b;
+    if (b === null) return a;
+    const [x1, y1] = a;
+    const [x2, y2] = b;
+    let l: bigint;
+    if (x1 === x2) {
+      if (mod(y1 + y2) === 0n) return null;
+      l = mod(3n * x1 * x1 * inv(2n * y1));
+    } else {
+      l = mod((y2 - y1) * inv(x2 - x1));
+    }
+    const x3 = mod(l * l - x1 - x2);
+    return [x3, mod(l * (x1 - x3) - y1)];
+  };
+  const onCurve = ([x, y]: [bigint, bigint]) => mod(y * y - x * x * x - 3n) === 0n;
+  const hex32 = (v: bigint) => v.toString(16).padStart(64, '0');
+  const blob = (pt: Pt) => (pt === null ? '00'.repeat(64) : hex32(pt[0]) + hex32(pt[1]));
+  const push64 = (h: string) => '40' + h;
+
+  const G: [bigint, bigint] = [1n, 2n];
+  const G2 = add(G, G) as [bigint, bigint];
+  const G3 = add(G, G2) as [bigint, bigint];
+  const neg = ([x, y]: [bigint, bigint]): [bigint, bigint] => [x, mod(-y)];
+  const omegaQ = (pt: [bigint, bigint], c: bigint): [bigint, bigint] => [mod(c * pt[0]), mod(-pt[1])];
+  const W2 = mod(W * W);
+
+  function spend(lockHex: string, a: Pt, b: Pt, expected: Pt): { ok: boolean; err: string } {
+    try {
+      const ok = newConsensusSpend({
+        ...CONSENSUS_SPEND_CONTEXT,
+        lockingScript: LockingScript.fromHex(lockHex),
+        unlockingScript: UnlockingScript.fromHex(push64(blob(a)) + push64(blob(b)) + push64(blob(expected))),
+        otherInputs: [],
+        outputs: [],
+      }).validate();
+      return { ok, err: '' };
+    } catch (e) {
+      return { ok: false, err: String((e as Error).message) };
+    }
+  }
+
+  it('the witness is what it claims: on-curve, px != qx, py + qy == 0, and the old answer is wrong', () => {
+    expect(W !== 1n && mod(W * W * W) === 1n).toBe(true);
+    const Q = omegaQ(G, W);
+    expect(onCurve(Q)).toBe(true);
+    expect(Q[0]).not.toBe(G[0]);
+    expect(mod(G[1] + Q[1])).toBe(0n);
+    const oldAnswer: [bigint, bigint] = [mod(-(G[0] + Q[0])), mod(-G[1])];
+    expect(onCurve(oldAnswer)).toBe(true);
+    expect(blob(oldAnswer)).not.toBe(blob(add(G, Q)));
+  });
+
+  const src = join(DIR, 'GoOnlyBn254G1Add.runar.ts');
+  for (const tier of available) {
+    it(`${tier.id}: omega pairs abort, legitimate sums are accepted`, () => {
+      const v = verdict(tier, src);
+      if (!v.ok) {
+        // A refusal is scored by the parity leg above. Only Java refuses
+        // today; any other tier refusing would make this leg vacuous for it.
+        expect(tier.id, `${tier.id} refused the probe:\n${v.diag.slice(0, 600)}`).toBe('java');
+        return;
+      }
+      const lock = v.hex;
+
+      const accepted: Array<[string, Pt, Pt]> = [
+        ['G+2G=3G', G, G2],
+        ['G+G=2G', G, G],
+        ['G+(-G)=O', G, neg(G)],
+        ['2G+(-2G)=O', G2, neg(G2)],
+        ['3G+G', G3, G],
+      ];
+      for (const [name, a, b] of accepted) {
+        const r = spend(lock, a, b, add(a, b));
+        expect(r.ok, `${tier.id} ${name} must be accepted: ${r.err}`).toBe(true);
+      }
+
+      const omega: Array<[string, [bigint, bigint], [bigint, bigint]]> = [
+        ['G+(wG.x,-G.y)', G, omegaQ(G, W)],
+        ['G+(w^2G.x,-G.y)', G, omegaQ(G, W2)],
+        ['(wG.x,-G.y)+G', omegaQ(G, W), G],
+        ['2G+(w*2G.x,-2G.y)', G2, omegaQ(G2, W)],
+      ];
+      for (const [name, a, b] of omega) {
+        const oldAnswer: [bigint, bigint] = [mod(-(a[0] + b[0])), mod(-a[1])];
+        for (const [label, expected] of [['old wrong answer', oldAnswer], ['true sum', add(a, b)]] as const) {
+          const r = spend(lock, a, b, expected);
+          expect(r.ok, `${tier.id} ${name} == ${label} must be REJECTED`).toBe(false);
+          expect(r.err, `${tier.id} ${name} == ${label}: the builtin must abort, not mismatch`).toMatch(/OP_VERIFY/);
+        }
+      }
+    });
+  }
+});
+
+/**
+ * F-196 — operand canonicity of the five raw BN254 scalar-field builtins,
+ * EXECUTED in every tier.
+ *
+ * Their operands are unlock arguments. Before the gate, every tier fed them
+ * straight into OP_ADD / OP_MUL and a bare OP_MOD — which keeps the sign of the
+ * dividend — so `bn254FieldAdd(-1, 0) === -1` SPENT, and `bn254FieldAdd(p, 0)
+ * === 0` spent as a second spelling of 0. Each entry point now runs
+ * `<0> <p> OP_WITHIN OP_VERIFY` on every operand first.
+ *
+ * What this proves: for each tier that compiles the probe, on @bsv/sdk's Spend,
+ * an operand of -1, of exactly p, or of 5+p in ANY position of ANY of the five
+ * builtins ABORTS inside the builtin (OP_VERIFY, not a mismatch on the final
+ * equality), whatever `expected` the spender supplies — the escaped value or
+ * the reduced residue; and canonical operands up to p-1 are ACCEPTED against
+ * results computed here with bigint arithmetic, so an over-strict gate reddens.
+ * What it does not prove: anything about the Groth16 / pairing paths, which use
+ * the internal field helpers and are deliberately left ungated; nor tiers that
+ * refuse the probe (Java), which the parity leg above scores.
+ */
+describe('F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend', () => {
+  const P: bigint = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
+  const mod = (a: bigint) => ((a % P) + P) % P;
+  const pow = (b: bigint, e: bigint): bigint => {
+    let r = 1n;
+    let x = mod(b);
+    while (e > 0n) {
+      if (e & 1n) r = (r * x) % P;
+      x = (x * x) % P;
+      e >>= 1n;
+    }
+    return r;
+  };
+
+  /** Minimal-push encoding of a script number (push-only, minimal pushes). */
+  const pushNum = (n: bigint): string => {
+    if (n === 0n) return '00';
+    if (n === -1n) return '4f';
+    if (n >= 1n && n <= 16n) return (0x50 + Number(n)).toString(16);
+    const neg = n < 0n;
+    let abs = neg ? -n : n;
+    const bytes: number[] = [];
+    while (abs > 0n) {
+      bytes.push(Number(abs & 0xffn));
+      abs >>= 8n;
+    }
+    if (bytes[bytes.length - 1]! & 0x80) bytes.push(neg ? 0x80 : 0x00);
+    else if (neg) bytes[bytes.length - 1]! |= 0x80;
+    if (bytes.length >= 0x4c) throw new Error('pushNum: test values stay below 76 bytes');
+    return bytes.length.toString(16).padStart(2, '0') + bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  // Public methods in declaration order — the dispatch index.
+  const M = { add: 0, sub: 1, mul: 2, inv: 3, neg: 4 } as const;
+  type Op = keyof typeof M;
+  const ref: Record<Op, (...a: bigint[]) => bigint> = {
+    add: (a, b) => mod(a! + b!),
+    sub: (a, b) => mod(a! - b!),
+    mul: (a, b) => mod(a! * b!),
+    inv: (a) => pow(a!, P - 2n),
+    neg: (a) => mod(-a!),
+  };
+
+  function spend(lockHex: string, op: Op, args: bigint[], expected: bigint): { ok: boolean; err: string } {
+    const unlock = [...args, expected].map(pushNum).join('') + pushNum(BigInt(M[op]));
+    try {
+      const ok = newConsensusSpend({
+        ...CONSENSUS_SPEND_CONTEXT,
+        lockingScript: LockingScript.fromHex(lockHex),
+        unlockingScript: UnlockingScript.fromHex(unlock),
+        otherInputs: [],
+        outputs: [],
+      }).validate();
+      return { ok, err: '' };
+    } catch (e) {
+      return { ok: false, err: String((e as Error).message) };
+    }
+  }
+
+  const PM1 = P - 1n;
+  const BAD: Array<[string, bigint]> = [['-1', -1n], ['p', P], ['5+p', P + 5n]];
+
+  const src = join(DIR, 'GoOnlyBn254Field.runar.ts');
+  for (const tier of available) {
+    it(`${tier.id}: non-canonical operands abort, canonical operands near p are accepted`, () => {
+      const v = verdict(tier, src);
+      if (!v.ok) {
+        expect(tier.id, `${tier.id} refused the probe:\n${v.diag.slice(0, 600)}`).toBe('java');
+        return;
+      }
+      const lock = v.hex;
+
+      // CONTROL WITH TEETH: honest spends against independently computed results.
+      const accepted: Array<[Op, bigint[]]> = [
+        ['add', [PM1, PM1]], ['add', [PM1, 1n]], ['add', [0n, 0n]],
+        ['sub', [0n, PM1]], ['sub', [0n, 1n]], ['sub', [PM1, PM1]],
+        ['mul', [PM1, PM1]], ['mul', [PM1, 2n]], ['mul', [P - 2n, P - 3n]],
+        ['inv', [PM1]], ['inv', [2n]],
+        ['neg', [0n]], ['neg', [1n]], ['neg', [PM1]],
+      ];
+      for (const [op, args] of accepted) {
+        const r = spend(lock, op, args, ref[op](...args));
+        expect(r.ok, `${tier.id} ${op}(${args.join(', ')}) must be accepted: ${r.err}`).toBe(true);
+      }
+
+      // The finding, verbatim: bn254FieldAdd(-1, 0) used to return -1.
+      for (const expected of [-1n, PM1]) {
+        const r = spend(lock, 'add', [-1n, 0n], expected);
+        expect(r.ok, `${tier.id} add(-1, 0) == ${expected} must be REJECTED`).toBe(false);
+        expect(r.err, `${tier.id} add(-1, 0): the builtin must abort`).toMatch(/OP_VERIFY/);
+      }
+
+      for (const op of ['add', 'sub', 'mul', 'inv', 'neg'] as const) {
+        const arity = op === 'inv' || op === 'neg' ? 1 : 2;
+        for (let pos = 0; pos < arity; pos++) {
+          for (const [label, bad] of BAD) {
+            const args = arity === 1 ? [bad] : pos === 0 ? [bad, 3n] : [3n, bad];
+            // Offer both the reduced residue and, for add / mul, the value the
+            // ungated bare OP_MOD returned (sign of the dividend, which is JS
+            // bigint `%`); the gate must abort either way.
+            const escaped =
+              op === 'add' ? (args[0]! + args[1]!) % P : op === 'mul' ? (args[0]! * args[1]!) % P : ref[op](...args);
+            for (const expected of [ref[op](...args), escaped]) {
+              const r = spend(lock, op, args, expected);
+              expect(r.ok, `${tier.id} ${op} with operand ${pos} = ${label} must be REJECTED`).toBe(false);
+              expect(r.err, `${tier.id} ${op} operand ${pos} = ${label}: must abort in the gate`).toMatch(/OP_VERIFY/);
+            }
+          }
+        }
+      }
+    });
+  }
+});
+
+/**
+ * N-347 — pass 4 must take byte-typedness of a builtin call from the type
+ * checker's return table, not from a hand-written list.
+ *
+ * Every tier's ANF lowerer used to decide "is `f(x)` a byte string?" from its
+ * own BYTE_RETURNING_FUNCTIONS / BYTE_RETURNING_EXTRACTORS lists. Those lists
+ * had drifted from the type checker twice (N-054, N-345), and were still
+ * narrower than it: merkleRootSha256 / merkleRootHash256 (ByteString) and
+ * bn254G1Add / bn254G1Negate / bn254G1ScalarMul (Point) were typed as byte
+ * strings by the checker and missing from all seven lists. So `f(a) === f(b)`
+ * — two results, neither side a parameter or property — got no
+ * `result_type: "bytes"` and lowered to OP_NUMEQUAL, measured in ts, go, rust,
+ * python, zig and ruby (Java refuses these families at emit, after ANF).
+ *
+ * What this proves: for each probe, every tier that compiles it ends the
+ * terminal assert with OP_EQUAL (0x87/0x88), found by a pushdata-aware opcode
+ * walk, and every native tier's `--emit-ir` annotates the `===` with
+ * `result_type: "bytes"` — the pass-4 property itself, which is how the Java
+ * tier is covered. The two controls show the walk discriminates: sha256 (always
+ * listed) must give OP_EQUAL, len (bigint) must give OP_NUMEQUAL.
+ * What it does not prove: `+` (OP_CAT vs OP_ADD) and the bitwise operators on
+ * these results, which the same predicate now decides but are not probed here;
+ * nor anything about the TS tier's ANF, which its CLI does not print (its hex
+ * leg covers it); nor that the builtins compute correct values.
+ */
+describe('N-347: byte-returning builtin results compare with OP_EQUAL in every tier', () => {
+  /** Opcodes of a script, pushdata payloads skipped. */
+  function opcodes(hex: string): number[] {
+    const b = Buffer.from(hex, 'hex');
+    const ops: number[] = [];
+    let i = 0;
+    while (i < b.length) {
+      const op = b[i++]!;
+      if (op >= 0x01 && op <= 0x4b) i += op;
+      else if (op === 0x4c) i += 1 + b[i]!;
+      else if (op === 0x4d) i += 2 + b.readUInt16LE(i);
+      else if (op === 0x4e) i += 4 + b.readUInt32LE(i);
+      if (i > b.length) throw new Error(`truncated push in ${hex.slice(0, 40)}...`);
+      ops.push(op);
+    }
+    return ops;
+  }
+  const EQUAL = [0x87, 0x88]; // OP_EQUAL, OP_EQUALVERIFY
+  const NUMEQUAL = [0x9c, 0x9d]; // OP_NUMEQUAL, OP_NUMEQUALVERIFY
+  /** The comparison the terminal assert compiled to: the last (NUM)EQUAL(VERIFY). */
+  const finalComparison = (hex: string): number | undefined =>
+    opcodes(hex).filter((o) => EQUAL.includes(o) || NUMEQUAL.includes(o)).at(-1);
+
+  const PROBES = [
+    { file: 'N347MerkleSha256Eq.runar.ts', builtin: 'merkleRootSha256', bytes: true },
+    { file: 'N347MerkleHash256Eq.runar.ts', builtin: 'merkleRootHash256', bytes: true },
+    { file: 'N347Bn254G1AddEq.runar.ts', builtin: 'bn254G1Add', bytes: true },
+    { file: 'N347Bn254G1NegateEq.runar.ts', builtin: 'bn254G1Negate', bytes: true },
+    { file: 'N347Bn254G1ScalarMulEq.runar.ts', builtin: 'bn254G1ScalarMul', bytes: true },
+    { file: 'N347ControlSha256Eq.runar.ts', builtin: 'sha256', bytes: true },
+    { file: 'N347ControlLenEq.runar.ts', builtin: 'len', bytes: false },
+  ] as const;
+
+  for (const { file, builtin, bytes } of PROBES) {
+    const src = join(DIR, file);
+    describe(`${builtin}(…) === ${builtin}(…)`, () => {
+      for (const tier of available) {
+        it(`${tier.id}: script compares with ${bytes ? 'OP_EQUAL' : 'OP_NUMEQUAL'}`, () => {
+          const v = verdict(tier, src);
+          if (!v.ok) {
+            // Only the Java tier may refuse, and only the Go-scoped families.
+            expect(tier.id, `${tier.id} refused ${file}:\n${v.diag.slice(0, 600)}`).toBe('java');
+            expect(v.diag, 'the refusal must name the builtin').toContain(builtin);
+            return;
+          }
+          const op = finalComparison(v.hex);
+          expect(op, `${tier.id}: no comparison opcode in the script`).toBeDefined();
+          expect(
+            (bytes ? EQUAL : NUMEQUAL).includes(op!),
+            `${tier.id}: ${builtin}(…) === ${builtin}(…) compiled to 0x${op!.toString(16)}; ` +
+              `expected ${bytes ? 'OP_EQUAL — OP_NUMEQUAL on byte strings is the N-347 miscompile' : 'OP_NUMEQUAL'}`,
+          ).toBe(true);
+        });
+
+        if (tier.id === 'ts') continue; // the TS CLI has no stdout IR flag; the hex leg covers it
+        it(`${tier.id}: --emit-ir ${bytes ? 'annotates' : 'does not annotate'} the === as bytes`, () => {
+          const res = spawnSync(tier.cmd!, [...tier.prefix, '--source', src, '--emit-ir'], {
+            cwd: tier.cwd,
+            encoding: 'utf-8',
+            timeout: tier.timeoutMs,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          expect(res.status, `${tier.id} --emit-ir failed:\n${res.stderr}`).toBe(0);
+          const eqs: Array<Record<string, unknown>> = [];
+          const visit = (n: unknown): void => {
+            if (Array.isArray(n)) n.forEach(visit);
+            else if (n && typeof n === 'object') {
+              const o = n as Record<string, unknown>;
+              if (o.kind === 'bin_op' && o.op === '===') eqs.push(o);
+              Object.values(o).forEach(visit);
+            }
+          };
+          visit(JSON.parse(res.stdout));
+          expect(eqs.length, `${tier.id}: expected exactly one === in the IR`).toBe(1);
+          expect(eqs[0]!.result_type, `${tier.id}: result_type of ${builtin}(…) === ${builtin}(…)`).toBe(
+            bytes ? 'bytes' : undefined,
+          );
         });
       }
     });

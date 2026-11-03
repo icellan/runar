@@ -31,6 +31,18 @@ const PushValue = ec.PushValue;
 const EcOpBundle = ec.EcOpBundle;
 
 /// emitRoll appends a ROLL operation for a given depth to an ops list.
+///
+/// N-254: `StackOp.roll` is a single logical op whose own lowering
+/// (`emitEcStackOp`'s `.roll` case in stack_lower.zig) ALREADY emits the
+/// depth push before `OP_ROLL` -- every other emitter module (ec_emitters,
+/// koalabear_emitters, babybear_emitters, bn254_emitters, nist_ec_emitters)
+/// appends bare `.{ .roll = depth }` for exactly that reason. This function
+/// used to append an extra explicit `.push` first, so each roll it emitted
+/// became `PUSH d, PUSH d, OP_ROLL` instead of `PUSH d, OP_ROLL` -- one dead
+/// byte of push data per roll. Invisible while `merkleRootPoseidon2KB` was
+/// unreachable (the builtin_map key bug); surfaced as an 8-byte divergence
+/// from Go once the key was fixed (8 rolls of depth 15 in the per-level
+/// conditional swap, at depth 1 alone).
 fn emitRoll(ops: *std.ArrayListUnmanaged(StackOp), allocator: Allocator, d: u32) !void {
     if (d == 0) return;
     if (d == 1) {
@@ -41,7 +53,6 @@ fn emitRoll(ops: *std.ArrayListUnmanaged(StackOp), allocator: Allocator, d: u32)
         try ops.append(allocator, .{ .rot = {} });
         return;
     }
-    try ops.append(allocator, .{ .push = .{ .integer = @intCast(d) } });
     try ops.append(allocator, .{ .roll = d });
 }
 
@@ -143,10 +154,11 @@ pub fn buildPoseidon2MerkleRootOps(allocator: Allocator, depth: u32) !EcOpBundle
         // Stack: [..., future_sibs, current(8), sib_i(8), bit]
         // Alt: [index]
 
-        // OP_IF: if bit==1, swap the two groups of 8 elements.
+        // OP_IF: if bit==1, swap the two groups of 8 elements. `.roll = 15`
+        // alone is correct (see `emitRoll`'s N-254 note): `emitEcStackOp`
+        // emits the depth push itself.
         var then_ops: std.ArrayListUnmanaged(StackOp) = .empty;
         for (0..8) |_| {
-            try then_ops.append(allocator, .{ .push = .{ .integer = 15 } });
             try then_ops.append(allocator, .{ .roll = 15 });
         }
         const then_slice = try then_ops.toOwnedSlice(allocator);
@@ -193,6 +205,61 @@ pub fn buildPoseidon2MerkleRootOps(allocator: Allocator, depth: u32) !EcOpBundle
     };
 }
 
+/// poseidon2_root_pack_base is the radix used to pack the 8-element Poseidon2
+/// KoalaBear root into a single Script integer. Every KoalaBear element is
+/// < p = 2^31 - 2^24 + 1 < 2^32, so base-2^32 positional packing is INJECTIVE
+/// over the whole root: two roots pack to the same integer if and only if all
+/// eight of their elements are equal.
+const poseidon2_root_pack_base: i64 = 1 << 32;
+
+/// buildPoseidon2RootPackOps folds the 8-element Poseidon2 KoalaBear root
+/// that `buildPoseidon2MerkleRootOps` leaves on the stack into ONE Script
+/// integer.
+///
+/// Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+/// Stack out: [..., packed]
+///
+/// where packed = sum(root_i * (2^32)^i) -- root_7 is the most significant
+/// limb and root_0 the least significant.
+///
+/// WHY THIS EXISTS (CL-BUG-099 / R-056). The Rúnar type system has no
+/// multi-word return type: `merkleRootPoseidon2KB` is declared to return one
+/// `bigint`. Reconciling the eight-element result with seven OP_NIPs would
+/// keep root_7 and discard root_0..root_6, so a contract writing
+/// `assert(merkleRootPoseidon2KB(...) === expected)` would authenticate
+/// against a SINGLE ~31-bit field element. Packing keeps every limb
+/// load-bearing: equality on the packed value is equality on all eight
+/// limbs. Direct port of Go's `EmitPoseidon2RootPack`
+/// (codegen/poseidon2_merkle.go), matched the same way by the Rust (N-237)
+/// and Ruby (N-248) tiers.
+///
+/// This is deliberately NOT folded into `buildPoseidon2MerkleRootOps`: Go's
+/// SP1 FRI verifier (Go-only) consumes the eight raw limbs directly.
+pub fn buildPoseidon2RootPackOps(allocator: Allocator) !EcOpBundle {
+    var ops: std.ArrayListUnmanaged(StackOp) = .empty;
+    errdefer {
+        ec.deinitOpsRecursive(allocator, ops.items);
+        ops.deinit(allocator);
+    }
+
+    // Horner from the top of the stack down: after step k the top holds
+    // sum_{j=7-k..7} root_j * (2^32)^(j-(7-k)), and root_(6-k) sits directly
+    // below it, so OP_ADD folds in the next limb with no rolls at all.
+    for (0..7) |_| {
+        try ops.append(allocator, .{ .push = .{ .integer = poseidon2_root_pack_base } });
+        try ops.append(allocator, .{ .opcode = "OP_MUL" });
+        try ops.append(allocator, .{ .opcode = "OP_ADD" });
+    }
+
+    const ops_slice = try ops.toOwnedSlice(allocator);
+    const empty_owned = try allocator.alloc([]u8, 0);
+    return .{
+        .allocator = allocator,
+        .ops = ops_slice,
+        .owned_bytes = empty_owned,
+    };
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -225,4 +292,31 @@ test "buildPoseidon2MerkleRootOps depth=1 ends with drop" {
     defer bundle.deinit();
     const last = bundle.ops[bundle.ops.len - 1];
     try std.testing.expectEqual(StackOp{ .drop = {} }, last);
+}
+
+// N-254 / CL-BUG-099: `buildPoseidon2RootPackOps` must emit 7 repetitions of
+// (push 2^32, OP_MUL, OP_ADD) -- the Horner fold that binds all eight root
+// limbs into the comparison, port of Go's `EmitPoseidon2RootPack`. Before
+// this port, `stack_lower.zig`'s caller reconciled the 8-element result with
+// seven OP_NIPs, discarding root_0..root_6 (CL-BUG-099). This test proves the
+// fold shape in isolation; it does not prove the caller actually uses it
+// (that is pinned at the lowering level in
+// `src/tests/n254_merkle_root_poseidon2kb_ir_test.zig`) nor byte-identity
+// with Go (that is the `--ir` leg of
+// conformance/go-only-parity/go-only-parity.test.ts).
+test "buildPoseidon2RootPackOps emits 7x (push 2^32, mul, add)" {
+    const allocator = std.testing.allocator;
+    var bundle = try buildPoseidon2RootPackOps(allocator);
+    defer bundle.deinit();
+
+    try std.testing.expectEqual(@as(usize, 21), bundle.ops.len);
+    var i: usize = 0;
+    while (i < 7) : (i += 1) {
+        try std.testing.expectEqual(
+            StackOp{ .push = .{ .integer = 1 << 32 } },
+            bundle.ops[i * 3],
+        );
+        try std.testing.expectEqualStrings("OP_MUL", bundle.ops[i * 3 + 1].opcode);
+        try std.testing.expectEqualStrings("OP_ADD", bundle.ops[i * 3 + 2].opcode);
+    }
 }

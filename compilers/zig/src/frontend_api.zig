@@ -32,5 +32,5 @@ pub const validateForFile = compiler.validateForFile;
 pub const assertSourceBytesUnderLimit = input_limits.assertSourceBytesUnderLimit;
 pub const MAX_SOURCE_BYTES = input_limits.MAX_SOURCE_BYTES;
 pub const SourceSizeError = input_limits.SourceSizeError;
-pub const SIGHASH_DIRECTIVE_ERROR = input_limits.SIGHASH_DIRECTIVE_ERROR;
-pub const EMBED_ALWAYS_DIRECTIVE_ERROR = input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR;
+pub const sighashDirectiveError = input_limits.sighashDirectiveError;
+pub const embedAlwaysDirectiveError = input_limits.embedAlwaysDirectiveError;

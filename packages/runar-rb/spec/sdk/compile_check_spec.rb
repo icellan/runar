@@ -5,18 +5,24 @@ require 'spec_helper'
 # Runar.compile_check requires the +runar_compiler+ gem, which is not published
 # — it lives in-tree at compilers/ruby/lib.  Make it loadable here so the spec
 # exercises the real frontend instead of the LoadError branch.
-COMPILER_LIB = File.expand_path('../../../../compilers/ruby/lib', __dir__)
-$LOAD_PATH.unshift(COMPILER_LIB) unless $LOAD_PATH.include?(COMPILER_LIB)
-
-REPO_ROOT = File.expand_path('../../../..', __dir__)
+#
+# Local variables, not constants: `CONST = value` written directly inside an
+# RSpec.describe block binds a top-level Object constant (a block opens no
+# constant scope), which can collide with a same-named bare constant in
+# another spec file (N-269; packages/runar-rb/spec/lint/bare_describe_constants_spec.rb
+# guards against it).
+compiler_lib = File.expand_path('../../../../compilers/ruby/lib', __dir__)
+$LOAD_PATH.unshift(compiler_lib) unless $LOAD_PATH.include?(compiler_lib)
 
 RSpec.describe 'Runar.compile_check' do
+  let(:repo_root) { File.expand_path('../../../..', __dir__) }
+
   # ---------------------------------------------------------------------------
   # Happy path — a real, well-formed contract round-trips Parse / Validate /
   # TypeCheck without errors.
   # ---------------------------------------------------------------------------
   describe 'with valid contract source' do
-    let(:p2pkh_path) { File.join(REPO_ROOT, 'examples', 'ruby', 'p2pkh', 'P2PKH.runar.rb') }
+    let(:p2pkh_path) { File.join(repo_root, 'examples', 'ruby', 'p2pkh', 'P2PKH.runar.rb') }
 
     it 'accepts a path to a valid .runar.rb contract' do
       skip "#{p2pkh_path} not found" unless File.file?(p2pkh_path)

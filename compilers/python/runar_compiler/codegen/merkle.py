@@ -154,15 +154,9 @@ def _emit_merkle_root(
         # Stack: [current, sibling, direction_bit]  Alt: [rest_proof, index]
 
         # --- Step 3: Conditional swap + concatenate + hash ---
-        # Roll current to top:
-        emit(_make_stack_op(op="rot"))
-        # Stack: [sibling, direction_bit, current]
-        emit(_make_stack_op(op="rot"))
-        # Stack: [direction_bit, current, sibling]
-
-        # Now: if direction_bit=1, swap current and sibling before CAT
-        emit(_make_stack_op(op="rot"))
-        # Stack: [current, sibling, direction_bit]
+        # F-249: no rotation here. [current, sibling, direction_bit] is already the
+        # order OP_IF wants (it pops direction_bit, leaving current and sibling
+        # adjacent); the three OP_ROTs that used to sit here composed to the identity.
 
         emit(_make_stack_op(
             op="if",

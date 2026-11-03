@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  ALL_TIER_IDS,
   BrokenTier,
   IR_TIER_IDS,
   REPO,
@@ -10,6 +11,7 @@ import {
   missingTierIds,
   verdict,
 } from './tier-harness.js';
+import { isCiEnv } from '../env.js';
 
 /**
  * Cross-tier REJECTION parity on the `--ir` path.
@@ -35,15 +37,29 @@ import {
  * accept, and every available tier must refuse all of them.
  *
  * ---------------------------------------------------------------------------
- * Six tiers, not seven
+ * Seven tiers (F-342)
  * ---------------------------------------------------------------------------
  *
- * TypeScript is absent BY DESIGN and this is the one place it is legitimate.
- * The reference tier ships no IR-consuming CLI mode at all; `runar-cli compile`
- * takes source. runner.ts's `IR_PARITY_COMPILERS` excludes `ts` for the same
- * reason on the positive side. `IR_TIER_IDS` in the harness records that, and
- * the vacuity guard below asserts the matrix matches it — so a tier dropping
- * out of this lane still fails loudly, which is the property R-100 was about.
+ * This used to say TypeScript was absent BY DESIGN because "the reference
+ * tier ships no IR-consuming CLI mode at all" — that was false, not a design
+ * choice. `runar-cli compile --from-ir <path>` (backed by `loadANFFromJSON` /
+ * `compileFromANF`) has shipped since GAP-016, reproduces the checked-in
+ * golden hex (verified against `asm-raw-script`, `bounded-loop`,
+ * `multi-method`, `fixed-array-index` and `stateful-counter` below), and is
+ * held to this gate exactly like the other six.
+ *
+ * Note this is NOT the same claim as runner.ts's `IR_PARITY_COMPILERS`, which
+ * still deliberately excludes `ts` — but for a different, still-valid reason:
+ * it also drives the `--emit-ir` -> `--ir` ROUND-TRIP check (F-038), which
+ * compares `parentClass`/`abi`/`stateFields` across full artifacts, and TS's
+ * `--from-ir` writes only a minimal `{contractName, script, asm}` artifact.
+ * `IR_TIER_IDS` here is scoped to the hex-producing REJECTION gate only; it no
+ * longer needs to match `IR_PARITY_COMPILERS` 1:1, and nothing in this file
+ * asserts that it does.
+ *
+ * The vacuity guard below asserts the matrix matches `IR_TIER_IDS` — so a
+ * tier dropping out of this lane still fails loudly, which is the property
+ * R-100 was about.
  *
  * ---------------------------------------------------------------------------
  * The corpus lives in ./ir/, not alongside the source fixtures
@@ -139,12 +155,101 @@ const PROPERTY_INIT_POSITIVE_CONTROL = join(
   'conformance/tests/fixed-array-index/expected-ir.json',
 );
 
+/**
+ * The fifth control. `I43`-`I46` (N-059) are about a `check_preimage`
+ * binding's `sighashFlag`, and none of the goldens above contains a
+ * `check_preimage`. `stateful-counter` does (`increment`'s `t1`); it has no
+ * `compilers` allowlist and all six IR tiers emit its golden bytes.
+ */
+const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
+  REPO,
+  'conformance/tests/stateful-counter/expected-ir.json',
+);
+
+/*
+ * `I47`-`I52` (N-087, the parentClass and property-write rules) reuse three
+ * controls above: `multi-method` (I47 one property made mutable; I52 the same
+ * with parentClass also removed, so the fail-closed inference is exercised),
+ * `stateful-counter` (I48 relabelled SmartContract; I49 `count` made readonly,
+ * so `increment` writes a readonly property; I51 relabelled AND every property
+ * made readonly, so the stateful-only nodes are the only violation) and
+ * `asm-raw-script` (I50 relabelled SmartContract). I51 and I52 change two
+ * fields because their rule cannot be reached with one.
+ */
+
+/*
+ * `I53`-`I56` (N-101, the re-derived StatefulSmartContract scaffolding) reuse
+ * the `stateful-counter` control, each with ONE field of `increment` changed:
+ * I53 the continuation compares the output hash with itself; I54 the
+ * sighash-type assert pins 67 instead of 65; I55 the checkPreimage assert
+ * asserts the preimage instead of the check's result; I56 the auto-injected
+ * `_newAmount` parameter is retyped ByteString.
+ */
+
+/*
+ * `I57` (N-096, the syntheticArrayChain rule) reuses the `fixed-array-index`
+ * control with ONE field changed: `table__0`'s chain repeated to 1024 levels,
+ * one past the deepest chain the artifact regrouper can consume. Go panicked
+ * on such a chain (exit 2); Python, Java, Zig and TS compiled it.
+ */
+
+/*
+ * `I58` (F-283 / CL-GAP-164, the nested-loop PRODUCT bound) reuses the
+ * `bounded-loop` control with the `verify` method's one `loop` binding
+ * changed: its `count` set to 10,000 and its `body` wrapped in a second
+ * `loop` of count 10,000 (the original body becomes that inner loop's
+ * body). Each of the two counts individually satisfies MAX_LOOP_COUNT
+ * (10,000) — the per-binding bound I07 already covers — but their product
+ * is 100,000,000. Every tier bounded the single count; before this fix none
+ * bounded the product.
+ *
+ * `I59` (F-357) reuses the `bounded-loop` control with ONE field changed:
+ * the `loop` binding's `step` is the string `"abc"` instead of an integer.
+ * Go, Rust, Python, Ruby and Java all already refuse this (their JSON
+ * decoders type-check the field on the way in); Zig's hand-rolled loader
+ * read it through `if (obj.get("step")) |v| switch (v) { .integer => ...,
+ * .float => ..., else => 1 }` — a wrong-typed value fell into the same
+ * `else` arm as a genuinely absent one and silently became the commonest
+ * step value (1) instead of an error. (I58 is F-283's.)
+ */
+
+/*
+ * `I60`-`I61` (N-208) reuse the `stateful-counter` control with ONE field
+ * changed each, both inside `increment`'s compiler-injected continuation
+ * check:
+ *
+ * `I60` sets `t34`'s (the `hash256(...) === extractOutputHash(...)` bin_op)
+ * `result_type` to the number `1` instead of the string `"bytes"`. Go, Rust,
+ * Zig and TS already refuse a wrong-typed `result_type`; before this fix,
+ * Python and Ruby read it with a bare `d["result_type"]` / `d.get(...)` and
+ * no type check, so the wrong-typed value fell into the same "absent" path
+ * as a missing field, silently lowering the comparison as numeric instead
+ * of byte-equality.
+ *
+ * `I61` sets `t35`'s (the assert over that bin_op) `isAutoInjectedStateCheck`
+ * to the string `"true"` instead of the boolean `true`. Go, Rust, Zig and TS
+ * already refuse this; before this fix, Python, Ruby and Java compared the
+ * raw value against `true` (`== true` / `Boolean.TRUE.equals(...)`), which
+ * is false for every non-boolean value, so the wrong-typed marker silently
+ * became `false` -- the opposite of what it declared, with no diagnostic.
+ */
+
+/*
+ * `I62`-`I63` (N-063) reuse the `multi-method` control with the private
+ * helper `computeThreshold` made recursive: I62 calls itself, I63 calls a
+ * new private `pingBack` that calls it back. Before N-265 no `--ir` loader
+ * but Go's refused either (TS RangeError, Rust SIGABRT, Zig SIGSEGV, Ruby
+ * SystemStackError, Java StackOverflowError). Graded by discrimination like
+ * the rest of the lane: a crash is BROKEN, not a refusal.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
   ['bounded-loop', LOOP_POSITIVE_CONTROL],
   ['multi-method', METHOD_CALL_POSITIVE_CONTROL],
   ['fixed-array-index', PROPERTY_INIT_POSITIVE_CONTROL],
+  ['stateful-counter', CHECK_PREIMAGE_POSITIVE_CONTROL],
 ];
 
 const fixtures = readdirSync(DIR)
@@ -157,8 +262,17 @@ const available = TIERS.filter((t) => t.cmd !== null);
 describe('cross-tier rejection parity (--ir path)', () => {
   // -- vacuity guards -------------------------------------------------------
 
-  it('the matrix names all six IR-capable tiers (a dropped tier fails here)', () => {
+  it('the matrix names all seven IR-capable tiers (a dropped tier fails here)', () => {
     expect([...TIERS.map((t) => t.id)].sort()).toEqual([...IR_TIER_IDS].sort());
+  });
+
+  // F-342: `runar-cli compile --from-ir` (packages/runar-cli/src/bin.ts,
+  // backed by `loadANFFromJSON`/`compileFromANF`) has shipped since GAP-016 —
+  // TS is not missing an IR-consuming CLI mode, so this lane is a seven-tier
+  // gate, not a six-tier one. A tier quietly dropping back out of the lane
+  // (TS included) must fail here, the same way a dropped native tier does.
+  it('the IR-capable tier set is all seven tiers, not six (TS has --from-ir)', () => {
+    expect([...IR_TIER_IDS].sort()).toEqual([...ALL_TIER_IDS].sort());
   });
 
   it('the corpus is non-empty and every control is a checked-in golden', () => {
@@ -179,7 +293,7 @@ describe('cross-tier rejection parity (--ir path)', () => {
 
   it('every IR-capable tier is built (strict in CI, ">=2" locally)', () => {
     const missing = missingTierIds(TIERS);
-    if (process.env.CI === 'true') {
+    if (isCiEnv(process.env)) {
       expect(
         missing,
         `CI=true but these tiers have no toolchain: ${missing.join(', ')}. ` +
@@ -233,8 +347,9 @@ describe('cross-tier rejection parity (--ir path)', () => {
   // R-100's regression tests, re-run against the IR argv shapes. The failure
   // they encode is lane-independent (a tier that cannot start scores a perfect
   // rejection rate) but the argv is not, and it is the argv this lane gets
-  // wrong: three of the six tiers take `--ir`, one takes a positional
-  // subcommand, and two are launched through a runtime.
+  // wrong: most of the seven tiers take `--ir`, Zig takes a positional
+  // subcommand (`compile-ir`), TS takes `--from-ir` (F-342), and more than one
+  // is launched through a runtime rather than a standalone binary.
 
   describe('verdict() distinguishes a rejection from a broken run', () => {
     const witness = available[0];

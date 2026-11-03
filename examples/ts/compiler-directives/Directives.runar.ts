@@ -9,9 +9,12 @@ import type { Addr, ByteString, PubKey, Sig } from 'runar-lang';
  * conformance fixture, no mention in `docs/`. They were discoverable only by
  * reading the compiler's own tests.
  *
- * BOTH ARE `.runar.ts` ONLY. The other eight surface parsers reject a source
- * carrying either directive rather than silently ignoring it, because ignoring
- * one would change signing or DCE semantics without saying so.
+ * The COMMENT spelling below is `.runar.ts` only. The other eight surfaces
+ * spell both directives natively instead (N-093) — e.g. a Go struct tag
+ * option, a Rust attribute, a Java annotation; see the ports beside this file
+ * in `examples/<format>/compiler-directives/` and `docs/formats/` — and their
+ * parsers reject a COMMENT directive rather than silently ignoring it, because
+ * ignoring one would change signing or DCE semantics without saying so.
  *
  * ---------------------------------------------------------------------------
  * `@embedAlways` — keep a readonly field the body never reads
@@ -26,8 +29,8 @@ import type { Addr, ByteString, PubKey, Sig } from 'runar-lang';
  * The effect is visible in the artifact's `constructorSlots` — the byte offsets
  * the deploy-time values are spliced into — and NOT in `abi.constructor.params`,
  * which lists the declared signature and keeps the parameter either way. With
- * the directive the slots are [deployTag, ownerPKH, ownerPKH]; without it,
- * [ownerPKH, ownerPKH], and the value never reaches the locking script even
+ * the directive the slots are [deployTag, pubKeyHash, pubKeyHash]; without it,
+ * [pubKeyHash, pubKeyHash], and the value never reaches the locking script even
  * though the constructor still takes it.
  *
  * ---------------------------------------------------------------------------
@@ -43,26 +46,26 @@ import type { Addr, ByteString, PubKey, Sig } from 'runar-lang';
  * `ANYONECANPAY` are modifiers.
  */
 export class Directives extends SmartContract {
-  readonly ownerPKH: Addr;
+  readonly pubKeyHash: Addr;
 
   /** @embedAlways */
   readonly deployTag: ByteString;
 
-  constructor(ownerPKH: Addr, deployTag: ByteString) {
-    super(ownerPKH, deployTag);
-    this.ownerPKH = ownerPKH;
+  constructor(pubKeyHash: Addr, deployTag: ByteString) {
+    super(pubKeyHash, deployTag);
+    this.pubKeyHash = pubKeyHash;
     this.deployTag = deployTag;
   }
 
   /** Default mode: no directive, so the covenant commits to ALL|FORKID. */
   public spendAll(sig: Sig, pubKey: PubKey) {
-    assert(hash160(pubKey) === this.ownerPKH);
+    assert(hash160(pubKey) === this.pubKeyHash);
     assert(checkSig(sig, pubKey));
   }
 
   /** @sighash SINGLE|FORKID */
   public spendSingle(sig: Sig, pubKey: PubKey) {
-    assert(hash160(pubKey) === this.ownerPKH);
+    assert(hash160(pubKey) === this.pubKeyHash);
     assert(checkSig(sig, pubKey));
   }
 }

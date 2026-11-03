@@ -1,6 +1,7 @@
 package runar.compiler.passes;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -102,8 +103,16 @@ public final class Validate {
         ctx.validateProperties();
         ctx.validateConstructor();
         ctx.validateMethods();
-        ctx.checkNoRecursion();
+        boolean callDepthExceeded = ctx.checkNoRecursion();
+        ctx.checkReservedNames();
         ctx.warnStrippedReadonlyFields();
+        // N-180: the Rabin-provenance and sighash passes walk the private-method
+        // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+        // refuses, so stop here.
+        if (callDepthExceeded) {
+            return new Result(ctx.errors, ctx.warnings);
+        }
+        RabinPubKeyProvenance.check(ctx);
 
         // Issue #123: reject preimage-field reads / output bindings that are
         // unsound under a method's declared @sighash mode (security core). Emits
@@ -137,6 +146,426 @@ public final class Validate {
     // ------------------------------------------------------------------
     // Internal state
     // ------------------------------------------------------------------
+
+    /**
+     * The R-127 diagnostic, shared verbatim with the other six tiers and with
+     * the pass-4 backstop in {@code AnfLower.lowerForStatement} (N-006).
+     */
+    static String loopOutputIntrinsicMessage(String intrinsic, String via) {
+        String viaClause =
+            via == null ? "" : " (reached through private method '" + via + "')";
+        return "Output intrinsic '" + intrinsic + "'" + viaClause
+            + " cannot be called inside a loop body. A loop body lowers into its own scope"
+            + " whose declared outputs never reach the method's output list, so the"
+            + " continuation hash would commit to fewer outputs than the transaction actually"
+            + " creates: the spend is rejected by every shipped SDK and any successor it"
+            + " produces is unspendable. Move the call out of the loop.";
+    }
+
+    /**
+     * The N-049 diagnostic, shared verbatim with the other six tiers (TS
+     * reference: {@code ternaryOutputIntrinsicDiagnostic} in 02-validate.ts) and
+     * with the pass-4 backstop in {@code AnfLower.lowerTernaryExpr}.
+     */
+    static String ternaryOutputIntrinsicMessage(String intrinsic, String via) {
+        String viaClause =
+            via == null ? "" : " (reached through private method '" + via + "')";
+        return "Output intrinsic '" + intrinsic + "'" + viaClause
+            + " cannot be called inside a conditional (ternary) expression arm. A ternary arm"
+            + " lowers into its own scope whose declared outputs never reach the method's output"
+            + " list, so the continuation hash would commit to fewer outputs than the transaction"
+            + " actually creates: a spender can drop the output and the honest spend is rejected."
+            + " Use an if/else statement instead.";
+    }
+
+    /**
+     * The F-286 diagnostic, shared verbatim with the other six tiers (TS
+     * reference: {@code RABIN_PUBKEY_PROVENANCE_MESSAGE} in 02-validate.ts).
+     */
+    /**
+     * N-205 (a): the diagnostic every tier emits when a mutable key property is
+     * written, outside the constructor, with a value the F-286 rule does not
+     * trust (TS reference: {@code rabinKeyWriteMessage} in 02-validate.ts).
+     */
+    static String rabinKeyWriteMessage(String prop) {
+        return "verifyRabinSig public key property '" + prop + "' may only be assigned a contract property or a literal "
+            + "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature";
+    }
+
+    static final String RABIN_PUBKEY_PROVENANCE_MESSAGE =
+        "verifyRabinSig public key (4th argument) must be a contract property or a literal; "
+            + "a spender-supplied Rabin modulus lets anyone forge a signature";
+
+    /**
+     * F-286: {@code verifyRabinSig(msg, sig, padding, n)} checks
+     * {@code (sig^2 + padding) mod n == SHA256(msg) mod n}. A spender who
+     * chooses {@code n} forges any message, so the modulus must be fixed by the
+     * deployer. Port of {@code checkRabinPubKeyProvenance} (TS reference).
+     *
+     * <p>Trusted 4th arguments: a property read ({@code PropertyAccessExpr}, a
+     * {@code MemberExpr} on {@code this}, or a bare identifier naming a
+     * property that no parameter or local shadows — the Java surface's bare
+     * field); a bigint literal; a local whose initialiser and every assignment
+     * are trusted (never one that is {@code ++}/{@code --}'d); a parameter of a
+     * PRIVATE method that every call site (at least one) binds to a trusted
+     * value (least fixed point). Everything else is refused.
+     */
+    private static final class RabinPubKeyProvenance {
+        private static final class Scope {
+            final MethodNode method;
+            final boolean isConstructor;
+            final Set<String> params = new HashSet<>();
+            final Map<String, List<Expression>> bindings = new LinkedHashMap<>();
+            final Set<String> mutated = new HashSet<>();
+            /** N-205: names declared as locals (a bare property write also lands in {@code bindings}). */
+            final Set<String> declared = new HashSet<>();
+
+            Scope(MethodNode method, boolean isConstructor) {
+                this.method = method;
+                this.isConstructor = isConstructor;
+                for (ParamNode p : method.params()) params.add(p.name());
+                visit(method.body());
+            }
+
+            private void bind(String name, Expression value) {
+                bindings.computeIfAbsent(name, k -> new ArrayList<>()).add(value);
+            }
+
+            private void visitExpr(Expression e) {
+                Ctx.walkExpression(e, x -> {
+                    if (x instanceof IncrementExpr ie && ie.operand() instanceof Identifier id) {
+                        mutated.add(id.name());
+                    } else if (x instanceof DecrementExpr de && de.operand() instanceof Identifier id) {
+                        mutated.add(id.name());
+                    }
+                });
+            }
+
+            private void visit(List<Statement> stmts) {
+                if (stmts == null) return;
+                for (Statement s : stmts) {
+                    if (s instanceof VariableDeclStatement v) {
+                        declared.add(v.name());
+                        bind(v.name(), v.init());
+                        visitExpr(v.init());
+                    } else if (s instanceof AssignmentStatement a) {
+                        if (a.target() instanceof Identifier id) bind(id.name(), a.value());
+                        visitExpr(a.target());
+                        visitExpr(a.value());
+                    } else if (s instanceof ExpressionStatement es) {
+                        visitExpr(es.expression());
+                    } else if (s instanceof IfStatement i) {
+                        visitExpr(i.condition());
+                        visit(i.thenBody());
+                        visit(i.elseBody());
+                    } else if (s instanceof ForStatement f) {
+                        if (f.init() != null) visit(List.of(f.init()));
+                        visitExpr(f.condition());
+                        if (f.update() != null) visit(List.of(f.update()));
+                        visit(f.body());
+                    } else if (s instanceof ReturnStatement r) {
+                        if (r.value() != null) visitExpr(r.value());
+                    }
+                }
+            }
+        }
+
+        private record Site(List<Expression> args, Scope scope) {}
+
+        private final Set<String> propertyNames = new HashSet<>();
+        private final Map<String, MethodNode> privateMethods = new LinkedHashMap<>();
+        private final Map<String, Set<Integer>> trustedParams = new HashMap<>();
+
+        static void check(Ctx ctx) {
+            new RabinPubKeyProvenance().run(ctx);
+        }
+
+        private void run(Ctx ctx) {
+            ContractNode contract = ctx.contract;
+            for (PropertyNode p : contract.properties()) propertyNames.add(p.name());
+            for (MethodNode m : contract.methods()) {
+                if (m.visibility() == Visibility.PRIVATE) {
+                    privateMethods.put(m.name(), m);
+                    trustedParams.put(m.name(), new HashSet<>());
+                }
+            }
+
+            List<Scope> scopes = new ArrayList<>();
+            if (contract.constructor() != null) scopes.add(new Scope(contract.constructor(), true));
+            for (MethodNode m : contract.methods()) scopes.add(new Scope(m, false));
+
+            Map<String, List<Site>> callSites = new HashMap<>();
+            for (String name : privateMethods.keySet()) callSites.put(name, new ArrayList<>());
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    String callee = privateCallee(e);
+                    if (callee != null) callSites.get(callee).add(new Site(((CallExpr) e).args(), scope));
+                });
+            }
+
+            // Least fixed point: monotone, so it terminates.
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (Map.Entry<String, MethodNode> entry : privateMethods.entrySet()) {
+                    List<Site> sites = callSites.get(entry.getKey());
+                    if (sites.isEmpty()) continue;
+                    Set<Integer> trusted = trustedParams.get(entry.getKey());
+                    for (int i = 0; i < entry.getValue().params().size(); i++) {
+                        if (trusted.contains(i)) continue;
+                        final int idx = i;
+                        boolean all = sites.stream().allMatch(site ->
+                            idx < site.args().size()
+                                && isTrusted(site.args().get(idx), site.scope(), new HashSet<>()));
+                        if (all) {
+                            trusted.add(i);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    if (e instanceof CallExpr c
+                        && c.callee() instanceof Identifier id
+                        && "verifyRabinSig".equals(id.name())
+                        && c.args().size() >= 4
+                        && !isTrusted(c.args().get(3), scope, new HashSet<>())) {
+                        // N-464 (user decision R186): anchored at the 4th
+                        // argument itself; the method only when it has no location.
+                        var argLoc = Typecheck.exprLoc(c.args().get(3));
+                        ctx.error(RABIN_PUBKEY_PROVENANCE_MESSAGE,
+                            argLoc != null ? argLoc : scope.method.sourceLocation());
+                    }
+                });
+            }
+
+            // N-205 (a): a MUTABLE key property is state the previous spend
+            // chose, so outside the constructor it may only be written with a
+            // value isTrusted accepts. KEY properties: those whose value
+            // reaches a 4th argument, closed under "is written into a key
+            // property". Port of the TS reference.
+            Set<String> keyProps = new HashSet<>();
+            for (Scope scope : scopes) {
+                walkDeep(scope.method.body(), e -> {
+                    if (e instanceof CallExpr c
+                        && c.callee() instanceof Identifier id
+                        && "verifyRabinSig".equals(id.name())
+                        && c.args().size() >= 4) {
+                        sourcesOf(c.args().get(3), scope, keyProps, new HashSet<>(), callSites);
+                    }
+                });
+            }
+
+            List<String> mutableProps = new ArrayList<>();
+            for (PropertyNode p : contract.properties()) if (!p.readonly()) mutableProps.add(p.name());
+            List<PropWrite> writes = new ArrayList<>();
+            for (Scope scope : scopes) {
+                if (scope.isConstructor) continue;
+                collectAssignments(scope.method.body(), scope, writes);
+                walkDeep(scope.method.body(), e -> {
+                    SourceLocation loc = scope.method.sourceLocation();
+                    if (e instanceof IncrementExpr ie) {
+                        String prop = writtenProp(ie.operand(), scope);
+                        if (prop != null) writes.add(new PropWrite(prop, null, scope, loc));
+                    } else if (e instanceof DecrementExpr de) {
+                        String prop = writtenProp(de.operand(), scope);
+                        if (prop != null) writes.add(new PropWrite(prop, null, scope, loc));
+                    } else if (e instanceof CallExpr c && "addOutput".equals(calleeProperty(c))) {
+                        // addOutput(satoshis, ...values): positional over the
+                        // mutable properties in declaration order. A single
+                        // array-literal value list (the Zig tuple form) is
+                        // unpacked, as AnfLower.flattenAddOutputArgs does.
+                        List<Expression> args = c.args();
+                        if (args.size() == 2 && args.get(1) instanceof ArrayLiteralExpr al) {
+                            args = new ArrayList<>(args.subList(0, 1));
+                            args.addAll(al.elements());
+                        }
+                        for (int i = 1; i < args.size(); i++) {
+                            if (i - 1 < mutableProps.size()) {
+                                writes.add(new PropWrite(mutableProps.get(i - 1), args.get(i), scope, loc));
+                            }
+                        }
+                    }
+                });
+            }
+
+            boolean grew = true;
+            while (grew) {
+                int before = keyProps.size();
+                for (PropWrite w : writes) {
+                    if (keyProps.contains(w.prop()) && w.value() != null
+                        && isTrusted(w.value(), w.scope(), new HashSet<>())) {
+                        sourcesOf(w.value(), w.scope(), keyProps, new HashSet<>(), callSites);
+                    }
+                }
+                grew = keyProps.size() != before;
+            }
+
+            Set<String> mutable = new HashSet<>(mutableProps);
+            for (PropWrite w : writes) {
+                if (!keyProps.contains(w.prop()) || !mutable.contains(w.prop())) continue;
+                if (w.value() != null && isTrusted(w.value(), w.scope(), new HashSet<>())) continue;
+                ctx.error(rabinKeyWriteMessage(w.prop()), w.loc());
+            }
+        }
+
+        private record PropWrite(String prop, Expression value, Scope scope, SourceLocation loc) {}
+
+        private static String calleeProperty(CallExpr c) {
+            if (c.callee() instanceof PropertyAccessExpr pa) return pa.property();
+            if (c.callee() instanceof MemberExpr me) return me.property();
+            return null;
+        }
+
+        private String writtenProp(Expression target, Scope scope) {
+            if (target instanceof PropertyAccessExpr pa) return pa.property();
+            if (target instanceof MemberExpr me && me.object() instanceof Identifier obj && "this".equals(obj.name())) {
+                return me.property();
+            }
+            if (target instanceof Identifier id
+                && propertyNames.contains(id.name())
+                && !scope.params.contains(id.name())
+                && !scope.declared.contains(id.name())) {
+                return id.name();
+            }
+            return null;
+        }
+
+        private void collectAssignments(List<Statement> stmts, Scope scope, List<PropWrite> out) {
+            if (stmts == null) return;
+            for (Statement s : stmts) {
+                if (s instanceof AssignmentStatement a) {
+                    String prop = writtenProp(a.target(), scope);
+                    if (prop != null) out.add(new PropWrite(prop, a.value(), scope, a.sourceLocation()));
+                } else if (s instanceof IfStatement i) {
+                    collectAssignments(i.thenBody(), scope, out);
+                    collectAssignments(i.elseBody(), scope, out);
+                } else if (s instanceof ForStatement f) {
+                    List<Statement> header = new ArrayList<>();
+                    if (f.init() != null) header.add(f.init());
+                    if (f.update() != null) header.add(f.update());
+                    collectAssignments(header, scope, out);
+                    collectAssignments(f.body(), scope, out);
+                }
+            }
+        }
+
+        /** The properties a trusted value can come from (aliases and private-helper call sites followed). */
+        private void sourcesOf(Expression expr, Scope scope, Set<String> out, Set<String> visiting,
+                               Map<String, List<Site>> callSites) {
+            if (expr instanceof PropertyAccessExpr pa) {
+                out.add(pa.property());
+                return;
+            }
+            if (expr instanceof MemberExpr me) {
+                if (me.object() instanceof Identifier obj && "this".equals(obj.name())) out.add(me.property());
+                return;
+            }
+            if (!(expr instanceof Identifier id)) return;
+            String name = id.name();
+            boolean isParam = scope.params.contains(name);
+            List<Expression> locals = scope.bindings.get(name);
+            if (!isParam && locals == null) {
+                if (propertyNames.contains(name)) out.add(name);
+                return;
+            }
+            String key = scope.method.name() + "\0" + name;
+            if (!visiting.add(key)) return;
+            if (locals != null) for (Expression v : locals) sourcesOf(v, scope, out, visiting, callSites);
+            MethodNode m = scope.method;
+            if (isParam && !scope.isConstructor && m.visibility() == Visibility.PRIVATE) {
+                int idx = -1;
+                for (int i = 0; i < m.params().size(); i++) {
+                    if (m.params().get(i).name().equals(name)) {
+                        idx = i;
+                        break;
+                    }
+                }
+                for (Site site : callSites.getOrDefault(m.name(), List.of())) {
+                    if (idx >= 0 && idx < site.args().size()) {
+                        sourcesOf(site.args().get(idx), site.scope(), out, visiting, callSites);
+                    }
+                }
+            }
+        }
+
+        private String privateCallee(Expression e) {
+            if (!(e instanceof CallExpr c)) return null;
+            String name = null;
+            if (c.callee() instanceof PropertyAccessExpr pa) {
+                name = pa.property();
+            } else if (c.callee() instanceof MemberExpr me
+                && me.object() instanceof Identifier obj
+                && "this".equals(obj.name())) {
+                name = me.property();
+            }
+            return name != null && privateMethods.containsKey(name) ? name : null;
+        }
+
+        private boolean isTrusted(Expression expr, Scope scope, Set<String> visiting) {
+            if (expr instanceof PropertyAccessExpr) return true;
+            if (expr instanceof MemberExpr me) {
+                return me.object() instanceof Identifier obj && "this".equals(obj.name());
+            }
+            if (expr instanceof BigIntLiteral) return true;
+            if (expr instanceof Identifier id) {
+                String name = id.name();
+                boolean isParam = scope.params.contains(name);
+                List<Expression> locals = scope.bindings.get(name);
+                if (!isParam && locals == null) return propertyNames.contains(name);
+                if (scope.mutated.contains(name)) return false;
+                if (isParam) {
+                    MethodNode m = scope.method;
+                    if (scope.isConstructor || m.visibility() != Visibility.PRIVATE) return false;
+                    int idx = -1;
+                    for (int i = 0; i < m.params().size(); i++) {
+                        if (m.params().get(i).name().equals(name)) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    Set<Integer> trusted = trustedParams.get(m.name());
+                    if (trusted == null || !trusted.contains(idx)) return false;
+                }
+                if (locals != null) {
+                    if (visiting.contains(name)) return false;
+                    visiting.add(name);
+                    boolean ok = true;
+                    for (Expression v : locals) {
+                        if (!isTrusted(v, scope, visiting)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    visiting.remove(name);
+                    if (!ok) return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        /** Visits every expression, including every for loop's init and update at any depth. */
+        private static void walkDeep(List<Statement> stmts, Ctx.ExprSink sink) {
+            if (stmts == null) return;
+            for (Statement s : stmts) {
+                if (s instanceof IfStatement i) {
+                    Ctx.walkExpression(i.condition(), sink);
+                    walkDeep(i.thenBody(), sink);
+                    walkDeep(i.elseBody(), sink);
+                } else if (s instanceof ForStatement f) {
+                    if (f.init() != null) walkDeep(List.of(f.init()), sink);
+                    Ctx.walkExpression(f.condition(), sink);
+                    if (f.update() != null) walkDeep(List.of(f.update()), sink);
+                    walkDeep(f.body(), sink);
+                } else {
+                    Ctx.walkExpressionsInStmt(s, sink);
+                }
+            }
+        }
+    }
 
     private static final class Ctx {
         final ContractNode contract;
@@ -263,6 +692,11 @@ public final class Validate {
                     prop.sourceLocation()
                 );
             }
+            // N-414 (peer of TS F-265): the shape checks above never validate a
+            // ByteStringLiteral's HEX FORMAT; that lives in validateExpression,
+            // which a property initializer never reached. An odd-length literal
+            // used to surface two passes later as an opaque emit error.
+            validateExpression(init);
         }
 
         // --------------------------------------------------------------
@@ -284,6 +718,7 @@ public final class Validate {
                         ctor.sourceLocation()
                     );
                 }
+                rejectUnknownParamType(p, "constructor", ctor.sourceLocation());
             }
 
             if (ctor.body().isEmpty()) {
@@ -494,6 +929,24 @@ public final class Validate {
             }
         }
 
+        /**
+         * N-325: a parameter whose type is a name that is not a Rúnar type.
+         * "unknown" is the missing-annotation case, diagnosed by the parser;
+         * StatefulContext is the explicit context parameter of the Zig/Go/Move
+         * stateful surfaces, dropped by ANF lowering.
+         */
+        private void rejectUnknownParamType(ParamNode p, String where, SourceLocation loc) {
+            if (p.type() instanceof CustomType ct
+                && !ct.name().equals("unknown")
+                && !ct.name().equals("StatefulContext")) {
+                error(
+                    "Type '" + ct.name() + "' of parameter '" + p.name() + "' in " + where
+                        + " is not a Rúnar type",
+                    loc
+                );
+            }
+        }
+
         private void validateMethod(MethodNode m) {
             for (ParamNode p : m.params()) {
                 if (p.type() instanceof FixedArrayType) {
@@ -504,6 +957,7 @@ public final class Validate {
                         m.sourceLocation()
                     );
                 }
+                rejectUnknownParamType(p, "method '" + m.name() + "'", m.sourceLocation());
             }
 
             // `return` is a PRIVATE-helper construct only (NEW-012).
@@ -811,7 +1265,7 @@ public final class Validate {
                         && !referenced.contains(prop.name())) {
                     warn(
                         "readonly field '" + prop.name() + "' is not referenced in any method body "
-                            + "and was eliminated by DCE; annotate it /** @embedAlways */ to preserve "
+                            + "and may be eliminated by DCE; mark it with the embedAlways directive to preserve "
                             + "it in the on-chain script",
                         prop.sourceLocation());
                 }
@@ -840,7 +1294,9 @@ public final class Validate {
                 walkExpressionsInBody(i.thenBody(), sink);
                 if (i.elseBody() != null) walkExpressionsInBody(i.elseBody(), sink);
             } else if (s instanceof ForStatement f) {
+                if (f.init() != null) walkExpressionsInStmt(f.init(), sink);
                 walkExpression(f.condition(), sink);
+                if (f.update() != null) walkExpressionsInStmt(f.update(), sink);
                 walkExpressionsInBody(f.body(), sink);
             } else if (s instanceof ReturnStatement r) {
                 if (r.value() != null) walkExpression(r.value(), sink);
@@ -902,6 +1358,7 @@ public final class Validate {
                 }
                 validateExpression(v.init());
             } else if (s instanceof AssignmentStatement a) {
+                validateIndexAssignmentTarget(a);
                 validateExpression(a.target());
                 validateExpression(a.value());
             } else if (s instanceof IfStatement i) {
@@ -925,6 +1382,35 @@ public final class Validate {
             }
         }
 
+        /**
+         * N-002 (F-013's rule, shared verbatim by all seven tiers): only a
+         * FixedArray property is index-writable. Any other index target (a
+         * ByteString property, a local, a parameter, a member-chained root) is
+         * left alone by ExpandFixedArrays and ANF lowering lowers it as a READ,
+         * dropping the write. Reject it here with a location instead.
+         */
+        private void validateIndexAssignmentTarget(AssignmentStatement a) {
+            if (!(a.target() instanceof IndexAccessExpr)) {
+                return;
+            }
+            Expression root = a.target();
+            while (root instanceof IndexAccessExpr ia) {
+                root = ia.object();
+            }
+            if (root instanceof PropertyAccessExpr pa) {
+                for (PropertyNode p : contract.properties()) {
+                    if (p.name().equals(pa.property()) && p.type() instanceof FixedArrayType) {
+                        return;
+                    }
+                }
+            }
+            error(
+                "index assignment is only supported on FixedArray contract properties; "
+                    + "the target here is not a FixedArray property",
+                a.sourceLocation()
+            );
+        }
+
         private void validateForStatement(ForStatement f) {
             // Bounded, literal iteration count — check the right-hand side of
             // the comparison in the loop condition. Non-zero starts and
@@ -934,7 +1420,7 @@ public final class Validate {
             // unrolled iteration.
             if (f.condition() instanceof BinaryExpr be) {
                 if (!isCompileTimeConstant(be.right())) {
-                    error("for-loop bound must be a compile-time constant", f.sourceLocation());
+                    error(forLoopBoundDiagnostic(be.right()), f.sourceLocation());
                 }
             } else {
                 error("for-loop condition must be a comparison against a compile-time constant",
@@ -999,14 +1485,7 @@ public final class Validate {
          * Build the R-127 rejection. Shared verbatim with the other six tiers.
          */
         private static String loopOutputIntrinsicMsg(String intrinsic, String via) {
-            String viaClause =
-                via == null ? "" : " (reached through private method '" + via + "')";
-            return "Output intrinsic '" + intrinsic + "'" + viaClause
-                + " cannot be called inside a loop body. A loop body lowers into its own scope"
-                + " whose declared outputs never reach the method's output list, so the"
-                + " continuation hash would commit to fewer outputs than the transaction actually"
-                + " creates: the spend is rejected by every shipped SDK and any successor it"
-                + " produces is unspendable. Move the call out of the loop.";
+            return loopOutputIntrinsicMessage(intrinsic, via);
         }
 
         /** Where an output intrinsic was found, and how it was reached. */
@@ -1047,6 +1526,25 @@ public final class Validate {
             }
             SourceLocation loc = site.location() != null ? site.location() : f.sourceLocation();
             error(loopOutputIntrinsicMsg(site.intrinsic(), site.via()), loc);
+        }
+
+        /**
+         * Reject an output intrinsic in either arm of a ternary (N-049).
+         *
+         * <p>{@code AnfLower.lowerTernaryExpr} lowers each arm into a sub-context whose output
+         * refs are dropped — unlike the if-statement lowering, which merges each arm's refs into
+         * the parent — so the continuation hash would omit the arm's output (EXT-2 TernaryToll: a
+         * spend dropping the payout was accepted on every tier). Private helpers are followed
+         * because they are inlined into the arm. A ternary that only selects values is untouched.
+         */
+        private void validateNoOutputIntrinsicInTernaryArm(TernaryExpr te) {
+            for (Expression arm : new Expression[] {te.consequent(), te.alternate()}) {
+                IntrinsicSite site = findOutputIntrinsicInExpr(arm, null, new HashSet<>());
+                if (site != null) {
+                    error(ternaryOutputIntrinsicMessage(site.intrinsic(), site.via()), null);
+                    return;
+                }
+            }
         }
 
         /** The property/function name a call names, or null. */
@@ -1118,6 +1616,23 @@ public final class Validate {
                 return findOutputIntrinsic(both, seen);
             }
             if (stmt instanceof ForStatement fs) {
+                if (fs.init() != null) {
+                    IntrinsicSite inInit = findOutputIntrinsicInStatement(fs.init(), seen);
+                    if (inInit != null) {
+                        return inInit;
+                    }
+                }
+                IntrinsicSite inCond =
+                    findOutputIntrinsicInExpr(fs.condition(), fs.sourceLocation(), seen);
+                if (inCond != null) {
+                    return inCond;
+                }
+                if (fs.update() != null) {
+                    IntrinsicSite inUpdate = findOutputIntrinsicInStatement(fs.update(), seen);
+                    if (inUpdate != null) {
+                        return inUpdate;
+                    }
+                }
                 return findOutputIntrinsic(fs.body(), seen);
             }
             return null;
@@ -1170,6 +1685,9 @@ public final class Validate {
             if (expr instanceof IndexAccessExpr ia) {
                 return List.of(ia.object(), ia.index());
             }
+            if (expr instanceof ArrayLiteralExpr al) {
+                return al.elements();
+            }
             return List.of();
         }
 
@@ -1204,7 +1722,9 @@ public final class Validate {
          * {@code i = i + 1} / {@code i = i - 1} / {@code i = 1 + i} that {@code i += 1} becomes in
          * the Solidity, Zig and Java parsers; and the effect-free no-op sentinel (a literal or a
          * bare identifier) that the while-shaped parsers synthesize when the source has no continue
-         * expression at all.
+         * expression at all -- but only on a loop whose condition does not test its declared iterator
+         * (already refused by the condition rule). On a real iterator a no-op update never advances
+         * it: {@code var i = 3; while (i < 5) : (i)} compiled two laps over i = 3, 4 (N-116).
          *
          * <p>The advanced variable must be the declared iterator or the identifier the condition
          * tests. Both are needed: the Zig parser only folds
@@ -1221,7 +1741,15 @@ public final class Validate {
                 allowed.add(id.name());
             }
 
-            if (isRepresentableForUpdate(allowed, f.update())) {
+            // N-116: the no-op sentinel is tolerated only on a loop the condition rule already
+            // refuses (placeholder iterator). On a real iterator it never advances, yet the
+            // unrolled loop would still step by one.
+            boolean condTestsIter = f.init() != null
+                && f.condition() instanceof BinaryExpr cbe
+                && cbe.left() instanceof Identifier cid
+                && cid.name().equals(f.init().name());
+
+            if (isRepresentableForUpdate(allowed, f.update(), !condTestsIter)) {
                 return;
             }
 
@@ -1246,6 +1774,7 @@ public final class Validate {
             } else if (e instanceof MemberExpr me) {
                 validateExpression(me.object());
             } else if (e instanceof TernaryExpr te) {
+                validateNoOutputIntrinsicInTernaryArm(te);
                 validateExpression(te.condition());
                 validateExpression(te.consequent());
                 validateExpression(te.alternate());
@@ -1322,7 +1851,7 @@ public final class Validate {
                 error(
                     "ByteString literal '" + v + "' has odd length (" + v.length()
                         + ") — hex strings must have an even number of characters",
-                    null
+                    lit.sourceLocation()
                 );
                 return;
             }
@@ -1333,7 +1862,7 @@ public final class Validate {
                     error(
                         "ByteString literal '" + v + "' contains non-hex characters "
                             + "— only 0-9, a-f, A-F are allowed",
-                        null
+                        lit.sourceLocation()
                     );
                     return;
                 }
@@ -1344,7 +1873,52 @@ public final class Validate {
         // Recursion detection
         // --------------------------------------------------------------
 
-        void checkNoRecursion() {
+        /**
+         * N-065 / N-060: refuse a declared identifier spelled like a name a
+         * compiler pass mints (see {@link ReservedNames}). Checks properties,
+         * method names, constructor and method parameters, locals and loop
+         * variables. A stateful {@code txPreimage} PROPERTY keeps its older,
+         * dedicated diagnostic.
+         */
+        void checkReservedNames() {
+            boolean stateful = contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT;
+            for (PropertyNode prop : contract.properties()) {
+                if (stateful && "txPreimage".equals(prop.name())) continue;
+                checkReserved(prop.name(), stateful, prop.sourceLocation());
+            }
+            List<MethodNode> all = new ArrayList<>();
+            if (contract.constructor() != null) all.add(contract.constructor());
+            all.addAll(contract.methods());
+            for (MethodNode m : all) {
+                if (m != contract.constructor()) checkReserved(m.name(), stateful, m.sourceLocation());
+                for (ParamNode p : m.params()) checkReserved(p.name(), stateful, m.sourceLocation());
+                checkReservedInBody(m.body(), stateful);
+            }
+        }
+
+        private void checkReservedInBody(List<Statement> body, boolean stateful) {
+            if (body == null) return;
+            for (Statement s : body) {
+                if (s instanceof VariableDeclStatement v) {
+                    checkReserved(v.name(), stateful, v.sourceLocation());
+                } else if (s instanceof IfStatement i) {
+                    checkReservedInBody(i.thenBody(), stateful);
+                    checkReservedInBody(i.elseBody(), stateful);
+                } else if (s instanceof ForStatement f) {
+                    if (f.init() != null) checkReserved(f.init().name(), stateful, f.init().sourceLocation());
+                    checkReservedInBody(f.body(), stateful);
+                }
+            }
+        }
+
+        private void checkReserved(String name, boolean stateful, SourceLocation loc) {
+            if (name != null && ReservedNames.isReservedSourceName(name, stateful)) {
+                error(ReservedNames.message(name), loc);
+            }
+        }
+
+        /** Reports recursion and the N-180 call depth; true iff MAX_CALL_DEPTH was exceeded. */
+        boolean checkNoRecursion() {
             Set<String> methodNames = new HashSet<>();
             for (MethodNode m : contract.methods()) {
                 methodNames.add(m.name());
@@ -1352,11 +1926,18 @@ public final class Validate {
             java.util.Map<String, Set<String>> callGraph = new java.util.HashMap<>();
             for (MethodNode m : contract.methods()) {
                 Set<String> calls = new HashSet<>();
-                collectMethodCalls(m.body(), calls);
+                collectMethodCalls(m.body(), calls, true);
                 callGraph.put(m.name(), calls);
             }
+            // N-180: one iterative pass answers, for every method, whether it
+            // reaches a cycle and how deep its call chain is, in O(methods +
+            // calls). The old per-method DFS restarted for each method
+            // (quadratic on a chain) and recursed once per link.
+            java.util.Map<String, Boolean> reachesCycle = new java.util.HashMap<>();
+            java.util.Map<String, Integer> depth = new java.util.HashMap<>();
+            analyzeCallGraph(callGraph, methodNames, reachesCycle, depth);
             for (MethodNode m : contract.methods()) {
-                if (hasCycle(m.name(), callGraph, methodNames, new HashSet<>(), new HashSet<>())) {
+                if (reachesCycle.getOrDefault(m.name(), false)) {
                     error(
                         "recursion detected: method '" + m.name()
                             + "' calls itself directly or indirectly",
@@ -1364,33 +1945,82 @@ public final class Validate {
                     );
                 }
             }
+            // N-180: private methods are inlined at every call site, so the call
+            // depth is the inlining depth. Report the first method (declaration
+            // order) past it.
+            for (MethodNode m : contract.methods()) {
+                if (!reachesCycle.getOrDefault(m.name(), false)
+                    && depth.getOrDefault(m.name(), 0) > runar.compiler.frontend.InputLimits.MAX_CALL_DEPTH) {
+                    error(runar.compiler.frontend.InputLimits.callDepthMessage(m.name()), m.sourceLocation());
+                    return true;
+                }
+            }
+            return false;
         }
 
-        private static boolean hasCycle(
-            String name,
+        /**
+         * N-180: for every method, whether it reaches a call cycle, and (when it
+         * does not) its call depth: 0 if it calls no contract method, else 1 +
+         * the largest call depth among the contract methods it calls. Iterative
+         * three-colour DFS with memoisation: O(methods + calls), no recursion.
+         * {@code reachesCycle} matches what a fresh DFS from each method reports.
+         */
+        private void analyzeCallGraph(
             java.util.Map<String, Set<String>> callGraph,
             Set<String> methodNames,
-            Set<String> visited,
-            Set<String> stack
+            java.util.Map<String, Boolean> reachesCycle,
+            java.util.Map<String, Integer> depth
         ) {
-            if (stack.contains(name)) {
-                return true;
+            final class Frame {
+                final String name;
+                final java.util.Iterator<String> callees;
+                boolean cyc;
+                int depth;
+
+                Frame(String name) {
+                    this.name = name;
+                    this.callees = callGraph.getOrDefault(name, Set.of()).iterator();
+                }
             }
-            if (visited.contains(name)) {
-                return false;
-            }
-            visited.add(name);
-            stack.add(name);
-            Set<String> callees = callGraph.getOrDefault(name, Set.of());
-            for (String callee : callees) {
-                if (methodNames.contains(callee)) {
-                    if (hasCycle(callee, callGraph, methodNames, visited, stack)) {
-                        return true;
+            Set<String> onStack = new HashSet<>();
+            for (MethodNode root : contract.methods()) {
+                if (reachesCycle.containsKey(root.name())) continue;
+                java.util.ArrayDeque<Frame> stack = new java.util.ArrayDeque<>();
+                onStack.add(root.name());
+                stack.push(new Frame(root.name()));
+                while (!stack.isEmpty()) {
+                    Frame top = stack.peek();
+                    if (top.callees.hasNext()) {
+                        String callee = top.callees.next();
+                        if (!methodNames.contains(callee)) continue;
+                        if (onStack.contains(callee)) {
+                            top.cyc = true;
+                        } else if (reachesCycle.containsKey(callee)) {
+                            if (reachesCycle.get(callee)) {
+                                top.cyc = true;
+                            } else {
+                                top.depth = Math.max(top.depth, 1 + depth.get(callee));
+                            }
+                        } else {
+                            onStack.add(callee);
+                            stack.push(new Frame(callee));
+                        }
+                        continue;
+                    }
+                    stack.pop();
+                    onStack.remove(top.name);
+                    reachesCycle.put(top.name, top.cyc);
+                    depth.put(top.name, top.depth);
+                    Frame parent = stack.peek();
+                    if (parent != null) {
+                        if (top.cyc) {
+                            parent.cyc = true;
+                        } else {
+                            parent.depth = Math.max(parent.depth, 1 + top.depth);
+                        }
                     }
                 }
             }
-            stack.remove(name);
-            return false;
         }
     }
 
@@ -1529,6 +2159,26 @@ public final class Validate {
     // here with a graceful diagnostic — anf-lower's extractLoopShape would
     // otherwise throw. Mirrors the reference TS compiler's observable behavior:
     // only literal loop bounds compile.
+    /**
+     * The reference (TypeScript) tier's sentence for a for-loop bound that is not an integer
+     * literal. The reference's validator trusts a bare identifier (or boolean literal, or a
+     * negation of one) as "could be a const" and lets ANF lowering refuse it with the "Cannot
+     * determine" sentence; every other non-literal shape ({@code this.x}, an expression) is
+     * refused by its validator with the "must be a compile-time constant" sentence. Both sentences
+     * are shared verbatim by all seven tiers (N-026).
+     */
+    private static String forLoopBoundDiagnostic(Expression bound) {
+        Expression e = bound;
+        while (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
+            e = u.operand();
+        }
+        if (e instanceof Identifier || e instanceof BoolLiteral) {
+            return "Cannot determine loop bound at compile time. "
+                + "For-loop bounds must be integer literals.";
+        }
+        return "For loop bound must be a compile-time constant (literal or const variable)";
+    }
+
     private static boolean isCompileTimeConstant(Expression e) {
         if (e == null) return false;
         if (e instanceof BigIntLiteral) return true;
@@ -1568,7 +2218,9 @@ public final class Validate {
             && b.value().equals(java.math.BigInteger.ONE);
     }
 
-    private static boolean isRepresentableForUpdate(List<String> allowed, Statement update) {
+    private static boolean isRepresentableForUpdate(
+        List<String> allowed, Statement update, boolean acceptNoOpSentinel
+    ) {
         if (update instanceof ExpressionStatement es) {
             Expression e = es.expression();
             if (e instanceof IncrementExpr inc) {
@@ -1579,8 +2231,10 @@ public final class Validate {
             }
             // The no-op sentinel a while-shaped frontend synthesizes when the source carries no
             // continue expression: zig's `while (c) {}`, move's `while (c) {}`, go's `for c {}`.
-            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing.
-            return e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier;
+            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing
+            // -- on a loop the condition rule already refuses (N-116).
+            return acceptNoOpSentinel
+                && (e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier);
         }
 
         if (update instanceof AssignmentStatement as) {
@@ -1637,36 +2291,42 @@ public final class Validate {
     // ------------------------------------------------------------------
 
     private static void collectMethodCalls(List<Statement> body, Set<String> out) {
+        collectMethodCalls(body, out, false);
+    }
+
+    private static void collectMethodCalls(List<Statement> body, Set<String> out, boolean bare) {
         for (Statement s : body) {
-            collectMethodCallsInStmt(s, out);
+            collectMethodCallsInStmt(s, out, bare);
         }
     }
 
-    private static void collectMethodCallsInStmt(Statement s, Set<String> out) {
+    private static void collectMethodCallsInStmt(Statement s, Set<String> out, boolean bare) {
         if (s instanceof ExpressionStatement es) {
-            collectMethodCallsInExpr(es.expression(), out);
+            collectMethodCallsInExpr(es.expression(), out, bare);
         } else if (s instanceof VariableDeclStatement v) {
-            collectMethodCallsInExpr(v.init(), out);
+            collectMethodCallsInExpr(v.init(), out, bare);
         } else if (s instanceof AssignmentStatement a) {
-            collectMethodCallsInExpr(a.target(), out);
-            collectMethodCallsInExpr(a.value(), out);
+            collectMethodCallsInExpr(a.target(), out, bare);
+            collectMethodCallsInExpr(a.value(), out, bare);
         } else if (s instanceof IfStatement i) {
-            collectMethodCallsInExpr(i.condition(), out);
-            collectMethodCalls(i.thenBody(), out);
+            collectMethodCallsInExpr(i.condition(), out, bare);
+            collectMethodCalls(i.thenBody(), out, bare);
             if (i.elseBody() != null) {
-                collectMethodCalls(i.elseBody(), out);
+                collectMethodCalls(i.elseBody(), out, bare);
             }
         } else if (s instanceof ForStatement f) {
-            collectMethodCallsInExpr(f.condition(), out);
-            collectMethodCalls(f.body(), out);
+            if (f.init() != null) collectMethodCallsInStmt(f.init(), out, bare);
+            collectMethodCallsInExpr(f.condition(), out, bare);
+            if (f.update() != null) collectMethodCallsInStmt(f.update(), out, bare);
+            collectMethodCalls(f.body(), out, bare);
         } else if (s instanceof ReturnStatement r) {
             if (r.value() != null) {
-                collectMethodCallsInExpr(r.value(), out);
+                collectMethodCallsInExpr(r.value(), out, bare);
             }
         }
     }
 
-    private static void collectMethodCallsInExpr(Expression e, Set<String> out) {
+    private static void collectMethodCallsInExpr(Expression e, Set<String> out, boolean bare) {
         if (e == null) return;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa) {
@@ -1677,31 +2337,38 @@ public final class Validate {
                 && "this".equals(id.name())) {
                 out.add(me.property());
             }
-            collectMethodCallsInExpr(c.callee(), out);
+            // N-180: the Solidity, Move and Java surfaces call a helper as a bare
+            // m(...). Counted only for the recursion / call-depth graph (bare),
+            // and only names of contract methods count there (analyzeCallGraph
+            // filters by methodNames), so builtins are unaffected.
+            if (bare && c.callee() instanceof Identifier bareId) {
+                out.add(bareId.name());
+            }
+            collectMethodCallsInExpr(c.callee(), out, bare);
             for (Expression arg : c.args()) {
-                collectMethodCallsInExpr(arg, out);
+                collectMethodCallsInExpr(arg, out, bare);
             }
         } else if (e instanceof BinaryExpr be) {
-            collectMethodCallsInExpr(be.left(), out);
-            collectMethodCallsInExpr(be.right(), out);
+            collectMethodCallsInExpr(be.left(), out, bare);
+            collectMethodCallsInExpr(be.right(), out, bare);
         } else if (e instanceof UnaryExpr ue) {
-            collectMethodCallsInExpr(ue.operand(), out);
+            collectMethodCallsInExpr(ue.operand(), out, bare);
         } else if (e instanceof MemberExpr me) {
-            collectMethodCallsInExpr(me.object(), out);
+            collectMethodCallsInExpr(me.object(), out, bare);
         } else if (e instanceof TernaryExpr te) {
-            collectMethodCallsInExpr(te.condition(), out);
-            collectMethodCallsInExpr(te.consequent(), out);
-            collectMethodCallsInExpr(te.alternate(), out);
+            collectMethodCallsInExpr(te.condition(), out, bare);
+            collectMethodCallsInExpr(te.consequent(), out, bare);
+            collectMethodCallsInExpr(te.alternate(), out, bare);
         } else if (e instanceof IndexAccessExpr ia) {
-            collectMethodCallsInExpr(ia.object(), out);
-            collectMethodCallsInExpr(ia.index(), out);
+            collectMethodCallsInExpr(ia.object(), out, bare);
+            collectMethodCallsInExpr(ia.index(), out, bare);
         } else if (e instanceof IncrementExpr ie) {
-            collectMethodCallsInExpr(ie.operand(), out);
+            collectMethodCallsInExpr(ie.operand(), out, bare);
         } else if (e instanceof DecrementExpr de) {
-            collectMethodCallsInExpr(de.operand(), out);
+            collectMethodCallsInExpr(de.operand(), out, bare);
         } else if (e instanceof ArrayLiteralExpr al) {
             for (Expression el : al.elements()) {
-                collectMethodCallsInExpr(el, out);
+                collectMethodCallsInExpr(el, out, bare);
             }
         }
     }

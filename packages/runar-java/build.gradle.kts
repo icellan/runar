@@ -68,7 +68,7 @@ dependencyLocking {
 
 dependencies {
     // secp256k1 ECDSA + SHA-256 / RIPEMD-160 / BIP-143 sighash.
-    api("org.bouncycastle:bcprov-jdk18on:1.84")
+    api("org.bouncycastle:bcprov-jdk18on:1.85")
 
     // Frontend-only access to the Rúnar Java compiler so CompileCheck can
     // run parse → validate → expand-fixed-arrays → typecheck without

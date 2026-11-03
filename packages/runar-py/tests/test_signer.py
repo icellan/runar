@@ -179,7 +179,7 @@ def _make_bsv_mock():
 
 
 @pytest.fixture()
-def bsv_mocked():
+def bsv_mocked(monkeypatch):
     """Inject a mock bsv module into sys.modules and reload LocalSigner."""
     bsv_mod, bsv_constants = _make_bsv_mock()
 
@@ -188,17 +188,19 @@ def bsv_mocked():
         # Force re-evaluation of _BSV_SDK_AVAILABLE in a fresh import
         import importlib
         import runar.sdk.local_signer as ls_module
-        original_available = ls_module._BSV_SDK_AVAILABLE
-        ls_module._BSV_SDK_AVAILABLE = True
-        # Patch the module-level names that were captured at import time
-        ls_module.PrivateKey = bsv_mod.PrivateKey
-        ls_module.BsvTransaction = bsv_mod.Transaction
-        ls_module.P2PKH = bsv_mod.P2PKH
-        ls_module.Script = bsv_mod.Script
-        ls_module.TransactionOutput = bsv_mod.TransactionOutput
+        # Patch the module-level names that were captured at import time.
+        # monkeypatch.setattr restores every one of these on teardown, even
+        # on test failure — a plain assignment + manual restore previously
+        # only restored _BSV_SDK_AVAILABLE and leaked the mocked
+        # PrivateKey/BsvTransaction/P2PKH/Script/TransactionOutput into
+        # later tests that build a real LocalSigner.
+        monkeypatch.setattr(ls_module, '_BSV_SDK_AVAILABLE', True)
+        monkeypatch.setattr(ls_module, 'PrivateKey', bsv_mod.PrivateKey, raising=False)
+        monkeypatch.setattr(ls_module, 'BsvTransaction', bsv_mod.Transaction, raising=False)
+        monkeypatch.setattr(ls_module, 'P2PKH', bsv_mod.P2PKH, raising=False)
+        monkeypatch.setattr(ls_module, 'Script', bsv_mod.Script, raising=False)
+        monkeypatch.setattr(ls_module, 'TransactionOutput', bsv_mod.TransactionOutput, raising=False)
         yield ls_module, bsv_mod
-        # Restore
-        ls_module._BSV_SDK_AVAILABLE = original_available
 
 
 class TestLocalSigner:
@@ -280,6 +282,27 @@ class TestLocalSigner:
         s = LocalSigner('ff' * 32)
         sig = s.sign('deadbeef', 0, '51', 10_000)
         assert sig[:2] == '30'
+
+    def test_bsv_mocked_fixture_restores_real_module_attributes(self):
+        """Regression for the bsv_mocked teardown leak (N-169): every test above
+        this one uses the bsv_mocked fixture, which patches PrivateKey,
+        BsvTransaction, P2PKH, Script and TransactionOutput on
+        runar.sdk.local_signer. The old fixture only restored
+        _BSV_SDK_AVAILABLE on teardown, so those five names stayed bound to
+        MagicMocks for every test running after, breaking any real
+        LocalSigner built later (e.g. invalid address length: 24 from a
+        mocked address() return value). Proves: after the fixture-using
+        tests above have run and torn down, the module's names are back to
+        the real bsv-sdk bindings, not MagicMocks. Does not prove: ordering
+        under randomized test collection (pytest-randomly is not installed
+        in this suite) — the authoritative proof for that is the
+        order-dependent cross-file pytest run documented in the remediation
+        log, not this in-file ordering check."""
+        import runar.sdk.local_signer as ls_module
+        for name in ('PrivateKey', 'BsvTransaction', 'P2PKH', 'Script', 'TransactionOutput'):
+            assert not isinstance(getattr(ls_module, name), MagicMock), (
+                f"ls_module.{name} is still a MagicMock after bsv_mocked teardown"
+            )
 
 
 # ---------------------------------------------------------------------------

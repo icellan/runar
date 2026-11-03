@@ -288,6 +288,13 @@ use, which also moves the shared Groth16 MSM path — a separate change. The
 current behaviour is pinned, and the mask's precision is guarded, by
 `TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity`.
 
+**Closed by F-091 (fail-closed).** The `bn254G1Add` builtin now aborts when
+`py + qy ≡ 0 (mod p)` while `px != qx` (`bn254G1OmegaCollisionVerify`, an
+`OP_VERIFY` placed before the infinity mask), in all six tiers that compile
+it, byte-identical to Go. The shared `bn254G1AffineAdd` helper, and with it the
+Groth16 MSM path, is unchanged. Pinned by `TestBN254G1Add_OmegaCollisionAborts`
+and by the `@bsv/sdk` execution leg in `conformance/go-only-parity/`.
+
 ## Found on the way in: five off-chain mocks disagreed with the script
 
 Adding `assert(!ecOnCurve(ecAdd(g, neg)))` to the `ec-unit` fixture made the

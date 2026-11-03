@@ -128,6 +128,8 @@ fn compileScriptHex(
 ) ![]const u8 {
     const result = try compiler_api.compileSourceWithOptions(allocator, source, file_name, true);
     if (result.artifact_json) |json| allocator.free(json);
+    for (result.warnings) |line| allocator.free(line);
+    allocator.free(result.warnings);
     return result.script_hex;
 }
 

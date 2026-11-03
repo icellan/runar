@@ -2,12 +2,23 @@
  * Zig parser: verify the Zig example tree mirrors the native example set and parses cleanly.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
 import { parse } from '../passes/01-parse.js';
 import { parseZigSource } from '../passes/01-parse-zig.js';
 import { compile } from '../index.js';
+
+// This file iterates `ZIG_EXAMPLES`/`TS_EXAMPLES` to generate its `it()`
+// cases, the same shape that let `rust-parser-examples.test.ts` go vacuously
+// green (see its own comment): a per-fixture test body that returns early
+// on a missing path executes zero `expect()` calls and still reports
+// PASSED. `expect.hasAssertions()` makes a future reintroduction of that
+// pattern fail loudly instead. See `multi-format.test.ts`'s copy of this
+// guard for a permanent regression test proving the mechanism (F-391).
+beforeEach(() => {
+  expect.hasAssertions();
+});
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 const EXAMPLES_ZIG_DIR = join(REPO_ROOT, 'examples', 'zig');
@@ -54,14 +65,6 @@ const ZIG_PORT_PENDING: readonly string[] = [
   // Port these alongside that fix.
   'companion-verifier/AttributedToken.runar.zig',
   'companion-verifier/CompanionVerifier.runar.zig',
-  // NOT pending — permanently TS-only, unlike every other entry here. R-209
-  // added this example for the `@embedAlways` and `@sighash` comment
-  // directives, and both are read on the `.runar.ts` surface ALONE: the other
-  // eight parsers REJECT a source carrying either, deliberately, because
-  // silently dropping a directive would change DCE or signing semantics without
-  // saying so. A `.runar.zig` translation is a parse error by design, so there
-  // is nothing to port and nothing to track. See examples/README.md.
-  'compiler-directives/Directives.runar.zig',
 ];
 
 describe('Zig parser: example inventory', () => {

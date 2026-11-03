@@ -50,8 +50,10 @@ class P256P384Test {
     void p256AddParity() {
         assertParity("p256Add",
             P256P384::emitP256Add,
-            6737, 20114,
-            "3c210d17ca365ce2b1b504f2210a8cc2452bf0513d1cb1620923539ea0a8b0bf");
+            // N-252, the y = 0 tangent guard: +12 ops / +12 bytes (three picks +
+            // OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY).
+            6749, 20126,
+            "b1a32c3b3481b0351e47c638268f20c47344fe0bef0c0c7c576a372e3726f786");
     }
 
     @Test
@@ -160,8 +162,9 @@ class P256P384Test {
     void p384AddParity() {
         assertParity("p384Add",
             P256P384::emitP384Add,
-            11543, 46982,
-            "477c845892660ecd52d7892894130db422f6a1eae60c37c298cbfa2c65cee443");
+            // N-252: +12 ops / +12 bytes, as p256Add.
+            11555, 46994,
+            "edc88db7c8c0bc4d77497a87d1de8384ca7c5bffca326c418b39048177b42e26");
     }
 
     @Test

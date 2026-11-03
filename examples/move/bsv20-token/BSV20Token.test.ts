@@ -69,6 +69,7 @@ describe('BSV20Token (Move)', () => {
       expect(json.op).toBe('deploy');
       expect(json.tick).toBe('RUNAR');
       expect(json.max).toBe('21000000');
+      expect(json.lim).toBe('1000');
     });
   });
 
@@ -84,6 +85,7 @@ describe('BSV20Token (Move)', () => {
 
       const json = JSON.parse(hexToUtf8(parsed!.data));
       expect(json.op).toBe('mint');
+      expect(json.tick).toBe('RUNAR');
       expect(json.amt).toBe('1000');
     });
   });
@@ -101,6 +103,7 @@ describe('BSV20Token (Move)', () => {
       const json = JSON.parse(hexToUtf8(parsed!.data));
       expect(json.op).toBe('transfer');
       expect(json.tick).toBe('RUNAR');
+      expect(json.amt).toBe('50');
     });
   });
 
@@ -121,6 +124,7 @@ describe('BSV20Token (Move)', () => {
       });
 
       expect(reconnected.inscription).not.toBeNull();
+      expect(reconnected.inscription!.contentType).toBe('application/bsv-20');
 
       const json = JSON.parse(hexToUtf8(reconnected.inscription!.data));
       expect(json.op).toBe('deploy');

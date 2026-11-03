@@ -39,6 +39,7 @@ const REQUIRED_CORPORA = [
   'sdk-output',
   'source-map',
   'decompiler-templates',
+  'decompiler-fingerprints',
   'decompiler-coverage',
   'script-size',
 ] as const;

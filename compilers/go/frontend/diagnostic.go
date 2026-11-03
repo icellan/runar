@@ -1,6 +1,9 @@
 package frontend
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // Severity represents the level of a compiler diagnostic.
 type Severity string
@@ -22,13 +25,176 @@ func MakeDiagnostic(message string, severity Severity, loc *SourceLocation) Diag
 	return Diagnostic{Message: message, Severity: severity, Loc: loc}
 }
 
-// FormatMessage returns the diagnostic message with optional file:line:column prefix.
+// FormatMessage returns the diagnostic message with optional file:line:column
+// prefix. The column is 0-based (N-078, R88a), so column 0 is a real position
+// and prints as `:0`; only an unknown line (0) drops the column.
 func (d Diagnostic) FormatMessage() string {
 	if d.Loc != nil && d.Loc.File != "" {
-		if d.Loc.Column > 0 {
+		if d.Loc.Line > 0 {
 			return fmt.Sprintf("%s:%d:%d: %s", d.Loc.File, d.Loc.Line, d.Loc.Column, d.Message)
 		}
 		return fmt.Sprintf("%s:%d: %s", d.Loc.File, d.Loc.Line, d.Message)
 	}
 	return d.Message
+}
+
+// GoBareStringLiteralMsg / ZigBareStringLiteralMsg are N-448's refusal (user
+// decision R174) of a bare, non-empty string literal used as a ByteString
+// value on .runar.go / .runar.zig: natively the literal is ASCII text but the
+// compiler reads it as hex. Every tier's parser for the surface emits the text
+// verbatim, at the literal's opening quote.
+func GoBareStringLiteralMsg(lit string) string {
+	return `bare string literal "` + lit + `" is ambiguous in .runar.go source: natively it is ASCII text but the compiler reads it as hex — ` +
+		`write runar.HexToBytes("` + lit + `") for hex bytes or runar.ByteString("` + lit + `") for the text`
+}
+
+func ZigBareStringLiteralMsg(lit string) string {
+	return `bare string literal "` + lit + `" is ambiguous in .runar.zig source: natively it is ASCII text but the compiler reads it as hex — ` +
+		`write runar.hexToBytes("` + lit + `") for hex bytes`
+}
+
+// UnterminatedStringLiteralMsg is F-011's shared diagnostic (the TS
+// reference's UNTERMINATED_STRING_LITERAL): every hand-written tokenizer emits
+// it, at the opening quote, for a quoted literal that reaches a line break or
+// end of file before its closing quote. On .runar.rs and for Python
+// triple-quoted strings, which may span lines, only end of file counts.
+const UnterminatedStringLiteralMsg = "unterminated string literal"
+
+// OptionalChainingMsg is N-121's refusal (user decision R85; the TS
+// reference's OPTIONAL_CHAINING) of a .runar.ts `?.`, located at the `?`.
+// Only the first `?.` in a file is reported.
+const OptionalChainingMsg = "optional chaining '?.' is not supported"
+
+// InvalidEscapeSequenceMsg is F-203's refusal of a .runar.py string or bytes
+// literal escape CPython does not define for that literal kind (or, in a plain
+// string, \N{..} / \u / \U, which the surface does not support), a \x not
+// followed by two hex digits, or an octal escape above 0o377 (the TS
+// reference's invalidEscapeSequenceMessage). esc is the backslash plus the
+// escape letter, or the whole octal escape.
+func InvalidEscapeSequenceMsg(esc string) string {
+	return "invalid escape sequence '" + esc + "'"
+}
+
+// PyBytesNonASCIIMsg is F-203's (and CPython's) refusal of a non-ASCII
+// character inside a .runar.py b'..' literal (the TS reference's
+// PY_BYTES_NON_ASCII).
+const PyBytesNonASCIIMsg = "bytes can only contain ASCII literal characters"
+
+// ZigListCommaMsg is F-026's refusal of a .runar.zig call argument list or
+// array literal whose elements are not separated by commas (the TS reference's
+// ZIG_LIST_COMMA).
+const ZigListCommaMsg = "expected ',' between list elements"
+
+// UnexpectedStructBodyTokenMsg and ZigStructInitDotMsg are N-410's refusals of
+// a .runar.zig struct-body token that is not a `pub const Contract` marker, a
+// method or a `name:` field, and of a struct-init field without its leading
+// `.` (the TS reference's unexpectedStructBodyTokenMessage / ZIG_STRUCT_INIT_DOT).
+func UnexpectedStructBodyTokenMsg(token string) string {
+	return fmt.Sprintf("Unexpected token in struct body: '%s'", token)
+}
+
+const ZigStructInitDotMsg = "expected '.' before struct-init field name"
+
+// PyStatementLineBreakMsg is F-026's refusal of a second .runar.py statement
+// on the same line (the TS reference's PY_STATEMENT_LINE_BREAK).
+const PyStatementLineBreakMsg = "expected a line break between statements"
+
+// JavaCharLiteralMsg is the TS reference's refusal of a Java char literal.
+const JavaCharLiteralMsg = "char literals are unsupported in Rúnar Java contracts"
+
+// UnsupportedStatementMsg is N-053's refusal of a .runar.rb / .runar.py
+// statement whose first token can begin neither a statement nor an expression
+// (the TS reference's unsupportedStatementMessage). `token` is the token's
+// source text.
+func UnsupportedStatementMsg(token string) string {
+	return fmt.Sprintf("Unsupported statement starting with '%s'", token)
+}
+
+// UnexpectedClassBodyTokenMsg and UnexpectedTokenAfterClassMsg are N-004's
+// refusals of a .runar.rb class-body token that is not `prop`, `runar_public`,
+// `params`, `def` or a bare `private` / `public` marker, and of the first
+// token after the class's `end` (the TS reference's
+// unexpectedClassBodyTokenMessage / unexpectedTokenAfterClassMessage). Both
+// used to be skipped, so an indented `=begin` (lexed as `=`, `begin`) let a
+// "commented-out" method become the only spend path.
+func UnexpectedClassBodyTokenMsg(token string) string {
+	return fmt.Sprintf("Unexpected token in class body: '%s'", token)
+}
+
+func UnexpectedTokenAfterClassMsg(token string) string {
+	return fmt.Sprintf("Unexpected token after class end: '%s'", token)
+}
+
+// StaticMethodMsg is N-050's refusal of a static or class-level method (the
+// TS reference's staticMethodMessage): `static` on .runar.ts / .runar.java,
+// `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,
+// and a `pub fn` without a self receiver on .runar.rs / .runar.zig. `name` is
+// the method name as written in the source.
+func StaticMethodMsg(name string) string {
+	return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static"
+}
+
+// UnknownReturnTypeDiagnostic is N-331's refusal of a method whose RETURN-type
+// annotation names a type that is not a Rúnar type (the TS reference's
+// checkReturnType). The AST keeps no return type, so every surface parser calls
+// this where the annotation is spelled. It returns nil for any other type;
+// "unknown" is the missing-annotation placeholder, diagnosed elsewhere.
+//
+// N-332: when isPublic, any non-void return type is also refused -- public
+// methods are spending entry points and return void (spec/grammar.md:161).
+func UnknownReturnTypeDiagnostic(t TypeNode, methodName string, loc SourceLocation, isPublic bool) *Diagnostic {
+	if ct, ok := t.(CustomType); ok {
+		if ct.Name == "unknown" {
+			return nil
+		}
+		return &Diagnostic{
+			Message:  "Type '" + ct.Name + "' of the return value of method '" + methodName + "' is not a Rúnar type",
+			Severity: SeverityError,
+			Loc:      &loc,
+		}
+	}
+	if isPublic {
+		if pt, ok := t.(PrimitiveType); !ok || pt.Name != "void" {
+			return &Diagnostic{
+				Message:  PublicReturnTypeMsg(methodName),
+				Severity: SeverityError,
+				Loc:      &loc,
+			}
+		}
+	}
+	return nil
+}
+
+// PublicReturnTypeMsg is N-332's refusal of a PUBLIC method that declares a
+// non-void return type (the TS reference's publicReturnTypeMessage).
+func PublicReturnTypeMsg(methodName string) string {
+	return "Public method '" + methodName + "' must not declare a return type: public methods are spending entry points and return void (spec/grammar.md:161)"
+}
+
+// BareJavaPropertyAssignmentMsg is N-023's (R49) refusal, on the .runar.java
+// surface, of an assignment (=, op=, ++, --) to a bare property name that no
+// local or parameter shadows (the TS reference's
+// bareJavaPropertyAssignmentMessage). In Java that bare name IS the field.
+func BareJavaPropertyAssignmentMsg(name string) string {
+	return "bare assignment to property '" + name + "' is not allowed; write `this." + name + " = ...`"
+}
+
+// lexDiag builds a tokenizer diagnostic located at line:col of file.
+func lexDiag(msg, file string, line, col int) Diagnostic {
+	return Diagnostic{Message: msg, Severity: SeverityError, Loc: &SourceLocation{File: file, Line: line, Column: col}}
+}
+
+// unexpectedCharDiag is N-214's refusal of a character a byte tokenizer does
+// not recognise at src[i] (the TS reference's "Unexpected character '<c>'").
+// It decodes the whole UTF-8 sequence, so `§` is reported as one character,
+// and returns its byte length so the caller can step over it as one column.
+func unexpectedCharDiag(src string, i int, file string, line, col int) (Diagnostic, int) {
+	r, size := utf8.DecodeRuneInString(src[i:])
+	return lexDiag(fmt.Sprintf("Unexpected character '%c'", r), file, line, col), size
+}
+
+// isASCIILetter is the letter class of the TS reference tokenizers' identifier
+// rule ([A-Za-z]); N-407 keeps a non-ASCII letter out of identifiers.
+func isASCIILetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }

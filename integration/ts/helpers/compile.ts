@@ -15,7 +15,7 @@ export function compileContract(sourcePath: string): RunarArtifact {
   const fileName = absPath.split('/').pop()!;
   const result = compile(source, { fileName });
   if (!result.artifact) {
-    throw new Error(`Compile failed for ${sourcePath}: ${JSON.stringify(result.errors)}`);
+    throw new Error(`Compile failed for ${sourcePath}: ${JSON.stringify(result.diagnostics)}`);
   }
   return result.artifact;
 }
@@ -23,7 +23,7 @@ export function compileContract(sourcePath: string): RunarArtifact {
 export function compileSource(source: string, fileName: string): RunarArtifact {
   const result = compile(source, { fileName });
   if (!result.artifact) {
-    throw new Error(`Compile failed: ${JSON.stringify(result.errors)}`);
+    throw new Error(`Compile failed: ${JSON.stringify(result.diagnostics)}`);
   }
   return result.artifact;
 }

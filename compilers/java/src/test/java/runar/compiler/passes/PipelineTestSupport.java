@@ -34,7 +34,10 @@ final class PipelineTestSupport {
         Typecheck.run(contract);
         contract = ExpandFixedArrays.run(contract);
         AnfProgram anf = AnfLower.run(contract);
-        anf = Cli.optimizeAnf(anf, disableConstantFolding); // DCE + EC rewrite always ON
+        // F-275: DCE only runs as part of the EC rewrite's post-cleanup, and
+        // the EC rewrite only fires when SOME method has an EC call
+        // (AnfOptimize.run's anyChanged gate) — it is not "always ON".
+        anf = Cli.optimizeAnf(anf, disableConstantFolding);
         StackProgram stack = StackLower.run(anf);
         stack = Peephole.run(stack);
         return Emit.run(stack);

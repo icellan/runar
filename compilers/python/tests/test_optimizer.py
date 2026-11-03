@@ -79,13 +79,18 @@ class TestWindow2Optimizations:
         result = optimize_stack_ops(ops)
         assert len(result) == 2
 
-    def test_double_negate_removed(self):
+    def test_double_negate_kept(self):
+        # F-001: -(-x) = x over integers, but OP_NEGATE decodes its operand as
+        # a CScriptNum (rejecting a non-minimal encoding under strict rules) and
+        # re-encodes it minimally, so deleting the pair changes accept/reject
+        # and value for a witness operand. Proves the pair survives; does not
+        # execute a script.
         ops = [
             StackOp(op="opcode", code="OP_NEGATE"),
             StackOp(op="opcode", code="OP_NEGATE"),
         ]
         result = optimize_stack_ops(ops)
-        assert len(result) == 0
+        assert [(o.op, o.code) for o in result] == [("opcode", "OP_NEGATE"), ("opcode", "OP_NEGATE")]
 
     def test_push1_add_becomes_1add(self):
         ops = [
@@ -105,21 +110,28 @@ class TestWindow2Optimizations:
         assert len(result) == 1
         assert result[0].code == "OP_1SUB"
 
-    def test_push0_add_removed(self):
+    def test_push0_add_kept(self):
+        # F-001: OP_ADD validates/normalises its operand (see
+        # test_double_negate_kept), so PUSH 0, OP_ADD must survive.
         ops = [
             StackOp(op="push", value=PushValue(kind="bigint", big_int=0)),
             StackOp(op="opcode", code="OP_ADD"),
         ]
         result = optimize_stack_ops(ops)
-        assert len(result) == 0
+        assert len(result) == 2
+        assert result[0].op == "push" and result[0].value.big_int == 0
+        assert result[1].code == "OP_ADD"
 
-    def test_push0_sub_removed(self):
+    def test_push0_sub_kept(self):
+        # F-001: as test_push0_add_kept, for OP_SUB.
         ops = [
             StackOp(op="push", value=PushValue(kind="bigint", big_int=0)),
             StackOp(op="opcode", code="OP_SUB"),
         ]
         result = optimize_stack_ops(ops)
-        assert len(result) == 0
+        assert len(result) == 2
+        assert result[0].op == "push" and result[0].value.big_int == 0
+        assert result[1].code == "OP_SUB"
 
     def test_equal_verify_becomes_equalverify(self):
         ops = [

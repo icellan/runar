@@ -28,6 +28,7 @@
  *     domain type, `FixedArray<T, N>` (N literal)
  */
 
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import type {
   ContractNode,
   PropertyNode,
@@ -41,9 +42,16 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import {
+  bareJavaPropertyAssignmentMessage,
+  checkReturnType,
+  makeDiagnostic,
+  staticMethodMessage,
+  UNTERMINATED_STRING_LITERAL,
+} from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { lostDirectiveMessage, resolveNativeSighash } from './sighash-directive.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -73,6 +81,10 @@ interface Token {
   value: string;
   line: number;
   column: number;
+  /** F-026: a number token's text as written. */
+  raw?: string;
+  /** F-026: valid only as the direct operand of a unary minus (`2147483648`). */
+  negOnly?: boolean;
 }
 
 const KEYWORDS = new Map<string, TokenType>([
@@ -92,11 +104,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
   function peek(): string { return source[pos] ?? ''; }
@@ -136,10 +148,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     if (ch === '"') {
       let val = '';
       advance(); // opening quote
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Java string literal cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
           advance();
           const esc = peek();
+          if (esc === '\n' || esc === '') break;
           if (esc === 'n') { val += '\n'; advance(); }
           else if (esc === 't') { val += '\t'; advance(); }
           else if (esc === 'r') { val += '\r'; advance(); }
@@ -152,7 +167,8 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           val += advance();
         }
       }
-      if (pos < source.length) advance(); // closing quote
+      if (peek() === '"') advance(); // closing quote
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('string', val, l, c);
       continue;
     }
@@ -221,49 +237,28 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       continue;
     }
 
-    // Hex literal: 0x...
-    if (ch === '0' && (peekN(1) === 'x' || peekN(1) === 'X')) {
-      let val = '';
-      advance(); advance();
-      while (pos < source.length && /[0-9a-fA-F_]/.test(peek())) {
-        const d = advance();
-        if (d !== '_') val += d;
-      }
-      // Java numeric suffixes L/l
-      if (peek() === 'L' || peek() === 'l') advance();
-      add('number', String(BigInt('0x' + val)), l, c);
-      continue;
-    }
-
-    // Decimal number (Java integer literal). No floats in the subset.
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Java integer
+    // literal (JLS 3.10.1), with Java's value: hex / octal / binary int and
+    // long literals wrap to two's complement (`0xFFFFFFFF` is -1).
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        const d = advance();
-        if (d !== '_') val += d;
-      }
-      // Reject floats explicitly
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      // A fraction (`1.5`) keeps its own wording; glued forms such as `1e3`
+      // or `10f` are not integer literals and take the shared refusal below.
       if (peek() === '.' && /[0-9]/.test(peekN(1))) {
         errors.push(makeDiagnostic(
           'floating-point literals are unsupported in Rúnar Java contracts',
           'error',
           { file, line: l, column: c },
         ));
-        // consume the fractional part
         advance();
-        while (pos < source.length && /[0-9_eE+\-]/.test(peek())) advance();
+        while (pos < source.length && /[0-9_eE+\-fFdD]/.test(peek())) advance();
+        add('number', '0', l, c);
+        continue;
       }
-      // Suffixes L/l (long) accepted; f/F/d/D rejected
-      if (peek() === 'L' || peek() === 'l') advance();
-      else if (peek() === 'f' || peek() === 'F' || peek() === 'd' || peek() === 'D') {
-        errors.push(makeDiagnostic(
-          'floating-point literals are unsupported in Rúnar Java contracts',
-          'error',
-          { file, line: l, column: c },
-        ));
-        advance();
-      }
-      add('number', val, l, c);
+      const lit = parseIntLiteral('java', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('java', text), 'error', { file, line: l, column: c }));
+      tokens.push({ type: 'number', value: lit ? lit.value.toString() : '0', line: l, column: c, raw: text, negOnly: lit?.negOnly ?? false });
       continue;
     }
 
@@ -329,6 +324,8 @@ class JavaParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[]) {
     this.tokens = tokens;
@@ -412,7 +409,7 @@ class JavaParser {
       parentClass = 'UnsafeSmartContract';
     } else {
       this.errorAt(nameTok,
-        `contract class must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got ${parentName}`);
+        `unknown parent class: '${parentName}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract`);
       return { contract: null, errors: this.errors };
     }
 
@@ -462,6 +459,8 @@ class JavaParser {
     // Note: classLoc is captured but ContractNode doesn't carry a sourceLocation.
     void classLoc;
 
+    checkBarePropertyAssignments(contract, this.errors);
+
     return { contract, errors: this.errors };
   }
 
@@ -508,6 +507,11 @@ class JavaParser {
     // Annotations precede modifiers.
     let readonly = false;
     let publicAnn = false;
+    // N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+    // the `@embedAlways` / `@sighash` directives.
+    let embedAlways: SourceLocation | null = null;
+    const sighashSpecs: Array<string | null> = [];
+    let sighashLoc: SourceLocation | null = null;
     while (this.current().type === '@') {
       const start = this.pos;
       this.expect('@');
@@ -522,6 +526,7 @@ class JavaParser {
         name = this.expect('ident').value;
       }
       // optional (...)
+      const argStart = this.pos;
       if (this.current().type === '(') {
         let depth = 0;
         while (this.current().type !== 'eof') {
@@ -530,8 +535,15 @@ class JavaParser {
           else this.advance();
         }
       }
+      const args = this.tokens.slice(argStart, this.pos); // `(` ... `)`, or empty
+      const annLoc = { file: this.file, line: this.tokens[start]!.line, column: this.tokens[start]!.column };
       if (name === 'Readonly') readonly = true;
       else if (name === 'Public') publicAnn = true;
+      else if (name === 'EmbedAlways') embedAlways = annLoc;
+      else if (name === 'Sighash') {
+        sighashLoc ??= annLoc;
+        sighashSpecs.push(args.length === 3 && args[1]!.type === 'string' ? args[1]!.value : null);
+      }
       else if (name === 'Stateful' || name === 'Override' || name === 'SuppressWarnings') {
         // accepted but ignored
       } else {
@@ -544,7 +556,11 @@ class JavaParser {
     }
 
     // modifiers
-    while (isMemberModifier(this.current().type)) this.advance();
+    let isStatic = false;
+    while (isMemberModifier(this.current().type)) {
+      if (this.current().type === 'static') isStatic = true;
+      this.advance();
+    }
 
     // A member is either:
     //   (1) constructor:  ClassName ( params ) { ... }
@@ -555,6 +571,9 @@ class JavaParser {
         && this.current().value === className
         && this.lookahead(1).type === '(') {
       const method = this.parseConstructor(className, loc);
+      // N-093: the constructor is neither a spending entry point nor a field.
+      if (sighashLoc) this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sighashLoc));
+      if (embedAlways) this.errors.push(makeDiagnostic(lostDirectiveMessage('@embedAlways'), 'error', embedAlways));
       return { kind: 'method', method, isConstructor: true };
     }
 
@@ -576,9 +595,22 @@ class JavaParser {
 
     if (this.current().type === '(') {
       // method
+      // N-050: a static method is not a contract method (it used to become a
+      // spending entry point when annotated @Public).
+      if (isStatic) {
+        this.errors.push(makeDiagnostic(staticMethodMessage(memberName), 'error', loc));
+      }
       const method = this.parseMethodBody(memberName, type, publicAnn, loc);
+      if (embedAlways) this.errors.push(makeDiagnostic(lostDirectiveMessage('@embedAlways'), 'error', embedAlways));
+      const sighash = resolveNativeSighash(memberName, publicAnn, sighashSpecs);
+      if (sighash && 'error' in sighash) {
+        this.errors.push(makeDiagnostic(sighash.error, 'error', loc));
+      } else if (sighash) {
+        method.sighashType = sighash.value;
+      }
       return { kind: 'method', method, isConstructor: false };
     }
+    if (sighashLoc) this.errors.push(makeDiagnostic(lostDirectiveMessage('@sighash'), 'error', sighashLoc));
 
     // Field declaration
     let initializer: Expression | undefined;
@@ -597,6 +629,7 @@ class JavaParser {
       type,
       readonly,
       initializer,
+      ...(embedAlways ? { embedAlways: true } : {}),
       sourceLocation: loc,
     };
     return prop;
@@ -630,10 +663,12 @@ class JavaParser {
 
   private parseMethodBody(
     name: string,
-    _returnType: TypeNode,
+    returnType: TypeNode,
     isPublic: boolean,
     loc: SourceLocation,
   ): MethodNode {
+    // The AST keeps no return type; N-331 refuses an unknown name here.
+    checkReturnType(returnType, name, loc, this.errors, isPublic);
     const params = this.parseParamList();
     // optional throws clause
     if (this.current().type === 'ident' && this.current().value === 'throws') {
@@ -718,7 +753,7 @@ class JavaParser {
       // Only `FixedArray<element, length>` is a supported generic type.
       if (last === 'FixedArray') {
         this.advance(); // consume '<'
-        const element = this.parseType();
+        const element = this.nest.nested(this.loc(), () => this.parseType());
         this.expect(',');
         // length literal
         const lenTok = this.current();
@@ -763,6 +798,10 @@ class JavaParser {
   // ----- statements -----
 
   private parseStatement(): Statement | null {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement | null {
     const loc = this.loc();
     const t = this.current();
 
@@ -979,7 +1018,7 @@ class JavaParser {
   // ----- expressions -----
 
   private parseExpression(): Expression {
-    return this.parseTernary();
+    return this.nest.nested(this.loc(), () => this.parseTernary());
   }
 
   private parseTernary(): Expression {
@@ -995,121 +1034,147 @@ class JavaParser {
   }
 
   private parseLogicalOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseLogicalAnd();
     while (this.current().type === '||') {
       this.advance();
-      left = { kind: 'binary_expr', op: '||', left, right: this.parseLogicalAnd() };
+      left = { kind: 'binary_expr', op: '||', left, right: this.parseLogicalAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseLogicalAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitOr();
     while (this.current().type === '&&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr() };
+      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitXor();
     while (this.current().type === '|') {
       this.advance();
-      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor() };
+      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitAnd();
     while (this.current().type === '^') {
       this.advance();
-      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd() };
+      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.current().type === '&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality() };
+      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality(), sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op: BinaryOp = this.advance().type === '==' ? '===' : '!==';
-      left = foldCompareToZero(op, left, this.parseComparison());
+      left = { ...foldCompareToZero(op, left, this.parseComparison()), sourceLocation: start };
     }
     return left;
   }
 
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = foldCompareToZero(op, left, this.parseShift());
+      left = { ...foldCompareToZero(op, left, this.parseShift()), sourceLocation: start };
     }
     return left;
   }
 
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
+      left = { kind: 'binary_expr', op, left, right: this.parseAddSub(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (this.current().type === '+' || this.current().type === '-') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv() };
+      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv(), sourceLocation: start };
     }
     return left;
   }
 
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (this.current().type === '*' || this.current().type === '/' || this.current().type === '%') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseUnary() };
+      left = { kind: 'binary_expr', op, left, right: this.parseUnary(), sourceLocation: start };
     }
     return left;
   }
 
   private parseUnary(): Expression {
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
     const t = this.current().type;
     if (t === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      // F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+      // legal only as the direct operand of this minus.
+      const next = this.current();
+      if (next.type === 'number' && next.negOnly) next.negOnly = false;
+      return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '+') {
       // unary plus: just the operand
       this.advance();
-      return this.parseUnary();
+      return this.nest.nested(this.loc(), () => this.parseUnary());
     }
     if (t === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at };
     }
     if (t === '++') {
       this.advance();
-      return { kind: 'increment_expr', operand: this.parseUnary(), prefix: true };
+      return { kind: 'increment_expr', operand: this.nest.nested(this.loc(), () => this.parseUnary()), prefix: true };
     }
     if (t === '--') {
       this.advance();
-      return { kind: 'decrement_expr', operand: this.parseUnary(), prefix: true };
+      return { kind: 'decrement_expr', operand: this.nest.nested(this.loc(), () => this.parseUnary()), prefix: true };
     }
     return this.parsePostfix();
   }
@@ -1281,6 +1346,7 @@ class JavaParser {
 
     switch (t.type) {
       case 'number':
+        if (t.negOnly) this.errorAt(t, invalidIntegerLiteral('java', t.raw ?? t.value));
         this.advance();
         return { kind: 'bigint_literal', value: BigInt(t.value) };
       case 'true':
@@ -1301,7 +1367,7 @@ class JavaParser {
         // it (bytestring in a non-ByteString context fails typecheck) and
         // we emit an error below for immediate diagnostic clarity.
         this.advance();
-        return { kind: 'bytestring_literal', value: t.value };
+        return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       case 'this':
         this.advance();
         return { kind: 'identifier', name: 'this' };
@@ -1318,7 +1384,7 @@ class JavaParser {
         return this.parseNewExpression();
       case 'ident': {
         this.advance();
-        return { kind: 'identifier', name: t.value };
+        return { kind: 'identifier', name: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       }
       default:
         this.errorAt(t, `unexpected token '${t.value || t.type}' in expression`);
@@ -1629,8 +1695,95 @@ function foldBigIntegerConstant(name: string): Expression | null {
 // Synthetic constructor (when the contract omits one)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// N-023 (R49): bare property assignment
+// ---------------------------------------------------------------------------
+
+/**
+ * In Java a bare name inside a method that no local or parameter shadows IS
+ * the field, so `count = ...`, `count += ...`, `count++` and `--count` write
+ * contract state. Lowering them as a local rebind (the old behaviour) dropped
+ * the state write silently, so the bare form is refused; the author writes
+ * `this.count = ...`. Shadowing follows Java block scope: parameters, a local
+ * from its declaration to the end of its block, a for-loop variable inside
+ * the loop. Bare READS are not touched.
+ */
+function checkBarePropertyAssignments(contract: ContractNode, errors: CompilerDiagnostic[]): void {
+  const props = new Set(contract.properties.map(p => p.name));
+  if (props.size === 0) return;
+
+  const report = (name: string, loc: SourceLocation | undefined) => {
+    errors.push(makeDiagnostic(bareJavaPropertyAssignmentMessage(name), 'error', loc));
+  };
+  const isBareProp = (e: Expression, scope: Set<string>[]): e is Extract<Expression, { kind: 'identifier' }> =>
+    e.kind === 'identifier' && props.has(e.name) && !scope.some(s => s.has(e.name));
+
+  const walkExpr = (e: Expression, scope: Set<string>[], loc: SourceLocation | undefined): void => {
+    switch (e.kind) {
+      case 'increment_expr':
+      case 'decrement_expr':
+        if (isBareProp(e.operand, scope)) report(e.operand.name, e.sourceLocation ?? loc);
+        walkExpr(e.operand, scope, loc);
+        return;
+      case 'binary_expr': walkExpr(e.left, scope, loc); walkExpr(e.right, scope, loc); return;
+      case 'unary_expr': walkExpr(e.operand, scope, loc); return;
+      case 'call_expr': walkExpr(e.callee, scope, loc); e.args.forEach(a => walkExpr(a, scope, loc)); return;
+      case 'member_expr': walkExpr(e.object, scope, loc); return;
+      case 'ternary_expr':
+        walkExpr(e.condition, scope, loc); walkExpr(e.consequent, scope, loc); walkExpr(e.alternate, scope, loc);
+        return;
+      case 'index_access': walkExpr(e.object, scope, loc); walkExpr(e.index, scope, loc); return;
+      case 'array_literal': e.elements.forEach(x => walkExpr(x, scope, loc)); return;
+      default: return;
+    }
+  };
+
+  const walkStmt = (s: Statement, scope: Set<string>[]): void => {
+    const loc = s.sourceLocation;
+    switch (s.kind) {
+      case 'variable_decl':
+        if (s.init) walkExpr(s.init, scope, loc);
+        scope[scope.length - 1]!.add(s.name);
+        return;
+      case 'assignment':
+        if (isBareProp(s.target, scope)) report(s.target.name, loc);
+        walkExpr(s.target, scope, loc);
+        walkExpr(s.value, scope, loc);
+        return;
+      case 'if_statement':
+        walkExpr(s.condition, scope, loc);
+        walkBlock(s.then, scope);
+        if (s.else) walkBlock(s.else, scope);
+        return;
+      case 'for_statement': {
+        const loopScope = [...scope, new Set<string>()];
+        walkStmt(s.init, loopScope);
+        walkExpr(s.condition, loopScope, loc);
+        walkStmt(s.update, loopScope);
+        walkBlock(s.body, loopScope);
+        return;
+      }
+      case 'return_statement':
+        if (s.value) walkExpr(s.value, scope, loc);
+        return;
+      case 'expression_statement':
+        walkExpr(s.expression, scope, loc);
+        return;
+    }
+  };
+
+  const walkBlock = (body: Statement[], outer: Set<string>[]): void => {
+    const scope = [...outer, new Set<string>()];
+    for (const s of body) walkStmt(s, scope);
+  };
+
+  for (const m of [contract.constructor, ...contract.methods]) {
+    walkBlock(m.body, [new Set(m.params.map(p => p.name))]);
+  }
+}
+
 function syntheticConstructor(properties: PropertyNode[], file: string): MethodNode {
-  const loc: SourceLocation = { file, line: 1, column: 1 };
+  const loc: SourceLocation = { file, line: 1, column: 0 };
   const params: ParamNode[] = [];
   const body: Statement[] = [];
 
@@ -1678,5 +1831,5 @@ export function parseJavaSource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new JavaParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

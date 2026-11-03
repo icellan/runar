@@ -430,7 +430,7 @@ public final class P256P384 {
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
-    private static void cAffineAdd(ECTracker t, BigInteger fieldP, BigInteger pMinus2) {
+    private static void cAffineAdd(ECTracker t, BigInteger fieldP, BigInteger pMinus2, boolean abortOnY0Tangent) {
         // The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
         // denominator is zero and the correct slope is the TANGENT,
         // (3px^2 - 3) / (2py). Both cases are the same shape, `s = num / den`, so
@@ -481,6 +481,29 @@ public final class P256P384 {
             e.accept(new OpcodeOp("OP_SUB"));
             e.accept(new OpcodeOp("OP_NOT"));
         });
+
+        // N-252: N-110's guard, for the a = -3 curves. The tangent has no denominator
+        // when py == 0 (2*py == 0, and the field inverse is Fermat, so inv(0) = 0
+        // silently returned (p - 2px, 0)). Neither curve has a point with y == 0 (prime
+        // order, no 2-torsion), so only an off-curve operand gets here. ABORT:
+        //   ok = NOT(cond AND px != 0 AND py == 0)
+        // px != 0 exempts O + O, which is cond = 1 with py == 0 and must stay O.
+        // Only pNNNAdd asks for it. The ECDSA verifier passes false: that builtin is
+        // total (see decompressPubKey), and its R1 = u1*G is on the curve or O, so
+        // cond = 1 with py == 0 there already means px == 0, the exempt case.
+        if (abortOnY0Tangent) {
+            t.copyToTop("px", "_px_g");
+            t.copyToTop("py", "_py_g");
+            t.copyToTop("_cond", "_cond_g");
+            t.rawBlock(List.of("_px_g", "_py_g", "_cond_g"), "", e -> {
+                e.accept(new OpcodeOp("OP_SWAP"));
+                e.accept(new OpcodeOp("OP_NOT"));
+                e.accept(new OpcodeOp("OP_BOOLAND"));
+                e.accept(new OpcodeOp("OP_BOOLAND"));
+                e.accept(new OpcodeOp("OP_NOT"));
+                e.accept(new OpcodeOp("OP_VERIFY"));
+            });
+        }
 
         // chord numerator / denominator
         t.copyToTop("qy", "_qy1");
@@ -1433,7 +1456,7 @@ public final class P256P384 {
             if ("_rqy".equals(t.nm.get(i))) { t.nm.set(i, "qy"); break; }
         }
 
-        cAffineAdd(t, fieldP, pMinus2);
+        cAffineAdd(t, fieldP, pMinus2, false);
 
         // Step 8: x_R mod n == r
         t.toTop("ry"); t.drop();
@@ -1470,7 +1493,7 @@ public final class P256P384 {
         // R-117: cAffineAdd's selectors compare these four values RAW.
         cEmitCoordCanonVerify(t, "px", "py", P256_P);
         cEmitCoordCanonVerify(t, "qx", "qy", P256_P);
-        cAffineAdd(t, P256_P, P256_P_MINUS_2);
+        cAffineAdd(t, P256_P, P256_P_MINUS_2, true);
         cComposePoint(t, "rx", "ry", "_result", 32, REV32);
     }
 
@@ -1579,7 +1602,7 @@ public final class P256P384 {
         // R-117: cAffineAdd's selectors compare these four values RAW.
         cEmitCoordCanonVerify(t, "px", "py", P384_P);
         cEmitCoordCanonVerify(t, "qx", "qy", P384_P);
-        cAffineAdd(t, P384_P, P384_P_MINUS_2);
+        cAffineAdd(t, P384_P, P384_P_MINUS_2, true);
         cComposePoint(t, "rx", "ry", "_result", 48, REV48);
     }
 

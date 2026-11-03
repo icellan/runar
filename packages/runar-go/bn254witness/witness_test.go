@@ -1278,6 +1278,68 @@ func TestComputePreparedInputs(t *testing.T) {
 	}
 }
 
+// TestBuildFromProofWithInputs_RejectsNonCanonicalPublicInput is the
+// failing-test-first gate for N-232 (user decision R86a, landed on-chain by
+// N-035 at compilers/go/codegen/bn254_groth16.go): the witness-assisted
+// MSM-binding verifier now asserts 0 <= pub_i < r for every one of its 5
+// public-input slots before folding them into prepared_inputs. Before this
+// fix, BuildFromProofWithInputs (via GenerateWitness's call into
+// computePreparedInputs) silently reduced pub_i mod r when building the
+// off-chain witness, so a caller could hand it pub_0 = 7 + 3r and get back
+// a witness carrying that raw, non-canonical value — exactly what the
+// on-chain preamble is designed to reject (see
+// compilers/go/compiler/groth16_wa_binding_test.go,
+// TestGroth16WAMSM_RejectsNonCanonicalPublicInput).
+//
+// Proves: BuildFromProofWithInputs refuses a public input outside [0, r)
+// (here, 7 + 3r) and still builds a witness for the canonical representative
+// (7).
+// Does not prove: that the resulting witness verifies on-chain (the
+// compiler-level test above covers that), or anything about
+// GenerateWitness's "raw" (non-MSM) layout beyond sharing the same
+// computePreparedInputs call.
+func TestBuildFromProofWithInputs_RejectsNonCanonicalPublicInput(t *testing.T) {
+	_, _, g1Aff, g2Aff := bn254.Generators()
+	scaleG1 := func(k int64) bn254.G1Affine {
+		var p bn254.G1Affine
+		p.ScalarMultiplication(&g1Aff, big.NewInt(k))
+		return p
+	}
+	scaleG2 := func(k int64) bn254.G2Affine {
+		var p bn254.G2Affine
+		p.ScalarMultiplication(&g2Aff, big.NewInt(k))
+		return p
+	}
+
+	// VK with 5 public-input slots (IC has 6 entries: IC[0] + 5).
+	ic := make([]bn254.G1Affine, 6)
+	for i := range ic {
+		ic[i] = scaleG1(int64(i + 1))
+	}
+	vk := NewVerifyingKeyFromPositive(
+		scaleG1(1), scaleG2(1), scaleG2(2), scaleG2(3), ic,
+	)
+	proof := Proof{
+		A: G1AffineToBig(scaleG1(13)),
+		B: G2AffineToBig(scaleG2(1)),
+		C: G1AffineToBig(scaleG1(2)),
+	}
+
+	canonical := []*big.Int{big.NewInt(7), big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0)}
+	if _, err := BuildFromProofWithInputs(vk, proof, canonical); err != nil {
+		t.Fatalf("pub_0 = 7 (canonical): expected BuildFromProofWithInputs to build a witness, got error: %v", err)
+	}
+
+	r := fr.Modulus()
+	nonCanonical := []*big.Int{
+		new(big.Int).Add(big.NewInt(7), new(big.Int).Mul(big.NewInt(3), r)),
+		big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0),
+	}
+	if _, err := BuildFromProofWithInputs(vk, proof, nonCanonical); err == nil {
+		t.Fatal("pub_0 = 7+3r (non-canonical, same residue as 7 mod r): BuildFromProofWithInputs built a witness instead of refusing; the on-chain MSM-binding preamble (N-035) rejects pub_i outside [0, r) and the SDK must match it")
+	}
+}
+
 // TestPrecomputeAlphaNegBeta verifies that PrecomputeAlphaNegBeta produces
 // the PRE-final-exp MillerLoop(α, -β) value — NOT the post-final-exp GT
 // element e(α, -β). The verifier multiplies this into the triple Miller

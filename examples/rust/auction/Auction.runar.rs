@@ -85,6 +85,13 @@ impl Auction {
 
         // Reject bids that do not exceed the current highest
         assert!(bid_amount > self.highest_bid);
+
+        // The bid must be paid into the pot (N-027): the continuation carries the
+        // prior pot plus the new bid. This example never refunds an outbid bidder,
+        // so the pot is the deposit plus every bid, and close() hands all of it to
+        // the auctioneer. `>=` lets a bidder add more; the compiler's own
+        // `>= input` floor alone would let a bid pay nothing.
+        assert!(continuation_amount() >= extract_amount(&self.tx_preimage) + bid_amount);
         // Persist new leader into on-chain state
         self.highest_bidder = bidder;
         self.highest_bid = bid_amount;

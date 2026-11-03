@@ -1436,3 +1436,40 @@ fn the_interpreter_refuses_op_2mul_which_is_why_three_ec_rows_are_excused() {
     let ok = ScriptVm::new(VmOptions::default()).execute(&[], &[0x51u8]);
     assert!(ok.success, "the interpreter rejected OP_1; nothing here proves anything");
 }
+
+/// Sibling of the OP_2MUL pin above: `bsv-sdk` refuses OP_2DIV on the same
+/// branch, and `compilers/rust/src/codegen/{ec,bn254,p256_p384,merkle}.rs`
+/// all emit it (single-bit-shift / halving helpers), so the same silent-gap
+/// risk applies — an excuse ("the interpreter can't run this family") that
+/// outlives the thing it excuses is how coverage disappears. This test is
+/// what proves the excuse still holds, rather than letting a comment assert
+/// it indefinitely.
+///
+/// What this proves: `ScriptVm::execute` reports `DisabledOpcode("OP_2DIV")`
+/// for a script containing OP_2DIV, today, against the pinned bsv-sdk
+/// version — not that it always will, which is the point of pinning it.
+/// What this does NOT prove: that OP_2DIV is refused for every bsv-sdk
+/// version, every script shape, or every other tier's VM; nor does it say
+/// anything about whether the mock/emitter VALUES agree for the four
+/// families that emit OP_2DIV — only that the Rust ScriptVm oracle cannot
+/// execute scripts containing it at all.
+#[test]
+fn the_interpreter_refuses_op_2div_emitted_by_ec_bn254_p256_p384_and_merkle() {
+    // OP_1 OP_2DIV OP_1 — would leave a truthy clean stack if OP_2DIV ran.
+    let lock = vec![0x51u8, 0x8e, 0x51];
+    let res = ScriptVm::new(VmOptions::default()).execute(&[], &lock);
+    assert!(!res.success);
+    assert_eq!(
+        res.error.as_deref(),
+        Some("DisabledOpcode(\"OP_2DIV\")"),
+        "bsv-sdk no longer refuses OP_2DIV. ec.rs, bn254.rs, p256_p384.rs, and \
+         merkle.rs all emit it for bit-extraction/halving — if this stops being \
+         refused, those codegen paths should be re-checked against the ScriptVm \
+         oracle rather than staying silently excused."
+    );
+
+    // And the control: a script the interpreter WILL run, so the assertion above
+    // is about OP_2DIV and not about `execute` refusing everything.
+    let ok = ScriptVm::new(VmOptions::default()).execute(&[], &[0x51u8]);
+    assert!(ok.success, "the interpreter rejected OP_1; nothing here proves anything");
+}

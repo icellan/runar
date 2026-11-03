@@ -26,7 +26,6 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { TestContract } from '../test-contract.js';
 import { ScriptExecutionContract } from '../script-execution.js';
-import { runSlowTests } from '../test-env.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -90,7 +89,7 @@ describe('SLH-DSA-SHA2-128s NIST ACVP vector (on-chain)', () => {
       expect(result.success).toBe(false);
     });
 
-    it.skipIf(!runSlowTests)(
+    it(
       `compiled script accepts the NIST signature (${v.name})`,
       () => {
         const contract = ScriptExecutionContract.fromSource(SOURCE, { pubkey: v.pk });
@@ -103,7 +102,7 @@ describe('SLH-DSA-SHA2-128s NIST ACVP vector (on-chain)', () => {
       120000,
     );
 
-    it.skipIf(!runSlowTests)(
+    it(
       `compiled script rejects a 1-bit-tampered NIST signature (${v.name})`,
       () => {
         const contract = ScriptExecutionContract.fromSource(SOURCE, { pubkey: v.pk });

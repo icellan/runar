@@ -45,6 +45,22 @@ fn test_sha256_compress_emits_nontrivial_program() {
     );
 }
 
+// F-338: emit_sha256_compress had no exact op-count golden, only the
+// ops.len() > 100 threshold above. Unlike the P-384 ladders, this emitter
+// has zero StackOp::If branches (confirmed: no `If` variant appears in its
+// output), so a flat ops.len() pin is already an exact gate — there is no
+// branch body for a regression to hide in.
+//
+// Cross-tier check: this tier's measured count (21298) is byte-for-byte the
+// same as the independently pinned Go golden, compilers/go/codegen/
+// crypto_codegen_test.go's `{"Sha256Compress", EmitSha256Compress, 21298}`.
+// No disagreement to report.
+#[test]
+fn test_sha256_compress_op_count_golden() {
+    let ops = collect_emit(|sink| emit_sha256_compress(sink));
+    assert_eq!(ops.len(), 21298, "sha256_compress op count drift");
+}
+
 #[test]
 fn test_sha256_compress_uses_arithmetic_opcodes() {
     let ops = collect_emit(|sink| emit_sha256_compress(sink));
@@ -71,6 +87,20 @@ fn test_sha256_finalize_emits_nontrivial_program() {
         "SHA-256 finalize should emit a non-trivial program, got {} ops",
         ops.len()
     );
+}
+
+// F-338: emit_sha256_finalize had no exact op-count golden, only the
+// ops.len() > 50 threshold above — see test_sha256_compress_op_count_golden
+// for why a flat count is an exact gate here (zero StackOp::If branches).
+//
+// Cross-tier check: this tier's measured count (63946) matches the
+// independently pinned Go golden exactly, compilers/go/codegen/
+// crypto_codegen_test.go's `{"Sha256Finalize", EmitSha256Finalize, 63946}`.
+// No disagreement to report.
+#[test]
+fn test_sha256_finalize_op_count_golden() {
+    let ops = collect_emit(|sink| emit_sha256_finalize(sink));
+    assert_eq!(ops.len(), 63946, "sha256_finalize op count drift");
 }
 
 #[test]

@@ -14,8 +14,8 @@ fn runCompileChecks(comptime basename: []const u8) !void {
 }
 
 fn buildExpectedOutput(recipient: []const u8, min_amount: i64) []const u8 {
-    const script_prefix = runar.cat("1976a914", recipient);
-    const p2pkh_script = runar.cat(script_prefix, "88ac");
+    const script_prefix = runar.cat(runar.hexToBytes("1976a914"), recipient);
+    const p2pkh_script = runar.cat(script_prefix, runar.hexToBytes("88ac"));
     const amount_bytes = runar.num2bin(min_amount, 8);
     return runar.cat(amount_bytes, p2pkh_script);
 }

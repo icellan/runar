@@ -84,6 +84,10 @@ pub const DeployOptions = struct {
 pub const CallOptions = struct {
     satoshis: i64 = 0,
     change_address: ?[]const u8 = null,
+    /// Override the public key (hex) whose hash160 is the covenant's `_changePKH`
+    /// (stateful methods). Defaults to the signer's public key. When
+    /// `change_address` is set it must be the P2PKH address of this key (N-426).
+    change_pub_key: ?[]const u8 = null,
     new_state: ?[]const StateValue = null,
     /// Multiple continuation outputs for multi-output methods (e.g.
     /// `transfer` on a fungible token where the contract emits one output
@@ -214,6 +218,9 @@ pub const RunarArtifact = struct {
     state_fields: []StateField = &.{},
     constructor_slots: []ConstructorSlot = &.{},
     code_sep_index_slots: []CodeSepIndexSlot = &.{},
+    /// N-051 -- `verify_code_part_len` length fields whose value is only known
+    /// at deploy time. The SDK writes the deployed code-part length into each.
+    code_part_len_slots: []CodePartLenSlot = &.{},
     build_timestamp: []const u8 = &.{},
     code_separator_index: ?i32 = null,
     code_separator_indices: []i32 = &.{},
@@ -251,6 +258,7 @@ pub const RunarArtifact = struct {
         if (self.state_fields.len > 0) a.free(self.state_fields);
         if (self.constructor_slots.len > 0) a.free(self.constructor_slots);
         if (self.code_sep_index_slots.len > 0) a.free(self.code_sep_index_slots);
+        if (self.code_part_len_slots.len > 0) a.free(self.code_part_len_slots);
         if (self.code_separator_indices.len > 0) a.free(self.code_separator_indices);
         if (self.anf_json) |aj| a.free(aj);
         // R-062: the marker's names are duped out of the parsed JSON.
@@ -391,6 +399,21 @@ pub const RunarArtifact = struct {
             }
         }
 
+        // Parse codePartLenSlots (N-051)
+        if (root.get("codePartLenSlots")) |cpl_val| {
+            if (cpl_val == .array) {
+                const items = cpl_val.array.items;
+                var cpls = try allocator.alloc(CodePartLenSlot, items.len);
+                for (items, 0..) |item, i| {
+                    const obj = item.object;
+                    cpls[i] = .{
+                        .byte_offset = if (obj.get("byteOffset")) |bo| @intCast(bo.integer) else 0,
+                    };
+                }
+                artifact.code_part_len_slots = cpls;
+            }
+        }
+
         return artifact;
     }
 };
@@ -472,6 +495,18 @@ pub const ABIMethod = struct {
     /// default ALL|FORKID (0x41).
     sig_hash_type: ?i64 = null,
 
+    /// Whether a stateful method builds a state continuation. A `_changePKH`
+    /// param implies one; N-038: a SIGHASH_SINGLE method continues the
+    /// contract WITHOUT change params (BIP-143 SINGLE does not commit the
+    /// change output), so for it the ABI's `isTerminal` decides.
+    pub fn hasContinuation(self: ABIMethod) bool {
+        for (self.params) |p| {
+            if (std.mem.eql(u8, p.name, "_changePKH")) return true;
+        }
+        const st = self.sig_hash_type orelse 0x41;
+        return (st & 0x1f) == 0x03 and !(self.is_terminal orelse false);
+    }
+
     pub fn deinit(self: *ABIMethod, allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
         for (self.params) |*p| p.deinit(allocator);
@@ -514,6 +549,28 @@ pub const ABIMethod = struct {
 };
 
 /// ABIParam describes a single parameter.
+/// Intent-intrinsic witness params the compiler auto-injects
+/// (`extractPrevOutputScript` -> `_prevOutScript_<i>`, `requireOutputP2PKH` ->
+/// `_serialisedOutputs`). Their values come from setPrevOutScript /
+/// setSerialisedOutputs.
+pub fn isIntentWitnessParam(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "_prevOutScript_") or
+        std.mem.eql(u8, name, "_serialisedOutputs");
+}
+
+/// True when the SDK supplies this param itself, so it is never part of the
+/// caller's args: the intent witnesses always, plus the stateful continuation
+/// params (SigHashPreimage, `_changePKH`, `_changeAmount`, `_newAmount`) on
+/// stateful contracts. Single source of truth for RunarContract.call's arity
+/// check and the typed-wrapper codegen (F-245).
+pub fn isSdkSuppliedParam(p: ABIParam, is_stateful: bool) bool {
+    if (isIntentWitnessParam(p.name)) return true;
+    return is_stateful and (std.mem.eql(u8, p.type_name, "SigHashPreimage") or
+        std.mem.eql(u8, p.name, "_changePKH") or
+        std.mem.eql(u8, p.name, "_changeAmount") or
+        std.mem.eql(u8, p.name, "_newAmount"));
+}
+
 pub const ABIParam = struct {
     name: []const u8 = &.{},
     type_name: []const u8 = &.{},
@@ -705,6 +762,15 @@ pub const CodeSepIndexSlot = struct {
     code_sep_index: i32,
 };
 
+/// N-051 -- a `verify_code_part_len` length field whose value is only known at
+/// deploy time (a variable-width readonly constructor arg is baked into the
+/// code part). `byte_offset` is the TEMPLATE byte offset of the first of the 4
+/// little-endian length bytes (the byte after the `04` push opcode). The SDK
+/// overwrites those 4 bytes with the deployed code-part length.
+pub const CodePartLenSlot = struct {
+    byte_offset: i32,
+};
+
 // ---------------------------------------------------------------------------
 // StateValue — dynamically-typed value used in contract state
 // ---------------------------------------------------------------------------
@@ -806,10 +872,13 @@ pub const PreparedCall = struct {
     new_satoshis: i64,
 
     // -------- stateful-only opaque plumbing (zero-sized for stateless) ---
-    /// Hex-encoded k=1 OP_PUSH_TX signature, captured after preimage
-    /// convergence so finalizeCall can rebuild the stateful unlock with
-    /// the same OP_PUSH_TX evidence.
-    op_push_tx_sig: []u8 = &.{},
+    //
+    // N-213: there is deliberately NO op_push_tx_sig field. Post-BUG-100 the
+    // OP_PUSH_TX signature is derived ON-CHAIN from preimage --
+    // buildStatefulUnlockScript's signature parameter is accepted for
+    // call-site compatibility but ignored (see its "_ = op_sig_hex" discard),
+    // so there was nothing for finalizeCall to rebuild from here. Mirrors
+    // F-369's TS fix.
     /// Hex-encoded BIP-143 preimage embedded in the stateful unlock.
     preimage: []u8 = &.{},
     /// Hex-encoded method-selector push (for multi-method stateful contracts);
@@ -847,7 +916,6 @@ pub const PreparedCall = struct {
         var u = self.contract_utxo;
         u.deinit(allocator);
         if (self.new_locking_script.len > 0) allocator.free(self.new_locking_script);
-        if (self.op_push_tx_sig.len > 0) allocator.free(self.op_push_tx_sig);
         if (self.preimage.len > 0) allocator.free(self.preimage);
         if (self.method_selector.len > 0) allocator.free(self.method_selector);
         if (self.change_pkh.len > 0) allocator.free(self.change_pkh);

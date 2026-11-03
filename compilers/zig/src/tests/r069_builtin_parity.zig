@@ -72,7 +72,13 @@ const SRC_EXIT =
 // W3 / BoolBamboozle re-stamp: `run(c: boolean)` takes a `boolean`
 // parameter, so the method opens with its 9-byte ABI-domain gate. Re-derived
 // from the TypeScript reference compiler.
-const EXPECTED_EXIT = "767600877c51879b6900009d6900009c77";
+//
+// F-072 re-stamp: the trailing OP_NIP (77) is gone. It came from a stack slot
+// every tier recorded for exit()'s void result, which OP_VERIFY never
+// produces; the NIP then needed two items with only one on the stack, so the
+// old bytes rejected every spend (c=1 failed "OP_NIP requires at least two
+// items" on @bsv/sdk Spend). The new bytes accept c=1 and reject c=0.
+const EXPECTED_EXIT = "767600877c51879b6900009d6900009c";
 
 test "R-069: exit() lowers to OP_VERIFY, byte-identical to the peer tiers" {
     try expectProbeHex(SRC_EXIT, EXPECTED_EXIT);

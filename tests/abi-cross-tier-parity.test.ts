@@ -124,7 +124,10 @@ describe('artifact ABI params agree across tiers', () => {
         (p: { name: string }) => p.name,
       );
       expect(names).toEqual(goldenParamNames(c.fixture, c.method));
-    });
+      // The first statement is a cold dynamic import of the whole compiler,
+      // which under host load can exceed vitest's 5000 ms default although
+      // compile itself takes <110 ms. Same budget as the native-tier cases.
+    }, 300_000);
 
     for (const tier of TIERS) {
       const maybe = available.includes(tier) ? it : it.skip;

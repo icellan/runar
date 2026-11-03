@@ -174,18 +174,52 @@ class AnfLoaderTest {
 
     /* ---------------- Per-kind direct deserialization ---------------- */
 
+    // N-071: a public method must end with an assert, so the shell closes the
+    // body with `_ok = true; assert(_ok)` after the binding under test.
     private static final String EMPTY_SHELL = """
         {
           "contractName":"X",
           "properties":[],
           "methods":[
-            {"name":"m","isPublic":true,"params":[],"body":[%s]}
+            {"name":"m","isPublic":true,"params":[],"body":[%s,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
           ]
         }
         """;
 
     private static AnfBinding firstBinding(String body) {
         AnfProgram p = AnfLoader.parse(EMPTY_SHELL.formatted(body));
+        return p.methods().get(0).body().get(0);
+    }
+
+    /**
+     * N-101: a stateful-only node makes the program a StatefulSmartContract,
+     * whose public methods must carry the scaffolding the frontend injects. The
+     * node under test therefore sits alone in a private helper (method 0), next
+     * to a public terminal method carrying exactly that scaffolding: the
+     * checkPreimage and sighash-type asserts, plus deserialize_state when the
+     * contract has a mutable property.
+     */
+    private static AnfBinding firstHelperBinding(String body, String properties) {
+        boolean mutable = properties.contains("\"readonly\":false");
+        String prologue = "{\"name\":\"p0\",\"value\":{\"kind\":\"load_param\",\"name\":\"txPreimage\"}},"
+            + "{\"name\":\"p1\",\"value\":{\"kind\":\"check_preimage\",\"preimage\":\"p0\"}},"
+            + "{\"name\":\"p2\",\"value\":{\"kind\":\"assert\",\"value\":\"p1\"}},"
+            + "{\"name\":\"p3\",\"value\":{\"kind\":\"load_param\",\"name\":\"txPreimage\"}},"
+            + "{\"name\":\"p4\",\"value\":{\"kind\":\"call\",\"func\":\"extractSigHashType\",\"args\":[\"p3\"]}},"
+            + "{\"name\":\"p5\",\"value\":{\"kind\":\"load_const\",\"value\":65}},"
+            + "{\"name\":\"p6\",\"value\":{\"kind\":\"bin_op\",\"op\":\"===\",\"left\":\"p4\",\"right\":\"p5\"}},"
+            + "{\"name\":\"p7\",\"value\":{\"kind\":\"assert\",\"value\":\"p6\"}}"
+            + (mutable
+                ? ",{\"name\":\"p8\",\"value\":{\"kind\":\"load_param\",\"name\":\"txPreimage\"}},"
+                    + "{\"name\":\"p9\",\"value\":{\"kind\":\"deserialize_state\",\"preimage\":\"p8\"}},"
+                    + "{\"name\":\"_ok\",\"value\":{\"kind\":\"load_const\",\"value\":true}},"
+                    + "{\"name\":\"_ok_assert\",\"value\":{\"kind\":\"assert\",\"value\":\"_ok\"}}"
+                : "");
+        AnfProgram p = AnfLoader.parse("{\"contractName\":\"X\",\"parentClass\":\"StatefulSmartContract\","
+            + "\"properties\":" + properties + ",\"methods\":["
+            + "{\"name\":\"helper\",\"isPublic\":false,\"params\":[],\"body\":[" + body + "]},"
+            + "{\"name\":\"m\",\"isPublic\":true,\"params\":[{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}],"
+            + "\"body\":[" + prologue + "]}]}");
         return p.methods().get(0).body().get(0);
     }
 
@@ -289,10 +323,59 @@ class AnfLoaderTest {
         assertTrue(b.value() instanceof Assert a && "cond".equals(a.value()));
     }
 
+    /**
+     * N-208: {@code isAutoInjectedStateCheck} is an OPTIONAL boolean; a JSON
+     * {@code true} is the only truthy form, and an absent key defaults to
+     * {@code false} (see {@code parsesAssertNodeDefaultsIsAutoInjectedStateCheckToFalse}).
+     */
+    @Test
+    void parsesAssertNodeWithIsAutoInjectedStateCheckTrue() {
+        AnfBinding b = firstBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\","
+                + "\"isAutoInjectedStateCheck\":true}}");
+        assertTrue(b.value() instanceof Assert a
+            && "cond".equals(a.value())
+            && a.isAutoInjectedStateCheck());
+    }
+
+    @Test
+    void parsesAssertNodeDefaultsIsAutoInjectedStateCheckToFalse() {
+        AnfBinding b = firstBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\"}}");
+        assertTrue(b.value() instanceof Assert a && !a.isAutoInjectedStateCheck());
+    }
+
+    /**
+     * N-208: before this fix, {@code Boolean.TRUE.equals(obj.get(key))} was
+     * {@code false} for EVERY non-{@code Boolean.TRUE} value, including a
+     * wrong-typed one (the JSON STRING {@code "true"}), so a malformed
+     * marker silently read the same as a genuinely absent one. Off-chain SDK
+     * interpreters key off this exact marker to skip the compiler-injected
+     * stateful-continuation assert, so a flipped marker is a silent
+     * behaviour change, not a crash.
+     */
+    @Test
+    void rejectsAssertWithNonBooleanIsAutoInjectedStateCheck() {
+        RuntimeException ex = assertThrows(
+            RuntimeException.class,
+            () -> firstBinding(
+                "{\"name\":\"t0\",\"value\":{\"kind\":\"assert\",\"value\":\"cond\","
+                    + "\"isAutoInjectedStateCheck\":\"true\"}}")
+        );
+        assertTrue(
+            ex.getMessage().contains("isAutoInjectedStateCheck")
+                && ex.getMessage().contains("must be a boolean"),
+            "Expected a boolean-type diagnostic naming the field, got: " + ex.getMessage());
+    }
+
     @Test
     void parsesUpdatePropNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"update_prop\",\"name\":\"count\",\"value\":\"newCount\"}}");
+        // N-087: the loader refuses a write to an undeclared property, so the
+        // shell declares `count` as a StatefulSmartContract state field.
+        // N-101: the write sits in a private helper (see firstHelperBinding).
+        AnfBinding b = firstHelperBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"update_prop\",\"name\":\"count\",\"value\":\"newCount\"}}",
+            "[{\"name\":\"count\",\"type\":\"bigint\",\"readonly\":false}]");
         assertTrue(b.value() instanceof UpdateProp up
             && "count".equals(up.name())
             && "newCount".equals(up.value()));
@@ -300,8 +383,9 @@ class AnfLoaderTest {
 
     @Test
     void parsesGetStateScriptNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"get_state_script\"}}");
+        // N-101: a stateful-only node; see firstHelperBinding.
+        AnfBinding b = firstHelperBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"get_state_script\"}}", "[]");
         assertTrue(b.value() instanceof GetStateScript);
     }
 
@@ -314,8 +398,9 @@ class AnfLoaderTest {
 
     @Test
     void parsesDeserializeStateNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"deserialize_state\",\"preimage\":\"p\"}}");
+        // N-101: a stateful-only node; see firstHelperBinding.
+        AnfBinding b = firstHelperBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"deserialize_state\",\"preimage\":\"p\"}}", "[]");
         assertTrue(b.value() instanceof DeserializeState ds && "p".equals(ds.preimage()));
     }
 
@@ -325,23 +410,14 @@ class AnfLoaderTest {
         // "properties":[] while this node names two state values — exactly the
         // mismatch AnfLoader.checkAddOutputArity now refuses, sitting in the
         // loader's own unit test. A two-mutable-property shell makes the
-        // program well-formed; the assertions below are unchanged.
-        AnfProgram program = AnfLoader.parse("""
-            {
-              "contractName":"X",
-              "properties":[
-                {"name":"a","type":"bigint","readonly":false},
-                {"name":"b","type":"bigint","readonly":false}
-              ],
-              "methods":[
-                {"name":"m","isPublic":true,"params":[],"body":[%s]}
-              ]
-            }
-            """.formatted(
-                "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
-                    + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],"
-                    + "\"preimage\":\"p\"}}"));
-        AnfBinding b = program.methods().get(0).body().get(0);
+        // program well-formed; the assertions below are unchanged. N-101: the
+        // node sits in a private helper (see firstHelperBinding).
+        AnfBinding b = firstHelperBinding(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
+                + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],"
+                + "\"preimage\":\"p\"}}",
+            "[{\"name\":\"a\",\"type\":\"bigint\",\"readonly\":false},"
+                + "{\"name\":\"b\",\"type\":\"bigint\",\"readonly\":false}]");
         assertTrue(b.value() instanceof AddOutput ao
             && "sats".equals(ao.satoshis())
             && ao.stateValues().size() == 2

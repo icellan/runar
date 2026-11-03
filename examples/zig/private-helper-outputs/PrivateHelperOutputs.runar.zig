@@ -29,14 +29,14 @@
 //     single-output state continuation that hashes the new state
 //     script + change.
 //
-//   - log(payload) calls private record(payload) which emits an
+//   - log(ctx, payload) calls private record(ctx, payload) which emits an
 //     addDataOutput. The compiler must inline the helper at ANF
 //     time so the data output's bytes ref bubbles into the public
 //     method's addDataOutputRefs. The continuation hash then
 //     concatenates state-output || data-output || change before
 //     hashing.
 //
-//   - partition(amount, leftover) calls private forkOutput which
+//   - partition(ctx, amount, leftover) calls private forkOutput which
 //     emits addOutput. ANF inlining lifts the helper's add_output
 //     ANF node into the public's binding stream, registering on
 //     addOutputRefs. The continuation hash then takes the
@@ -53,6 +53,13 @@
 // public's tracking lists. The continuation hash construction
 // then sees the correct output set and matches the runtime
 // transaction's hashOutputs.
+//
+// The `ctx: runar.StatefulContext` handle is threaded into the
+// private helpers so the contract also runs natively (Zig cannot
+// inject intrinsics into the struct). It is not a parameter of the
+// compiled contract: every compiler elides it from each method's
+// parameter list and drops it from `self.helper(ctx, ...)` calls
+// (N-453), so the script and ANF IR are those of the ctx-free form.
 //
 // # Cross-compiler scope
 //
@@ -85,15 +92,17 @@ pub const PrivateHelperOutputs = struct {
     /// addDataOutput called from a private helper. The public
     /// caller's continuation hash must include the data output
     /// bytes between the state output and the change output.
-    fn record(self: *PrivateHelperOutputs, payload: runar.ByteString) void {
-        self.addDataOutput(0, payload);
+    fn record(self: *PrivateHelperOutputs, ctx: runar.StatefulContext, payload: runar.ByteString) void {
+        _ = self;
+        ctx.addDataOutput(0, payload);
     }
 
     /// addOutput called from a private helper. The public caller's
     /// continuation hash must commit to the explicit state output
     /// via the multi-output path.
-    fn forkOutput(self: *PrivateHelperOutputs, amount: i64, leftover: i64) void {
-        self.addOutput(amount, leftover);
+    fn forkOutput(self: *PrivateHelperOutputs, ctx: runar.StatefulContext, amount: i64, leftover: i64) void {
+        _ = self;
+        ctx.addOutput(amount, .{leftover});
     }
 
     /// Public spending entry: state mutation via private helper.
@@ -103,14 +112,14 @@ pub const PrivateHelperOutputs = struct {
     }
 
     /// Public spending entry: data output via private helper.
-    pub fn log(self: *PrivateHelperOutputs, payload: runar.ByteString) void {
-        self.record(payload);
+    pub fn log(self: *PrivateHelperOutputs, ctx: runar.StatefulContext, payload: runar.ByteString) void {
+        self.record(ctx, payload);
         runar.assert(true);
     }
 
     /// Public spending entry: state output via private helper.
-    pub fn partition(self: *PrivateHelperOutputs, amount: i64, leftover: i64) void {
-        self.forkOutput(amount, leftover);
+    pub fn partition(self: *PrivateHelperOutputs, ctx: runar.StatefulContext, amount: i64, leftover: i64) void {
+        self.forkOutput(ctx, amount, leftover);
         runar.assert(true);
     }
 };

@@ -32,6 +32,9 @@ import { execFileSync } from 'node:child_process';
 import {
   arbGeneratedContract,
   arbGeneratedStatefulContract,
+  arbGeneratedContractWideLoops,
+  arbGeneratedStatefulContractWideLoops,
+  withExtraKinds,
   renderTypeScript,
   renderGo,
   renderRust,
@@ -57,6 +60,12 @@ export interface IRFuzzerOptions {
   compareHex?: boolean;
   /** Include stateful contracts in the generated distribution. */
   includeStateful?: boolean;
+  /**
+   * Opt-in (N-400): also draw `addRawOutput`, `addDataOutput` (stateful only)
+   * and a call to a private helper method — the kinds no other mode reaches.
+   * Off by default so the fixed-seed corpora of the CI gates stay unchanged.
+   */
+  extraKinds?: boolean;
   /** How each compiler should receive its source — shared TS or per-language. */
   renderStrategy?: RenderStrategy;
   /** Directory to save failing cases. */
@@ -78,6 +87,17 @@ export interface IRFuzzerOptions {
    * opt out for an exploratory local run.
    */
   requireTiers?: readonly CompilerName[];
+  /**
+   * Constant folding OFF (default, `true`) passes `--disable-constant-folding`
+   * to every tier and `disableConstantFolding: true` to the in-process TS tier,
+   * matching the checked-in goldens. `false` is the fold-ON mode (N-399): the
+   * flag is omitted everywhere so every tier runs its default pipeline, folder
+   * included, on the same rendered source. Requires `compareHex`: the ANF-depth
+   * compare is taken straight out of the frontends, and whether that ANF is
+   * pre- or post-fold is not uniform across tiers, so a fold-ON ANF compare
+   * would not be a like-for-like check.
+   */
+  disableConstantFolding?: boolean;
 }
 
 /** What one program's run told us about tier PRESENCE (not about bytes). */
@@ -170,6 +190,14 @@ export interface IRDifferentialReport {
    * caller must fail.
    */
   missingRequiredTiers: CompilerName[];
+  /**
+   * Fold-ON runs only (0 otherwise): programs whose in-process TS bytes
+   * differ between folding ON and OFF. 0 on a fold-ON run means the folder
+   * changed nothing that was compared, i.e. the run was fold-OFF under another
+   * name (N-003's failure mode) and the caller must fail it. Counted only when
+   * the `ts` tier is in the run.
+   */
+  foldedPrograms: number;
 }
 
 export interface IRDifferentialResult {
@@ -291,7 +319,20 @@ interface CompilerDispatch {
   run: (file: string, hex: boolean) => string | null;
 }
 
-function dispatch(): Record<CompilerName, CompilerDispatch> {
+/**
+ * The `--source` argument tail every native tier receives. Fold-OFF appends
+ * `--disable-constant-folding`; fold-ON (N-399) omits it, so the tier runs its
+ * default pipeline with the constant folder enabled.
+ */
+export function sourceArgs(file: string, hex: boolean, disableConstantFolding: boolean): string[] {
+  return [
+    '--source', file,
+    hex ? '--hex' : '--emit-ir',
+    ...(disableConstantFolding ? ['--disable-constant-folding'] : []),
+  ];
+}
+
+function dispatch(disableConstantFolding: boolean): Record<CompilerName, CompilerDispatch> {
   const go = findBinary('compilers/go/runar-go');
   const rust = findBinary('compilers/rust/target/release/runar-compiler-rust');
   const zig = findBinary('compilers/zig/zig-out/bin/runar-zig');
@@ -307,20 +348,20 @@ function dispatch(): Record<CompilerName, CompilerDispatch> {
   return {
     ts: {
       name: 'ts',
-      run: tsCompileRun,
+      run: (file, hex) => tsCompileRun(file, hex, disableConstantFolding),
     },
     go: {
       name: 'go',
       run: (file, hex) => {
         if (!go) return null;
-        return runProcess(go, ['--source', file, hex ? '--hex' : '--emit-ir', '--disable-constant-folding']);
+        return runProcess(go, sourceArgs(file, hex, disableConstantFolding));
       },
     },
     rust: {
       name: 'rust',
       run: (file, hex) => {
         if (!rust) return null;
-        return runProcess(rust, ['--source', file, hex ? '--hex' : '--emit-ir', '--disable-constant-folding']);
+        return runProcess(rust, sourceArgs(file, hex, disableConstantFolding));
       },
     },
     python: {
@@ -328,23 +369,21 @@ function dispatch(): Record<CompilerName, CompilerDispatch> {
       run: (file, hex) =>
         runProcess('python3', [
           '-m', 'runar_compiler',
-          '--source', file,
-          hex ? '--hex' : '--emit-ir',
-          '--disable-constant-folding',
+          ...sourceArgs(file, hex, disableConstantFolding),
         ], { cwd: resolve(ROOT, 'compilers/python') }),
     },
     zig: {
       name: 'zig',
       run: (file, hex) => {
         if (!zig) return null;
-        return runProcess(zig, ['--source', file, hex ? '--hex' : '--emit-ir', '--disable-constant-folding']);
+        return runProcess(zig, sourceArgs(file, hex, disableConstantFolding));
       },
     },
     ruby: {
       name: 'ruby',
       run: (file, hex) => {
         if (!hasRuby) return null;
-        return runProcess('ruby', [rubyScript, '--source', file, hex ? '--hex' : '--emit-ir', '--disable-constant-folding']);
+        return runProcess('ruby', [rubyScript, ...sourceArgs(file, hex, disableConstantFolding)]);
       },
     },
     java: {
@@ -353,9 +392,7 @@ function dispatch(): Record<CompilerName, CompilerDispatch> {
         if (!javaJar) return null;
         return runProcess('java', [
           '-jar', javaJar,
-          '--source', file,
-          hex ? '--hex' : '--emit-ir',
-          '--disable-constant-folding',
+          ...sourceArgs(file, hex, disableConstantFolding),
         ]);
       },
     },
@@ -393,13 +430,13 @@ async function loadTsCompile(): Promise<RunarCompileFn | null> {
   return _cachedCompile;
 }
 
-function tsCompileRun(file: string, hex: boolean): string | null {
+function tsCompileRun(file: string, hex: boolean, disableConstantFolding: boolean): string | null {
   // This path is sync-by-contract; use a cached loaded compile fn.
   const compile = _cachedCompile;
   if (!compile) return null;
   try {
     const source = readFileSync(file, 'utf-8');
-    const result = compile(source, { fileName: file, disableConstantFolding: true });
+    const result = compile(source, { fileName: file, disableConstantFolding });
     // PIPELINE-DEPTH SYMMETRY (2026-08-06). The native tiers answer `--emit-ir`
     // straight out of the frontend: their ANF is produced and printed WITHOUT
     // ever running stack lowering or emit. `compile()` has no stop-at-ANF
@@ -539,6 +576,13 @@ export async function runIRDifferentialFuzzing(
   const compilers = options.compilers ?? ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'];
   const strategy: RenderStrategy = options.renderStrategy ?? 'ts';
   const compareHex = options.compareHex ?? true;
+  const disableConstantFolding = options.disableConstantFolding ?? true;
+  if (!disableConstantFolding && !compareHex) {
+    throw new Error(
+      'ir-differential: fold-ON requires compareHex (--hex). The ANF-depth compare reads each ' +
+        "frontend's ANF, which is not uniformly post-fold across tiers.",
+    );
+  }
   const verbose = options.verbose ?? false;
   const findingsDir = options.findingsDir ?? join(__dirname, '..', 'fuzz-findings-ir');
 
@@ -548,12 +592,19 @@ export async function runIRDifferentialFuzzing(
   // Load the TS compiler once; subsequent iterations reuse the cached fn.
   if (compilers.includes('ts')) await loadTsCompile();
 
-  const arb = options.includeStateful
-    ? fc.oneof(arbGeneratedContract, arbGeneratedStatefulContract)
-    : arbGeneratedContract;
+  // Countdown and closed-bound loops (F-300) have no native Go / Rust / Python /
+  // Zig / Ruby surface form, so only the `ts` strategy (TypeScript source for
+  // six tiers, `renderJava` for Java) can feed them to every tier. The `native`
+  // strategy keeps the ascending unit-step subset its renderers can express.
+  const wide = strategy === 'ts';
+  const statelessArb = wide ? arbGeneratedContractWideLoops : arbGeneratedContract;
+  const statefulArb = wide ? arbGeneratedStatefulContractWideLoops : arbGeneratedStatefulContract;
+  const baseArb = options.includeStateful ? fc.oneof(statelessArb, statefulArb) : statelessArb;
+  const arb = options.extraKinds ? withExtraKinds(baseArb) : baseArb;
 
   const contracts = fc.sample(arb, { numRuns: numPrograms, seed: options.seed });
-  const compilerMap = dispatch();
+  const compilerMap = dispatch(disableConstantFolding);
+  let foldedPrograms = 0;
   const requireTiers = options.requireTiers ?? compilers;
   const results: IRDifferentialResult[] = [];
   // Tier PRESENCE per program. It is classified after the loop, against the
@@ -582,6 +633,10 @@ export async function runIRDifferentialFuzzing(
         continue;
       }
       outputs[compiler] = normalizeOutput(raw, compareHex);
+      if (compiler === 'ts' && !disableConstantFolding) {
+        const unfolded = tsCompileRun(tmpFile, compareHex, true);
+        if (unfolded !== null && normalizeOutput(unfolded, compareHex) !== outputs[compiler]) foldedPrograms++;
+      }
       if (verbose) console.log(`    ${compiler}: ${outputs[compiler]!.slice(0, 60)}${outputs[compiler]!.length > 60 ? '...' : ''}`);
     }
 
@@ -643,6 +698,9 @@ export async function runIRDifferentialFuzzing(
         ? `, ${classification.allRejectedCount} rejected by every tier`
         : ''),
   );
+  if (!disableConstantFolding) {
+    console.log(`  Folded: ${foldedPrograms} program(s) whose TS bytes folding changed`);
+  }
   console.log(
     `  Tiers that compiled at least one program: ${classification.everProduced.join(', ') || '(none)'}`,
   );
@@ -660,5 +718,6 @@ export async function runIRDifferentialFuzzing(
     everProduced: classification.everProduced,
     requiredTiers: classification.requiredTiers,
     missingRequiredTiers: classification.missingRequiredTiers,
+    foldedPrograms,
   };
 }

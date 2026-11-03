@@ -1362,7 +1362,7 @@ example (msg sig pk : ByteArray) :
 Rabin signature verification has a *concrete arithmetic* spec: the
 verifier checks `(sig² + padding) mod pubKey == SHA256(msg)`. The
 lowering at `Stack.Lower.lowerVerifyRabinSigOpsLive` emits a fixed
-15-opcode body — see `Stack.Rabin.rabinBodyOps` — that exactly
+34-op body — see `Stack.Rabin.rabinBodyOps` — that exactly
 mirrors the TS reference `emitVerifyRabinSig` at
 `packages/runar-compiler/src/passes/rabin-codegen.ts:37-48`.
 
@@ -1411,8 +1411,13 @@ def verifyRabinSig_spec (msg : ByteArray) (sig padding pubKey : Int) : Bool :=
   -- (sign-and-magnitude), which is precisely the ~50% of messages the old
   -- byte compare rejected. The script appends the sign byte before OP_BIN2NUM
   -- for exactly this reason, so the spec states the same bytes.
+  --
+  -- F-047: the digest is reduced by the same modulus before the compare, so
+  -- the predicate is `(sig² + padding) mod n == SHA256(msg) mod n` — the
+  -- definition every off-chain verifier uses. Without the reduction any
+  -- n <= digest refused signatures the off-chain verifiers accept.
   decide (lhs = RunarVerification.Stack.decodeMinimalLE
-                  (Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
+                  (Crypto.sha256 msg ++ ByteArray.mk #[0x00]) % pubKey)
 
 /-! ## 11. SLH-DSA-SHA2 verification — concrete specs (Phase B9-a)
 
@@ -1460,7 +1465,7 @@ def verifySlhDsa_SHA2_192f (msg sig pk : ByteArray) : Bool :=
 def verifySlhDsa_SHA2_256s (msg sig pk : ByteArray) : Bool :=
   RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256s msg sig pk
 
-/-- FIPS 205 SLH-DSA-SHA2-256f spec (n=32, h=68, d=17, a=8, k=35). -/
+/-- FIPS 205 SLH-DSA-SHA2-256f spec (n=32, h=68, d=17, a=9, k=35). -/
 def verifySlhDsa_SHA2_256f (msg sig pk : ByteArray) : Bool :=
   RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256f msg sig pk
 

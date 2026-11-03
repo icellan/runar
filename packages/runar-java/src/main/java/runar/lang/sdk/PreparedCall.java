@@ -51,6 +51,12 @@ public final class PreparedCall {
      * order). Empty when the method has no auto-injected intent params.
      */
     final String intentWitnessHex;
+    /**
+     * N-145: the OP_PUSH_TX layout (stateful / txPreimage methods) the
+     * primary unlock is rebuilt from — exactly what {@code call()} splices.
+     * {@code null} on the legacy stateless and terminal paths.
+     */
+    final RunarContract.PushTxLayout pushTx;
 
     PreparedCall(
         String txHex,
@@ -81,6 +87,24 @@ public final class PreparedCall {
         long newSatoshis,
         String intentWitnessHex
     ) {
+        this(txHex, sighashes, sigIndices, methodName, resolvedArgs, contractUtxo,
+             isStateful, continuation, newLockingScriptHex, newSatoshis, intentWitnessHex, null);
+    }
+
+    PreparedCall(
+        String txHex,
+        List<byte[]> sighashes,
+        List<Integer> sigIndices,
+        String methodName,
+        List<Object> resolvedArgs,
+        UTXO contractUtxo,
+        boolean isStateful,
+        Map<String, Object> continuation,
+        String newLockingScriptHex,
+        long newSatoshis,
+        String intentWitnessHex,
+        RunarContract.PushTxLayout pushTx
+    ) {
         this.txHex = txHex;
         // Deep-copy each sighash array so callers cannot mutate the
         // stored digest by poking at the returned reference.
@@ -98,6 +122,7 @@ public final class PreparedCall {
         this.newLockingScriptHex = newLockingScriptHex;
         this.newSatoshis = newSatoshis;
         this.intentWitnessHex = intentWitnessHex == null ? "" : intentWitnessHex;
+        this.pushTx = pushTx;
     }
 
     /** Tx hex with 72-byte zero-filled placeholders at every Sig slot. */

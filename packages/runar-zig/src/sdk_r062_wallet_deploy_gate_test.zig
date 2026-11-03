@@ -11,6 +11,15 @@
 //! (over-rejection, not under-rejection). `acknowledge_unsound` on the
 //! `deployWithWallet` options closes that, with the same mechanism and the same
 //! error as `DeployOptions.acknowledge_unsound`.
+//!
+//! N-260 / R100: the wallet path's broadcast step itself now fails closed
+//! (WalletProvider.broadcastImpl in sdk_wallet.zig) instead of faking success
+//! via a wallet-composed createAction call (N-040), so `deployWithWallet`
+//! never actually funds anything over this path any more. The two CONTROL
+//! tests below still prove the R-062 gate decision — that an ordinary or
+//! acknowledged artifact clears the gate rather than being wrongly blocked —
+//! by asserting the failure they now see is the broadcast refusal, not
+//! UnsoundPrimitiveNotAcknowledged.
 
 const std = @import("std");
 const types = @import("sdk_types.zig");
@@ -90,19 +99,45 @@ test "R-062 zig: deployWithWallet refuses an unacknowledged unsound artifact" {
     try std.testing.expectEqualStrings("Sp1Rollup.deploy", rec.contextSlice());
 }
 
-test "R-062 zig CONTROL: an ordinary artifact still funds through the wallet path" {
+// N-260 / R100: the wallet broadcast path now fails closed (see sdk_wallet.zig
+// WalletProvider.broadcastImpl) — BRC-100's createAction has no primitive to
+// relay an already-signed raw tx, so deployWithWallet can no longer "fund"
+// anything over this path; it always fails at the broadcast step with
+// ContractError.DeployFailed. These CONTROL tests keep their R-062 intent —
+// proving the unsound-primitive GATE let the artifact through — by asserting
+// the failure is NOT the gate (errors_mod.last_unsound stays unset) but IS
+// the broadcast refusal (errors_mod.last_broadcast_refusal is set). A
+// regression that made the gate itself start blocking an ordinary or
+// acknowledged artifact would leave last_unsound populated and fail these.
+test "R-062 zig CONTROL: an ordinary artifact clears the gate (fails later, at broadcast)" {
     const allocator = std.testing.allocator;
-    const txid = try runWalletDeploy(allocator, "", &.{});
-    defer allocator.free(txid);
-    try std.testing.expect(txid.len > 0);
+    errors_mod.last_unsound = null;
+    errors_mod.last_broadcast_refusal = null;
+
+    try std.testing.expectError(
+        contract_mod.ContractError.DeployFailed,
+        runWalletDeploy(allocator, "", &.{}),
+    );
+
+    try std.testing.expect(errors_mod.last_unsound == null);
+    const msg = errors_mod.last_broadcast_refusal orelse return error.TestExpectedRecordedContext;
+    try std.testing.expectEqualStrings(wallet_mod.WalletProvider.RAW_BROADCAST_UNSUPPORTED_MSG, msg);
 }
 
-test "R-062 zig CONTROL: an acknowledged unsound artifact still funds through the wallet path" {
+test "R-062 zig CONTROL: an acknowledged unsound artifact clears the gate (fails later, at broadcast)" {
     const allocator = std.testing.allocator;
+    errors_mod.last_unsound = null;
+    errors_mod.last_broadcast_refusal = null;
     const ack: []const []const u8 = &.{"verifySP1FRI"};
-    const txid = try runWalletDeploy(allocator, UNSOUND, ack);
-    defer allocator.free(txid);
-    try std.testing.expect(txid.len > 0);
+
+    try std.testing.expectError(
+        contract_mod.ContractError.DeployFailed,
+        runWalletDeploy(allocator, UNSOUND, ack),
+    );
+
+    try std.testing.expect(errors_mod.last_unsound == null);
+    const msg = errors_mod.last_broadcast_refusal orelse return error.TestExpectedRecordedContext;
+    try std.testing.expectEqualStrings(wallet_mod.WalletProvider.RAW_BROADCAST_UNSUPPORTED_MSG, msg);
 }
 
 test "R-062 zig: a PARTIAL acknowledgement is still a refusal" {

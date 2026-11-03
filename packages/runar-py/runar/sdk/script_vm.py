@@ -195,7 +195,7 @@ class ScriptVM:
         spend = Spend({
             "sourceTXID": "00" * 32,
             "sourceOutputIndex": 0,
-            "sourceSatoshis": 0,
+            "sourceSatoshis": 100_000,  # TS/Go SYNTHETIC_SPEND_CONTEXT; part of the BIP-143 preimage
             "lockingScript": Script(locking),
             "transactionVersion": 1,
             "otherInputs": [],

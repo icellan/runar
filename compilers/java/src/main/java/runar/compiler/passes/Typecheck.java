@@ -1,5 +1,6 @@
 package runar.compiler.passes;
 
+import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -56,7 +57,16 @@ import runar.compiler.ir.ast.Visibility;
  */
 public final class Typecheck {
 
+    /** F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount(). */
+    public static final String CONTINUATION_AMOUNT_READ_ONLY =
+        "continuationAmount() is read-only and cannot be assigned";
+
     private Typecheck() {}
+
+    /** N-464: the N-463 expression position rule, for the validator's anchors. */
+    static SourceLocation exprLoc(Expression e) {
+        return Checker.exprLoc(e);
+    }
 
     // ------------------------------------------------------------------
     // Public API
@@ -118,19 +128,27 @@ public final class Typecheck {
         return BYTESTRING_SUBTYPES.contains(typeName);
     }
 
+    /**
+     * Whether the builtin {@code name} returns a ByteString-family value.
+     *
+     * <p>N-347: {@code AnfLower} answers "is {@code f(x)} a byte string?" from
+     * this, i.e. from the return type {@link BuiltinRegistry} records for the
+     * builtin, instead of keeping its own hand-written list. That list drifted
+     * twice (N-054, N-345) and was still missing merkleRootSha256 /
+     * merkleRootHash256 / bn254G1Add / bn254G1Negate / bn254G1ScalarMul, so
+     * {@code f(a) === f(b)} on them was not annotated {@code bytes}.
+     */
+    static boolean isByteReturningBuiltin(String name) {
+        return BuiltinRegistry.lookup(name)
+            .map(sig -> isByteStringFamily(sig.returnType()))
+            .orElse(false);
+    }
+
     private static final Set<String> BIGINT_SUBTYPES = Set.of(
         "bigint", "RabinSig", "RabinPubKey"
     );
 
     private static final Set<String> AFFINE_TYPES = Set.of("Sig", "SigHashPreimage");
-
-    /**
-     * State-output intrinsics: a call to either signals that the method builds
-     * its own output layout, so the compiler does NOT inject a single-output
-     * state continuation. Mirrors {@code STATE_OUTPUT_METHOD_NAMES} in
-     * {@code packages/runar-compiler/src/passes/03-typecheck.ts}.
-     */
-    private static final Set<String> STATE_OUTPUT_METHOD_NAMES = Set.of("addOutput", "addRawOutput");
 
     private static final Map<String, int[]> CONSUMING_FUNCTIONS = Map.of(
         "checkSig", new int[]{0},
@@ -242,6 +260,49 @@ public final class Typecheck {
             }
             return null;
         }
+
+        /** Index (outermost = 0) of the innermost scope binding {@code name}, or -1. */
+        int scopeIndexOf(String name) {
+            int i = scopes.size() - 1;
+            for (Map<String, String> scope : scopes) {
+                if (scope.containsKey(name)) return i;
+                i--;
+            }
+            return -1;
+        }
+
+        /** Index the next {@link #push()} will occupy. */
+        int depth() { return scopes.size(); }
+    }
+
+    /**
+     * F-110: whether a for-statement may execute its body two or more times.
+     * Mirrors the trip count AnfLower unrolls; a shape it cannot resolve is
+     * refused elsewhere and is treated as repeating here.
+     */
+    private static boolean loopMayRunTwice(ForStatement f) {
+        BigInteger start = f.init() == null ? null : loopLiteral(f.init().init());
+        if (start == null || !(f.condition() instanceof BinaryExpr b)) return true;
+        BigInteger bound = loopLiteral(b.right());
+        if (bound == null) return true;
+        BigInteger count;
+        switch (b.op()) {
+            case LT -> count = bound.subtract(start);
+            case LE -> count = bound.subtract(start).add(BigInteger.ONE);
+            case GT -> count = start.subtract(bound);
+            case GE -> count = start.subtract(bound).add(BigInteger.ONE);
+            default -> { return true; }
+        }
+        return count.compareTo(BigInteger.TWO) >= 0;
+    }
+
+    private static BigInteger loopLiteral(Expression e) {
+        if (e instanceof BigIntLiteral l) return l.value();
+        if (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
+            BigInteger inner = loopLiteral(u.operand());
+            return inner == null ? null : inner.negate();
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -283,6 +344,25 @@ public final class Typecheck {
         // Maps a local name to the canonical affine origin it
         // aliases. 2026-04-30 audit finding F6.
         Map<String, String> affineAliases = new HashMap<>();
+        // F-110: for every enclosing loop that may run two or more times, the
+        // env scope index its init/body bindings live at (innermost last). A
+        // bounded loop is unrolled `count` times, so consuming an affine value
+        // bound below the innermost index happens once per iteration.
+        final Deque<Integer> repeatingLoopScopes = new ArrayDeque<>();
+        // N-109: for every contract method, the indices of the parameters it
+        // consumes (directly or through further helper calls). Private helpers
+        // are inlined, so a call consumes the arguments at those positions.
+        // N-288: each entry also carries the "prop:<name>" origins the method
+        // consumes, which a call consumes in the caller.
+        // Computed lazily by consumedParamSummary.
+        Map<String, MethodConsumption> consumedParams;
+
+        /**
+         * N-109 / N-288: what a contract method consumes when it is called (it
+         * is inlined): the indices of its affine parameters and the
+         * {@code prop:<name>} origin keys of the affine properties it consumes.
+         */
+        private record MethodConsumption(int[] params, List<String> props) {}
 
         Checker(ContractNode contract) {
             this.contract = contract;
@@ -304,12 +384,94 @@ public final class Typecheck {
             }
         }
 
+        /**
+         * F-024 (R14): {@code continuationAmount()} is a read-only view of the
+         * auto-injected {@code _newAmount}. Without this check an assignment to
+         * it would lower as a plain read and silently drop the write.
+         */
+        void refuseContinuationAmountWrite(Expression target) {
+            if (target instanceof CallExpr c
+                && c.callee() instanceof Identifier id
+                && "continuationAmount".equals(id.name())) {
+                error(CONTINUATION_AMOUNT_READ_ONLY);
+            }
+        }
+
         void error(String msg) {
             SourceLocation loc = currentStmtLoc != null ? currentStmtLoc : currentMethodLoc;
             errors.add(format(msg, loc));
         }
 
+        /**
+         * N-463: an error about an expression is anchored at that expression,
+         * as in TS, when its position is known (the {@code .runar.ts} parser
+         * records it); otherwise at the statement, then the method, as
+         * {@link #error(String)} does.
+         */
+        void errorAt(String msg, Expression at) {
+            SourceLocation loc = at == null ? null : exprLoc(at);
+            if (loc == null) {
+                error(msg);
+            } else {
+                errors.add(format(msg, loc));
+            }
+        }
+
+        /**
+         * N-472: an operand type error is anchored at the operand with no
+         * fallback, as TS does with {@code operand.sourceLocation}. A bigint
+         * or boolean literal carries no location in any TS parser, so the
+         * diagnostic prints none rather than the statement. Any other operand
+         * without a recorded position (a surface that does not record it)
+         * keeps {@link #errorAt}'s statement anchor.
+         */
+        void operandErrorAt(String msg, Expression operand) {
+            if (exprLoc(operand) == null && (operand instanceof BigIntLiteral || operand instanceof BoolLiteral)) {
+                errors.add(format(msg, null));
+                return;
+            }
+            errorAt(msg, operand);
+        }
+
+        /**
+         * N-463: the position of {@code e}'s first token, or null when unknown.
+         * Only identifiers ({@code this} included), {@code this.x} and
+         * ByteString literals record a position, and only on
+         * {@code .runar.ts}. A composite expression starts where its leftmost
+         * child starts, which is the position TS reports for it (a
+         * parenthesised leftmost child is the exception: TS points at the
+         * {@code (}).
+         */
+        static SourceLocation exprLoc(Expression e) {
+            while (true) {
+                if (e instanceof Identifier id) return id.sourceLocation();
+                if (e instanceof PropertyAccessExpr pa) return pa.sourceLocation();
+                if (e instanceof ByteStringLiteral bs) return bs.sourceLocation();
+                // N-472: the parser records where the whole
+                // expression starts, which a leading `(` moves left of the
+                // leftmost leaf.
+                if (e instanceof BinaryExpr be) {
+                    if (be.sourceLocation() != null) return be.sourceLocation();
+                    e = be.left();
+                }
+                else if (e instanceof UnaryExpr ue) return ue.sourceLocation();
+                else if (e instanceof CallExpr ce) e = ce.callee();
+                else if (e instanceof MemberExpr me) e = me.object();
+                else if (e instanceof IndexAccessExpr ie) e = ie.object();
+                else if (e instanceof TernaryExpr te) e = te.condition();
+                else return null;
+            }
+        }
+
+        /** N-321: cap on a typecheck message; mirrored in every tier. */
+        static final int MAX_DIAGNOSTIC_CHARS = 1024;
+
         private static String format(String msg, SourceLocation loc) {
+            if (msg.length() > MAX_DIAGNOSTIC_CHARS) {
+                int cut = MAX_DIAGNOSTIC_CHARS;
+                if (Character.isLowSurrogate(msg.charAt(cut))) cut--;
+                msg = msg.substring(0, cut) + "...(" + (msg.length() - cut) + " more bytes elided)";
+            }
             if (loc == null) return msg;
             if (loc.file() != null && !loc.file().isEmpty() && loc.line() > 0) {
                 return loc.file() + ":" + loc.line() + ":" + loc.column() + ": " + msg;
@@ -321,9 +483,39 @@ public final class Typecheck {
         }
 
         void check() {
+            checkPropertyInitializers();
             checkConstructor();
             for (MethodNode m : contract.methods()) {
                 checkMethod(m);
+            }
+        }
+
+        /**
+         * N-234: a scalar property initializer whose literal type does not
+         * match the declared property type compiled without complaint on
+         * every tier ({@code readonly x: bigint = toByteString('ab')}
+         * emitted a locking script that pushes a byte string where the
+         * contract's own arithmetic expects a script NUMBER). Validation
+         * only checks that an initializer IS a literal of one of the three
+         * families, never that it is a literal OF THE DECLARED TYPE.
+         * {@code FixedArray} properties are skipped here: their
+         * element-type check already lives in {@code ExpandFixedArrays}
+         * (N-133), which runs on the expanded array elements, not the
+         * whole-array initializer this pass sees. Mirrors the TS
+         * reference's method of the same name in {@code 03-typecheck.ts}.
+         */
+        private void checkPropertyInitializers() {
+            for (PropertyNode p : contract.properties()) {
+                if (p.initializer() == null) continue;
+                if (p.type() instanceof FixedArrayType) continue;
+                String initType = staticInferType(p.initializer());
+                if ("<unknown>".equals(initType)) continue;
+                String declaredType = typeToString(p.type());
+                if (!isSubtype(initType, declaredType)) {
+                    currentMethodLoc = p.sourceLocation();
+                    currentStmtLoc = null;
+                    error("type '" + initType + "' is not assignable to type '" + declaredType + "'");
+                }
             }
         }
 
@@ -371,8 +563,15 @@ public final class Typecheck {
             // silently wrong when an OP_RETURN output (variable length)
             // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
             // relax with a variable-stride decoder.
-            boolean hasRequireP2PKH = bodyCallsBuiltin(m.body(), "requireOutputP2PKH");
-            boolean hasAddDataOutput = bodyCallsAddDataOutput(m.body());
+            //
+            // F-075: all three guards here read the method's effects through
+            // AnfLower's transitive continuation predicates, which follow the
+            // private-helper call graph — the same analysis ANF lowering
+            // injects the continuation from, and ANF lowering inlines private
+            // helpers. A body-local walk let a developer disable every guard by
+            // moving the triggering call into a helper.
+            boolean hasRequireP2PKH = AnfLower.methodCallsRequireOutputP2PKH(m, contract, false);
+            boolean hasAddDataOutput = AnfLower.methodHasAddDataOutput(m, contract);
             if (hasRequireP2PKH && hasAddDataOutput) {
                 errors.add(format(
                     "method '" + m.name() + "' mixes requireOutputP2PKH() with "
@@ -405,12 +604,8 @@ public final class Typecheck {
             // Mirrors the guard in
             // packages/runar-compiler/src/passes/03-typecheck.ts.
             if (contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT) {
-                Set<String> mutableProps = new HashSet<>();
-                for (PropertyNode p : contract.properties()) {
-                    if (!p.readonly()) mutableProps.add(p.name());
-                }
-                MethodOutputSignals sig = analyzeMethodOutputSignals(m.body(), mutableProps);
-                if (hasRequireP2PKH && sig.hasStateOutput) {
+                boolean hasStateOutput = AnfLower.methodHasAddOutput(m, contract);
+                if (hasRequireP2PKH && hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' mixes requireOutputP2PKH() with "
                             + "this.addOutput()/addRawOutput() — the intrinsic reads output i "
@@ -424,7 +619,9 @@ public final class Typecheck {
                         m.sourceLocation()
                     ));
                 }
-                if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
+                if (AnfLower.methodCallsRequireOutputP2PKH(m, contract, true)
+                        && AnfLower.methodMutatesState(m, contract)
+                        && !hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' calls requireOutputP2PKH(0, ...) but also "
                             + "mutates state without this.addOutput()/addRawOutput() — the "
@@ -437,272 +634,6 @@ public final class Typecheck {
                         m.sourceLocation()
                     ));
                 }
-            }
-        }
-
-        // --------------------------------------------------------------
-        // Body-walk helpers — Crit-3 rejection (requireOutputP2PKH +
-        // addDataOutput mix). Mirrors bodyCallsBuiltin /
-        // bodyCallsAddDataOutput in compilers/go/frontend/typecheck.go.
-        // --------------------------------------------------------------
-
-        private static boolean bodyCallsBuiltin(List<Statement> body, String name) {
-            for (Statement s : body) {
-                if (stmtContainsCallTo(s, name)) return true;
-            }
-            return false;
-        }
-
-        private static boolean bodyCallsAddDataOutput(List<Statement> body) {
-            for (Statement s : body) {
-                if (stmtContainsAddDataOutput(s)) return true;
-            }
-            return false;
-        }
-
-        private static boolean stmtContainsCallTo(Statement s, String name) {
-            if (s instanceof ExpressionStatement e) {
-                return exprContainsCallTo(e.expression(), name);
-            }
-            if (s instanceof VariableDeclStatement v) {
-                return exprContainsCallTo(v.init(), name);
-            }
-            if (s instanceof AssignmentStatement a) {
-                return exprContainsCallTo(a.value(), name)
-                    || exprContainsCallTo(a.target(), name);
-            }
-            if (s instanceof IfStatement i) {
-                if (exprContainsCallTo(i.condition(), name)) return true;
-                for (Statement t : i.thenBody()) {
-                    if (stmtContainsCallTo(t, name)) return true;
-                }
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) {
-                        if (stmtContainsCallTo(t, name)) return true;
-                    }
-                }
-                return false;
-            }
-            if (s instanceof ForStatement f) {
-                for (Statement t : f.body()) {
-                    if (stmtContainsCallTo(t, name)) return true;
-                }
-                return false;
-            }
-            if (s instanceof ReturnStatement r) {
-                return r.value() != null && exprContainsCallTo(r.value(), name);
-            }
-            return false;
-        }
-
-        private static boolean exprContainsCallTo(Expression e, String name) {
-            if (e == null) return false;
-            if (e instanceof CallExpr c) {
-                if (c.callee() instanceof Identifier id && name.equals(id.name())) {
-                    return true;
-                }
-                for (Expression a : c.args()) {
-                    if (exprContainsCallTo(a, name)) return true;
-                }
-                return false;
-            }
-            if (e instanceof BinaryExpr b) {
-                return exprContainsCallTo(b.left(), name)
-                    || exprContainsCallTo(b.right(), name);
-            }
-            if (e instanceof UnaryExpr u) {
-                return exprContainsCallTo(u.operand(), name);
-            }
-            if (e instanceof TernaryExpr t) {
-                return exprContainsCallTo(t.condition(), name)
-                    || exprContainsCallTo(t.consequent(), name)
-                    || exprContainsCallTo(t.alternate(), name);
-            }
-            if (e instanceof IndexAccessExpr ia) {
-                return exprContainsCallTo(ia.object(), name)
-                    || exprContainsCallTo(ia.index(), name);
-            }
-            if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) {
-                    if (exprContainsCallTo(el, name)) return true;
-                }
-            }
-            return false;
-        }
-
-        private static boolean stmtContainsAddDataOutput(Statement s) {
-            if (s instanceof ExpressionStatement e) {
-                return exprContainsAddDataOutput(e.expression());
-            }
-            if (s instanceof VariableDeclStatement v) {
-                return exprContainsAddDataOutput(v.init());
-            }
-            if (s instanceof AssignmentStatement a) {
-                return exprContainsAddDataOutput(a.value())
-                    || exprContainsAddDataOutput(a.target());
-            }
-            if (s instanceof IfStatement i) {
-                if (exprContainsAddDataOutput(i.condition())) return true;
-                for (Statement t : i.thenBody()) {
-                    if (stmtContainsAddDataOutput(t)) return true;
-                }
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) {
-                        if (stmtContainsAddDataOutput(t)) return true;
-                    }
-                }
-                return false;
-            }
-            if (s instanceof ForStatement f) {
-                for (Statement t : f.body()) {
-                    if (stmtContainsAddDataOutput(t)) return true;
-                }
-                return false;
-            }
-            if (s instanceof ReturnStatement r) {
-                return r.value() != null && exprContainsAddDataOutput(r.value());
-            }
-            return false;
-        }
-
-        private static boolean exprContainsAddDataOutput(Expression e) {
-            if (e == null) return false;
-            if (e instanceof CallExpr c) {
-                if (c.callee() instanceof PropertyAccessExpr pa
-                        && "addDataOutput".equals(pa.property())) {
-                    return true;
-                }
-                if (c.callee() instanceof MemberExpr me
-                        && "addDataOutput".equals(me.property())) {
-                    return true;
-                }
-                for (Expression a : c.args()) {
-                    if (exprContainsAddDataOutput(a)) return true;
-                }
-                return false;
-            }
-            if (e instanceof BinaryExpr b) {
-                return exprContainsAddDataOutput(b.left())
-                    || exprContainsAddDataOutput(b.right());
-            }
-            if (e instanceof UnaryExpr u) {
-                return exprContainsAddDataOutput(u.operand());
-            }
-            if (e instanceof TernaryExpr t) {
-                return exprContainsAddDataOutput(t.condition())
-                    || exprContainsAddDataOutput(t.consequent())
-                    || exprContainsAddDataOutput(t.alternate());
-            }
-            if (e instanceof IndexAccessExpr ia) {
-                return exprContainsAddDataOutput(ia.object())
-                    || exprContainsAddDataOutput(ia.index());
-            }
-            if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) {
-                    if (exprContainsAddDataOutput(el)) return true;
-                }
-            }
-            return false;
-        }
-
-        // --------------------------------------------------------------
-        // Single-output-continuation vs requireOutputP2PKH(0) collision.
-        // A StatefulSmartContract method that mutates state but calls no
-        // this.addOutput()/addRawOutput() takes the single-output
-        // continuation path (codePart at output 0); requireOutputP2PKH(0,
-        // ...) additionally asserts output 0 is a 34-byte P2PKH — impossible
-        // for any codePart >= 253 bytes. Detect the three signals in one
-        // walk. Mirrors analyzeMethodOutputSignals in
-        // packages/runar-compiler/src/passes/03-typecheck.ts.
-        // --------------------------------------------------------------
-
-        /** Three output-layout signals gathered from a single method body walk. */
-        private static final class MethodOutputSignals {
-            boolean mutatesState;             // assigns to / ++/-- a non-readonly property
-            boolean hasStateOutput;           // calls this.addOutput() or this.addRawOutput()
-            boolean requiresOutputP2PKHZero;  // calls requireOutputP2PKH(0, ...)
-        }
-
-        private static MethodOutputSignals analyzeMethodOutputSignals(
-                List<Statement> body, Set<String> mutableProps) {
-            MethodOutputSignals sig = new MethodOutputSignals();
-            for (Statement s : body) walkStmtForOutputSignals(s, mutableProps, sig);
-            return sig;
-        }
-
-        private static void walkStmtForOutputSignals(
-                Statement s, Set<String> mutableProps, MethodOutputSignals sig) {
-            if (s instanceof AssignmentStatement a) {
-                if (a.target() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(a.target(), mutableProps, sig);
-                walkExprForOutputSignals(a.value(), mutableProps, sig);
-            } else if (s instanceof ExpressionStatement e) {
-                walkExprForOutputSignals(e.expression(), mutableProps, sig);
-            } else if (s instanceof VariableDeclStatement v) {
-                walkExprForOutputSignals(v.init(), mutableProps, sig);
-            } else if (s instanceof IfStatement i) {
-                walkExprForOutputSignals(i.condition(), mutableProps, sig);
-                for (Statement t : i.thenBody()) walkStmtForOutputSignals(t, mutableProps, sig);
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) walkStmtForOutputSignals(t, mutableProps, sig);
-                }
-            } else if (s instanceof ForStatement f) {
-                if (f.init() != null) walkStmtForOutputSignals(f.init(), mutableProps, sig);
-                walkExprForOutputSignals(f.condition(), mutableProps, sig);
-                if (f.update() != null) walkStmtForOutputSignals(f.update(), mutableProps, sig);
-                for (Statement b : f.body()) walkStmtForOutputSignals(b, mutableProps, sig);
-            } else if (s instanceof ReturnStatement r) {
-                if (r.value() != null) walkExprForOutputSignals(r.value(), mutableProps, sig);
-            }
-        }
-
-        private static void walkExprForOutputSignals(
-                Expression e, Set<String> mutableProps, MethodOutputSignals sig) {
-            if (e == null) return;
-            if (e instanceof IncrementExpr inc) {
-                if (inc.operand() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(inc.operand(), mutableProps, sig);
-            } else if (e instanceof DecrementExpr dec) {
-                if (dec.operand() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(dec.operand(), mutableProps, sig);
-            } else if (e instanceof CallExpr c) {
-                Expression callee = c.callee();
-                if (callee instanceof PropertyAccessExpr pa && STATE_OUTPUT_METHOD_NAMES.contains(pa.property())) {
-                    sig.hasStateOutput = true;
-                }
-                if (callee instanceof MemberExpr me && STATE_OUTPUT_METHOD_NAMES.contains(me.property())) {
-                    sig.hasStateOutput = true;
-                }
-                if (callee instanceof Identifier id && "requireOutputP2PKH".equals(id.name())) {
-                    if (!c.args().isEmpty() && c.args().get(0) instanceof BigIntLiteral idx
-                            && idx.value().signum() == 0) {
-                        sig.requiresOutputP2PKHZero = true;
-                    }
-                }
-                for (Expression arg : c.args()) walkExprForOutputSignals(arg, mutableProps, sig);
-                if (!(callee instanceof Identifier)) walkExprForOutputSignals(callee, mutableProps, sig);
-            } else if (e instanceof BinaryExpr b) {
-                walkExprForOutputSignals(b.left(), mutableProps, sig);
-                walkExprForOutputSignals(b.right(), mutableProps, sig);
-            } else if (e instanceof UnaryExpr u) {
-                walkExprForOutputSignals(u.operand(), mutableProps, sig);
-            } else if (e instanceof TernaryExpr t) {
-                walkExprForOutputSignals(t.condition(), mutableProps, sig);
-                walkExprForOutputSignals(t.consequent(), mutableProps, sig);
-                walkExprForOutputSignals(t.alternate(), mutableProps, sig);
-            } else if (e instanceof IndexAccessExpr ia) {
-                walkExprForOutputSignals(ia.object(), mutableProps, sig);
-                walkExprForOutputSignals(ia.index(), mutableProps, sig);
-            } else if (e instanceof MemberExpr me) {
-                walkExprForOutputSignals(me.object(), mutableProps, sig);
-            } else if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) walkExprForOutputSignals(el, mutableProps, sig);
             }
         }
 
@@ -741,6 +672,7 @@ public final class Typecheck {
                     }
                 }
             } else if (s instanceof AssignmentStatement a) {
+                refuseContinuationAmountWrite(a.target());
                 String targetType = inferExpr(a.target(), env);
                 String valueType = inferExpr(a.value(), env);
                 if (!isSubtype(valueType, targetType)) {
@@ -762,15 +694,24 @@ public final class Typecheck {
                 if (!"boolean".equals(cond)) {
                     error("if condition must be boolean, got '" + cond + "'");
                 }
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                Map<String, Boolean> consumedBefore = new HashMap<>(consumed);
                 env.push();
                 checkStatements(i.thenBody(), env);
                 env.pop();
+                Map<String, Boolean> consumedAfterThen = consumed;
+                consumed = consumedBefore;
                 if (i.elseBody() != null) {
                     env.push();
                     checkStatements(i.elseBody(), env);
                     env.pop();
                 }
+                consumed.putAll(consumedAfterThen);
             } else if (s instanceof ForStatement f) {
+                int loopScope = env.depth();
+                boolean repeats = loopMayRunTwice(f);
                 env.push();
                 if (f.init() != null) {
                     checkStatement(f.init(), env);
@@ -793,7 +734,10 @@ public final class Typecheck {
                 if (f.update() != null) {
                     checkStatement(f.update(), env);
                 }
+                // F-110: the body runs once per iteration; see repeatingLoopScopes.
+                if (repeats) repeatingLoopScopes.push(loopScope);
                 checkStatements(f.body(), env);
+                if (repeats) repeatingLoopScopes.pop();
                 env.pop();
             } else if (s instanceof ExpressionStatement e) {
                 inferExpr(e.expression(), env);
@@ -902,8 +846,9 @@ public final class Typecheck {
                     if (isSubtype(alt, cons)) return cons;
                     if (isSubtype(cons, alt)) return alt;
                     if (!"<unknown>".equals(cons) && !"<unknown>".equals(alt)) {
-                        error(
-                            "ternary branches have incompatible types: '" + cons + "' vs '" + alt + "'"
+                        errorAt(
+                            "ternary branches have incompatible types: '" + cons + "' vs '" + alt + "'",
+                            te
                         );
                     }
                 }
@@ -923,6 +868,7 @@ public final class Typecheck {
             }
 
             if (e instanceof IncrementExpr ie) {
+                refuseContinuationAmountWrite(ie.operand());
                 String t = inferExpr(ie.operand(), env);
                 if (!isBigintFamily(t)) {
                     error("++ operator requires bigint, got '" + t + "'");
@@ -930,6 +876,7 @@ public final class Typecheck {
                 return "bigint";
             }
             if (e instanceof DecrementExpr de) {
+                refuseContinuationAmountWrite(de.operand());
                 String t = inferExpr(de.operand(), env);
                 if (!isBigintFamily(t)) {
                     error("-- operator requires bigint, got '" + t + "'");
@@ -968,19 +915,19 @@ public final class Typecheck {
             switch (op) {
                 case ADD, SUB, MUL, DIV, MOD -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case LT, LE, GT, GE -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "boolean";
                 }
@@ -993,40 +940,42 @@ public final class Typecheck {
                     // here would be a second copy of the lattice to drift.
                     boolean compatible = isSubtype(lt, rt) || isSubtype(rt, lt);
                     if (!compatible && !"<unknown>".equals(lt) && !"<unknown>".equals(rt)) {
-                        error("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'");
+                        errorAt("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'", e);
                     }
                     return "boolean";
                 }
                 case AND, OR -> {
                     if (!"boolean".equals(lt) && !"<unknown>".equals(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be boolean, got '" + lt + "'");
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be boolean, got '" + lt + "'", e.left());
                     }
                     if (!"boolean".equals(rt) && !"<unknown>".equals(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be boolean, got '" + rt + "'");
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be boolean, got '" + rt + "'", e.right());
                     }
                     return "boolean";
                 }
                 case SHL, SHR -> {
                     if (!isBigintFamily(lt)) {
-                        error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
+                        operandErrorAt("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'", e.left());
                     }
                     if (!isBigintFamily(rt)) {
-                        error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
+                        operandErrorAt("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'", e.right());
                     }
                     return "bigint";
                 }
                 case BIT_AND, BIT_OR, BIT_XOR -> {
                     if (isByteFamily(lt) && isByteFamily(rt)) return "ByteString";
                     if (!isBigintFamily(lt)) {
-                        error(
+                        operandErrorAt(
                             "left operand of '" + op.canonical()
-                                + "' must be bigint or ByteString, got '" + lt + "'"
+                                + "' must be bigint or ByteString, got '" + lt + "'",
+                            e.left()
                         );
                     }
                     if (!isBigintFamily(rt)) {
-                        error(
+                        operandErrorAt(
                             "right operand of '" + op.canonical()
-                                + "' must be bigint or ByteString, got '" + rt + "'"
+                                + "' must be bigint or ByteString, got '" + rt + "'",
+                            e.right()
                         );
                     }
                     return "bigint";
@@ -1040,20 +989,20 @@ public final class Typecheck {
             switch (e.op()) {
                 case NOT -> {
                     if (!"boolean".equals(t) && !"<unknown>".equals(t)) {
-                        error("operand of '!' must be boolean, got '" + t + "'");
+                        errorAt("operand of '!' must be boolean, got '" + t + "'", e);
                     }
                     return "boolean";
                 }
                 case NEG -> {
                     if (!isBigintFamily(t)) {
-                        error("operand of unary '-' must be bigint, got '" + t + "'");
+                        errorAt("operand of unary '-' must be bigint, got '" + t + "'", e);
                     }
                     return "bigint";
                 }
                 case BIT_NOT -> {
                     if (isByteFamily(t)) return "ByteString";
                     if (!isBigintFamily(t)) {
-                        error("operand of '~' must be bigint or ByteString, got '" + t + "'");
+                        errorAt("operand of '~' must be bigint or ByteString, got '" + t + "'", e);
                     }
                     return "bigint";
                 }
@@ -1102,8 +1051,15 @@ public final class Typecheck {
                 }
                 String local = env.lookup(name);
                 if (local != null) {
-                    // Local variable shaped like a callable — ambiguous,
-                    // evaluate args and give up.
+                    // F-208: Rúnar has no first-class functions, so a bound
+                    // local can never be called. This used to evaluate args
+                    // and give up with NO diagnostic, silently accepting
+                    // `const f: bigint = a; const r = f(a, a, a);`.
+                    error(
+                        "local variable '" + name + "' is not callable — Rúnar has no "
+                            + "first-class functions; only built-in functions and "
+                            + "contract methods can be called"
+                    );
                     for (Expression a : e.args()) inferExpr(a, env);
                     return "<unknown>";
                 }
@@ -1186,7 +1142,7 @@ public final class Typecheck {
         private void checkSatoshisArg(String prop, Expression arg, Env env) {
             String t = inferExpr(arg, env);
             if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
-                error(prop + "() first argument (satoshis) must be bigint, got '" + t + "'");
+                errorAt(prop + "() first argument (satoshis) must be bigint, got '" + t + "'", arg);
             }
         }
 
@@ -1215,7 +1171,7 @@ public final class Typecheck {
         private void checkScriptBytesArg(String prop, Expression arg, Env env) {
             String t = inferExpr(arg, env);
             if (!isSubtype(t, "ByteString") && !"<unknown>".equals(t)) {
-                error(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'");
+                errorAt(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'", arg);
             }
         }
 
@@ -1286,8 +1242,8 @@ public final class Typecheck {
                 StateSlot slot = mutableProps.get(i - 1);
                 String propType = typeToString(slot.type());
                 if (!isSubtype(argType, propType)) {
-                    error("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
-                        + propType + "', got '" + argType + "'");
+                    errorAt("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
+                        + propType + "', got '" + argType + "'", normalized.get(i));
                 }
             }
             return "void";
@@ -1458,9 +1414,9 @@ public final class Typecheck {
                         // require 0 <= idx <= 1000 to keep the offset well
                         // under script-int max and reject obvious nonsense
                         // (negative or astronomically large).
-                        java.math.BigInteger v = lit.value();
-                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
-                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        BigInteger v = lit.value();
+                        BigInteger min64 = BigInteger.valueOf(Long.MIN_VALUE);
+                        BigInteger max64 = BigInteger.valueOf(Long.MAX_VALUE);
                         if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
                             error(name + "() argument 1 (index) must fit in int64; got " + v);
                         } else {
@@ -1517,9 +1473,9 @@ public final class Typecheck {
                         // against a 32-byte SHA-256 hash. prefixLen < 32 is
                         // suspicious (the prefix doesn't cover a hash-sized
                         // chunk). prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES.
-                        java.math.BigInteger v = preLit.value();
-                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
-                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        BigInteger v = preLit.value();
+                        BigInteger min64 = BigInteger.valueOf(Long.MIN_VALUE);
+                        BigInteger max64 = BigInteger.valueOf(Long.MAX_VALUE);
                         if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
                             error("extractPrevOutputScript() argument 3 (prefixLen) "
                                 + "must fit in int64; got " + v);
@@ -1544,12 +1500,40 @@ public final class Typecheck {
                 return returnType;
             }
 
-            // requireOutputP2PKH and currentBlockHeight need the
-            // auto-injected txPreimage — only available in
-            // StatefulSmartContract methods.
-            if ("requireOutputP2PKH".equals(name) || "currentBlockHeight".equals(name)) {
+            // requireOutputP2PKH, currentBlockHeight and continuationAmount
+            // need the auto-injected txPreimage / _newAmount — only available
+            // in StatefulSmartContract methods.
+            if ("requireOutputP2PKH".equals(name) || "currentBlockHeight".equals(name)
+                || "continuationAmount".equals(name)) {
                 if (contract != null && contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
                     error(name + "() is only available in StatefulSmartContract methods");
+                }
+            }
+
+            // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+            // argument. A literal negative start used to type-check as
+            // plain 'bigint' (the standard subtype loop below never
+            // inspects a literal's VALUE) and compile to a script that
+            // aborts at runtime -- `-5n` minimal-encodes to `<85>`, which
+            // OP_SPLIT rejects. Catch the literal case (bare or
+            // unary-negated BigIntLiteral) at compile time, mirroring the
+            // extractPrevOutputScript/requireOutputP2PKH "must be >= 0"
+            // pattern above. A non-literal start (a variable or computed
+            // expression) has no static value to check and is unaffected.
+            if ("substr".equals(name) && args.size() >= 2) {
+                Expression startArg = args.get(1);
+                BigIntLiteral startLit = null;
+                if (startArg instanceof BigIntLiteral b) {
+                    startLit = b;
+                } else if (startArg instanceof UnaryExpr u
+                    && u.op() == Expression.UnaryOp.NEG
+                    && u.operand() instanceof BigIntLiteral inner
+                    && inner.value() != null) {
+                    startLit = new BigIntLiteral(inner.value().negate());
+                }
+                if (startLit != null && startLit.value() != null
+                    && startLit.value().signum() < 0) {
+                    error("substr() argument 2 (start) must be >= 0; got " + startLit.value());
                 }
             }
 
@@ -1587,7 +1571,16 @@ public final class Typecheck {
          */
         private void checkAffine(String name, List<Expression> args, Env env) {
             int[] indices = CONSUMING_FUNCTIONS.get(name);
-            if (indices == null) return;
+            List<String> consumedProps = List.of();
+            if (indices == null) {
+                // N-109: a call to a contract method consumes the arguments at
+                // the parameter positions that method consumes.
+                if (BuiltinRegistry.lookup(name).isPresent() || !methodSigs.containsKey(name)) return;
+                if (consumedParams == null) consumedParams = consumedParamSummary(contract);
+                MethodConsumption mc = consumedParams.getOrDefault(name, new MethodConsumption(new int[0], List.of()));
+                indices = mc.params();
+                consumedProps = mc.props();
+            }
             for (int idx : indices) {
                 if (idx >= args.size()) continue;
                 Expression arg = args.get(idx);
@@ -1601,12 +1594,94 @@ public final class Typecheck {
                 else if (arg instanceof PropertyAccessExpr pa) label = "this." + pa.property();
                 else label = origin;
 
-                if (Boolean.TRUE.equals(consumed.get(origin))) {
-                    error("affine value '" + label + "' has already been consumed");
+                if (Boolean.TRUE.equals(consumed.get(origin)) || consumedPerLoopIteration(origin, env)) {
+                    errorAt("affine value '" + label + "' has already been consumed", arg);
                 } else {
                     consumed.put(origin, true);
                 }
             }
+
+            // N-288: the call also consumes every property the method consumes.
+            for (String origin : consumedProps) {
+                if (Boolean.TRUE.equals(consumed.get(origin)) || consumedPerLoopIteration(origin, env)) {
+                    errorAt(
+                        "affine value 'this." + origin.substring("prop:".length()) + "' has already been consumed",
+                        args.isEmpty() ? null : args.get(0)
+                    );
+                } else {
+                    consumed.put(origin, true);
+                }
+            }
+        }
+
+        /**
+         * N-109: run the affine checker over each method body with throwaway
+         * diagnostics and record which parameters (and, N-288, which
+         * {@code prop:<name>} property origins) end up consumed. Reusing the
+         * checker inherits alias, if-arm and loop handling. Consumption only
+         * grows as summaries grow, so iterating until no entry changes
+         * terminates, also for recursive call graphs (refused separately by
+         * validation). Mirrors {@code consumedParamSummary} in the TS reference
+         * {@code 03-typecheck.ts}.
+         */
+        private static Map<String, MethodConsumption> consumedParamSummary(ContractNode contract) {
+            Map<String, MethodConsumption> summary = new HashMap<>();
+            for (MethodNode m : contract.methods()) summary.put(m.name(), new MethodConsumption(new int[0], List.of()));
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (MethodNode m : contract.methods()) {
+                    Checker scratch = new Checker(contract);
+                    scratch.consumedParams = summary;
+                    MethodConsumption consumed = scratch.consumedParamIndices(m);
+                    MethodConsumption prev = summary.get(m.name());
+                    if (consumed.params().length != prev.params().length
+                        || consumed.props().size() != prev.props().size()) {
+                        summary.put(m.name(), consumed);
+                        changed = true;
+                    }
+                }
+            }
+            return summary;
+        }
+
+        /**
+         * N-109: the indices of {@code m}'s parameters its body consumes, and
+         * (N-288) the {@code prop:<name>} property origins it consumes.
+         */
+        private MethodConsumption consumedParamIndices(MethodNode m) {
+            currentMethodLoc = m.sourceLocation();
+            consumed = new HashMap<>();
+            affineAliases = new HashMap<>();
+            Env env = new Env();
+            for (ParamNode p : m.params()) {
+                env.define(p.name(), typeToString(p.type()));
+            }
+            checkStatements(m.body(), env);
+            List<Integer> out = new ArrayList<>();
+            for (int i = 0; i < m.params().size(); i++) {
+                if (Boolean.TRUE.equals(consumed.get(m.params().get(i).name()))) out.add(i);
+            }
+            List<String> props = new ArrayList<>();
+            for (Map.Entry<String, Boolean> e : consumed.entrySet()) {
+                if (Boolean.TRUE.equals(e.getValue()) && e.getKey().startsWith("prop:")) props.add(e.getKey());
+            }
+            props.sort(null);
+            return new MethodConsumption(out.stream().mapToInt(Integer::intValue).toArray(), props);
+        }
+
+        /**
+         * F-110: true when {@code origin} is bound outside the innermost
+         * enclosing loop that may run two or more times, so this one syntactic
+         * consumption is executed once per iteration -- a double use. A
+         * property, or a name the env does not bind (a bare-identifier
+         * property), is always outside.
+         */
+        private boolean consumedPerLoopIteration(String origin, Env env) {
+            Integer innermost = repeatingLoopScopes.peek();
+            if (innermost == null) return false;
+            if (origin.startsWith("prop:")) return true;
+            return env.scopeIndexOf(origin) < innermost;
         }
 
         /** Resolve the canonical affine origin for an expression. */
@@ -1708,6 +1783,7 @@ public final class Typecheck {
             return staticInferType(te.alternate());
         }
         if (e instanceof IncrementExpr || e instanceof DecrementExpr) return "bigint";
+        if (e instanceof ArrayLiteralExpr) return "<unknown>[]";
         return "<unknown>";
     }
 

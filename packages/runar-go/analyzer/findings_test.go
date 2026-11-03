@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,38 @@ func TestChecksigResultDropped(t *testing.T) {
 	}
 }
 
+// F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+// `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+// OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+// removes the item BELOW the result) is not. Does not prove that longer
+// discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+// only looks at the next opcode.
+func TestChecksigResultDroppedBy2Drop(t *testing.T) {
+	cases := []struct{ hex, want string }{
+		{"0000ac6d51", "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect"},
+		{"000000ae6d51", "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect"},
+	}
+	for _, c := range cases {
+		r, _ := AnalyzeScript(c.hex)
+		var got []Finding
+		for _, f := range r.Findings {
+			if f.Code == "CHECKSIG_RESULT_DROPPED" {
+				got = append(got, f)
+			}
+		}
+		if len(got) != 1 || got[0].Message != c.want || got[0].Severity != SeverityWarning || !got[0].HasOffset {
+			t.Fatalf("%s: expected one CHECKSIG_RESULT_DROPPED %q, got %+v", c.hex, c.want, r.Findings)
+		}
+	}
+	if r, _ := AnalyzeScript("0000ac6d51"); r.Findings[0].Offset != 2 || r.Findings[0].Opcode != "OP_CHECKSIG" {
+		t.Fatalf("expected offset 2 / OP_CHECKSIG, got %+v", r.Findings)
+	}
+	// OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+	if r, _ := AnalyzeScript("0000ac77"); containsCode(r, "CHECKSIG_RESULT_DROPPED") {
+		t.Fatalf("OP_NIP must not be flagged, got %+v", r.Findings)
+	}
+}
+
 func TestCodeSeparatorPresent(t *testing.T) {
 	r, _ := AnalyzeScript("ab")
 	if !containsCode(r, "CODESEPARATOR_PRESENT") {
@@ -225,15 +258,34 @@ func TestFormatKilobytes(t *testing.T) {
 		// Spec example: 1024 → "1.0", 1500 → "1.5".
 		{1024, "1.0"},
 		{1500, "1.5"},
-		// Golden fixtures.
+		// Golden fixtures (conformance/analyzer/{ec-demo,schnorr-zkp}) —
+		// pinned here so the tie-rounding fix below is proven not to move
+		// them: neither size lands on an exact .5 tie at the tenths digit.
 		{1328100, "1297.0"},
 		{872248, "851.8"},
+		{1337343, "1306.0"},
+		{877253, "856.7"},
 	}
 	for _, c := range cases {
 		got := formatKilobytes(c.n)
 		if got != c.want {
 			t.Errorf("formatKilobytes(%d) = %q, want %q", c.n, got, c.want)
 		}
+	}
+}
+
+func TestFormatKilobytesBreaksTiesLikeJsNotHalfToEven(t *testing.T) {
+	// 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+	// division has no floating-point error). Scaled by 10 that is 4892.5 —
+	// an exact tie at the tenths digit. JS Number.prototype.toFixed(1)
+	// does not use round-half-to-even: per spec it picks the integer n for
+	// which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+	// Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+	// "489.3". math.RoundToEven rounds 4892.5 down to 4892 (already even),
+	// producing the wrong "489.2".
+	got := formatKilobytes(500992)
+	if got != "489.3" {
+		t.Errorf("formatKilobytes(500992) = %q, want %q", got, "489.3")
 	}
 }
 
@@ -292,10 +344,109 @@ func TestOpcodeName_Unknown(t *testing.T) {
 	}
 }
 
+// chronicleOps are the seven Chronicle opcodes the compiler emits, with the
+// (pops, pushes) the @bsv/sdk interpreter (Spend.ts) gives them.
+var chronicleOps = []struct {
+	b      string
+	name   string
+	pops   int
+	pushes int
+}{
+	{"8d", "OP_2MUL", 1, 1},
+	{"8e", "OP_2DIV", 1, 1},
+	{"b3", "OP_SUBSTR", 3, 1},
+	{"b4", "OP_LEFT", 2, 1},
+	{"b5", "OP_RIGHT", 2, 1},
+	{"b6", "OP_LSHIFTNUM", 2, 1},
+	{"b7", "OP_RSHIFTNUM", 2, 1},
+}
+
+// TestChronicleOpcodes_NamesAndEffects (F-131) proves the Chronicle opcodes
+// are named per spec §4.1 and modelled with their real stack effect, in the
+// lookup and in the observable report (underflow message, stackDepthAtEnd,
+// maxStackDepth). It does not prove runtime semantics (the analyzer is
+// static) and does not re-derive the arities from the interpreter.
+func TestChronicleOpcodes_NamesAndEffects(t *testing.T) {
+	for _, c := range chronicleOps {
+		ops, err := parseScript(c.b)
+		if err != nil || len(ops) != 1 {
+			t.Fatalf("%s: parse: %v", c.b, err)
+		}
+		if ops[0].Name != c.name {
+			t.Errorf("0x%s: name %q, want %q", c.b, ops[0].Name, c.name)
+		}
+		if p, q := stackEffect(ops[0]); p != c.pops || q != c.pushes {
+			t.Errorf("%s: effect (%d,%d), want (%d,%d)", c.name, p, q, c.pops, c.pushes)
+		}
+
+		// OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+		dropThen, _ := parseScript("75" + c.b)
+		lin := analyzeStackLinear(dropThen, 1)
+		want := fmt.Sprintf("%s requires %d stack item(s) but only 0 available", c.name, c.pops)
+		found := false
+		for _, f := range lin.findings {
+			if f.Code == "STACK_UNDERFLOW" && f.Message == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: missing underflow %q in %+v", c.name, want, lin.findings)
+		}
+
+		// `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+		r, err := AnalyzeScript(strings.Repeat("51", c.pops) + c.b)
+		if err != nil {
+			t.Fatalf("%s: analyze: %v", c.name, err)
+		}
+		if r.Paths[0].StackDepthAtEnd != c.pushes || r.Summary.MaxStackDepth != c.pushes {
+			t.Errorf("%s: depthAtEnd=%d maxStackDepth=%d, want %d", c.name,
+				r.Paths[0].StackDepthAtEnd, r.Summary.MaxStackDepth, c.pushes)
+		}
+	}
+
+	// A genuinely unknown byte keeps the OP_UNKNOWN name and (0,0) effect.
+	ops, _ := parseScript("b8")
+	if ops[0].Name != "OP_UNKNOWN(0xb8)" {
+		t.Errorf("0xb8 name %q", ops[0].Name)
+	}
+	if p, q := stackEffect(ops[0]); p != 0 || q != 0 {
+		t.Errorf("0xb8 effect (%d,%d), want (0,0)", p, q)
+	}
+}
+
 func TestNormalizeHex(t *testing.T) {
 	got := normalizeHex(" Ab\tcD\n")
 	if got != "abcd" {
 		t.Errorf("normalize: %q", got)
+	}
+}
+
+func TestNormalizeHexStripsJsWhitespaceSet(t *testing.T) {
+	// normalizeHex only matched a handful of ASCII whitespace runes
+	// (space, tab, \n, \r, \v, \f) and passed every other rune through
+	// unchanged. JS's /\s/g (what the TS reference strips) additionally
+	// matches NBSP (U+00A0) and ZERO WIDTH NO-BREAK SPACE / BOM (U+FEFF),
+	// among other Unicode whitespace. Verified against the live TS
+	// analyzer: both inputs below normalize to "76a988ac".
+	got := normalizeHex("76\u00a0a9\u00a088\u00a0ac")
+	if got != "76a988ac" {
+		t.Errorf("normalize (NBSP): %q", got)
+	}
+	got = normalizeHex("\ufeff76a988ac")
+	if got != "76a988ac" {
+		t.Errorf("normalize (BOM): %q", got)
+	}
+}
+
+func TestNormalizeHexDoesNotStripC0Separators(t *testing.T) {
+	// U+001C-U+001F are not matched by JS /\s/g, so the TS reference keeps
+	// them in the normalized string (and then rejects them as non-hex
+	// characters — verified live: the TS analyzer throws "Invalid hex
+	// character" on this exact input). normalizeHex must not strip them
+	// either.
+	got := normalizeHex("76\u001ca9")
+	if got != "76\u001ca9" {
+		t.Errorf("normalize (C0 separator): %q, want kept", got)
 	}
 }
 

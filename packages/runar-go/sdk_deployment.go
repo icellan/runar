@@ -1,11 +1,13 @@
 package runar
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
 
+	base58 "github.com/bsv-blockchain/go-sdk/compat/base58"
 	sdkscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"golang.org/x/crypto/ripemd160"
@@ -273,14 +275,33 @@ func BuildP2PKHScript(address string) string {
 		}
 		pubKeyHash = computeHash160Hex(pubKeyBytes)
 	} else {
-		// Decode Base58Check address to extract the 20-byte pubkey hash
+		// Decode Base58Check address to extract the 20-byte pubkey hash.
+		// NewAddressFromString checks the length and version byte but NOT the
+		// checksum, so verify the SHA256d checksum here.
 		addr, err := sdkscript.NewAddressFromString(address)
 		if err != nil {
 			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: %v", address, err))
 		}
+		decoded, _ := base58.Decode(address) // cannot fail: NewAddressFromString decoded it
+		first := sha256.Sum256(decoded[:21])
+		second := sha256.Sum256(first[:])
+		if !bytes.Equal(second[:4], decoded[21:]) {
+			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: bad checksum", address))
+		}
 		pubKeyHash = hex.EncodeToString(addr.PublicKeyHash)
 	}
 	return "76a914" + pubKeyHash + "88ac"
+}
+
+// ChangeAddressMismatchMessage is the N-426 refusal text, byte-identical in all
+// seven SDKs (conformance/sdk-call/n426-change-address-guard.json). A stateful
+// covenant rebuilds its change output from _changePKH = hash160(changePubKey ??
+// signer pubkey), so a changeAddress naming a different key builds a spend the
+// network rejects.
+func ChangeAddressMismatchMessage(changeAddress string) string {
+	return "changeAddress " + changeAddress + " does not match the change key the covenant enforces " +
+		"(hash160 of changePubKey, or of the signer's key when changePubKey is unset); " +
+		"pass changePubKey for that address"
 }
 
 // computeHash160Hex computes RIPEMD160(SHA256(data)) and returns the hex-encoded result.

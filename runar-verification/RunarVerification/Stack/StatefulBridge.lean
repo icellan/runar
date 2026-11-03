@@ -132,7 +132,7 @@ theorem gatedStatefulPrologue_isSome_eq
   --   [ _cp0 := check_preimage pre ;  _v := assert _cp0 ].
   unfold gatedStatefulPrologueBody AgreesD2.statefulPrologueBody
   show (evalBindingsP methods s
-        [⟨"_cp0", .checkPreimage pre, none⟩, ⟨"_v", .assert "_cp0", none⟩]).toOption.isSome
+        [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩]).toOption.isSome
       = Crypto.checkPreimage b
   -- The post-state after the `check_preimage` cons-step: `_cp0` is the head
   -- binding, so `resolveRef "_cp0"` finds the bool verdict.

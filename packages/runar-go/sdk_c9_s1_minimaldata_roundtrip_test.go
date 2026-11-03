@@ -84,7 +84,7 @@ func TestS1_CtorByteString_MinimalDataRoundtrip(t *testing.T) {
 			contract := NewRunarContract(artifact, []interface{}{tc.hex})
 			lockingScript := contract.GetLockingScript()
 
-			restored := ExtractConstructorArgs(artifact, lockingScript)
+			restored := mustExtractConstructorArgs(t, artifact, lockingScript)
 			if got := restored["b"]; got != tc.hex {
 				t.Errorf("roundtrip %s: got %q, want %q (lockingScript=%q)", tc.label, got, tc.hex, lockingScript)
 			}

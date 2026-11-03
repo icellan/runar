@@ -71,9 +71,10 @@ describe('R-209: both compiler directives have a worked example and are document
   });
 
   it('the directives section names the surface restriction', () => {
-    // Both are `.runar.ts`-only and the other eight parsers REJECT them. A user
-    // who copies the directive into a .runar.py file gets a parse error, so the
-    // reference has to say so.
+    // The COMMENT spelling is `.runar.ts`-only: the other eight parsers REJECT
+    // it and take a native spelling instead (N-093). A user who copies the
+    // comment into a .runar.py file gets a parse error, so the reference has to
+    // say so.
     const ref = readFileSync(join(ROOT, 'docs/language-reference.md'), 'utf-8');
     const section = ref.slice(ref.indexOf('## Compiler Directives'));
     expect(section, 'the reference does not say the directives are TS-surface only').toMatch(

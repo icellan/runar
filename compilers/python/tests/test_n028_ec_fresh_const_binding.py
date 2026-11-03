@@ -68,10 +68,17 @@ class ECLinear extends SmartContract {
 # efcff80d2f183358... / 2548856. Sourced from the TYPESCRIPT tier, not from
 # Python's own output — this pin exists precisely to be another tier's opinion
 # of these bytes. Independently equal to what the Ruby and Zig tiers measured.
+# Re-stamped for N-376, the ROT ROT ROT -> [] peephole rule: -9288 hex chars
+# (4644 identity OP_ROTs deleted, nothing else moved per the opcode-walk
+# oracle). Was 7214cad88783e09e... / 2554314. TS and Go agree on the new bytes.
+# Re-stamped for N-113: the two inner ecMulGen(<const>) calls the fusion
+# orphans are no longer kept (they cannot abort), so one scalar multiplication
+# remains instead of three: -1695608 hex chars. Was 87a45fc5c08da42f... /
+# 2545026. Sourced from the TS tier; Go emits the same bytes.
 EC_LINEAR_REFERENCE_SHA256 = (
-    "7214cad88783e09e484fe15f57c3d45fdf4443960c7f7a45731e052065b1bcad"
+    "389db2b9d4a17bda5d7606ce913de744ebcaeabdf9cd915cf69ed74c1521b09c"
 )
-EC_LINEAR_REFERENCE_HEX_LEN = 2554314
+EC_LINEAR_REFERENCE_HEX_LEN = 849418
 
 # Control: no EC calls at all, so `optimize_ec` returns early. Pinned so the
 # fix above cannot be "achieved" by disabling the optimizer.
@@ -256,7 +263,7 @@ def test_folded_scalar_uses_canonical_bigint_json_encoding(tmp_path):
         b
         for m in ir["methods"]
         for b in m["body"]
-        if b["name"].startswith("__ec_opt_")
+        if b["name"].endswith("_k")  # the TS-style `<binding>_k` name (F-191)
     ]
     assert folded, "expected the EC optimizer to emit a folded-scalar binding"
     value = folded[0]["value"]["value"]

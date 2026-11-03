@@ -1,5 +1,6 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
+const der_mod = @import("sdk_der.zig");
 
 // ---------------------------------------------------------------------------
 // ANF Interpreter — compute state transitions from ANF IR
@@ -63,6 +64,12 @@ pub const ANFValue = union(enum) {
     /// per-call allocators owned by the caller cover the lifetime, matching
     /// how `bytes` storage is managed everywhere else in this file.
     array: []const ANFValue,
+    /// N-163: a caller-supplied integer outside i64, as its decimal text
+    /// (borrowed from the `StateValue.big_int`). Carried unchanged — back to
+    /// state as the same `big_int`, into `verifyRabinSig` — and refused
+    /// (`error.ScriptNumberError`) wherever the interpreter would have to
+    /// compute with it. It used to be read as 0.
+    wide: []const u8,
     none: void,
 };
 
@@ -174,10 +181,17 @@ pub const StrictError = error{
     /// Mirrors the TS interpreter's "requires witness bytes" error.
     MissingWitness,
     /// A bigint `& | ^` was applied to operands whose minimal script-number
-    /// encodings differ in length, or a `<< >>` used a negative shift count.
+    /// encodings differ in length, or a `<< >>` used a negative shift count,
+    /// or a math builtin hit an input its script aborts on (F-134: zero
+    /// divisor, `pow` exponent outside 0..32, `sqrt` of a negative).
     /// On-chain OP_AND/OP_OR/OP_XOR/OP_LSHIFT/OP_RSHIFT abort the script in
     /// exactly these cases; the interpreter surfaces the same failure so
     /// off-chain simulation agrees with the deployed script byte-for-byte.
+    /// On-chain mode also raises it where `OP_CHECKSIG` aborts on a malformed
+    /// signature or public-key encoding (N-197, `checkSigEncodingError`), and
+    /// where a node aborts it under NULLFAIL on a non-empty signature that
+    /// does not verify (N-198), and where `OP_CHECKMULTISIG` aborts or a node
+    /// applies NULLFAIL to a failing multisig (N-259).
     ScriptNumberError,
 };
 
@@ -194,6 +208,16 @@ const StrictCtx = struct {
     method_name: []const u8,
     last_binding_name: []const u8 = "<anonymous>",
     real_crypto: ?*const RealCryptoCtx = null,
+    /// F-164 (round 2): set by `evalBindings` immediately before evaluating
+    /// EACH binding — true only when that specific binding is one of the
+    /// two auto-injected prologue asserts (checkPreimage's assert + the
+    /// sighash-type assert), detected structurally (see
+    /// `detectAutoInjectedPrologue`) on the CURRENT `bindings` slice. Reset
+    /// every iteration, so a nested if/loop body's own (unrelated) walk
+    /// never sees a stale value from an outer scope. Left false whenever
+    /// `real_crypto` is non-null, so `executeOnChainAuthoritative` keeps
+    /// enforcing both for real.
+    mock_this_prologue_assert: bool = false,
 };
 
 /// Bag of optional contexts threaded through evaluation. Kept as a
@@ -275,6 +299,14 @@ pub const MockEnv = struct {
     output_hash_hex: ?[]const u8 = null,
     hash_prevouts_hex: ?[]const u8 = null,
     hash_sequence_hex: ?[]const u8 = null,
+
+    /// R67: the contract's own real codePart (post-OP_CODESEPARATOR,
+    /// CompactSize-prefixed exactly as the BIP-143 preimage carries it),
+    /// surfaced by `extractScriptCode`. Hex-encoded; null falls back to the
+    /// historical empty-string dummy (not the 32-zero-byte stub the other
+    /// preimage byte fields use — `extractScriptCode`'s dummy has always
+    /// been `""`, matching every other tier).
+    script_code_hex: ?[]const u8 = null,
 
     /// Caller-supplied allocator used to allocate the witness-name keys
     /// (the bytes themselves are caller-owned). Same allocator must be
@@ -519,11 +551,11 @@ pub fn executeStrictWithFailureInfo(
 /// Failure trips the enclosing `assert(...)` and returns
 /// `error.AssertionFailure`.
 ///
-/// `checkMultiSig(sigs, pks)` iterates signatures left-to-right and consumes
-/// pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`. Right now the
-/// interpreter has no array values surface (sigs/pks come in as arrays of
-/// hex strings via `args`), so this path is exercised only when the caller
-/// supplies array-of-bytes args; behaviour matches the TS SDK reference.
+/// `checkMultiSig(sigs, pks)` runs `OP_CHECKMULTISIG` as `Spend` does: last
+/// signature against last key first, the same encoding gates on every
+/// examined pair, NULLFAIL on a failing check with a non-empty signature
+/// (N-259, see `verifyMultiSigReal`). The lists come from `array_literal`
+/// bindings or array-of-bytes args.
 ///
 /// `checkPreimage(preimage)` computes `hash256(preimage)`
 /// (`SHA256(SHA256(preimage))`) and compares to `ctx.sighash` byte-for-byte
@@ -645,9 +677,25 @@ fn runMethod(
 
     // Load method params (skip implicit ones)
     for (meth.params) |param| {
-        if (isImplicitParam(param.name)) continue;
+        // F-024 (R14): a caller that knows the continuation's satoshis binds
+        // `_newAmount` (what `continuationAmount()` reads), and one that knows
+        // the spent UTXO's satoshis passes them as an INTEGER `txPreimage` (a
+        // real preimage is bytes), which `extractAmount` then returns.
+        const caller_bound = if (args.get(param.name)) |v|
+            std.mem.eql(u8, param.name, "_newAmount") or
+                (std.mem.eql(u8, param.name, "txPreimage") and v == .int)
+        else
+            false;
+        if (isImplicitParam(param.name) and !caller_bound) continue;
         if (args.get(param.name)) |val| {
             try env.put(param.name, val);
+        } else if (std.mem.endsWith(u8, param.name, "@local")) {
+            // N-360: a property-named public param the method reassigns is
+            // bound in the ANF under its `<name>@local` slot; the caller's args
+            // (and the ABI) use the source name.
+            if (args.get(param.name[0 .. param.name.len - "@local".len])) |val| {
+                try env.put(param.name, val);
+            }
         }
     }
 
@@ -744,6 +792,58 @@ fn isImplicitParam(name: []const u8) bool {
 // Binding evaluation
 // ---------------------------------------------------------------------------
 
+/// F-164 (round 2): Zig port of the TS reference's
+/// `detectAutoInjectedPrologueAsserts` (packages/runar-sdk/src/anf-interpreter.ts)
+/// — see that function's doc comment for the full rationale. Structural
+/// (shape/position-based, NOT binding-name-based) detection of the fixed
+/// 8-binding sequence `compilers/zig/src/passes/anf_lower.zig`'s
+/// stateful-prologue emitter injects at the START of every public
+/// StatefulSmartContract method:
+///
+///   [0] load_param txPreimage
+///   [1] check_preimage(preimage: [0])
+///   [2] assert([1])                              <- mocked in strict mode
+///   [3] load_param txPreimage
+///   [4] call extractSigHashType([3])
+///   [5] load_const <declared sighash mode>
+///   [6] bin_op === ([4], [5])
+///   [7] assert([6])                              <- mocked in strict mode
+///
+/// This sequence can only appear at index 0 of a bindings slice — the
+/// compiler emits it before a single line of developer code, so a
+/// user-written assert (even one that also calls `extractSigHashType`) is
+/// lowered AFTER it, at a later index, and is never matched here.
+///
+/// We don't mark these two ANF nodes with the existing
+/// `is_auto_injected_state_check` field the way the exit-time
+/// continuation-hash assert is marked: that field is part of the
+/// serialized ANF IR, and setting it on the prologue asserts would add a
+/// key to `conformance/tests/*/expected-ir.json` for every stateful
+/// fixture — a compiler-golden move this item must not cause.
+fn detectAutoInjectedPrologue(bindings: []const ANFBinding) bool {
+    if (bindings.len < 8) return false;
+    const b0 = bindings[0];
+    const b1 = bindings[1];
+    const b2 = bindings[2];
+    const b3 = bindings[3];
+    const b4 = bindings[4];
+    const b5 = bindings[5];
+    const b6 = bindings[6];
+    const b7 = bindings[7];
+    if (b0.value != .load_param or !std.mem.eql(u8, b0.value.load_param.name, "txPreimage")) return false;
+    if (b1.value != .check_preimage) return false;
+    if (b2.value != .assert_node or !std.mem.eql(u8, b2.value.assert_node.value, b1.name)) return false;
+    if (b3.value != .load_param or !std.mem.eql(u8, b3.value.load_param.name, "txPreimage")) return false;
+    if (b4.value != .call or !std.mem.eql(u8, b4.value.call.func, "extractSigHashType")) return false;
+    if (b4.value.call.args.len == 0 or !std.mem.eql(u8, b4.value.call.args[0], b3.name)) return false;
+    if (b5.value != .load_const) return false;
+    if (b6.value != .bin_op) return false;
+    const bo = b6.value.bin_op;
+    if (!std.mem.eql(u8, bo.op, "===") or !std.mem.eql(u8, bo.left, b4.name) or !std.mem.eql(u8, bo.right, b5.name)) return false;
+    if (b7.value != .assert_node or !std.mem.eql(u8, b7.value.assert_node.value, b6.name)) return false;
+    return true;
+}
+
 fn evalBindings(
     allocator: std.mem.Allocator,
     bindings: []const ANFBinding,
@@ -754,8 +854,15 @@ fn evalBindings(
     anf: *const ANFProgram,
     eval_ctx: EvalCtx,
 ) error{ OutOfMemory, AssertionFailure, MissingWitness, ScriptNumberError }!void {
-    for (bindings) |binding| {
-        if (eval_ctx.strict) |ctx| ctx.last_binding_name = binding.name;
+    // F-164 (round 2): computed ONCE per bindings slice (cheap — bails out
+    // at the first mismatched binding for every non-prologue slice,
+    // including every nested if/loop body). See detectAutoInjectedPrologue.
+    const is_prologue = detectAutoInjectedPrologue(bindings);
+    for (bindings, 0..) |binding, idx| {
+        if (eval_ctx.strict) |ctx| {
+            ctx.last_binding_name = binding.name;
+            ctx.mock_this_prologue_assert = is_prologue and ctx.real_crypto == null and (idx == 2 or idx == 7);
+        }
         const val = try evalNode(allocator, binding.value, binding.name, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
         try env.put(binding.name, val);
     }
@@ -828,6 +935,7 @@ fn evalNode(
         .bin_op => |bo| {
             const left = env.get(bo.left) orelse anf_none;
             const right = env.get(bo.right) orelse anf_none;
+            if (isWide(left) or isWide(right)) return error.ScriptNumberError;
             // Numeric byte-array ops (& | ^ << >>) thread the operands' real
             // stack bytes so CHAINED expressions match the deployed script (a
             // shift/bitwise result can be non-minimal; the next length-sensitive
@@ -871,6 +979,7 @@ fn evalNode(
         },
         .unary_op => |uo| {
             const operand = env.get(uo.operand) orelse anf_none;
+            if (isWide(operand)) return error.ScriptNumberError;
             // Numeric OP_INVERT threads raw stack bytes for chained expressions,
             // same as the bitwise/shift ops above. Bytes-typed `~` and other
             // unary ops use evalUnaryOp's minimal/native path (unchanged).
@@ -887,9 +996,25 @@ fn evalNode(
             // numeric path — it is a byte op and must keep accepting
             // non-minimal bytes.
             try assertMinimalNumericOperand(eval_ctx, uo.operand, operand);
+            // N-281: `-minInt(i64)` has no i64 representation; `evalUnaryOp`'s
+            // `-%val` would wrap instead of returning the on-chain value. Same
+            // rejection channel as the N-163 `*` / math-builtin overflow
+            // refusals above.
+            if (std.mem.eql(u8, uo.op, "-") and toInt(operand) == std.math.minInt(i64)) {
+                return error.ScriptNumberError;
+            }
             return evalUnaryOp(allocator, uo.op, operand, uo.result_type);
         },
         .call => |c| {
+            // N-163: `verifyRabinSig` is the one builtin that legitimately takes
+            // values outside i64 (Rabin keys / signatures), and it does no
+            // integer math here. Every other builtin would compute with a
+            // `.wide` argument as 0.
+            if (!std.mem.eql(u8, c.func, "verifyRabinSig")) {
+                for (c.args) |arg_ref| {
+                    if (isWide(env.get(arg_ref) orelse anf_none)) return error.ScriptNumberError;
+                }
+            }
             // The single funnel every numeric builtin (`abs`, `min`, `max`,
             // `within`, `safediv`, `clamp`, `sign`, `bool`, ...) reads its
             // operands through. Only a NUMERIC byte-op result ever carries
@@ -910,8 +1035,55 @@ fn evalNode(
                 if (!isTruthy(arg)) return error.AssertionFailure;
                 return anf_none;
             }
+            // A math builtin whose compiled script ABORTS on these operands
+            // (zero divisor, the pow exponent guard, sqrt of a negative) fails
+            // the spend, like a byte-op abort; `evalCall` would otherwise
+            // invent a value (F-134).
+            if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
+            if (splitBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
+            // N-163: not an on-chain abort — the script computes the value,
+            // but it lies outside the i64 this interpreter represents. Refuse
+            // through the same channel rather than return a wrapped value.
+            if (mathBuiltinOverflowsI64(c.func, c.args, env)) return error.ScriptNumberError;
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
-            return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
+            // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+            // encoding; it does not push false. Answering false let
+            // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+            // spend the chain aborts on. Same rejection channel as the
+            // OP_SPLIT / math aborts above.
+            if (real_crypto != null and std.mem.eql(u8, c.func, "checkSig")) {
+                if (checkSigEncodingError(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env)) != null) {
+                    return error.ScriptNumberError;
+                }
+            }
+            // N-259: on-chain checkMultiSig runs OP_CHECKMULTISIG as Spend does
+            // (`verifyMultiSigReal`); an abort (malformed encoding of an
+            // examined pair, NULLFAIL, N > M) takes the same rejection channel.
+            if (real_crypto) |rc| {
+                if (std.mem.eql(u8, c.func, "checkMultiSig")) {
+                    const ok = verifyMultiSigReal(allocator, getArg(c.args, 0, env), getArg(c.args, 1, env), rc.sighash) orelse
+                        return error.ScriptNumberError;
+                    return .{ .boolean = ok };
+                }
+            }
+            const result = evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
+            // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that
+            // does not verify aborts the script; only an empty one pushes
+            // false. So the arm of `checkSig(a, A) || checkSig(b, B)` that must
+            // fail takes an empty signature (EMPTY_SIG, issue #106). `Spend`
+            // has no NULLFAIL. Same rejection channel as the N-197 gate above.
+            if (real_crypto != null and std.mem.eql(u8, c.func, "checkSig")) {
+                const failed = switch (result) {
+                    .boolean => |b| !b,
+                    else => false,
+                };
+                const sig_nonempty = switch (getArg(c.args, 0, env)) {
+                    .bytes => |b| b.len > 0,
+                    else => false,
+                };
+                if (failed and sig_nonempty) return error.ScriptNumberError;
+            }
+            return result;
         },
         .method_call => |mc| {
             return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
@@ -957,8 +1129,18 @@ fn evalNode(
             // have no realistic continuation hash. Developer-written
             // covenant asserts with the identical IR shape carry no
             // marker and ARE enforced (see BUG-002).
-            if (strict_ctx != null) {
+            if (strict_ctx) |ctx| {
                 if (an.is_auto_injected_state_check) return anf_none;
+                // F-164 (round 2): the auto-injected prologue's
+                // checkPreimage assert and sighash-type assert (detected
+                // structurally — see detectAutoInjectedPrologue, set per
+                // binding by evalBindings) are mocked in plain strict
+                // mode, matching PROTOCOL.md's documented "crypto
+                // built-ins still mock-return true" contract. Always
+                // false when real_crypto is set, so
+                // executeOnChainAuthoritative keeps enforcing both for
+                // real.
+                if (ctx.mock_this_prologue_assert) return anf_none;
                 if (an.value.len > 0) {
                     const predicate = env.get(an.value) orelse anf_none;
                     if (!isTruthy(predicate)) return error.AssertionFailure;
@@ -991,12 +1173,14 @@ fn evalNode(
             // method may interleave raw outputs around it, and the on-chain
             // covenant folds them into hashOutputs in exactly this order.
             const sat_val = env.get(ao.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             try eval_ctx.ordered_outputs.append(allocator, .{ .kind = .state, .satoshis = toInt(sat_val) });
             return anf_none;
         },
         .add_data_output => |ado| {
             // Resolve the two arg refs from env and record the data output.
             const sat_val = env.get(ado.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             const script_val = env.get(ado.script_bytes) orelse anf_none;
             const sats: i64 = toInt(sat_val);
             const script_bytes: []const u8 = switch (script_val) {
@@ -1018,6 +1202,7 @@ fn evalNode(
             // mode (matches TS reference at
             // packages/runar-sdk/src/anf-interpreter.ts).
             const sat_val = env.get(aro.satoshis) orelse anf_none;
+            if (isWide(sat_val)) return error.ScriptNumberError;
             const script_val = env.get(aro.script_bytes) orelse anf_none;
             const sats: i64 = toInt(sat_val);
             const script_bytes: []const u8 = switch (script_val) {
@@ -1035,8 +1220,19 @@ fn evalNode(
             try eval_ctx.ordered_outputs.append(allocator, .{ .kind = .raw, .satoshis = sats, .script = script_bytes });
             return anf_none;
         },
-        // On-chain-only operations — skip
-        .check_preimage, .deserialize_state, .get_state_script => {
+        // F-164: mirrors evalCall's "checkPreimage" case (mock true unless
+        // a real-crypto context is active). The ANFValue.check_preimage
+        // variant carries no `preimage` ref field (unlike the manual
+        // `call(checkPreimage, ...)` path above), so real verification
+        // isn't modelled here — only the mock/lenient split, which is all
+        // any existing test or conformance golden exercises for this
+        // auto-injected node kind.
+        .check_preimage => {
+            const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
+            if (real_crypto != null) return anf_none;
+            return .{ .boolean = true };
+        },
+        .deserialize_state, .get_state_script => {
             return anf_none;
         },
         .array_literal => |al| {
@@ -1327,11 +1523,24 @@ fn evalBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right
     const l = toInt(left);
     const r = toInt(right);
 
-    if (std.mem.eql(u8, op, "+")) return .{ .int = l +% r };
-    if (std.mem.eql(u8, op, "-")) return .{ .int = l -% r };
-    if (std.mem.eql(u8, op, "*")) return .{ .int = l *% r };
-    if (std.mem.eql(u8, op, "/")) return .{ .int = if (r == 0) 0 else @divTrunc(l, r) };
-    if (std.mem.eql(u8, op, "%")) return .{ .int = if (r == 0) 0 else @rem(l, r) };
+    // N-281 (sibling of N-163): refuse a sum/difference outside i64 rather
+    // than wrap it (`+%`/`-%`).
+    if (std.mem.eql(u8, op, "+")) return .{ .int = std.math.add(i64, l, r) catch return error.ScriptNumberError };
+    if (std.mem.eql(u8, op, "-")) return .{ .int = std.math.sub(i64, l, r) catch return error.ScriptNumberError };
+    // N-163: refuse a product outside i64 rather than wrap it.
+    if (std.mem.eql(u8, op, "*")) return .{ .int = std.math.mul(i64, l, r) catch return error.ScriptNumberError };
+    // N-102: OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+    // post-state to compute. `minInt(i64) / -1` (2^63) is outside i64: refuse
+    // it too. `minInt(i64) % -1` is 0 on chain.
+    if (std.mem.eql(u8, op, "/")) {
+        if (r == 0 or (l == std.math.minInt(i64) and r == -1)) return error.ScriptNumberError;
+        return .{ .int = @divTrunc(l, r) };
+    }
+    if (std.mem.eql(u8, op, "%")) {
+        if (r == 0) return error.ScriptNumberError;
+        if (r == -1) return .{ .int = 0 };
+        return .{ .int = @rem(l, r) };
+    }
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "===")) return .{ .boolean = l == r };
     if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "!==")) return .{ .boolean = l != r };
     if (std.mem.eql(u8, op, "<")) return .{ .boolean = l < r };
@@ -1421,6 +1630,92 @@ fn evalUnaryOp(allocator: std.mem.Allocator, op: []const u8, operand: ANFValue, 
 // Built-in function calls
 // ---------------------------------------------------------------------------
 
+/// True when the compiled script for this math builtin ABORTS on these
+/// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, `sqrt`'s
+/// `n >= 0` guard and `log2`'s `n > 0` guard (N-103). (`sqrt`'s `n < 2^495`
+/// guard is out of i64 reach.)
+fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    if (eql(u8, func, "safediv") or eql(u8, func, "safemod") or eql(u8, func, "divmod")) {
+        return toInt(getArg(arg_names, 1, env)) == 0;
+    }
+    if (eql(u8, func, "mulDiv")) return toInt(getArg(arg_names, 2, env)) == 0;
+    if (eql(u8, func, "pow")) {
+        const exp = toInt(getArg(arg_names, 1, env));
+        return exp < 0 or exp > 32;
+    }
+    if (eql(u8, func, "sqrt")) return toInt(getArg(arg_names, 0, env)) < 0;
+    if (eql(u8, func, "log2")) return toInt(getArg(arg_names, 0, env)) <= 0;
+    return false;
+}
+
+/// N-163: true when this math builtin's (non-aborting) result lies outside
+/// i64, so `evalCall` could only return a wrapped value. Checked after
+/// `mathBuiltinAborts`, so divisors are non-zero and the `pow` exponent is in
+/// 0..32 here.
+fn mathBuiltinOverflowsI64(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    const a = toInt(getArg(arg_names, 0, env));
+    const b = toInt(getArg(arg_names, 1, env));
+    // N-281: `abs(minInt(i64))` has no i64 representation (`-minInt(i64)`
+    // overflows); `evalCall`'s `-v` would panic (Debug/ReleaseSafe) or wrap
+    // (ReleaseFast) rather than return the on-chain value.
+    if (eql(u8, func, "abs")) return a == std.math.minInt(i64);
+    if (eql(u8, func, "pow")) {
+        var result: i64 = 1;
+        var i: i64 = 0;
+        while (i < b) : (i += 1) result = std.math.mul(i64, result, a) catch return true;
+        return false;
+    }
+    if (eql(u8, func, "mulDiv")) {
+        const c = toInt(getArg(arg_names, 2, env));
+        if (c == 0) return false;
+        return std.math.cast(i64, @divTrunc(@as(i128, a) * b, c)) == null;
+    }
+    if (eql(u8, func, "percentOf")) {
+        return std.math.cast(i64, @divTrunc(@as(i128, a) * b, 10000)) == null;
+    }
+    return false;
+}
+
+/// F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+/// whenever the computed split position is outside `[0, size(data)]` --
+/// `left` splits at `length` directly, `right` splits at
+/// `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+/// lowerRight). A negative or past-the-end `length` must abort, never return
+/// a clamped value.
+///
+/// N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the RIGHT
+/// half -- same bound, `index` in place of `length`.
+///
+/// R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+/// OP_SPLIT OP_DROP` -- TWO chained OP_SPLITs, the second against the
+/// REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+/// [0, size(data)] or `length` is outside [0, size(data) - start], which
+/// collapses to: start<0, length<0, or start+length>size(data). `substr`
+/// used to be excluded here because its one caller via `extractScriptCode`
+/// (`FungibleToken#merge`) got an empty dummy scriptCode, turning a
+/// realistic `substr(sc, ...)` into a POSITIVE overflow this check would
+/// have to reject. `extractScriptCode` now returns the contract's own REAL
+/// codePart (`sdk_contract.zig`'s call path, via `MockEnv.script_code_hex`),
+/// so `substr` can be fully abort-faithful too.
+fn splitBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    if (eql(u8, func, "left") or eql(u8, func, "right") or eql(u8, func, "split")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const length = toInt(getArg(arg_names, 1, env));
+        return length < 0 or length * 2 > @as(i64, @intCast(hex.len));
+    }
+    if (eql(u8, func, "substr")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const start = toInt(getArg(arg_names, 1, env));
+        const length = toInt(getArg(arg_names, 2, env));
+        return start < 0 or length < 0 or (start + length) * 2 > @as(i64, @intCast(hex.len));
+    }
+    return false;
+}
+
 fn evalCall(
     allocator: std.mem.Allocator,
     func: []const u8,
@@ -1442,7 +1737,10 @@ fn evalCall(
         if (real_crypto) |rc| {
             const sigs_val = getArg(arg_names, 0, env);
             const pks_val = getArg(arg_names, 1, env);
-            return .{ .boolean = verifyMultiSigReal(allocator, sigs_val, pks_val, rc.sighash) };
+            // Not reached in real-crypto mode: the call-binding site runs
+            // `verifyMultiSigReal` itself and turns its abort (null) into
+            // error.ScriptNumberError. Kept total for safety.
+            return .{ .boolean = verifyMultiSigReal(allocator, sigs_val, pks_val, rc.sighash) orelse false };
         }
         return .{ .boolean = true };
     }
@@ -1502,7 +1800,9 @@ fn evalCall(
         const v = toInt(getArg(arg_names, 0, env));
         const lo = toInt(getArg(arg_names, 1, env));
         const hi = toInt(getArg(arg_names, 2, env));
-        return .{ .int = if (v < lo) lo else if (v > hi) hi else v };
+        // The script is `OP_MAX` then `OP_MIN`: min(max(v, lo), hi), so with
+        // lo > hi, hi wins (N-030).
+        return .{ .int = @min(@max(v, lo), hi) };
     }
     if (std.mem.eql(u8, func, "sign")) {
         const v = toInt(getArg(arg_names, 0, env));
@@ -1522,13 +1822,16 @@ fn evalCall(
     if (std.mem.eql(u8, func, "sqrt")) {
         const v = toInt(getArg(arg_names, 0, env));
         if (v <= 0) return .{ .int = 0 };
-        var x = v;
-        var y = @divTrunc(x + 1, 2);
+        // Newton in i128, so `x + 1` cannot overflow at v = maxInt(i64)
+        // (sqrt(2^63 - 1) is 3037000499 on-chain; N-030).
+        const w: i128 = v;
+        var x: i128 = w;
+        var y: i128 = @divTrunc(x + 1, 2);
         while (y < x) {
             x = y;
-            y = @divTrunc(x + @divTrunc(v, x), 2);
+            y = @divTrunc(x + @divTrunc(w, x), 2);
         }
-        return .{ .int = x };
+        return .{ .int = @intCast(x) };
     }
     if (std.mem.eql(u8, func, "gcd")) {
         var a = toInt(getArg(arg_names, 0, env));
@@ -1567,12 +1870,13 @@ fn evalCall(
         const b = toInt(getArg(arg_names, 1, env));
         const c = toInt(getArg(arg_names, 2, env));
         if (c == 0) return .{ .int = 0 };
-        return .{ .int = @divTrunc(a *% b, c) };
+        // N-163: i128 product, so an intermediate past i64 is exact.
+        return .{ .int = @intCast(@divTrunc(@as(i128, a) * b, c)) };
     }
     if (std.mem.eql(u8, func, "percentOf")) {
         const a = toInt(getArg(arg_names, 0, env));
         const b = toInt(getArg(arg_names, 1, env));
-        return .{ .int = @divTrunc(a *% b, 10000) };
+        return .{ .int = @intCast(@divTrunc(@as(i128, a) * b, 10000)) };
     }
 
     // Byte operations
@@ -1586,14 +1890,12 @@ fn evalCall(
         const hex = asHex(getArg(arg_names, 0, env));
         return .{ .int = @intCast(hex.len / 2) };
     }
+    // R67: bounds already verified by `splitBuiltinAborts` above.
     if (std.mem.eql(u8, func, "substr")) {
         const hex = asHex(getArg(arg_names, 0, env));
-        const start: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 2, env))));
-        const hex_start = start * 2;
-        const hex_end = @min((start + length) * 2, hex.len);
-        if (hex_start >= hex.len) return .{ .bytes = "" };
-        const result = allocator.dupe(u8, hex[hex_start..hex_end]) catch return .{ .bytes = "" };
+        const start: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const length: usize = @intCast(toInt(getArg(arg_names, 2, env)));
+        const result = allocator.dupe(u8, hex[start * 2 .. start * 2 + length * 2]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "split")) {
@@ -1607,28 +1909,25 @@ fn evalCall(
         // surface can name one, so an artifact run here and then spent on-chain
         // took two different branches for every contract that splits.
         // `sdk_anf_interpreter_split_test.zig` is the guard.
+        //
+        // N-171: bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const pos: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_pos = @min(pos * 2, hex.len);
-        const result = allocator.dupe(u8, hex[hex_pos..]) catch return .{ .bytes = "" };
+        const pos: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[pos * 2 ..]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "left")) {
+        // Bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_len = @min(length * 2, hex.len);
-        const result = allocator.dupe(u8, hex[0..hex_len]) catch return .{ .bytes = "" };
+        const length: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[0 .. length * 2]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "right")) {
+        // Bounds already verified by `splitBuiltinAborts` above.
         const hex = asHex(getArg(arg_names, 0, env));
-        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
-        const hex_len = length * 2;
-        if (hex_len >= hex.len) {
-            const result = allocator.dupe(u8, hex) catch return .{ .bytes = "" };
-            return .{ .bytes = result };
-        }
-        const result = allocator.dupe(u8, hex[hex.len - hex_len ..]) catch return .{ .bytes = "" };
+        const length: usize = @intCast(toInt(getArg(arg_names, 1, env)));
+        const result = allocator.dupe(u8, hex[hex.len - length * 2 ..]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "reverseBytes")) {
@@ -1697,6 +1996,9 @@ fn evalCall(
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }
     if (std.mem.eql(u8, func, "extractAmount")) {
+        // F-024 (R14): an integer `txPreimage` is the caller-supplied input amount.
+        const pre = getArg(arg_names, 0, env);
+        if (pre == .int) return pre;
         if (mock_env) |me| return .{ .int = me.amount };
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }
@@ -1723,6 +2025,17 @@ fn evalCall(
             if (me.hash_sequence_hex) |h| return .{ .bytes = h };
         }
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
+    }
+    // R67: the contract's own real codePart when the caller supplied it via
+    // `MockEnv.script_code_hex` -- sdk_contract.zig's call path always
+    // supplies it now. Falls back to the historical empty dummy for a bare
+    // `computeNewStateAndDataOutputs` call with no MockEnv (e.g. a
+    // hand-built ANF probe in a test).
+    if (std.mem.eql(u8, func, "extractScriptCode")) {
+        if (mock_env) |me| {
+            if (me.script_code_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "" };
     }
 
     return anf_none;
@@ -1863,11 +2176,63 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
 // Real ECDSA / preimage verification (used by executeOnChainAuthoritative)
 // ---------------------------------------------------------------------------
 
+/// N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+/// `null` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+/// `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules): a
+/// non-empty signature must be strict DER (BIP66) with a low S; the public key
+/// -- checked even when the signature is empty -- must be 33 bytes behind
+/// 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+/// signature, or a well-formed one that does not verify, is not an encoding
+/// abort (`Spend` has no NULLFAIL; it pushes false); the `checkSig` call site
+/// applies NULLFAIL after verification (N-198). A non-empty signature is in
+/// checksig format, DER followed by exactly one sighash-type byte, as `Spend`
+/// requires: bare DER with no sighash byte aborts (N-255).
+/// Operands that are not hex bytes at all are left to `verifyEcdsaReal`.
+fn checkSigEncodingError(allocator: std.mem.Allocator, sig_val: ANFValue, pk_val: ANFValue) ?[]const u8 {
+    const sig_hex = switch (sig_val) {
+        .bytes => |b| b,
+        else => return null,
+    };
+    const pk_hex = switch (pk_val) {
+        .bytes => |b| b,
+        else => return null,
+    };
+    const sig = bsvz.primitives.hex.decode(allocator, sig_hex) catch return null;
+    defer allocator.free(sig);
+    const pk = bsvz.primitives.hex.decode(allocator, pk_hex) catch return null;
+    defer allocator.free(pk);
+    if (sig.len > 0) {
+        if (sig.len < 2 or sig.len != @as(usize, sig[1]) + 3) return "the signature is not strict DER";
+        const der = sig[0 .. sig.len - 1];
+        if (!der_mod.isStrictDerSignature(der)) return "the signature is not strict DER";
+        const r_len: usize = der[3];
+        const s_bytes = der[6 + r_len ..];
+        var i: usize = 0;
+        while (i < s_bytes.len and s_bytes[i] == 0) : (i += 1) {}
+        const s_min = s_bytes[i..];
+        const half_n = [32]u8{
+            0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+        };
+        const low_s = s_min.len > 0 and (s_min.len < 32 or
+            (s_min.len == 32 and std.mem.order(u8, s_min, &half_n) != .gt));
+        if (!low_s) return "the signature does not have a low S value";
+    }
+    const shape_ok = pk.len > 0 and (((pk[0] == 0x02 or pk[0] == 0x03) and pk.len == 33) or
+        (pk[0] == 0x04 and pk.len == 65));
+    if (!shape_ok) return "the public key is not a 33-byte compressed or 65-byte uncompressed key";
+    _ = std.crypto.ecc.Secp256k1.fromSec1(pk) catch return "the public key is not a point on secp256k1";
+    return null;
+}
+
 /// Verify an ECDSA signature against a sighash digest using bsvz's
 /// secp256k1 primitives. The pubkey must be SEC1-encoded
 /// (compressed 33 bytes or uncompressed 65 bytes); the signature is DER
 /// (with optional trailing sighash type byte stripped). Returns false on
-/// any decode error so the enclosing assert fires.
+/// any decode error so the enclosing assert fires. The `checkSig` call site
+/// first applies `checkSigEncodingError` and aborts on a malformed encoding,
+/// as `OP_CHECKSIG` does (N-197); so does `checkMultiSig`, per examined pair
+/// (N-259).
 fn verifyEcdsaReal(
     allocator: std.mem.Allocator,
     sig_val: ANFValue,
@@ -1896,26 +2261,33 @@ fn verifyEcdsaReal(
         }
     }
 
+    // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. bsvz's relaxed
+    // reader alone strips leading zeros and ignores trailing bytes.
+    if (!der_mod.isStrictDerSignature(der_slice)) return false;
     return bsvz.crypto.verifyDigest256RelaxedSec1(pk_bytes, sighash, der_slice) catch false;
 }
 
-/// Real `checkMultiSig` verification: iterate `sigs` left-to-right and
-/// consume `pks` greedily (mirrors the on-chain `OP_CHECKMULTISIG` semantic
-/// and the TS / Java SDK references at
-/// `packages/runar-sdk/src/anf-interpreter.ts::verifyMultiSig` and
-/// `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java::verifyMultiSigReal`).
+/// N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+/// layout `0 <sig1..sigN> N <pk1..pkM> M`. The LAST signature is examined
+/// against the LAST key first and both lists are walked toward the first. Each
+/// examined pair passes the N-197 encoding gates first and a malformed one
+/// aborts (a pair never reached is never checked); a signature that verifies
+/// consumes its key, a key is consumed either way, and the check fails once
+/// fewer keys remain than signatures. N > M aborts, as in `Spend`. NULLFAIL
+/// (BIP146, N-198): a failing check with ANY non-empty signature aborts on a
+/// node (`Spend` has no NULLFAIL); only an all-empty one yields `false`.
 ///
 /// `sigs_val` and `pks_val` must be `ANFValue.array` whose elements are
 /// `ANFValue.bytes` (hex-encoded) — what `stateValueToAnf` produces for a
 /// `StateValue.array_value` of `bytes` leaves and what an `array_literal`
-/// ANF binding produces from byte-shaped element refs. Returns `false` on
-/// any other shape so an enclosing `assert(checkMultiSig(...))` fails loudly.
+/// ANF binding produces from byte-shaped element refs. Any other shape yields
+/// `false`. Returns `null` where the script aborts.
 fn verifyMultiSigReal(
     allocator: std.mem.Allocator,
     sigs_val: ANFValue,
     pks_val: ANFValue,
     sighash: [32]u8,
-) bool {
+) ?bool {
     const sigs = switch (sigs_val) {
         .array => |a| a,
         else => return false,
@@ -1924,21 +2296,31 @@ fn verifyMultiSigReal(
         .array => |a| a,
         else => return false,
     };
-    if (sigs.len > pks.len) return false;
-    var pk_idx: usize = 0;
-    for (sigs) |sig| {
-        var matched = false;
-        while (pk_idx < pks.len) : (pk_idx += 1) {
-            const ok = verifyEcdsaReal(allocator, sig, pks[pk_idx], sighash);
-            if (ok) {
-                pk_idx += 1;
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) return false;
+    if (sigs.len > pks.len) return null;
+    var nsigs: usize = sigs.len;
+    var nkeys: usize = pks.len;
+    var success = true;
+    while (success and nsigs > 0) {
+        const sig = sigs[nsigs - 1];
+        const pk = pks[nkeys - 1];
+        if (checkSigEncodingError(allocator, sig, pk) != null) return null;
+        if (anfNonEmptyBytes(sig) and verifyEcdsaReal(allocator, sig, pk, sighash)) nsigs -= 1;
+        nkeys -= 1;
+        if (nsigs > nkeys) success = false; // fewer keys left than signatures
     }
-    return true;
+    if (!success) {
+        for (sigs) |sig| {
+            if (anfNonEmptyBytes(sig)) return null;
+        }
+    }
+    return success;
+}
+
+fn anfNonEmptyBytes(v: ANFValue) bool {
+    return switch (v) {
+        .bytes => |b| b.len > 0,
+        else => false,
+    };
 }
 
 /// Verify that hash256(preimage) equals the supplied 32-byte sighash —
@@ -1985,7 +2367,20 @@ fn toInt(v: ANFValue) i64 {
         // mirror how `asHex` returns "" and the rest of the lenient
         // interpreter degrades gracefully on type mismatches.
         .array => 0,
+        // Unreached: every numeric consumer refuses a `.wide` first (N-163).
+        .wide => 0,
         .none => 0,
+    };
+}
+
+/// N-163: a `.wide` value, or an array holding one.
+fn isWide(v: ANFValue) bool {
+    return switch (v) {
+        .wide => true,
+        .array => |items| for (items) |it| {
+            if (isWide(it)) break true;
+        } else false,
+        else => false,
     };
 }
 
@@ -1997,6 +2392,8 @@ fn isTruthy(v: ANFValue) bool {
         // A non-empty array is truthy; an empty array is falsy. Matches the
         // TS / Java reference shapes (empty `[]` is falsy in lenient mode).
         .array => |a| a.len > 0,
+        // Outside i64, so never zero.
+        .wide => true,
         .none => false,
     };
 }
@@ -2473,9 +2870,15 @@ fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{
         .string => |s| blk: {
             // Handle BigInt strings like "42n"
             if (s.len > 0 and s[s.len - 1] == 'n') {
-                if (std.fmt.parseInt(i64, s[0 .. s.len - 1], 10)) |n| {
+                const digits = s[0 .. s.len - 1];
+                if (std.fmt.parseInt(i64, digits, 10)) |n| {
                     break :blk .{ .int = n };
-                } else |_| {}
+                } else |_| {
+                    // N-282: outside i64 -> `.wide` (same value N-163 gives a
+                    // caller-supplied `StateValue.big_int`), never 0. Dupe —
+                    // the source std.json.Parsed is deinit'd by the caller.
+                    break :blk .{ .wide = try allocator.dupe(u8, digits) };
+                }
             }
             // Plain numeric string
             if (std.fmt.parseInt(i64, s, 10)) |n| {
@@ -2993,6 +3396,50 @@ test "parseANFFromJson simple counter" {
     try std.testing.expectEqual(@as(usize, 4), program.methods[0].body.len);
 }
 
+// N-282: a beyond-i64 ANF `load_const` literal (`"<digits>n"`) reached
+// `parseJSONToANFValue`, and because `std.fmt.parseInt(i64, ...)` overflows
+// for both the "n"-stripped and plain-numeric attempts, fell through to the
+// `.bytes` branch -- so `toInt` read it as 0 and arithmetic on the literal
+// silently derived a post-state the on-chain script never produces (same
+// class as N-163, different entry point: N-163 covers a caller-supplied
+// `StateValue.big_int` reaching `stateValueToAnf`; this item covers the same
+// value arriving as an ANF literal through `parseJSONToANFValue`/`load_const`).
+//
+// Proves: a stateful method whose body contains a `load_const` of a
+// beyond-i64 bigint literal, used as a `bin_op` operand, is refused with
+// `error.ScriptNumberError` -- never silently computed as 0.
+// Does not prove: arithmetic on wide values (the interpreter refuses it; the
+// on-chain script computes it), or anything about the compiled script.
+test "N-282: a beyond-i64 load_const literal used in arithmetic is refused, never computed as 0" {
+    const allocator = std.testing.allocator;
+
+    // 2^70 + 12345: outside i64 (max i64 is ~9.2e18).
+    const json =
+        \\{"contractName":"WideLiteralProbe","properties":[{"name":"count","type":"bigint","readonly":false}],
+        \\"methods":[{"name":"settle","params":[],"body":[
+        \\{"name":"c","value":{"kind":"load_prop","name":"count"}},
+        \\{"name":"w","value":{"kind":"load_const","value":"1180591620717411315769n"}},
+        \\{"name":"n","value":{"kind":"bin_op","op":"+","left":"c","right":"w"}},
+        \\{"name":"u","value":{"kind":"update_prop","name":"count","value":"n"}}
+        \\],"isPublic":true}]}
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const program = try parseANFFromJson(arena.allocator(), json);
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("count", .{ .int = 5 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+
+    const result = computeNewState(allocator, &program, "settle", current_state, args, &.{});
+    try std.testing.expectError(error.ScriptNumberError, result);
+}
+
 // ---------------------------------------------------------------------------
 // Strict-mode tests
 //
@@ -3369,6 +3816,17 @@ fn hexEncode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out;
 }
 
+/// Hex-encode a bare DER signature in checksig format: DER plus a 0x41
+/// (SIGHASH_ALL|FORKID) sighash-type byte. On-chain mode aborts on bare DER,
+/// as OP_CHECKSIG does (N-255).
+fn hexEncodeChecksig(allocator: std.mem.Allocator, der: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, der.len * 2 + 2);
+    _ = try bsvz.primitives.hex.encodeLower(der, out[0 .. der.len * 2]);
+    out[der.len * 2] = '4';
+    out[der.len * 2 + 1] = '1';
+    return out;
+}
+
 test "executeOnChainAuthoritative — checkSig passes with a real signature" {
     const allocator = std.testing.allocator;
     const anf = buildSigGuardAnf();
@@ -3381,7 +3839,7 @@ test "executeOnChainAuthoritative — checkSig passes with a real signature" {
     const pub_key = try priv.publicKey();
     const sig = try priv.signDigest256(sighash);
 
-    const sig_hex = try hexEncode(allocator, sig.asSlice());
+    const sig_hex = try hexEncodeChecksig(allocator, sig.asSlice());
     defer allocator.free(sig_hex);
     const pk_hex = try hexEncode(allocator, &pub_key.bytes);
     defer allocator.free(pk_hex);
@@ -3427,7 +3885,7 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
     const sig_slice = sig_bytes_buf[0..sig.asSlice().len];
     sig_slice[sig_slice.len - 1] ^= 0xff; // corrupt the last byte of S
 
-    const sig_hex = try hexEncode(allocator, sig_slice);
+    const sig_hex = try hexEncodeChecksig(allocator, sig_slice);
     defer allocator.free(sig_hex);
     const pk_hex = try hexEncode(allocator, &pub_key.bytes);
     defer allocator.free(pk_hex);
@@ -3445,7 +3903,84 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
         allocator, &anf, "unlock", current_state, args, &.{},
         .{ .sighash = sighash },
     );
-    try std.testing.expectError(StrictError.AssertionFailure, result);
+    // N-198: a NON-EMPTY signature that does not verify aborts the script
+    // under NULLFAIL (BIP146) on a node, so the refusal comes through the
+    // opcode-abort channel, not an assert on a pushed false.
+    try std.testing.expectError(StrictError.ScriptNumberError, result);
+}
+
+// F-242 (CL-BUG-160): strict DER (BIP66). conformance/sdk-der/vectors.json
+// is the cross-tier vector set: every ok=false entry re-encodes a valid
+// signature's (r, s), so only the encoding can make it fail. This path parsed
+// through bsvz's lax DER reader, which strips any number of leading 0x00
+// bytes, ignores the sign bit and ignores bytes after the SEQUENCE.
+//
+// Proves: executeOnChainAuthoritative's checkSig reaches the fixture verdict
+// on every vector, each in checksig format (DER + one sighash-type byte,
+// N-255). Does not prove builtins.checkSig (tested in builtins.zig)
+// or the envelope path (sdk_envelope_interop_test.zig replays the der-*
+// rejection vectors).
+test "executeOnChainAuthoritative — checkSig applies strict DER to every sdk-der vector (F-242)" {
+    const allocator = std.testing.allocator;
+    const anf = buildSigGuardAnf();
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../../conformance/sdk-der/vectors.json", allocator, .limited(1024 * 1024));
+    defer allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const pk_hex = parsed.value.object.get("pubkey").?.string;
+    const vectors = parsed.value.object.get("vectors").?.array;
+    try std.testing.expect(vectors.items.len > 0);
+
+    for (vectors.items) |v| {
+        const id = v.object.get("id").?.string;
+        const want_ok = v.object.get("ok").?.bool;
+        var sighash: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&sighash, v.object.get("digest").?.string);
+
+        var current_state = std.StringHashMap(ANFValue).init(allocator);
+        defer current_state.deinit();
+        try current_state.put("value", .{ .int = 0 });
+        var args = std.StringHashMap(ANFValue).init(allocator);
+        defer args.deinit();
+        // In checksig format: a bare-DER vector gets a 0x41 sighash-type byte
+        // (N-255: bare DER aborts in on-chain mode before the encoding under
+        // test is reached).
+        const sig_raw = v.object.get("sig").?.string;
+        const sig_len = sig_raw.len / 2;
+        const seq_len = try std.fmt.parseInt(usize, sig_raw[2..4], 16);
+        const sig_hex = if (sig_len == seq_len + 3)
+            try allocator.dupe(u8, sig_raw)
+        else
+            try std.fmt.allocPrint(allocator, "{s}41", .{sig_raw});
+        defer allocator.free(sig_hex);
+        try args.put("sig", .{ .bytes = sig_hex });
+        try args.put("pk", .{ .bytes = pk_hex });
+
+        const result = executeOnChainAuthoritative(
+            allocator, &anf, "unlock", current_state, args, &.{},
+            .{ .sighash = sighash },
+        );
+        if (result) |res| {
+            var state = res.state;
+            defer state.deinit();
+            for (res.data_outputs) |d| allocator.free(d.script);
+            allocator.free(res.data_outputs);
+            for (res.raw_outputs) |d| allocator.free(d.script);
+            allocator.free(res.raw_outputs);
+            if (!want_ok) {
+                std.debug.print("F-242: {s} verified, want refused\n", .{id});
+                return error.TestUnexpectedResult;
+            }
+        } else |err| {
+            // N-197: a non-strict-DER signature ABORTS OP_CHECKSIG, so the
+            // refusal comes through the opcode-abort channel, not an assert.
+            if (want_ok or err != StrictError.ScriptNumberError) {
+                std.debug.print("F-242: {s} -> {s}, want ok={}\n", .{ id, @errorName(err), want_ok });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }
 
 test "executeOnChainAuthoritative — checkPreimage passes when hash256(preimage) == sighash" {
@@ -3638,7 +4173,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 passes when sig match
     const pub1 = try priv1.publicKey();
     const sig1 = try priv1.signDigest256(sighash);
 
-    const sig1_hex = try hexEncode(allocator, sig1.asSlice());
+    const sig1_hex = try hexEncodeChecksig(allocator, sig1.asSlice());
     defer allocator.free(sig1_hex);
     const pk0_hex = try hexEncode(allocator, &pub0.bytes);
     defer allocator.free(pk0_hex);
@@ -3670,7 +4205,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 passes when sig match
     try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
 }
 
-test "executeOnChainAuthoritative — checkMultiSig 1-of-2 fails when sig matches no pk" {
+test "executeOnChainAuthoritative — checkMultiSig 1-of-2 aborts (NULLFAIL) when sig matches no pk" {
     const allocator = std.testing.allocator;
     const anf = buildMultiSigGuardAnf();
 
@@ -3693,7 +4228,7 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 fails when sig matche
     const pub1 = try priv1.publicKey();
     const sig2 = try priv2.signDigest256(sighash);
 
-    const sig2_hex = try hexEncode(allocator, sig2.asSlice());
+    const sig2_hex = try hexEncodeChecksig(allocator, sig2.asSlice());
     defer allocator.free(sig2_hex);
     const pk0_hex = try hexEncode(allocator, &pub0.bytes);
     defer allocator.free(pk0_hex);
@@ -3714,7 +4249,9 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 fails when sig matche
         allocator, &anf, "unlock", current_state, args, &.{},
         .{ .sighash = sighash },
     );
-    try std.testing.expectError(StrictError.AssertionFailure, result);
+    // N-259: the check fails with a non-empty signature, which a node aborts
+    // under NULLFAIL (BIP146) rather than push false.
+    try std.testing.expectError(StrictError.ScriptNumberError, result);
 }
 
 test "executeOnChainAuthoritative — checkMultiSig real-crypto rejects non-array sig arg" {
@@ -4075,5 +4612,111 @@ test "@ref: alias carries the threaded stack bytes" {
         };
         const v = try H.run(allocator, &body);
         try std.testing.expectEqual(@as(i64, 5), v.int);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-134: the math builtins match the compiled script.
+//
+// The expected column was established by EXECUTING the TS compiler's script
+// for each builtin in @bsv/sdk's Spend (fold ON and OFF, identical): OP_DIV /
+// OP_MOD truncate toward zero; a zero divisor aborts; `pow` aborts outside
+// 0 <= exp <= 32 (OP_WITHIN guard); `sqrt` aborts on n < 0 (its n < 2^495
+// guard is out of i64 reach). `null` means the script fails, so the
+// interpreter must return its abort error instead of inventing a value.
+//
+// Proves: for each listed input the interpreter returns the script's value or
+// aborts where the script aborts. Does not prove: agreement outside the
+// table, or anything about the script itself (it is the oracle here). The
+// native builtins.zig mocks were already script-faithful for these inputs.
+// ---------------------------------------------------------------------------
+
+test "F-134 math builtins match the compiled script" {
+    const V = struct { func: []const u8, args: []const i64, want: ?i64 };
+    const vectors = [_]V{
+        .{ .func = "divmod", .args = &.{ -7, 2 }, .want = -3 },
+        .{ .func = "divmod", .args = &.{ 7, -2 }, .want = -3 },
+        .{ .func = "divmod", .args = &.{ 1, 0 }, .want = null },
+        .{ .func = "mulDiv", .args = &.{ -7, 1, 2 }, .want = -3 },
+        .{ .func = "mulDiv", .args = &.{ 1, 1, 0 }, .want = null },
+        .{ .func = "percentOf", .args = &.{ -1, 5000 }, .want = 0 },
+        .{ .func = "percentOf", .args = &.{ -15000, 1 }, .want = -1 },
+        .{ .func = "pow", .args = &.{ 2, -1 }, .want = null },
+        .{ .func = "pow", .args = &.{ 2, 0 }, .want = 1 },
+        .{ .func = "pow", .args = &.{ -2, 3 }, .want = -8 },
+        .{ .func = "pow", .args = &.{ 2, 32 }, .want = 4294967296 },
+        .{ .func = "pow", .args = &.{ 2, 33 }, .want = null },
+        .{ .func = "pow", .args = &.{ 1, 40 }, .want = null },
+        .{ .func = "sqrt", .args = &.{-1}, .want = null },
+        .{ .func = "sqrt", .args = &.{0}, .want = 0 },
+        .{ .func = "sqrt", .args = &.{8}, .want = 2 },
+        .{ .func = "safediv", .args = &.{ -7, 2 }, .want = -3 },
+        .{ .func = "safediv", .args = &.{ 1, 0 }, .want = null },
+        .{ .func = "safemod", .args = &.{ -7, 2 }, .want = -1 },
+        .{ .func = "safemod", .args = &.{ 7, -2 }, .want = 1 },
+        .{ .func = "safemod", .args = &.{ 1, 0 }, .want = null },
+    };
+    const names = [_][]const u8{ "a", "b", "c" };
+    for (vectors) |v| {
+        var body: [5]ANFBinding = undefined;
+        for (v.args, 0..) |arg, i| {
+            body[i] = .{ .name = names[i], .value = .{ .load_const = .{ .value = .{ .int = arg } } } };
+        }
+        const n = v.args.len;
+        body[n] = .{ .name = "r", .value = .{ .call = .{ .func = v.func, .args = names[0..n] } } };
+        body[n + 1] = .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } };
+        const got = runAliasBody(std.testing.allocator, body[0 .. n + 2]);
+        if (v.want) |w| {
+            std.testing.expectEqual(w, try got) catch |e| {
+                std.debug.print("F-134: {s}{any} diverges from the script\n", .{ v.func, v.args });
+                return e;
+            };
+        } else {
+            std.testing.expectError(error.ScriptNumberError, got) catch |e| {
+                std.debug.print("F-134: {s}{any} script aborts, interpreter did not\n", .{ v.func, v.args });
+                return e;
+            };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N-102: binary `/` and `%` refuse a zero divisor and truncate toward zero.
+//
+// OP_DIV / OP_MOD abort the script on a zero divisor, so there is no
+// post-state; the interpreter used to return 0. `minInt(i64) / -1` (2^63) is
+// outside i64 and is refused too; `minInt(i64) % -1` is 0 on chain.
+//
+// Proves: evalBinOp-through-computeNewState refuses the zero divisor and the
+// i64 overflow, and truncates toward zero (-7/2 = -3, -7%2 = -1). Does not
+// prove: agreement with an executed script (the expected values are the
+// OP_DIV/OP_MOD semantics, not an execution).
+// ---------------------------------------------------------------------------
+
+test "N-102 binary / and % refuse a zero divisor and truncate toward zero" {
+    const V = struct { op: []const u8, a: i64, b: i64, want: ?i64 };
+    const vectors = [_]V{
+        .{ .op = "/", .a = -7, .b = 2, .want = -3 },
+        .{ .op = "%", .a = -7, .b = 2, .want = -1 },
+        .{ .op = "/", .a = 7, .b = -2, .want = -3 },
+        .{ .op = "%", .a = 7, .b = -2, .want = 1 },
+        .{ .op = "/", .a = 7, .b = 0, .want = null },
+        .{ .op = "%", .a = 7, .b = 0, .want = null },
+        .{ .op = "/", .a = std.math.minInt(i64), .b = -1, .want = null },
+        .{ .op = "%", .a = std.math.minInt(i64), .b = -1, .want = 0 },
+    };
+    for (vectors) |v| {
+        var body = [_]ANFBinding{
+            .{ .name = "a", .value = .{ .load_const = .{ .value = .{ .int = v.a } } } },
+            .{ .name = "b", .value = .{ .load_const = .{ .value = .{ .int = v.b } } } },
+            .{ .name = "r", .value = .{ .bin_op = .{ .op = v.op, .left = "a", .right = "b", .result_type = "int" } } },
+            .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } },
+        };
+        const got = runAliasBody(std.testing.allocator, &body);
+        if (v.want) |w| {
+            try std.testing.expectEqual(w, try got);
+        } else {
+            try std.testing.expectError(error.ScriptNumberError, got);
+        }
     }
 }

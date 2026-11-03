@@ -44,7 +44,14 @@ output on error — print full output on stdout only after a successful run.
   Exactly one of `case` / `anfPath` must be present.
 - `methodName` — public method name to execute
 - `currentState` — map of property name → value
-- `args` — map of param name → value
+- `args` — map of param name → value, keyed by the SOURCE (ABI) name.
+  Interpreters bind args to the ANF method's `params` BY NAME, never by
+  position. One rename applies (N-360): a property-named public param that
+  the method reassigns appears in the ANF's `params` under its slot name
+  `<name>@local`, and every interpreter binds that slot from `args[<name>]`
+  (an exact `args["<name>@local"]` entry, if present, wins). Positional
+  binding is not used because the ANF and ABI param lists do not align
+  1:1 — a FixedArray param is one ABI entry but several ANF params.
 - `constructorArgs` — list of constructor arg values (positional)
 
 ## Bigint encoding
@@ -55,6 +62,11 @@ Example: `"42n"` decodes to integer 42.
 Drivers MUST decode `"Xn"` → bigint when reading currentState/args/constructorArgs,
 and MUST encode bigints back as `"Xn"` strings when writing state/dataOutputs
 satoshis fields.
+
+A value outside a tier's native integer width (e.g. Rust's and Zig's `i64`,
+N-163) MUST still round-trip byte-identically as its `"Xn"` string — carried
+through state unchanged even though the tier refuses to compute with it
+(design B: refuse on use, pass through otherwise).
 
 ## Output JSON (stdout)
 
@@ -106,15 +118,46 @@ non-zero with a stderr message.
   Used for state-transition simulation.
 - **strict**: asserts enforced (raises `AssertionFailureError` on first
   falsy predicate); crypto built-ins still mocked. Used for pre-broadcast
-  guard checks.
+  guard checks. This also covers the compiler's own auto-injected
+  stateful-method prologue (the `checkPreimage` call and the sighash-type
+  check every public `StatefulSmartContract` method starts with): both are
+  mocked exactly like `checkSig`/`checkMultiSig`/`checkPreimage`, detected
+  by the prologue's fixed structural shape rather than by binding name, so
+  a developer-written `assert(...)` anywhere else in the method body is
+  still fully enforced (F-164).
 - **on-chain**: asserts enforced AND crypto built-ins perform real
   verification against the supplied `sighash`:
   - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
-    secp256k1. DER signature with optional trailing sighash type byte
-    stripped. Verification is against the raw 32-byte sighash (no extra
-    SHA-256), matching the on-chain `OP_CHECKSIG` semantic.
-  - `checkMultiSig(sigs, pks)` → iterate sigs left-to-right, consume
-    pubkeys greedily.
+    secp256k1. The signature is in checksig format, DER followed by one
+    sighash type byte (stripped); bare DER with no sighash byte aborts, as in
+    `Spend` (N-255). Verification is against the raw 32-byte sighash (no extra
+    SHA-256), matching the on-chain `OP_CHECKSIG` semantic. An EMPTY
+    signature that does not verify yields `false`. A NON-EMPTY, well-formed
+    signature that does not verify aborts (N-198): a node rejects it under
+    NULLFAIL (BIP146), so the arm of `checkSig(a, A) || checkSig(b, B)` that
+    must fail takes an empty signature (`EMPTY_SIG`). `@bsv/sdk` `Spend` has no
+    NULLFAIL and pushes false there. A
+    MALFORMED encoding aborts too, as `OP_CHECKSIG` does on `@bsv/sdk`
+    `Spend` (N-197): a non-empty signature that is not strict DER or has a
+    high S, or a public key that is not 0x02/0x03 + 33 bytes or 0x04 + 65
+    bytes on the curve. Each tier raises it through its OP_SPLIT-abort
+    channel — a plain error carrying `OP_CHECKSIG aborts` (TS / Go / Python /
+    Ruby / Java: non-zero exit + stderr), `error.ScriptNumberError` (Zig), or
+    an `AssertionFailureError` at the `checkSig` call binding (Rust). Pinned
+    by `../checksig-encoding-abort.test.ts` over `../checksig-encoding/vectors.json`
+    (the NULLFAIL abort uses the same channels; `../cross-interpreter-real-crypto.test.ts`
+    normalises them to `{ "error": "ScriptAbort", "methodName": "<m>" }`).
+  - `checkMultiSig(sigs, pks)` → `OP_CHECKMULTISIG` as `Spend` runs it
+    (N-259), over the lists an `array_literal` binding builds: the last
+    signature against the last key first, walking both lists toward the
+    first; a verifying signature consumes its key, a key is consumed either
+    way, and the check fails once fewer keys remain than signatures. Each
+    EXAMINED pair passes the `checkSig` encoding gates and aborts on a
+    malformed one; N > M aborts; a failing check with any non-empty signature
+    aborts under NULLFAIL (`Spend` pushes false there). Aborts use the
+    `checkSig` channels, with `OP_CHECKMULTISIG aborts` in the message (Rust:
+    an `AssertionFailureError` at the `checkMultiSig` call binding). Pinned by
+    `../checkmultisig-onchain.test.ts` over `../checkmultisig-onchain/vectors.json`.
   - `checkPreimage(preimage)` → `hash256(preimage) == sighash`
     byte-equal.
 

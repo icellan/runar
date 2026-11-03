@@ -72,6 +72,7 @@ fn make_intent_artifact(prev_out_inputs: &[usize], serialised: bool) -> RunarArt
         }]),
         constructor_slots: None,
         code_sep_index_slots: None,
+        code_part_len_slots: None,
         // Stateful with codeSeparatorIndex=0 keeps the stateful branch active.
         code_separator_index: Some(0),
         code_separator_indices: None,

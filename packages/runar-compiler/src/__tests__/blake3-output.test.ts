@@ -2,7 +2,7 @@
  * Direct blake3 codegen output tests.
  * Tests setup, output extraction, and round correctness in isolation.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { generateCompressOps } from '../passes/blake3-codegen.js';
 import { emitMethod } from '../passes/06-emit.js';
 
@@ -26,7 +26,10 @@ function pushHex(hex: string): string {
 
 // Import ScriptVM dynamically from the testing package
 async function createVM() {
-  const vmPath = '../../../runar-testing/src/vm/index.js';
+  // An absolute file URL: vite 8 resolves a relative variable specifier from
+  // the project root ('/runar-testing/...'), and a literal one would pull
+  // runar-testing into this package's tsc rootDir.
+  const vmPath = new URL('../../../runar-testing/src/vm/index.js', import.meta.url).href;
   const mod = await import(vmPath);
   return new mod.ScriptVM({ maxOps: 10_000_000 }) as {
     executeHex(hex: string): {
@@ -116,11 +119,16 @@ function referenceCompress(cvHex: string, blockHex: string, numRounds: number): 
   return out.toString('hex');
 }
 
+// This suite proves: each test below can run alone (via `vitest -t`, shuffled
+// order, or any subset) because the shared VM is built in a beforeAll hook,
+// not in a sibling it() block that earlier ran first by incidental ordering.
+// It does not prove anything about blake3 correctness beyond what the
+// individual assertions already checked — that coverage is unchanged.
 describe('blake3 codegen — isolated phase tests', () => {
   const block = '00'.repeat(64);
   let vm: Awaited<ReturnType<typeof createVM>>;
 
-  it('setup VM', async () => {
+  beforeAll(async () => {
     vm = await createVM();
     expect(vm).toBeDefined();
   });

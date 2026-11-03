@@ -85,7 +85,8 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # verifyCanonical flag that is FALSE on the ECDSA path, because
     # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
     # bytes must return false from a total boolean builtin rather than abort.
-    ("p256Add",              emit_p256_add,               6737),
+    # N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+    ("p256Add",              emit_p256_add,               6749),
     # R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
     # p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
     # secp256k1's, with each curve's own on-curve body; the two curves differ only
@@ -116,7 +117,7 @@ def test_p256_op_count(name, fn, expected):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("p384Add",              emit_p384_add,              11543),
+    ("p384Add",              emit_p384_add,              11555),
     ("p384Mul",              emit_p384_mul,             211986),
     ("p384MulGen",           emit_p384_mul_gen,         211988),
     ("p384Negate",           emit_p384_negate,            1404),

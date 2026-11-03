@@ -109,6 +109,9 @@ export function rabinVerify(
   // Without it, an attacker forges any message with sig=0 and
   // padding=SHA256(msg), since (0²+SHA256(msg)) mod n == SHA256(msg) mod n.
   if (padBN >= RABIN_PADDING_LIMIT) return false;
+  // Signature range — mirrors the on-chain `sig < n` gate (F-368). Without it
+  // `sig + k*n` verifies here but aborts in the deployed script.
+  if (sig >= pubkey) return false;
   const hash = createHash('sha256').update(msg).digest();
   const hashBN = bytesToUnsignedLE(hash);
   const lhs = ((sig * sig + padBN) % pubkey + pubkey) % pubkey;

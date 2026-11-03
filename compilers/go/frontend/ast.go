@@ -58,13 +58,6 @@ type ContractNode struct {
 	Constructor MethodNode
 	Methods     []MethodNode
 	SourceFile  string
-
-	// AckUnsoundSP1Fri is set by ParseSource when the raw source carries
-	// `@acknowledgeUnsoundSP1FriVerifier`. Without it, calling verifySP1FRI is
-	// a hard compile ERROR: the emitted locking script is not a sound proof
-	// verifier (the per-query chain is never emitted, so forged Merkle openings
-	// are accepted on-chain). See frontend/sp1_fri_soundness_warning.go.
-	AckUnsoundSP1Fri bool
 }
 
 // SyntheticArrayLevel is one level of the synthetic FixedArray nesting
@@ -209,6 +202,11 @@ type BinaryExpr struct {
 	Op    string // "+", "-", "*", "/", "%", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "&", "|", "^"
 	Left  Expression
 	Right Expression
+	// SourceLocation is where the expression starts, including a leading
+	// `(` (N-472). Every surface parser sets it, as the TS reference
+	// does; a synthesized node carries zero and exprLoc falls back to the
+	// leftmost leaf.
+	SourceLocation SourceLocation
 }
 
 func (BinaryExpr) exprMarker() {}
@@ -217,6 +215,8 @@ func (BinaryExpr) exprMarker() {}
 type UnaryExpr struct {
 	Op      string // "!", "-", "~"
 	Operand Expression
+	// SourceLocation is the operator token (N-472); every surface parser sets it.
+	SourceLocation SourceLocation
 }
 
 func (UnaryExpr) exprMarker() {}
@@ -246,6 +246,10 @@ func (MemberExpr) exprMarker() {}
 // Identifier represents a variable or name reference.
 type Identifier struct {
 	Name string
+	// SourceLocation is the identifier's token (N-463). Every surface
+	// parser sets it, as the TS reference does; a synthesized node carries zero.
+	// exprLoc derives a composite expression's position from it.
+	SourceLocation SourceLocation
 }
 
 func (Identifier) exprMarker() {}
@@ -267,6 +271,10 @@ func (BoolLiteral) exprMarker() {}
 // ByteStringLiteral represents a hex-encoded byte string literal.
 type ByteStringLiteral struct {
 	Value string // hex-encoded
+	// SourceLocation is the literal's opening quote (N-432). Only the
+	// .runar.ts parser sets it, as the TS reference does; elsewhere it is
+	// zero and the hex diagnostics print no location.
+	SourceLocation SourceLocation
 }
 
 func (ByteStringLiteral) exprMarker() {}
@@ -283,6 +291,8 @@ func (TernaryExpr) exprMarker() {}
 // PropertyAccessExpr represents `this.x` (property access on the contract).
 type PropertyAccessExpr struct {
 	Property string
+	// SourceLocation is the `this` token (N-463); .runar.ts parser only.
+	SourceLocation SourceLocation
 }
 
 func (PropertyAccessExpr) exprMarker() {}

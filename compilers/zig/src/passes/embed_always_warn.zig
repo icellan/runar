@@ -44,8 +44,8 @@ pub fn collectDceWarnings(
         if (prop.readonly and !prop.embed_always and prop.initializer == null and !referenced.contains(prop.name)) {
             const msg = try std.fmt.allocPrint(
                 allocator,
-                "readonly field '{s}' is not referenced in any method body and was " ++
-                    "eliminated by DCE; annotate it /** @embedAlways */ to preserve it in the " ++
+                "readonly field '{s}' is not referenced in any method body and may " ++
+                    "be eliminated by DCE; mark it with the embedAlways directive to preserve it in the " ++
                     "on-chain script",
                 .{prop.name},
             );
@@ -115,6 +115,6 @@ test "collectDceWarnings warns on un-annotated unreferenced readonly field only"
     // @embedAlways (preserved), counted has an initializer.
     try std.testing.expectEqual(@as(usize, 1), diags.len);
     try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "metadataId") != null);
-    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "@embedAlways") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "embedAlways directive") != null);
     try std.testing.expect(diags[0].severity == .warning);
 }

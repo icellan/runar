@@ -25,7 +25,7 @@
 //!   sqrt      -> OP_DIV      (0x96)
 //!   gcd       -> OP_MOD      (0x97)
 //!   divmod    -> OP_MOD+OP_DIV
-//!   log2      -> OP_DIV      (0x96)  + OP_1ADD (0x8b)
+//!   log2      -> the N-103 exact encoding read (whole window pinned)
 //!   bool      -> OP_0NOTEQUAL (0x92)
 
 const std = @import("std");
@@ -202,12 +202,19 @@ test "math builtin divmod lowers to OP_MOD and OP_DIV" {
     try expectOpcode(hex, "96"); // OP_DIV
 }
 
-// E15 — log2
-test "math builtin log2 lowers to OP_DIV and OP_1ADD" {
+// E15 — log2. N-103 (user decision R86, 2026-10-21): this used to pin the
+// 64-iteration halving loop (OP_DIV + OP_1ADD), which capped log2 at 64. The
+// lowering is now an exact, branch-free read of the operand's minimal
+// encoding; this pins the whole window. Execution is covered by
+// conformance/negatives/n103-log2-exact-parity.test.ts.
+test "math builtin log2 lowers to the N-103 exact encoding read" {
     const hex = try compileBuiltinCheck("        runar.assert(runar.log2(a) == self.threshold);");
     defer std.testing.allocator.free(hex);
-    try expectOpcode(hex, "96"); // OP_DIV
-    try expectOpcode(hex, "8b"); // OP_1ADD
+    const window = "817600a069828c7d7f77817c58958c" ++
+        "7851a293" ++ "7852a293" ++ "7854a293" ++ "7858a293" ++ "7860a293" ++
+        "780120a293" ++ "780140a293" ++ "77";
+    try std.testing.expect(std.mem.indexOf(u8, hex, window) != null);
+    try std.testing.expect(!hexHasOpcode(hex, "63")); // no OP_IF: branch-free
 }
 
 // E16 — bool() cast. The Zig surface parser treats a bare `bool` as a type

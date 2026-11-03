@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::input_limits::{call_depth_message, MAX_CALL_DEPTH};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -37,7 +38,15 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     validate_properties(contract, &mut errors, &mut warnings);
     validate_constructor(contract, &mut errors);
     validate_methods(contract, &mut errors, &mut warnings);
-    check_no_recursion(contract, &mut errors);
+    let call_depth_exceeded = check_no_recursion(contract, &mut errors);
+    check_reserved_names(contract, &mut errors);
+    // N-180: the Rabin-provenance and sighash passes walk the private-method
+    // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+    // refuses, so stop here.
+    if call_depth_exceeded {
+        return ValidationResult { errors, warnings };
+    }
+    check_rabin_pubkey_provenance(contract, &mut errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). This
@@ -52,6 +61,57 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     }
 
     ValidationResult { errors, warnings }
+}
+
+/// N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+/// pass mints (see `reserved_names.rs`). Checks properties, method names,
+/// constructor and method parameters, locals and loop variables. A stateful
+/// `txPreimage` PROPERTY keeps its older, dedicated diagnostic (V27).
+fn check_reserved_names(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    use super::reserved_names::{is_reserved_source_name, reserved_name_message};
+    let stateful = contract.parent_class == "StatefulSmartContract";
+    fn walk(stmts: &[Statement], stateful: bool, errors: &mut Vec<Diagnostic>) {
+        for s in stmts {
+            match s {
+                Statement::VariableDecl { name, source_location, .. } => {
+                    if is_reserved_source_name(name, stateful) {
+                        errors.push(Diagnostic::error(reserved_name_message(name), Some(source_location.clone())));
+                    }
+                }
+                Statement::IfStatement { then_branch, else_branch, .. } => {
+                    walk(then_branch, stateful, errors);
+                    if let Some(e) = else_branch {
+                        walk(e, stateful, errors);
+                    }
+                }
+                Statement::ForStatement { init, body, .. } => {
+                    walk(std::slice::from_ref(init.as_ref()), stateful, errors);
+                    walk(body, stateful, errors);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for prop in &contract.properties {
+        if stateful && prop.name == "txPreimage" {
+            continue;
+        }
+        if is_reserved_source_name(&prop.name, stateful) {
+            errors.push(Diagnostic::error(reserved_name_message(&prop.name), Some(prop.source_location.clone())));
+        }
+    }
+    for method in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        if method.name != "constructor" && is_reserved_source_name(&method.name, stateful) {
+            errors.push(Diagnostic::error(reserved_name_message(&method.name), Some(method.source_location.clone())));
+        }
+        for p in &method.params {
+            if is_reserved_source_name(&p.name, stateful) {
+                errors.push(Diagnostic::error(reserved_name_message(&p.name), Some(method.source_location.clone())));
+            }
+        }
+        walk(&method.body, stateful, errors);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +177,21 @@ fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, wa
                     Some(prop.source_location.clone()),
                 ));
             }
+
+            // F-265: the shape checks above only ask "is this a literal node
+            // at all?" -- they never validate a ByteStringLiteral's HEX
+            // FORMAT. That check lives in `validate_expression`'s
+            // `ByteStringLiteral` arm, which a method body reaches via the
+            // statement walk but a property INITIALIZER never did: it is
+            // read directly off `prop.initializer` here and is not part of
+            // that walk. A malformed hex literal (e.g. `"zzz" as
+            // ByteString`, or `toByteString('zzz')`) used to sail through
+            // this pass and only surface two passes later as an opaque
+            // stack-lowering error with no source location --
+            // `validate_expression` recurses into array elements and
+            // `toByteString(...)` args, so this also covers FixedArray
+            // initializer elements.
+            validate_expression(init, errors);
         }
     }
 
@@ -152,7 +227,7 @@ fn is_literal_expression(expr: &Expression) -> bool {
         Expression::BigIntLiteral { .. }
         | Expression::BoolLiteral { .. }
         | Expression::ByteStringLiteral { .. } => true,
-        Expression::UnaryExpr { op, operand } => {
+        Expression::UnaryExpr { op, operand, .. } => {
             *op == UnaryOp::Neg && matches!(operand.as_ref(), Expression::BigIntLiteral { .. })
         }
         // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
@@ -185,7 +260,7 @@ pub(crate) fn is_to_byte_string_literal(expr: &Expression) -> bool {
     let Expression::CallExpr { callee, args, .. } = expr else {
         return false;
     };
-    let Expression::Identifier { name } = callee.as_ref() else {
+    let Expression::Identifier { name, .. } = callee.as_ref() else {
         return false;
     };
     name == "toByteString"
@@ -249,7 +324,7 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     let mut assigned_props = HashSet::new();
     for stmt in &ctor.body {
         if let Statement::Assignment { target, .. } = stmt {
-            if let Expression::PropertyAccess { property } = target {
+            if let Expression::PropertyAccess { property, .. } = target {
                 assigned_props.insert(property.clone());
             }
         }
@@ -279,6 +354,14 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
                 errors.push(Diagnostic::error(format!(
                     "Constructor parameter '{}' must have a type annotation",
                     param.name
+                ), Some(ctor.source_location.clone())));
+            } else if name != "StatefulContext" {
+                // N-325: a named type that is not a Rúnar type is refused.
+                // `StatefulContext` is the explicit context parameter of the
+                // Zig/Go/Move stateful surfaces, dropped by ANF lowering.
+                errors.push(Diagnostic::error(format!(
+                    "Type '{}' of parameter '{}' in constructor is not a Rúnar type",
+                    name, param.name
                 ), Some(ctor.source_location.clone())));
             }
         }
@@ -335,11 +418,11 @@ fn validate_constructor_slot_bijection(contract: &ContractNode, errors: &mut Vec
         let Statement::Assignment { target, value, .. } = stmt else {
             continue;
         };
-        let Expression::PropertyAccess { property } = target else {
+        let Expression::PropertyAccess { property, .. } = target else {
             continue;
         };
         match value {
-            Expression::Identifier { name } if param_index.contains_key(name.as_str()) => {
+            Expression::Identifier { name, .. } if param_index.contains_key(name.as_str()) => {
                 prop_to_params
                     .entry(property.clone())
                     .or_default()
@@ -478,7 +561,7 @@ fn validate_constructor_slot_bijection(contract: &ContractNode, errors: &mut Vec
 fn is_super_call(stmt: &Statement) -> bool {
     if let Statement::ExpressionStatement { expression, .. } = stmt {
         if let Expression::CallExpr { callee, .. } = expression {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 return name == "super";
             }
         }
@@ -530,6 +613,12 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
                     "Parameter '{}' in method '{}' must have a type annotation",
                     param.name, method.name
                 ), Some(method.source_location.clone())));
+            } else if name != "StatefulContext" {
+                // N-325: see the constructor check above.
+                errors.push(Diagnostic::error(format!(
+                    "Type '{}' of parameter '{}' in method '{}' is not a Rúnar type",
+                    name, param.name, method.name
+                ), Some(method.source_location.clone())));
             }
         }
         if matches!(param.param_type, TypeNode::FixedArray { .. }) {
@@ -542,6 +631,8 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
             ));
         }
     }
+
+    validate_no_output_intrinsic_in_ternary_arm(method, contract, errors);
 
     // `return` is a PRIVATE-helper construct only (NEW-012).
     if method.visibility == Visibility::Public {
@@ -595,7 +686,7 @@ fn written_property(target: &Expression) -> Option<&str> {
         node = object.as_ref();
     }
     match node {
-        Expression::PropertyAccess { property } => Some(property.as_str()),
+        Expression::PropertyAccess { property, .. } => Some(property.as_str()),
         _ => None,
     }
 }
@@ -787,7 +878,7 @@ fn collect_return_statements(body: &[Statement], out: &mut Vec<SourceLocation>) 
 /// Reports whether `expr` is a call to the `asm` compiler intrinsic.
 fn is_asm_call(expr: &Expression) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             return name == "asm";
         }
     }
@@ -885,7 +976,7 @@ fn validate_asm_usage(
         }
 
         match &args[0] {
-            Expression::ByteStringLiteral { value } => {
+            Expression::ByteStringLiteral { value, .. } => {
                 if value.is_empty() {
                     errors.push(Diagnostic::error(
                         "asm() body must be a non-empty hex string literal",
@@ -983,7 +1074,7 @@ fn ends_with_assert(body: &[Statement]) -> bool {
 
 fn is_assert_call(expr: &Expression) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             return name == "assert";
         }
     }
@@ -1001,8 +1092,9 @@ fn is_assert_call(expr: &Expression) -> bool {
 /// The three intrinsics that register an output ref.
 const OUTPUT_INTRINSIC_NAMES: [&str; 3] = ["addOutput", "addRawOutput", "addDataOutput"];
 
-/// Build the R-127 rejection. Shared verbatim with the other six tiers.
-fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+/// Build the R-127 rejection. Shared verbatim with the other six tiers and
+/// with the pass-4 backstop in `anf_lower::lower_for_statement` (N-006).
+pub(crate) fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
     let via_clause = match via {
         Some(v) => format!(" (reached through private method '{}')", v),
         None => String::new(),
@@ -1015,6 +1107,69 @@ fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
          Move the call out of the loop.",
         intrinsic, via_clause
     )
+}
+
+/// Build the N-049 rejection. Shared verbatim with the other six tiers (TS
+/// reference: `ternaryOutputIntrinsicDiagnostic` in 02-validate.ts) and with the
+/// pass-4 backstop in `anf_lower::lower_ternary_expr`.
+pub(crate) fn ternary_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+    let via_clause = match via {
+        Some(v) => format!(" (reached through private method '{}')", v),
+        None => String::new(),
+    };
+    format!(
+        "Output intrinsic '{}'{} cannot be called inside a conditional (ternary) expression arm. \
+         A ternary arm lowers into its own scope whose declared outputs never reach the method's \
+         output list, so the continuation hash would commit to fewer outputs than the transaction \
+         actually creates: a spender can drop the output and the honest spend is rejected. \
+         Use an if/else statement instead.",
+        intrinsic, via_clause
+    )
+}
+
+/// Reject an output intrinsic in either arm of a ternary expression (N-049).
+///
+/// `anf_lower::lower_ternary_expr` lowers each arm into a sub-context whose
+/// output refs are dropped -- unlike the if-statement lowering, which merges
+/// each arm's refs into the parent -- so the continuation hash would omit the
+/// arm's output (EXT-2 TernaryToll: a spend dropping the payout was accepted on
+/// every tier). Private helpers are followed because they are inlined into the
+/// arm. A ternary that only selects values is untouched.
+fn validate_no_output_intrinsic_in_ternary_arm(
+    method: &MethodNode,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for stmt in &method.body {
+        let loc = statement_location(stmt);
+        walk_expressions_in_statement(stmt, &mut |e| {
+            if let Expression::TernaryExpr { consequent, alternate, .. } = e {
+                for arm in [consequent.as_ref(), alternate.as_ref()] {
+                    let mut seen: Vec<String> = Vec::new();
+                    if let Some((intrinsic, via, _)) =
+                        find_output_intrinsic_in_expr(arm, loc, contract, &mut seen)
+                    {
+                        errors.push(Diagnostic::error(
+                            ternary_output_intrinsic_msg(&intrinsic, via.as_deref()),
+                            Some(loc.clone()),
+                        ));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn statement_location(stmt: &Statement) -> &SourceLocation {
+    match stmt {
+        Statement::ExpressionStatement { source_location, .. }
+        | Statement::VariableDecl { source_location, .. }
+        | Statement::Assignment { source_location, .. }
+        | Statement::ReturnStatement { source_location, .. }
+        | Statement::IfStatement { source_location, .. }
+        | Statement::ForStatement { source_location, .. } => source_location,
+    }
 }
 
 /// Reject an output intrinsic called inside a loop body (R-127).
@@ -1064,9 +1219,9 @@ type IntrinsicSite = (String, Option<String>, Option<SourceLocation>);
 fn callee_property(expr: &Expression) -> Option<&str> {
     match expr {
         Expression::CallExpr { callee, .. } => match callee.as_ref() {
-            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::PropertyAccess { property, .. } => Some(property.as_str()),
             Expression::MemberExpr { property, .. } => Some(property.as_str()),
-            Expression::Identifier { name } => Some(name.as_str()),
+            Expression::Identifier { name, .. } => Some(name.as_str()),
             _ => None,
         },
         _ => None,
@@ -1121,7 +1276,20 @@ fn find_output_intrinsic_in_statement(
                 .as_ref()
                 .and_then(|e| find_output_intrinsic(e, contract, seen))
         }
-        Statement::ForStatement { body, .. } => find_output_intrinsic(body, contract, seen),
+        Statement::ForStatement { init, condition, update, body, source_location } => {
+            if let Some(found) = find_output_intrinsic_in_statement(init, contract, seen) {
+                return Some(found);
+            }
+            if let Some(found) =
+                find_output_intrinsic_in_expr(condition, source_location, contract, seen)
+            {
+                return Some(found);
+            }
+            if let Some(found) = find_output_intrinsic_in_statement(update, contract, seen) {
+                return Some(found);
+            }
+            find_output_intrinsic(body, contract, seen)
+        }
     }
 }
 
@@ -1172,7 +1340,43 @@ fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
             vec![condition.as_ref(), consequent.as_ref(), alternate.as_ref()]
         }
         Expression::IndexAccess { object, index } => vec![object.as_ref(), index.as_ref()],
+        Expression::ArrayLiteral { elements } => elements.iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+/// N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+/// property is index-writable. Any other index target (a ByteString property,
+/// a local, a parameter, a member-chained root) is left alone by
+/// expand_fixed_arrays and ANF lowering lowers it as a READ, dropping the write
+/// -- a deployable script whose state never changes. Reject it here with a
+/// location instead.
+fn validate_index_assignment_target(
+    target: &Expression,
+    loc: &SourceLocation,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if !matches!(target, Expression::IndexAccess { .. }) {
+        return;
+    }
+    let mut root = target;
+    while let Expression::IndexAccess { object, .. } = root {
+        root = object.as_ref();
+    }
+    let is_fixed_array_prop = match root {
+        Expression::PropertyAccess { property, .. } => contract
+            .properties
+            .iter()
+            .any(|p| &p.name == property && matches!(p.prop_type, TypeNode::FixedArray { .. })),
+        _ => false,
+    };
+    if !is_fixed_array_prop {
+        errors.push(Diagnostic::error(
+            "index assignment is only supported on FixedArray contract properties; \
+             the target here is not a FixedArray property",
+            Some(loc.clone()),
+        ));
     }
 }
 
@@ -1190,7 +1394,8 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
             }
             validate_expression(init, errors);
         }
-        Statement::Assignment { target, value, .. } => {
+        Statement::Assignment { target, value, source_location } => {
+            validate_index_assignment_target(target, source_location, contract, errors);
             validate_expression(target, errors);
             validate_expression(value, errors);
         }
@@ -1239,10 +1444,7 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
             // i*step` on each unrolled iteration.
             if let Expression::BinaryExpr { right, .. } = condition {
                 if !is_compile_time_constant(right) {
-                    errors.push(Diagnostic::error(
-                        "For loop bound must be a compile-time constant (literal or const variable)",
-                        None,
-                    ));
+                    errors.push(Diagnostic::error(for_loop_bound_diagnostic(right), None));
                 }
             }
 
@@ -1301,7 +1503,7 @@ fn validate_for_condition_tests_iterator(
         _ => "",
     };
     if let Expression::BinaryExpr { left, .. } = condition {
-        if let Expression::Identifier { name } = left.as_ref() {
+        if let Expression::Identifier { name, .. } = left.as_ref() {
             if name == iter {
                 return;
             }
@@ -1347,7 +1549,10 @@ fn validate_for_condition_tests_iterator(
 /// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
 /// the effect-free no-op sentinel (a literal or a bare identifier) that the
 /// while-shaped parsers synthesize when the source has no continue expression
-/// at all.
+/// at all -- but only on a loop whose condition does not test its declared
+/// iterator (already refused by the condition rule). On a real iterator a
+/// no-op update never advances it: `var i = 3; while (i < 5) : (i)` compiled
+/// two laps over i = 3, 4 (N-116).
 ///
 /// The advanced variable must be the declared iterator or the identifier the
 /// condition tests. Both are needed: the Zig parser only folds
@@ -1368,12 +1573,22 @@ fn validate_for_update(
         allowed.push(name.as_str());
     }
     if let Expression::BinaryExpr { left, .. } = condition {
-        if let Expression::Identifier { name } = left.as_ref() {
+        if let Expression::Identifier { name, .. } = left.as_ref() {
             allowed.push(name.as_str());
         }
     }
 
-    if for_update_is_representable(&allowed, update) {
+    // N-116: the no-op sentinel is tolerated only on a loop the condition rule
+    // already refuses (placeholder iterator). On a real iterator it never
+    // advances, yet the unrolled loop would still step by one.
+    let cond_tests_iter = match (init, condition) {
+        (Statement::VariableDecl { name: iter, .. }, Expression::BinaryExpr { left, .. }) => {
+            matches!(left.as_ref(), Expression::Identifier { name, .. } if name == iter)
+        }
+        _ => false,
+    };
+
+    if for_update_is_representable(&allowed, update, !cond_tests_iter) {
         return;
     }
 
@@ -1391,7 +1606,7 @@ fn validate_for_update(
 /// accepted: those are the side effects that used to be dropped.
 fn is_allowed_loop_var(allowed: &[&str], expr: &Expression) -> bool {
     match expr {
-        Expression::Identifier { name } => allowed.iter().any(|a| *a == name.as_str()),
+        Expression::Identifier { name, .. } => allowed.iter().any(|a| *a == name.as_str()),
         _ => false,
     }
 }
@@ -1400,7 +1615,11 @@ fn is_literal_one(expr: &Expression) -> bool {
     matches!(expr, Expression::BigIntLiteral { value } if *value == num_bigint::BigInt::from(1))
 }
 
-fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
+fn for_update_is_representable(
+    allowed: &[&str],
+    update: &Statement,
+    accept_no_op_sentinel: bool,
+) -> bool {
     match update {
         Statement::ExpressionStatement { expression, .. } => match expression {
             Expression::IncrementExpr { operand, .. }
@@ -1408,10 +1627,11 @@ fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
             // The no-op sentinel a while-shaped frontend synthesizes when the
             // source carries no continue expression: `zig`'s `while (c) {}`,
             // `move`'s `while (c) {}`, `go`'s `for c {}`. Reading a literal or
-            // a bare identifier has no effect, so discarding it loses nothing.
+            // a bare identifier has no effect, so discarding it loses nothing --
+            // on a loop the condition rule already refuses (N-116).
             Expression::BigIntLiteral { .. }
             | Expression::BoolLiteral { .. }
-            | Expression::Identifier { .. } => true,
+            | Expression::Identifier { .. } => accept_no_op_sentinel,
             _ => false,
         },
         // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
@@ -1420,7 +1640,7 @@ fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
                 return false;
             }
             match value {
-                Expression::BinaryExpr { op, left, right } => match op {
+                Expression::BinaryExpr { op, left, right, .. } => match op {
                     BinaryOp::Add => {
                         (is_allowed_loop_var(allowed, left) && is_literal_one(right))
                             || (is_literal_one(left) && is_allowed_loop_var(allowed, right))
@@ -1435,6 +1655,29 @@ fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
     }
 }
 
+/// The reference (TypeScript) tier's sentence for a for-loop bound that is not
+/// an integer literal. The reference's validator trusts a bare identifier (or
+/// boolean literal, or a negation of one) as "could be a const" and lets ANF
+/// lowering refuse it with the "Cannot determine" sentence; every other
+/// non-literal shape (`this.x`, an expression) is refused by its validator with
+/// the "must be a compile-time constant" sentence. Both sentences are shared
+/// verbatim by all seven tiers (N-026).
+fn for_loop_bound_diagnostic(bound: &Expression) -> &'static str {
+    let mut e = bound;
+    while let Expression::UnaryExpr { op, operand, .. } = e {
+        if *op != UnaryOp::Neg {
+            break;
+        }
+        e = operand;
+    }
+    match e {
+        Expression::Identifier { .. } | Expression::BoolLiteral { .. } => {
+            "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
+        }
+        _ => "For loop bound must be a compile-time constant (literal or const variable)",
+    }
+}
+
 fn is_compile_time_constant(expr: &Expression) -> bool {
     // Only integer literals (and their negation) can be unrolled into fixed
     // Bitcoin Script by anf-lower. A bare identifier bound (e.g. `const N`) or a
@@ -1444,7 +1687,7 @@ fn is_compile_time_constant(expr: &Expression) -> bool {
     // behavior: only literal loop bounds compile.
     match expr {
         Expression::BigIntLiteral { .. } => true,
-        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+        Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => {
             is_compile_time_constant(operand)
         }
         _ => false,
@@ -1467,7 +1710,7 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
         Expression::CallExpr { callee, args, .. } => {
             validate_expression(callee, errors);
             // assert() message (2nd arg) is a human-readable string, not hex — skip validation
-            let is_assert = matches!(callee.as_ref(), Expression::Identifier { name } if name == "assert");
+            let is_assert = matches!(callee.as_ref(), Expression::Identifier { name, .. } if name == "assert");
             for (i, arg) in args.iter().enumerate() {
                 if is_assert && i >= 1 {
                     continue;
@@ -1505,19 +1748,21 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
         | Expression::BoolLiteral { .. }
         | Expression::PropertyAccess { .. } => {}
 
-        Expression::ByteStringLiteral { value } => {
+        Expression::ByteStringLiteral { value, source_location } => {
             if !value.is_empty() {
-                if value.len() % 2 != 0 {
+                // N-436: TS counts UTF-16 code units; value.len() would count UTF-8 bytes.
+                let units = value.encode_utf16().count();
+                if units % 2 != 0 {
                     errors.push(Diagnostic::error(format!(
                         "ByteString literal '{}' has odd length ({}) \u{2014} hex strings must have an even number of characters",
                         value,
-                        value.len()
-                    ), None));
+                        units
+                    ), source_location.clone()));
                 } else if !value.chars().all(|c| c.is_ascii_hexdigit()) {
                     errors.push(Diagnostic::error(format!(
                         "ByteString literal '{}' contains non-hex characters \u{2014} only 0-9, a-f, A-F are allowed",
                         value
-                    ), None));
+                    ), source_location.clone()));
                 }
             }
         }
@@ -1528,7 +1773,9 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
 // Recursion detection
 // ---------------------------------------------------------------------------
 
-fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+/// Reports recursion and the N-180 call depth; returns true iff
+/// `MAX_CALL_DEPTH` was exceeded.
+fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) -> bool {
     // Build call graph: method name -> set of methods it calls
     let mut call_graph: HashMap<String, HashSet<String>> = HashMap::new();
     let mut method_names: HashSet<String> = HashSet::new();
@@ -1536,54 +1783,137 @@ fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     for method in &contract.methods {
         method_names.insert(method.name.clone());
         let mut calls = HashSet::new();
-        collect_method_calls(&method.body, &mut calls);
+        collect_method_calls(&method.body, &mut calls, true);
         call_graph.insert(method.name.clone(), calls);
     }
 
     // Also add constructor
     {
         let mut calls = HashSet::new();
-        collect_method_calls(&contract.constructor.body, &mut calls);
+        collect_method_calls(&contract.constructor.body, &mut calls, true);
         call_graph.insert("constructor".to_string(), calls);
     }
 
-    // Check for cycles using DFS
-    for method in &contract.methods {
-        let mut visited = HashSet::new();
-        let mut stack = HashSet::new();
+    // N-180: one iterative pass answers, for every method, whether it reaches
+    // a cycle and how deep its call chain is, in O(methods + calls). The old
+    // per-method DFS restarted for each method (quadratic on a chain) and
+    // recursed once per link (a stack overflow at ~8000 links).
+    let (reaches_cycle, depth) = analyze_call_graph(contract, &call_graph, &method_names);
 
-        if has_cycle(
-            &method.name,
-            &call_graph,
-            &method_names,
-            &mut visited,
-            &mut stack,
-        ) {
+    for method in &contract.methods {
+        if reaches_cycle.get(&method.name).copied().unwrap_or(false) {
             errors.push(Diagnostic::error(format!(
                 "Recursion detected: method '{}' calls itself directly or indirectly. Recursion is not allowed in Rúnar contracts.",
                 method.name
             ), Some(method.source_location.clone())));
         }
     }
+
+    // N-180: private methods are inlined at every call site, so the call depth
+    // is the inlining depth. Report the first method (declaration order) past it.
+    for method in &contract.methods {
+        if !reaches_cycle.get(&method.name).copied().unwrap_or(false)
+            && depth.get(&method.name).copied().unwrap_or(0) > MAX_CALL_DEPTH
+        {
+            errors.push(Diagnostic::error(
+                call_depth_message(&method.name),
+                Some(method.source_location.clone()),
+            ));
+            return true;
+        }
+    }
+    false
 }
 
-fn collect_method_calls(stmts: &[Statement], calls: &mut HashSet<String>) {
+/// N-180: for every method, whether it reaches a call cycle, and (when it does
+/// not) its call depth: 0 if it calls no contract method, else 1 + the largest
+/// call depth among the contract methods it calls. Iterative three-colour DFS
+/// with memoisation: O(methods + calls), no recursion. `reaches_cycle` matches
+/// what a fresh DFS from each method reports.
+fn analyze_call_graph(
+    contract: &ContractNode,
+    call_graph: &HashMap<String, HashSet<String>>,
+    method_names: &HashSet<String>,
+) -> (HashMap<String, bool>, HashMap<String, usize>) {
+    struct Frame<'a> {
+        name: &'a str,
+        callees: Vec<&'a str>,
+        next: usize,
+        cyc: bool,
+        depth: usize,
+    }
+    let mut reaches_cycle: HashMap<String, bool> = HashMap::new();
+    let mut depth: HashMap<String, usize> = HashMap::new();
+    let mut on_stack: HashSet<&str> = HashSet::new();
+
+    for root in &contract.methods {
+        if reaches_cycle.contains_key(&root.name) {
+            continue;
+        }
+        let mut stack: Vec<Frame> = Vec::new();
+        let callees_of = |name: &str| -> Vec<&str> {
+            call_graph
+                .get(name)
+                .map(|c| c.iter().map(|s| s.as_str()).collect())
+                .unwrap_or_default()
+        };
+        on_stack.insert(root.name.as_str());
+        stack.push(Frame { name: root.name.as_str(), callees: callees_of(&root.name), next: 0, cyc: false, depth: 0 });
+        while let Some(top) = stack.last_mut() {
+            if top.next < top.callees.len() {
+                let callee = top.callees[top.next];
+                top.next += 1;
+                if !method_names.contains(callee) {
+                    continue;
+                }
+                if on_stack.contains(callee) {
+                    top.cyc = true;
+                } else if let Some(&cyc) = reaches_cycle.get(callee) {
+                    if cyc {
+                        top.cyc = true;
+                    } else {
+                        top.depth = top.depth.max(1 + depth[callee]);
+                    }
+                } else {
+                    on_stack.insert(callee);
+                    let callees = callees_of(callee);
+                    stack.push(Frame { name: callee, callees, next: 0, cyc: false, depth: 0 });
+                }
+                continue;
+            }
+            let done = stack.pop().expect("non-empty");
+            on_stack.remove(done.name);
+            reaches_cycle.insert(done.name.to_string(), done.cyc);
+            depth.insert(done.name.to_string(), done.depth);
+            if let Some(parent) = stack.last_mut() {
+                if done.cyc {
+                    parent.cyc = true;
+                } else {
+                    parent.depth = parent.depth.max(1 + done.depth);
+                }
+            }
+        }
+    }
+    (reaches_cycle, depth)
+}
+
+fn collect_method_calls(stmts: &[Statement], calls: &mut HashSet<String>, bare: bool) {
     for stmt in stmts {
-        collect_method_calls_in_statement(stmt, calls);
+        collect_method_calls_in_statement(stmt, calls, bare);
     }
 }
 
-fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<String>) {
+fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<String>, bare: bool) {
     match stmt {
         Statement::ExpressionStatement { expression, .. } => {
-            collect_method_calls_in_expr(expression, calls);
+            collect_method_calls_in_expr(expression, calls, bare);
         }
         Statement::VariableDecl { init, .. } => {
-            collect_method_calls_in_expr(init, calls);
+            collect_method_calls_in_expr(init, calls, bare);
         }
         Statement::Assignment { target, value, .. } => {
-            collect_method_calls_in_expr(target, calls);
-            collect_method_calls_in_expr(value, calls);
+            collect_method_calls_in_expr(target, calls, bare);
+            collect_method_calls_in_expr(value, calls, bare);
         }
         Statement::IfStatement {
             condition,
@@ -1591,107 +1921,98 @@ fn collect_method_calls_in_statement(stmt: &Statement, calls: &mut HashSet<Strin
             else_branch,
             ..
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls(then_branch, calls);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls(then_branch, calls, bare);
             if let Some(else_stmts) = else_branch {
-                collect_method_calls(else_stmts, calls);
+                collect_method_calls(else_stmts, calls, bare);
             }
         }
         Statement::ForStatement {
-            condition, body, ..
+            init,
+            condition,
+            update,
+            body,
+            ..
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls(body, calls);
+            collect_method_calls_in_statement(init, calls, bare);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls_in_statement(update, calls, bare);
+            collect_method_calls(body, calls, bare);
         }
         Statement::ReturnStatement { value, .. } => {
             if let Some(v) = value {
-                collect_method_calls_in_expr(v, calls);
+                collect_method_calls_in_expr(v, calls, bare);
             }
         }
     }
 }
 
-fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>) {
+fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>, bare: bool) {
     match expr {
         Expression::CallExpr { callee, args, .. } => {
             // Check if callee is `this.methodName` (PropertyAccess variant)
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 calls.insert(property.clone());
             }
             // Also check `this.method` via MemberExpr
             if let Expression::MemberExpr { object, property } = callee.as_ref() {
-                if let Expression::Identifier { name } = object.as_ref() {
+                if let Expression::Identifier { name, .. } = object.as_ref() {
                     if name == "this" {
                         calls.insert(property.clone());
                     }
                 }
             }
-            collect_method_calls_in_expr(callee, calls);
+            // N-180: the Solidity, Move and Java surfaces may call a helper as
+            // a bare `m(...)`. Counted only for the recursion / call-depth
+            // graph (`bare`), and only names of contract methods count there
+            // (analyze_call_graph filters by method_names), so builtins are
+            // unaffected.
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
+                if bare {
+                    calls.insert(name.clone());
+                }
+            }
+            collect_method_calls_in_expr(callee, calls, bare);
             for arg in args {
-                collect_method_calls_in_expr(arg, calls);
+                collect_method_calls_in_expr(arg, calls, bare);
             }
         }
         Expression::BinaryExpr { left, right, .. } => {
-            collect_method_calls_in_expr(left, calls);
-            collect_method_calls_in_expr(right, calls);
+            collect_method_calls_in_expr(left, calls, bare);
+            collect_method_calls_in_expr(right, calls, bare);
         }
         Expression::UnaryExpr { operand, .. } => {
-            collect_method_calls_in_expr(operand, calls);
+            collect_method_calls_in_expr(operand, calls, bare);
         }
         Expression::MemberExpr { object, .. } => {
-            collect_method_calls_in_expr(object, calls);
+            collect_method_calls_in_expr(object, calls, bare);
         }
         Expression::TernaryExpr {
             condition,
             consequent,
             alternate,
         } => {
-            collect_method_calls_in_expr(condition, calls);
-            collect_method_calls_in_expr(consequent, calls);
-            collect_method_calls_in_expr(alternate, calls);
+            collect_method_calls_in_expr(condition, calls, bare);
+            collect_method_calls_in_expr(consequent, calls, bare);
+            collect_method_calls_in_expr(alternate, calls, bare);
         }
         Expression::IndexAccess { object, index } => {
-            collect_method_calls_in_expr(object, calls);
-            collect_method_calls_in_expr(index, calls);
+            collect_method_calls_in_expr(object, calls, bare);
+            collect_method_calls_in_expr(index, calls, bare);
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            collect_method_calls_in_expr(operand, calls);
+            collect_method_calls_in_expr(operand, calls, bare);
+        }
+        Expression::ArrayLiteral { elements } => {
+            for el in elements {
+                collect_method_calls_in_expr(el, calls, bare);
+            }
         }
         // Leaf nodes
         _ => {}
     }
 }
 
-fn has_cycle(
-    method_name: &str,
-    call_graph: &HashMap<String, HashSet<String>>,
-    method_names: &HashSet<String>,
-    visited: &mut HashSet<String>,
-    stack: &mut HashSet<String>,
-) -> bool {
-    if stack.contains(method_name) {
-        return true;
-    }
-    if visited.contains(method_name) {
-        return false;
-    }
-
-    visited.insert(method_name.to_string());
-    stack.insert(method_name.to_string());
-
-    if let Some(calls) = call_graph.get(method_name) {
-        for callee in calls {
-            if method_names.contains(callee) {
-                if has_cycle(callee, call_graph, method_names, visited, stack) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    stack.remove(method_name);
-    false
-}
 
 // ---------------------------------------------------------------------------
 // V24, V25: Warn about manual use of checkPreimage / getStateScript in
@@ -1703,7 +2024,7 @@ fn warn_manual_preimage_usage(method: &MethodNode, warnings: &mut Vec<Diagnostic
     walk_expressions_in_body(&method.body, &mut |expr| {
         // V24: Detect manual checkPreimage(...)
         if let Expression::CallExpr { callee, .. } = expr {
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 if name == "checkPreimage" {
                     warnings.push(Diagnostic::warning(format!(
                         "StatefulSmartContract auto-injects checkPreimage(); calling it manually in '{}' will cause a duplicate verification",
@@ -1712,7 +2033,7 @@ fn warn_manual_preimage_usage(method: &MethodNode, warnings: &mut Vec<Diagnostic
                 }
             }
             // V25: Detect manual this.getStateScript()
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 if property == "getStateScript" {
                     warnings.push(Diagnostic::warning(format!(
                         "StatefulSmartContract auto-injects state continuation; calling getStateScript() manually in '{}' is redundant",
@@ -1734,7 +2055,7 @@ const SEQUENCE_FINAL: u64 = 0xffff_ffff;
 /// True when `expr` is a direct call to the named intrinsic, e.g. `f(...)`.
 fn is_call_to_named(expr: &Expression, name: &str) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::Identifier { name: callee_name } = callee.as_ref() {
+        if let Expression::Identifier { name: callee_name, .. } = callee.as_ref() {
             return callee_name == name;
         }
     }
@@ -1767,7 +2088,7 @@ fn is_locktime_read(expr: &Expression) -> bool {
 /// Also NOT accepted: `extractSequence(pre) < 0`. Unsigned nSequence is never
 /// negative, so that comparison is vacuous.
 fn is_sequence_finality_guard(expr: &Expression) -> bool {
-    let Expression::BinaryExpr { op, left, right } = expr else {
+    let Expression::BinaryExpr { op, left, right, .. } = expr else {
         return false;
     };
     let final_sentinel = num_bigint::BigInt::from(SEQUENCE_FINAL);
@@ -1852,7 +2173,7 @@ fn warn_locktime_without_sequence_guard(
         // supplied by an inlined helper is seen by the public entry point.
         // Reuses the shared `collect_method_calls` recursion-detection helper.
         let mut calls = HashSet::new();
-        collect_method_calls(&current.body, &mut calls);
+        collect_method_calls(&current.body, &mut calls, false);
         for callee in calls {
             if !visited.contains(&callee) {
                 if let Some(m) = private_methods.get(callee.as_str()) {
@@ -1874,6 +2195,550 @@ fn warn_locktime_without_sequence_guard(
             ),
             Some(method.source_location.clone()),
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-286: verifyRabinSig's public key must not be chosen by the spender
+// ---------------------------------------------------------------------------
+
+/// The one diagnostic every tier emits for F-286 (user decision R78).
+pub const RABIN_PUBKEY_PROVENANCE_MESSAGE: &str =
+    "verifyRabinSig public key (4th argument) must be a contract property or a literal; \
+a spender-supplied Rabin modulus lets anyone forge a signature";
+
+/// Per-method binding facts for the F-286 trust predicate.
+struct RabinScope<'a> {
+    method: &'a MethodNode,
+    is_constructor: bool,
+    params: HashSet<String>,
+    /// Local name -> every value bound to it (inits + assignments).
+    bindings: HashMap<String, Vec<&'a Expression>>,
+    /// Names that are ever ++/--: never trusted.
+    mutated: HashSet<String>,
+    /// N-205: names declared as locals (a bare property write also lands in
+    /// `bindings`).
+    declared: HashSet<String>,
+}
+
+fn rabin_scope_collect<'a>(stmts: &'a [Statement], scope: &mut RabinScope<'a>) {
+    fn note_mutations(expr: &Expression, mutated: &mut HashSet<String>) {
+        walk_expression(expr, &mut |e| match e {
+            Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                if let Expression::Identifier { name, .. } = operand.as_ref() {
+                    mutated.insert(name.clone());
+                }
+            }
+            _ => {}
+        });
+    }
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDecl { name, init, .. } => {
+                scope.declared.insert(name.clone());
+                scope.bindings.entry(name.clone()).or_default().push(init);
+                note_mutations(init, &mut scope.mutated);
+            }
+            Statement::Assignment { target, value, .. } => {
+                if let Expression::Identifier { name, .. } = target {
+                    scope.bindings.entry(name.clone()).or_default().push(value);
+                }
+                note_mutations(target, &mut scope.mutated);
+                note_mutations(value, &mut scope.mutated);
+            }
+            Statement::ExpressionStatement { expression, .. } => note_mutations(expression, &mut scope.mutated),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                note_mutations(condition, &mut scope.mutated);
+                rabin_scope_collect(then_branch, scope);
+                if let Some(e) = else_branch {
+                    rabin_scope_collect(e, scope);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                rabin_scope_collect(std::slice::from_ref(init.as_ref()), scope);
+                note_mutations(condition, &mut scope.mutated);
+                rabin_scope_collect(std::slice::from_ref(update.as_ref()), scope);
+                rabin_scope_collect(body, scope);
+            }
+            Statement::ReturnStatement { value, .. } => {
+                if let Some(v) = value {
+                    note_mutations(v, &mut scope.mutated);
+                }
+            }
+        }
+    }
+}
+
+/// Like `walk_expressions_in_body`, but also visits every `for` loop's init
+/// and update, at any nesting depth.
+fn walk_expressions_in_body_deep(stmts: &[Statement], visitor: &mut impl FnMut(&Expression)) {
+    for stmt in stmts {
+        match stmt {
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                walk_expression(condition, visitor);
+                walk_expressions_in_body_deep(then_branch, visitor);
+                if let Some(e) = else_branch {
+                    walk_expressions_in_body_deep(e, visitor);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                walk_expressions_in_body_deep(std::slice::from_ref(init.as_ref()), visitor);
+                walk_expression(condition, visitor);
+                walk_expressions_in_body_deep(std::slice::from_ref(update.as_ref()), visitor);
+                walk_expressions_in_body_deep(body, visitor);
+            }
+            _ => walk_expressions_in_statement(stmt, visitor),
+        }
+    }
+}
+
+fn rabin_private_callee<'a>(expr: &'a Expression, private: &HashMap<String, &MethodNode>) -> Option<(&'a str, &'a [Expression])> {
+    if let Expression::CallExpr { callee, args, .. } = expr {
+        let name = match callee.as_ref() {
+            Expression::PropertyAccess { property, .. } => Some(property.as_str()),
+            Expression::MemberExpr { object, property } => match object.as_ref() {
+                Expression::Identifier { name, .. } if name == "this" => Some(property.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = name {
+            if private.contains_key(n) {
+                return Some((n, args.as_slice()));
+            }
+        }
+    }
+    None
+}
+
+/// Every `this.<private>(...)` call in `stmts` (any depth, `for` init/update included).
+fn rabin_collect_private_calls<'a>(
+    stmts: &'a [Statement],
+    private: &HashMap<String, &MethodNode>,
+    out: &mut Vec<(&'a str, &'a [Expression])>,
+) {
+    fn expr<'a>(e: &'a Expression, private: &HashMap<String, &MethodNode>, out: &mut Vec<(&'a str, &'a [Expression])>) {
+        if let Some(hit) = rabin_private_callee(e, private) {
+            out.push(hit);
+        }
+        match e {
+            Expression::CallExpr { callee, args, .. } => {
+                expr(callee, private, out);
+                for a in args {
+                    expr(a, private, out);
+                }
+            }
+            Expression::BinaryExpr { left, right, .. } => {
+                expr(left, private, out);
+                expr(right, private, out);
+            }
+            Expression::UnaryExpr { operand, .. }
+            | Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => expr(operand, private, out),
+            Expression::TernaryExpr { condition, consequent, alternate } => {
+                expr(condition, private, out);
+                expr(consequent, private, out);
+                expr(alternate, private, out);
+            }
+            Expression::MemberExpr { object, .. } => expr(object, private, out),
+            Expression::IndexAccess { object, index } => {
+                expr(object, private, out);
+                expr(index, private, out);
+            }
+            Expression::ArrayLiteral { elements } => {
+                for el in elements {
+                    expr(el, private, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDecl { init, .. } => expr(init, private, out),
+            Statement::Assignment { target, value, .. } => {
+                expr(target, private, out);
+                expr(value, private, out);
+            }
+            Statement::ExpressionStatement { expression, .. } => expr(expression, private, out),
+            Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+                expr(condition, private, out);
+                rabin_collect_private_calls(then_branch, private, out);
+                if let Some(e) = else_branch {
+                    rabin_collect_private_calls(e, private, out);
+                }
+            }
+            Statement::ForStatement { init, condition, update, body, .. } => {
+                rabin_collect_private_calls(std::slice::from_ref(init.as_ref()), private, out);
+                expr(condition, private, out);
+                rabin_collect_private_calls(std::slice::from_ref(update.as_ref()), private, out);
+                rabin_collect_private_calls(body, private, out);
+            }
+            Statement::ReturnStatement { value, .. } => {
+                if let Some(v) = value {
+                    expr(v, private, out);
+                }
+            }
+        }
+    }
+}
+
+fn rabin_is_trusted(
+    expr: &Expression,
+    scope: &RabinScope,
+    property_names: &HashSet<&str>,
+    trusted_params: &HashMap<String, HashSet<usize>>,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match expr {
+        Expression::PropertyAccess { .. } => true,
+        Expression::MemberExpr { object, .. } => {
+            matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this")
+        }
+        Expression::BigIntLiteral { .. } => true,
+        Expression::Identifier { name, .. } => {
+            let is_param = scope.params.contains(name);
+            let locals = scope.bindings.get(name);
+            if !is_param && locals.is_none() {
+                return property_names.contains(name.as_str());
+            }
+            if scope.mutated.contains(name) {
+                return false;
+            }
+            if is_param {
+                let m = scope.method;
+                if m.visibility != Visibility::Private || scope.is_constructor {
+                    return false;
+                }
+                let idx = m.params.iter().position(|p| &p.name == name);
+                let ok = match (idx, trusted_params.get(&m.name)) {
+                    (Some(i), Some(set)) => set.contains(&i),
+                    _ => false,
+                };
+                if !ok {
+                    return false;
+                }
+            }
+            if let Some(values) = locals {
+                if visiting.contains(name) {
+                    return false;
+                }
+                visiting.insert(name.clone());
+                let ok = values
+                    .iter()
+                    .all(|v| rabin_is_trusted(v, scope, property_names, trusted_params, visiting));
+                visiting.remove(name);
+                if !ok {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// F-286: `verifyRabinSig(msg, sig, padding, n)` checks `(sig² + padding) mod
+/// n == SHA256(msg) mod n`; a spender who picks `n` forges any message. The
+/// 4th argument must be a property read (`this.x`, or a bare identifier naming
+/// a property no param/local shadows), a bigint literal, a local whose init
+/// and every assignment are trusted, or a private-method parameter that every
+/// call site (at least one) binds to a trusted value (least fixed point).
+/// Mirrors `checkRabinPubKeyProvenance` in the TS reference.
+fn check_rabin_pubkey_provenance(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    let property_names: HashSet<&str> = contract.properties.iter().map(|p| p.name.as_str()).collect();
+    let mut private: HashMap<String, &MethodNode> = HashMap::new();
+    for m in &contract.methods {
+        if m.visibility == Visibility::Private {
+            private.insert(m.name.clone(), m);
+        }
+    }
+
+    let mut scopes: Vec<RabinScope> = Vec::new();
+    let all = std::iter::once((&contract.constructor, true)).chain(contract.methods.iter().map(|m| (m, false)));
+    for (m, is_ctor) in all {
+        let mut scope = RabinScope {
+            method: m,
+            is_constructor: is_ctor,
+            params: m.params.iter().map(|p| p.name.clone()).collect(),
+            bindings: HashMap::new(),
+            mutated: HashSet::new(),
+            declared: HashSet::new(),
+        };
+        rabin_scope_collect(&m.body, &mut scope);
+        scopes.push(scope);
+    }
+
+    // Every call site of every private method: (callee, args, caller scope index).
+    let mut call_sites: HashMap<String, Vec<(&[Expression], usize)>> = HashMap::new();
+    for name in private.keys() {
+        call_sites.insert(name.clone(), Vec::new());
+    }
+    for (si, scope) in scopes.iter().enumerate() {
+        let mut found: Vec<(&str, &[Expression])> = Vec::new();
+        rabin_collect_private_calls(&scope.method.body, &private, &mut found);
+        for (callee, args) in found {
+            call_sites.get_mut(callee).unwrap().push((args, si));
+        }
+    }
+
+    let mut trusted_params: HashMap<String, HashSet<usize>> =
+        private.keys().map(|k| (k.clone(), HashSet::new())).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (name, m) in &private {
+            let sites = &call_sites[name];
+            if sites.is_empty() {
+                continue;
+            }
+            for i in 0..m.params.len() {
+                if trusted_params[name].contains(&i) {
+                    continue;
+                }
+                let all_ok = sites.iter().all(|(args, si)| match args.get(i) {
+                    Some(a) => rabin_is_trusted(a, &scopes[*si], &property_names, &trusted_params, &mut HashSet::new()),
+                    None => false,
+                });
+                if all_ok {
+                    trusted_params.get_mut(name).unwrap().insert(i);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for scope in &scopes {
+        // N-464 (user decision R186): each refusal is anchored at the 4th
+        // argument itself; the method only when the argument has no location.
+        let mut bad: Vec<SourceLocation> = Vec::new();
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
+            if let Expression::CallExpr { callee, args, .. } = e {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
+                    if name == "verifyRabinSig"
+                        && args.len() >= 4
+                        && !rabin_is_trusted(&args[3], scope, &property_names, &trusted_params, &mut HashSet::new())
+                    {
+                        bad.push(
+                            crate::frontend::typecheck::expr_loc(&args[3])
+                                .unwrap_or(&scope.method.source_location)
+                                .clone(),
+                        );
+                    }
+                }
+            }
+        });
+        for loc in bad {
+            errors.push(Diagnostic::error(RABIN_PUBKEY_PROVENANCE_MESSAGE, Some(loc)));
+        }
+    }
+
+    // N-205 (a): a MUTABLE key property is state the previous spend chose, so
+    // outside the constructor it may only be written with a trusted value.
+    // KEY properties: those whose value reaches a 4th argument, closed under
+    // "is written into a key property".
+    let ctx = RabinCtx { scopes: &scopes, call_sites: &call_sites, property_names: &property_names };
+    let mut key_props: HashSet<String> = HashSet::new();
+    for (si, scope) in scopes.iter().enumerate() {
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| {
+            if let Expression::CallExpr { callee, args, .. } = e {
+                if let Expression::Identifier { name, .. } = callee.as_ref() {
+                    if name == "verifyRabinSig" && args.len() >= 4 {
+                        rabin_sources_of(&args[3], si, &ctx, &mut key_props, &mut HashSet::new());
+                    }
+                }
+            }
+        });
+    }
+
+    // Every write to a property outside the constructor: (prop, value, scope
+    // index). `None` is ++/--, which no value makes trusted.
+    let mutable_props: Vec<&str> =
+        contract.properties.iter().filter(|p| !p.readonly).map(|p| p.name.as_str()).collect();
+    let mut writes: Vec<(String, Option<Expression>, usize)> = Vec::new();
+    for (si, scope) in scopes.iter().enumerate() {
+        if scope.is_constructor {
+            continue;
+        }
+        rabin_collect_assignments(&scope.method.body, scope, &property_names, si, &mut writes);
+        walk_expressions_in_body_deep(&scope.method.body, &mut |e| match e {
+            Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                if let Some(prop) = rabin_written_prop(operand, scope, &property_names) {
+                    writes.push((prop, None, si));
+                }
+            }
+            Expression::CallExpr { callee, args, .. } => {
+                let is_add_output = match callee.as_ref() {
+                    Expression::PropertyAccess { property, .. } | Expression::MemberExpr { property, .. } => {
+                        property == "addOutput"
+                    }
+                    _ => false,
+                };
+                if is_add_output {
+                    // addOutput(satoshis, ...values): positional over the
+                    // mutable properties in declaration order. A single
+                    // array-literal value list (the Zig tuple form) is
+                    // unpacked, as ANF lowering's flatten_add_output_args does.
+                    let flat = crate::frontend::anf_lower::flatten_add_output_args(args);
+                    for (i, value) in flat.iter().skip(1).enumerate() {
+                        if let Some(prop) = mutable_props.get(i) {
+                            writes.push((prop.to_string(), Some(value.clone()), si));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        });
+    }
+
+    let trusted = |v: &Expression, si: usize| {
+        rabin_is_trusted(v, &scopes[si], &property_names, &trusted_params, &mut HashSet::new())
+    };
+    loop {
+        let before = key_props.len();
+        for (prop, value, si) in &writes {
+            if let Some(v) = value {
+                if key_props.contains(prop) && trusted(v, *si) {
+                    rabin_sources_of(v, *si, &ctx, &mut key_props, &mut HashSet::new());
+                }
+            }
+        }
+        if key_props.len() == before {
+            break;
+        }
+    }
+
+    for (prop, value, si) in &writes {
+        if !key_props.contains(prop) || !mutable_props.contains(&prop.as_str()) {
+            continue;
+        }
+        if let Some(v) = value {
+            if trusted(v, *si) {
+                continue;
+            }
+        }
+        errors.push(Diagnostic::error(
+            rabin_key_write_message(prop),
+            Some(scopes[*si].method.source_location.clone()),
+        ));
+    }
+}
+
+/// N-205 (a): the diagnostic every tier emits when a mutable key property is
+/// written, outside the constructor, with a value the F-286 rule does not trust.
+pub fn rabin_key_write_message(prop: &str) -> String {
+    format!(
+        "verifyRabinSig public key property '{}' may only be assigned a contract property or a literal \
+outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature",
+        prop
+    )
+}
+
+struct RabinCtx<'s, 'a> {
+    scopes: &'s [RabinScope<'a>],
+    call_sites: &'s HashMap<String, Vec<(&'a [Expression], usize)>>,
+    property_names: &'s HashSet<&'a str>,
+}
+
+/// N-205: the properties a trusted expression's value can come from, through
+/// local aliases and private-helper call sites.
+fn rabin_sources_of(
+    expr: &Expression,
+    si: usize,
+    ctx: &RabinCtx,
+    out: &mut HashSet<String>,
+    visiting: &mut HashSet<(usize, String)>,
+) {
+    match expr {
+        Expression::PropertyAccess { property, .. } => {
+            out.insert(property.clone());
+        }
+        Expression::MemberExpr { object, property } => {
+            if matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this") {
+                out.insert(property.clone());
+            }
+        }
+        Expression::Identifier { name, .. } => {
+            let scope = &ctx.scopes[si];
+            let is_param = scope.params.contains(name);
+            let locals = scope.bindings.get(name);
+            if !is_param && locals.is_none() {
+                if ctx.property_names.contains(name.as_str()) {
+                    out.insert(name.clone());
+                }
+                return;
+            }
+            if !visiting.insert((si, name.clone())) {
+                return;
+            }
+            if let Some(values) = locals {
+                for v in values {
+                    rabin_sources_of(v, si, ctx, out, visiting);
+                }
+            }
+            let m = scope.method;
+            if is_param && m.visibility == Visibility::Private && !scope.is_constructor {
+                if let Some(idx) = m.params.iter().position(|p| &p.name == name) {
+                    if let Some(sites) = ctx.call_sites.get(&m.name) {
+                        for (args, caller) in sites {
+                            if let Some(a) = args.get(idx) {
+                                rabin_sources_of(a, *caller, ctx, out, visiting);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// N-205: the property a write target names, if any.
+fn rabin_written_prop(target: &Expression, scope: &RabinScope, property_names: &HashSet<&str>) -> Option<String> {
+    match target {
+        Expression::PropertyAccess { property, .. } => Some(property.clone()),
+        Expression::MemberExpr { object, property } => match object.as_ref() {
+            Expression::Identifier { name, .. } if name == "this" => Some(property.clone()),
+            _ => None,
+        },
+        Expression::Identifier { name, .. }
+            if property_names.contains(name.as_str())
+                && !scope.params.contains(name)
+                && !scope.declared.contains(name) =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn rabin_collect_assignments(
+    stmts: &[Statement],
+    scope: &RabinScope,
+    property_names: &HashSet<&str>,
+    si: usize,
+    out: &mut Vec<(String, Option<Expression>, usize)>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Assignment { target, value, .. } => {
+                if let Some(prop) = rabin_written_prop(target, scope, property_names) {
+                    out.push((prop, Some(value.clone()), si));
+                }
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                rabin_collect_assignments(then_branch, scope, property_names, si, out);
+                if let Some(e) = else_branch {
+                    rabin_collect_assignments(e, scope, property_names, si, out);
+                }
+            }
+            Statement::ForStatement { init, update, body, .. } => {
+                rabin_collect_assignments(std::slice::from_ref(init.as_ref()), scope, property_names, si, out);
+                rabin_collect_assignments(std::slice::from_ref(update.as_ref()), scope, property_names, si, out);
+                rabin_collect_assignments(body, scope, property_names, si, out);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1908,9 +2773,15 @@ fn walk_expressions_in_statement(stmt: &Statement, visitor: &mut impl FnMut(&Exp
             }
         }
         Statement::ForStatement {
-            condition, body, ..
+            init,
+            condition,
+            update,
+            body,
+            ..
         } => {
+            walk_expressions_in_statement(init, visitor);
             walk_expression(condition, visitor);
+            walk_expressions_in_statement(update, visitor);
             walk_expressions_in_body(body, visitor);
         }
         Statement::ReturnStatement { value, .. } => {
@@ -1955,6 +2826,11 @@ fn walk_expression(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
             walk_expression(operand, visitor);
+        }
+        Expression::ArrayLiteral { elements } => {
+            for el in elements {
+                walk_expression(el, visitor);
+            }
         }
         _ => {}
     }
@@ -2447,5 +3323,407 @@ class ZeroStart extends SmartContract {
             "zero-start counting-up loop should not trigger loop-shape errors, got: {:?}",
             result.errors
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-063: array-literal elements are walked by every validator walker.
+    //
+    // Expression::ArrayLiteral was missing from collect_method_calls_in_expr,
+    // walk_expression and sub_expressions, so a construct written inside
+    // `[...]` (the only place checkMultiSig's arguments can be written)
+    // escaped the rule those walkers enforce. Pre-fix the recursion shape
+    // overflowed the stack in ANF inlining instead of being refused.
+    //
+    // Proves: validate() refuses each shape with the diagnostic it gives the
+    // un-nested form. Does not prove: CLI exit status or cross-tier parity
+    // (conformance/negatives N99+).
+    // -----------------------------------------------------------------------
+
+    fn f063_errors(source: &str) -> Vec<String> {
+        validate(&parse_contract(source))
+            .errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    fn f063_require(errors: &[String], needle: &str) {
+        assert!(
+            errors.iter().any(|m| m.contains(needle)),
+            "expected an error containing {:?}, got: {:?}",
+            needle,
+            errors
+        );
+    }
+
+    #[test]
+    fn f063_recursion_inside_array_literal_detected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+}
+"#,
+        );
+        f063_require(&errs, "Recursion detected: method 'h'");
+    }
+
+    #[test]
+    fn f063_odd_length_hex_inside_array_literal_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'abc' has odd length (3)");
+    }
+
+    #[test]
+    fn f063_readonly_increment_inside_array_literal_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+}
+"#,
+        );
+        f063_require(&errs, "cannot assign to readonly property 'n'");
+    }
+
+    #[test]
+    fn f063_output_intrinsic_inside_array_literal_in_loop_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public step() {
+    for (let i = 0n; i < 2n; i++) {
+      const a = [this.addOutput(1000n, this.count)];
+    }
+    assert(true);
+  }
+}
+"#,
+        );
+        f063_require(&errs, "Output intrinsic 'addOutput'");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-265 -- ByteString property initializers skip hex validation
+    //
+    // `is_literal_expression` only checks the literal's SHAPE (is this a
+    // ByteStringLiteral / toByteString(<literal>) node at all?). It never
+    // validated the hex FORMAT -- that check lives in `validate_expression`'s
+    // `ByteStringLiteral` arm, which a method body reaches via the statement
+    // walk but a property INITIALIZER never did: it is read directly off
+    // `prop.initializer` in `validate_properties` and was never passed to
+    // `validate_expression`. `readonly k: ByteString = "zzz" as ByteString;`
+    // used to sail through this pass and only surface two passes later as
+    // an opaque stack-lowering error ("invalid hex string length: 3") with
+    // no source location.
+    //
+    // Proves: `validate()` itself now reports the hex-format diagnostic for
+    // a malformed ByteString property initializer, in both the bare-literal
+    // and `toByteString(...)` forms. Does not prove: a source LOCATION is
+    // attached -- `Expression::ByteStringLiteral` carries none, and
+    // `validate_expression`'s existing method-body check already pushes
+    // `None` for the same diagnostic (see f063 tests above), so this is not
+    // a regression. Also does not prove anything about any other tier; see
+    // the TS peer test in `02-validate.test.ts` and the cross-tier parity
+    // fixture in `conformance/negatives`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f265_odd_length_hex_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit extends SmartContract {
+  readonly k: ByteString = "zzz" as ByteString;
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zzz' has odd length (3)");
+    }
+
+    #[test]
+    fn f265_non_hex_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit2 extends SmartContract {
+  readonly k: ByteString = "zz" as ByteString;
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zz' contains non-hex characters");
+    }
+
+    #[test]
+    fn f265_odd_length_hex_inside_to_byte_string_property_initializer_rejected() {
+        let errs = f063_errors(
+            r#"
+class BadHexInit3 extends SmartContract {
+  readonly k: ByteString = toByteString('zzz');
+  constructor() { super(); }
+  public unlock() { assert(this.k === this.k); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'zzz' has odd length (3)");
+    }
+
+    // N-012. Proves: the expression walker behind the asm() gate visits all
+    // three header slots (init, condition, update) of a `for` statement, so an
+    // asm(...) call planted in any of them in a non-Unsafe contract is refused.
+    // The AST is hand-built (mutated after parsing) because the for-update and
+    // literal-init rules make these shapes unreachable from source today.
+    // Does not prove: that any source program can reach this; only that a
+    // future loosening of those rules cannot reopen the asm gate.
+    fn n012_asm_call() -> Expression {
+        Expression::CallExpr {
+            callee: Box::new(Expression::Identifier { name: "asm".to_string(), source_location: None }),
+            args: vec![],
+            asm_return_type: None,
+        }
+    }
+
+    fn n012_refuses_asm_in(slot: &str) {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly t: bigint;
+
+    constructor(t: bigint) {
+        super(t);
+        this.t = t;
+    }
+
+    public verify(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if let Statement::ForStatement {
+                init,
+                condition,
+                update,
+                source_location,
+                ..
+            } = stmt
+            {
+                match slot {
+                    "init" => {
+                        if let Statement::VariableDecl { init: e, .. } = init.as_mut() {
+                            *e = n012_asm_call();
+                        }
+                    }
+                    "condition" => *condition = n012_asm_call(),
+                    _ => {
+                        **update = Statement::ExpressionStatement {
+                            expression: n012_asm_call(),
+                            source_location: source_location.clone(),
+                        };
+                    }
+                }
+                planted = true;
+            }
+        }
+        assert!(planted, "no ForStatement in method body");
+        let result = validate(&contract);
+        assert!(
+            result.errors.iter().any(|e| e
+                .message
+                .contains("'asm' is only available in contracts extending UnsafeSmartContract")),
+            "asm() in for-loop {} was not refused; got {:?}",
+            slot,
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n012_asm_in_for_init_refused() {
+        n012_refuses_asm_in("init");
+    }
+
+    #[test]
+    fn n012_asm_in_for_condition_refused() {
+        n012_refuses_asm_in("condition");
+    }
+
+    #[test]
+    fn n012_asm_in_for_update_refused() {
+        n012_refuses_asm_in("update");
+    }
+
+    // N-401. Proves: the method-call collector (behind the recursion check) and
+    // the output-intrinsic search (behind the no-addOutput-in-a-loop rule)
+    // visit all three header slots (init, condition, update) of a `for`
+    // statement. A call planted only in a header slot is collected, and an
+    // addOutput planted only in a NESTED loop's header is found from the
+    // enclosing loop. The AST is hand-built (mutated after parsing) because
+    // the for-update and literal-init rules make these shapes unreachable from
+    // source today.
+    // Does not prove: that any source program can reach these shapes today.
+    fn n401_this_call(name: &str) -> Expression {
+        Expression::CallExpr {
+            callee: Box::new(Expression::PropertyAccess { property: name.to_string(), source_location: None }),
+            args: vec![],
+            asm_return_type: None,
+        }
+    }
+
+    fn n401_plant(stmt: &mut Statement, slot: &str, expr: Expression) {
+        if let Statement::ForStatement { init, condition, update, source_location, .. } = stmt {
+            match slot {
+                "init" => {
+                    if let Statement::VariableDecl { init: e, .. } = init.as_mut() {
+                        *e = expr;
+                    }
+                }
+                "condition" => *condition = expr,
+                _ => {
+                    **update = Statement::ExpressionStatement {
+                        expression: expr,
+                        source_location: source_location.clone(),
+                    };
+                }
+            }
+        } else {
+            panic!("not a ForStatement");
+        }
+    }
+
+    fn n401_collects_call_in(slot: &str) {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly t: bigint;
+
+    constructor(t: bigint) {
+        super(t);
+        this.t = t;
+    }
+
+    public m(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) { s = s + a; }
+        assert(s === this.t);
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if matches!(stmt, Statement::ForStatement { .. }) {
+                n401_plant(stmt, slot, n401_this_call("m"));
+                planted = true;
+            }
+        }
+        assert!(planted, "no ForStatement in method body");
+        let mut calls = HashSet::new();
+        collect_method_calls(&contract.methods[0].body, &mut calls, true);
+        assert!(
+            calls.contains("m"),
+            "collect_method_calls did not visit the for-loop {}; got {:?}",
+            slot,
+            calls
+        );
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_init() {
+        n401_collects_call_in("init");
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_condition() {
+        n401_collects_call_in("condition");
+    }
+
+    #[test]
+    fn n401_collect_method_calls_visits_for_update() {
+        n401_collects_call_in("update");
+    }
+
+    fn n401_finds_nested_add_output_in(slot: &str) {
+        let source = r#"
+import { StatefulSmartContract } from 'runar-lang';
+
+class C extends StatefulSmartContract {
+    count: bigint;
+
+    constructor(count: bigint) {
+        super(count);
+        this.count = count;
+    }
+
+    public m(a: bigint) {
+        let s: bigint = 0n;
+        for (let i: bigint = 0n; i < 3n; i++) {
+            for (let j: bigint = 0n; j < 3n; j++) { s = s + a; }
+        }
+        this.count = s;
+    }
+}
+"#;
+        let mut contract = parse_contract(source);
+        let mut planted = false;
+        for stmt in contract.methods[0].body.iter_mut() {
+            if let Statement::ForStatement { body, .. } = stmt {
+                for inner in body.iter_mut() {
+                    if matches!(inner, Statement::ForStatement { .. }) {
+                        n401_plant(inner, slot, n401_this_call("addOutput"));
+                        planted = true;
+                    }
+                }
+            }
+        }
+        assert!(planted, "no nested ForStatement in method body");
+        let result = validate(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Output intrinsic 'addOutput'")),
+            "addOutput in nested for-loop {} was not found; got {:?}",
+            slot,
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_init() {
+        n401_finds_nested_add_output_in("init");
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_condition() {
+        n401_finds_nested_add_output_in("condition");
+    }
+
+    #[test]
+    fn n401_output_intrinsic_search_visits_nested_for_update() {
+        n401_finds_nested_add_output_in("update");
     }
 }

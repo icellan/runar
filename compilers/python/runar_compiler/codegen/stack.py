@@ -10,7 +10,7 @@ Port of ``compilers/go/codegen/stack.go``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Generator, Optional
 
 from runar_compiler.ir.types import (
     ANFBinding,
@@ -90,6 +90,25 @@ def is_variable_length_state_type(t: str) -> bool:
     """State types that are stored with a push-data length prefix."""
     return t in _VARIABLE_LENGTH_STATE_TYPES
 
+
+# N-045: declared byte width of each fixed-width byte state type. MUST match
+# the reader's size table in ``_lower_deserialize_state`` and the shared
+# STATE_FIELD_WIDTHS table.
+_FIXED_WIDTH_STATE_BYTES: dict[str, int] = {
+    "PubKey": 33,
+    "Addr": 20,
+    "Ripemd160": 20,
+    "Sha256": 32,
+    "Point": 64,
+    "P256Point": 64,
+    "P384Point": 96,
+}
+
+
+def fixed_width_state_bytes(t: str) -> int:
+    """Declared byte width of a fixed-width byte state type, or 0."""
+    return _FIXED_WIDTH_STATE_BYTES.get(t, 0)
+
 # ---------------------------------------------------------------------------
 # Stack IR types
 # ---------------------------------------------------------------------------
@@ -132,8 +151,10 @@ class StackOp:
     # verify_code_part_len (R-095) -- pin SIZE(_codePart) against the code
     # part's own DEPLOYED byte length. code_part_len_delta is the deploy-time
     # byte growth of the template's OP_0 placeholders; code_part_len_exact says
-    # whether that growth is fully type-determined (equality pin) or only a
-    # lower bound. Both are resolved by _pin_code_part_length once every method
+    # whether that growth is fully type-determined (value final at compile
+    # time) or not (N-051: the emitter records the field as a deploy-time
+    # codePartLenSlots entry the SDK patches; the comparison is always
+    # OP_NUMEQUAL). Both are resolved by _pin_code_part_length once every method
     # has been lowered; the emitter back-patches the length itself.
     code_part_len_delta: int = 0
     code_part_len_exact: bool = False
@@ -396,16 +417,37 @@ class StackMap:
 # Use analysis -- determine last-use sites for each variable
 # ---------------------------------------------------------------------------
 
-def compute_last_uses(bindings: list[ANFBinding]) -> dict[str, int]:
+def compute_last_uses(
+    bindings: list[ANFBinding],
+    inherited_arrays: dict[str, list[str]] | None = None,
+) -> dict[str, int]:
     last_use: dict[str, int] = {}
     # Pre-scan: map each array_literal binding to its element refs. Used to
     # propagate last-use across the array indirection (the array binding is
     # pure metadata in _lower_array_literal -- its elements must remain live
     # until the array's consumer, not until the array_literal binding itself).
-    array_elems: dict[str, list[str]] = {}
+    #
+    # F-081: an if-arm or loop body can consume an array declared in an
+    # ENCLOSING scope. Its bindings do not contain that array_literal, so the
+    # enclosing scope's array metadata is seeded first; without it an element
+    # reached only through the outer array had no last-use here and was
+    # consumed at its first read.
+    array_elems: dict[str, list[str]] = dict(inherited_arrays or {})
     for b in bindings:
         if b.value.kind == "array_literal":
             array_elems[b.name] = list(b.value.elements)
+        elif (b.value.kind == "load_const"
+                and b.value.const_string is not None
+                and len(b.value.const_string) > 5
+                and b.value.const_string[:5] == "@ref:"):
+            # F-081: ``const sigs = [a, b]`` lowers to ``t = array_literal``
+            # plus the alias ``sigs = @ref:t``, and checkMultiSig reads the
+            # ALIAS. Without following it the elements got no last-use at all
+            # and were consumed at the first checkMultiSig, so a second read
+            # failed.
+            target = b.value.const_string[5:]
+            if target in array_elems:
+                array_elems[b.name] = list(array_elems[target])
     for i, binding in enumerate(bindings):
         # array_literal is metadata-only -- do NOT advance its elements'
         # last-use to here; defer to the array's consumer.
@@ -642,6 +684,52 @@ def _hex_to_bytes(h: str) -> bytes:
 # ---------------------------------------------------------------------------
 # Lowering context
 # ---------------------------------------------------------------------------
+
+# N-264: a suspended step of the lowering. ``lower_bindings``,
+# ``_lower_binding``, ``_lower_if``, ``_lower_loop``, ``_lower_method_call``
+# and ``_inline_method_call`` are generators (``*_task``), and each place one
+# used to CALL another (an if's two arms, a loop body, an inlined private
+# method's body) now YIELDS the child generator instead. ``_run_lower_tasks``
+# keeps the suspended parents on an explicit heap stack, so lowering depth no
+# longer consumes the interpreter stack.
+#
+# Why: private methods are inlined at every call site, so F-213's per-method
+# nesting bound (128) and N-180's call-depth bound (128) compose
+# multiplicatively -- a chain of D helpers that each call the next under K
+# nested ifs is D*K nested ifs here, and the recursive lowering hit
+# "maximum recursion depth exceeded" at D=32 x 120 (user decision R106: lower
+# iteratively). A generator resumes exactly where it yielded, so every
+# statement runs in the same order with the same state as the recursive
+# version did -- the emitted ops are unchanged. Never ``yield from`` a child:
+# that resumes the delegation chain recursively.
+_LowerTask = Generator["_LowerTask", None, None]
+
+
+def _run_lower_tasks(root: _LowerTask) -> None:
+    """Run ``root`` and every task it yields, depth-first, on an explicit stack."""
+    stack: list[_LowerTask] = [root]
+    error: BaseException | None = None
+    while stack:
+        top = stack[-1]
+        try:
+            if error is not None:
+                e, error = error, None
+                child = top.throw(e)
+            else:
+                child = next(top)
+        except StopIteration:
+            stack.pop()
+            continue
+        except BaseException as e:  # noqa: BLE001 -- re-raised at the parent's yield
+            # ``top`` raised (or did not catch what a child raised): it is
+            # finished, and its parent sees the exception at its ``yield``.
+            stack.pop()
+            if not stack:
+                raise
+            error = e
+            continue
+        stack.append(child)
+
 
 class _LoweringContext:
     """Mutable state for the stack-lowering pass."""
@@ -892,7 +980,20 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
         self.sm = sm_after_inner_if
 
-        # ELSE: >= 256 -> 0x4d + 2-byte LE
+        # ELSE: >= 256
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(65536)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_pd4_if = self.sm.clone()
+
+        # THEN: 256-65535 -> 0x4d + 2-byte LE
         self.emit_op(StackOp(op="push", value=big_int_push(4)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
@@ -915,6 +1016,35 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.push("")
 
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_pd4_if
+
+        # ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044 / F-194: this arm was
+        # missing, so the length was silently truncated mod 65536).
+        # NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length.
+        self.emit_op(StackOp(op="push", value=big_int_push(5)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x4E]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.sm = sm_end_target
@@ -924,6 +1054,12 @@ class _LoweringContext:
 
         Expects stack: [..., state_bytes]
         Leaves stack:  [..., data, remaining_state]
+
+        Accepts exactly the headers ``emit_push_data_encode`` writes: < 76
+        (the header is the length), 0x4c (1-byte length), 0x4d (2-byte LE),
+        0x4e (4-byte LE); any other header fails the script. The header and
+        every length are read UNSIGNED (``_emit_unsigned_bin2num``) — bare
+        OP_BIN2NUM read 0x80 as 0 and 0x81..0xff as negative (N-044).
         """
         self.emit_op(StackOp(op="push", value=big_int_push(1)))
         self.sm.push("")
@@ -931,7 +1067,7 @@ class _LoweringContext:
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self._emit_unsigned_bin2num()  # [..., rest, hb]
         self.emit_op(StackOp(op="dup"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(76)))
@@ -944,7 +1080,7 @@ class _LoweringContext:
         self.sm.pop()
         sm_after_outer_if = self.sm.clone()
 
-        # THEN: fb < 76 -> direct length
+        # THEN: hb < 76 -> direct length
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
@@ -953,6 +1089,25 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
         self.sm = sm_after_outer_if.clone()
 
+        # ELSE: map the header to its length width (1, 2 or 4).
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(76)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_pd1_if = self.sm.clone()
+        # 0x4c -> width 1
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        sm_width = self.sm.clone()
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_pd1_if
         self.emit_op(StackOp(op="dup"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(77)))
@@ -960,43 +1115,69 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
         self.sm.pop(); self.sm.pop()
         self.sm.push("")
-
         self.emit_op(StackOp(op="opcode", code="OP_IF"))
         self.sm.pop()
-        sm_after_inner_if = self.sm.clone()
-
-        # THEN: fb == 77 -> 2-byte LE
+        sm_after_pd2_if = self.sm.clone()
+        # 0x4d -> width 2
         self.emit_op(StackOp(op="drop")); self.sm.pop()
         self.emit_op(StackOp(op="push", value=big_int_push(2)))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop(); self.sm.pop()
-        self.sm.push(""); self.sm.push("")
-        self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop(); self.sm.pop()
-        self.sm.push(""); self.sm.push("")
 
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-        self.sm = sm_after_inner_if
-
-        # ELSE: fb == 76 -> 1-byte
-        self.emit_op(StackOp(op="drop")); self.sm.pop()
-        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm = sm_after_pd2_if
+        # 0x4e -> width 4; any other header fails the script
+        self.emit_op(StackOp(op="push", value=big_int_push(78)))
         self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.sm = sm_width
+        # [..., rest, width]
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self._emit_unsigned_bin2num()  # [..., rest2, len]
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
 
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.sm = sm_end_target
+
+    def emit_assert_state_consumed(self) -> None:
+        """Fail the script unless the value on top (the rest of the state
+        section after the last field) is empty, and pop it: the last state
+        field must consume the state section exactly (N-044)."""
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+
+    def emit_fixed_width_state_check(self, t: str) -> None:
+        """N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+        Ripemd160, Point, P256Point, P384Point) is committed to a
+        continuation, assert it has exactly its declared width::
+
+            [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+
+        The writer copies these values as they are and the next spend's reader
+        slices each at its declared width, so a wrong-width value shifts every
+        later field. No-op for every other type."""
+        width = fixed_width_state_bytes(t)
+        if not width:
+            return
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(width)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUALVERIFY"))
+        self.sm.pop()
+        self.sm.pop()
 
     # -----------------------------------------------------------------
     # bring_to_top
@@ -1201,27 +1382,42 @@ class _LoweringContext:
     # lower_bindings
     # -----------------------------------------------------------------
 
-    def lower_bindings(self, bindings: list[ANFBinding], terminal_assert: bool) -> None:
+    def lower_bindings(
+        self,
+        bindings: list[ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: dict[str, list[str]] | None = None,
+    ) -> None:
+        _run_lower_tasks(self._lower_bindings_task(bindings, terminal_assert, inherited_arrays))
+
+    def _lower_bindings_task(
+        self,
+        bindings: list[ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: dict[str, list[str]] | None = None,
+    ) -> _LowerTask:
         self.local_bindings = {b.name: True for b in bindings}
-        last_uses = compute_last_uses(bindings)
+        last_uses = compute_last_uses(bindings, inherited_arrays)
 
         # Protect parent-scope refs that are still needed after this scope
         if self.outer_protected_refs is not None:
             for ref in self.outer_protected_refs:
                 last_uses[ref] = len(bindings)
 
-        # Find terminal binding index
+        # Find terminal binding index.
+        # Only an assert that IS the last binding may leave its value as the
+        # result (N-005): any later binding (e.g. a terminal asm() raw_script
+        # with out_arity 1) pushes its own result, the cleanup NIPs the
+        # assert's value away, and the check is never enforced. Such an
+        # assert gets OP_VERIFY.
         last_assert_idx = -1
         terminal_if_idx = -1
         if terminal_assert:
             last_binding = bindings[-1]
             if last_binding.value.kind == "if":
                 terminal_if_idx = len(bindings) - 1
-            else:
-                for i in range(len(bindings) - 1, -1, -1):
-                    if bindings[i].value.kind == "assert":
-                        last_assert_idx = i
-                        break
+            elif last_binding.value.kind == "assert":
+                last_assert_idx = len(bindings) - 1
 
         for i, binding in enumerate(bindings):
             # Propagate source location from ANF binding to StackOps
@@ -1231,14 +1427,14 @@ class _LoweringContext:
                 self._lower_assert(binding.value.value_ref, i, last_uses, True)
             elif binding.value.kind == "if" and i == terminal_if_idx:
                 # Terminal if: propagate terminalAssert into both branches
-                self._lower_if(
+                yield self._lower_if_task(
                     binding.name, binding.value.cond,
                     binding.value.then, binding.value.else_,
                     binding.value.results or [],
                     i, last_uses, True,
                 )
             else:
-                self._lower_binding(binding, i, last_uses)
+                yield self._lower_binding_task(binding, i, last_uses)
             self.current_source_loc = None
 
     def _lower_bindings_protected(self, bindings: list[ANFBinding], protected_names: set[str]) -> None:
@@ -1259,6 +1455,9 @@ class _LoweringContext:
     # -----------------------------------------------------------------
 
     def _lower_binding(self, binding: ANFBinding, binding_index: int, last_uses: dict[str, int]) -> None:
+        _run_lower_tasks(self._lower_binding_task(binding, binding_index, last_uses))
+
+    def _lower_binding_task(self, binding: ANFBinding, binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         name = binding.name
         value = binding.value
         kind = value.kind
@@ -1276,13 +1475,13 @@ class _LoweringContext:
         elif kind == "call":
             self._lower_call(name, value.func, value.args, binding_index, last_uses)
         elif kind == "method_call":
-            self._lower_method_call(name, value.object, value.method, value.args, binding_index, last_uses)
+            yield self._lower_method_call_task(name, value.object, value.method, value.args, binding_index, last_uses)
         elif kind == "if":
-            self._lower_if(name, value.cond, value.then, value.else_,
-                           value.results or [], binding_index, last_uses)
+            yield self._lower_if_task(name, value.cond, value.then, value.else_,
+                                      value.results or [], binding_index, last_uses)
         elif kind == "loop":
-            self._lower_loop(name, value.count, value.body, value.iter_var,
-                             value.start, value.step, binding_index, last_uses)
+            yield self._lower_loop_task(name, value.count, value.body, value.iter_var,
+                                        value.start, value.step, binding_index, last_uses)
         elif kind == "assert":
             self._lower_assert(value.value_ref, binding_index, last_uses, False)
         elif kind == "update_prop":
@@ -1347,12 +1546,17 @@ class _LoweringContext:
                 prop = p
                 break
 
-        if self.sm.has(prop_name):
+        # N-016: only a MUTABLE property ever lives on the stack
+        # (deserialize_state / update_prop). A readonly property is a
+        # deploy-time constant, so a slot that merely shares its name is a
+        # param, local or temp -- reading it made ``this.target`` return
+        # whatever that slot held.
+        if (prop is None or not prop.readonly) and self.sm.has(prop_name):
             # Property has been updated -- use the stack value
             self.bring_to_top(prop_name, False)
             self.sm.pop()
         elif prop is not None and prop.initial_value is not None:
-            self._push_property_value(prop.initial_value)
+            self._push_property_value(prop.initial_value, prop.name)
         else:
             # Property value will be provided at deployment time; emit placeholder
             # for its constructor slot.
@@ -1401,7 +1605,7 @@ class _LoweringContext:
             self.emit_op(StackOp(op="placeholder", param_index=param_index, param_name=prop_name))
         self.sm.push(binding_name)
 
-    def _push_property_value(self, val: object) -> None:
+    def _push_property_value(self, val: object, prop_name: str) -> None:
         if isinstance(val, bool):
             self.emit_op(StackOp(op="push", value=PushValue(kind="bool", bool_val=val)))
         elif isinstance(val, int):
@@ -1411,7 +1615,19 @@ class _LoweringContext:
         elif isinstance(val, str):
             self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=_hex_to_bytes(val))))
         else:
-            self.emit_op(StackOp(op="push", value=big_int_push(0)))
+            # F-258 / CL-BUG-151: a property initializer is supposed to be a
+            # literal (bool/int/float/str) -- the language only allows
+            # BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+            # `--ir` skips the frontend that enforces that, so a hand-written
+            # IR file can hand this an array or object. Silently pushing 0
+            # compiled a working-looking script whose property reads whatever
+            # the caller named `secret`, `threshold`, etc. always as 0 --
+            # fail loudly instead.
+            raise RuntimeError(
+                f"Stack lowering: property '{prop_name}' has a non-literal "
+                f"initializer of type {type(val).__name__!r} ({val!r}). "
+                f"Refusing to emit a silent OP_0 placeholder."
+            )
 
     def _lower_load_const(self, binding_name: str, value: ANFValue,
                           binding_index: int, last_uses: dict[str, int]) -> None:
@@ -1533,7 +1749,9 @@ class _LoweringContext:
                 self.bring_to_top(args[0], is_last)
                 self.sm.pop()
                 self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
-                self.sm.push(binding_name)
+                # No result slot: OP_VERIFY leaves nothing behind, and a
+                # model-only slot puts every later PICK/ROLL one item too
+                # deep (F-072). Same model as the dedicated assert lowering.
             return
 
         # exit(condition) => condition OP_VERIFY — same as assert
@@ -1543,12 +1761,14 @@ class _LoweringContext:
                 self.bring_to_top(args[0], is_last)
                 self.sm.pop()
                 self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
-                self.sm.push(binding_name)
+                # No result slot: OP_VERIFY leaves nothing behind, and a
+                # model-only slot puts every later PICK/ROLL one item too
+                # deep (F-072). Same model as the dedicated assert lowering.
             return
 
         # super() in constructor
         if func_name == "super":
-            self.sm.push(binding_name)
+            # No opcode, so no stack slot either (F-072).
             return
 
         # checkMultiSig(sigs, pks) -- special handling for OP_CHECKMULTISIG.
@@ -1761,8 +1981,8 @@ class _LoweringContext:
     # method_call
     # -----------------------------------------------------------------
 
-    def _lower_method_call(self, binding_name: str, _obj: str, method: str,
-                           args: list[str], binding_index: int, last_uses: dict[str, int]) -> None:
+    def _lower_method_call_task(self, binding_name: str, _obj: str, method: str,
+                                args: list[str], binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         if method == "getStateScript":
             # Consume the @this object reference — compile-time concept, not a runtime value.
             if self.sm.has(_obj):
@@ -1780,15 +2000,19 @@ class _LoweringContext:
                 self.bring_to_top(_obj, True)
                 self.emit_op(StackOp(op="drop"))
                 self.sm.pop()
-            self._inline_method_call(binding_name, private_method, args, binding_index, last_uses)
+            yield self._inline_method_call_task(binding_name, private_method, args, binding_index, last_uses)
             return
 
         # For other method calls, treat like a function call
         self._lower_call(binding_name, method, args, binding_index, last_uses)
 
-    def _inline_method_call(self, binding_name: str, method: ANFMethod,
-                            args: list[str], binding_index: int, last_uses: dict[str, int]) -> None:
+    def _inline_method_call_task(self, binding_name: str, method: ANFMethod,
+                                 args: list[str], binding_index: int, last_uses: dict[str, int]) -> _LowerTask:
         """Inline a private method by lowering its body in the current context."""
+        # N-055: see _IR_OUTPUT_DELEGATION_ERROR.
+        if _contains_output_intrinsic(method.body):
+            raise RuntimeError(_IR_OUTPUT_DELEGATION_ERROR)
+
         # Track shadowed names so we can restore them after the body runs.
         # When a param name already exists on the stack, temporarily rename
         # the existing entry to avoid duplicate names which break Set-based
@@ -1847,7 +2071,7 @@ class _LoweringContext:
                 self.sm.push(param_name)
 
         # Lower the method body
-        self.lower_bindings(method.body, False)
+        yield self._lower_bindings_task(method.body, False)
 
         # Restore shadowed names so the caller's scope sees its original entries.
         for entry in shadowed:
@@ -1871,11 +2095,11 @@ class _LoweringContext:
     # if
     # -----------------------------------------------------------------
 
-    def _lower_if(self, binding_name: str, cond: str,
-                  then_bindings: list[ANFBinding], else_bindings: list[ANFBinding],
-                  results: list[str],
-                  binding_index: int, last_uses: dict[str, int],
-                  terminal_assert: bool = False) -> None:
+    def _lower_if_task(self, binding_name: str, cond: str,
+                       then_bindings: list[ANFBinding], else_bindings: list[ANFBinding],
+                       results: list[str],
+                       binding_index: int, last_uses: dict[str, int],
+                       terminal_assert: bool = False) -> _LowerTask:
         """``results`` is the ``if`` node's declared result slots, deepest
         first (see ``ANFValue.results``).  Empty for an ``if`` that carries at
         most one result, and then every path below behaves exactly as it did
@@ -2020,8 +2244,22 @@ class _LoweringContext:
         # (spec/semantics.md §6.3), which stack lowering performs; an arm is not
         # a different scope for that.
         then_ctx.private_methods = self.private_methods
+        # F-015 / issue #130: the arm's cloned stack carries the parent's
+        # reserved ``__param_<name>`` slot for a param that shadows a mutable
+        # property, so the arm must resolve ``load_param`` through the same
+        # map. A fresh context starts with it EMPTY, and the arm then read the
+        # same-named deserialized PROPERTY slot -- the stale on-chain state --
+        # in place of the caller's witness argument.
+        then_ctx.renamed_params = self.renamed_params
+        # F-081: the same holds for array_literal metadata. An array declared
+        # before the ``if`` is visible in the arm, and ``checkMultiSig(sigs,
+        # pks)`` there needs its element refs; a fresh context has none and
+        # failed with "array_literal metadata missing". Copied, so an arm-local
+        # array does not leak out.
+        then_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
+        then_ctx.array_lengths = dict(self.array_lengths)
         then_ctx.inside_branch = True
-        then_ctx.lower_bindings(then_bindings, terminal_assert)
+        yield then_ctx._lower_bindings_task(then_bindings, terminal_assert, self.array_elements)
 
         then_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2030,6 +2268,15 @@ class _LoweringContext:
             for _ in range(excess):
                 then_ctx.emit_op(StackOp(op="nip"))
                 then_ctx.sm.remove_at_depth(1)
+        # N-072: under a terminal assert the arm's one remaining slot is its
+        # VERDICT, which nothing reads by name. It must not keep the name of the
+        # parent local it asserted (`const x = a; if (c) { assert(x); } else
+        # { assert(b); }`): phase 1 below would then see "the else-arm consumed
+        # `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+        # the depth back with OP_0 -- an arm that always fails.
+        if terminal_assert and then_ctx.sm.depth() >= 1:
+            then_ctx.sm.pop()
+            then_ctx.sm.push("")
 
         # Lower else-branch
         else_ctx = _LoweringContext(None, self.properties)
@@ -2037,8 +2284,12 @@ class _LoweringContext:
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.script_level_code_separator = self.script_level_code_separator
         else_ctx.private_methods = self.private_methods  # N-051, see then_ctx above
+        else_ctx.renamed_params = self.renamed_params  # F-015, see then_ctx above
+        # F-081, see then_ctx above
+        else_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
+        else_ctx.array_lengths = dict(self.array_lengths)
         else_ctx.inside_branch = True
-        else_ctx.lower_bindings(else_bindings, terminal_assert)
+        yield else_ctx._lower_bindings_task(else_bindings, terminal_assert, self.array_elements)
 
         else_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2047,6 +2298,10 @@ class _LoweringContext:
             for _ in range(excess):
                 else_ctx.emit_op(StackOp(op="nip"))
                 else_ctx.sm.remove_at_depth(1)
+        # N-072, see then_ctx above
+        if terminal_assert and else_ctx.sm.depth() >= 1:
+            else_ctx.sm.pop()
+            else_ctx.sm.push("")
 
         # Balance stack between branches so both end at the same depth.
         # When addOutput is inside an if-then with no else, the then-branch
@@ -2235,9 +2490,31 @@ class _LoweringContext:
                     else_ctx.sm.pop()
                 else_ctx.sm.push(then_name)
             else:
+                # N-262: padding an EMPTY else arm is the legitimate #99
+                # fallback; padding a NON-EMPTY one writes a placeholder the
+                # post-ENDIF code reads as a value.  Same sentence as Go's
+                # R-161 guard.
+                if else_bindings:
+                    raise RuntimeError(
+                        "internal codegen error: conditional needs "
+                        f"{then_ctx.sm.depth() - else_ctx.sm.depth()} placeholder push(es) "
+                        "to balance a NON-EMPTY else arm (then depth "
+                        f"{then_ctx.sm.depth()} != else depth {else_ctx.sm.depth()}); an "
+                        "empty push there becomes a value the post-ENDIF code reads (see "
+                        "GitHub issue #99 and the OP_0-in-the-taken-arm shape); "
+                        f'binding="{binding_name}"'
+                    )
                 else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
                 else_ctx.sm.push("")
         while else_ctx.sm.depth() > then_ctx.sm.depth():
+            if then_bindings:
+                raise RuntimeError(
+                    "internal codegen error: conditional needs "
+                    f"{else_ctx.sm.depth() - then_ctx.sm.depth()} placeholder push(es) "
+                    "to balance a NON-EMPTY then arm (else depth "
+                    f"{else_ctx.sm.depth()} != then depth {then_ctx.sm.depth()}); "
+                    f'binding="{binding_name}"'
+                )
             then_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
             then_ctx.sm.push("")
 
@@ -2346,7 +2623,7 @@ class _LoweringContext:
                     if self.sm.peek_at_depth(d) == name:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)
@@ -2381,7 +2658,7 @@ class _LoweringContext:
                         StackOp(op="push", value=big_int_push(window_size - 1))
                     )
                     self.sm.push("")
-                    self.emit_op(StackOp(op="roll", depth=window_size))
+                    self.emit_op(StackOp(op="roll", depth=window_size - 1))
                     self.sm.pop()
                     lifted = self.sm.remove_at_depth(window_size - 1)
                     self.sm.push(lifted)
@@ -2405,7 +2682,7 @@ class _LoweringContext:
                     if self.sm.peek_at_depth(d) == name:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)
@@ -2430,7 +2707,7 @@ class _LoweringContext:
                         else:
                             self.emit_op(StackOp(op="push", value=big_int_push(d)))
                             self.sm.push("")
-                            self.emit_op(StackOp(op="roll", depth=d + 1))
+                            self.emit_op(StackOp(op="roll", depth=d))
                             self.sm.pop()
                             rolled = self.sm.remove_at_depth(d)
                             self.sm.push(rolled)
@@ -2452,7 +2729,7 @@ class _LoweringContext:
                         else:
                             self.emit_op(StackOp(op="push", value=big_int_push(d)))
                             self.sm.push("")
-                            self.emit_op(StackOp(op="roll", depth=d + 1))
+                            self.emit_op(StackOp(op="roll", depth=d))
                             self.sm.pop()
                             rolled = self.sm.remove_at_depth(d)
                             self.sm.push(rolled)
@@ -2516,11 +2793,11 @@ class _LoweringContext:
     # loop
     # -----------------------------------------------------------------
 
-    def _lower_loop(self, binding_name: str, count: int,
-                    body: list[ANFBinding], iter_var: str,
-                    start: Optional[int] = None, step: Optional[int] = None,
-                    loop_binding_index: Optional[int] = None,
-                    enclosing_last_uses: Optional[dict[str, int]] = None) -> None:
+    def _lower_loop_task(self, binding_name: str, count: int,
+                         body: list[ANFBinding], iter_var: str,
+                         start: Optional[int] = None, step: Optional[int] = None,
+                         loop_binding_index: Optional[int] = None,
+                         enclosing_last_uses: Optional[dict[str, int]] = None) -> _LowerTask:
         # Iterator start value and step direction (issue #121). Older ANF
         # payloads without start/step describe zero-start counting-up loops.
         start_val = start if start is not None else 0
@@ -2557,6 +2834,15 @@ class _LoweringContext:
             if ref != iter_var:
                 outer_refs.add(ref)
 
+        # F-081: an outer array_literal binding is metadata only -- its
+        # ELEMENTS are the stack slots. Protecting the array name protects
+        # nothing, so the first iteration consumed the elements and the second
+        # failed with "value 't0' not found on stack". Protect the elements
+        # themselves.
+        outer_arrays = {k: list(v) for k, v in self.array_elements.items()}
+        for ref in list(outer_refs):
+            outer_refs.update(outer_arrays.get(ref, []))
+
         # Temporarily extend localBindings with body binding names
         prev_local_bindings = self.local_bindings
         new_local_bindings = dict(prev_local_bindings)
@@ -2571,7 +2857,7 @@ class _LoweringContext:
             self.emit_op(StackOp(op="push", value=big_int_push(start_val + i * step_val)))
             self.sm.push(iter_var)
 
-            last_uses = compute_last_uses(body)
+            last_uses = compute_last_uses(body, outer_arrays)
 
             # Prevent outer-scope refs from being consumed by setting their
             # last-use beyond any body binding index:
@@ -2595,8 +2881,15 @@ class _LoweringContext:
                 if (not is_final_iteration) or used_after_loop:
                     last_uses[ref_name] = len(body)
 
+            # F-259: each body binding's ops carry that binding's own location
+            # (a binding without one keeps the loop's). The iteration-variable
+            # push above and the cleanup below stay on the loop's location.
+            loop_loc = self.current_source_loc
             for j, binding in enumerate(body):
-                self._lower_binding(binding, j, last_uses)
+                if binding.source_loc is not None:
+                    self.current_source_loc = binding.source_loc
+                yield self._lower_binding_task(binding, j, last_uses)
+                self.current_source_loc = loop_loc
 
             # Clean up the iteration variable if it was not consumed
             #
@@ -2678,7 +2971,7 @@ class _LoweringContext:
                     else:
                         self.emit_op(StackOp(op="push", value=big_int_push(d)))
                         self.sm.push("")
-                        self.emit_op(StackOp(op="roll", depth=d + 1))
+                        self.emit_op(StackOp(op="roll", depth=d))
                         self.sm.pop()
                         rolled = self.sm.remove_at_depth(d)
                         self.sm.push(rolled)
@@ -2705,11 +2998,14 @@ class _LoweringContext:
             if self.sm.has(prop.name):
                 self.bring_to_top(prop.name, True)  # consume
             elif prop.initial_value is not None:
-                self._push_property_value(prop.initial_value)
+                self._push_property_value(prop.initial_value, prop.name)
                 self.sm.push("")
             else:
                 self.emit_op(StackOp(op="push", value=big_int_push(0)))
                 self.sm.push("")
+
+            # N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(prop.type)
 
             # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
             # The width MUST come from ``numeric_state_type_width`` -- the same
@@ -3182,10 +3478,10 @@ class _LoweringContext:
         if len(state_props) == 1:
             prop = state_props[0]
             if is_variable_length_state_type(prop.type):
-                # Single variable-length byte-string: decode push-data prefix,
-                # drop the trailing empty remainder.
+                # Single variable-length byte-string: decode push-data prefix;
+                # the remainder must be empty (N-044).
                 self.emit_push_data_decode()  # [..., data, remaining]
-                self.emit_op(StackOp(op="drop")); self.sm.pop()
+                self.emit_assert_state_consumed()  # [..., data]
             elif is_numeric_state_type(prop.type):
                 self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
             self.sm.pop()
@@ -3215,13 +3511,20 @@ class _LoweringContext:
                         self.sm.push(prop.name)
                         self.sm.push("")
                 else:
+                    # Last field: it must consume the state section exactly
+                    # (N-044).
                     if is_variable_length_state_type(prop.type):
-                        # Last variable-length field: decode push-data prefix,
-                        # drop the trailing empty remainder.
                         self.emit_push_data_decode()  # [..., data, remaining]
-                        self.emit_op(StackOp(op="drop")); self.sm.pop()
-                    elif is_numeric_state_type(prop.type):
-                        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+                        self.emit_assert_state_consumed()  # [..., data]
+                    else:
+                        self.emit_op(StackOp(op="push", value=big_int_push(prop_sizes[i])))
+                        self.sm.push("")
+                        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+                        self.sm.pop(); self.sm.pop()
+                        self.sm.push(""); self.sm.push("")
+                        self.emit_assert_state_consumed()  # [..., field]
+                        if is_numeric_state_type(prop.type):
+                            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.sm.pop()
                     self.sm.push(prop.name)
 
@@ -3265,6 +3568,9 @@ class _LoweringContext:
 
             consume = self._operand_consume(value_ref, output_operands, binding_index, last_uses)
             self.bring_to_top(value_ref, consume)
+
+            # N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(prop.type)
 
             # Convert numeric/boolean values to fixed-width bytes. Same table as
             # the reader -- see ``numeric_state_type_width``.
@@ -3766,8 +4072,9 @@ class _LoweringContext:
         #     SIZE(codePart) where it found it, so the stack map is untouched.
         if self._has_state_section() and self._fixed_state_section_length() is None:
             # delta / exact are refined by _pin_code_part_length once every
-            # method has been lowered; the defaults are the sound ones (a lower
-            # bound of emitted_length + 0 holds for any deployment).
+            # method has been lowered; the defaults are the safe ones:
+            # exact=False makes the length a deploy-time slot (N-051) that the
+            # SDK fills with the real deployed code-part length.
             self.emit_op(StackOp(
                 op="verify_code_part_len",
                 code_part_len_delta=0,
@@ -4739,6 +5046,21 @@ class _LoweringContext:
 
     def _lower_log2(self, binding_name: str, args: list[str],
                     binding_index: int, last_uses: dict[str, int]) -> None:
+        """log2(n): exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+        user decision R86). No iteration cap: the bit length is read off the
+        minimal Script-number encoding.
+
+          OP_BIN2NUM                              n        (minimal re-encoding)
+          OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+          OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+          OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+          OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+          7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+          OP_NIP                                  b + #{c : t >= c}
+
+        t = 0 only as the sign-padding byte, where n's bit length is exactly
+        8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
+        """
         if not args:
             raise RuntimeError("log2 requires 1 argument")
         n = args[0]
@@ -4747,29 +5069,30 @@ class _LoweringContext:
         self.bring_to_top(n, n_is_last)
         self.sm.pop()
 
-        # Push counter = 0
+        def op(code: str) -> None:
+            self.emit_op(StackOp(op="opcode", code=code))
+
+        op("OP_BIN2NUM")
+        op("OP_DUP")
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
-
-        LOG2_ITERATIONS = 64
-        for _ in range(LOG2_ITERATIONS):
-            self.emit_op(StackOp(op="swap"))
-            self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-            self.emit_op(StackOp(op="push", value=big_int_push(1)))
-            self.emit_op(StackOp(op="opcode", code="OP_GREATERTHAN"))
-            self.emit_op(StackOp(
-                op="if",
-                then=[
-                    StackOp(op="push", value=big_int_push(2)),
-                    StackOp(op="opcode", code="OP_DIV"),
-                    StackOp(op="swap"),
-                    StackOp(op="opcode", code="OP_1ADD"),
-                    StackOp(op="swap"),
-                ],
-            ))
-            self.emit_op(StackOp(op="swap"))
-
-        # Drop input, keep counter
-        self.emit_op(StackOp(op="nip"))
+        op("OP_GREATERTHAN")
+        op("OP_VERIFY")
+        op("OP_SIZE")
+        op("OP_1SUB")
+        op("OP_TUCK")
+        op("OP_SPLIT")
+        op("OP_NIP")
+        op("OP_BIN2NUM")
+        op("OP_SWAP")
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        op("OP_MUL")
+        op("OP_1SUB")
+        for c in (1, 2, 4, 8, 16, 32, 64):
+            op("OP_OVER")
+            self.emit_op(StackOp(op="push", value=big_int_push(c)))
+            op("OP_GREATERTHANOREQUAL")
+            op("OP_ADD")
+        op("OP_NIP")
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -5097,9 +5420,12 @@ class _LoweringContext:
                 f"constant integer literal. Got a runtime value for '{depth_arg}'."
             )
         depth = int(depth_value)
-        if depth < 1 or depth > 64:
+        # The bound is 32, not 64 (F-260, mirrors Go R-172): emit_poseidon2_merkle_root
+        # refuses anything above 32, so a gate at 64 let 33..64 through to die in
+        # the emitter under its internal name.
+        if depth < 1 or depth > 32:
             raise RuntimeError(
-                f"merkleRootPoseidon2KB: depth must be between 1 and 64, got {depth}"
+                f"merkleRootPoseidon2KB: depth must be between 1 and 32, got {depth}"
             )
 
         # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
@@ -5126,15 +5452,19 @@ class _LoweringContext:
         for _ in range(runtime_arg_count):
             self.sm.pop()
 
-        from runar_compiler.codegen.poseidon2_merkle import emit_poseidon2_merkle_root
+        from runar_compiler.codegen.poseidon2_merkle import (
+            emit_poseidon2_merkle_root,
+            emit_poseidon2_root_pack,
+        )
         emit_fn = lambda op: self.emit_op(op)
         emit_poseidon2_merkle_root(emit_fn, depth)
 
-        # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
-        # The type system returns a single bigint, so only root_7 (top) is accessible.
-        # Drop the lower 7 elements with OP_NIP to keep the stack clean.
-        for _ in range(7):
-            self.emit_op(StackOp(op="nip"))
+        # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on
+        # top) but the type system models the result as one bigint. F-092: this
+        # used to be reconciled with seven OP_NIPs, discarding root_0..root_6.
+        # Pack all eight limbs base-2^32 instead, matching Go's
+        # EmitPoseidon2RootPack byte for byte (Go-only-parity policy).
+        emit_poseidon2_root_pack(emit_fn)
         self.sm.push(binding_name)
         self._track_depth()
 
@@ -5302,25 +5632,68 @@ def _method_uses_check_preimage(
     missed manual checkPreimage calls inside if/loop bodies and
     private helpers, causing stack lowering to fail with
     `Value '_opPushTxSig' not found on stack`."""
-    if seen is None:
-        seen = set()
+    return _some_reachable_binding(
+        bindings, private_methods, seen, lambda b: b.value.kind == "check_preimage",
+    )
+
+
+def _some_reachable_binding(
+    bindings: list[ANFBinding],
+    private_methods: dict | None,
+    seen: set[str] | None,
+    pred,
+) -> bool:
+    """True when ``pred`` holds for some binding reachable from ``bindings``
+    through if arms, loop bodies and (when ``private_methods`` is given) the
+    bodies of called private methods not in ``seen``.
+
+    N-264: an explicit work list, not recursion -- a chain of D helpers each
+    calling the next under K nested ifs is D*K levels deep through those
+    edges. The answer is plain reachability, exactly what the recursive walk
+    (which pruned a method only when it was already on the current call
+    path) computed."""
+    visited = set(seen) if seen is not None else set()
+    work: list[list[ANFBinding]] = [bindings]
+    while work:
+        for b in work.pop():
+            if pred(b):
+                return True
+            if b.value.kind == "if":
+                work.append(getattr(b.value, "else_", None) or [])
+                work.append(getattr(b.value, "then", None) or [])
+            elif b.value.kind == "loop":
+                work.append(getattr(b.value, "body", None) or [])
+            elif b.value.kind == "method_call" and private_methods is not None:
+                target = private_methods.get(b.value.method)
+                if target is not None and target.name not in visited:
+                    visited.add(target.name)
+                    work.append(target.body)
+    return False
+
+
+# N-055: the one diagnostic all seven tiers give an --ir program whose
+# method_call reaches a private method holding an output intrinsic. The source
+# frontend inlines such helpers before ANF, so the intrinsic always sits in the
+# public method; --ir has no delegation support.
+_IR_OUTPUT_DELEGATION_ERROR = (
+    "output intrinsics must be called from the public method or an inlined helper; "
+    "--ir method_call delegation is not supported"
+)
+
+
+def _contains_output_intrinsic(bindings: list[ANFBinding]) -> bool:
+    """True if bindings, at any if / loop depth, hold an output intrinsic."""
     for b in bindings:
-        if b.value.kind == "check_preimage":
+        kind = b.value.kind
+        if kind in ("add_output", "add_raw_output", "add_data_output"):
             return True
-        if b.value.kind == "if":
-            if _method_uses_check_preimage(b.value.then, private_methods, seen):
+        if kind == "if":
+            if (_contains_output_intrinsic(getattr(b.value, "then", None) or [])
+                    or _contains_output_intrinsic(getattr(b.value, "else_", None) or [])):
                 return True
-            if _method_uses_check_preimage(b.value.else_ or [], private_methods, seen):
+        if kind == "loop":
+            if _contains_output_intrinsic(getattr(b.value, "body", None) or []):
                 return True
-        if b.value.kind == "loop":
-            if _method_uses_check_preimage(b.value.body, private_methods, seen):
-                return True
-        if b.value.kind == "method_call" and private_methods is not None:
-            target = private_methods.get(b.value.method)
-            if target is not None and target.name not in seen:
-                next_seen = seen | {target.name}
-                if _method_uses_check_preimage(target.body, private_methods, next_seen):
-                    return True
     return False
 
 
@@ -5370,28 +5743,10 @@ def _method_reads_var_len_state(
     guarded via `seen`) exactly like the sibling _method_uses_check_preimage --
     otherwise _codePart is never pushed and the load_prop falls through to the
     deploy-time constructor placeholder instead of the live on-chain state."""
-    if seen is None:
-        seen = set()
-    for b in bindings:
-        if b.value.kind == "load_prop" and getattr(b.value, "name", None) in var_len_props:
-            return True
-        if b.value.kind == "if":
-            then_bindings = getattr(b.value, "then", None) or []
-            else_bindings = getattr(b.value, "else_", None) or []
-            if (_method_reads_var_len_state(then_bindings, var_len_props, private_methods, seen)
-                    or _method_reads_var_len_state(else_bindings, var_len_props, private_methods, seen)):
-                return True
-        if b.value.kind == "loop":
-            body_bindings = getattr(b.value, "body", None) or []
-            if _method_reads_var_len_state(body_bindings, var_len_props, private_methods, seen):
-                return True
-        if b.value.kind == "method_call" and private_methods is not None:
-            target = private_methods.get(b.value.method)
-            if target is not None and target.name not in seen:
-                next_seen = seen | {target.name}
-                if _method_reads_var_len_state(target.body, var_len_props, private_methods, next_seen):
-                    return True
-    return False
+    return _some_reachable_binding(
+        bindings, private_methods, seen,
+        lambda b: b.value.kind == "load_prop" and getattr(b.value, "name", None) in var_len_props,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5544,11 +5899,18 @@ def _pin_code_part_length(
     pins: list[StackOp] = []
     placeholders: list[int] = []
 
-    def walk(ops: list[StackOp]) -> None:
-        for op in ops:
+    # N-264: pre-order over nested if arms on an explicit stack -- inlined
+    # private methods nest D*K if-ops here, too deep to recurse on.
+    def walk(root: list[StackOp]) -> None:
+        stack = [iter(root)]
+        while stack:
+            op = next(stack[-1], None)
+            if op is None:
+                stack.pop()
+                continue
             if op.op == "if":
-                walk(op.then)
-                walk(op.else_ops)
+                stack.append(iter(op.else_ops))
+                stack.append(iter(op.then))
             elif op.op == "placeholder":
                 placeholders.append(op.param_index)
             elif op.op == "verify_code_part_len":
@@ -5572,8 +5934,8 @@ def _pin_code_part_length(
             typ = ctor_props[param_index].type
         growth, known = _constructor_slot_growth(typ)
         if not known:
-            # No compile-time width. Growth is never negative, so the running
-            # sum stays a sound lower bound -- just not an exact one.
+            # No compile-time width: the emitter records the length field as a
+            # deploy-time codePartLenSlots entry (N-051) and the SDK patches it.
             exact = False
         else:
             delta += growth

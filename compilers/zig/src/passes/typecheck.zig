@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
+const anf_lower = @import("anf_lower.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -33,25 +34,61 @@ const log = std.log.scoped(.typecheck);
 pub const TypeCheckResult = struct {
     contract: ContractNode,
     errors: []const []const u8,
+    /// N-463: `error_locations[i]` is where `errors[i]` points in the source,
+    /// when known (every surface parser records expression positions).
+    /// Same length as `errors`, or empty.
+    error_locations: []const ?types.SourceLocation = &.{},
 
     pub fn deinit(self: *const TypeCheckResult, allocator: Allocator) void {
         for (self.errors) |msg| allocator.free(msg);
         if (self.errors.len > 0) allocator.free(self.errors);
+        if (self.error_locations.len > 0) allocator.free(self.error_locations);
     }
 };
+
+/// N-463: the recorded first-token position of `args[i]`, or null when the
+/// parser recorded none (every surface but .runar.ts) or the lists disagree.
+fn argLoc(arg_locs: []const ?types.SourceLocation, args: []const Expression, i: usize) ?types.SourceLocation {
+    if (arg_locs.len != args.len or i >= arg_locs.len) return null;
+    return arg_locs[i];
+}
+
+/// N-472: a bigint or boolean literal has no location in any TS parser, so an
+/// error about one anchors at the statement (arguments) or prints none
+/// (operands), whatever token position this tier's parser recorded for it.
+fn isLocationlessLiteral(e: Expression) bool {
+    return switch (e) {
+        .literal_int, .literal_bool, .literal_bigint => true,
+        else => false,
+    };
+}
+
+/// The location of operand `e` whose parser-recorded position is `loc`:
+/// none for a literal, as TS prints none (N-472).
+fn operandLoc(e: Expression, loc: ?types.SourceLocation) ?types.SourceLocation {
+    return if (isLocationlessLiteral(e)) null else loc;
+}
+
+/// N-321: cap on a typecheck message; mirrored in every tier.
+const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
 /// Type-check a Runar AST. Returns the same AST plus any errors.
 pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult {
     var checker = try TypeChecker.init(allocator, contract);
     defer checker.deinit();
 
+    checker.checkPropertyInitializers();
     checker.checkConstructor();
     for (contract.methods) |method| {
         checker.checkMethod(method);
     }
 
     const errors = try checker.errors.toOwnedSlice(allocator);
-    return .{ .contract = contract, .errors = errors };
+    const error_locations: []const ?types.SourceLocation = if (checker.error_locs.items.len == errors.len)
+        try checker.error_locs.toOwnedSlice(allocator)
+    else
+        &.{};
+    return .{ .contract = contract, .errors = errors, .error_locations = error_locations };
 }
 
 // ============================================================================
@@ -232,7 +269,23 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "extractPrevOutputScript", sig(&.{ .bigint, .byte_string }, .byte_string) },
     .{ "requireOutputP2PKH", sig(&.{ .bigint, .byte_string, .bigint }, .void) },
     .{ "currentBlockHeight", sig(&.{}, .bigint) },
+    // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+    // satoshis of the default single-output state continuation.
+    .{ "continuationAmount", sig(&.{}, .bigint) },
 });
+
+/// F-024 (R14): the one diagnostic every tier emits for a write to
+/// continuationAmount(). Also raised by `parse_ts.zig` for an assignment,
+/// because this tier's `Assign` node carries a name, not an expression target.
+pub const CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned";
+
+/// True when `e` is a call to `continuationAmount()`.
+pub fn isContinuationAmountCall(e: types.Expression) bool {
+    return switch (e) {
+        .call => |c| std.mem.eql(u8, c.callee, "continuationAmount"),
+        else => false,
+    };
+}
 
 // ============================================================================
 // Subtyping
@@ -252,6 +305,18 @@ pub fn isByteFamily(t: RunarType) bool {
         .p256_point, .p384_point => true,
         else => false,
     };
+}
+
+/// Does the builtin `name` return a ByteString-family value?
+///
+/// N-347: `anf_lower.zig` answers "is `f(x)` a byte string?" from this, i.e.
+/// from the return type column of `builtin_functions`, instead of keeping its
+/// own hand-written list. That list drifted twice (N-054, N-345) and was still
+/// missing merkleRootSha256 / merkleRootHash256 / bn254G1Add / bn254G1Negate /
+/// bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to OP_NUMEQUAL.
+pub fn builtinReturnsBytes(name: []const u8) bool {
+    const func_sig = builtin_functions.get(name) orelse return false;
+    return isByteFamily(func_sig.return_type);
 }
 
 /// BigInt-family types: all are subtypes of bigint.
@@ -332,7 +397,29 @@ const TypeEnv = struct {
         }
         return null;
     }
+
+    /// Index of the innermost scope binding `name`, or null if none does.
+    fn scopeIndexOf(self: *const TypeEnv, name: []const u8) ?usize {
+        var i = self.scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.scopes.items[i].contains(name)) return i;
+        }
+        return null;
+    }
 };
+
+/// F-110: whether a for-statement may execute its body two or more times.
+/// Mirrors the trip count `lowerForStatement` (anf_lower) unrolls; a shape it
+/// cannot resolve is refused elsewhere and is treated as repeating here.
+fn loopMayRunTwice(f: types.ForStmt) bool {
+    if (!f.bound_is_const or !f.init_is_const) return true;
+    const start: i128 = f.init_value;
+    const bound: i128 = f.bound;
+    const base: i128 = if (f.descending) start - bound else bound - start;
+    const count: i128 = if (f.inclusive) base + 1 else base;
+    return count >= 2;
+}
 
 // ============================================================================
 // Affine types
@@ -343,6 +430,45 @@ fn isAffineType(t: RunarType) bool {
 }
 
 /// Functions that consume affine values, mapped to the parameter indices that get consumed.
+/// N-109 / N-288: what a contract method consumes when it is called (it is
+/// inlined): the indices of its affine parameters, and the `prop:<name>`
+/// origin keys of the affine properties it consumes. Both slices, and every
+/// key string, are owned by the summary.
+const MethodConsumption = struct {
+    params: []u8,
+    props: [][]u8,
+
+    fn deinit(self: MethodConsumption, allocator: Allocator) void {
+        allocator.free(self.params);
+        for (self.props) |key| allocator.free(key);
+        allocator.free(self.props);
+    }
+};
+
+/// N-109: method name -> what that method consumes.
+const ConsumedParamSummary = std.StringHashMapUnmanaged(MethodConsumption);
+
+/// N-453: a `ctx: runar.StatefulContext` parameter — a handle, not a value.
+fn isStatefulContextParam(p: types.ParamNode) bool {
+    return std.mem.eql(u8, p.type_name, "StatefulContext");
+}
+
+/// N-453: a method's parameter count without its StatefulContext handles.
+fn valueParamCount(params: []const types.ParamNode) usize {
+    var n: usize = 0;
+    for (params) |p| {
+        if (!isStatefulContextParam(p)) n += 1;
+    }
+    return n;
+}
+
+fn freeConsumedParamSummary(allocator: Allocator, summary: *ConsumedParamSummary) void {
+    var it = summary.iterator();
+    while (it.next()) |entry| entry.value_ptr.deinit(allocator);
+    summary.deinit(allocator);
+    allocator.destroy(summary);
+}
+
 fn consumedIndices(func_name: []const u8) ?[]const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
         .{ "checkSig", &[_]u8{0} },
@@ -360,6 +486,12 @@ const TypeChecker = struct {
     allocator: Allocator,
     contract: ContractNode,
     errors: std.ArrayListUnmanaged([]const u8),
+    /// N-463: parallel to `errors`; see `TypeCheckResult.error_locations`.
+    error_locs: std.ArrayListUnmanaged(?types.SourceLocation) = .empty,
+    /// N-472: the statement being checked, TS's `currentStmtLoc`: where an
+    /// error about an argument or call anchors when the argument itself
+    /// carries no location (a literal, or a call with no arguments).
+    current_stmt_loc: ?types.SourceLocation = null,
     prop_types: std.StringHashMapUnmanaged(RunarType),
     /// Element type of each `FixedArray<T, N>` property, for the T that this
     /// tier can actually name. Populated only when T is a scalar: a nested
@@ -375,11 +507,23 @@ const TypeChecker = struct {
     /// aliases. Populated by `const_decl` / `let_decl` of an affine
     /// type whose initializer is itself an affine origin.
     affine_aliases: std.StringHashMapUnmanaged([]const u8),
+    /// F-110: for every enclosing loop that may run two or more times, the
+    /// env scope index its loop variable and body bindings live at (innermost
+    /// last). A bounded loop is unrolled `count` times, so consuming an affine
+    /// value bound below the innermost index happens once per iteration.
+    repeating_loop_scopes: std.ArrayListUnmanaged(usize) = .empty,
     /// Pre-allocated `prop:<name>` origin keys for each contract
     /// property, owned by this checker. Avoids per-lookup allocation
     /// in the affine consumption check.
     prop_origin_keys: std.StringHashMapUnmanaged([]u8),
     stateful_ctx_params: std.StringHashMapUnmanaged(void),
+    /// N-109: for every contract method, the indices of the parameters it
+    /// consumes (directly or through further helper calls). Private helpers
+    /// are inlined, so a call consumes the arguments at those positions.
+    /// Computed lazily by `consumedParamSummary`; owned by this checker only
+    /// when `owns_consumed_params` (scratch checkers borrow the caller's).
+    consumed_params: ?*ConsumedParamSummary = null,
+    owns_consumed_params: bool = false,
 
     fn init(allocator: Allocator, contract: ContractNode) !TypeChecker {
         var self = TypeChecker{
@@ -412,12 +556,29 @@ const TypeChecker = struct {
         // StatefulSmartContract gets implicit txPreimage property
         if (contract.parent_class == .stateful_smart_contract) {
             try self.prop_types.put(allocator, "txPreimage", .sig_hash_preimage);
+            // N-288: and an origin key for it, so `this.txPreimage` is
+            // tracked as an affine origin like every other property (the TS
+            // reference keys it `prop:txPreimage`). Without one, consuming it
+            // twice -- directly or through a helper -- went unnoticed.
+            const gop = try self.prop_origin_keys.getOrPut(allocator, "txPreimage");
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try std.fmt.allocPrint(allocator, "prop:{s}", .{"txPreimage"});
+            }
         }
 
         // Register method signatures
+        // N-453: a StatefulContext parameter is a compiler-re-injected
+        // handle, not a value: it is not part of a method's call arity (a
+        // `self.helper(ctx, ...)` call site drops the bare handle, see
+        // `withoutStatefulContextArgs`).
         for (contract.methods) |method| {
-            const params = try allocator.alloc(RunarType, method.params.len);
-            for (method.params, 0..) |p, i| params[i] = p.type_info;
+            const params = try allocator.alloc(RunarType, valueParamCount(method.params));
+            var n: usize = 0;
+            for (method.params) |p| {
+                if (isStatefulContextParam(p)) continue;
+                params[n] = p.type_info;
+                n += 1;
+            }
             const ret: RunarType = if (method.is_public) .void else inferMethodReturnType(method);
             try self.method_sigs.put(allocator, method.name, .{ .params = params, .return_type = ret });
         }
@@ -426,6 +587,7 @@ const TypeChecker = struct {
     }
 
     fn deinit(self: *TypeChecker) void {
+        self.error_locs.deinit(self.allocator);
         // Free method sig param slices we allocated
         var it = self.method_sigs.iterator();
         while (it.next()) |entry| {
@@ -436,11 +598,113 @@ const TypeChecker = struct {
         self.prop_elem_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
         self.affine_aliases.deinit(self.allocator);
+        self.repeating_loop_scopes.deinit(self.allocator);
         var keys_it = self.prop_origin_keys.iterator();
         while (keys_it.next()) |entry| self.allocator.free(entry.value_ptr.*);
         self.prop_origin_keys.deinit(self.allocator);
         self.stateful_ctx_params.deinit(self.allocator);
+        if (self.owns_consumed_params) {
+            if (self.consumed_params) |summary| freeConsumedParamSummary(self.allocator, summary);
+        }
         // Note: self.errors ownership transfers to caller via toOwnedSlice
+    }
+
+    /// N-109: run the affine checker over each method body with throwaway
+    /// diagnostics and record which parameters end up consumed. Reusing the
+    /// checker inherits alias, if-arm and loop handling. Consumption only
+    /// grows as summaries grow, so iterating until no entry changes
+    /// terminates, also for recursive call graphs (refused separately by the
+    /// validator). Mirrors `consumedParamSummary` in the TS reference
+    /// 03-typecheck.ts.
+    fn consumedParamSummary(allocator: Allocator, contract: ContractNode) !*ConsumedParamSummary {
+        const summary = try allocator.create(ConsumedParamSummary);
+        summary.* = .empty;
+        errdefer freeConsumedParamSummary(allocator, summary);
+        for (contract.methods) |method| {
+            try summary.put(allocator, method.name, .{
+                .params = try allocator.alloc(u8, 0),
+                .props = try allocator.alloc([]u8, 0),
+            });
+        }
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (contract.methods) |method| {
+                var scratch = try TypeChecker.init(allocator, contract);
+                defer {
+                    for (scratch.errors.items) |msg| allocator.free(msg);
+                    scratch.errors.deinit(allocator);
+                    scratch.deinit();
+                }
+                scratch.consumed_params = summary;
+                const consumed = try scratch.consumedParamIndices(method);
+                const slot = summary.getPtr(method.name).?;
+                if (consumed.params.len != slot.params.len or consumed.props.len != slot.props.len) {
+                    slot.deinit(allocator);
+                    slot.* = consumed;
+                    changed = true;
+                } else {
+                    consumed.deinit(allocator);
+                }
+            }
+        }
+        return summary;
+    }
+
+    /// N-109: the indices of `method`'s parameters its body consumes, and
+    /// (N-288) the `prop:<name>` property origins it consumes. The caller
+    /// owns the result (free with `MethodConsumption.deinit`).
+    fn consumedParamIndices(self: *TypeChecker, method: MethodNode) !MethodConsumption {
+        var env = try TypeEnv.init(self.allocator);
+        defer env.deinit();
+        self.consumed_values.clearRetainingCapacity();
+        self.affine_aliases.clearRetainingCapacity();
+        self.stateful_ctx_params.clearRetainingCapacity();
+        for (method.params) |param| {
+            // N-453: the handle is not a value, so it is not bound: a bare
+            // `ctx` anywhere but a `self.helper(ctx, ...)` argument is an
+            // undefined variable.
+            if (isStatefulContextParam(param)) {
+                try self.stateful_ctx_params.put(self.allocator, param.name, {});
+                continue;
+            }
+            env.define(param.name, param.type_info);
+        }
+        self.checkStatements(method.body, &env);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        // N-453: indices into the ctx-free parameter list, which is what a
+        // call site's ctx-free argument list lines up with.
+        var i: usize = 0;
+        for (method.params) |param| {
+            if (isStatefulContextParam(param)) continue;
+            if (self.consumed_values.get(param.name) orelse false) {
+                try out.append(self.allocator, @intCast(i));
+            }
+            i += 1;
+        }
+        var props: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (props.items) |key| self.allocator.free(key);
+            props.deinit(self.allocator);
+        }
+        var it = self.consumed_values.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.* or !std.mem.startsWith(u8, entry.key_ptr.*, "prop:")) continue;
+            const key = try self.allocator.dupe(u8, entry.key_ptr.*);
+            props.append(self.allocator, key) catch |err| {
+                self.allocator.free(key);
+                return err;
+            };
+        }
+        std.mem.sort([]u8, props.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+        const params = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(params);
+        return .{ .params = params, .props = try props.toOwnedSlice(self.allocator) };
     }
 
     /// One emitted state value: what the state continuation actually carries.
@@ -498,15 +762,73 @@ const TypeChecker = struct {
     }
 
     fn addError(self: *TypeChecker, comptime fmt: []const u8, args: anytype) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        self.addErrorAt(null, fmt, args);
+    }
+
+    /// N-463: `addError` anchored at `loc` -- the offending expression's
+    /// first token, where the TS reference anchors it -- when known.
+    fn addErrorAt(self: *TypeChecker, loc: ?types.SourceLocation, comptime fmt: []const u8, args: anytype) void {
+        var msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        // N-321: a message may echo user-written source text of any length; cap it.
+        if (msg.len > MAX_DIAGNOSTIC_BYTES) {
+            var cut: usize = MAX_DIAGNOSTIC_BYTES;
+            while (cut > 0 and (msg[cut] & 0xC0) == 0x80) cut -= 1;
+            const capped = std.fmt.allocPrint(self.allocator, "{s}...({d} more bytes elided)", .{ msg[0..cut], msg.len - cut }) catch {
+                self.allocator.free(msg);
+                return;
+            };
+            self.allocator.free(msg);
+            msg = capped;
+        }
+        self.error_locs.ensureUnusedCapacity(self.allocator, 1) catch {
+            self.allocator.free(msg);
+            return;
+        };
         self.errors.append(self.allocator, msg) catch {
             self.allocator.free(msg);
+            return;
         };
+        self.error_locs.appendAssumeCapacity(loc);
+    }
+
+    /// N-472: the anchor of an error about argument `i`: the argument's own
+    /// position, else the statement, as TS's
+    /// `args[i].sourceLocation ?? currentStmtLoc`. A literal argument has no
+    /// location in TS, whatever token position this tier recorded.
+    fn argErrorLoc(self: *const TypeChecker, arg_locs: []const ?types.SourceLocation, args: []const Expression, i: usize) ?types.SourceLocation {
+        if (i < args.len and isLocationlessLiteral(args[i])) return self.current_stmt_loc;
+        return argLoc(arg_locs, args, i) orelse self.current_stmt_loc;
     }
 
     // ------------------------------------------------------------------
     // Top-level checks
     // ------------------------------------------------------------------
+
+    /// N-234: a scalar property initializer whose literal type does not
+    /// match the declared property type compiled without complaint on
+    /// every tier (`readonly x: bigint = toByteString('ab')` emitted a
+    /// locking script that pushes a byte string where the contract's own
+    /// arithmetic expects a script NUMBER). The validator only checks that
+    /// an initializer IS a literal of one of the three families, never
+    /// that it is a literal OF THE DECLARED TYPE. FixedArray properties
+    /// are skipped here: their element-type check already lives in
+    /// expand_fixed_arrays.zig (N-133), which runs on the expanded array
+    /// elements, not the whole-array initializer this pass sees. Mirrors
+    /// the TS reference's method of the same name in 03-typecheck.ts.
+    fn checkPropertyInitializers(self: *TypeChecker) void {
+        for (self.contract.properties) |prop| {
+            const initializer = prop.initializer orelse continue;
+            if (prop.type_info == .fixed_array) continue;
+            const init_type = inferExprTypeStatic(initializer);
+            if (init_type == .unknown) continue;
+            if (!isSubtype(init_type, prop.type_info)) {
+                self.addError("type '{s}' is not assignable to type '{s}'", .{
+                    types.runarTypeToString(init_type),
+                    types.runarTypeToString(prop.type_info),
+                });
+            }
+        }
+    }
 
     fn checkConstructor(self: *TypeChecker) void {
         var env = TypeEnv.init(self.allocator) catch return;
@@ -535,10 +857,12 @@ const TypeChecker = struct {
         self.stateful_ctx_params.clearRetainingCapacity();
 
         for (method.params) |param| {
-            env.define(param.name, param.type_info);
-            if (std.mem.eql(u8, param.type_name, "StatefulContext")) {
+            // N-453: not bound — see consumedParamIndices.
+            if (isStatefulContextParam(param)) {
                 self.stateful_ctx_params.put(self.allocator, param.name, {}) catch {};
+                continue;
             }
+            env.define(param.name, param.type_info);
         }
 
         self.checkStatements(method.body, &env);
@@ -547,8 +871,15 @@ const TypeChecker = struct {
         // addDataOutput in the same method body. v1 of the intrinsic assumes
         // a fixed 34-byte per-output stride; a variable-length OP_RETURN
         // output silently breaks the byte-offset computation.
-        const has_require_p2pkh = bodyCallsBuiltin(method.body, "requireOutputP2PKH");
-        const has_add_data_output = bodyCallsAddDataOutput(method.body);
+        //
+        // F-075: all three guards here read the method's effects through
+        // anf_lower's transitive continuation predicates, which follow the
+        // private-helper call graph — the same analysis ANF lowering injects
+        // the continuation from, and ANF lowering inlines private helpers. A
+        // body-local walk let a developer disable every guard by moving the
+        // triggering call into a helper.
+        const has_require_p2pkh = anf_lower.methodCallsRequireOutputP2PKH(method, self.contract, false);
+        const has_add_data_output = anf_lower.methodHasAddDataOutput(method, self.contract);
         if (has_require_p2pkh and has_add_data_output) {
             self.addError(
                 "method '{s}' mixes requireOutputP2PKH() with addDataOutput() — " ++
@@ -578,8 +909,8 @@ const TypeChecker = struct {
         // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         // Mirrors compilers/../03-typecheck.ts analyzeMethodOutputSignals.
         if (self.contract.parent_class == .stateful_smart_contract) {
-            const signals = analyzeMethodOutputSignals(method.body, self.contract.properties);
-            if (has_require_p2pkh and signals.has_state_output) {
+            const has_state_output = anf_lower.methodHasAddOutput(method, self.contract);
+            if (has_require_p2pkh and has_state_output) {
                 self.addError(
                     "method '{s}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — " ++
                         "the intrinsic reads output i at byte offset i*34, which is only correct when " ++
@@ -591,7 +922,10 @@ const TypeChecker = struct {
                     .{method.name},
                 );
             }
-            if (signals.requires_output_p2pkh_zero and signals.mutates_state and !signals.has_state_output) {
+            if (anf_lower.methodCallsRequireOutputP2PKH(method, self.contract, true) and
+                anf_lower.methodMutatesState(method, self.contract) and
+                !has_state_output)
+            {
                 self.addError(
                     "method '{s}' calls requireOutputP2PKH(0, ...) but also mutates state " ++
                         "without this.addOutput()/addRawOutput() — the auto-injected single-output state " ++
@@ -605,16 +939,42 @@ const TypeChecker = struct {
         }
     }
 
+    /// N-323: a local annotated with a type name no tier recognises. Every
+    /// parser lowers an unrecognised name to `.unknown`, and `isSubtype` treats
+    /// `.unknown` as compatible with everything, so `let q: TTT = a;` used to
+    /// compile. The six peer tiers answer "type 'bigint' is not assignable to
+    /// type 'TTT'"; this reuses that wording, quoting the spelled name.
+    fn addUnknownAnnotationError(self: *TypeChecker, init_type: RunarType, spelled: []const u8) void {
+        self.addError("type '{s}' is not assignable to type '{s}'", .{
+            types.runarTypeToString(init_type),
+            if (spelled.len > 0) spelled else "unknown",
+        });
+    }
+
     fn checkStatements(self: *TypeChecker, stmts: []const Statement, env: *TypeEnv) void {
         for (stmts) |stmt| self.checkStatement(stmt, env);
     }
 
     fn checkStatement(self: *TypeChecker, stmt: Statement, env: *TypeEnv) void {
+        // N-472: TS's `currentStmtLoc = stmt.sourceLocation ?? currentStmtLoc`.
+        const stmt_loc: ?types.SourceLocation = switch (stmt) {
+            .const_decl => |d| d.source_loc,
+            .let_decl => |d| d.source_loc,
+            .assign => |d| d.source_loc,
+            .if_stmt => |d| d.source_loc,
+            .for_stmt => |d| d.source_loc,
+            .expr_stmt => |d| d.source_loc,
+            .assert_stmt => |d| d.source_loc,
+            .return_stmt => |d| d.source_loc,
+        };
+        if (stmt_loc != null) self.current_stmt_loc = stmt_loc;
         switch (stmt) {
             .const_decl => |decl| {
                 const init_type = self.inferExprType(decl.value, env);
                 const decl_type = if (decl.type_info) |declared| blk: {
-                    if (!isSubtype(init_type, declared)) {
+                    if (declared == .unknown) {
+                        self.addUnknownAnnotationError(init_type, decl.type_name);
+                    } else if (!isSubtype(init_type, declared)) {
                         self.addError("type '{s}' is not assignable to type '{s}'", .{
                             types.runarTypeToString(init_type),
                             types.runarTypeToString(declared),
@@ -632,7 +992,9 @@ const TypeChecker = struct {
                 if (decl.value) |val| {
                     const init_type = self.inferExprType(val, env);
                     const decl_type = if (decl.type_info) |declared| blk: {
-                        if (!isSubtype(init_type, declared)) {
+                        if (declared == .unknown) {
+                            self.addUnknownAnnotationError(init_type, decl.type_name);
+                        } else if (!isSubtype(init_type, declared)) {
                             self.addError("type '{s}' is not assignable to type '{s}'", .{
                                 types.runarTypeToString(init_type),
                                 types.runarTypeToString(declared),
@@ -646,6 +1008,14 @@ const TypeChecker = struct {
                     };
                     self.recordAffineAlias(decl.name, val, decl_type);
                 } else {
+                    // N-325: N-323 only checked the initializer branch, so a
+                    // declaration WITHOUT one (`var q runar.TTT`) still compiled.
+                    // There is no initializer type to quote, hence the plain form.
+                    if (decl.type_info) |declared| {
+                        if (declared == .unknown and decl.type_name.len > 0) {
+                            self.addError("unsupported type '{s}' in local declaration of '{s}'", .{ decl.type_name, decl.name });
+                        }
+                    }
                     env.define(decl.name, decl.type_info orelse .unknown);
                 }
             },
@@ -711,16 +1081,42 @@ const TypeChecker = struct {
                 if (cond_type != .boolean) {
                     self.addError("if condition must be boolean, got '{s}'", .{types.runarTypeToString(cond_type)});
                 }
-                env.pushScope() catch return;
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                // An allocation failure would silently lose a consumption, so
+                // it is reported, not swallowed.
+                var consumed_before = self.consumed_values.clone(self.allocator) catch {
+                    self.addError("out of memory tracking affine consumption", .{});
+                    return;
+                };
+                env.pushScope() catch {
+                    consumed_before.deinit(self.allocator);
+                    return;
+                };
                 self.checkStatements(if_s.then_body, env);
                 env.popScope();
+                var consumed_after_then = self.consumed_values;
+                self.consumed_values = consumed_before;
+                defer consumed_after_then.deinit(self.allocator);
                 if (if_s.else_body) |else_body| {
-                    env.pushScope() catch return;
+                    env.pushScope() catch {
+                        self.addError("out of memory tracking affine consumption", .{});
+                        return;
+                    };
                     self.checkStatements(else_body, env);
                     env.popScope();
                 }
+                var it = consumed_after_then.keyIterator();
+                while (it.next()) |origin| {
+                    self.consumed_values.put(self.allocator, origin.*, true) catch {
+                        self.addError("out of memory tracking affine consumption", .{});
+                        return;
+                    };
+                }
             },
             .for_stmt => |for_s| {
+                const loop_scope = env.scopes.items.len;
                 env.pushScope() catch return;
                 env.define(for_s.var_name, .bigint);
                 // N-061 / R-065: the update clause used to be skipped entirely
@@ -731,7 +1127,20 @@ const TypeChecker = struct {
                 // clause to a unit-step advance; this is the type-level half of
                 // the same guard.
                 if (for_s.update) |u| self.checkStatement(u.*, env);
+                // F-110: the body runs once per iteration; see
+                // `repeating_loop_scopes`. An allocation failure here would
+                // silently drop the guard, so it is reported, not swallowed.
+                var pushed = false;
+                if (loopMayRunTwice(for_s)) {
+                    self.repeating_loop_scopes.append(self.allocator, loop_scope) catch {
+                        self.addError("out of memory tracking loop scopes", .{});
+                        env.popScope();
+                        return;
+                    };
+                    pushed = true;
+                }
                 self.checkStatements(for_s.body, env);
+                if (pushed) _ = self.repeating_loop_scopes.pop();
                 env.popScope();
             },
             .expr_stmt => |expr| {
@@ -743,7 +1152,8 @@ const TypeChecker = struct {
                     self.addError("assert() condition must be boolean, got '{s}'", .{types.runarTypeToString(cond_type)});
                 }
             },
-            .return_stmt => |maybe_expr| {
+            .return_stmt => |maybe_expr_r| {
+                const maybe_expr = maybe_expr_r.value;
                 if (maybe_expr) |expr| {
                     _ = self.inferExprType(expr, env);
                 }
@@ -842,7 +1252,8 @@ const TypeChecker = struct {
                     // `unknown` never reaches here: isSubtype treats it as top
                     // of the lattice, so a private helper's return type is
                     // related to everything, exactly as in TS.
-                    self.addError(
+                    self.addErrorAt(
+                        tern.location,
                         "Ternary branches have incompatible types: '{s}' and '{s}'",
                         .{ types.runarTypeToString(cons_type), types.runarTypeToString(alt_type) },
                     );
@@ -859,6 +1270,7 @@ const TypeChecker = struct {
                 return .unknown;
             },
             .increment => |inc| {
+                if (isContinuationAmountCall(inc.operand)) self.addError("{s}", .{CONTINUATION_AMOUNT_READ_ONLY});
                 // N-019: `inferOperandType`, not `inferExprType` — a FixedArray
                 // element read resolves to the array's declared element type
                 // here, the same way `checkBinaryExpr` resolves its operands.
@@ -875,6 +1287,7 @@ const TypeChecker = struct {
                 return .bigint;
             },
             .decrement => |dec| {
+                if (isContinuationAmountCall(dec.operand)) self.addError("{s}", .{CONTINUATION_AMOUNT_READ_ONLY});
                 const operand_type = self.inferOperandType(dec.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("-- operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
@@ -882,7 +1295,27 @@ const TypeChecker = struct {
                 return .bigint;
             },
             .array_literal => |elems| {
-                for (elems) |elem| _ = self.inferExprType(elem, env);
+                // F-216: compare every element to the first, the same way
+                // the six peer tiers' generic array-literal arm does
+                // (F-063). checkMultiSig's special case (below) only
+                // validates a Sig[]/PubKey[] array when the LITERAL
+                // appears directly at the call site; binding a
+                // heterogeneous literal to a local `const` first and
+                // passing the identifier bypassed that check entirely,
+                // because this arm used to infer elements for side
+                // effects only and return `.unknown` unconditionally with
+                // no cross-element comparison.
+                if (elems.len == 0) return .unknown;
+                const elem_type = self.inferExprType(elems[0], env);
+                for (elems[1..]) |elem| {
+                    const et = self.inferExprType(elem, env);
+                    if (!isSubtype(et, elem_type) and et != .unknown) {
+                        self.addError("Array element type mismatch: expected '{s}', got '{s}'", .{
+                            types.runarTypeToString(elem_type),
+                            types.runarTypeToString(et),
+                        });
+                    }
+                }
                 return .unknown;
             },
         };
@@ -961,27 +1394,27 @@ const TypeChecker = struct {
             .add => {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(left_type)});
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '+' must be bigint, got '{s}'", .{types.runarTypeToString(right_type)});
                 return .bigint;
             },
             // Arithmetic
             .sub, .mul, .div, .mod => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Comparison
             .lt, .lte, .gt, .gte => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .boolean;
             },
             // Equality
@@ -996,7 +1429,7 @@ const TypeChecker = struct {
                 const compatible = isSubtype(left_type, right_type) or
                     isSubtype(right_type, left_type);
                 if (!compatible and left_type != .unknown and right_type != .unknown) {
-                    self.addError("cannot compare '{s}' and '{s}' with '{s}'", .{
+                    self.addErrorAt(bin.loc, "cannot compare '{s}' and '{s}' with '{s}'", .{
                         types.runarTypeToString(left_type),
                         types.runarTypeToString(right_type),
                         bin.op.toTsString(),
@@ -1008,18 +1441,18 @@ const TypeChecker = struct {
             .and_op, .or_op => {
                 const op_str = bin.op.toTsString();
                 if (left_type != .boolean and left_type != .unknown)
-                    self.addError("left operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (right_type != .boolean and right_type != .unknown)
-                    self.addError("right operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be boolean, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .boolean;
             },
             // Shifts
             .lshift, .rshift => {
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
             // Bitwise: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
@@ -1027,9 +1460,9 @@ const TypeChecker = struct {
                 if (isByteFamily(left_type) and isByteFamily(right_type)) return .byte_string;
                 const op_str = bin.op.toTsString();
                 if (!isBigintFamily(left_type))
-                    self.addError("left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
+                    self.addErrorAt(operandLoc(bin.left, bin.left_loc), "left operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(left_type) });
                 if (!isBigintFamily(right_type))
-                    self.addError("right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
+                    self.addErrorAt(operandLoc(bin.right, bin.right_loc), "right operand of '{s}' must be bigint or ByteString, got '{s}'", .{ op_str, types.runarTypeToString(right_type) });
                 return .bigint;
             },
         }
@@ -1045,20 +1478,20 @@ const TypeChecker = struct {
         return switch (un.op) {
             .not => {
                 if (operand_type != .boolean and operand_type != .unknown) {
-                    self.addError("operand of '!' must be boolean, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of '!' must be boolean, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .boolean;
             },
             .negate => {
                 if (!isBigintFamily(operand_type)) {
-                    self.addError("operand of unary '-' must be bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of unary '-' must be bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
             .bitnot => {
                 if (isByteFamily(operand_type)) return .byte_string;
                 if (!isBigintFamily(operand_type)) {
-                    self.addError("operand of '~' must be bigint or ByteString, got '{s}'", .{types.runarTypeToString(operand_type)});
+                    self.addErrorAt(un.location, "operand of '~' must be bigint or ByteString, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
@@ -1095,16 +1528,20 @@ const TypeChecker = struct {
 
         // Builtin function
         if (builtin_functions.get(name)) |func_sig| {
-            return self.checkCallArgs(name, func_sig, call.args, env);
+            return self.checkCallArgs(name, func_sig, call.args, call.arg_locs, env);
         }
 
         // Known contract method
         if (self.method_sigs.get(name)) |method_sig| {
-            return self.checkCallArgs(name, method_sig, call.args, env);
+            return self.checkCallArgs(name, method_sig, call.args, call.arg_locs, env);
         }
 
-        // Local variable (callable)
+        // Local variable (callable) -- F-208: Rúnar has no first-class
+        // functions, so a bound local can never be called. This used to
+        // return .unknown with no diagnostic, silently accepting
+        // `const f: bigint = a; const r = f(a, a, a);`.
         if (env.lookup(name) != null) {
+            self.addError("local variable '{s}' is not callable -- Runar has no first-class functions; only built-in functions and contract methods can be called", .{name});
             for (call.args) |arg| _ = self.inferExprType(arg, env);
             return .unknown;
         }
@@ -1156,6 +1593,7 @@ const TypeChecker = struct {
         self: *TypeChecker,
         name: []const u8,
         args: []const types.Expression,
+        arg_locs: []const ?types.SourceLocation,
         env: *TypeEnv,
     ) RunarType {
         // N-105: all three intrinsics build an OUTPUT, and an output only
@@ -1218,7 +1656,8 @@ const TypeChecker = struct {
             if (args.len >= 1) {
                 const sat_type = self.inferExprType(args[0], env);
                 if (!isBigintFamily(sat_type) and sat_type != .unknown) {
-                    self.addError(
+                    self.addErrorAt(
+                        self.argErrorLoc(arg_locs, args, 0),
                         "addOutput() first argument (satoshis) must be bigint, got '{s}'",
                         .{types.runarTypeToString(sat_type)},
                     );
@@ -1242,7 +1681,10 @@ const TypeChecker = struct {
                 // rather than guessed.
                 if (slot.type_info == .unknown) continue;
                 if (!isSubtype(arg_type, slot.type_info) and arg_type != .unknown) {
-                    self.addError(
+                    // The tuple form's elements carry no recorded positions.
+                    const state_is_tail = args.len != 2 or args[1] != .array_literal;
+                    self.addErrorAt(
+                        if (state_is_tail) self.argErrorLoc(arg_locs, args, i + 1) else self.current_stmt_loc,
                         "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
                         .{
                             i + 2,
@@ -1266,7 +1708,8 @@ const TypeChecker = struct {
         if (args.len >= 1) {
             const sat_type = self.inferExprType(args[0], env);
             if (!isBigintFamily(sat_type) and sat_type != .unknown) {
-                self.addError(
+                self.addErrorAt(
+                    self.argErrorLoc(arg_locs, args, 0),
                     "{s}() first argument (satoshis) must be bigint, got '{s}'",
                     .{ name, types.runarTypeToString(sat_type) },
                 );
@@ -1277,13 +1720,51 @@ const TypeChecker = struct {
             // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
             const script_type = self.inferExprType(args[1], env);
             if (!isSubtype(script_type, .byte_string) and script_type != .unknown) {
-                self.addError(
+                self.addErrorAt(
+                    self.argErrorLoc(arg_locs, args, 1),
                     "{s}() second argument (scriptBytes) must be ByteString, got '{s}'",
                     .{ name, types.runarTypeToString(script_type) },
                 );
             }
         }
         return .void;
+    }
+
+    /// N-453: `args` without the bare identifiers that name a StatefulContext
+    /// parameter of the method being checked. The handle is elided from every
+    /// method's parameter list (method_sigs), so a `self.helper(ctx, ...)`
+    /// call drops it too and the arities line up. Returns `args` itself when
+    /// there is nothing to drop; otherwise the caller frees the result.
+    ///
+    /// N-472: when `arg_locs` lines up with `args`, the dropped arguments'
+    /// locations are dropped with them (`dropped_locs` is then a fresh slice
+    /// the caller frees too), so the locations of the arguments that remain
+    /// keep their indices instead of all being lost.
+    fn withoutStatefulContextArgs(
+        self: *TypeChecker,
+        args: []const Expression,
+        arg_locs: []const ?types.SourceLocation,
+        dropped_locs: *[]const ?types.SourceLocation,
+    ) Allocator.Error![]const Expression {
+        dropped_locs.* = arg_locs;
+        var drop: usize = 0;
+        for (args) |arg| {
+            if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) drop += 1;
+        }
+        if (drop == 0) return args;
+        const out = try self.allocator.alloc(Expression, args.len - drop);
+        errdefer self.allocator.free(out);
+        const locs_aligned = arg_locs.len == args.len;
+        const out_locs: []?types.SourceLocation = if (locs_aligned) try self.allocator.alloc(?types.SourceLocation, args.len - drop) else &.{};
+        var n: usize = 0;
+        for (args, 0..) |arg, i| {
+            if (arg == .identifier and self.stateful_ctx_params.get(arg.identifier) != null) continue;
+            out[n] = arg;
+            if (locs_aligned) out_locs[n] = arg_locs[i];
+            n += 1;
+        }
+        dropped_locs.* = out_locs;
+        return out;
     }
 
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {
@@ -1305,16 +1786,28 @@ const TypeChecker = struct {
                 return .byte_string;
             }
             if (std.mem.eql(u8, mc.method, "addOutput")) {
-                return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addOutput", mc.args, mc.arg_locs, env);
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
-                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, mc.arg_locs, env);
             }
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
-                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
+                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, mc.arg_locs, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
-                return self.checkCallArgs(mc.method, method_sig, mc.args, env);
+                if (is_this) {
+                    var arg_locs: []const ?types.SourceLocation = &.{};
+                    const args = self.withoutStatefulContextArgs(mc.args, mc.arg_locs, &arg_locs) catch {
+                        self.addError("out of memory checking call to '{s}'", .{mc.method});
+                        return .unknown;
+                    };
+                    defer if (args.ptr != mc.args.ptr) {
+                        self.allocator.free(args);
+                        if (arg_locs.ptr != mc.arg_locs.ptr and arg_locs.len > 0) self.allocator.free(arg_locs);
+                    };
+                    return self.checkCallArgs(mc.method, method_sig, args, arg_locs, env);
+                }
+                return self.checkCallArgs(mc.method, method_sig, mc.args, mc.arg_locs, env);
             }
             self.addError("unknown method '{s}.{s}' -- only Runar built-in methods and contract methods are allowed", .{ mc.object, mc.method });
             for (mc.args) |arg| _ = self.inferExprType(arg, env);
@@ -1331,7 +1824,7 @@ const TypeChecker = struct {
     // Argument checking
     // ------------------------------------------------------------------
 
-    fn checkCallArgs(self: *TypeChecker, func_name: []const u8, func_sig: FuncSig, args: []const Expression, env: *TypeEnv) RunarType {
+    fn checkCallArgs(self: *TypeChecker, func_name: []const u8, func_sig: FuncSig, args: []const Expression, arg_locs: []const ?types.SourceLocation, env: *TypeEnv) RunarType {
         // assert: 1-2 args special case
         if (std.mem.eql(u8, func_name, "assert")) {
             if (args.len < 1 or args.len > 2) {
@@ -1357,7 +1850,7 @@ const TypeChecker = struct {
             if (args.len != 2) {
                 self.addError("checkMultiSig() expects 2 arguments, got {d}", .{args.len});
                 for (args) |arg| _ = self.inferExprType(arg, env);
-                self.checkAffineConsumption(func_name, args, env);
+                self.checkAffineConsumption(func_name, args, arg_locs, env);
                 return func_sig.return_type;
             }
             const expected: [2]RunarType = .{ .sig, .pub_key };
@@ -1384,7 +1877,7 @@ const TypeChecker = struct {
                     },
                 }
             }
-            self.checkAffineConsumption(func_name, args, env);
+            self.checkAffineConsumption(func_name, args, arg_locs, env);
             return func_sig.return_type;
         }
 
@@ -1479,17 +1972,55 @@ const TypeChecker = struct {
                 }
                 _ = self.inferExprType(args[2], env);
             }
-            self.checkAffineConsumption(func_name, args, env);
+            self.checkAffineConsumption(func_name, args, arg_locs, env);
             return func_sig.return_type;
         }
 
-        // requireOutputP2PKH and currentBlockHeight need the auto-injected
-        // txPreimage — only available in StatefulSmartContract methods.
+        // requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        // the auto-injected txPreimage / _newAmount — only available in
+        // StatefulSmartContract methods.
         if (std.mem.eql(u8, func_name, "requireOutputP2PKH") or
-            std.mem.eql(u8, func_name, "currentBlockHeight"))
+            std.mem.eql(u8, func_name, "currentBlockHeight") or
+            std.mem.eql(u8, func_name, "continuationAmount"))
         {
             if (self.contract.parent_class != .stateful_smart_contract) {
                 self.addError("{s}() is only available in StatefulSmartContract methods", .{func_name});
+            }
+        }
+
+        // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        // argument. A literal negative start used to type-check as plain
+        // 'bigint' (the standard subtype loop below never inspects a
+        // literal's VALUE) and compile to a script that aborts at runtime
+        // -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects. Catch
+        // the literal case (bare or unary-negated literal_int) at compile
+        // time, mirroring the extractPrevOutputScript/requireOutputP2PKH
+        // "must be >= 0" pattern above. A non-literal start (a variable or
+        // computed expression) has no static value to check and is
+        // unaffected.
+        if (std.mem.eql(u8, func_name, "substr") and args.len >= 2) {
+            var start_lit: ?i64 = null;
+            switch (args[1]) {
+                .literal_int => |v| start_lit = v,
+                .unary_op => |u| {
+                    if (u.op == .negate) {
+                        switch (u.operand) {
+                            // Mirrors the extractPrevOutputScript/
+                            // requireOutputP2PKH guard above: `v > 0` is
+                            // `-v < 0` and also dodges negating minInt.
+                            .literal_int => |v| {
+                                if (v > 0) start_lit = -v;
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+            if (start_lit) |start| {
+                if (start < 0) {
+                    self.addError("substr() argument 2 (start) must be >= 0; got {d}", .{start});
+                }
             }
         }
 
@@ -1515,7 +2046,7 @@ const TypeChecker = struct {
         // Type-check extra args beyond expected arity
         for (count..args.len) |i| _ = self.inferExprType(args[i], env);
 
-        self.checkAffineConsumption(func_name, args, env);
+        self.checkAffineConsumption(func_name, args, arg_locs, env);
         return func_sig.return_type;
     }
 
@@ -1527,8 +2058,26 @@ const TypeChecker = struct {
     /// (`const again = sig`) and property accesses (`this.sig`)
     /// cannot launder a double-consumption past the affine check.
     /// 2026-04-30 audit finding F6.
-    fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, env: *TypeEnv) void {
-        const indices = consumedIndices(func_name) orelse return;
+    fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, arg_locs: []const ?types.SourceLocation, env: *TypeEnv) void {
+        var consumed_props: []const []u8 = &.{};
+        const indices = consumedIndices(func_name) orelse blk: {
+            // N-109: a call to a contract method consumes the arguments at
+            // the parameter positions that method consumes.
+            if (builtin_functions.get(func_name) != null) return;
+            if (self.method_sigs.get(func_name) == null) return;
+            const summary = self.consumed_params orelse s: {
+                const computed = consumedParamSummary(self.allocator, self.contract) catch {
+                    self.addError("out of memory computing affine consumption of helper '{s}'", .{func_name});
+                    return;
+                };
+                self.consumed_params = computed;
+                self.owns_consumed_params = true;
+                break :s computed;
+            };
+            const mc = summary.get(func_name) orelse return;
+            consumed_props = mc.props;
+            break :blk mc.params;
+        };
 
         for (indices) |param_index| {
             if (param_index >= args.len) continue;
@@ -1541,18 +2090,47 @@ const TypeChecker = struct {
 
             // Diagnostic label (source-form) — derived inline from
             // the arg shape so we don't have to allocate.
-            if (self.consumed_values.get(origin)) |consumed| {
-                if (consumed) {
-                    switch (arg) {
-                        .identifier => |name| self.addError("affine value '{s}' has already been consumed", .{name}),
-                        .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
-                        else => self.addError("affine value '{s}' has already been consumed", .{origin}),
-                    }
-                    continue;
+            const consumed = (self.consumed_values.get(origin) orelse false) or
+                self.consumedPerLoopIteration(origin, env);
+            if (consumed) {
+                const at = argLoc(arg_locs, args, param_index);
+                switch (arg) {
+                    .identifier => |name| self.addErrorAt(at, "affine value '{s}' has already been consumed", .{name}),
+                    .property_access => |pa| self.addErrorAt(at, "affine value 'this.{s}' has already been consumed", .{pa.property}),
+                    else => self.addErrorAt(at, "affine value '{s}' has already been consumed", .{origin}),
                 }
+                continue;
             }
             self.consumed_values.put(self.allocator, origin, true) catch {};
         }
+
+        // N-288: the call also consumes every property the method consumes.
+        // The key is re-resolved to this checker's own `prop_origin_keys`
+        // entry so `consumed_values` never borrows a summary-owned string.
+        for (consumed_props) |summary_key| {
+            const prop_name = summary_key["prop:".len..];
+            const origin = self.prop_origin_keys.get(prop_name) orelse continue;
+            const consumed = (self.consumed_values.get(origin) orelse false) or
+                self.consumedPerLoopIteration(origin, env);
+            if (consumed) {
+                self.addErrorAt(self.argErrorLoc(arg_locs, args, 0), "affine value 'this.{s}' has already been consumed", .{prop_name});
+                continue;
+            }
+            self.consumed_values.put(self.allocator, origin, true) catch {};
+        }
+    }
+
+    /// F-110: true when `origin` is bound outside the innermost enclosing loop
+    /// that may run two or more times, so this one syntactic consumption is
+    /// executed once per iteration — a double use. A property, or a name the
+    /// env does not bind (a bare-identifier property), is always outside.
+    fn consumedPerLoopIteration(self: *TypeChecker, origin: []const u8, env: *TypeEnv) bool {
+        const n = self.repeating_loop_scopes.items.len;
+        if (n == 0) return false;
+        const innermost = self.repeating_loop_scopes.items[n - 1];
+        if (std.mem.startsWith(u8, origin, "prop:")) return true;
+        const idx = env.scopeIndexOf(origin) orelse return true;
+        return idx < innermost;
     }
 
     /// Compute the canonical origin key for affine tracking. Returns
@@ -1589,276 +2167,6 @@ const TypeChecker = struct {
         self.affine_aliases.put(self.allocator, name, origin) catch {};
     }
 };
-
-// ============================================================================
-// Body walkers — Crit-3 requireOutputP2PKH + addDataOutput mix detection
-// ============================================================================
-
-/// True if any statement in `body` (recursively) contains a top-level call
-/// expression to a builtin function named `name`.
-fn bodyCallsBuiltin(body: []const Statement, name: []const u8) bool {
-    for (body) |stmt| {
-        if (stmtContainsCallTo(stmt, name)) return true;
-    }
-    return false;
-}
-
-/// True if any statement in `body` (recursively) contains a call to
-/// `this.addDataOutput(...)` or `c.addDataOutput(...)` — matched by the
-/// method name on a MethodCall expression.
-fn bodyCallsAddDataOutput(body: []const Statement) bool {
-    for (body) |stmt| {
-        if (stmtContainsAddDataOutput(stmt)) return true;
-    }
-    return false;
-}
-
-fn stmtContainsCallTo(stmt: Statement, name: []const u8) bool {
-    return switch (stmt) {
-        .const_decl => |d| exprContainsCallTo(d.value, name),
-        .let_decl => |d| if (d.value) |v| exprContainsCallTo(v, name) else false,
-        .assign => |a| exprContainsCallTo(a.value, name),
-        .if_stmt => |s| blk: {
-            if (exprContainsCallTo(s.condition, name)) break :blk true;
-            for (s.then_body) |t| {
-                if (stmtContainsCallTo(t, name)) break :blk true;
-            }
-            if (s.else_body) |eb| {
-                for (eb) |t| {
-                    if (stmtContainsCallTo(t, name)) break :blk true;
-                }
-            }
-            break :blk false;
-        },
-        .for_stmt => |s| blk: {
-            for (s.body) |t| {
-                if (stmtContainsCallTo(t, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .expr_stmt => |e| exprContainsCallTo(e.expr, name),
-        .assert_stmt => |s| exprContainsCallTo(s.condition, name),
-        .return_stmt => |rv| if (rv) |v| exprContainsCallTo(v, name) else false,
-    };
-}
-
-fn exprContainsCallTo(expr: Expression, name: []const u8) bool {
-    return switch (expr) {
-        .call => |c| blk: {
-            if (std.mem.eql(u8, c.callee, name)) break :blk true;
-            for (c.args) |a| {
-                if (exprContainsCallTo(a, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .method_call => |mc| blk: {
-            for (mc.args) |a| {
-                if (exprContainsCallTo(a, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .binary_op => |b| exprContainsCallTo(b.left, name) or exprContainsCallTo(b.right, name),
-        .unary_op => |u| exprContainsCallTo(u.operand, name),
-        .ternary => |t| exprContainsCallTo(t.condition, name) or
-            exprContainsCallTo(t.then_expr, name) or
-            exprContainsCallTo(t.else_expr, name),
-        .index_access => |ia| exprContainsCallTo(ia.object, name) or exprContainsCallTo(ia.index, name),
-        .increment => |i| exprContainsCallTo(i.operand, name),
-        .decrement => |d| exprContainsCallTo(d.operand, name),
-        .array_literal => |elems| blk: {
-            for (elems) |el| {
-                if (exprContainsCallTo(el, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
-fn stmtContainsAddDataOutput(stmt: Statement) bool {
-    return switch (stmt) {
-        .const_decl => |d| exprContainsAddDataOutput(d.value),
-        .let_decl => |d| if (d.value) |v| exprContainsAddDataOutput(v) else false,
-        .assign => |a| exprContainsAddDataOutput(a.value),
-        .if_stmt => |s| blk: {
-            if (exprContainsAddDataOutput(s.condition)) break :blk true;
-            for (s.then_body) |t| {
-                if (stmtContainsAddDataOutput(t)) break :blk true;
-            }
-            if (s.else_body) |eb| {
-                for (eb) |t| {
-                    if (stmtContainsAddDataOutput(t)) break :blk true;
-                }
-            }
-            break :blk false;
-        },
-        .for_stmt => |s| blk: {
-            for (s.body) |t| {
-                if (stmtContainsAddDataOutput(t)) break :blk true;
-            }
-            break :blk false;
-        },
-        .expr_stmt => |e| exprContainsAddDataOutput(e.expr),
-        .assert_stmt => |s| exprContainsAddDataOutput(s.condition),
-        .return_stmt => |rv| if (rv) |v| exprContainsAddDataOutput(v) else false,
-    };
-}
-
-fn exprContainsAddDataOutput(expr: Expression) bool {
-    return switch (expr) {
-        .method_call => |mc| blk: {
-            if (std.mem.eql(u8, mc.method, "addDataOutput")) break :blk true;
-            for (mc.args) |a| {
-                if (exprContainsAddDataOutput(a)) break :blk true;
-            }
-            break :blk false;
-        },
-        .call => |c| blk: {
-            for (c.args) |a| {
-                if (exprContainsAddDataOutput(a)) break :blk true;
-            }
-            break :blk false;
-        },
-        .binary_op => |b| exprContainsAddDataOutput(b.left) or exprContainsAddDataOutput(b.right),
-        .unary_op => |u| exprContainsAddDataOutput(u.operand),
-        .ternary => |t| exprContainsAddDataOutput(t.condition) or
-            exprContainsAddDataOutput(t.then_expr) or
-            exprContainsAddDataOutput(t.else_expr),
-        .index_access => |ia| exprContainsAddDataOutput(ia.object) or exprContainsAddDataOutput(ia.index),
-        .increment => |i| exprContainsAddDataOutput(i.operand),
-        .decrement => |d| exprContainsAddDataOutput(d.operand),
-        .array_literal => |elems| blk: {
-            for (elems) |el| {
-                if (exprContainsAddDataOutput(el)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
-// ============================================================================
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ============================================================================
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the
-// TS reference `analyzeMethodOutputSignals` in 03-typecheck.ts.
-
-const MethodOutputSignals = struct {
-    /// assigns to / ++/-- a non-readonly property
-    mutates_state: bool = false,
-    /// calls this.addOutput() or this.addRawOutput()
-    has_state_output: bool = false,
-    /// calls requireOutputP2PKH(0, ...)
-    requires_output_p2pkh_zero: bool = false,
-};
-
-/// True when `name` is a non-readonly (mutable) contract property.
-fn isMutableProperty(properties: []const types.PropertyNode, name: []const u8) bool {
-    for (properties) |prop| {
-        if (!prop.readonly and std.mem.eql(u8, prop.name, name)) return true;
-    }
-    return false;
-}
-
-fn analyzeMethodOutputSignals(body: []const Statement, properties: []const types.PropertyNode) MethodOutputSignals {
-    var signals = MethodOutputSignals{};
-    for (body) |stmt| walkStmtForOutputSignals(stmt, properties, &signals);
-    return signals;
-}
-
-fn walkStmtForOutputSignals(stmt: Statement, properties: []const types.PropertyNode, signals: *MethodOutputSignals) void {
-    switch (stmt) {
-        .assign => |a| {
-            // Scalar property write (`this.count = ...`). Index-target writes
-            // (`this.board[i] = v`) are not scalar state mutation here — they
-            // mirror TS, which only flags a `property_access` assignment target.
-            if (a.index_target == null and isMutableProperty(properties, a.target)) signals.mutates_state = true;
-            walkExprForOutputSignals(a.value, properties, signals);
-        },
-        .const_decl => |d| walkExprForOutputSignals(d.value, properties, signals),
-        .let_decl => |d| {
-            if (d.value) |v| walkExprForOutputSignals(v, properties, signals);
-        },
-        .if_stmt => |s| {
-            walkExprForOutputSignals(s.condition, properties, signals);
-            for (s.then_body) |t| walkStmtForOutputSignals(t, properties, signals);
-            if (s.else_body) |eb| {
-                for (eb) |e| walkStmtForOutputSignals(e, properties, signals);
-            }
-        },
-        .for_stmt => |s| {
-            for (s.body) |b| walkStmtForOutputSignals(b, properties, signals);
-        },
-        .expr_stmt => |e| walkExprForOutputSignals(e.expr, properties, signals),
-        .assert_stmt => |s| walkExprForOutputSignals(s.condition, properties, signals),
-        .return_stmt => |rv| {
-            if (rv) |v| walkExprForOutputSignals(v, properties, signals);
-        },
-    }
-}
-
-fn walkExprForOutputSignals(expr: Expression, properties: []const types.PropertyNode, signals: *MethodOutputSignals) void {
-    switch (expr) {
-        .increment => |i| {
-            switch (i.operand) {
-                .property_access => |pa| {
-                    if (isMutableProperty(properties, pa.property)) signals.mutates_state = true;
-                },
-                else => {},
-            }
-            walkExprForOutputSignals(i.operand, properties, signals);
-        },
-        .decrement => |d| {
-            switch (d.operand) {
-                .property_access => |pa| {
-                    if (isMutableProperty(properties, pa.property)) signals.mutates_state = true;
-                },
-                else => {},
-            }
-            walkExprForOutputSignals(d.operand, properties, signals);
-        },
-        .method_call => |mc| {
-            if (std.mem.eql(u8, mc.method, "addOutput") or std.mem.eql(u8, mc.method, "addRawOutput")) {
-                signals.has_state_output = true;
-            }
-            for (mc.args) |arg| walkExprForOutputSignals(arg, properties, signals);
-        },
-        .call => |c| {
-            if (std.mem.eql(u8, c.callee, "requireOutputP2PKH") and c.args.len > 0) {
-                switch (c.args[0]) {
-                    .literal_int => |v| {
-                        if (v == 0) signals.requires_output_p2pkh_zero = true;
-                    },
-                    else => {},
-                }
-            }
-            for (c.args) |arg| walkExprForOutputSignals(arg, properties, signals);
-        },
-        .binary_op => |b| {
-            walkExprForOutputSignals(b.left, properties, signals);
-            walkExprForOutputSignals(b.right, properties, signals);
-        },
-        .unary_op => |u| walkExprForOutputSignals(u.operand, properties, signals),
-        .ternary => |t| {
-            walkExprForOutputSignals(t.condition, properties, signals);
-            walkExprForOutputSignals(t.then_expr, properties, signals);
-            walkExprForOutputSignals(t.else_expr, properties, signals);
-        },
-        .index_access => |ia| {
-            walkExprForOutputSignals(ia.object, properties, signals);
-            walkExprForOutputSignals(ia.index, properties, signals);
-        },
-        .array_literal => |elems| {
-            for (elems) |el| walkExprForOutputSignals(el, properties, signals);
-        },
-        else => {},
-    }
-}
 
 // ============================================================================
 // Private method return type inference (pre-pass, no type env needed)
@@ -1941,7 +2249,8 @@ fn collectReturnTypes(stmts: []const Statement) []const RunarType {
 fn collectReturnTypesInto(stmts: []const Statement, buf: *ReturnTypeBuf) void {
     for (stmts) |stmt| {
         switch (stmt) {
-            .return_stmt => |maybe_expr| {
+            .return_stmt => |maybe_expr_r| {
+                const maybe_expr = maybe_expr_r.value;
                 if (maybe_expr) |expr| buf.append(inferExprTypeStatic(expr));
             },
             .if_stmt => |if_s| {
@@ -2135,6 +2444,7 @@ test "builtin_functions: all 60+ entries present" {
         "extractOutputs",  "extractLocktime",   "extractSigHashType",
         // Intent sub-covenant intrinsics (BSVM Phase 13)
         "extractPrevOutputScript", "requireOutputP2PKH", "currentBlockHeight",
+        "continuationAmount",
     };
     for (expected) |name| {
         try std.testing.expect(builtin_functions.get(name) != null);
@@ -2208,6 +2518,147 @@ test "typeCheck: type mismatch in variable declaration" {
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "not assignable") != null);
 }
 
+// N-323: a local annotated with an unrecognised type name (every parser lowers
+// it to `.unknown`, which `isSubtype` accepts against anything) compiled.
+// Proves the checker refuses an annotated `const`/`let` whose annotation is
+// `.unknown`, quoting the spelled name, and that an UNANNOTATED local (also
+// `.unknown` until inferred) is still accepted. Does not prove any parser
+// records the spelled name; conformance/negatives/n323-* covers the source path.
+test "typeCheck: N-323 local with unknown type annotation is refused" {
+    const allocator = std.testing.allocator;
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "x", .type_info = .unknown, .type_name = "TTT", .value = .{ .literal_int = 42 } } };
+    stmts[1] = .{ .let_decl = .{ .name = "y", .type_info = .unknown, .type_name = "UUU", .value = .{ .literal_int = 1 } } };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = &.{}, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(2, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'bigint' is not assignable to type 'TTT'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[1], "type 'bigint' is not assignable to type 'UUU'") != null);
+}
+
+test "typeCheck: N-323 unannotated local is still accepted" {
+    const allocator = std.testing.allocator;
+
+    const stmts = try allocator.alloc(Statement, 1);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "x", .value = .{ .literal_int = 42 } } };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = &.{}, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(0, result.errors.len);
+}
+
+// N-234: a property initializer of the wrong literal family compiled
+// without complaint. Proves only the Zig tier's checkPropertyInitializers;
+// the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+
+test "typeCheck: N-234 rejects a ByteString literal initializing a bigint property" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = 'ab';
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .literal_bytes = .{ .value = "ab" } },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(1, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'ByteString' is not assignable to type 'bigint'") != null);
+}
+
+test "typeCheck: N-234 rejects a toByteString(...) literal initializing a bigint property" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = toByteString('ab');
+    var args = [_]Expression{.{ .literal_bytes = .{ .value = "ab" } }};
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "toByteString", .args = args[0..] };
+
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .call = call },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(1, result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "type 'ByteString' is not assignable to type 'bigint'") != null);
+}
+
+test "typeCheck: N-234 still accepts a well-typed scalar initializer" {
+    const allocator = std.testing.allocator;
+
+    // readonly x: bigint = 1;
+    const properties = try allocator.alloc(types.PropertyNode, 1);
+    defer allocator.free(properties);
+    properties[0] = .{
+        .name = "x",
+        .type_info = .bigint,
+        .readonly = true,
+        .initializer = .{ .literal_int = 1 },
+    };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = properties,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = &.{},
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(0, result.errors.len);
+}
+
 test "typeCheck: if condition must be boolean" {
     const allocator = std.testing.allocator;
 
@@ -2268,6 +2719,51 @@ test "typeCheck: unknown function error" {
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "unknown function") != null);
 }
 
+// F-208: Rúnar has no first-class functions. A bound local variable used as
+// a callee used to fall into the "local variable" branch and return
+// `.unknown` with NO diagnostic, silently accepting the call:
+//   const f: bigint = a; const r = f(a, a, a);
+test "typeCheck: local variable called as function is rejected" {
+    const allocator = std.testing.allocator;
+
+    const args = try allocator.alloc(Expression, 3);
+    defer allocator.free(args);
+    args[0] = .{ .identifier = "a" };
+    args[1] = .{ .identifier = "a" };
+    args[2] = .{ .identifier = "a" };
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "f", .args = args };
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "f", .value = .{ .identifier = "a" } } };
+    stmts[1] = .{ .const_decl = .{ .name = "r", .value = .{ .call = call } } };
+
+    const params = try allocator.alloc(types.ParamNode, 1);
+    defer allocator.free(params);
+    params[0] = .{ .name = "a", .type_info = .bigint };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "check", .is_public = true, .params = params, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "not callable") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
 test "typeCheck: valid builtin call sha256" {
     const allocator = std.testing.allocator;
 
@@ -2276,7 +2772,7 @@ test "typeCheck: valid builtin call sha256" {
     defer allocator.destroy(call);
     const args = try allocator.alloc(Expression, 1);
     defer allocator.free(args);
-    args[0] = .{ .literal_bytes = "cafe" };
+    args[0] = .{ .literal_bytes = .{ .value = "cafe" } };
     call.* = .{ .callee = "sha256", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -2339,8 +2835,8 @@ test "typeCheck: wrong arity for builtin" {
     defer allocator.destroy(call);
     const args = try allocator.alloc(Expression, 2);
     defer allocator.free(args);
-    args[0] = .{ .literal_bytes = "a" };
-    args[1] = .{ .literal_bytes = "b" };
+    args[0] = .{ .literal_bytes = .{ .value = "a" } };
+    args[1] = .{ .literal_bytes = .{ .value = "b" } };
     call.* = .{ .callee = "sha256", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -2635,7 +3131,7 @@ test "typeCheck: assert special case with 2 args" {
     const args = try allocator.alloc(Expression, 2);
     defer allocator.free(args);
     args[0] = .{ .literal_bool = true };
-    args[1] = .{ .literal_bytes = "error message" };
+    args[1] = .{ .literal_bytes = .{ .value = "error message" } };
     call.* = .{ .callee = "assert", .args = args };
 
     const stmts = try allocator.alloc(Statement, 1);
@@ -2723,7 +3219,7 @@ test "typeCheck: incompatible equality comparison" {
 test "inferExprTypeStatic: literal types" {
     try std.testing.expectEqual(.bigint, inferExprTypeStatic(.{ .literal_int = 42 }));
     try std.testing.expectEqual(.boolean, inferExprTypeStatic(.{ .literal_bool = true }));
-    try std.testing.expectEqual(.byte_string, inferExprTypeStatic(.{ .literal_bytes = "ff" }));
+    try std.testing.expectEqual(.byte_string, inferExprTypeStatic(.{ .literal_bytes = .{ .value = "ff" } }));
 }
 
 test "inferExprTypeStatic: binary ops" {
@@ -2867,4 +3363,87 @@ test "N-019: `this.board[i]++` types, because pass 3b now writes it back" {
     const result = try typeCheck(alloc, contract);
 
     try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// -----------------------------------------------------------------------
+// F-216: a heterogeneous array literal bound to a local const before
+// reaching checkMultiSig() must still be rejected.
+//
+// checkMultiSig's special case (above) validates a Sig[]/PubKey[] argument
+// element-by-element ONLY when the argument is a literal `.array_literal`
+// AT THE CALL SITE. The generic `.array_literal` arm of `inferExprType`
+// — reached for any OTHER expression position, including a `const`
+// initializer — used to just walk elements for side effects (so a call
+// nested in one still reached the unknown-function rule) and return
+// `.unknown` unconditionally, with no comparison between elements. Binding
+// `[s, 1n]` to `const sigs = ...` and passing the identifier `sigs` to
+// checkMultiSig therefore hit the special case's `else` branch (identifier,
+// not a literal), which only infers for side effects and validates nothing,
+// so the heterogeneous array sailed through untyped and compiled.
+//
+// Six peer tiers (TS, Go, Rust, Python, Ruby, Java) do not have this gap:
+// their generic array-literal arm already compares every element against
+// the first element's type (F-063), so the SAME local-binding shape is
+// caught at the `const sigs = [s, 1n]` statement itself, before
+// checkMultiSig is ever reached. This test ports that behaviour to Zig's
+// generic arm with the same diagnostic wording.
+//
+// Proves: a `const` bound to a heterogeneous array literal is rejected by
+// the typechecker with an "Array element type mismatch" diagnostic, closing
+// the one shape that bypassed checkMultiSig's own per-argument check.
+// Does not prove: cross-tier hex/byte parity, or that every OTHER consumer
+// of a local array-typed identifier (there are none yet — arrays are not
+// first-class values in this language) is covered.
+test "F-216: a heterogeneous array literal bound to a local const is rejected" {
+    const allocator = std.testing.allocator;
+
+    var sig_elems = [_]Expression{ .{ .identifier = "s" }, .{ .literal_int = 1 } };
+
+    const pk_elems = try allocator.alloc(Expression, 2);
+    defer allocator.free(pk_elems);
+    pk_elems[0] = .{ .identifier = "pk" };
+    pk_elems[1] = .{ .identifier = "pk2" };
+
+    const call_args = try allocator.alloc(Expression, 2);
+    defer allocator.free(call_args);
+    call_args[0] = .{ .identifier = "sigs" };
+    call_args[1] = .{ .array_literal = pk_elems };
+
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "checkMultiSig", .args = call_args };
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "sigs", .value = .{ .array_literal = &sig_elems } } };
+    stmts[1] = .{ .assert_stmt = .{ .condition = .{ .call = call } } };
+
+    const params = try allocator.alloc(types.ParamNode, 1);
+    defer allocator.free(params);
+    params[0] = .{ .name = "s", .type_info = .sig };
+
+    const props = try allocator.alloc(types.PropertyNode, 2);
+    defer allocator.free(props);
+    props[0] = .{ .name = "pk", .type_info = .pub_key, .readonly = true };
+    props[1] = .{ .name = "pk2", .type_info = .pub_key, .readonly = true };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "unlock", .is_public = true, .params = params, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "ProbeSigArray",
+        .parent_class = .smart_contract,
+        .properties = props,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "Array element type mismatch") != null) found = true;
+    }
+    try std.testing.expect(found);
 }

@@ -7,13 +7,23 @@ from conftest import load_contract
 contract_mod = load_contract(str(Path(__file__).parent / "TicTacToe.runar.py"))
 TicTacToe = contract_mod.TicTacToe
 
-from runar import ALICE, BOB
+from contextlib import contextmanager
+
+from runar import ALICE, BOB, set_mock_continuation_amount
 
 # Use real test keys as hex strings (TicTacToe uses hex-encoded pubkeys)
 PLAYER_X = ALICE.pub_key.hex()
 PLAYER_O = BOB.pub_key.hex()
 ZERO_PK = "00" * 33
 BET_AMOUNT = 1000
+
+
+def wrap_hash_outputs_n246(hash_bytes):
+    """Pads a 32-byte hash so extract_output_hash's end-relative
+    bytes[len-40:len-8] slice (N-246) reads it back, mirroring where
+    hashOutputs sits in a real BIP-143 preimage (40 bytes before the end:
+    8 trailing bytes for locktime + sighashType)."""
+    return (b'\x00' * 32) + hash_bytes + (b'\x00' * 8)
 
 
 def make_game(**overrides):
@@ -34,6 +44,24 @@ def make_game(**overrides):
     return game
 
 
+@contextmanager
+def continuation(amount):
+    """Run the block with continuation_amount() returning `amount`
+    (extract_amount stays at its mock 10000)."""
+    prev = set_mock_continuation_amount(amount)
+    try:
+        yield
+    finally:
+        set_mock_continuation_amount(prev)
+
+
+def join_paying(game):
+    """Player O joins paying exactly the bet: the continuation is the input
+    (10000 off-chain) plus bet_amount (N-027)."""
+    with continuation(10000 + game.bet_amount):
+        game.join(PLAYER_O, BOB.test_sig)
+
+
 def make_playing_game(**overrides):
     """Create a TicTacToe contract in the playing state (after join)."""
     defaults = dict(
@@ -50,7 +78,7 @@ class TestJoin:
     def test_join(self):
         """Player O can join a waiting game."""
         game = make_game()
-        game.join(PLAYER_O, BOB.test_sig)
+        join_paying(game)
         assert game.player_o == PLAYER_O
         assert game.status == 1
         assert game.turn == 1
@@ -59,7 +87,16 @@ class TestJoin:
         """Cannot join a game that is already in progress."""
         game = make_playing_game()
         with pytest.raises(AssertionError):
+            join_paying(game)
+
+    @pytest.mark.parametrize("amount", [10000, 10000 + BET_AMOUNT - 1, 10000 + BET_AMOUNT + 1])
+    def test_join_rejects_wrong_payment(self, amount):
+        """N-027: a join must pay exactly the bet. Carrying the input forward
+        unpaid (10000) passes F-024's `>= input` floor but not join's rule."""
+        game = make_game()
+        with continuation(amount), pytest.raises(AssertionError):
             game.join(PLAYER_O, BOB.test_sig)
+        assert game.status == 0
 
 
 class TestMove:
@@ -95,7 +132,7 @@ class TestMove:
         game = make_game()
 
         # Player O joins
-        game.join(PLAYER_O, BOB.test_sig)
+        join_paying(game)
         assert game.status == 1
         assert game.turn == 1
 
@@ -119,7 +156,7 @@ class TestMove:
         total_payout = game.bet_amount * 2
         payout = cat(cat(num2bin(total_payout, 8), game.p2pkh_prefix),
                      cat(hash160(PLAYER_X), game.p2pkh_suffix))
-        game.tx_preimage = hash256(payout)
+        game.tx_preimage = wrap_hash_outputs_n246(hash256(payout))
         game.move_and_win(2, PLAYER_X, ALICE.test_sig, "00", 0)
 
     def test_all_positions(self):

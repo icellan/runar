@@ -50,6 +50,10 @@ export const CORPORA: Corpus[] = [
     argv: ['pnpm', 'run', 'decompiler:templates:check'],
   },
   {
+    id: 'decompiler-fingerprints',
+    argv: ['pnpm', '--filter', 'runar-decompiler', 'exec', 'tsx', 'scripts/build-fingerprints.ts', '--check'],
+  },
+  {
     id: 'decompiler-coverage',
     argv: ['pnpm', '--filter', 'runar-decompiler', 'run', 'coverage', '--', '--check'],
   },

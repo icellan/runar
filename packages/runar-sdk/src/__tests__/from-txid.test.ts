@@ -138,6 +138,39 @@ describe('RunarContract.fromTxId', () => {
     ).rejects.toThrow('out of range');
   });
 
+  // F-273: a negative outputIndex must be rejected with a clear error.
+  // JS arrays do not support Python/Ruby-style negative indexing
+  // (tx.outputs[-1] is `undefined`, not the last element), so this does not
+  // silently bind to the wrong output the way Python/Ruby did — but without
+  // an explicit `< 0` guard it crashes on `output.satoshis` with an
+  // unrelated TypeError instead of RunarContract's own clear error.
+  //
+  // Proves: outputIndex=-1 throws RunarContract's own "out of range" Error
+  // instead of an unrelated TypeError from indexing past the array.
+  // Does not prove: behaviour for other negative indices, or for providers
+  // other than MockProvider.
+  it('throws a clear error on a negative outputIndex', async () => {
+    const provider = new MockProvider();
+    provider.addTransaction(
+      makeTx(FAKE_TXID, [
+        { satoshis: 5_000, script: '51' },
+        { satoshis: 9_999, script: '76a9140000000000000000000000000000000000000088ac' },
+      ]),
+    );
+
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [],
+      },
+    });
+
+    await expect(
+      RunarContract.fromTxId(artifact, FAKE_TXID, -1, provider),
+    ).rejects.toThrow('out of range');
+  });
+
   it('throws on unknown txid', async () => {
     const provider = new MockProvider();
     // Do NOT add any transactions.

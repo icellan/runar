@@ -476,6 +476,27 @@ async function buildScenarios(): Promise<Scenario[]> {
     );
   }
 
+  // ---- Scenario 9: non-zero nLockTime (F-299) ----
+  // Every scenario above serializes nLockTime = 0, so a tier that hard-codes 0
+  // in its preimage builder (or reads the wrong four bytes of the tx) passed
+  // them all. This one uses a timestamp-range locktime whose four bytes are all
+  // distinct (0x65f1a2b3), so a byte-order or truncation bug cannot hide, and a
+  // non-final sequence so the locktime is semantically live.
+  scenarios.push(
+    buildScenario(
+      'nonzero_locktime',
+      'Non-zero nLockTime 0x65f1a2b3 (distinct bytes), sequence 0xfffffffe, single input, ' +
+        'SIGHASH_ALL|FORKID. Pins that the preimage commits to the tx nLockTime rather than a constant 0.',
+      [{ prevTxid: '9'.repeat(64), prevVout: 3, sequence: 0xfffffffe }],
+      [{ satoshis: 4000, scriptHex: p2pkhScript(pkh) }],
+      0,
+      p2pkhPrevScript,
+      6000,
+      SIGHASH_ALL_FORKID,
+      0x65f1a2b3,
+    ),
+  );
+
   return scenarios;
 }
 
@@ -501,7 +522,7 @@ function selfValidate(scenarios: Scenario[]): void {
       prevValueSats: s.prevValueSats,
       inputs: reInputs,
       outputs: reOutputs,
-      lockTime: 0,
+      lockTime: parseLockTime(s.unsignedTxHex),
       scope: s.sighashFlags,
     });
     if (re !== s.preimageHex) {
@@ -578,6 +599,11 @@ function parseOutputs(txHex: string): TxOut[] {
   return outputs;
 }
 
+/** nLockTime is the last 4 bytes of a raw tx (little-endian). */
+function parseLockTime(txHex: string): number {
+  return Buffer.from(txHex.slice(-8), 'hex').readUInt32LE(0);
+}
+
 function readVarint(buf: Buffer, o: number): [number, number] {
   const first = buf[o]!;
   if (first < 0xfd) return [first, o + 1];
@@ -630,7 +656,7 @@ async function main(): Promise<void> {
     provenance_note:
       'R-206 asked whether these vectors are self-graded. Partly: they are produced by the TS tier, but they are CHECKED by seven independent implementations, two of which are upstream third-party libraries rather than repo code — @bsv/sdk (TS) and bsv-blockchain/go-sdk (Go, via CalcInputPreimage). Rust, Python, Zig, Ruby and Java hand-roll the preimage. Two independent upstream BIP-143 implementations agreeing is category (b), not (c). What is still missing is a category-(a) vector published by the BIP itself; adding one requires fetching it from the spec, and transcribing digests from memory would be fabricating test data.',
     coverage_note:
-      'Sighash modes covered: ALL|FORKID (0x41, three tx shapes), NONE|FORKID (0x42), SINGLE|FORKID (0x43), ALL|ANYONECANPAY|FORKID (0xc1), NONE|ANYONECANPAY|FORKID (0xc2), SINGLE|ANYONECANPAY|FORKID (0xc3). The five mode scenarios share one 2-in/2-out transaction signing input 1, so the only difference between their preimages is the flag. Two outputs are required: under SINGLE the digest covers the output at the SIGNING index, and with a single output index 1 would hit the no-corresponding-output case, zero hashOutputs, and make SINGLE indistinguishable from NONE.',
+      'Sighash modes covered: ALL|FORKID (0x41, three tx shapes plus one with a non-zero nLockTime 0x65f1a2b3), NONE|FORKID (0x42), SINGLE|FORKID (0x43), ALL|ANYONECANPAY|FORKID (0xc1), NONE|ANYONECANPAY|FORKID (0xc2), SINGLE|ANYONECANPAY|FORKID (0xc3). The five mode scenarios share one 2-in/2-out transaction signing input 1, so the only difference between their preimages is the flag. Two outputs are required: under SINGLE the digest covers the output at the SIGNING index, and with a single output index 1 would hit the no-corresponding-output case, zero hashOutputs, and make SINGLE indistinguishable from NONE.',
     signer_priv_hex: '0000000000000000000000000000000000000000000000000000000000000001',
     signer_pub_hex: ALICE_PUB_HEX,
     sighash_note: '0x41 = SIGHASH_ALL | SIGHASH_FORKID. digestHex = sha256d(preimage) = the value ECDSA actually signs. Each scenario carries its own sighashFlags; consumers must recompute under THAT value, not a hardcoded one.',

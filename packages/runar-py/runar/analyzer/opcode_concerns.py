@@ -20,27 +20,25 @@ def _format_kb(n: int) -> str:
     """Format `n / 1024` with exactly one digit after decimal, matching
     JS `(n / 1024).toFixed(1)`.
 
-    Canonical formula (spec §5.1): `k = round_half_to_even(n * 10 / 1024) / 10`.
+    Per ECMA-262, toFixed picks the integer k for which k/10 - value is
+    closest to zero, and on an exact tie picks the LARGER k -
+    round-half-up (ties away from zero for our non-negative n), not
+    IEEE-754 round-half-to-even. Verified live:
+    `node -e "console.log((500992/1024).toFixed(1))"` prints "489.3",
+    where round-half-to-even would give "489.2".
+
+    Canonical formula (spec §5.1): `k = round_half_up(n * 10 / 1024) / 10`.
     """
-    # round_half_to_even on tenths place.
-    # tenths_scaled = n * 10 / 1024 (real-valued).
-    # We need to round half-to-even.
     # n is a non-negative integer here.
     numer = n * 10
     denom = 1024
     q, r = divmod(numer, denom)
     # Doubled remainder vs denom for half comparison.
     doubled = r * 2
-    if doubled > denom:
+    if doubled >= denom:
         tenths_total = q + 1
-    elif doubled < denom:
-        tenths_total = q
     else:
-        # Exact half — round to even.
-        if q % 2 == 0:
-            tenths_total = q
-        else:
-            tenths_total = q + 1
+        tenths_total = q
     int_part, tenth = divmod(tenths_total, 10)
     return f"{int_part}.{tenth}"
 

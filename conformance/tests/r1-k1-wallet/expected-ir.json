@@ -439,6 +439,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "r1SaltedPubKeyHash",

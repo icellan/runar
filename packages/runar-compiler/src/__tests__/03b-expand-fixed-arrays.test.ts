@@ -381,6 +381,91 @@ describe('expandFixedArrays', () => {
   });
 
   // -------------------------------------------------------------------------
+  // N-048 (external "PrematurePeek"): a computed runtime index is hoisted to
+  // a `const __idx_K` binding in front of its STATEMENT. That is only sound
+  // when nothing the statement evaluates before the read can observe or be
+  // observed by the move. The reported exploit was
+  //   assert(++this.cursor > 0n && this.enabled[this.cursor % 2n] === 1n);
+  // where `__idx_0 = this.cursor % 2n` was bound before the increment, so the
+  // gate read the PRE-increment slot. The AST has no let-expression, so the
+  // index cannot be bound at the read's own position; the pass refuses every
+  // hoist that would reorder evaluation, with one shared diagnostic.
+  //
+  // Proves: each reordering shape below is refused, and each order-preserving
+  // shape still expands without error. Does not prove on-chain behaviour —
+  // that is runar-testing's n048-fixed-array-index-order-vm.test.ts.
+  // -------------------------------------------------------------------------
+  describe('N-048: hoisted runtime index keeps source evaluation order', () => {
+    const ORDER_DIAG = 'FixedArray index would be evaluated out of source order';
+    const contractWith = (body: string) => `
+      class Peek extends StatefulSmartContract {
+        readonly enabled: FixedArray<bigint, 2> = [1n, 0n];
+        slots: FixedArray<bigint, 2> = [0n, 0n];
+        cursor: bigint;
+        constructor(cursor: bigint) { super(cursor); this.cursor = cursor; }
+        public release(k: bigint, c: boolean) {
+          ${body}
+        }
+      }
+    `;
+    const refused: Array<[string, string]> = [
+      ['the reported shape: index after ++ in the left operand of &&',
+        'assert(++this.cursor > 0n && this.enabled[this.cursor % 2n] === 1n);'],
+      ['index after an earlier ++ with no short-circuit',
+        'assert(++this.cursor + this.enabled[this.cursor % 2n] > 0n);'],
+      ['index after an earlier output intrinsic call',
+        'assert(this.addRawOutput(1n, toByteString("00")) === this.enabled[this.cursor % 2n]);'],
+      ['effect-free index in the right operand of && (spec 3.7)',
+        'assert(k > 0n && this.enabled[k - 1n] === 1n);'],
+      ['effect-free index in the right operand of ||',
+        'assert(k === 0n || this.enabled[k - 1n] === 1n);'],
+      ['index in a ternary arm',
+        'assert((c ? this.enabled[k + 1n] : 0n) === 0n);'],
+      ['index whose own ++ moves ahead of an earlier read',
+        'assert(this.cursor + this.enabled[++this.cursor % 2n] > 0n);'],
+      ['value-side read whose index follows the target index side effect',
+        'this.slots[++this.cursor % 2n] = this.enabled[this.cursor % 2n]; assert(true);'],
+    ];
+    for (const [what, body] of refused) {
+      it(`refuses: ${what}`, () => {
+        const { errors } = expand(contractWith(body));
+        expect(errors.map(e => e.message).join('\n')).toContain(ORDER_DIAG);
+      });
+    }
+
+    const accepted: Array<[string, string]> = [
+      ['the increment in its own statement before the read',
+        '++this.cursor; assert(this.enabled[this.cursor % 2n] === 1n);'],
+      ['index in the left operand of &&',
+        'assert(this.enabled[k - 1n] === 1n && k > 0n);'],
+      ['index in a ternary condition',
+        'assert((this.enabled[k + 1n] === 1n ? 1n : 0n) === 1n);'],
+      ['effect after the read',
+        'assert(this.enabled[this.cursor % 2n] + ++this.cursor > 0n);'],
+      ['statement-form read', 'const v = this.enabled[k + 1n]; assert(v === 1n);'],
+      ['runtime write with a computed index and a side-effecting value',
+        'this.slots[this.cursor % 2n] = ++this.cursor; assert(true);'],
+    ];
+    for (const [what, body] of accepted) {
+      it(`accepts: ${what}`, () => {
+        const { errors } = expand(contractWith(body));
+        expect(errors.map(e => e.message).join('\n')).not.toContain(ORDER_DIAG);
+      });
+    }
+
+    it('hoists the split form after the increment, not before it', () => {
+      const { contract, errors } = expand(contractWith(
+        '++this.cursor; assert(this.enabled[this.cursor % 2n] === 1n);',
+      ));
+      expect(errors).toEqual([]);
+      const body = methodBody(contract, 'release');
+      expect(body[0]!.kind).toBe('expression_statement');
+      expect(body[1]!.kind).toBe('variable_decl');
+      expect((body[1] as { name: string }).name.startsWith('__idx_')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Field preservation (R-025 / R-026)
   // -------------------------------------------------------------------------
   //

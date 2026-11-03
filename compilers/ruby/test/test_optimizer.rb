@@ -56,23 +56,29 @@ class TestOptimizer < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
-  # 4. Push 0 + OP_ADD eliminated
+  # 4. Push 0 + OP_ADD kept (F-001)
+  #
+  # x + 0 = x over integers, but OP_ADD decodes its operand as a CScriptNum
+  # (rejecting a non-minimal encoding under strict rules) and re-encodes it
+  # minimally; a witness operand gets no other normalisation, so deleting the
+  # pair changes accept/reject and value. Proves the Ruby peephole keeps the
+  # pair; does not execute a script.
   # ---------------------------------------------------------------------------
 
-  def test_push_zero_add_eliminated
+  def test_push_zero_add_kept
     ops = [push_bigint(0), opcode("OP_ADD")]
     result = optimize(ops)
-    assert_empty result, "push(0) + OP_ADD should be eliminated (identity)"
+    assert_equal ops, result, "push(0) + OP_ADD must survive (F-001)"
   end
 
   # ---------------------------------------------------------------------------
-  # 5. Push 0 + OP_SUB eliminated
+  # 5. Push 0 + OP_SUB kept (F-001, as for OP_ADD)
   # ---------------------------------------------------------------------------
 
-  def test_push_zero_sub_eliminated
+  def test_push_zero_sub_kept
     ops = [push_bigint(0), opcode("OP_SUB")]
     result = optimize(ops)
-    assert_empty result, "push(0) + OP_SUB should be eliminated (identity)"
+    assert_equal ops, result, "push(0) + OP_SUB must survive (F-001)"
   end
 
   # ---------------------------------------------------------------------------
@@ -195,13 +201,13 @@ class TestOptimizer < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
-  # 9. Double NEGATE eliminated
+  # 9. Double NEGATE kept (F-001, as for push(0) + OP_ADD)
   # ---------------------------------------------------------------------------
 
-  def test_double_negate_eliminated
+  def test_double_negate_kept
     ops = [opcode("OP_NEGATE"), opcode("OP_NEGATE")]
     result = optimize(ops)
-    assert_empty result, "double NEGATE should be eliminated"
+    assert_equal ops, result, "double NEGATE must survive (F-001)"
   end
 
   # ---------------------------------------------------------------------------
@@ -320,13 +326,13 @@ class TestOptimizer < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_multiple_passes_converge
-    # push(0) + OP_ADD first eliminates to nothing,
+    # push(7) + drop first eliminates to nothing,
     # but we add context around it that benefits from a second pass.
-    # swap swap dup drop push(0) OP_ADD
+    # swap swap dup drop push(7) drop  (was push(0) OP_ADD; F-001 keeps it)
     ops = [
       { op: "swap" }, { op: "swap" },   # eliminate in pass 1
       { op: "dup" }, { op: "drop" },     # eliminate in pass 1
-      push_bigint(0), opcode("OP_ADD")   # eliminate in pass 1
+      push_bigint(7), { op: "drop" }     # eliminate in pass 1
     ]
     result = optimize(ops)
     assert_empty result, "all ops should be eliminated through multiple passes"
@@ -374,7 +380,7 @@ class TestOptimizer < Minitest::Test
       {
         op: "if",
         then: [opcode("OP_DUP"), opcode("OP_DROP")],
-        else_ops: [push_bigint(0), opcode("OP_ADD")]
+        else_ops: [push_bigint(7), { op: "drop" }]
       }
     ]
     result = optimize(ops)
@@ -382,7 +388,8 @@ class TestOptimizer < Minitest::Test
     assert_equal "if", result[0][:op]
     # then branch: OP_DUP + OP_DROP should be eliminated
     assert_empty result[0][:then], "then branch should be optimized away"
-    # else branch: push(0) + OP_ADD should be eliminated
+    # else branch: push(7) + drop should be eliminated (was push(0) + OP_ADD;
+    # F-001 keeps that pair)
     assert_empty result[0][:else_ops], "else branch should be optimized away"
   end
 

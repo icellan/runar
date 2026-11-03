@@ -16,9 +16,9 @@ sha2 = "0.10"
 ripemd = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-k256 = { version = "0.13", features = ["ecdsa"] }
-p256 = { version = "0.13", features = ["ecdsa"] }
-p384 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa", "getrandom"] }
+p384 = { version = "0.14", features = ["ecdsa", "getrandom"] }
 rand = "0.8"
 bs58 = { version = "0.5", features = ["check"] }
 # >=0.2.89 is a REQUIREMENT, not a preference: 0.1.x builds the BIP-143

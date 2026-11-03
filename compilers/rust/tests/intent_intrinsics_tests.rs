@@ -524,3 +524,93 @@ func (c *Bond) PayBond() {
         errors
     );
 }
+
+// ---------------------------------------------------------------------------
+// F-075 — the requireOutputP2PKH layout guards follow private helpers
+// ---------------------------------------------------------------------------
+// ANF lowering inlines private helpers and compute_side_effect_summary injects
+// the continuation through the private call graph. The guards used to walk only
+// the method's own body, so moving either half of the forbidden pair into a
+// helper compiled a contract the guard itself calls permanently unspendable.
+// Proves: each guard fires with its own diagnostic, naming the public method,
+// when one half sits in a private helper. Does not prove: the helper form would
+// otherwise compile end-to-end (requireOutputP2PKH in a helper also fails later
+// in stack lowering, a separate issue).
+
+fn f075_source(helpers: &str, body: &str) -> String {
+    format!(
+        r#"
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {{
+    runar.StatefulSmartContract
+    BondPKH runar.ByteString `runar:"readonly"`
+    Bond    runar.Bigint     `runar:"readonly"`
+    Tag     runar.ByteString `runar:"readonly"`
+    Count   runar.Bigint
+}}
+
+{helpers}
+
+func (c *Cov) Go() {{
+{body}
+}}
+"#
+    )
+}
+
+#[test]
+fn test_f075_require_output_p2pkh_zero_in_helper_with_mutation_errors() {
+    let errors = typecheck_errors(&f075_source(
+        "func (c *Cov) assertBond() {\n    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}",
+        "    c.Count = c.Count + 1\n    c.assertBond()",
+    ));
+    assert_error_contains(&errors, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+}
+
+#[test]
+fn test_f075_mutation_in_helper_with_require_output_p2pkh_zero_errors() {
+    let errors = typecheck_errors(&f075_source(
+        "func (c *Cov) bump() {\n    c.Count = c.Count + 1\n}",
+        "    c.bump()\n    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)",
+    ));
+    assert_error_contains(&errors, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+}
+
+#[test]
+fn test_f075_crit3_require_output_p2pkh_in_helper_errors() {
+    let errors = typecheck_errors(&f075_source(
+        "func (c *Cov) assertBond() {\n    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}",
+        "    c.AddDataOutput(0, c.Tag)\n    c.assertBond()",
+    ));
+    assert_error_contains(&errors, "method 'go' mixes requireOutputP2PKH() with addDataOutput()");
+}
+
+#[test]
+fn test_f075_state_output_in_helper_errors() {
+    let errors = typecheck_errors(&f075_source(
+        "func (c *Cov) emitNext() {\n    c.AddOutput(1000, c.Count+1)\n}",
+        "    c.emitNext()\n    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)",
+    ));
+    assert_error_contains(
+        &errors,
+        "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()",
+    );
+}
+
+#[test]
+fn test_f075_terminal_helper_not_flagged() {
+    let errors = typecheck_errors(&f075_source(
+        "func (c *Cov) assertBond() {\n    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}",
+        "    c.assertBond()",
+    ));
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.contains("mixes requireOutputP2PKH()") || e.contains("permanently unspendable")),
+        "terminal helper form wrongly flagged: {:?}",
+        errors
+    );
+}

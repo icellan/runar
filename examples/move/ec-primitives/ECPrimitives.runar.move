@@ -46,9 +46,9 @@ module ECPrimitives {
     }
 
     public fun check_make_point(contract: &ECPrimitives, x: bigint, y: bigint, expected_x: bigint, expected_y: bigint) {
-        let pt: Point = ecMakePoint(x, y);
-        assert!(ecPointX(pt) == expected_x, 0);
-        assert!(ecPointY(pt) == expected_y, 0);
+        let point: Point = ecMakePoint(x, y);
+        assert!(ecPointX(point) == expected_x, 0);
+        assert!(ecPointY(point) == expected_y, 0);
     }
 
     public fun check_encode_compressed(contract: &ECPrimitives, expected: ByteString) {

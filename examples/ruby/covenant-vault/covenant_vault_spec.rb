@@ -10,9 +10,11 @@ require_relative 'CovenantVault.runar'
 #     == extract_output_hash(tx_preimage)
 #
 # In the Ruby builtins, every byte string is represented as hex. The mock
-# extract_output_hash (packages/runar-rb/lib/runar/builtins.rb:425) returns
-# the first 64 hex chars (32 bytes) of the preimage. We drive adversarial
-# cases by setting tx_preimage to hash256(adversarial_outputs).
+# extract_output_hash (packages/runar-rb/lib/runar/builtins.rb) returns the
+# preimage's hashOutputs field: the 64 hex chars (32 bytes) ending 16 hex
+# chars (8 bytes) before the end (N-246). We drive adversarial cases by
+# building a preimage whose hashOutputs window is
+# hash256(adversarial_outputs).
 RSpec.describe CovenantVault do
   let(:alice)      { Runar::TestKeys::ALICE }
   let(:bob)        { Runar::TestKeys::BOB }
@@ -25,13 +27,14 @@ RSpec.describe CovenantVault do
       '1976a914' + pkh_hex + '88ac'
   end
 
-  # Build a 181-byte preimage hex string whose first 32 bytes are
-  # hash256(outputs_hex). Pads with zeros so the preimage is the canonical
-  # 181-byte BIP-143 length.
+  # Build a 181-byte preimage hex string whose hashOutputs window
+  # (bytes[141:173], i.e. bytes[len-40:len-8]) is hash256(outputs_hex).
+  # Pads with zeros so the preimage is the canonical 181-byte BIP-143
+  # length.
   def preimage_for(outputs_hex)
     sha1 = Digest::SHA256.hexdigest([outputs_hex].pack('H*'))
     sha2 = Digest::SHA256.hexdigest([sha1].pack('H*'))
-    sha2 + ('00' * (181 - 32))
+    ('00' * 141) + sha2 + ('00' * 8)
   end
 
   # Helper that gives our helper functions access to the Runar::Builtins

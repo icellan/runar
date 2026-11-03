@@ -211,7 +211,8 @@ The full byte → canonical name mapping the analyzer uses:
 0x82 OP_SIZE
 0x83 OP_INVERT     0x84 OP_AND           0x85 OP_OR            0x86 OP_XOR
 0x87 OP_EQUAL      0x88 OP_EQUALVERIFY
-0x8b OP_1ADD       0x8c OP_1SUB          0x8f OP_NEGATE        0x90 OP_ABS
+0x8b OP_1ADD       0x8c OP_1SUB          0x8d OP_2MUL          0x8e OP_2DIV
+0x8f OP_NEGATE     0x90 OP_ABS
 0x91 OP_NOT        0x92 OP_0NOTEQUAL     0x93 OP_ADD           0x94 OP_SUB
 0x95 OP_MUL        0x96 OP_DIV           0x97 OP_MOD           0x98 OP_LSHIFT
 0x99 OP_RSHIFT     0x9a OP_BOOLAND       0x9b OP_BOOLOR        0x9c OP_NUMEQUAL
@@ -221,11 +222,18 @@ The full byte → canonical name mapping the analyzer uses:
 0xa6 OP_RIPEMD160  0xa7 OP_SHA1          0xa8 OP_SHA256        0xa9 OP_HASH160
 0xaa OP_HASH256    0xab OP_CODESEPARATOR
 0xac OP_CHECKSIG   0xad OP_CHECKSIGVERIFY 0xae OP_CHECKMULTISIG 0xaf OP_CHECKMULTISIGVERIFY
+0xb3 OP_SUBSTR     0xb4 OP_LEFT          0xb5 OP_RIGHT         0xb6 OP_LSHIFTNUM
+0xb7 OP_RSHIFTNUM
 ```
 
+`0x8d`, `0x8e` and `0xb3`..`0xb7` are the Chronicle opcodes the Rúnar
+compiler emits (`spec/opcodes.md` §13); `0xb3`..`0xb7` were
+`OP_NOP4`..`OP_NOP8` before Chronicle and carry only their Chronicle
+names here.
+
 Any byte not listed above (including `0x62`, `0x65`, `0x66`, `0x89`,
-`0x8a`, `0x8d`, `0x8e`, and `0x50` etc.) is unknown to the analyzer
-and renders as `OP_UNKNOWN(0xNN)`.
+`0x8a`, `0xb0`..`0xb2`, `0xb8`..`0xb9`, and `0x50` etc.) is unknown to
+the analyzer and renders as `OP_UNKNOWN(0xNN)`.
 
 ---
 
@@ -245,7 +253,7 @@ Severity is assigned per code (never varies by context).
 | `UNREACHABLE_AFTER_RETURN`    | warning  | Opcode appears after OP_RETURN in linear flow.    |
 | `UNCONDITIONALLY_SUCCEEDS`    | warning  | A path contains no verification opcode.            |
 | `NO_SIG_CHECK`                | warning  | A reachable path has no CHECKSIG/CHECKMULTISIG.    |
-| `CHECKSIG_RESULT_DROPPED`     | warning  | OP_CHECKSIG immediately followed by OP_DROP.       |
+| `CHECKSIG_RESULT_DROPPED`     | warning  | OP_CHECKSIG immediately followed by OP_DROP/OP_2DROP. |
 | `CODESEPARATOR_PRESENT`       | info     | OP_CODESEPARATOR present (expected for stateful). |
 | `INEFFICIENT_PUSH`            | info     | A push uses a longer encoding than necessary.      |
 | `LARGE_SCRIPT`                | info     | Script size exceeds the LARGE_SCRIPT threshold.    |
@@ -278,11 +286,15 @@ including punctuation (em dashes `—` are U+2014).
   - `pushdata4` of ≤65535-byte data: `OP_PUSHDATA4 used for <n>-byte data — OP_PUSHDATA2 would be more efficient`
 - `LARGE_SCRIPT`: `Script is <n> bytes (<k> KB) — consider if this is intentional`
   where `k` is `n / 1024` formatted with **exactly one** digit after the
-  decimal point, using banker-free truncation toward zero after standard
-  IEEE-754 rounding of `n/1024` to one decimal. To remove ambiguity, the
-  canonical formula is: `k = round_half_to_even(n * 10 / 1024) / 10`,
-  rendered as `<integer>.<digit>`. (Implementations may choose any
-  algorithm equivalent to JS `(n / 1024).toFixed(1)`.)
+  decimal point, matching JS `(n / 1024).toFixed(1)`. Per ECMA-262,
+  `toFixed` picks the integer that minimizes `|k/10 - n/1024|`, and on an
+  exact tie picks the LARGER `k` — round-half-up (ties away from zero for
+  non-negative `n`), **not** IEEE-754 round-half-to-even (verified live:
+  `node -e "console.log((500992/1024).toFixed(1))"` prints `"489.3"`,
+  where round-half-to-even would give `"489.2"`). To remove ambiguity, the
+  canonical formula is: `k = round_half_up(n * 10 / 1024) / 10`, rendered
+  as `<integer>.<digit>`. (Implementations may choose any algorithm
+  equivalent to JS `(n / 1024).toFixed(1)`.)
 - `PATHS_TRUNCATED`: two message forms, selected by `numBranches`:
   - For `numBranches < 53` (an exact 2^N fits in a JS safe integer):
     `Script has <numBranches> branch points (2^<numBranches> = <requested> paths); analysis truncated to the first 256. Consider reducing branching or splitting the contract into smaller spending paths.`
@@ -329,13 +341,26 @@ classified by encoding:
 
 If the declared length extends past the end of the script, the parser
 emits the opcode with **whatever data is available** (silently
-truncated) and stops parsing. No additional finding is emitted —
-truncation is observable through:
+truncated). Truncation consumes every remaining byte, so the truncated
+push is necessarily the last opcode the parser produces — there is no
+further opcode for it to perturb. No additional finding is emitted.
+This is acceptable, not merely unnoticed:
 
-- `STACK_UNDERFLOW` findings downstream (if subsequent analysis sees a
-  smaller stack effect), or
-- The script's stack effect simply being short.
+- The truncated push's own stack effect is still `(0, 1)` (§8.1): a
+  push counts as pushing exactly one item regardless of how much data
+  it actually carries, so truncation does not change depth tracking.
+- Even disregarding the point above, §8.2's underflow check only fires
+  when `initialDepth > 0`; the default `initialDepth = 0` analysis
+  (locking scripts analyzed in isolation, which is how the checked-in
+  goldens are produced) never emits `STACK_UNDERFLOW` regardless of
+  what truncation does to depth.
 
+So a truncated push cannot manifest as a `STACK_UNDERFLOW` finding
+"downstream" — both because there is no downstream opcode to analyze,
+and because the one analysis mode that could in principle underflow
+(`initialDepth > 0`) is not the one applied to a standalone script. A
+malformed script missing opcodes a well-formed one would need (e.g. an
+unclosed `OP_IF`) is instead caught by `UNBALANCED_IF_ENDIF` (§7.1).
 This matches the reference behavior; the spec does NOT introduce a
 `TRUNCATED_PUSH` code.
 
@@ -564,7 +589,8 @@ OP_CAT            (2,1)   OP_SPLIT          (2,2)   OP_NUM2BIN        (2,1)
 OP_BIN2NUM        (1,1)   OP_SIZE           (1,2)
 OP_INVERT         (1,1)   OP_AND            (2,1)   OP_OR             (2,1)
 OP_XOR            (2,1)   OP_EQUAL          (2,1)   OP_EQUALVERIFY    (2,0)
-OP_1ADD           (1,1)   OP_1SUB           (1,1)   OP_NEGATE         (1,1)
+OP_1ADD           (1,1)   OP_1SUB           (1,1)   OP_2MUL           (1,1)
+OP_2DIV           (1,1)   OP_NEGATE         (1,1)
 OP_ABS            (1,1)   OP_NOT            (1,1)   OP_0NOTEQUAL      (1,1)
 OP_ADD            (2,1)   OP_SUB            (2,1)   OP_MUL            (2,1)
 OP_DIV            (2,1)   OP_MOD            (2,1)   OP_LSHIFT         (2,1)
@@ -577,7 +603,16 @@ OP_RIPEMD160      (1,1)   OP_SHA1           (1,1)   OP_SHA256         (1,1)
 OP_HASH160        (1,1)   OP_HASH256        (1,1)
 OP_CHECKSIG       (2,1)   OP_CHECKSIGVERIFY (2,0)
 OP_CHECKMULTISIG  (3,1)   OP_CHECKMULTISIGVERIFY (3,0)
+OP_SUBSTR         (3,1)   OP_LEFT           (2,1)   OP_RIGHT          (2,1)
+OP_LSHIFTNUM      (2,1)   OP_RSHIFTNUM      (2,1)
 ```
+
+The Chronicle arities above are those of the `@bsv/sdk` script
+interpreter (`Spend.ts`): `OP_2MUL`/`OP_2DIV` pop one number and push
+one; `OP_SUBSTR` pops `buf offset len` and pushes the substring;
+`OP_LEFT`/`OP_RIGHT` pop `buf len` and push the slice;
+`OP_LSHIFTNUM`/`OP_RSHIFTNUM` pop `value bits` and push the shifted
+number.
 
 - Any push operation: `(0, 1)`.
 - `OP_CODESEPARATOR` (0xab): `(0, 0)` — not in the table; falls
@@ -637,7 +672,7 @@ empty, `maxStackDepth = 0` (the seed). Verified against all 8 canonical
 goldens (e.g. `basic-p2pkh`: `stackDepthAtEnd: -1`, `maxStackDepth: 0`;
 `stateful-counter`: all per-path `stackDepthAtEnd` negative,
 `maxStackDepth: 0`; `schnorr-zkp`: positive max-over-paths,
-`maxStackDepth: 1023`).
+`maxStackDepth: 513`).
 
 Per-path `stackDepthAtEnd` is unaffected by this clamp and may be
 negative — see §14.
@@ -650,8 +685,14 @@ negative — see §14.
   emit one finding (severity `warning`).
 - **CHECKSIG_RESULT_DROPPED**: Walk the opcode list linearly. For each
   index `i` where `i+1 < opcodes.length`, if `opcodes[i]` is `OP_CHECKSIG`
-  or `OP_CHECKMULTISIG` AND `opcodes[i+1]` is `OP_DROP`, emit one finding
-  with `offset = opcodes[i].offset`, `opcode = opcodes[i].name`.
+  or `OP_CHECKMULTISIG` AND `opcodes[i+1]` is `OP_DROP` (0x75) or
+  `OP_2DROP` (0x6d), emit one finding with `offset = opcodes[i].offset`,
+  `opcode = opcodes[i].name`.
+
+  Both discarding opcodes pop the result without reading it. `OP_NIP` and
+  similar opcodes that leave the result on top are NOT flagged, and the
+  rule inspects only `opcodes[i+1]`: a result discarded by a longer
+  sequence (e.g. `OP_SWAP OP_NIP`, `OP_TOALTSTACK`) is not detected.
 
   Note: only `OP_CHECKSIG` and `OP_CHECKMULTISIG` are flagged (NOT the
   `*VERIFY` variants — they don't leave a result on the stack).
@@ -847,9 +888,26 @@ avoid them:
 
 ## 15. Version
 
-Spec version: 1.2 (2026-05-28). All goldens at
+Spec version: 1.4 (2026-10-05). All goldens at
 `conformance/analyzer/*/expected-analyzer-report.json` were produced
 under this version.
+
+**1.4 (2026-10-05).** `CHECKSIG_RESULT_DROPPED` (§9) also fires when
+the next opcode is `OP_2DROP`, which discards the signature result just
+as `OP_DROP` does; before, `OP_CHECKSIG OP_2DROP OP_1` produced no
+finding (F-234). No golden contains that pair, so all eight goldens are
+byte-identical.
+
+**1.3 (2026-10-05).** Adds the Chronicle opcodes `OP_2MUL` (0x8d),
+`OP_2DIV` (0x8e), `OP_SUBSTR` (0xb3), `OP_LEFT` (0xb4), `OP_RIGHT`
+(0xb5), `OP_LSHIFTNUM` (0xb6) and `OP_RSHIFTNUM` (0xb7) to the name
+table (§4.1) and the stack-effect table (§8.1). Earlier versions
+rendered them as `OP_UNKNOWN(0xNN)` with a `(0,0)` effect, so every
+`OP_RSHIFTNUM` in the EC ladders was scored as stack-neutral instead
+of net −1. Bytes that are still unknown keep the `(0,0)` rule. Only
+`stackDepthAtEnd` and `maxStackDepth` move in the goldens:
+`schnorr-zkp` 1023 → 513 and `ec-demo` 524 → 269; the other six
+fixtures are byte-identical.
 
 **1.2 (2026-05-28).** Drops the JS-32-bit-shift quirk in `PATHS_TRUNCATED`
 arithmetic (§5.1) and path enumeration (§7.2). The `<requested>` field

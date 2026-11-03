@@ -315,4 +315,40 @@ RSpec.describe Runar::SDK::RunarContract do
       expect(input_count(prepared.tx_hex)).to eq(1)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # N-271: terminal_outputs + additional_contract_inputs must refuse, not drop
+  # ---------------------------------------------------------------------------
+  #
+  # prepare_terminal lays out exactly one contract input (plus an optional
+  # fee/funding input) and never reads opts.additional_contract_inputs at
+  # all. Before the fix this proves the extra UTXO is silently dropped
+  # instead of being rejected or spent -- the call succeeds and returns a
+  # PreparedCall, but the built tx has only one input, not two.
+  #
+  # This does NOT prove additional_contract_inputs could ever be made to
+  # work on the terminal path (merging it validly) -- only that dropping it
+  # silently is unacceptable and must become a refusal.
+
+  describe '#prepare_call with terminal_outputs and additional_contract_inputs' do
+    let(:artifact) { make_artifact(SIMPLE_TERMINAL_ARTIFACT_JSON) }
+    let(:provider) { funded_provider }
+    let(:signer)   { make_signer }
+    let(:contract) { contract_with_utxo(artifact, 'cc') }
+
+    let(:extra_utxo) do
+      Runar::SDK::Utxo.new(txid: 'ee' * 32, output_index: 0, satoshis: 1_000,
+                           script: '51')
+    end
+
+    it 'raises ArgumentError naming additional_contract_inputs instead of dropping it' do
+      opts = Runar::SDK::CallOptions.new(
+        terminal_outputs: sample_terminal_outputs,
+        additional_contract_inputs: [extra_utxo]
+      )
+      expect do
+        contract.prepare_call('settle', [], provider, signer, opts)
+      end.to raise_error(ArgumentError, /additional_contract_inputs/)
+    end
+  end
 end

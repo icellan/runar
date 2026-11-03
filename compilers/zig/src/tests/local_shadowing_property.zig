@@ -36,9 +36,16 @@ const peephole = @import("../passes/peephole.zig");
 const emit = @import("../codegen/emit.zig");
 const types = @import("../ir/types.zig");
 
-/// The cross-tier hex TS and Go both emit for `SHADOW_SRC` with constant
-/// folding disabled.
-const CROSS_TIER_HEX = "517c529300a0697600a077";
+/// The cross-tier hex every tier emits for `SHADOW_SRC` with constant folding
+/// disabled.
+///
+/// N-016: this used to be `517c529300a0697600a077`, which TS and Go agreed on
+/// and which was itself wrong — its tail `76 00 a0` read `this.limit` as an
+/// OP_DUP of the LOCAL `limit` still on the stack, so `assert(this.limit > 0n)`
+/// checked the local. The property read now pushes the constructor-slot
+/// placeholder (`00 00 a0`). The part this test is about — the rebind stays a
+/// local write (`51 7c 52 93 00 a0 69`) — is unchanged.
+const CROSS_TIER_HEX = "517c529300a0690000a077";
 
 /// What the tier emitted while the write resolved to the property.
 const BUGGY_HEX = "517c52937700a0690000a0";

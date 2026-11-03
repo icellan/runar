@@ -6,6 +6,26 @@ const peephole = @import("passes/peephole.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const emit = @import("codegen/emit.zig");
 const compiler_api = @import("compiler_api.zig");
+const input_limits = @import("frontend/input_limits.zig");
+
+/// `SOURCE_DATE_EPOCH` (Unix seconds) as given to this process, or null. Set
+/// once in `main`; read by `buildTimestamp`. Reproducible-builds convention,
+/// honoured by every tier (R-212).
+var source_date_epoch: ?[]const u8 = null;
+
+/// N-152: the artifact's `buildTimestamp` - the `SOURCE_DATE_EPOCH` instant when
+/// that variable holds a non-negative integer, otherwise the wall clock. A
+/// malformed value is ignored, as in the Go and Java tiers.
+fn buildTimestamp(buf: *[emit.BUILD_TIMESTAMP_LEN]u8, io: std.Io) []const u8 {
+    if (source_date_epoch) |raw| {
+        if (std.fmt.parseInt(u64, std.mem.trim(u8, raw, " \t\r\n"), 10)) |secs| {
+            return emit.formatBuildTimestamp(buf, secs);
+        } else |_| {}
+    }
+    const now = std.Io.Clock.real.now(io);
+    const secs: i64 = now.toSeconds();
+    return emit.formatBuildTimestamp(buf, if (secs < 0) 0 else @intCast(secs));
+}
 
 const CompileOptions = struct {
     emit_ir: bool = false,
@@ -13,6 +33,9 @@ const CompileOptions = struct {
     disable_constant_folding: bool = false,
     parse_only: bool = false,
     emit_source_map_path: ?[]const u8 = null,
+    /// N-445: `--no-source-map` omits the artifact's sourceMap key. Mutually
+    /// exclusive with `--emit-source-map`.
+    no_source_map: bool = false,
     /// `--emit-ir-to <path>`: write the SAME bytes `--emit-ir` would print to
     /// this file and then CONTINUE compiling, so one process yields both the
     /// ANF IR and the script hex. The conformance runner drives every tier with
@@ -25,6 +48,10 @@ const ParseOptionsError = error{
     UnknownFlag,
     UnsupportedFlag,
     MissingFlagValue,
+    /// N-220: a second input (`--source` / `--ir`) after the first one.
+    ConflictingInputs,
+    /// N-445: `--no-source-map` together with `--emit-source-map`.
+    ConflictingSourceMapFlags,
 };
 
 fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding: bool) ParseOptionsError!CompileOptions {
@@ -32,6 +59,12 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+        // N-220: the input file is already fixed by the subcommand / first
+        // flag, so another --source or --ir is a second input mode. Go F-183
+        // and Ruby F-335 refuse this; we used to answer "unknown flag".
+        if (std.mem.eql(u8, arg, "--source") or std.mem.eql(u8, arg, "--ir")) {
+            return error.ConflictingInputs;
+        }
         if (std.mem.eql(u8, arg, "--emit-ir")) {
             opts.emit_ir = true;
             continue;
@@ -61,6 +94,10 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
             opts.emit_source_map_path = arg["--emit-source-map=".len..];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--no-source-map")) {
+            opts.no_source_map = true;
+            continue;
+        }
         // --emit-ir-to <PATH> writes the canonical ANF IR JSON (byte-identical
         // to what --emit-ir prints) to PATH, then continues compiling.
         if (std.mem.eql(u8, arg, "--emit-ir-to")) {
@@ -75,12 +112,14 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
         }
         return error.UnknownFlag;
     }
+    if (opts.no_source_map and opts.emit_source_map_path != null) return error.ConflictingSourceMapFlags;
     return opts;
 }
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
+    source_date_epoch = init.environ_map.get("SOURCE_DATE_EPOCH");
 
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer args_list.deinit(allocator);
@@ -108,12 +147,14 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown compile-ir flag\n",
                 error.UnsupportedFlag => "error: --disable-constant-folding is only valid for source compilation\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
         };
         compileFromIR(allocator, io, args[2], opts) catch |err| {
-            std.debug.print("error: {s}\n", .{@errorName(err)});
+            printIrError(err);
             std.process.exit(1);
         };
         return;
@@ -128,6 +169,8 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown compile flag\n",
                 error.UnsupportedFlag => "error: unsupported compile flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -155,6 +198,8 @@ pub fn main(init: std.process.Init) !void {
                 error.UnknownFlag => "error: unknown source flag\n",
                 error.UnsupportedFlag => "error: unsupported source flag\n",
                 error.MissingFlagValue => "error: --emit-source-map requires a path argument\n",
+                error.ConflictingInputs => "Error: --source and --ir are mutually exclusive; pass exactly one\n",
+                error.ConflictingSourceMapFlags => "Error: --no-source-map and --emit-source-map are mutually exclusive\n",
             };
             std.debug.print("{s}", .{message});
             std.process.exit(1);
@@ -165,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
         else
             compileFromSource(allocator, io, file_path, opts);
         result catch |err| {
-            std.debug.print("error: {s}\n", .{@errorName(err)});
+            printIrError(err);
             std.process.exit(1);
         };
         return;
@@ -206,6 +251,7 @@ fn printUsage() void {
         \\  --emit-ir                 Output canonical ANF IR JSON (stop after pass 4)
         \\  --hex                     Output script hex only (no artifact JSON)
         \\  --disable-constant-folding  Skip constant folding pass
+        \\  --no-source-map           Omit the sourceMap key from the artifact
         \\
         \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.java, .json
         \\
@@ -228,6 +274,22 @@ fn writeStdoutLn(io: std.Io, data: []const u8) !void {
 }
 
 /// Compile from ANF IR JSON (passes 5-6 only)
+/// N-069: the required-field check leaves its field-path message beside the
+/// error name, because Zig errors carry no payload.
+fn printIrError(err: anyerror) void {
+    if (err == error.IROutputDelegation) {
+        std.debug.print("error: {s}\n", .{stack_lower.ir_output_delegation_error});
+        return;
+    }
+    if (err == error.IRRequiredFieldMissing or err == error.IRFieldWrongType or err == error.IRIdentifierInvalid or err == error.PublicMethodMissingTerminalAssert or err == error.ReservedName or err == error.ParentClassRuleViolation or err == error.IllegalPropertyWrite or err == error.StatefulScaffoldMismatch or err == error.SyntheticArrayChainMalformed or err == error.RabinKeyProvenance or err == error.IRRecursionDetected or err == error.IRCallDepthExceeded) {
+        if (json_parser.required_fields.lastDiagnostic()) |msg| {
+            std.debug.print("error: {s}\n", .{msg});
+            return;
+        }
+    }
+    std.debug.print("error: {s}\n", .{@errorName(err)});
+}
+
 fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
     // N-119: run the whole IR pipeline in one arena, exactly as
     // `compileFromSource` below already does.
@@ -255,13 +317,31 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     defer arena.deinit();
     const work_allocator = arena.allocator();
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(10 * 1024 * 1024));
+    // N-105: this used to read with `.limited(10 MiB)`, so any IR file
+    // between 10 MiB and json_parser.MAX_IR_BYTES (16 MiB) failed with a bare
+    // `error: StreamTooLong` before parseANFProgram's own size guard ever saw
+    // it, while TS (and every other tier reading the same input) accepted it.
+    // Reading up to MAX_IR_BYTES+1 lets files at or under the cap reach the
+    // loader; a file actually too large for std.json's own read limit still
+    // surfaces as the typed `IRSizeExceeded` diagnostic rather than a raw
+    // StreamTooLong, matching the diagnostic parseANFProgram gives for an
+    // in-memory oversized payload (ir/json_size_guard_test.zig).
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(json_parser.MAX_IR_BYTES + 1)) catch |err| switch (err) {
+        error.StreamTooLong => return error.IRSizeExceeded,
+        else => return err,
+    };
 
     const program = try json_parser.parseANFProgram(work_allocator, source);
 
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
+        // N-186: honour --emit-source-map here too. Stack lowering is not
+        // run (--emit-ir's contract is "stop after the IR") and an IR has no
+        // source locations anyway, so the map is the empty wrapper.
+        if (opts.emit_source_map_path) |sm_path| {
+            try writeSourceMapToPath(work_allocator, io, "", sm_path, path);
+        }
         return;
     }
 
@@ -299,13 +379,23 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // appear in the artifact's "script" field), matching compileFromSource
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
+    var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, optimized_program, buildTimestamp(&ts_buf, io), !opts.no_source_map);
+
+    // --emit-source-map (N-186): this path never looked at the flag, so
+    // `--source IR.json --emit-source-map Y` exited 0 with no Y. An ANF IR
+    // carries no source locations, so the artifact has no sourceMap and
+    // writeSourceMapToPath writes the empty {"mappings":[]} wrapper — the
+    // same file the Go/Rust/Python/Ruby/Java CLIs write for an IR input.
+    if (opts.emit_source_map_path) |sm_path| {
+        try writeSourceMapToPath(work_allocator, io, artifact, sm_path, path);
+    }
+
     if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
         try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 
-    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
     try writeStdoutLn(io, artifact);
 }
 
@@ -331,7 +421,21 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     defer arena.deinit();
     const work_allocator = arena.allocator();
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(1 * 1024 * 1024));
+    // Read every source the MAX_SOURCE_BYTES cap admits (`.limited(n)` accepts
+    // fewer than n bytes). A larger file is refused with the library size
+    // guard's diagnostic (actual size from stat, since it is never read whole)
+    // and `error.SourceSizeExceeded` through the CLI's normal error path. This
+    // read used to stop at 1 MiB, refusing a 1-4 MiB source the cap admits with
+    // a bare `StreamTooLong`.
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(input_limits.MAX_SOURCE_BYTES + 1)) catch |err| switch (err) {
+        error.StreamTooLong => {
+            const st = try std.Io.Dir.cwd().statFile(io, path, .{});
+            const msg = try input_limits.sourceSizeExceededMessage(work_allocator, st.size);
+            std.debug.print("  parse error: {s}\n", .{msg});
+            return error.SourceSizeExceeded;
+        },
+        else => return err,
+    };
 
     // Fail-closed on anything no surface parser claims. `.anf.json` is a
     // compiler *output*, so it is a mistake here too — `--source` routes it to
@@ -349,10 +453,14 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
     // `--parse-only` stops after validate; `--emit-ir` stops after the ANF
     // optimizers — running stack lowering for either would let a later pass
-    // fail a command that never asked for its output.
+    // fail a command that never asked for its output. EXCEPT when
+    // --emit-source-map was also requested (F-255): the source map is only
+    // populated by stack-lowering + emit, so --emit-ir alone must run the
+    // full pipeline in that combination, the same way --emit-ir-to already
+    // does.
     const stop_after: compiler_api.StopAfter = if (opts.parse_only)
         .validate
-    else if (opts.emit_ir)
+    else if (opts.emit_ir and opts.emit_source_map_path == null)
         .anf
     else
         .full;
@@ -376,11 +484,22 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
     const program = pipeline.program.?;
 
-    // --emit-ir: output canonical ANF IR JSON and stop
+    // --emit-ir: output canonical ANF IR JSON, then stop — UNLESS
+    // --emit-source-map was also requested (F-255, same bug as Go's F-183:
+    // an unconditional return here used to silently drop the
+    // --emit-source-map file with no diagnostic). When --emit-source-map is
+    // also set, `stop_after` above already chose `.full`, so we fall
+    // through into stack-lowering + emit below; `emit_ir_handled` then stops
+    // us before the final hex/artifact output, since --emit-ir's contract
+    // is "stdout carries only the IR".
+    var emit_ir_handled = false;
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
-        return;
+        if (opts.emit_source_map_path == null) {
+            return;
+        }
+        emit_ir_handled = true;
     }
 
     // --emit-ir-to <path>: write the SAME bytes --emit-ir would print, then
@@ -402,19 +521,28 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // locking script (same bytes that appear in the artifact's "script"
     // field), so downstream tools can compare byte-for-byte across
     // compilers without parsing JSON.
-    if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
-        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
-        return;
-    }
-
     // Pass 6: Emit full artifact
-    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
+    var ts_buf: [emit.BUILD_TIMESTAMP_LEN]u8 = undefined;
+    const artifact = try emit.emitArtifactStamped(work_allocator, optimized_stack_program, program, buildTimestamp(&ts_buf, io), !opts.no_source_map);
 
     // --emit-source-map: extract the artifact's sourceMap object (or emit
     // the empty {"mappings":[]} wrapper if absent) and write it to PATH.
+    // This runs before the --hex return below (N-186): --hex used to return
+    // first, silently dropping the requested map.
     if (opts.emit_source_map_path) |sm_path| {
         try writeSourceMapToPath(work_allocator, io, artifact, sm_path, path);
+    }
+
+    // --emit-ir already printed the IR above; having fallen through only to
+    // populate and write the source map, stop here rather than also print
+    // the full artifact.
+    if (emit_ir_handled) {
+        return;
+    }
+
+    if (opts.hex_only) {
+        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
+        return;
     }
 
     try writeStdoutLn(io, artifact);

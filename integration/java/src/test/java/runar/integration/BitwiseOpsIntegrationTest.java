@@ -29,13 +29,16 @@ class BitwiseOpsIntegrationTest extends IntegrationBase {
     @Test
     @DisplayName("testShift: shifts compile and the node accepts the spend")
     void testShiftRuns() {
-        runMethod("testShift");
+        // a = 12: 12 << 2 = 48, 12 >> 1 = 6 (F-167: the contract checks them).
+        runMethod("testShift", List.<Object>of(BigInteger.valueOf(48), BigInteger.valueOf(6)));
     }
 
     @Test
     @DisplayName("testBitwise: AND/OR/XOR/NEG compile and spend succeeds")
     void testBitwiseRuns() {
-        runMethod("testBitwise");
+        // a = 12, b = 10: & = 8, | = 14, ^ = 6 (F-167: the contract checks them).
+        runMethod("testBitwise",
+            List.<Object>of(BigInteger.valueOf(8), BigInteger.valueOf(14), BigInteger.valueOf(6)));
     }
 
     @Test
@@ -53,7 +56,7 @@ class BitwiseOpsIntegrationTest extends IntegrationBase {
 
     // ------------------------------------------------------------------
 
-    private void runMethod(String method) {
+    private void runMethod(String method, List<Object> args) {
         RunarArtifact artifact = ContractCompiler.compileRelative(
             "examples/java/src/main/java/runar/examples/bitwise-ops/BitwiseOps.runar.java"
         );
@@ -63,12 +66,14 @@ class BitwiseOpsIntegrationTest extends IntegrationBase {
 
         RunarContract contract = new RunarContract(
             artifact,
-            List.of(BigInteger.valueOf(0x1234), BigInteger.valueOf(0x5678))
+            // 1-byte operands whose results stay below 0x80, so the byte-array
+            // opcodes agree with the integer results passed above.
+            List.of(BigInteger.valueOf(12), BigInteger.valueOf(10))
         );
         contract.deploy(provider, wallet.signer(), 5_000L);
 
         RunarContract.CallOutcome out = contract.call(
-            method, List.of(), null, provider, wallet.signer()
+            method, args, null, provider, wallet.signer()
         );
         assertNotNull(out.txid());
         assertEquals(64, out.txid().length());

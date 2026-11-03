@@ -339,11 +339,35 @@ func (e *sha256Emitter) beWordsToLEReversed8() {
 // generateCompressOps generates SHA-256 compression ops.
 // Assumes top of stack is [..., state(32 BE), block(64 BE)].
 // After: [..., newState(32 BE)]. Net depth: -1.
-func generateCompressOps() []StackOp {
+//
+// guardOperands (F-114): abort unless the block is exactly 64 bytes and the
+// state exactly 32 bytes. Without it a mis-sized operand (a 5-byte or short
+// last word) is truncated / zero-extended by the 32-bit word arithmetic and
+// yields the same digest as a different 64-byte block. sha256Finalize builds
+// its blocks itself and checks its state once at entry, so its compressions
+// run unguarded.
+func generateCompressOps(guardOperands bool) []StackOp {
 	em := newSha256Emitter(2)
+
+	if guardOperands {
+		// [state, block] -> abort unless len(block) == 64
+		em.oc("OP_SIZE")
+		em.depth++
+		em.pushI(64)
+		em.oc("OP_EQUALVERIFY")
+		em.depth -= 2
+	}
 
 	// Phase 1: Save init state to alt, unpack block into 16 LE words
 	em.swap()
+	if guardOperands {
+		// [block, state] -> abort unless len(state) == 32
+		em.oc("OP_SIZE")
+		em.depth++
+		em.pushI(32)
+		em.oc("OP_EQUALVERIFY")
+		em.depth -= 2
+	}
 	em.dup()
 	em.toAlt()
 	em.toAlt()
@@ -422,12 +446,20 @@ func generateCompressOps() []StackOp {
 
 // Cache the ops since they're identical every time
 var sha256CompressOpsCache []StackOp
+var sha256GuardedCompressOpsCache []StackOp
 
 func getCompressOps() []StackOp {
 	if sha256CompressOpsCache == nil {
-		sha256CompressOpsCache = generateCompressOps()
+		sha256CompressOpsCache = generateCompressOps(false)
 	}
 	return sha256CompressOpsCache
+}
+
+func getGuardedCompressOps() []StackOp {
+	if sha256GuardedCompressOpsCache == nil {
+		sha256GuardedCompressOpsCache = generateCompressOps(true)
+	}
+	return sha256GuardedCompressOpsCache
 }
 
 // =========================================================================
@@ -437,8 +469,9 @@ func getCompressOps() []StackOp {
 // EmitSha256Compress emits SHA-256 compression in Bitcoin Script.
 // Stack on entry: [..., state(32 BE), block(64 BE)]
 // Stack on exit:  [..., newState(32 BE)]
+// Aborts unless the state is 32 bytes and the block 64 bytes (F-114).
 func EmitSha256Compress(emit func(StackOp)) {
-	for _, op := range getCompressOps() {
+	for _, op := range getGuardedCompressOps() {
 		emit(op)
 	}
 }
@@ -468,6 +501,16 @@ func EmitSha256Finalize(emit func(StackOp)) {
 	em.binOp("OP_CAT") // [bitLenBE(8)]
 	em.toAlt()         // save bitLenBE to alt
 	em.assertDepth(2, "finalize: after bitLen conversion")
+
+	// F-114: abort unless len(state) == 32 (remaining is variable-length; a
+	// remaining past 119 bytes already aborts on the negative OP_NUM2BIN below).
+	em.swap() // [remaining, state]
+	em.oc("OP_SIZE")
+	em.depth++
+	em.pushI(32)
+	em.oc("OP_EQUALVERIFY")
+	em.depth -= 2
+	em.swap() // [state, remaining]
 
 	// ---- Step 2: Pad remaining ----
 	// [state, remaining]

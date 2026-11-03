@@ -94,6 +94,38 @@ impl Counter {
         assert method_names == ["increment", "decrement"]
 
 
+class TestRustUnsafeContract:
+    def test_unsafe_contract_with_mutable_field_stays_unsafe(self):
+        # F-204: `#[runar::unsafe_contract]` must not be silently downgraded
+        # to StatefulSmartContract by the structural mutability inference.
+        # The explicit attribute is authoritative — see parser_move.py's
+        # `not is_unsafe and ...` gate, which this mirrors.
+        source = """\
+use runar::prelude::*;
+
+#[runar::unsafe_contract]
+pub struct Counter {
+    pub count: Bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        asm("51", 0, 1);
+    }
+}
+"""
+        result = parse_source(source, "Counter.runar.rs")
+        assert result.errors == [], result.error_strings()
+        c = result.contract
+        assert c is not None
+        assert c.name == "Counter"
+        # Must remain UnsafeSmartContract; a mutable field must not
+        # silently downgrade it to StatefulSmartContract (which would
+        # change the compiled security model: auto-injected checkPreimage
+        # and state continuation).
+        assert c.parent_class == "UnsafeSmartContract"
+
+
 class TestRustBareImpl:
     def test_bare_impl_without_methods_attribute(self):
         source = """\

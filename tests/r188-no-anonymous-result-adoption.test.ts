@@ -25,7 +25,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compile } from 'runar-compiler';
@@ -33,6 +33,21 @@ import { compile } from 'runar-compiler';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PASS = 'packages/runar-compiler/src/passes/05-stack-lower.ts';
 const source = readFileSync(join(ROOT, PASS), 'utf-8');
+
+/**
+ * R-188-FU: this used to enumerate with `find`, which has no concept of
+ * "tracked" — it picks up conformance/.tmp/parseonly-*.runar.ts scratch
+ * files that concurrent conformance runs write and then delete, and (when
+ * run from a checkout that hosts nested .worktrees/ copies) every other
+ * worktree's contracts too. `git ls-files` only ever returns files the repo
+ * actually tracks, so it sees neither.
+ */
+function listRunarTsFiles(): string[] {
+  return execSync("git ls-files -- '*.runar.ts'", { cwd: ROOT, encoding: 'utf-8' })
+    .trim()
+    .split('\n')
+    .filter(Boolean);
+}
 
 describe('R-188: an anonymous branch result is refused, not renamed', () => {
   it('the silent fallback is gone', () => {
@@ -48,16 +63,35 @@ describe('R-188: an anonymous branch result is refused, not renamed', () => {
     expect(source).toMatch(/result slot \$\{i\} of \$\{resultCount\} is/);
   });
 
+  it('the enumeration excludes an untracked scratch .runar.ts file', () => {
+    // conformance/runner/runner.ts writes exactly this shape of file
+    // (conformance/.tmp/parseonly-ts-<pid>-<rand>-<name>.runar.ts) while a
+    // --parser-only run is in flight, then deletes it. If the sweep below
+    // enumerates with `find`, it can observe that file mid-flight and then
+    // fail with ENOENT once the owning run deletes it out from under a
+    // concurrent `readFileSync` (checkpoint-12/vitest-all.log ~line 3839).
+    // `git ls-files` never returns it, because it is never `git add`ed.
+    const tmpDir = join(ROOT, 'conformance', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const marker = `parseonly-ts-${process.pid}-${Date.now()}-R188FU.runar.ts`;
+    const tmpFile = join(tmpDir, marker);
+    writeFileSync(tmpFile, '// scratch file a concurrent conformance run would write', 'utf-8');
+    try {
+      expect(existsSync(tmpFile), 'setup: the scratch file was not actually written').toBe(true);
+      const files = listRunarTsFiles();
+      expect(
+        files.some((f) => f.endsWith(marker)),
+        'the enumeration picked up an untracked scratch file under conformance/.tmp',
+      ).toBe(false);
+    } finally {
+      unlinkSync(tmpFile);
+    }
+  });
+
   it('every in-repo contract still compiles, in both fold modes', () => {
     // The regression check that matters: turning a fallback into a throw is only
     // safe if nothing reaches it. This is the sweep the measurement above used.
-    const files = execSync(
-      "find . -name '*.runar.ts' -not -path './node_modules/*' -not -path '*/node_modules/*'",
-      { cwd: ROOT, encoding: 'utf-8' },
-    )
-      .trim()
-      .split('\n')
-      .filter(Boolean);
+    const files = listRunarTsFiles();
     expect(files.length, 'the sweep found no contracts; it would pass vacuously').toBeGreaterThan(
       100,
     );

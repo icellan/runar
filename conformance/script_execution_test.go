@@ -20,6 +20,7 @@ import (
 	crypto "github.com/bsv-blockchain/go-sdk/primitives/hash"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
+	"github.com/bsv-blockchain/go-sdk/script/interpreter/errs"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 	runar "github.com/icellan/runar/packages/runar-go"
@@ -279,6 +280,220 @@ func executeScriptWithTx(lockingHex, unlockingHex string, tx *transaction.Transa
 		interpreter.WithForkID(),
 		interpreter.WithTx(tx, inputIdx, prevOutput),
 	)
+}
+
+// ---------------------------------------------------------------------------
+// N-074 — locating WHERE a spend was rejected.
+//
+// A must-fail spend test that only checks `err != nil` passes for ANY
+// rejection, including one that has nothing to do with the attack it claims
+// to exercise. That is not hypothetical: when F-024 added the value-
+// conservation assert (`_newAmount >= extractAmount(txPreimage)`) every
+// stateful spend here that moved 9,000 of a 10,000-sat input died at that
+// assert, so the honest controls went red and each negative built on the same
+// amounts stayed green no matter which guard it was meant to prove.
+//
+// executeScriptWithTxLocated runs the same engine as executeScriptWithTx and
+// additionally reports the byte offset, in the LOCKING script, of the opcode
+// that raised the error. A negative then asserts that offset is the guard it
+// targets (found by its emitted byte signature via lockingGuardOffsets), so a
+// rejection by any other guard — or the guard being deleted — turns it red.
+// ---------------------------------------------------------------------------
+
+// spendRejection is the outcome of a located execution.
+type spendRejection struct {
+	err error
+	// finalStackFalse: the scripts ran to the end and left a false value —
+	// the contract's LAST expression evaluated false, no opcode aborted.
+	finalStackFalse bool
+	// lockingOffset is the byte offset in the locking script of the opcode
+	// that aborted execution, or -1 (no error, a final-stack failure, or a
+	// failure in the unlocking script).
+	lockingOffset int
+	opcode        string
+}
+
+func (r spendRejection) String() string {
+	switch {
+	case r.err == nil:
+		return "accepted"
+	case r.finalStackFalse:
+		return fmt.Sprintf("final stack value false (%v)", r.err)
+	case r.lockingOffset >= 0:
+		return fmt.Sprintf("%s at locking-script byte %d (%v)", r.opcode, r.lockingOffset, r.err)
+	default:
+		return fmt.Sprintf("outside the locking script (%v)", r.err)
+	}
+}
+
+// lastOpcodeTracker remembers the opcode about to execute. The engine calls
+// BeforeExecuteOpcode and then returns straight out of Step on error, so after
+// a failed Execute the last recorded opcode is the one that raised it.
+type lastOpcodeTracker struct {
+	scriptIdx int
+	opcodeIdx int
+	scripts   []interpreter.ParsedScript
+}
+
+func (d *lastOpcodeTracker) BeforeExecuteOpcode(s *interpreter.State) {
+	d.scriptIdx, d.opcodeIdx, d.scripts = s.ScriptIdx, s.OpcodeIdx, s.Scripts
+}
+func (d *lastOpcodeTracker) BeforeExecute(*interpreter.State)           {}
+func (d *lastOpcodeTracker) AfterExecute(*interpreter.State)            {}
+func (d *lastOpcodeTracker) BeforeStep(*interpreter.State)              {}
+func (d *lastOpcodeTracker) AfterStep(*interpreter.State)               {}
+func (d *lastOpcodeTracker) AfterExecuteOpcode(*interpreter.State)      {}
+func (d *lastOpcodeTracker) BeforeScriptChange(*interpreter.State)      {}
+func (d *lastOpcodeTracker) AfterScriptChange(*interpreter.State)       {}
+func (d *lastOpcodeTracker) AfterSuccess(*interpreter.State)            {}
+func (d *lastOpcodeTracker) AfterError(*interpreter.State, error)       {}
+func (d *lastOpcodeTracker) BeforeStackPush(*interpreter.State, []byte) {}
+func (d *lastOpcodeTracker) AfterStackPush(*interpreter.State, []byte)  {}
+func (d *lastOpcodeTracker) BeforeStackPop(*interpreter.State)          {}
+func (d *lastOpcodeTracker) AfterStackPop(*interpreter.State, []byte)   {}
+
+// parsedOpcodeByteLen is the serialized size of one parsed opcode.
+func parsedOpcodeByteLen(op interpreter.ParsedOpcode) int {
+	switch l := op.Length(); {
+	case l > 0:
+		return l
+	case l == -1:
+		return 2 + len(op.Data)
+	case l == -2:
+		return 3 + len(op.Data)
+	default: // -4
+		return 5 + len(op.Data)
+	}
+}
+
+// executeScriptWithTxLocated is executeScriptWithTx plus the location of the
+// rejection. Slower (the engine clones its state at every debug hook), so use
+// it only where a negative must name the guard that rejected it.
+func executeScriptWithTxLocated(lockingHex, unlockingHex string, tx *transaction.Transaction, inputIdx int, prevOutput *transaction.TransactionOutput) spendRejection {
+	locking, err := script.NewFromHex(lockingHex)
+	if err != nil {
+		return spendRejection{err: fmt.Errorf("%w: invalid locking script hex: %v", errHarnessSetup, err), lockingOffset: -1}
+	}
+	unlocking, err := script.NewFromHex(unlockingHex)
+	if err != nil {
+		return spendRejection{err: fmt.Errorf("%w: invalid unlocking script hex: %v", errHarnessSetup, err), lockingOffset: -1}
+	}
+
+	tracker := &lastOpcodeTracker{scriptIdx: -1}
+	err = interpreter.NewEngine().Execute(
+		interpreter.WithScripts(locking, unlocking),
+		interpreter.WithAfterChronicle(),
+		interpreter.WithForkID(),
+		interpreter.WithTx(tx, inputIdx, prevOutput),
+		interpreter.WithDebugger(tracker),
+	)
+	res := spendRejection{err: err, lockingOffset: -1}
+	if err == nil {
+		return res
+	}
+	if errs.IsErrorCode(err, errs.ErrEvalFalse) {
+		res.finalStackFalse = true
+		return res
+	}
+	// Script 0 is the unlocking script, script 1 the locking script.
+	if tracker.scriptIdx == 1 && tracker.opcodeIdx < len(tracker.scripts[1]) {
+		off := 0
+		for _, op := range tracker.scripts[1][:tracker.opcodeIdx] {
+			off += parsedOpcodeByteLen(op)
+		}
+		res.lockingOffset = off
+		res.opcode = tracker.scripts[1][tracker.opcodeIdx].Name()
+	}
+	return res
+}
+
+// lockingGuardOffsets returns the byte offset of the guard opcode in every
+// opcode-aligned occurrence of signatureHex in the locking script. The guard
+// opcode sits guardByte bytes into the signature. An occurrence that starts
+// inside push data is not code and is skipped.
+func lockingGuardOffsets(lockingHex, signatureHex string, guardByte int) []int {
+	b, err := hex.DecodeString(lockingHex)
+	if err != nil {
+		return nil
+	}
+	sig, err := hex.DecodeString(signatureHex)
+	if err != nil || guardByte < 0 || guardByte >= len(sig) {
+		return nil
+	}
+	var offs []int
+	for i := 0; i < len(b); {
+		if strings.HasPrefix(string(b[i:]), string(sig)) {
+			offs = append(offs, i+guardByte)
+		}
+		op := b[i]
+		switch {
+		case op >= 0x01 && op <= 0x4b:
+			i += 1 + int(op)
+		case op == 0x4c && i+1 < len(b):
+			i += 2 + int(b[i+1])
+		case op == 0x4d && i+2 < len(b):
+			i += 3 + (int(b[i+1]) | int(b[i+2])<<8)
+		case op == 0x4e && i+4 < len(b):
+			i += 5 + int(binary.LittleEndian.Uint32(b[i+1:i+5]))
+		case op == 0x6a:
+			// Post-Genesis OP_RETURN at top level ends the code; what follows
+			// is the state section, not opcodes.
+			return offs
+		default:
+			i++
+		}
+	}
+	return offs
+}
+
+// requireRejectedAt fails the test unless the spend was rejected by the
+// opcode at one of the guard offsets.
+func requireRejectedAt(t *testing.T, res spendRejection, guard string, guardOffsets []int) {
+	t.Helper()
+	if len(guardOffsets) == 0 {
+		t.Fatalf("guard %q is not present in the compiled locking script — the spend (%s) cannot be "+
+			"attributed to it", guard, res)
+	}
+	if res.err == nil {
+		t.Fatalf("expected rejection by %s, but the spend was ACCEPTED", guard)
+	}
+	if errors.Is(res.err, errHarnessSetup) {
+		t.Fatalf("expected rejection by %s, got a harness setup error: %v", guard, res.err)
+	}
+	for _, off := range guardOffsets {
+		if res.lockingOffset == off {
+			return
+		}
+	}
+	t.Fatalf("rejected for the WRONG reason: want %s (locking-script byte %v), got %s",
+		guard, guardOffsets, res)
+}
+
+// valueConservationGuard locates F-024's injected
+// `assert(_newAmount >= extractAmount(txPreimage))` — the tail of the
+// extractAmount read, the pick of _newAmount, OP_GREATERTHANOREQUAL OP_VERIFY —
+// returning the offsets of its OP_VERIFY.
+func valueConservationGuard(lockingHex string) []int {
+	// OP_8 OP_SPLIT OP_DROP OP_BIN2NUM OP_3 OP_PICK OP_SWAP OP_GREATERTHANOREQUAL OP_VERIFY
+	return lockingGuardOffsets(lockingHex, "587f758153797ca269", 8)
+}
+
+// addFeeFundingInput appends a P2PKH funding input that pays the fee and the
+// change, the way an SDK call funds a stateful spend: the contract UTXO's full
+// value goes into the continuation (F-024) and the rest of the transaction is
+// paid for by the caller. Only the contract input is executed by these tests;
+// this input matters only through hashPrevouts / hashSequence in the preimage,
+// which the engine recomputes from the same transaction.
+func addFeeFundingInput(tx *transaction.Transaction, satoshis uint64) {
+	txid, _ := chainhash.NewHashFromHex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	tx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       txid,
+		SourceTxOutIndex: 0,
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, &transaction.TransactionOutput{
+		Satoshis:      satoshis,
+		LockingScript: buildP2PKHLockingScript(make([]byte, 20)),
+	})
 }
 
 // makeFundingTxID returns a deterministic 32-byte txid for testing.
@@ -790,7 +1005,7 @@ func TestStateful_Increment(t *testing.T) {
 
 	// Step 5: Set satoshi amounts.
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 
 	// Step 6: Create a change address (P2PKH).
@@ -813,6 +1028,7 @@ func TestStateful_Increment(t *testing.T) {
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	addFeeFundingInput(spendTx, 1000) // pays the change and a 500-sat fee
 
 	// Output 0: continuation (same codePart + OP_RETURN + count=1)
 	contScript, _ := script.NewFromHex(continuationScriptHex)
@@ -896,7 +1112,7 @@ func TestStateful_Decrement(t *testing.T) {
 	}
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -912,6 +1128,7 @@ func TestStateful_Decrement(t *testing.T) {
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	addFeeFundingInput(spendTx, 1000) // pays the change and a 500-sat fee
 
 	contScript, _ := script.NewFromHex(continuationScriptHex)
 	spendTx.AddOutput(&transaction.TransactionOutput{
@@ -968,7 +1185,7 @@ func TestStateful_WrongState_Fail(t *testing.T) {
 	codeSepOffset := findCodeSeparatorOffset(codePartHex, 0)
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -984,6 +1201,7 @@ func TestStateful_WrongState_Fail(t *testing.T) {
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	addFeeFundingInput(spendTx, 1000) // pays the change and a 500-sat fee
 
 	contScript, _ := script.NewFromHex(continuationScriptHex)
 	spendTx.AddOutput(&transaction.TransactionOutput{
@@ -1020,8 +1238,16 @@ func TestStateful_WrongState_Fail(t *testing.T) {
 	unlockScript, _ := script.NewFromHex(unlockingHex)
 	spendTx.Inputs[0].UnlockingScript = unlockScript
 
-	if !scriptRejected(executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)) {
+	// N-074: the continuation's hashOutputs compare is increment()'s LAST
+	// expression, so a wrong state must surface as a false final stack value —
+	// not as an abort at any earlier assert (on 9,000-of-10,000 amounts this
+	// test used to "pass" by dying at F-024's value-conservation OP_VERIFY).
+	res := executeScriptWithTxLocated(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)
+	if res.err == nil {
 		t.Fatal("expected failure with wrong state but execution succeeded")
+	}
+	if !res.finalStackFalse {
+		t.Fatalf("rejected for the WRONG reason: want the final hashOutputs compare to be false, got %s", res)
 	}
 }
 
@@ -1254,7 +1480,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Accept(t *testing.T) {
 	}
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -1353,7 +1579,7 @@ func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T
 	codeSepOffset := findCodeSeparatorOffset(codePartHex, 0)
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -1416,9 +1642,12 @@ func TestIntentPrevOutputScript_ScriptExecution_Reject_WrongWitness(t *testing.T
 	unlockScript, _ := script.NewFromHex(unlockingHex)
 	spendTx.Inputs[1].UnlockingScript = unlockScript
 
-	if !scriptRejected(executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 1, contractPrevOutput)) {
-		t.Fatal("expected rejection with a tampered prevout-script witness, but execution succeeded")
-	}
+	// N-074: must die at the witness check itself —
+	// <expectedHash> OP_OVER OP_HASH256 OP_SWAP OP_EQUALVERIFY — not at any
+	// other assert in the method.
+	res := executeScriptWithTxLocated(fullLockingHex, unlockingHex, spendTx, 1, contractPrevOutput)
+	requireRejectedAt(t, res, "hash256(_prevOutScript_0) == expectedHash",
+		lockingGuardOffsets(fullLockingHex, "20"+hex.EncodeToString(expectedHash)+"78aa7c88", 36))
 }
 
 // TestIntentOutputP2PKH_GuardRejectsMutatingVariant verifies the typecheck guard
@@ -1750,7 +1979,7 @@ func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
 	}
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -1769,6 +1998,7 @@ func TestStatefulWOTSGate_ScriptExecution(t *testing.T) {
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	addFeeFundingInput(spendTx, 1000) // pays the change and a 500-sat fee
 
 	contScript, _ := script.NewFromHex(continuationScriptHex)
 	spendTx.AddOutput(&transaction.TransactionOutput{
@@ -1855,7 +2085,7 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 	}
 
 	prevSatoshis := uint64(10000)
-	contSatoshis := uint64(9000)
+	contSatoshis := uint64(10000) // F-024: the continuation carries the full input value
 	changeSatoshis := uint64(500)
 	changePKH := make([]byte, 20)
 
@@ -1874,6 +2104,7 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 		SourceTxOutIndex: 0,
 		SequenceNumber:   transaction.DefaultSequenceNumber,
 	}, prevOutput)
+	addFeeFundingInput(spendTx, 1000) // pays the change and a 500-sat fee
 
 	contScript, _ := script.NewFromHex(continuationScriptHex)
 	spendTx.AddOutput(&transaction.TransactionOutput{
@@ -1911,9 +2142,12 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 	unlockScript, _ := script.NewFromHex(unlockingHex)
 	spendTx.Inputs[0].UnlockingScript = unlockScript
 
-	if !scriptRejected(executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)) {
-		t.Fatal("expected failure with tampered WOTS+ signature but stateful-wots-gate execution succeeded")
-	}
+	// N-074: must die at verifyWOTS's final compare — the recomputed public
+	// key against wotsPubKey:
+	// OP_SHA256 OP_FROMALTSTACK OP_EQUAL OP_SWAP OP_DROP OP_VERIFY.
+	res := executeScriptWithTxLocated(fullLockingHex, unlockingHex, spendTx, 0, prevOutput)
+	requireRejectedAt(t, res, "assert(verifyWOTS(msg, sig, wotsPubKey))",
+		lockingGuardOffsets(fullLockingHex, "a86c877c7569", 5))
 }
 
 // ---------------------------------------------------------------------------

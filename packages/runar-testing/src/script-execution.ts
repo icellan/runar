@@ -11,12 +11,12 @@ import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
 import { compile } from 'runar-compiler';
 import type { CompileOptions } from 'runar-compiler';
 import { encodeScriptNumber, hexToBytes, bytesToHex } from './vm/utils.js';
+import { newConsensusSpend, CONSENSUS_SPEND_CONTEXT } from './consensus-spend.js';
 
 // BSV SDK imports (peer dependency)
 import {
   LockingScript,
   UnlockingScript,
-  Spend,
   PrivateKey,
   Hash,
   TransactionSignature,
@@ -29,6 +29,16 @@ import {
 export interface ScriptExecResult {
   success: boolean;
   error?: string;
+}
+
+export interface ScriptExecOptions {
+  /**
+   * Near-miss knob: rebuild the unlocking script from the encoded pushes (one
+   * hex push per arg, then the method selector when there is one). Used to
+   * hand the engine a deliberately malformed witness (non-push-only,
+   * non-minimal push, high-S, extra stack item) of an otherwise valid spend.
+   */
+  tamperUnlocking?: (pushesHex: string[]) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +82,8 @@ export class ScriptExecutionContract {
    *
    * For pure-computation contracts (no checkSig / checkPreimage).
    */
-  execute(methodName: string, args: unknown[]): ScriptExecResult {
-    const unlockingHex = this.buildUnlockingScriptHex(methodName, args);
+  execute(methodName: string, args: unknown[], opts?: ScriptExecOptions): ScriptExecResult {
+    const unlockingHex = this.buildUnlockingScriptHex(methodName, args, opts);
     return executeScripts(unlockingHex, this.scriptHex);
   }
 
@@ -92,6 +102,7 @@ export class ScriptExecutionContract {
     args: unknown[],
     sigArgIndex: number,
     privateKey: PrivateKey,
+    opts?: ScriptExecOptions,
   ): ScriptExecResult {
     this.findMethod(methodName); // validate method exists
     const lockingScript = LockingScript.fromHex(this.scriptHex);
@@ -102,18 +113,14 @@ export class ScriptExecutionContract {
       TransactionSignature.SIGHASH_ALL |
       TransactionSignature.SIGHASH_FORKID;
 
-    // Compute sighash preimage
+    // Compute sighash preimage. F-055: version 1 (CONSENSUS_SPEND_CONTEXT), the
+    // version every SDK-built transaction carries; version 2 would put the
+    // Spend below in @bsv/sdk's relaxed mode.
     const preimageBytes = TransactionSignature.formatBytes({
-      sourceTXID: '00'.repeat(32),
-      sourceOutputIndex: 0,
-      sourceSatoshis: 100000,
-      transactionVersion: 2,
+      ...CONSENSUS_SPEND_CONTEXT,
       otherInputs: [],
       outputs: [],
-      inputIndex: 0,
       subscript: lockingScript,
-      inputSequence: 0xffffffff,
-      lockTime: 0,
       scope,
     });
 
@@ -134,22 +141,17 @@ export class ScriptExecutionContract {
     const unlockingHex = this.buildUnlockingScriptHex(
       methodName,
       resolvedArgs,
+      opts,
     );
 
     // Execute with the same tx context used for signing
     const unlocking = UnlockingScript.fromHex(unlockingHex);
-    const spend = new Spend({
-      sourceTXID: '00'.repeat(32),
-      sourceOutputIndex: 0,
-      sourceSatoshis: 100000,
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
       lockingScript,
-      transactionVersion: 2,
       otherInputs: [],
       outputs: [],
       unlockingScript: unlocking,
-      inputIndex: 0,
-      inputSequence: 0xffffffff,
-      lockTime: 0,
     });
 
     try {
@@ -200,6 +202,7 @@ export class ScriptExecutionContract {
   private buildUnlockingScriptHex(
     methodName: string,
     args: unknown[],
+    opts?: ScriptExecOptions,
   ): string {
     const method = this.findMethod(methodName);
 
@@ -222,6 +225,7 @@ export class ScriptExecutionContract {
       pushes.push(encodePushData(encodeScriptNumber(BigInt(publicIdx))));
     }
 
+    if (opts?.tamperUnlocking) return opts.tamperUnlocking(pushes.map(bytesToHex));
     const bytes = concatUint8Arrays(pushes);
     return bytesToHex(bytes);
   }
@@ -238,18 +242,12 @@ function executeScripts(
   const lockingScript = LockingScript.fromHex(lockingHex);
   const unlockingScript = UnlockingScript.fromHex(unlockingHex);
 
-  const spend = new Spend({
-    sourceTXID: '00'.repeat(32),
-    sourceOutputIndex: 0,
-    sourceSatoshis: 100000,
+  const spend = newConsensusSpend({
+    ...CONSENSUS_SPEND_CONTEXT,
     lockingScript,
-    transactionVersion: 2, // relaxed mode (no strict encoding checks)
     otherInputs: [],
     outputs: [],
     unlockingScript,
-    inputIndex: 0,
-    inputSequence: 0xffffffff,
-    lockTime: 0,
   });
 
   try {
@@ -303,6 +301,16 @@ function encodeArgument(arg: unknown, param: ABIParam): Uint8Array {
 function encodePushData(data: Uint8Array): Uint8Array {
   if (data.length === 0) {
     return new Uint8Array([0x00]); // OP_0
+  }
+
+  // Minimal push (consensus MINIMALDATA): a single byte 0x01..0x10 is
+  // OP_1..OP_16 and 0x81 is OP_1NEGATE. Same stack item as the 1-byte data
+  // push, which the strict Spend rejects (F-055).
+  if (data.length === 1 && data[0]! >= 0x01 && data[0]! <= 0x10) {
+    return new Uint8Array([0x50 + data[0]!]);
+  }
+  if (data.length === 1 && data[0] === 0x81) {
+    return new Uint8Array([0x4f]); // OP_1NEGATE
   }
 
   if (data.length <= 75) {

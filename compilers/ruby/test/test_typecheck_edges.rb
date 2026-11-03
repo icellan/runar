@@ -125,6 +125,34 @@ class TestTypecheckEdges < Minitest::Test
     assert_typecheck_error(source, 'unknown function')
   end
 
+  # ---------------------------------------------------------------------------
+  # F-208: Rúnar has no first-class functions -- a bound local variable used
+  # as a callee must be rejected, not silently typed <unknown>.
+  # ---------------------------------------------------------------------------
+
+  def test_rejects_local_variable_called_as_function
+    source = <<~TS
+      import { SmartContract, assert } from 'runar-lang';
+
+      class Bad extends SmartContract {
+        readonly a: bigint;
+
+        constructor(a: bigint) {
+          super(a);
+          this.a = a;
+        }
+
+        public check(a: bigint): void {
+          const f: bigint = a;
+          const r = f(a, a, a);
+          assert(this.a >= 0n);
+        }
+      }
+    TS
+
+    assert_typecheck_error(source, 'not callable')
+  end
+
   def test_accepts_rúnar_builtin_max
     source = <<~TS
       import { SmartContract, assert, max } from 'runar-lang';

@@ -304,6 +304,7 @@
       "caught": true,
       "survived": false,
       "caughtBy": [
+        "state-push-framing-vm",
         "c28-state-strict"
       ],
       "expectCaughtBy": [
@@ -339,6 +340,181 @@
       ],
       "expectCaughtBy": [
         "sdk-vertical-codeseparator"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-dup-records-neighbour",
+      "class": "off-by-one stack index",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-dup-records-undefined",
+      "class": "off-by-one stack index",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-drain-nip-vs-roll-inverted",
+      "class": "off-by-one stack index",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-empty-else-reconcile-or-a",
+      "class": "if-without-else regression",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-empty-else-reconcile-or-b",
+      "class": "if-without-else regression",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "stacklower-sinkbelow-wrong-distance",
+      "class": "branch-merge regression",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "peephole-walk-drops-else-arm",
+      "class": "if-without-else regression",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "differential-witness",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "peephole-withoptimizedarms-swap-then-else",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness",
+        "branch-merged-locals-vm",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ],
+      "expectCaughtBy": [
+        "differential-witness",
+        "branch-merged-locals-vm",
+        "real-crypto-branch-merged-locals",
+        "stack-frame-mutation-pins"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "peephole-f392-roll0-opcode-form-matches-pick",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "sideeffect-unioninto-and-instead-of-or",
+      "class": "dropped side-effect detection",
+      "stage": "side-effect-summary",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "real-crypto-private-helper-outputs"
+      ],
+      "expectCaughtBy": [
+        "real-crypto-private-helper-outputs"
+      ],
+      "documentedSurvivor": false,
+      "stale": false
+    },
+    {
+      "id": "sideeffect-ifstmt-skip-else-branch",
+      "class": "dropped side-effect detection",
+      "stage": "side-effect-summary",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "side-effect-summary-unit"
+      ],
+      "expectCaughtBy": [
+        "side-effect-summary-unit"
       ],
       "documentedSurvivor": false,
       "stale": false

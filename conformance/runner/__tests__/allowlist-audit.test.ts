@@ -25,8 +25,15 @@ const APPROVED_ALLOWLISTS: Record<string, string[]> = {
   // EVM/STARK proof-system primitives are Go-only by project policy
   // (see CLAUDE.md "EVM/STARK proof-system primitives are Go-only by
   // project policy" + the project_go_only_crypto_modules memory).
-  // Covers: BabyBear / KoalaBear / Poseidon2* / BN254 + Groth16 /
-  // Merkle / merkleRootSha256 / SP1 FRI / FiatShamir-KB.
+  // Covers: BabyBear / merkleRootSha256 / BN254.
+  // BN254 is the four-pair pairing check `bn254MultiPairing4` in
+  // `bn254-pairing` (N-314), whose golden is executed by the precompiled-hex
+  // spec witnesses/real-crypto/bn254-pairing.json.
+  // The policy also scopes KoalaBear, Poseidon2*, the Groth16 verifier
+  // shape, SP1 FRI and FiatShamir-KB to Go. No conformance fixture calls any
+  // of them: they are covered only by Go unit and integration tests.
+  // tests/f278-go-only-coverage-claims.test.ts fails if the "Covers:" list
+  // names a family that no fixture calls.
   // Non-Go tiers may carry partial ports but are NOT conformance
   // targets for these families. Their parsers are still exercised
   // by the all-tier --parser-only matrix.
@@ -34,6 +41,7 @@ const APPROVED_ALLOWLISTS: Record<string, string[]> = {
   'babybear-ext4': ['go'],
   'merkle-proof': ['go'],
   'state-covenant': ['go'],
+  'bn254-pairing': ['go'],
 };
 
 function listFixtureDirs(): string[] {
@@ -171,9 +179,19 @@ describe('conformance allowlist audit', () => {
   // javax.tools.JavaCompiler — and `runar.lang.types.FixedArray` was withdrawn
   // under N-122 rather than left as a trap. The Java COMPILER is still a full
   // parity target for these fixtures' other eight surfaces.
+  //
+  // N-093 added the third, `embed-always-fixed-array`, for the same reason
+  // (user decision R38: the one approved `.runar.java` skip, like the other
+  // FixedArray fixtures).
+  //
+  // F-352 added the fourth, `state-array-set`, for the same reason: it is the
+  // second witness for the mutable-state shape FixedArray<bigint, 4>, and no
+  // Java spelling of a FixedArray property exists.
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
+    'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],
+    'state-array-set': ['.runar.java'],
   };
   it('no fixture opts a format out of parser coverage unless approved (parserSkip stays governed)', () => {
     const offenders: string[] = [];

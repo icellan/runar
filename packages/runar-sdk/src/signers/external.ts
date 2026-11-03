@@ -58,6 +58,11 @@ export class ExternalSigner implements Signer {
     satoshis: number,
     sigHashType?: number,
   ): Promise<string> {
+    // N-041: the subscript is the BIP-143 scriptCode. An empty one yields a
+    // signature no OP_CHECKSIG accepts, so refuse it before calling out.
+    if (!subscript) {
+      throw new Error(`ExternalSigner.sign: refusing to sign input ${inputIndex} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent`);
+    }
     return this.signFn(txHex, inputIndex, subscript, satoshis, sigHashType);
   }
 }

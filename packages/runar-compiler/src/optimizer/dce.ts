@@ -50,8 +50,9 @@
  * previous in-place DCE inside `constant-fold.ts`. Verified by the conformance
  * suite (cross-tier hex parity) and the optimizer unit tests.
  *
- * N-140 is the one deliberate behaviour change since: liveness considers the
- * names a binding DEFINES, not only its own `name`.
+ * N-140 is a deliberate behaviour change since: liveness considers the
+ * names a binding DEFINES, not only its own `name`. F-108 is the other: a
+ * private method's last binding (its return value) is a liveness root.
  */
 
 import type {
@@ -79,8 +80,129 @@ export function eliminateDeadBindings(program: ANFProgram): ANFProgram {
 }
 
 function eliminateDeadInMethod(method: ANFMethod): ANFMethod {
-  const live = filterLiveBindings(method.body);
+  const live = filterLiveBindings(method.body, returnsLastBinding(method));
   return { ...method, body: live };
+}
+
+/**
+ * N-138: dead-binding elimination restricted to `candidates[i]` for method `i`.
+ *
+ * Only a binding whose name is in the candidate set may be removed; everything
+ * else is kept as if live. The constant folder uses it to drop the operand
+ * bindings its own rewrites orphaned (the `1` under a folded `-1n`) without
+ * also deleting bindings that were already dead before folding — those are the
+ * unconditional-DCE question N-140 left open, and fold-ON output must not move
+ * for programs the folder did not change.
+ */
+export function eliminateDeadBindingsAmong(
+  program: ANFProgram,
+  candidates: ReadonlyArray<ReadonlySet<string>>,
+): ANFProgram {
+  return {
+    ...program,
+    methods: program.methods.map((method, i) => {
+      const keepLast = returnsLastBinding(method);
+      const cands = candidates[i];
+      let body = filterLiveBindings(method.body, keepLast, cands);
+      // N-446: the fold also orphans operands INSIDE `if` arms and loop
+      // bodies (`-5n` in an else arm). Filtering only the top level left them
+      // there, stack lowering pushed them, and the arms ended at different
+      // depths. Prune the nested scopes too, then re-filter the top level, to
+      // a fixed point (a nested removal can orphan a top-level operand).
+      if (cands !== undefined) {
+        for (;;) {
+          const nested = pruneNestedOrphans(body, cands);
+          if (nested === body) break;
+          body = filterLiveBindings(nested, keepLast, cands);
+        }
+      }
+      return { ...method, body };
+    }),
+  };
+}
+
+/**
+ * N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+ * arms, `loop` bodies, recursively). Returns `bindings` itself when nothing
+ * was removed.
+ *
+ * A nested binding is removed only if it is a candidate (referenced before
+ * folding), is referenced by NO binding anywhere in the method now (arm
+ * bindings can be read after the `if` by name, so an arm is never filtered
+ * against its own references alone), is not one of its `if`'s declared
+ * `results` (stack lowering requires those slots in both arms), is side-effect
+ * free, and is not itself an `if` / `loop` (those are recursed into instead).
+ * Only the candidate-restricted fold prune calls this; the EC-gated DCE stays
+ * top-level, so fold-OFF output cannot move.
+ */
+function pruneNestedOrphans(
+  bindings: ANFBinding[],
+  candidates: ReadonlySet<string>,
+): ANFBinding[] {
+  let current = bindings;
+  for (;;) {
+    const refs = new Set<string>();
+    for (const b of current) collectRefsFromValue(b.value, refs);
+    let changed = false;
+    const filterScope = (scope: ANFBinding[], protect: ReadonlySet<string>): ANFBinding[] => {
+      const out: ANFBinding[] = [];
+      let scopeChanged = false;
+      for (const b of scope) {
+        const v = b.value;
+        if (v.kind === 'if') {
+          const protectedResults = new Set(v.results ?? []);
+          const thenB = filterScope(v.then, protectedResults);
+          const elseB = filterScope(v.else, protectedResults);
+          if (thenB !== v.then || elseB !== v.else) {
+            out.push({ ...b, value: { ...v, then: thenB, else: elseB } });
+            scopeChanged = true;
+          } else {
+            out.push(b);
+          }
+        } else if (v.kind === 'loop') {
+          const body = filterScope(v.body, new Set());
+          if (body !== v.body) {
+            out.push({ ...b, value: { ...v, body } });
+            scopeChanged = true;
+          } else {
+            out.push(b);
+          }
+        } else if (
+          protect !== TOP_LEVEL &&
+          candidates.has(b.name) &&
+          !refs.has(b.name) &&
+          !protect.has(b.name) &&
+          !hasSideEffect(v)
+        ) {
+          scopeChanged = true;
+        } else {
+          out.push(b);
+        }
+      }
+      if (!scopeChanged) return scope;
+      changed = true;
+      return out;
+    };
+    const next = filterScope(current, TOP_LEVEL);
+    if (!changed) return current;
+    current = next;
+  }
+}
+
+/** Sentinel: the method's own body, which `filterLiveBindings` owns. */
+const TOP_LEVEL: ReadonlySet<string> = new Set<string>();
+
+/**
+ * F-108: a private method's LAST binding is its return value — stack lowering
+ * inlines the helper at each `method_call` and takes that binding as the
+ * call's result — so it is a liveness root even though nothing inside the
+ * method references it. Without this root a pure return expression
+ * (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+ * one stack lowering uses to collect inlinable private methods. A public
+ * method's last binding is never a return value and stays freely eliminable.
+ */
+function returnsLastBinding(method: ANFMethod): boolean {
+  return method.name !== 'constructor' && !method.isPublic;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +212,13 @@ function eliminateDeadInMethod(method: ANFMethod): ANFMethod {
 export function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   switch (value.kind) {
     case 'load_param':
+      // N-356: a reassigned parameter (`p = q`) is bound under the
+      // parameter's own name, and every later read stays `load_param p`,
+      // which stack lowering resolves by name to that binding. Count the read
+      // as a reference, or the rebinding is deleted and the read falls back to
+      // the caller's argument. A name with no binding is a no-op here.
+      refs.add(value.name);
+      break;
     case 'load_prop':
     case 'get_state_script':
       break;
@@ -262,7 +391,11 @@ function isReferencedExternally(
   return false;
 }
 
-function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
+function filterLiveBindings(
+  bindings: ANFBinding[],
+  keepLast: boolean,
+  candidates?: ReadonlySet<string>,
+): ANFBinding[] {
   // Iterate to a fixed point so transitively dead bindings are removed too.
   let current = bindings;
   let changed = true;
@@ -283,6 +416,8 @@ function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
     for (let i = 0; i < current.length; i++) {
       const binding = current[i]!;
       if (
+        (keepLast && i === current.length - 1) ||
+        (candidates !== undefined && !candidates.has(binding.name)) ||
         isReferencedExternally(binding, ownRefs[i]!, refCount) ||
         hasSideEffect(binding.value)
       ) {

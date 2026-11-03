@@ -11,6 +11,7 @@ import runar.integration.helpers.ContractCompiler;
 import runar.integration.helpers.IntegrationBase;
 import runar.integration.helpers.IntegrationWallet;
 import runar.integration.helpers.RpcProvider;
+import runar.lang.sdk.CallOptions;
 import runar.lang.sdk.RunarArtifact;
 import runar.lang.sdk.RunarContract;
 
@@ -60,8 +61,8 @@ class TicTacToeIntegrationTest extends IntegrationBase {
         ArrayList<Object> args = new ArrayList<>();
         args.add(o.pubKeyHex());
         args.add(null); // sig auto-computed
-        RunarContract.CallOutcome out = contract.call(
-            "join", args, null, provider, o.signer()
+        RunarContract.CallOutcome out = contract.callWithOptions(
+            "join", args, new CallOptions(null, null, null, null).withSatoshis(10_000L) /* N-027: the join pays the 5000 bet */, provider, o.signer()
         );
         assertNotNull(out.txid());
     }
@@ -82,7 +83,7 @@ class TicTacToeIntegrationTest extends IntegrationBase {
         ArrayList<Object> joinArgs = new ArrayList<>();
         joinArgs.add(o.pubKeyHex());
         joinArgs.add(null);
-        contract.call("join", joinArgs, null, provider, o.signer());
+        contract.callWithOptions("join", joinArgs, new CallOptions(null, null, null, null).withSatoshis(10_000L) /* N-027: the join pays the 5000 bet */, provider, o.signer());
 
         ArrayList<Object> moveArgs = new ArrayList<>();
         moveArgs.add(BigInteger.valueOf(4));
@@ -110,7 +111,7 @@ class TicTacToeIntegrationTest extends IntegrationBase {
         ArrayList<Object> joinArgs = new ArrayList<>();
         joinArgs.add(o.pubKeyHex());
         joinArgs.add(null);
-        contract.call("join", joinArgs, null, provider, o.signer());
+        contract.callWithOptions("join", joinArgs, new CallOptions(null, null, null, null).withSatoshis(10_000L) /* N-027: the join pays the 5000 bet */, provider, o.signer());
 
         // It's X's turn, but O attempts the move with O's pubKeyHex.
         ArrayList<Object> moveArgs = new ArrayList<>();

@@ -1,6 +1,7 @@
 package runar.lang.analyzer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,40 @@ class AnalyzerTest {
         AnalysisResult r = Analyzer.analyzeScript(" 76 A9 88 AC ");
         assertEquals("76a988ac", r.script);
         assertEquals(4, r.scriptSize);
+    }
+
+    @Test
+    void normalizeStripsJsWhitespaceNotJustCharacterIsWhitespace() {
+        // TS's normalize() strips exactly what JS /\s/g matches: a fixed
+        // 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator), which is
+        // NOT the same set as Character.isWhitespace(). U+00A0 (NBSP) and
+        // U+FEFF (BOM) are both in the JS set but Character.isWhitespace
+        // returns false for both ("non-breaking" spaces and the BOM are
+        // deliberately excluded by the JDK), so the old normalize() left
+        // them in the hex string and ScriptParser then rejected them as
+        // non-hex characters. Verified against the live TS analyzer:
+        //   node -e "... TestContract analyzer on '76 a9 88 ac'" -> script "76a988ac"
+        AnalysisResult r1 = Analyzer.analyzeScript("76 a9 88 ac");
+        assertEquals("76a988ac", r1.script);
+        assertEquals(4, r1.scriptSize);
+
+        AnalysisResult r2 = Analyzer.analyzeScript("﻿76a988ac");
+        assertEquals("76a988ac", r2.script);
+        assertEquals(4, r2.scriptSize);
+    }
+
+    @Test
+    void normalizeKeepsC0SeparatorsThatCharacterIsWhitespaceWronglyStrips() {
+        // U+001C-U+001F (file/group/record/unit separator) ARE whitespace
+        // per Character.isWhitespace, but JS /\s/g does NOT match them —
+        // so the TS reference keeps them in the normalized string and then
+        // rejects them as non-hex characters (confirmed live: the TS
+        // analyzer throws "Invalid hex character" on this exact input).
+        // The old Java normalize() silently stripped them instead, which
+        // would have accepted this input and dropped a byte the TS
+        // reference refuses to.
+        assertThrows(AnalyzerException.class,
+            () -> Analyzer.analyzeScript("76\u001ca988ac"));
     }
 
     @Test

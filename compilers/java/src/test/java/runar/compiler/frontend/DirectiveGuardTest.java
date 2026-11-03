@@ -79,8 +79,8 @@ class DirectiveGuardTest {
 
     @Test
     void doesNotTripOnNonDirectiveIdentifier() {
-        // A field named `sighashType` must NOT trip the word-boundary guard in a
-        // non-TS format. The format parser may still raise its own errors; we
+        // A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard
+        // in a non-TS format. The format parser may still raise its own errors; we
         // only assert the directive guard message is not the failure reason.
         String src =
             "class Counter extends SmartContract {\n"
@@ -91,7 +91,7 @@ class DirectiveGuardTest {
         try {
             ParserDispatch.parse(src, "Counter.runar.go");
         } catch (Exception e) {
-            assertFalse(e.getMessage().contains("only supported on the .runar.ts surface"),
+            assertFalse(e.getMessage().contains("@sighash directive"),
                 "directive guard tripped on a non-directive identifier: " + e.getMessage());
         }
     }

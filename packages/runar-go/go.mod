@@ -19,8 +19,12 @@ require (
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
-// NOTE: local development resolves github.com/icellan/runar/compilers/go via the
-// root go.work `use ./compilers/go` directive, so no `replace` is needed here.
-// A `replace => ../../compilers/go` was removed because it is honored only from
-// the main module and thus breaks downstream `go get` of this SDK (the require
-// must point at a real published tag — compilers/go/v1.0.0-rc.1 — instead).
+// NOTE: go.work is the supported build path for this monorepo (root go.work's
+// `use ./compilers/go` and `use ./packages/runar-go` directives resolve both
+// modules to this local checkout, so no `replace` is needed here). Standalone,
+// non-workspace builds (GOWORK=off) and `go get` of this module are NOT
+// currently supported: compilers/go v1.0.0-rc.1 above is not a published tag
+// (published compilers/go tags top out at v0.4.5), and the latest published
+// tag of this module does not contain packages compilers/go's current source
+// already imports from it. Closing that cycle with real tags is tracked as
+// N-204; until then, build and test via `go.work`, not `go get`.

@@ -53,12 +53,27 @@ function prog(params: { name: string; type: string }[], body: ANFBinding[]): ANF
   };
 }
 
-/** `unlock(...) { assert(<func>(...args)) }` over the --ir path. */
+/**
+ * `unlock(...) { assert(<func>(...args)) }` over the --ir path.
+ *
+ * `t2`/`t3` append a `load_const true` + dedicated terminal
+ * `{ kind: 'assert' }` pair after the wrapper assert (`t1`), so the method
+ * satisfies N-071's terminal-assert structural check (which only recognizes
+ * the dedicated node, not the generic `{ kind: 'call', func: 'assert' }`
+ * `t1` uses). Every "must reject wrong arity" case below throws on `t0`
+ * during stack-lowering, well before `t1`..`t3` are reached, so this has no
+ * effect on what's being tested there. The "controls" cases DO reach `t2`/
+ * `t3` — they contribute exactly one extra opcode (OP_TRUE, 0x51) at the
+ * very end of the script, which is baked into the re-stamped SHA-256
+ * digests below.
+ */
 function call(func: string, args: string[], params: { name: string; type: string }[]) {
   return () => compileFromANF(
     prog(params, [
       { name: 't0', value: { kind: 'call', func, args } } as unknown as ANFBinding,
       { name: 't1', value: { kind: 'call', func: 'assert', args: ['t0'] } } as unknown as ANFBinding,
+      { name: 't2', value: { kind: 'load_const', value: true } },
+      { name: 't3', value: { kind: 'assert', value: 't2' } },
     ]),
     { disableConstantFolding: true },
   );
@@ -155,15 +170,38 @@ export class Probe extends SmartContract {
       // builtins, so bn254FieldAdd / bn254FieldNeg are the evidence that the
       // coordinate gate stayed off the field surface. The four EC digests are
       // likewise unchanged by both.
-      ecAdd: '98a71715a649bbb34b70882213d7588ef1d44b44279bbffe3d72263d99e1ba2a',
-      ecPointX: '4579847d2e40a84e69f14ae1f87da077e6937a0aa405d93a0e309cd2edd8c191',
-      p256Add: '6fd2d8ea132fedaa3ab9ce31bcb0c80a91b5053849f5e15a5dabd8a2ed6c1399',
-      p384Negate: 'd776c22a2e492f48539119a6543c2421633807c2d953c961ce9c30364f1cb8a3',
-      bn254FieldAdd: 'fe9e984bb631a254e07b304b081a5cc3b0ebe6394302ef48c52e27340c75ca97',
-      bn254FieldNeg: '354ac5ea0ab4cb6d88ec17b91b1ae01cc58428414b1f32994e803e93d4457d4e',
-      bbFieldAdd: '315257826b086e89f32e63a39807c7b8c6ef936cebedc776bad99c092288b1e9',
-      bbExt4Inv0: 'e9996b756bae7b44bcf76eeecc7e1823363a57d486fca5f29440679b10a8ed59',
-      kbFieldInv: 'bf76a8b2434ba6a2a36de161e78e55e0d67aca72ee758aed2ec2f89c156d0d28',
+      //
+      // N-071-FU re-stamped all nine: `call()` now appends a terminal
+      // `assert(true)` (see its docstring) so the probe satisfies N-071's
+      // terminal-assert check, adding one fixed trailing OP_TRUE (0x51) to
+      // every script below. The digests were recomputed from that new byte
+      // sequence; the guard itself changed nothing upstream of the append.
+      //
+      // F-196 re-stamps exactly the TWO bn254 FIELD digests: the field gate is
+      // one `<0> <p> OP_WITHIN OP_VERIFY` per witness operand on the five
+      // bn254Field* entry points, the R-119 gate for this field. The other
+      // seven digests are the control that it stayed off every other emitter.
+      //
+      // N-110 re-stamps exactly ecAdd: the secp256k1 adder's tangent y = 0
+      // guard (+12 bytes) lives inside affineAdd. p256Add is the control that
+      // it stayed on secp256k1, and the other seven that it touched nothing else.
+      //
+      // N-252 re-stamps p256Add: the SAME tangent y = 0 guard (+12 bytes, three
+      // picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY) lands in
+      // cAffineAdd for the NIST a = -3 curves (p256-p384-codegen.ts, `if
+      // (abortOnY0Tangent)`), landing after N-110 added the secp256k1 one. The
+      // other eight digests are unchanged, which is the control that the guard
+      // stayed confined to pNNNAdd (p384Add is not pinned here; p384Negate does
+      // not take the guard).
+      ecAdd: '77e995b4398cf150ed9475ddeb8c6672fb414eda2b81d2ecb1fe2d6c0169f65f',
+      ecPointX: '53726c95e164ce324e32889a6934902ad9eadd2a25ba5bfe3c813408cbe3ca87',
+      p256Add: '9a8b40c3157ca3243a4673929d849ed129b3cbc2b9ca1e3df985f71d9a14fa54',
+      p384Negate: '84da75c3c5ceef1ada452b1156d1af554ce2d54f731d2527cd21bdd05775b7f2',
+      bn254FieldAdd: '06a7ea3aa48ecd1cdd81aa2865055861b90a246547e3da832b943eded50bcd7a',
+      bn254FieldNeg: '10edf181d703fb76a418265963985ded6072cf9fef2a4b457ae73b392f84027a',
+      bbFieldAdd: 'bfe2ec39a830c67de5dd52820078146d368123d98c29dea482e4f16c59117e10',
+      bbExt4Inv0: '8fa60adfcd55207763200366a56dd212af876f76e41f737b6f384bcfc8932067',
+      kbFieldInv: 'f2c21a3172a58d6633b74f7538f3f6fdf6a8a3702282eef44b4a161369eb53f1',
     };
 
     const CONTROLS: { func: string; args: string[]; params: { name: string; type: string }[] }[] = [

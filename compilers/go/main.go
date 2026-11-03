@@ -102,24 +102,54 @@ func main() {
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
-	ackUnsoundSP1Fri := flag.Bool("acknowledge-unsound-sp1-fri", false,
-		"compile ANF IR that reaches the known-unsound SP1 FRI verifier (the --ir path has no source "+
-			"to carry @acknowledgeUnsoundSP1FriVerifier). See docs/sp1-fri-verifier.md")
+	// N-445: opt out of the artifact's sourceMap key (N-152 made it default).
+	// Large artifacts (Bn254Pairing: 831 MB, 566 MB of it sourceMap) exceed
+	// V8's max string length and the conformance runner's capture cap.
+	noSourceMap := flag.Bool("no-source-map", false, "omit the sourceMap key from the artifact (mutually exclusive with --emit-source-map)")
+	// F-305: the main --source/--ir compile path had no way to set
+	// CompileOptions.Groth16WAVKey, so a contract whose method body calls
+	// runar.AssertGroth16WitnessAssisted could only be compiled through the
+	// Go library API, never through this CLI — it always failed with "no
+	// Groth16WAConfig was supplied to the codegen". This is distinct from
+	// the `groth16-wa` subcommand above, which synthesizes a bare fixed-VK
+	// verifier and takes no --source file at all.
+	groth16WAVKey := flag.String("groth16-wa-vk", "", "path to a SP1-format Groth16 vk.json file; required to compile a --source/--ir contract whose method body calls assertGroth16WitnessAssisted")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
-		DisableConstantFolding:   *disableConstFold,
-		AcknowledgeUnsoundSP1Fri: *ackUnsoundSP1Fri,
-		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
-		// so the artifact carries the mapping table the user just asked for.
-		IncludeSourceMap: *emitSourceMap != "",
+		DisableConstantFolding: *disableConstFold,
+		// N-152: the CLI artifact always carries its sourceMap, like the TS,
+		// Rust, Python, Ruby and Zig artifacts do. --emit-source-map only
+		// additionally writes the table to its own file.
+		IncludeSourceMap: !*noSourceMap,
+		Groth16WAVKey:    *groth16WAVKey,
+	}
+
+	if *noSourceMap && *emitSourceMap != "" {
+		fmt.Fprintln(os.Stderr, "--no-source-map and --emit-source-map are mutually exclusive")
+		os.Exit(1)
 	}
 
 	if *irFile == "" && *sourceFile == "" {
-		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir] [--emit-ir-to <path>]")
+		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir] [--emit-ir-to <path>] [--no-source-map]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir).")
 		fmt.Fprintln(os.Stderr, "Phase 2: Compile from .runar.ts source to Bitcoin Script (--source).")
+		os.Exit(1)
+	}
+
+	// F-183: --source and --ir are mutually exclusive input modes. The old
+	// code picked --source silently whenever both were set (no diagnostic);
+	// refuse the combination instead.
+	if *sourceFile != "" && *irFile != "" {
+		fmt.Fprintln(os.Stderr, "Error: --source and --ir are mutually exclusive; pass exactly one")
+		os.Exit(1)
+	}
+
+	// F-183: --hex and --asm are mutually exclusive output modes. The old
+	// code picked --hex silently whenever both were set; refuse instead.
+	if *hexOnly && *asmOnly {
+		fmt.Fprintln(os.Stderr, "Error: --hex and --asm are mutually exclusive; pass exactly one")
 		os.Exit(1)
 	}
 
@@ -155,19 +185,40 @@ func main() {
 		return
 	}
 
-	// Handle --emit-ir: dump ANF IR JSON and exit
+	// Handle --emit-ir: dump ANF IR JSON, then exit — UNLESS
+	// --emit-source-map was also requested. The source map (GAP-011's
+	// SourceMapData) is only populated by the full compile (stack-lowering
+	// + emit), which this IR-only snapshot (passes 1-4) never runs, so an
+	// unconditional return here used to silently drop the --emit-source-map
+	// file with no diagnostic (F-183). When --emit-source-map is also set we
+	// fall through — the same way --emit-ir-to already does — into the
+	// normal compile below so SourceMapData gets populated and the
+	// --emit-source-map block further down can write it; emitIRHandled then
+	// stops us before the final hex/asm/artifact output, since --emit-ir's
+	// contract is "stdout carries only the IR".
+	emitIRHandled := false
 	if *emitIR {
 		if *sourceFile == "" {
 			fmt.Fprintln(os.Stderr, "--emit-ir requires --source")
 			os.Exit(1)
 		}
-		irJSON, err := sourceToIRJSON(*sourceFile, opts)
+		irJSON, irWarnings, err := sourceToIRJSON(*sourceFile, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(irJSON))
-		return
+		if *emitSourceMap == "" {
+			// F-220: this early return skips the full compile, which is where
+			// warnings are otherwise printed, so print them here. When
+			// --emit-source-map is set we fall through and the full compile
+			// prints them; printing here too would print each one twice.
+			for _, w := range irWarnings {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
+			}
+			return
+		}
+		emitIRHandled = true
 	}
 
 	// Handle --emit-ir-to: write the SAME bytes --emit-ir would print to a
@@ -180,7 +231,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--emit-ir-to requires --source")
 			os.Exit(1)
 		}
-		irJSON, err := sourceToIRJSON(*sourceFile, opts)
+		// Warnings are discarded here: the full compile below prints them.
+		irJSON, _, err := sourceToIRJSON(*sourceFile, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
@@ -234,6 +286,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Source map written to %s\n", *emitSourceMap)
+	}
+
+	// --emit-ir already printed the IR above; having fallen through only to
+	// populate and write the source map, stop here rather than also print
+	// the full hex/asm/artifact output.
+	if emitIRHandled {
+		return
 	}
 
 	// Determine output
@@ -303,7 +362,7 @@ func runGroth16WA() error {
 	vkPath := fs.String("vk", "", "path to .groth16.vk.json verifying key file (required)")
 	outPath := fs.String("out", "", "output artifact JSON path (required)")
 	contractName := fs.String("name", "", "contract name in the output artifact (default \"Groth16Verifier\")")
-	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~718 KB for SP1 v6); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
+	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~1.4 MB for SP1 v6's MSM-bound verifier); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
 	var pubInputs groth16PubInputFlag
 	fs.Var(&pubInputs, "pub", "public-input scalar to pin into the verifier, as a decimal integer; repeat once per public input (required)")
 	fs.Usage = func() {
@@ -369,17 +428,20 @@ func runGroth16WA() error {
 // (stdout) and `--emit-ir-to` (file) so the two modes are byte-identical by
 // construction — the conformance runner compares one against the other's
 // goldens.
-func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, error) {
-	program, err := compiler.CompileSourceToIR(sourcePath, opts)
+//
+// It also returns the warnings CompileSourceToIRCollectingWarnings collected
+// (F-220): `--emit-ir` prints them when it skips the full compile.
+func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, []frontend.Diagnostic, error) {
+	program, warnings, err := compiler.CompileSourceToIRCollectingWarnings(sourcePath, opts)
 	if err != nil {
-		return nil, fmt.Errorf("Compilation error: %v", err)
+		return nil, nil, fmt.Errorf("Compilation error: %v", err)
 	}
 	// Serialize to generic map and ensure "if" values always have an
 	// "else" field (even if empty) to match TS compiler IR format.
 	// Go's omitempty drops empty slices, but TS always emits else: [].
 	fullJSON, err := json.Marshal(program)
 	if err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
 	var raw map[string]interface{}
 	// UseNumber() keeps every JSON number as its verbatim source text.
@@ -392,14 +454,14 @@ func sourceToIRJSON(sourcePath string, opts compiler.CompileOptions) ([]byte, er
 	dec := json.NewDecoder(bytes.NewReader(fullJSON))
 	dec.UseNumber()
 	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
 	ensureIRFields(raw)
 	irJSON, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("JSON error: %v", err)
+		return nil, nil, fmt.Errorf("JSON error: %v", err)
 	}
-	return irJSON, nil
+	return irJSON, warnings, nil
 }
 
 // ensureIRFields walks a generic JSON map and patches up fields that Go's

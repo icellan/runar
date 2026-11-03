@@ -156,6 +156,71 @@ export class TransitivePrivate extends StatefulSmartContract {
   });
 });
 
+// ---------------------------------------------------------------------------
+// N-298: `collectStmt`'s `if_statement` case walks BOTH `stmt.then` and (when
+// present) `stmt.else` to find side effects buried in a private helper. Every
+// F1 fixture above puts its helper's only effect at the top level or inside a
+// `then` arm, so none of them exercises the `stmt.else` walk at all — a
+// private helper whose ONLY side effect lives exclusively inside an `else`
+// branch is untested. mutation id `sideeffect-ifstmt-skip-else-branch`
+// disables that walk (`if (false) for (const inner of stmt.else) ...`); with
+// it disabled, `bump`'s mutation (buried only in the else arm below) never
+// surfaces to `effectsFor`, so `spend` is wrongly summarised as having no
+// continuation requirement.
+// ---------------------------------------------------------------------------
+describe("N-298: side-effect-summary walks a private helper's else branch", () => {
+  const ELSE_ONLY_SOURCE = `
+import { StatefulSmartContract, assert } from 'runar-lang';
+export class PrivateElseMut extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  private bump(flag: bigint): void {
+    if (flag === 1n) {
+      assert(true);
+    } else {
+      this.count = this.count + 1n;
+    }
+  }
+  public spend(flag: bigint): void {
+    this.bump(flag);
+    assert(true);
+  }
+}`;
+
+  it("a mutation hidden only in a private helper's else branch still auto-injects continuation params", () => {
+    const { anf, artifact } = compile(ELSE_ONLY_SOURCE);
+    const anfSpend = anfMethod(anf, 'spend');
+    const abiSpend = abiMethod(artifact, 'spend');
+
+    // Proves: `effectsFor('bump', ...)` sees `mutatesState: true` even though
+    // the ONLY assignment to `count` is nested inside an else branch, and
+    // that effect propagates through the call-graph walk to `spend`'s ANF
+    // params and ABI, exactly as the then-branch/top-level F1 fixtures above
+    // already prove for their own placements.
+    // Does NOT prove: anything about effects nested inside an else branch of
+    // a `for` loop, or about effects reachable ONLY through multiple nested
+    // else arms.
+    expect(paramNames(anfSpend.params)).toEqual(
+      ['flag', '_changePKH', '_changeAmount', '_newAmount', 'txPreimage'],
+    );
+    expect(paramNames(abiSpend.params)).toEqual(paramNames(anfSpend.params));
+    expect(abiSpend.isTerminal).toBeFalsy();
+  });
+
+  it("interpreter: taking the else arm actually mutates the caller's state", () => {
+    // Proves: the else-only mutation is not just visible to the ANF/ABI
+    // summary but actually executes and changes contract state when the
+    // helper takes that branch.
+    // Does NOT prove: the real on-chain continuation-shape binding (covered
+    // by `real-crypto-execution.test.ts`'s `private-helper-outputs` witness,
+    // which this item's dispatcher brief did not ask to extend).
+    const c = TestContract.fromSource(ELSE_ONLY_SOURCE, { count: 5n });
+    const result = c.call('spend', { flag: 0n });
+    expect(result.success).toBe(true);
+    expect(c.state.count).toBe(6n);
+  });
+});
+
 describe('audit F3: artifact ABI matches ANF for all output intrinsics', () => {
   it('non-mutating addDataOutput injects continuation params in both ANF and ABI', () => {
     const source = `

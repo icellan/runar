@@ -6,15 +6,43 @@
  * dispatcher routes correctly based on file extension.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { compile } from '../index.js';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join, resolve, basename } from 'path';
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Vacuity guard
 // ---------------------------------------------------------------------------
+//
+// This file iterates conformance fixtures to generate its `it()` cases (see
+// "universal parser coverage" and the Zig conformance loop below). Per its
+// own comment, `rust-parser-examples.test.ts` was once bitten by exactly
+// this shape: a per-fixture test body that `return`s early when a fixture
+// path is missing executes zero `expect()` calls and still reports PASSED —
+// invisible to `scripts/lint-no-silent-skips.sh` because a bare `return` is
+// not a skip marker. `expect.hasAssertions()` makes a future reintroduction
+// of that pattern fail loudly instead of silently passing.
+beforeEach(() => {
+  expect.hasAssertions();
+});
+
+// Permanent regression test for the guard above, not for fixture content.
+// It reproduces the documented incident shape directly: a test body that
+// returns early on a missing path and asserts nothing. Without the
+// `beforeEach` guard, zero `expect()` calls is not an error to vitest — the
+// inner case reports PASSED — so this wrapping `it.fails` would itself fail
+// ("expected test to fail, but it passed"). With the guard, the inner case's
+// lack of any assertion is caught and reported as a failure, which
+// `it.fails` correctly expects, so the outer case passes.
+it.fails('a zero-assertion fixture-iteration body is caught, not silently green', () => {
+  const missingFixturePath = join(CONFORMANCE_DIR, '__f-391-does-not-exist__', 'source.json');
+  if (!existsSync(missingFixturePath)) {
+    return; // the historical incident: early return, zero assertions
+  }
+  expect(true).toBe(true);
+});
 
 const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', 'tests');
 
@@ -290,13 +318,11 @@ describe('Multi-format: universal parser coverage (every fixture × every declar
   });
 
   for (const fixture of fixtures) {
-    const config = (() => {
-      try {
-        return loadSourceConfig(fixture);
-      } catch {
-        return { sources: undefined } as SourceConfig;
-      }
-    })();
+    // F-225: a malformed or missing source.json must fail collection loudly
+    // (the same way findZigConformanceCases's unguarded call already does),
+    // not be swallowed into an empty config that silently drops every test
+    // for this fixture.
+    const config = loadSourceConfig(fixture);
     const declaredExts = Object.keys(config.sources ?? {});
     if (declaredExts.length === 0) continue;
 
@@ -353,7 +379,27 @@ describe('Multi-format: stateful contract', () => {
 // ---------------------------------------------------------------------------
 
 describe('Multi-format: Zig conformance', () => {
-  const zigConformanceCases = findZigConformanceCases();
+  // N-314 (R144): the golden-hex cases below compile the Zig surface with the
+  // TS compiler, so a fixture whose allowlist excludes ts AND which TS has no
+  // codegen for (today the Go-only BN254 pairing) cannot run here. Skipped BY
+  // NAME, only when also allowlisted away from ts; the skipped set is pinned
+  // below so a new one fails loudly. Its Zig surface is still parsed by the
+  // all-tier parser-only matrix.
+  const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+  const allZigCases = findZigConformanceCases();
+  const skippedNotTs = allZigCases
+    .filter(c => {
+      const compilers = loadSourceConfig(c.testName).compilers;
+      return Array.isArray(compilers) && !compilers.includes('ts')
+        && EXPECTED_NOT_TS_COMPILABLE.includes(c.testName);
+    })
+    .map(c => c.testName)
+    .sort();
+  const zigConformanceCases = allZigCases.filter(c => !skippedNotTs.includes(c.testName));
+
+  it('skips exactly the expected fixtures whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
+  });
 
   it('discovers Zig conformance cases via source.json', () => {
     // Sanity: source.json indirection actually surfaces fixtures. If this

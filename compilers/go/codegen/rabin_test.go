@@ -5,32 +5,51 @@ import (
 	"testing"
 )
 
-// rabinGolden is the fixed 18-op Rabin verification sequence:
-// (sig^2 + padding) mod pubKey == SHA256(msg) (numeric compare, BUG-011)
+// rabinGolden is the fixed 34-op Rabin verification sequence:
+// (sig^2 + padding) mod pubKey == SHA256(msg) mod pubKey (numeric compare,
+// BUG-011; digest reduced mod pubKey, F-047)
 // AND 0 <= padding < 65536 (BUG-010). See _review/BUG-010-rfc.md.
+// AND sig < pubKey (F-368).
+// pubKey, padding and sig are each read as unsigned LE integers (F-144).
 var rabinGolden = []struct {
 	op    string
 	code  string
 	value int64  // only meaningful for op="push" kind=bigint
 	bytes []byte // only meaningful for op="push" kind=bytes
 }{
+	{op: "push", bytes: []byte{0x00}}, // F-144: pubKey as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
 	{op: "opcode", code: "OP_SWAP"},
+	{op: "push", bytes: []byte{0x00}}, // F-144: padding as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
 	{op: "opcode", code: "OP_DUP"},
 	{op: "opcode", code: "OP_0"},
 	{op: "push", value: 65536},
 	{op: "opcode", code: "OP_WITHIN"},
 	{op: "opcode", code: "OP_VERIFY"},
 	{op: "opcode", code: "OP_ROT"},
+	{op: "push", bytes: []byte{0x00}}, // F-144: sig as unsigned
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
+	{op: "opcode", code: "OP_DUP"}, // F-368: sig < pubKey
+	{op: "push", value: 3},
+	{op: "opcode", code: "OP_PICK"},
+	{op: "opcode", code: "OP_LESSTHAN"},
+	{op: "opcode", code: "OP_VERIFY"},
 	{op: "opcode", code: "OP_DUP"},
 	{op: "opcode", code: "OP_MUL"},
 	{op: "opcode", code: "OP_ADD"},
-	{op: "opcode", code: "OP_SWAP"},
+	{op: "opcode", code: "OP_OVER"},
 	{op: "opcode", code: "OP_MOD"},
-	{op: "opcode", code: "OP_SWAP"},
+	{op: "opcode", code: "OP_ROT"},
 	{op: "opcode", code: "OP_SHA256"},
 	{op: "push", bytes: []byte{0x00}},
 	{op: "opcode", code: "OP_CAT"},
 	{op: "opcode", code: "OP_BIN2NUM"},
+	{op: "opcode", code: "OP_ROT"},
+	{op: "opcode", code: "OP_MOD"},
 	{op: "opcode", code: "OP_NUMEQUAL"},
 }
 

@@ -129,6 +129,20 @@ runar-compiler-rust --source MyContract.runar.ts --output artifacts/MyContract.j
 runar-compiler-rust --source MyContract.runar.ts -o artifacts/MyContract.json
 ```
 
+### The `--disable-constant-folding` Flag
+
+The ANF constant folding pass optimizes the intermediate representation by evaluating constant expressions at compile time. This optimization is enabled by default for source compilation (Phase 2).
+
+**Important:** The `--disable-constant-folding` flag is a **no-op when using `--ir`** (Phase 1). When compiling from already-lowered ANF IR, constant folding is always disabled. This is intentional: re-folding pre-lowered IR would leave dead operand bindings in place, causing the stack lowering phase to emit wasteful `push`+`drop` sequences that diverge from the conformance goldens. The peephole optimizer still performs stack-level optimizations, so the final script size is not affected.
+
+```bash
+# --disable-constant-folding works as expected with --source
+runar-compiler-rust --source MyContract.runar.ts --disable-constant-folding
+
+# --disable-constant-folding is a no-op with --ir (folding is always disabled for IR input)
+runar-compiler-rust --ir input.json --disable-constant-folding  # constant folding is already disabled
+```
+
 ---
 
 ## Conformance Testing

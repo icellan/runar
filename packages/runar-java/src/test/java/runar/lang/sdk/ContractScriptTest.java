@@ -214,4 +214,24 @@ class ContractScriptTest {
             List.of(), List.of(), List.of(), null, null);
         assertEquals("76aa55", ContractScript.renderLockingScript(a, List.of(), Map.of()));
     }
+
+    // F-238: extractConstructorArgs (reconnection path, FromUtxo-equivalent)
+    // must propagate a malformed deployed script as a typed rejection
+    // (IllegalArgumentException, via ScriptUtils.decodePushData) rather than
+    // crashing with a raw StringIndexOutOfBoundsException or silently
+    // returning a wrong/truncated value for the slot.
+    @Test
+    void extractConstructorArgsRefusesTruncatedDeployedPush() {
+        RunarArtifact a = new RunarArtifact(
+            "v0", "0", "Test",
+            abi(List.of(param("count", "bigint"))),
+            "76007c", // OP_DUP OP_0 OP_SWAP — placeholder at byte 1
+            "asm", null,
+            List.of(), List.of(new ConstructorSlot(0, 1)), List.of(), null, null);
+        // Direct push declares 5 bytes but only 2 remain -- an
+        // adversarial/malformed provider-supplied script.
+        String malformedDeployed = "7605aabb";
+        assertThrows(IllegalArgumentException.class,
+            () -> ContractScript.extractConstructorArgs(a, malformedDeployed));
+    }
 }

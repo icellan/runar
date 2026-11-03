@@ -418,18 +418,26 @@ fn test_parse_dispatch_go() {
 
 #[test]
 fn test_parse_dispatch_unknown_extension() {
-    // parse_source with an unrecognized extension should produce errors
-    // or an empty result — it must NOT panic.
+    // parse_source with an unrecognized extension must not panic, and must
+    // report a diagnostic rather than returning silently (see F-340 note
+    // below). Today `.runar.xyz` falls through to the TS parser and is
+    // rejected there for lacking a contract class -- the extension itself
+    // is not detected as unknown.
     let source = "class Foo { }";
     let result = parse_source(source, Some("Contract.runar.xyz"));
 
-    // An unrecognized extension should either produce errors or an empty result.
-    let has_contract = result.contract.is_some();
+    // F-340: require an actual diagnostic, not just "no contract" -- the old
+    // `!has_contract || has_errors` form was satisfied by a parser that
+    // silently returns no contract AND no errors, which is exactly the
+    // failure mode this test exists to catch.
+    // Proves: parse_source emits a diagnostic for this input rather than
+    // returning silently. Does not prove: that the extension itself is
+    // detected as unknown, or the diagnostic's text/location.
     let has_errors = !result.errors.is_empty();
 
     assert!(
-        !has_contract || has_errors,
-        "unrecognized extension should produce errors or no contract; got contract with no errors"
+        has_errors,
+        "unrecognized extension should produce a diagnostic"
     );
 }
 
@@ -448,9 +456,13 @@ class Foo < Runar::UnknownBase
 end
 "#;
     let result = parse_source(source, Some("Test.runar.rb"));
+    // F-340: require an actual diagnostic (see test_ruby_empty_source above
+    // for why the old `contract.is_none() || !errors.is_empty()` form was
+    // weak). Proves: the parser reports why it rejected the unknown parent
+    // class. Does not prove: the diagnostic's text or location.
     assert!(
-        result.contract.is_none() || !result.errors.is_empty(),
-        "expected errors or no contract for unknown parent class"
+        !result.errors.is_empty(),
+        "expected a diagnostic for unknown parent class"
     );
 }
 
@@ -469,9 +481,13 @@ class Foo < Runar::SmartContract
 end
 "#;
     let result = parse_source(source, Some("Test.runar.rb"));
+    // F-340: require an actual diagnostic (see test_ruby_empty_source above
+    // for why the old `contract.is_none() || !errors.is_empty()` form was
+    // weak). Proves: the parser reports why the prop's missing type is
+    // invalid. Does not prove: the diagnostic's text or location.
     assert!(
-        result.contract.is_none() || !result.errors.is_empty(),
-        "expected errors or no contract for prop missing type"
+        !result.errors.is_empty(),
+        "expected a diagnostic for prop missing type"
     );
 }
 
@@ -488,17 +504,92 @@ class Foo < Runar::SmartContract
     assert @x > 0
 "#;
     let result = parse_source(source, Some("Test.runar.rb"));
+    // F-340: require an actual diagnostic (see test_ruby_empty_source above
+    // for why the old `contract.is_none() || !errors.is_empty()` form was
+    // weak). Proves: the parser reports why the unclosed method is invalid.
+    // Does not prove: the diagnostic's text or location.
     assert!(
-        result.contract.is_none() || !result.errors.is_empty(),
-        "expected errors or no contract for unclosed method"
+        !result.errors.is_empty(),
+        "expected a diagnostic for unclosed method"
     );
 }
 
 #[test]
 fn test_ruby_empty_source() {
     let result = parse_source("", Some("Test.runar.rb"));
+    // F-340: must require an actual diagnostic, not just "no contract" --
+    // the old `result.contract.is_none() || !result.errors.is_empty()` form
+    // was satisfied by a parser that silently returns no contract AND no
+    // errors, which is exactly the failure mode this test exists to catch.
+    // Proves: the parser reports why it refused empty source. Does not
+    // prove: the diagnostic's text or location, or coverage of other inputs.
     assert!(
-        result.contract.is_none() || !result.errors.is_empty(),
-        "expected errors or no contract for empty source"
+        !result.errors.is_empty(),
+        "expected a diagnostic for empty source"
     );
 }
+
+// ---------------------------------------------------------------------------
+// N-127: every one of the nine source formats is covered by the per-format
+// golden test and the N-way identity test.
+//
+// Proves: ALL_FORMATS names exactly the nine formats of the frontend-parity
+// invariant (CLAUDE.md), and basic-p2pkh compiled from each of them through
+// compile_from_source_str reaches the shared golden expected-script.hex and
+// therefore the same bytes as every other format.
+// Does not prove: fixtures beyond basic-p2pkh, constructs beyond
+// hash160+checkSig, or constant-folding-OFF output.
+// ---------------------------------------------------------------------------
+
+const ALL_FORMATS: [&str; 9] = [
+    ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+    ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
+];
+
+fn basic_p2pkh_script(ext: &str) -> String {
+    let source = read_conformance_format("basic-p2pkh", ext);
+    compile_from_source_str(&source, Some(&format!("basic-p2pkh{}", ext)))
+        .unwrap_or_else(|e| panic!("basic-p2pkh{}: compilation failed: {}", ext, e))
+        .script
+}
+
+#[test]
+fn test_format_list_covers_all_nine() {
+    let required = [
+        ".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rs",
+        ".runar.py", ".runar.zig", ".runar.rb", ".runar.java",
+    ];
+    for ext in &required {
+        assert!(ALL_FORMATS.contains(ext), "ALL_FORMATS is missing {}", ext);
+    }
+    assert_eq!(ALL_FORMATS.len(), required.len(), "ALL_FORMATS has extra or duplicate entries");
+}
+
+#[test]
+fn test_basic_p2pkh_matches_golden_all_formats() {
+    let golden_path = conformance_dir().join("basic-p2pkh").join("expected-script.hex");
+    let golden = std::fs::read_to_string(&golden_path)
+        .unwrap_or_else(|e| panic!("golden {:?} unreadable: {}", golden_path, e));
+    for ext in &ALL_FORMATS {
+        assert_eq!(
+            basic_p2pkh_script(ext),
+            golden.trim(),
+            "basic-p2pkh{} does not match the golden",
+            ext
+        );
+    }
+}
+
+#[test]
+fn test_basic_p2pkh_all_formats_identical() {
+    let reference = basic_p2pkh_script(".runar.ts");
+    for ext in &ALL_FORMATS {
+        assert_eq!(
+            basic_p2pkh_script(ext),
+            reference,
+            "basic-p2pkh{} differs from .runar.ts",
+            ext
+        );
+    }
+}
+

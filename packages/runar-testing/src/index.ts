@@ -61,6 +61,7 @@ export {
   runFoldEquivalence,
   runStatelessSigned,
   runStatefulSpend,
+  runPrecompiledHexSpend,
   testKey,
 } from './oracle/index.js';
 export type {
@@ -77,6 +78,7 @@ export type {
   StatelessArg,
   StatelessSignedOptions,
   StatefulSpendOptions,
+  PrecompiledHexOptions,
 } from './oracle/index.js';
 
 // Test helpers
@@ -94,7 +96,7 @@ export type { TestCallResult, OutputSnapshot, MockPreimage } from './test-contra
 
 // Script execution (BSV SDK)
 export { ScriptExecutionContract } from './script-execution.js';
-export type { ScriptExecResult } from './script-execution.js';
+export type { ScriptExecResult, ScriptExecOptions } from './script-execution.js';
 
 // Source map resolver (for debugger)
 export { SourceMapResolver } from './source-map.js';

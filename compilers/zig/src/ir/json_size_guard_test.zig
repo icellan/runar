@@ -26,8 +26,9 @@ test "parseANFProgram accepts minimal program (size guard does not trip)" {
     // (no public method => empty locking script => spendable with OP_1). This
     // test's subject is the DoS caps, not the schema, so the fix is a fixture
     // that is genuinely minimal AND valid rather than a weaker assertion.
+    // N-071: and a public method must end with an assert.
     const minimal =
-        \\{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}
+        \\{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}]}
     ;
     const program = try json.parseANFProgram(allocator, minimal);
     try testing.expectEqualStrings("X", program.contract_name);
@@ -78,8 +79,8 @@ test "depth walk ignores braces inside JSON strings" {
     // `"methods":[]` an invalid program (no spending entry point => an empty,
     // anyone-can-spend locking script). The subject here is the depth walk,
     // not the schema, so the fixture is made valid rather than the assertion
-    // weakened.
-    const head = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":[]}],\"_note\":\"";
+    // weakened. N-071: and a public method must end with an assert.
+    const head = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":[{\"name\":\"_ok\",\"value\":{\"kind\":\"load_const\",\"value\":true}},{\"name\":\"_ok_assert\",\"value\":{\"kind\":\"assert\",\"value\":\"_ok\"}}]}],\"_note\":\"";
     const tail = "\"}";
     const inner_count: usize = 1000;
     const buf = try allocator.alloc(u8, head.len + inner_count + tail.len);

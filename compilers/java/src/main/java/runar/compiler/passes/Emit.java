@@ -79,6 +79,19 @@ public final class Emit {
     public record CodeSepIndexSlot(int byteOffset, int codeSepIndex) {}
 
     /**
+     * N-051 — a {@code verify_code_part_len} length field whose value is only
+     * known at deploy time (a readonly constructor arg of variable width is
+     * baked into the code part). {@code byteOffset} is the offset, in the
+     * TEMPLATE script, of the first of the 4 little-endian length bytes (the
+     * byte after the {@code 04} push opcode). The SDK overwrites those 4 bytes
+     * with the deployed code-part length.
+     *
+     * <p>Mirrors {@code CodePartLenSlot} in
+     * {@code packages/runar-compiler/src/passes/06-emit.ts}.
+     */
+    public record CodePartLenSlot(int byteOffset) {}
+
+    /**
      * R-007: full emit result. Carries everything the deployment SDK needs to
      * turn a script into a deployable locking script: the constructor-argument
      * slot offsets, the codeSepIndex slot offsets, and the OP_CODESEPARATOR
@@ -99,7 +112,11 @@ public final class Emit {
         List<ConstructorSlot> constructorSlots,
         List<CodeSepIndexSlot> codeSepIndexSlots,
         int codeSeparatorIndex,
-        List<Integer> codeSeparatorIndices
+        List<Integer> codeSeparatorIndices,
+        /** N-051 — deploy-time pin length fields; empty when every pin is exact. */
+        List<CodePartLenSlot> codePartLenSlots,
+        /** N-152 — space-separated human-readable disassembly, the artifact's {@code asm}. */
+        String scriptAsm
     ) {}
 
     /**
@@ -334,7 +351,9 @@ public final class Emit {
             List.copyOf(ctx.constructorSlots),
             List.copyOf(ctx.codeSepIndexSlots),
             ctx.codeSeparatorIndex,
-            List.copyOf(ctx.codeSeparatorIndices)
+            List.copyOf(ctx.codeSeparatorIndices),
+            List.copyOf(ctx.codePartLenSlots),
+            publicMethods.isEmpty() ? "" : String.join(" ", ctx.asmParts)
         );
     }
 
@@ -372,10 +391,71 @@ public final class Emit {
     }
 
     private static void emitStackOp(StackOp op, Ctx ctx) {
-        // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
-        // this op (when any) so Ctx#recordSourceMapping can attach it to
-        // the next opcode index.
-        ctx.setPendingSourceLoc(extractSourceLoc(op));
+        emitOps(List.of(op), ctx);
+    }
+
+    /** An op list being emitted by {@link #emitOps}: the root, or an IfOp arm. */
+    private static final class EmitFrame {
+        final java.util.Iterator<StackOp> ops;
+        /** 0 = root, 1 = then-arm (else-arm follows), 2 = else-arm. */
+        final int arm;
+        final List<StackOp> elseOps;
+
+        EmitFrame(List<StackOp> ops, int arm, List<StackOp> elseOps) {
+            this.ops = ops.iterator();
+            this.arm = arm;
+            this.elseOps = elseOps;
+        }
+    }
+
+    /**
+     * Emits {@code root} in order, descending into IfOp arms on an explicit
+     * stack. N-264: this used to recurse (emitStackOp -> emitIf ->
+     * emitStackOp), one level per nested IfOp; private methods are inlined, so
+     * a chain of D helpers each calling the next under K nested ifs nests D*K
+     * IfOps, too deep for the thread stack. Same opcodes, same order, same
+     * source-loc bookkeeping as the recursive version.
+     */
+    private static void emitOps(List<StackOp> root, Ctx ctx) {
+        java.util.ArrayDeque<EmitFrame> stack = new java.util.ArrayDeque<>();
+        stack.push(new EmitFrame(root, 0, null));
+        while (!stack.isEmpty()) {
+            EmitFrame frame = stack.peek();
+            if (frame.ops.hasNext()) {
+                StackOp op = frame.ops.next();
+                // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
+                // this op (when any) so Ctx#recordSourceMapping can attach it to
+                // the opcodes it emits.
+                // N-468: same bookkeeping as TS emitOps. An op WITHOUT a loc
+                // keeps whatever is pending (so the first op of an if-arm
+                // inherits the if's loc), a leaf op clears it after emitting,
+                // and OP_ELSE / OP_ENDIF go out under whatever the last arm op
+                // left, cleared after OP_ENDIF.
+                runar.compiler.ir.stack.StackSourceLoc loc = extractSourceLoc(op);
+                if (loc != null) ctx.setPendingSourceLoc(loc);
+                if (op instanceof IfOp ifo) {
+                    ctx.emitOpcode("OP_IF");
+                    stack.push(new EmitFrame(ifo.thenBranch(), 1, ifo.elseBranch()));
+                } else {
+                    emitLeafOp(op, ctx);
+                    ctx.setPendingSourceLoc(null);
+                }
+                continue;
+            }
+            stack.pop();
+            if (frame.arm == 0) continue;
+            if (frame.arm == 1 && frame.elseOps != null && !frame.elseOps.isEmpty()) {
+                ctx.emitOpcode("OP_ELSE");
+                stack.push(new EmitFrame(frame.elseOps, 2, null));
+                continue;
+            }
+            ctx.emitOpcode("OP_ENDIF");
+            ctx.setPendingSourceLoc(null);
+        }
+    }
+
+    /** Emits one op that is not an IfOp. */
+    private static void emitLeafOp(StackOp op, Ctx ctx) {
         if (op instanceof PushOp p) {
             ctx.emitPush(p.value());
         } else if (op instanceof DupOp) {
@@ -398,8 +478,6 @@ public final class Emit {
             ctx.emitOpcode("OP_TUCK");
         } else if (op instanceof OpcodeOp o) {
             ctx.emitOpcode(o.code());
-        } else if (op instanceof IfOp ifo) {
-            emitIf(ifo.thenBranch(), ifo.elseBranch(), ctx);
         } else if (op instanceof PlaceholderOp ph) {
             ctx.emitPlaceholder(ph.paramIndex().intValueExact());
         } else if (op instanceof PushCodeSepIndexOp) {
@@ -439,18 +517,9 @@ public final class Emit {
         if (op instanceof PlaceholderOp o) return o.sourceLoc();
         if (op instanceof PushCodeSepIndexOp o) return o.sourceLoc();
         if (op instanceof VerifyCodePartLenOp o) return o.sourceLoc();
-        // RawBytesOp / others have no sourceLoc.
+        // F-316: a raw_script span (asm({...})) now carries a sourceLoc too.
+        if (op instanceof RawBytesOp o) return o.sourceLoc();
         return null;
-    }
-
-    private static void emitIf(List<StackOp> thenOps, List<StackOp> elseOps, Ctx ctx) {
-        ctx.emitOpcode("OP_IF");
-        for (StackOp op : thenOps) emitStackOp(op, ctx);
-        if (elseOps != null && !elseOps.isEmpty()) {
-            ctx.emitOpcode("OP_ELSE");
-            for (StackOp op : elseOps) emitStackOp(op, ctx);
-        }
-        ctx.emitOpcode("OP_ENDIF");
     }
 
     // ------------------------------------------------------------------
@@ -459,6 +528,8 @@ public final class Emit {
 
     private static final class Ctx {
         final StringBuilder hex = new StringBuilder();
+        /** N-152: one entry per emitted opcode/push, the artifact's {@code asm} column. */
+        final java.util.List<String> asmParts = new java.util.ArrayList<>();
         final java.util.List<RawScriptSpan> rawScriptSpans = new java.util.ArrayList<>();
         // GAP-002: sourceMap accumulator + opcode index + pending loc.
         // Mirrors the EmitContext pattern from the TS / Go / Rust / Python
@@ -471,6 +542,8 @@ public final class Emit {
         final java.util.List<Integer> codeSeparatorIndices = new java.util.ArrayList<>();
         /** R-095: verify_code_part_len length fields awaiting back-patch. */
         final java.util.List<CodePartLenFixup> codePartLenFixups = new java.util.ArrayList<>();
+        /** N-051: pin length fields the SDK patches at deploy time. */
+        final java.util.List<CodePartLenSlot> codePartLenSlots = new java.util.ArrayList<>();
         /** Byte offset of the most recent OP_CODESEPARATOR; -1 when none was emitted. */
         int codeSeparatorIndex = -1;
         int byteLength = 0;
@@ -494,11 +567,9 @@ public final class Emit {
                 pendingSourceLoc.line().intValueExact(),
                 pendingSourceLoc.column().intValueExact()
             ));
-            // Consume after recording so each StackOp produces at most one
-            // mapping. Dispatch-table opcodes (OP_DUP/OP_NUMEQUAL/...) and
-            // emitIf opcodes (OP_IF/OP_ELSE/OP_ENDIF) emitted between user
-            // ops therefore don't pick up the prior op's loc by accident.
-            pendingSourceLoc = null;
+            // N-468: NOT consumed here, as in TS: every opcode a leaf op
+            // emits is mapped, and emitOps clears the loc after each leaf
+            // and after OP_ENDIF.
         }
 
         void emitOpcode(String name) {
@@ -513,6 +584,7 @@ public final class Emit {
             }
             recordSourceMapping();
             appendHex(byteToHex(b));
+            asmParts.add(name);
             opcodeIndex++;
         }
 
@@ -529,6 +601,7 @@ public final class Emit {
             // the bump left every later mapping pointing one opcode short.
             recordSourceMapping();
             appendHex("00");
+            asmParts.add("OP_0");
             opcodeIndex++;
         }
 
@@ -549,12 +622,14 @@ public final class Emit {
             // appendHex("00"); this one called neither.
             recordSourceMapping();
             appendHex("00");
+            asmParts.add("OP_0");
             opcodeIndex++;
         }
 
         void emitPush(PushValue value) {
             recordSourceMapping();
             appendHex(encodePushValue(value));
+            asmParts.add(encodePushAsm(value));
             opcodeIndex++;
         }
 
@@ -570,6 +645,7 @@ public final class Emit {
             int offset = byteLength;
             recordSourceMapping();
             appendHex(bytesToHex(bytes));
+            asmParts.add("<raw " + bytes.length + " bytes>");
             rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
             opcodeIndex++;
         }
@@ -578,7 +654,7 @@ public final class Emit {
          * R-095 — emit the 9-byte {@code SIZE(_codePart)} pin and register its
          * length field for back-patching.
          *
-         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY</pre>
+         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM OP_NUMEQUAL OP_VERIFY</pre>
          *
          * <p>{@code LL LL LL LL} is a fixed-width little-endian field, not a
          * minimal Script number push: the value being patched IS the length of
@@ -586,16 +662,30 @@ public final class Emit {
          * would be self-referential. {@code OP_BIN2NUM} normalises the
          * fixed-width field back to a minimal Script number so the comparison
          * is numeric.
+         *
+         * <p>N-051 — the comparison is ALWAYS an equality. It used to degrade to
+         * OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+         * deployed length unknown here, and a lower bound lets a spender claim a
+         * TRUNCATED {@code _codePart} that ends at any 0x6a byte inside the baked
+         * value, planting attacker-chosen code in the continuation. When the
+         * length is not exact at compile time, the field is recorded as a
+         * {@code codePartLenSlots} entry and the SDK writes the real deployed
+         * code-part length into it at deploy time. The template keeps the
+         * compile-time lower bound, so an SDK that does not patch produces a
+         * contract whose honest spends fail (funds stuck), never one that
+         * accepts a truncated code part.
          */
         void emitVerifyCodePartLen(int delta, boolean exact) {
             emitOpcode("OP_DUP");
             // +1 skips the single-byte push header the 4-byte data push carries.
             int valueByteOffset = byteLength + 1;
+            int asmIndex = asmParts.size();
             emitPush(PushValue.ofHex("00000000"));
             emitOpcode("OP_BIN2NUM");
-            emitOpcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL");
+            emitOpcode("OP_NUMEQUAL");
             emitOpcode("OP_VERIFY");
-            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, delta));
+            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, asmIndex, delta));
+            if (!exact) codePartLenSlots.add(new CodePartLenSlot(valueByteOffset));
         }
 
         /**
@@ -657,6 +747,7 @@ public final class Emit {
                 }
                 int start = fixup.valueByteOffset() * 2;
                 hex.replace(start, start + 8, le.toString());
+                asmParts.set(fixup.asmIndex(), "<" + le + ">");
             }
         }
     }
@@ -667,7 +758,7 @@ public final class Emit {
      * exists. {@code delta} is the deploy-time growth of the constructor-arg
      * placeholders.
      */
-    private record CodePartLenFixup(int valueByteOffset, int delta) {}
+    private record CodePartLenFixup(int valueByteOffset, int asmIndex, int delta) {}
 
     // ------------------------------------------------------------------
     // Script number encoding
@@ -718,6 +809,35 @@ public final class Emit {
                 if (b == 0x81) return "4f";
             }
             return bytesToHex(encodePushData(data));
+        }
+        throw new RuntimeException("unknown push value type");
+    }
+
+    /**
+     * N-152: the {@code asm} spelling of a push, identical to the TS emitter's
+     * {@code encodePushValue(...).asm}: small-integer opcodes by name, data as
+     * {@code <hex>} of the VALUE bytes (no push header).
+     */
+    static String encodePushAsm(PushValue value) {
+        if (value instanceof BoolPushValue b) {
+            return b.value() ? "OP_TRUE" : "OP_FALSE";
+        }
+        if (value instanceof BigIntPushValue i) {
+            BigInteger n = i.value();
+            if (n.signum() == 0) return "OP_0";
+            if (n.equals(BigInteger.valueOf(-1))) return "OP_1NEGATE";
+            if (n.signum() > 0 && n.compareTo(BigInteger.valueOf(16)) <= 0) return "OP_" + n.intValue();
+            return "<" + bytesToHex(encodeScriptNumber(n)) + ">";
+        }
+        if (value instanceof ByteStringPushValue bs) {
+            byte[] data = hexToBytes(bs.hex());
+            if (data.length == 0) return "OP_0";
+            if (data.length == 1) {
+                int b = data[0] & 0xff;
+                if (b >= 1 && b <= 16) return "OP_" + b;
+                if (b == 0x81) return "OP_1NEGATE";
+            }
+            return "<" + bytesToHex(data) + ">";
         }
         throw new RuntimeException("unknown push value type");
     }

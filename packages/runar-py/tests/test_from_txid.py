@@ -108,6 +108,30 @@ class TestFromTxId:
         with pytest.raises((ValueError, RuntimeError)):
             RunarContract.from_txid(artifact, FAKE_TXID, 5, provider)
 
+    def test_negative_output_index_raises(self):
+        """from_txid with a negative output_index raises, instead of silently
+        binding to tx.outputs[-1] (Python's negative-indexing semantics would
+        otherwise resolve -1 to the LAST output — typically change — giving a
+        contract whose _current_utxo points at a UTXO the covenant cannot
+        spend). F-273.
+
+        Proves: output_index=-1 against a MockProvider-fetched tx raises
+        instead of silently resolving to the last output. Does not prove:
+        behaviour for other negative indices (-2, etc. — same `< 0` guard
+        covers them identically) or for non-Mock providers (Python SDK has
+        no WhatsOnChain/RPC equivalent of the Java provider-level guard).
+        """
+        provider = MockProvider('testnet')
+        provider.add_transaction(_make_tx(FAKE_TXID, [
+            TxOutput(satoshis=5_000, script='51'),
+            TxOutput(satoshis=9_999, script='76a9140000000000000000000000000000000000000088ac'),
+        ]))
+
+        artifact = _make_artifact('51')
+
+        with pytest.raises((ValueError, RuntimeError)):
+            RunarContract.from_txid(artifact, FAKE_TXID, -1, provider)
+
     def test_unknown_txid_raises(self):
         """from_txid with a txid not in the provider raises an error."""
         provider = MockProvider('testnet')  # empty, no transactions

@@ -28,7 +28,8 @@
  * a real transaction context, so we drive it with a synthetic single-input
  * spend built directly from the compiled locking script + the generated witness.
  */
-import { Spend, LockingScript, UnlockingScript } from '@bsv/sdk';
+import { LockingScript, UnlockingScript } from '@bsv/sdk';
+import { newConsensusSpend } from '../consensus-spend.js';
 import {
   runDifferentialExecution,
   type DiffExecOptions,
@@ -55,7 +56,7 @@ function runSpendEngine(
   witnessHex: string,
 ): { accepted: boolean; error?: string } {
   try {
-    const spend = new Spend({
+    const spend = newConsensusSpend({
       sourceTXID: '00'.repeat(32),
       sourceOutputIndex: 0,
       sourceSatoshis: 1,

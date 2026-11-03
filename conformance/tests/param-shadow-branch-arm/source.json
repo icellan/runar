@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/param-shadow-branch-arm/ParamShadowBranchArm.runar.ts",
+    ".runar.sol": "../../../examples/sol/param-shadow-branch-arm/ParamShadowBranchArm.runar.sol",
+    ".runar.move": "../../../examples/move/param-shadow-branch-arm/ParamShadowBranchArm.runar.move",
+    ".runar.go": "../../../examples/go/param-shadow-branch-arm/ParamShadowBranchArm.runar.go",
+    ".runar.rs": "../../../examples/rust/param-shadow-branch-arm/ParamShadowBranchArm.runar.rs",
+    ".runar.py": "../../../examples/python/param-shadow-branch-arm/ParamShadowBranchArm.runar.py",
+    ".runar.zig": "../../../examples/zig/param-shadow-branch-arm/ParamShadowBranchArm.runar.zig",
+    ".runar.rb": "../../../examples/ruby/param-shadow-branch-arm/ParamShadowBranchArm.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/param-shadow-branch-arm/ParamShadowBranchArm.runar.java"
+  }
+}

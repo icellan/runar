@@ -57,6 +57,7 @@ fn make_artifact(byte_string_param_name: &str) -> RunarArtifact {
         }]),
         constructor_slots: None,
         code_sep_index_slots: None,
+        code_part_len_slots: None,
         code_separator_index: Some(0),
         code_separator_indices: None,
         anf: None,

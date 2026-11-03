@@ -13,6 +13,12 @@
 //! its arms happened to be pure, and the merged locals kept their pre-branch
 //! values. See `conformance/dce/live-if.test.ts`.
 //!
+//! F-108: a private method's last binding is its return value -- stack
+//! lowering inlines the helper at each `method_call` and takes that binding as
+//! the call's result -- so it is a liveness root even though nothing inside the
+//! method references it. See `eliminateDeadBindingsInMethod` and
+//! `conformance/dce/private-return.test.ts`.
+//!
 //! Runs as a standalone pass after constant folding (pass 4.25) and before
 //! EC optimization (pass 4.5). Also used internally by the EC optimizer
 //! to clean up temporaries created during algebraic simplification.
@@ -34,7 +40,7 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
     errdefer allocator.free(new_methods);
 
     for (program.methods, 0..) |method, i| {
-        const optimized_body = try eliminateDeadBindings(allocator, method.body);
+        const optimized_body = try eliminateDeadBindingsInMethod(allocator, method);
         const changed = optimized_body.ptr != method.body.ptr;
         if (changed) any_changed = true;
         new_methods[i] = .{
@@ -43,6 +49,7 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
             .params = method.params,
             .bindings = method.bindings,
             .body = optimized_body,
+            .sighash_type = method.sighash_type,
         };
     }
 
@@ -64,10 +71,160 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
 // Core algorithm
 // ============================================================================
 
+/// F-108: whether `method`'s LAST binding is its return value. Stack lowering
+/// inlines a private method at each `method_call` and takes that binding as the
+/// call's result, so it is a liveness root even though nothing inside the
+/// method references it; without the root a pure return expression
+/// (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+/// one stack lowering uses to collect inlinable private methods. A public
+/// method's last binding is never a return value.
+fn returnsLastBinding(method: types.ANFMethod) bool {
+    return !method.is_public and !std.mem.eql(u8, method.name, "constructor");
+}
+
+/// Dead-binding elimination for a whole method body: `eliminateDeadBindings`
+/// plus the F-108 root (a private method's last binding is always live).
+/// Caller must free the returned slice. The input body is NOT freed.
+pub fn eliminateDeadBindingsInMethod(allocator: Allocator, method: types.ANFMethod) ![]types.ANFBinding {
+    return eliminateDeadBindingsImpl(allocator, method.body, returnsLastBinding(method));
+}
+
 /// Remove bindings whose results are never referenced.
 /// Iterates until stable, handling transitive dead code.
 /// Caller must free the returned slice. The input `body` is NOT freed by this function.
+/// Roots nothing but side effects: for a method body, use
+/// `eliminateDeadBindingsInMethod`, which also roots a private method's return value.
 pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]types.ANFBinding {
+    return eliminateDeadBindingsImpl(allocator, body, false);
+}
+
+/// N-138: `eliminateDeadBindingsInMethod` restricted to bindings whose name is
+/// in `candidates`; every other binding is kept as if live. The constant folder
+/// uses it to drop the operand bindings its own rewrites orphaned (the `1`
+/// under a folded `-1n`) without also deleting bindings that were already dead
+/// before folding, so fold-ON output does not move for a program the folder did
+/// not change. Caller must free the returned slice; the input body is NOT freed.
+pub fn eliminateDeadBindingsAmongInMethod(
+    allocator: Allocator,
+    method: types.ANFMethod,
+    candidates: *const std.StringHashMap(void),
+) ![]types.ANFBinding {
+    const keep_last = returnsLastBinding(method);
+    var body = try eliminateDeadBindingsFiltered(allocator, method.body, keep_last, candidates);
+    // N-446: the fold also orphans operands INSIDE `if` arms and loop bodies
+    // (`-5n` in an else arm). Filtering only the top level left them there,
+    // stack lowering pushed them, and the arms ended at different depths.
+    // Prune the nested scopes too, then re-filter the top level, to a fixed
+    // point (a nested removal can orphan a top-level operand).
+    while (try pruneNestedOrphans(allocator, &body, candidates)) {
+        const next = try eliminateDeadBindingsFiltered(allocator, body, keep_last, candidates);
+        allocator.free(body);
+        body = next;
+    }
+    return body;
+}
+
+/// N-446: remove fold-orphaned pure bindings from every nested scope (`if`
+/// arms, `loop` bodies, recursively); returns whether anything was removed.
+///
+/// A nested binding is removed only if it is a candidate (referenced before
+/// folding), is referenced by NO binding anywhere in the method now (arm
+/// bindings can be read after the `if` by name, so an arm is never filtered
+/// against its own references alone), is not one of its `if`'s declared
+/// `results` (stack lowering requires those slots in both arms), is
+/// side-effect free, and is not itself an `if` / `loop` (those are recursed
+/// into instead). Only the candidate-restricted fold prune calls this; the
+/// EC-gated DCE stays top-level, so fold-OFF output cannot move. A changed
+/// `if` / `loop` node is re-allocated, never edited in place (its pointer may
+/// be shared with the pre-fold program). Replaced slices are not freed, for
+/// the same reason.
+fn pruneNestedOrphans(
+    allocator: Allocator,
+    body: *[]types.ANFBinding,
+    candidates: *const std.StringHashMap(void),
+) !bool {
+    var any = false;
+    while (true) {
+        var refs = std.StringHashMap(void).init(allocator);
+        defer refs.deinit();
+        for (body.*) |b| try collectRefs(b.value, &refs);
+        if (!try pruneScope(allocator, body, false, &.{}, &refs, candidates)) return any;
+        any = true;
+    }
+}
+
+fn pruneScope(
+    allocator: Allocator,
+    scope: *[]types.ANFBinding,
+    nested: bool,
+    protect: []const []const u8,
+    refs: *const std.StringHashMap(void),
+    candidates: *const std.StringHashMap(void),
+) !bool {
+    var changed = false;
+    var out = std.ArrayListUnmanaged(types.ANFBinding).empty;
+    errdefer out.deinit(allocator);
+    for (scope.*) |b| {
+        switch (b.value) {
+            .@"if" => |if_val| {
+                var then_b = if_val.then;
+                var else_b = if_val.@"else";
+                const t = try pruneScope(allocator, &then_b, true, if_val.results, refs, candidates);
+                const e = try pruneScope(allocator, &else_b, true, if_val.results, refs, candidates);
+                if (t or e) {
+                    const nv = try allocator.create(types.ANFIf);
+                    nv.* = if_val.*;
+                    nv.then = then_b;
+                    nv.@"else" = else_b;
+                    var nb = b;
+                    nb.value = .{ .@"if" = nv };
+                    try out.append(allocator, nb);
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+            .loop => |loop_val| {
+                var body_b = loop_val.body;
+                if (try pruneScope(allocator, &body_b, true, &.{}, refs, candidates)) {
+                    const nv = try allocator.create(types.ANFLoop);
+                    nv.* = loop_val.*;
+                    nv.body = body_b;
+                    var nb = b;
+                    nb.value = .{ .loop = nv };
+                    try out.append(allocator, nb);
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+            else => {
+                var is_result = false;
+                for (protect) |r| {
+                    if (std.mem.eql(u8, r, b.name)) is_result = true;
+                }
+                if (nested and candidates.contains(b.name) and !refs.contains(b.name) and
+                    !is_result and !hasSideEffect(b.value))
+                {
+                    changed = true;
+                } else try out.append(allocator, b);
+            },
+        }
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return false;
+    }
+    scope.* = try out.toOwnedSlice(allocator);
+    return true;
+}
+
+fn eliminateDeadBindingsImpl(allocator: Allocator, body: []types.ANFBinding, keep_last: bool) ![]types.ANFBinding {
+    return eliminateDeadBindingsFiltered(allocator, body, keep_last, null);
+}
+
+fn eliminateDeadBindingsFiltered(
+    allocator: Allocator,
+    body: []types.ANFBinding,
+    keep_last: bool,
+    candidates: ?*const std.StringHashMap(void),
+) ![]types.ANFBinding {
     var current = body;
     var owns_current = false;
     var changed = true;
@@ -103,7 +260,9 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
 
         for (current, 0..) |binding, i| {
             const live = try isReferencedExternally(allocator, binding, &own_refs[i], &ref_count);
-            if (live or hasSideEffect(binding.value)) {
+            const root = keep_last and i == current.len - 1;
+            const protected = if (candidates) |c| !c.contains(binding.name) else false;
+            if (root or protected or live or hasSideEffect(binding.value)) {
                 try filtered.append(allocator, binding);
             } else {
                 changed = true;
@@ -167,9 +326,12 @@ fn isReferencedExternally(
 }
 
 /// Walk an ANFValue and collect all binding name references.
-fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
+pub fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
     switch (v) {
-        .load_param => return,
+        // N-356: a reassigned parameter is bound under its own name and read
+        // back as `load_param <name>`; count the read so DCE keeps the
+        // rebinding. Matches TS collectRefsFromValue.
+        .load_param => |lp| try used.put(lp.name, {}),
         .load_const => |lc| {
             switch (lc.value) {
                 .string => |s| {
@@ -376,4 +538,31 @@ test "R-140 hasSideEffect recurses into if / loop bodies" {
     // An empty `if` carries nothing, so it carries no effect.
     var empty = types.ANFIf{ .cond = "c", .then = &.{}, .@"else" = &.{} };
     try std.testing.expect(!hasSideEffect(.{ .@"if" = &empty }));
+}
+
+// F-108: a private method's last binding is its return value and must survive
+// DCE (with its inputs); a genuinely dead binding ahead of it is still dropped,
+// and a PUBLIC method's unreferenced pure last binding is still eliminated.
+// Does not prove spendability -- conformance/dce/private-return.test.ts runs the
+// compiled script on all seven tiers.
+test "F-108 eliminateDeadBindingsInMethod roots a private method's return value" {
+    const alloc = std.testing.allocator;
+
+    var body_arr = [_]types.ANFBinding{
+        .{ .name = "dead", .value = .{ .load_const = .{ .value = .{ .integer = 7 } } }, .source_loc = null },
+        .{ .name = "t0", .value = .{ .load_param = .{ .name = "n" } }, .source_loc = null },
+        .{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } }, .source_loc = null },
+        .{ .name = "t2", .value = .{ .bin_op = .{ .op = "+", .left = "t0", .right = "t1" } }, .source_loc = null },
+    };
+
+    const private_result = try eliminateDeadBindingsInMethod(alloc, .{ .name = "add1", .is_public = false, .body = &body_arr });
+    defer alloc.free(private_result);
+    try std.testing.expectEqual(@as(usize, 3), private_result.len);
+    try std.testing.expectEqualStrings("t0", private_result[0].name);
+    try std.testing.expectEqualStrings("t1", private_result[1].name);
+    try std.testing.expectEqualStrings("t2", private_result[2].name);
+
+    const public_result = try eliminateDeadBindingsInMethod(alloc, .{ .name = "pub_m", .is_public = true, .body = &body_arr });
+    defer alloc.free(public_result);
+    try std.testing.expectEqual(@as(usize, 0), public_result.len);
 }

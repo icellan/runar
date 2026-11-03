@@ -32,6 +32,9 @@ func Verify(proof *Proof, publicValues []uint32) error {
 // 3 public values, max_constraint_degree=2 → log_num_quotient_chunks=0) is
 // shared across both fixtures, so the rest of the verifier is parametric.
 func VerifyWithConfig(proof *Proof, publicValues []uint32, cfg FriVerifierConfig) error {
+	if proof == nil {
+		return fmt.Errorf("verify: proof is nil")
+	}
 	if uint64(cfg.numPublicValues) != uint64(len(publicValues)) {
 		return fmt.Errorf("verify: public values len mismatch: want %d got %d",
 			cfg.numPublicValues, len(publicValues))

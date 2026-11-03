@@ -3,6 +3,11 @@ const bsvz = @import("bsvz");
 
 pub const Int = i64;
 pub const Bigint = i64;
+/// N-182: a 256-bit unsigned integer, the native spelling for a full EC
+/// coordinate (ecPointX / ecPointY / ecMakePoint). Mirrors Go's
+/// runar.BigintBig; every .runar.zig parser maps it to the AST type bigint.
+/// Unsigned (not i256) because secp256k1 coordinates exceed 2^255.
+pub const BigintBig = u256;
 pub const PubKey = []const u8;
 pub const Sig = []const u8;
 pub const Addr = []const u8;
@@ -22,6 +27,25 @@ pub const P384Point = ByteString;
 
 pub fn Readonly(comptime T: type) type {
     return T;
+}
+
+/// N-093: the native `.runar.zig` spelling of the `@embedAlways` directive
+/// (`deployTag: runar.EmbedAlways(runar.ByteString)`), composable with
+/// `Readonly` in either order. The Rúnar compiler keeps such a readonly field
+/// in the locking script even when no method reads it; natively it is just
+/// `T`.
+pub fn EmbedAlways(comptime T: type) type {
+    return T;
+}
+
+/// N-093: the native `.runar.zig` spelling of the `@sighash` directive, written
+/// in place of a public method's `void` return type
+/// (`pub fn spendSingle(...) runar.Sighash("SINGLE|FORKID") { ... }`). The
+/// Rúnar compiler reads `flags` as the BIP-143 sighash type the method commits
+/// to; natively the method still returns `void`.
+pub fn Sighash(comptime flags: []const u8) type {
+    _ = flags;
+    return void;
 }
 
 pub const OutputValue = union(enum) {
@@ -463,6 +487,12 @@ test "stateful runtime records and resets outputs" {
 
 test "Readonly returns the wrapped type unchanged" {
     try std.testing.expect(Readonly(i64) == i64);
+}
+
+test "EmbedAlways returns the wrapped type unchanged and Sighash is void" {
+    try std.testing.expect(EmbedAlways(i64) == i64);
+    try std.testing.expect(Readonly(EmbedAlways([3]i64)) == [3]i64);
+    try std.testing.expect(Sighash("SINGLE|FORKID") == void);
 }
 
 test "StatefulContext exposes txPreimage and mutating output helpers" {

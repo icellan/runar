@@ -64,7 +64,7 @@ describe('fail-closed directive guard (issues #123 / #109)', () => {
   });
 
   it('does not trip the guard on a non-directive identifier (word boundary)', () => {
-    // A field named `sighashType` must NOT trip the `@sighash\b` guard.
+    // A field named `sighashType` (no `@`) must NOT trip the `@sighash` guard.
     const src = `
       class C extends SmartContract {
         readonly sighashType: bigint;

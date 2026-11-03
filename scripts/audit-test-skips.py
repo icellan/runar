@@ -85,11 +85,17 @@ SKIP_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ".go",
         re.compile(r"\bt\.Skip(?:f)?\b"),
     ),
-    # Python
+    # Python. `pytest.importorskip(...)` is a skip surface too (F-324): it
+    # was previously invisible here, so a module gated on an optional
+    # dependency CI never installs (e.g. `compilers/python/tests`'s
+    # `bsv`/`runar.sdk.script_vm` gates, which `ci.yml`'s `python-compiler`
+    # job installed neither of) could vanish from CI with no inventory row
+    # and no orphan-skip failure to catch it.
     (
         ".py",
         re.compile(
             r"@pytest\.mark\.skip\b|pytest\.mark\.skipif\b|pytest\.skip\(|@unittest\.skip\b"
+            r"|pytest\.importorskip\("
         ),
     ),
     # Rust — `#[ignore]` and `#[ignore = "..."]` (with reason).
@@ -574,6 +580,19 @@ def enclosing_scope(path: str, skip_line: int) -> ScopeRef | None:
     text = full.read_text(encoding="utf-8", errors="replace").splitlines()
     if skip_line < 1 or skip_line - 1 >= len(text):
         return None
+
+    if path.endswith(".py"):
+        skip_text = text[skip_line - 1]
+        if skip_text == skip_text.lstrip() and "pytest.importorskip(" in skip_text:
+            # A bare, unindented `pytest.importorskip(...)` sits at MODULE
+            # scope — Python module-level statements are never indented —
+            # and skips collection of the WHOLE file, not one test. Falling
+            # through to the backward/forward `def` search below would
+            # anchor it to whichever function happens to sit nearest (e.g.
+            # `test_cli_debug.py`'s `_run` helper, which is not even a
+            # test), so this is checked first, same idea as the `.sh` case
+            # above.
+            return ScopeRef("module", Path(path).name)
 
     if _IT_ALIAS_RE.search(text[skip_line - 1]):
         for i in range(skip_line - 1, max(skip_line - _SCOPE_LOOKBACK, -1), -1):
@@ -1087,6 +1106,30 @@ def self_test() -> int:
     for probe in ('@EnabledIf("repoLayoutAvailable")', "@DisabledIf(\"x\")"):
         if not java_pat.search(probe):
             failures.append(f"Java skip pattern does not match {probe!r}")
+
+    # F-324: `pytest.importorskip(...)` is a skip surface the Python pattern
+    # used to miss entirely (`grep -c importorskip scripts/audit-test-skips.py`
+    # was 0) — a module gated on an optional dependency CI never installs
+    # (e.g. `compilers/python/tests/test_cli_debug.py`'s `bsv` /
+    # `runar.sdk.script_vm` gates, which `ci.yml`'s `python-compiler` job
+    # installed neither of) could vanish from CI with no inventory row and no
+    # orphan-skip failure to catch it.
+    python_pat = next(p for label, p in SKIP_PATTERNS if ".py" in label.split())
+    for probe in ('pytest.importorskip("bsv")', 'pytest.importorskip("bsv", reason="x")'):
+        if not python_pat.search(probe):
+            failures.append(f"Python skip pattern does not match {probe!r}")
+
+    # A bare, unindented `pytest.importorskip(...)` must anchor to MODULE
+    # scope, not to whichever `def` happens to sit nearest it — in
+    # test_cli_debug.py that would otherwise be the `_spec_missing` helper
+    # (N-209's CI guard) or the `_run` helper at line 86, neither of which
+    # is a test.
+    cli_debug_scope = enclosing_scope("compilers/python/tests/test_cli_debug.py", 75)
+    if cli_debug_scope != ScopeRef("module", "test_cli_debug.py"):
+        failures.append(
+            f"enclosing_scope(test_cli_debug.py:75) resolved {cli_debug_scope!r}, "
+            "expected ScopeRef('module', 'test_cli_debug.py')"
+        )
 
     for f in failures:
         print(f"SELF-TEST FAILED: {f}", file=sys.stderr)

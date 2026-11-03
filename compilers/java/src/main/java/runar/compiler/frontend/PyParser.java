@@ -3,6 +3,7 @@ package runar.compiler.frontend;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -42,6 +43,7 @@ import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.py} source into a Rúnar {@link ContractNode}.
@@ -72,11 +74,24 @@ public final class PyParser {
     private PyParser() {}
 
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         PyParserImpl impl = new PyParserImpl(filename);
-        List<Token> raw = tokenizeRaw(source);
+        List<String> lex = new ArrayList<>();
+        List<Token> raw = tokenizeRaw(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         impl.tokens = insertIndentation(raw);
         impl.pos = 0;
-        ContractNode contract = impl.parseContract();
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(impl::parseContract, ParseException::new);
+        String collision = impl.idents.message();
+        if (collision != null) impl.errors.add(collision);
         if (!impl.errors.isEmpty()) {
             throw new ParseException(String.join("\n", impl.errors));
         }
@@ -152,12 +167,22 @@ public final class PyParser {
         final String value;
         final int line;
         final int col;
+        /**
+         * Marks a STRING token that came from a {@code b'..'} literal (its
+         * value is hex). N-093: only a str literal is a sighash flag spec.
+         */
+        final boolean isBytes;
 
         Token(TokKind kind, String value, int line, int col) {
+            this(kind, value, line, col, false);
+        }
+
+        Token(TokKind kind, String value, int line, int col, boolean isBytes) {
             this.kind = kind;
             this.value = value;
             this.line = line;
             this.col = col;
+            this.isBytes = isBytes;
         }
     }
 
@@ -352,29 +377,97 @@ public final class PyParser {
     // Byte-string helpers
     // -----------------------------------------------------------------
 
-    /** Convert a Python byte-string content like {@code \xde\xad} to hex {@code "dead"}. */
-    static String pyByteStringToHex(String s) {
-        StringBuilder out = new StringBuilder();
-        int i = 0;
-        int n = s.length();
-        while (i < n) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < n) {
-                char nc = s.charAt(i + 1);
-                if (nc == 'x' && i + 3 < n) {
-                    out.append(s, i + 2, i + 4);
-                    i += 4;
-                    continue;
-                } else if (nc == '0') {
-                    out.append("00");
-                    i += 2;
-                    continue;
-                }
-            }
-            out.append(String.format("%02x", (int) c));
-            i++;
+    /**
+     * F-203: the decoded body of a .runar.py quoted literal: its text, its
+     * bytes as hex (meaningful for bytes only) and the first refusal, or null.
+     */
+    record PyLiteral(String text, String hex, String error) {}
+
+    private static boolean isOctal(char c) {
+        return c >= '0' && c <= '7';
+    }
+
+    private static boolean isHexDigit(String s, int i) {
+        if (i >= s.length()) return false;
+        char c = s.charAt(i);
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    private static int simpleEscape(char e) {
+        switch (e) {
+            case '\\': return 0x5c;
+            case '\'': return 0x27;
+            case '"': return 0x22;
+            case 'a': return 0x07;
+            case 'b': return 0x08;
+            case 'f': return 0x0c;
+            case 'n': return 0x0a;
+            case 'r': return 0x0d;
+            case 't': return 0x09;
+            case 'v': return 0x0b;
+            default: return -1;
         }
-        return out.toString();
+    }
+
+    /**
+     * F-203: decode the body of a .runar.py quoted literal (the text between
+     * the quotes) the way CPython decodes a bytes ({@code bytes = true}) or str
+     * literal — the TS reference's decodePyLiteral. Defined escapes decode;
+     * any other (including str's backslash-N, -u and -U, which the surface does
+     * not support), a short or non-hex x escape and an octal escape above
+     * 0o377 are refused; a non-ASCII character in bytes is refused. A trailing
+     * lone backslash (only in an unterminated literal, already refused) is
+     * dropped. The two hex digits of an x escape are kept verbatim in hex.
+     */
+    static PyLiteral decodePyLiteral(String body, boolean bytes) {
+        StringBuilder text = new StringBuilder();
+        StringBuilder hex = new StringBuilder();
+        int i = 0;
+        int n = body.length();
+        while (i < n) {
+            char c = body.charAt(i);
+            if (bytes && c >= 0x80) return new PyLiteral(text.toString(), hex.toString(), LexDiag.PY_BYTES_NON_ASCII);
+            if (c != '\\') {
+                text.append(c);
+                if (bytes) hex.append(String.format("%02x", (int) c));
+                i++;
+                continue;
+            }
+            if (i + 1 >= n) break;
+            char e = body.charAt(i + 1);
+            int simple = simpleEscape(e);
+            if (simple >= 0) {
+                text.append((char) simple);
+                hex.append(String.format("%02x", simple));
+                i += 2;
+                continue;
+            }
+            if (isOctal(e)) {
+                int j = i + 1;
+                while (j < n && j < i + 4 && isOctal(body.charAt(j))) j++;
+                int v = Integer.parseInt(body.substring(i + 1, j), 8);
+                if (v > 0xff) {
+                    return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence(body.substring(i, j)));
+                }
+                text.append((char) v);
+                hex.append(String.format("%02x", v));
+                i = j;
+                continue;
+            }
+            if (e == 'x') {
+                if (!isHexDigit(body, i + 2) || !isHexDigit(body, i + 3)) {
+                    return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence("\\x"));
+                }
+                text.append((char) Integer.parseInt(body.substring(i + 2, i + 4), 16));
+                hex.append(body, i + 2, i + 4);
+                i += 4;
+                continue;
+            }
+            if (bytes && e >= 0x80) return new PyLiteral(text.toString(), hex.toString(), LexDiag.PY_BYTES_NON_ASCII);
+            String esc = "\\" + new String(Character.toChars(body.codePointAt(i + 1)));
+            return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence(esc));
+        }
+        return new PyLiteral(text.toString(), hex.toString(), null);
     }
 
     // -----------------------------------------------------------------
@@ -382,18 +475,20 @@ public final class PyParser {
     // -----------------------------------------------------------------
 
     private static boolean isIdentStart(char ch) {
-        return Character.isLetter(ch) || ch == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(ch) || ch == '_';
     }
 
     private static boolean isIdentPart(char ch) {
-        return Character.isLetterOrDigit(ch) || ch == '_';
+        return LexDiag.isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch == '_';
     }
 
     private static boolean isHexDigit(char ch) {
         return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
     }
 
-    private static List<Token> tokenizeRaw(String source) {
+    private static List<Token> tokenizeRaw(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -445,8 +540,11 @@ public final class PyParser {
                 i += 2;
                 col += 2;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
@@ -454,11 +552,16 @@ public final class PyParser {
                     col++;
                 }
                 String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
+                if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                tokens.add(new Token(TokKind.STRING, pyByteStringToHex(val), line, startCol));
+                // F-203: escapes decode as in a CPython bytes literal.
+                PyLiteral dec = decodePyLiteral(val, true);
+                if (dec.error() != null) lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                tokens.add(new Token(TokKind.STRING, dec.hex(), line, startCol, true));
                 continue;
             }
 
@@ -469,6 +572,7 @@ public final class PyParser {
                     // Triple-quoted: docstring — consume without emitting a token.
                     i += 3;
                     col += 3;
+                    int openLine = line;
                     while (i + 2 < n) {
                         if (source.charAt(i) == quote
                             && source.charAt(i + 1) == quote
@@ -486,14 +590,21 @@ public final class PyParser {
                     if (i + 2 < n) {
                         i += 3;
                         col += 3;
+                    } else {
+                        // F-011: still open at end of file.
+                        lex.add(LexDiag.at(filename, openLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
+                        i = n;
                     }
                     continue;
                 }
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
@@ -501,32 +612,25 @@ public final class PyParser {
                     col++;
                 }
                 String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
+                if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                tokens.add(new Token(TokKind.STRING, val, line, startCol));
+                // F-203: a str literal decodes the same escapes as CPython does.
+                PyLiteral dec = decodePyLiteral(val, false);
+                if (dec.error() != null) lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                tokens.add(new Token(TokKind.STRING, dec.text(), line, startCol));
                 continue;
             }
 
-            // Numbers.
-            if (Character.isDigit(ch)) {
-                int start = i;
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isHexDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else {
-                    while (i < n && (Character.isDigit(source.charAt(i)) || source.charAt(i) == '_')) {
-                        i++;
-                        col++;
-                    }
-                }
-                String numStr = source.substring(start, i).replace("_", "");
-                tokens.add(new Token(TokKind.NUMBER, numStr, line, startCol));
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("py", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(TokKind.NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -591,12 +695,9 @@ public final class PyParser {
                 case ')' -> TokKind.RPAREN;
                 case '[' -> TokKind.LBRACKET;
                 case ']' -> TokKind.RBRACKET;
-                case '{' -> TokKind.LBRACE;
-                case '}' -> TokKind.RBRACE;
                 case ',' -> TokKind.COMMA;
                 case '.' -> TokKind.DOT;
                 case ':' -> TokKind.COLON;
-                case ';' -> TokKind.SEMICOLON;
                 case '=' -> TokKind.ASSIGN;
                 case '<' -> TokKind.LT;
                 case '>' -> TokKind.GT;
@@ -625,7 +726,9 @@ public final class PyParser {
                 continue;
             }
 
-            // Skip unknown characters (mirror Python parser behaviour).
+            // N-033: a character the TS reference does not tokenize (`;`,
+            // `{`, `}`, `$`, `?`, ...) is refused, never skipped.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -697,9 +800,36 @@ public final class PyParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /**
+         * N-046: the locals already bound in the current method, so a later
+         * {@code name = expr} of one of them is emitted as an
+         * AssignmentStatement, not a fresh VariableDeclStatement. Python is
+         * function-scoped, so rebinding an existing local inside a loop body
+         * or an if-arm IS an assignment; ANF lowering alpha-renames a
+         * declaration that reuses an enclosing binding's name.
+         * Snapshot/restored around if-branches and loop bodies exactly as the
+         * Ruby parser's declaredLocals.
+         */
+        Set<String> declaredLocals = new HashSet<>();
 
         PyParserImpl(String fileName) {
             this.fileName = fileName;
+        }
+
+        /**
+         * N-046: {@code name = init} is an assignment when the method already
+         * bound {@code name}, otherwise a declaration.
+         */
+        Statement bindLocal(String name, TypeNode type, Expression init, SourceLocation location) {
+            if (declaredLocals.contains(name)) {
+                return new AssignmentStatement(new Identifier(name), init, location);
+            }
+            declaredLocals.add(name);
+            return new VariableDeclStatement(name, type, init, location);
         }
 
         // -- Token helpers ----------------------------------------------------
@@ -788,7 +918,7 @@ public final class PyParser {
 
             if (name.equals("Readonly")) {
                 if (match(TokKind.LBRACKET)) {
-                    TypeNode inner = parseTypeAnnotation();
+                    TypeNode inner = nest.nested(this::parseTypeAnnotation);
                     expect(TokKind.RBRACKET);
                     return inner;
                 }
@@ -797,7 +927,7 @@ public final class PyParser {
 
             if (name.equals("FixedArray")) {
                 if (match(TokKind.LBRACKET)) {
-                    TypeNode elem = parseTypeAnnotation();
+                    TypeNode elem = nest.nested(this::parseTypeAnnotation);
                     expect(TokKind.COMMA);
                     Token sizeTok = expect(TokKind.NUMBER);
                     int size;
@@ -865,7 +995,8 @@ public final class PyParser {
                 case "SmartContract" -> parentClass = ParentClass.SMART_CONTRACT;
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
-                default -> throw new ParseException("unknown parent class: " + parentClassName);
+                default -> throw new ParseException("unknown parent class: '" + parentClassName
+                    + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
             }
 
             expect(TokKind.COLON);
@@ -880,14 +1011,52 @@ public final class PyParser {
                 skipNewlines();
                 if (check(TokKind.DEDENT) || check(TokKind.EOF)) break;
 
-                // Decorator: @public def foo(...)
+                // Decorators: @public (any others make a private method). N-050:
+                // a method may carry several (`@public @staticmethod`), so read
+                // them all.
                 if (check(TokKind.AT)) {
-                    advance();
-                    Token decoratorTok = expect(TokKind.IDENT);
-                    String decorator = decoratorTok.value;
-                    skipNewlines();
+                    List<String> decorators = new ArrayList<>();
+                    List<String> sighashSpecs = new ArrayList<>();
+                    while (check(TokKind.AT)) {
+                        advance();
+                        String decName = expect(TokKind.IDENT).value;
+                        decorators.add(decName);
+                        // N-093: `@public(sighash="FLAGS")` is the native
+                        // spelling of the `@sighash` directive.
+                        if (decName.equals("public") && check(TokKind.LPAREN)) {
+                            sighashSpecs.addAll(parsePublicDecoratorArgs());
+                        }
+                        skipNewlines();
+                    }
+                    String decorator = decorators.get(decorators.size() - 1);
+                    // N-093: the constructor is not a spending entry point.
+                    if (!sighashSpecs.isEmpty() && checkIdent("def")
+                        && pos + 1 < tokens.size() && tokens.get(pos + 1).value.equals("__init__")) {
+                        addError(SighashDirective.lostDirectiveMessage("@sighash"));
+                        sighashSpecs.clear();
+                    }
                     if (checkIdent("def")) {
-                        methods.add(parseMethod(decorator));
+                        if (decorators.contains("staticmethod") || decorators.contains("classmethod")) {
+                            // N-050: a class-level function is not a contract method.
+                            addError(LexDiag.staticMethod(pos + 1 < tokens.size() ? tokens.get(pos + 1).value : ""));
+                        }
+                        if (pos + 1 < tokens.size() && tokens.get(pos + 1).value.equals("__init__")) {
+                            // N-303: the TS reference decides "constructor" from
+                            // the name alone; decorators on __init__ are ignored.
+                            constructor = parseConstructor(properties);
+                            continue;
+                        }
+                        String visibility = decorators.contains("public") ? "public" : "private";
+                        MethodNode method = parseMethod(visibility);
+                        SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                            method.name(), visibility.equals("public"), sighashSpecs);
+                        if (sighash != null && sighash.isError()) {
+                            addError(sighash.error());
+                        } else if (sighash != null) {
+                            method = new MethodNode(method.name(), method.params(), method.body(),
+                                method.visibility(), method.sourceLocation(), sighash.value());
+                        }
+                        methods.add(method);
                     } else {
                         addError("line " + peek().line + ": expected 'def' after @" + decorator);
                     }
@@ -917,22 +1086,61 @@ public final class PyParser {
                     continue;
                 }
 
-                advance();
+                // N-033: any other token is refused, never skipped.
+                refuseClassBodyToken();
             }
 
             match(TokKind.DEDENT);
 
+            // N-410: nothing but blank lines may follow the class (N-004 did
+            // this for .runar.rb); a method or class after it used to be
+            // dropped unread.
+            skipNewlines();
+            if (!check(TokKind.EOF)) {
+                Token t = peek();
+                String text = t.kind == TokKind.INDENT ? "INDENT" : t.kind == TokKind.DEDENT ? "DEDENT" : t.value;
+                errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.unexpectedTokenAfterClass(text)));
+            }
+
             if (constructor == null) {
+                // N-032: auto-generate from the uninitialized properties
+                // (declaration order): super(...) first, then self.p = p.
+                SourceLocation ctorLoc = new SourceLocation(fileName, 1, 0);
+                List<ParamNode> ctorParams = new ArrayList<>();
+                List<Expression> superArgs = new ArrayList<>();
+                List<Statement> ctorBody = new ArrayList<>();
+                for (PropertyNode pn : properties) {
+                    if (pn.initializer() == null) {
+                        ctorParams.add(new ParamNode(pn.name(), pn.type()));
+                        superArgs.add(new Identifier(pn.name()));
+                    }
+                }
+                ctorBody.add(new ExpressionStatement(
+                    new CallExpr(new Identifier("super"), superArgs), ctorLoc));
+                for (PropertyNode pn : properties) {
+                    if (pn.initializer() == null) {
+                        ctorBody.add(new AssignmentStatement(
+                            new PropertyAccessExpr(pn.name()),
+                            new Identifier(pn.name()), ctorLoc));
+                    }
+                }
                 constructor = new MethodNode(
-                    "constructor",
-                    new ArrayList<>(),
-                    new ArrayList<>(),
-                    Visibility.PUBLIC,
-                    new SourceLocation(fileName, 1, 0)
-                );
+                    "constructor", ctorParams, ctorBody, Visibility.PUBLIC, ctorLoc);
             }
 
             return new ContractNode(contractName, parentClass, properties, constructor, methods, fileName);
+        }
+
+        /**
+         * N-033: a class-body token that begins no property, method,
+         * decorator or {@code pass} is refused at that token (N-004's
+         * diagnostic), and the rest of its line is skipped.
+         */
+        void refuseClassBodyToken() {
+            Token t = advance();
+            String text = t.kind == TokKind.INDENT ? "INDENT" : t.value;
+            errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.unexpectedClassBodyToken(text)));
+            while (!check(TokKind.NEWLINE) && !check(TokKind.DEDENT) && !check(TokKind.EOF)) advance();
         }
 
         boolean isPropertyDecl() {
@@ -945,12 +1153,20 @@ public final class PyParser {
         PropertyNode parseProperty(String parentClassName) {
             SourceLocation location = loc();
             Token nameTok = expect(TokKind.IDENT);
-            String propName = pyConvertName(nameTok.value);
+            String propName = idents.declare(nameTok.value, pyConvertName(nameTok.value));
             expect(TokKind.COLON);
 
+            // Readonly[T]. N-093: `EmbedAlways[T]` is the native spelling of
+            // the `@embedAlways` directive; the two wrappers compose in either
+            // order.
             boolean isReadonly = false;
-            if (checkIdent("Readonly")) {
-                isReadonly = true;
+            boolean embedAlways = false;
+            int wrappers = 0;
+            while (checkIdent("Readonly") || checkIdent("EmbedAlways")) {
+                if (advance().value.equals("Readonly")) isReadonly = true;
+                else embedAlways = true;
+                expect(TokKind.LBRACKET);
+                wrappers++;
             }
             // In SmartContract (and UnsafeSmartContract), all properties
             // are automatically readonly.
@@ -960,14 +1176,57 @@ public final class PyParser {
             }
 
             TypeNode typeNode = parseTypeAnnotation();
+            for (int w = 0; w < wrappers; w++) {
+                expect(TokKind.RBRACKET);
+            }
 
             Expression initializer = null;
             if (match(TokKind.ASSIGN)) {
                 initializer = parseExpression();
             }
+            // F-026: the field declaration ends at its line break.
+            expectStatementEnd();
             skipNewlines();
 
-            return new PropertyNode(propName, typeNode, isReadonly, initializer, location, null);
+            return new PropertyNode(propName, typeNode, isReadonly, initializer, location, null, embedAlways);
+        }
+
+        /**
+         * N-093: the argument list of {@code @public(...)}. The only argument
+         * is the keyword {@code sighash=<str>}; each one yields its string, and
+         * any other argument (positional, another keyword, a non-str value)
+         * yields {@code null}, which is refused as a malformed spelling.
+         * Mirrors parsePublicDecoratorArgs in the TS reference
+         * (01-parse-python.ts).
+         */
+        List<String> parsePublicDecoratorArgs() {
+            List<String> specs = new ArrayList<>();
+            expect(TokKind.LPAREN);
+            while (!check(TokKind.RPAREN) && !check(TokKind.NEWLINE) && !check(TokKind.EOF)) {
+                boolean isSighashKw = checkIdent("sighash")
+                    && pos + 1 < tokens.size() && tokens.get(pos + 1).kind == TokKind.ASSIGN;
+                if (isSighashKw) {
+                    advance(); // 'sighash'
+                    advance(); // '='
+                }
+                // One argument value: up to the next top-level ',' or ')'.
+                Token first = peek();
+                int count = 0;
+                int depth = 0;
+                while (!check(TokKind.NEWLINE) && !check(TokKind.EOF)) {
+                    TokKind k = peek().kind;
+                    if ((k == TokKind.COMMA || k == TokKind.RPAREN) && depth == 0) break;
+                    if (k == TokKind.LPAREN || k == TokKind.LBRACKET) depth++;
+                    if (k == TokKind.RPAREN || k == TokKind.RBRACKET) depth--;
+                    advance();
+                    count++;
+                }
+                specs.add(isSighashKw && count == 1 && first.kind == TokKind.STRING && !first.isBytes
+                    ? first.value : null);
+                if (!match(TokKind.COMMA)) break;
+            }
+            expect(TokKind.RPAREN);
+            return specs;
         }
 
         // -- Constructor parsing ---------------------------------------------
@@ -976,6 +1235,9 @@ public final class PyParser {
             SourceLocation location = loc();
             expectIdent("def");
             expectIdent("__init__");
+
+            // N-046: reset local tracking for this method's scope.
+            declaredLocals = new HashSet<>();
 
             List<ParamNode> params = parseParams();
 
@@ -989,7 +1251,6 @@ public final class PyParser {
             // Transform `super().__init__(...)` (or `super().constructor(...)`)
             // into the canonical `super(...)` call form.
             List<Statement> ctorBody = new ArrayList<>();
-            boolean foundSuper = false;
             for (Statement stmt : body) {
                 Statement transformed = stmt;
                 if (stmt instanceof ExpressionStatement es
@@ -1003,21 +1264,9 @@ public final class PyParser {
                         new CallExpr(new Identifier("super"), call.args()),
                         es.sourceLocation()
                     );
-                    foundSuper = true;
                 }
                 ctorBody.add(transformed);
             }
-            if (!foundSuper) {
-                List<Expression> superArgs = new ArrayList<>(params.size());
-                for (ParamNode p : params) {
-                    superArgs.add(new Identifier(p.name()));
-                }
-                ctorBody.add(0, new ExpressionStatement(
-                    new CallExpr(new Identifier("super"), superArgs),
-                    location
-                ));
-            }
-
             return new MethodNode("constructor", params, ctorBody, Visibility.PUBLIC, location);
         }
 
@@ -1027,12 +1276,21 @@ public final class PyParser {
             SourceLocation location = loc();
             expectIdent("def");
             Token nameTok = expect(TokKind.IDENT);
-            String name = pyConvertName(nameTok.value);
+            String name = idents.declare(nameTok.value, pyConvertName(nameTok.value));
+
+            // N-046: reset local tracking for this method's scope.
+            declaredLocals = new HashSet<>();
 
             List<ParamNode> params = parseParams();
 
             if (match(TokKind.ARROW)) {
-                parseTypeAnnotation(); // skip return type
+                // The AST keeps no return type; N-331 refuses an unknown name.
+                // `None` is Python's spelling of "returns nothing".
+                TypeNode returnType = parseTypeAnnotation();
+                if (!(returnType instanceof CustomType ct && ct.name().equals("None"))) {
+                    String unknownReturn = LexDiag.unknownReturnType(returnType, nameTok.value, visibility.equals("public"));
+                    if (unknownReturn != null) addError(unknownReturn);
+                }
             }
 
             expect(TokKind.COLON);
@@ -1062,7 +1320,7 @@ public final class PyParser {
                     typ = parseTypeAnnotation();
                 }
 
-                params.add(new ParamNode(pyConvertName(paramName), typ));
+                params.add(new ParamNode(idents.declare(paramName, pyConvertName(paramName)), typ));
 
                 if (!match(TokKind.COMMA)) break;
             }
@@ -1083,14 +1341,36 @@ public final class PyParser {
                 if (check(TokKind.DEDENT) || check(TokKind.EOF)) break;
                 Statement s = parseStatement();
                 if (s != null) stmts.add(s);
+                expectStatementEnd();
             }
             match(TokKind.DEDENT);
             return stmts;
         }
 
+        /**
+         * F-026: a simple statement ends at its line break; compound statements
+         * end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+         * {@code lim = 0b1010} parsed as {@code lim = 0} plus a second statement
+         * {@code b1010}.
+         */
+        void expectStatementEnd() {
+            if (check(TokKind.NEWLINE) || check(TokKind.DEDENT) || check(TokKind.EOF)) return;
+            if (pos > 0) {
+                TokKind prev = tokens.get(pos - 1).kind;
+                if (prev == TokKind.NEWLINE || prev == TokKind.DEDENT) return;
+            }
+            Token t = tokens.get(pos);
+            errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.PY_STATEMENT_LINE_BREAK));
+            while (!check(TokKind.NEWLINE) && !check(TokKind.DEDENT) && !check(TokKind.EOF)) advance();
+        }
+
         // -- Statement parsing -----------------------------------------------
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
 
             if (checkIdent("assert") || checkIdent("assert_")) {
@@ -1117,8 +1397,40 @@ public final class PyParser {
                     + kw + " — Rúnar does not support loop early-exit");
                 return null;
             }
+            // N-053: a statement must start with a name or a token that can
+            // begin an expression; anything else (a stray `elif`, `from`,
+            // `@`, an unexpected indent, ...) is refused with the shared
+            // diagnostic.
+            Token tok = peek();
+            boolean refused = tok.kind == TokKind.IDENT
+                ? PY_NON_EXPR_KEYWORDS.contains(tok.value)
+                : !PY_EXPR_START_KINDS.contains(tok.kind);
+            if (refused) {
+                advance();
+                String text = switch (tok.kind) {
+                    case INDENT -> "INDENT";
+                    case DEDENT -> "DEDENT";
+                    case NEWLINE -> "NEWLINE";
+                    case EOF -> "eof";
+                    default -> tok.value;
+                };
+                addError("line " + tok.line + ": " + LexDiag.unsupportedStatement(text));
+                return null;
+            }
             return parseExprOrAssign(location);
         }
+
+        /** N-053: the non-name tokens that can begin an expression. */
+        private static final Set<TokKind> PY_EXPR_START_KINDS = EnumSet.of(
+            TokKind.NUMBER, TokKind.STRING, TokKind.LPAREN, TokKind.LBRACKET,
+            TokKind.MINUS, TokKind.TILDE, TokKind.BANG);
+
+        /**
+         * N-053: the keywords the TS reference lexes as their own tokens that
+         * begin neither a statement form nor an expression.
+         */
+        private static final Set<String> PY_NON_EXPR_KEYWORDS = Set.of(
+            "class", "def", "elif", "else", "in", "range", "from", "import");
 
         Statement parseAssert(SourceLocation location) {
             Token tok = advance();
@@ -1159,19 +1471,25 @@ public final class PyParser {
         Statement parseIfBody(SourceLocation location) {
             Expression condition = parseExpression();
             expect(TokKind.COLON);
+            // N-046: a name first bound inside a branch stays branch-local.
+            Set<String> localsBefore = new HashSet<>(declaredLocals);
             List<Statement> thenBlock = parseBlock();
+            declaredLocals = new HashSet<>(localsBefore);
 
             List<Statement> elseBlock = null;
             skipNewlines();
             if (checkIdent("elif")) {
                 SourceLocation elifLoc = loc();
                 advance();
-                Statement elif = parseIfBody(elifLoc);
+                // F-213 A1: an elif is a statement of the else branch.
+                Statement elif = nest.nested(() -> parseIfBody(elifLoc));
+                declaredLocals = new HashSet<>(localsBefore);
                 elseBlock = new ArrayList<>();
                 elseBlock.add(elif);
             } else if (matchIdent("else")) {
                 expect(TokKind.COLON);
                 elseBlock = parseBlock();
+                declaredLocals = new HashSet<>(localsBefore);
             }
             return new IfStatement(condition, thenBlock, elseBlock, location);
         }
@@ -1196,7 +1514,7 @@ public final class PyParser {
         Statement parseFor(SourceLocation location) {
             expectIdent("for");
             Token varTok = expect(TokKind.IDENT);
-            String varName = pyConvertName(varTok.value);
+            String varName = idents.declare(varTok.value, pyConvertName(varTok.value));
 
             expectIdent("in");
             expectIdent("range");
@@ -1239,7 +1557,13 @@ public final class PyParser {
             expect(TokKind.RPAREN);
             expect(TokKind.COLON);
 
+            // N-046: the loop variable and the body's first bindings are
+            // body-local; a rebinding of the loop variable inside the body is
+            // an assignment.
+            Set<String> localsBeforeBody = new HashSet<>(declaredLocals);
+            declaredLocals.add(varName);
             List<Statement> body = parseBlock();
+            declaredLocals = localsBeforeBody;
 
             VariableDeclStatement init = new VariableDeclStatement(
                 varName,
@@ -1281,7 +1605,7 @@ public final class PyParser {
                 && pos + 1 < tokens.size()
                 && tokens.get(pos + 1).kind == TokKind.COLON) {
                 Token nameTok = advance();
-                String varName = pyConvertName(nameTok.value);
+                String varName = idents.declare(nameTok.value, pyConvertName(nameTok.value));
                 expect(TokKind.COLON);
                 TypeNode typeNode = parseTypeAnnotation();
                 Expression init;
@@ -1291,9 +1615,11 @@ public final class PyParser {
                     init = new BigIntLiteral(BigInteger.ZERO);
                 }
                 skipNewlines();
-                return new VariableDeclStatement(varName, typeNode, init, location);
+                // N-046: rebinding a local of this method is an assignment in Python.
+                return bindLocal(varName, typeNode, init, location);
             }
 
+            Token targetTok = peek();
             Expression expr = parseExpression();
             if (expr == null) {
                 advance();
@@ -1306,7 +1632,10 @@ public final class PyParser {
                 Expression value = parseExpression();
                 skipNewlines();
                 if (expr instanceof Identifier id) {
-                    return new VariableDeclStatement(id.name(), null, value, location);
+                    if (targetTok.kind == TokKind.IDENT) idents.declare(targetTok.value, id.name());
+                    // N-046: rebinding a local of this method is an assignment
+                    // in Python (function-scoped).
+                    return bindLocal(id.name(), null, value, location);
                 }
                 return new AssignmentStatement(expr, value, location);
             }
@@ -1334,7 +1663,7 @@ public final class PyParser {
         // -- Expression parsing ----------------------------------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1343,74 +1672,81 @@ public final class PyParser {
                 advance();
                 Expression condition = parseOr();
                 expectIdent("else");
-                Expression alternate = parseTernary();
+                Expression alternate = nest.nested(this::parseTernary);
                 return new TernaryExpr(condition, expr, alternate);
             }
             return expr;
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(TokKind.PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseNot();
             while (match(TokKind.AMPAMP)) {
                 Expression right = parseNot();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseNot() {
+            SourceLocation opLoc = loc();
             if (match(TokKind.BANG)) {
-                Expression operand = parseNot();
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                Expression operand = nest.nested(this::parseNot);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parseBitwiseOr();
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(TokKind.PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(TokKind.CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(TokKind.AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(TokKind.EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(TokKind.NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1419,20 +1755,21 @@ public final class PyParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(TokKind.LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(TokKind.LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(TokKind.GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(TokKind.GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1441,14 +1778,15 @@ public final class PyParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(TokKind.LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(TokKind.RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1457,14 +1795,15 @@ public final class PyParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(TokKind.PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(TokKind.MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1473,20 +1812,21 @@ public final class PyParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(TokKind.STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(TokKind.SLASHSLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TokKind.SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(TokKind.PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1495,17 +1835,18 @@ public final class PyParser {
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             if (match(TokKind.MINUS)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NEG, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NEG, operand, opLoc);
             }
             if (match(TokKind.TILDE)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, operand, opLoc);
             }
             if (match(TokKind.BANG)) {
-                Expression operand = parseUnary();
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                Expression operand = nest.nested(this::parseUnary);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parsePower();
         }
@@ -1513,7 +1854,8 @@ public final class PyParser {
         Expression parsePower() {
             Expression base = parsePostfix();
             if (match(TokKind.STARSTAR)) {
-                Expression exp = parseUnary();
+                // F-213 A4: the right operand recurses outside parseExpression.
+                Expression exp = nest.nested(this::parseUnary);
                 return new CallExpr(new Identifier("pow"), List.of(base, exp));
             }
             return base;
@@ -1571,7 +1913,7 @@ public final class PyParser {
 
             if (tok.kind == TokKind.STRING) {
                 advance();
-                return new ByteStringLiteral(tok.value);
+                return new ByteStringLiteral(tok.value, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TokKind.IDENT) {
@@ -1591,9 +1933,9 @@ public final class PyParser {
                 String converted = pyConvertName(name);
                 if (check(TokKind.LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(converted), args);
+                    return new CallExpr(new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col)), args);
                 }
-                return new Identifier(converted);
+                return new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == TokKind.LPAREN) {
@@ -1619,7 +1961,7 @@ public final class PyParser {
                 expect(TokKind.LPAREN);
                 Token strTok = expect(TokKind.STRING);
                 expect(TokKind.RPAREN);
-                return new ByteStringLiteral(strTok.value);
+                return new ByteStringLiteral(strTok.value, new SourceLocation(fileName, strTok.line, strTok.col));
             }
             if (check(TokKind.LPAREN)) {
                 List<Expression> args = parseCallArgs();

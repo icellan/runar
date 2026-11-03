@@ -79,6 +79,10 @@ the worked examples and which gate now catches which bug, and
 [`conformance/README.md`](conformance/README.md) for the provenance-discipline
 and weak-coverage-kind policies.
 
+### Removed
+
+- **BREAKING: `PreparedCall.opPushTxSig` (and its per-language equivalent — `OpPushTxSig` in Go, `op_push_tx_sig` in Rust/Python/Ruby) removed from the Go, Rust, Python, Ruby, and Zig SDKs.** Since BUG-100, the stateful unlocking script's OP_PUSH_TX signature is derived ON-CHAIN from the pushed preimage — `buildStatefulPrefix`'s (or `build_stateful_prefix` / `buildStatefulUnlockScript`'s) signature parameter has been accepted for call-site compatibility but ignored in every tier, so this field was documented public surface backing nothing a caller could use. A caller who read the field and prepended it to the unlock, as its doc comment implied, would have produced an INVALID unlock (one extra stack item). The TypeScript SDK dropped the equivalent field earlier (F-369); this closes the remaining five tiers. Code that reads `prepared.opPushTxSig` / `prepared.OpPushTxSig` / `prepared.op_push_tx_sig` must delete that read — nothing replaces it.
+
 ## [1.0.0-rc.1] — 2026-06-22
 
 First release candidate for 1.0.0. All seven compiler and SDK tiers are unified

@@ -18,10 +18,13 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic } from '../errors.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
+import { checkReturnType, makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
-import { assertSourceWithinLimits } from './source-limits.js';
+import { normalizeLoopCondition } from './loop-condition.js';
+import { lostDirectiveMessage, resolveNativeSighash, unknownMoveAttributeMessage } from './sighash-directive.js';
+import { assertSourceWithinLimits, NestingCounter, withNestingLimit } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -38,7 +41,15 @@ type TokenType =
   | '<<' | '>>'
   | '&' | '|' | '^' | '~' | '!'
   | '=' | '+=' | '-='
+  | '#'
   | 'eof';
+
+/** N-093: one parsed `#[...]` attribute (see `parseAttributes`). */
+interface MoveAttribute {
+  kind: 'embed_always' | 'sighash';
+  flags: string | null;
+  loc: SourceLocation;
+}
 
 interface Token {
   type: TokenType;
@@ -58,11 +69,11 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
-  let column = 1;
+  let column = 0;
 
   function advance(): string {
     const ch = source[pos++]!;
-    if (ch === '\n') { line++; column = 1; } else { column++; }
+    if (ch === '\n') { line++; column = 0; } else { column++; }
     return ch;
   }
   function peek(): string { return source[pos] || ''; }
@@ -71,6 +82,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     tokens.push({ type, value, line: l, column: c });
   }
 
+  let closingQuoteAt = -1; // F-011, see the quoted-literal check below
   while (pos < source.length) {
     const ch = peek();
     const l = line;
@@ -91,6 +103,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       }
       continue;
     }
+
+    // N-093: `#[` opens an attribute (`#[embed_always]`, `#[sighash(...)]`).
+    // A `#` not followed by `[` stays an unexpected character below.
+    if (ch === '#' && peekN(1) === '[') { advance(); add('#', '#', l, c); continue; }
 
     // Two-char ops
     if (ch === ':' && peekN(1) === ':') { advance(); advance(); add('::', '::', l, c); continue; }
@@ -118,11 +134,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       continue;
     }
 
-    // Number
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) val += advance();
-      add('number', val.replace(/_/g, ''), l, c);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('move', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('move', text), 'error', { file, line: l, column: c }));
+      add('number', lit ? lit.value.toString() : '0', l, c);
       continue;
     }
 
@@ -139,6 +157,29 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       }
       add(KEYWORDS[val] || 'ident', val, l, c);
       continue;
+    }
+
+    // F-011: this surface accepts no quoted literal (a terminated one is
+    // refused as an unexpected character below), but an unterminated one --
+    // reaching a line break or end of file -- gets the diagnostic every tier
+    // emits for it.
+    if ((ch === '"' || ch === "'") && pos !== closingQuoteAt) {
+      let k = pos + 1;
+      while (k < source.length && source[k] !== ch && source[k] !== '\n') {
+        if (source[k] === '\\') {
+          if (k + 1 >= source.length || source[k + 1] === '\n') break;
+          k++;
+        }
+        k++;
+      }
+      if (source[k] !== ch) {
+        errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
+        advance();
+        continue;
+      }
+      // Terminated: both quotes stay unexpected characters, as before; the
+      // closing one must not be re-read as an opening quote.
+      closingQuoteAt = k;
     }
 
     // Unrecognized character — reject it rather than dropping it silently.
@@ -204,6 +245,19 @@ class MoveParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-213 measure (A): parse nesting. */
+  private readonly nest = new NestingCounter();
+
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
@@ -243,7 +297,12 @@ class MoveParser {
     }
 
     // module ContractName { ... }
-    this.expect('module');
+    const moduleToken = this.expect('module');
+    // N-490: the synthesized constructor is anchored at the first struct's
+    // `struct` keyword (the `resource` token when it stands alone), or at
+    // `module` when the contract declares no struct.
+    let ctorLoc: SourceLocation = { file: this.file, line: moduleToken.line, column: moduleToken.column };
+    let sawStruct = false;
     const contractName = this.expect('ident').value;
     this.expect('{');
 
@@ -259,10 +318,20 @@ class MoveParser {
     const methods: MethodNode[] = [];
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
+      // N-093: attributes before a function (`#[sighash(...)]`). Anything
+      // else they precede reads neither directive, so each one is refused.
+      const attrs = this.parseAttributes();
+      if (attrs.length > 0 && this.current().type !== 'public' && this.current().type !== 'fun') {
+        this.reportLostAttributes(attrs);
+      }
       if (this.current().type === 'resource' || this.current().type === 'struct') {
         const isResource = this.current().type === 'resource';
-        this.advance();
-        if (this.current().type === 'struct') this.advance(); // "resource struct"
+        let kindToken = this.advance();
+        if (this.current().type === 'struct') kindToken = this.advance(); // "resource struct"
+        if (!sawStruct) {
+          sawStruct = true;
+          ctorLoc = { file: this.file, line: kindToken.line, column: kindToken.column };
+        }
 
         // Struct name (skip, should match module name)
         if (this.current().type === 'ident') this.advance();
@@ -277,7 +346,14 @@ class MoveParser {
         let hasMutableField = false;
         while (this.current().type !== '}' && this.current().type !== 'eof') {
           const propLoc = this.loc();
-          const propName = snakeToCamel(this.expect('ident').value);
+          // N-093: `#[embed_always]` before a field is the native spelling
+          // of `@embedAlways`; `#[sighash(...)]` here annotates nothing.
+          let embedAlways = false;
+          for (const attr of this.parseAttributes()) {
+            if (attr.kind === 'embed_always') embedAlways = true;
+            else this.reportLostAttributes([attr]);
+          }
+          const propName = this.declare(this.expect('ident').value);
           this.expect(':');
 
           // Check for &mut (mutable reference)
@@ -306,6 +382,7 @@ class MoveParser {
             type: typeName,
             readonly,
             initializer,
+            ...(embedAlways ? { embedAlways: true } : {}),
             sourceLocation: propLoc,
           });
 
@@ -320,7 +397,7 @@ class MoveParser {
           parentClass = 'StatefulSmartContract';
         }
       } else if (this.current().type === 'public' || this.current().type === 'fun') {
-        const { method, hasMutReceiver: hasMut } = this.parseFunction();
+        const { method, hasMutReceiver: hasMut } = this.parseFunction(attrs);
         if (hasMut && !isUnsafe) parentClass = 'StatefulSmartContract';
         methods.push(method);
       } else {
@@ -335,7 +412,7 @@ class MoveParser {
     if (hasMutable && !isUnsafe) parentClass = 'StatefulSmartContract';
 
     // Build constructor — only non-initialized properties become params
-    const loc = { file: this.file, line: 1, column: 1 };
+    const loc = ctorLoc;
     const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
@@ -373,6 +450,11 @@ class MoveParser {
       sourceFile: this.file,
     };
 
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -386,7 +468,7 @@ class MoveParser {
     // the token in place and falling through to the next `>` close.
     if (name === 'FixedArray' && this.current().type === '<') {
       this.advance();
-      const inner = this.parseMoveType();
+      const inner = this.nest.nested(this.loc(), () => this.parseMoveType());
       this.expect(',');
       const length = parseInt(this.expect('number').value, 10);
       this.consumeGenericClose();
@@ -396,7 +478,7 @@ class MoveParser {
     // vector<T> => FixedArray<T, N> (we treat it as ByteString for now)
     if (name === 'vector' && this.current().type === '<') {
       this.advance();
-      const innerType = this.parseMoveType();
+      const innerType = this.nest.nested(this.loc(), () => this.parseMoveType());
       this.consumeGenericClose();
       return innerType; // Simplify: vector<u8> -> ByteString
     }
@@ -433,7 +515,63 @@ class MoveParser {
     this.expect('>');
   }
 
-  private parseFunction(): { method: MethodNode; hasMutReceiver: boolean } {
+  /**
+   * N-093: parse `#[...]` attributes. Only `#[embed_always]` and
+   * `#[sighash(FLAGS)]` exist; any other attribute is refused (it would
+   * otherwise be ignored). For `sighash`, `flags` is the `|`-joined
+   * identifier list, or `null` when the parentheses hold anything else or are
+   * missing.
+   */
+  private parseAttributes(): MoveAttribute[] {
+    const attrs: MoveAttribute[] = [];
+    while (this.current().type === '#') {
+      const loc = this.loc();
+      this.advance();
+      this.expect('[');
+      const name = this.current().type === 'ident' ? this.advance().value : '';
+      let flags: string | null = null;
+      let hasArgs = false;
+      if (this.current().type === '(') {
+        hasArgs = true;
+        this.advance();
+        let text = '';
+        let ok = true;
+        let depth = 1;
+        while (this.current().type !== 'eof') {
+          const t = this.current();
+          if (t.type === '(') depth++;
+          if (t.type === ')' && --depth === 0) break;
+          if (t.type === 'ident' || t.type === '|') text += t.value;
+          else ok = false;
+          this.advance();
+        }
+        this.expect(')');
+        flags = ok ? text : null;
+      }
+      while (this.current().type !== ']' && this.current().type !== 'eof') this.advance();
+      this.expect(']');
+      if (name === 'embed_always' && !hasArgs) {
+        attrs.push({ kind: 'embed_always', flags: null, loc });
+      } else if (name === 'sighash') {
+        attrs.push({ kind: 'sighash', flags, loc });
+      } else {
+        this.errors.push(makeDiagnostic(unknownMoveAttributeMessage(name + (hasArgs ? '(...)' : '')), 'error', loc));
+      }
+    }
+    return attrs;
+  }
+
+  private reportLostAttributes(attrs: MoveAttribute[]): void {
+    for (const attr of attrs) {
+      this.errors.push(makeDiagnostic(
+        lostDirectiveMessage(attr.kind === 'sighash' ? '@sighash' : '@embedAlways'),
+        'error',
+        attr.loc,
+      ));
+    }
+  }
+
+  private parseFunction(attrs: MoveAttribute[] = []): { method: MethodNode; hasMutReceiver: boolean } {
     const location = this.loc();
     let visibility: 'public' | 'private' = 'private';
     if (this.current().type === 'public') {
@@ -448,7 +586,7 @@ class MoveParser {
 
     this.expect('fun');
     const rawName = this.expect('ident').value;
-    const name = snakeToCamel(rawName);
+    const name = this.declare(rawName);
 
     this.expect('(');
     const params: ParamNode[] = [];
@@ -496,7 +634,7 @@ class MoveParser {
 
         params.push({
           kind: 'param',
-          name: snakeToCamel(pNameRaw),
+          name: this.declare(pNameRaw),
           type: pType,
         });
       }
@@ -509,7 +647,7 @@ class MoveParser {
     let hasReturnType = false;
     if (this.current().type === ':') {
       this.advance();
-      this.parseMoveType();
+      checkReturnType(this.parseMoveType(), name, location, this.errors, visibility === 'public');
       hasReturnType = true;
     }
 
@@ -545,13 +683,33 @@ class MoveParser {
       }
     }
 
+    // N-093: `#[sighash(FLAGS)]` on the function; `#[embed_always]` here
+    // annotates nothing.
+    this.reportLostAttributes(attrs.filter((a) => a.kind !== 'sighash'));
+    const sighash = resolveNativeSighash(
+      name,
+      visibility === 'public',
+      attrs.filter((a) => a.kind === 'sighash').map((a) => a.flags),
+    );
+    if (sighash && 'error' in sighash) {
+      this.errors.push(makeDiagnostic(sighash.error, 'error', location));
+    }
+
     return {
-      method: { kind: 'method', name, params, body, visibility, sourceLocation: location },
+      method: {
+        kind: 'method', name, params, body, visibility,
+        ...(sighash && 'value' in sighash ? { sighashType: sighash.value } : {}),
+        sourceLocation: location,
+      },
       hasMutReceiver,
     };
   }
 
   private parseStatement(): Statement {
+    return this.nest.nested(this.loc(), () => this.parseStatementInner());
+  }
+
+  private parseStatementInner(): Statement {
     const location = this.loc();
 
     // assert!(expr, code) -> assert(expr)
@@ -610,7 +768,7 @@ class MoveParser {
         this.advance();
         mutable = true;
       }
-      const varName = snakeToCamel(this.expect('ident').value);
+      const varName = this.declare(this.expect('ident').value);
       let varType: TypeNode | undefined;
       if (this.current().type === ':') {
         this.advance();
@@ -787,78 +945,100 @@ class MoveParser {
   }
 
   // Expression parsing (same precedence climbing as Solidity parser)
-  private parseExpression(): Expression { return this.parseOr(); }
+  private parseExpression(): Expression { return this.nest.nested(this.loc(), () => this.parseOr()); }
 
   private parseOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAnd();
-    while (this.current().type === '||') { this.advance(); left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd() }; }
+    while (this.current().type === '||') { this.advance(); left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd(), sourceLocation: start }; }
     return left;
   }
   private parseAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitOr();
-    while (this.current().type === '&&') { this.advance(); left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr() }; }
+    while (this.current().type === '&&') { this.advance(); left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr(), sourceLocation: start }; }
     return left;
   }
   private parseBitOr(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitXor();
-    while (this.current().type === '|' && this.tokens[this.pos + 1]?.type !== '|') { this.advance(); left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor() }; }
+    while (this.current().type === '|' && this.tokens[this.pos + 1]?.type !== '|') { this.advance(); left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor(), sourceLocation: start }; }
     return left;
   }
   private parseBitXor(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseBitAnd();
-    while (this.current().type === '^') { this.advance(); left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd() }; }
+    while (this.current().type === '^') { this.advance(); left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd(), sourceLocation: start }; }
     return left;
   }
   private parseBitAnd(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseEquality();
-    while (this.current().type === '&' && this.tokens[this.pos + 1]?.type !== '&') { this.advance(); left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality() }; }
+    while (this.current().type === '&' && this.tokens[this.pos + 1]?.type !== '&') { this.advance(); left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality(), sourceLocation: start }; }
     return left;
   }
   private parseEquality(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op = this.advance().type === '==' ? '===' : '!==';
-      left = { kind: 'binary_expr', op: op as BinaryOp, left, right: this.parseComparison() };
+      left = { kind: 'binary_expr', op: op as BinaryOp, left, right: this.parseComparison(), sourceLocation: start };
     }
     return left;
   }
   private parseComparison(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseShift() };
+      left = { kind: 'binary_expr', op, left, right: this.parseShift(), sourceLocation: start };
     }
     return left;
   }
   private parseShift(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseAddSub();
     while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
+      left = { kind: 'binary_expr', op, left, right: this.parseAddSub(), sourceLocation: start };
     }
     return left;
   }
   private parseAddSub(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (this.current().type === '+' || this.current().type === '-') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv() };
+      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv(), sourceLocation: start };
     }
     return left;
   }
   private parseMulDiv(): Expression {
+    // N-491: a binary node is located at its first token, as `.runar.ts` locates it.
+    const start = this.loc();
     let left = this.parseUnary();
     while (this.current().type === '*' || this.current().type === '/' || this.current().type === '%') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseUnary() };
+      left = { kind: 'binary_expr', op, left, right: this.parseUnary(), sourceLocation: start };
     }
     return left;
   }
 
   private parseUnary(): Expression {
-    if (this.current().type === '!') { this.advance(); return { kind: 'unary_expr', op: '!', operand: this.parseUnary() }; }
-    if (this.current().type === '-') { this.advance(); return { kind: 'unary_expr', op: '-', operand: this.parseUnary() }; }
-    if (this.current().type === '~') { this.advance(); return { kind: 'unary_expr', op: '~', operand: this.parseUnary() }; }
+    // N-491: a unary node is located at its operator, as `.runar.ts` locates it.
+    const at = this.loc();
+    if (this.current().type === '!') { this.advance(); return { kind: 'unary_expr', op: '!', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at }; }
+    if (this.current().type === '-') { this.advance(); return { kind: 'unary_expr', op: '-', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at }; }
+    if (this.current().type === '~') { this.advance(); return { kind: 'unary_expr', op: '~', operand: this.nest.nested(this.loc(), () => this.parseUnary()), sourceLocation: at }; }
     // Dereference & — skip
     if (this.current().type === '&') {
       this.advance();
@@ -921,7 +1101,7 @@ class MoveParser {
   private parsePrimary(): Expression {
     const t = this.current();
     if (t.type === 'number') { this.advance(); return { kind: 'bigint_literal', value: BigInt(t.value) }; }
-    if (t.type === 'hexstring') { this.advance(); return { kind: 'bytestring_literal', value: t.value }; }
+    if (t.type === 'hexstring') { this.advance(); return { kind: 'bytestring_literal', value: t.value, sourceLocation: { file: this.file, line: t.line, column: t.column } }; }
     if (t.type === 'true') { this.advance(); return { kind: 'bool_literal', value: true }; }
     if (t.type === 'false') { this.advance(); return { kind: 'bool_literal', value: false }; }
     if (t.type === '(') {
@@ -957,7 +1137,7 @@ class MoveParser {
       };
       const anchored = preserved[t.value];
       if (anchored !== undefined) {
-        return { kind: 'identifier', name: anchored };
+        return { kind: 'identifier', name: anchored, sourceLocation: { file: this.file, line: t.line, column: t.column } };
       }
       const name = snakeToCamel(t.value);
       // Map Move builtins to Rúnar builtins.
@@ -1022,7 +1202,7 @@ class MoveParser {
         // Merkle proof verification
         merkleRootSha256: 'merkleRootSha256', merkleRootHash256: 'merkleRootHash256',
       };
-      return { kind: 'identifier', name: builtinMap[name] || name };
+      return { kind: 'identifier', name: builtinMap[name] || name, sourceLocation: { file: this.file, line: t.line, column: t.column } };
     }
 
     // Nothing in the Move surface syntax can start an expression with this
@@ -1116,7 +1296,8 @@ function foldCountingWhile(
   stub: Extract<Statement, { kind: 'for_statement' }>,
 ): Statement | null {
   const iterName = decl.name;
-  const cond = stub.condition;
+  // N-115: `while (5 > i)` folds exactly like `while (i < 5)`.
+  const cond = normalizeLoopCondition(stub.condition, iterName);
   if (cond.kind !== 'binary_expr') return null;
   if (cond.left.kind !== 'identifier' || cond.left.name !== iterName) return null;
 
@@ -1221,5 +1402,5 @@ export function parseMoveSource(source: string, fileName?: string): ParseResult 
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
   const parser = new MoveParser(tokens, file, errors);
-  return parser.parse();
+  return withNestingLimit(file, () => parser.parse());
 }

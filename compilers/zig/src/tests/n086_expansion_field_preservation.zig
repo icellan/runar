@@ -41,11 +41,19 @@
 //!                                   byte-typed expression -> bin_op result
 //!                                   type -> OP_CAT selection.
 //!
-//! Deliberately NOT fixed here: `PropertyNode.embed_always` is dropped by this
-//! pass in all SEVEN tiers including the TypeScript reference. Fixing Zig alone
-//! would manufacture a 1-vs-6 divergence. Filed as its own seven-tier item.
-//! `Assign.index_target` is also omitted, correctly — the pass's contract is
-//! that it is null by the time ANF lowering runs.
+//!   PropertyNode.embed_always    `/** @embedAlways */ readonly tags:
+//!                                FixedArray<bigint, 2> = [7n, 9n]`, unread
+//!                                -> "91", byte-identical to the un-annotated
+//!                                   array: both slots DCE'd. The drop was in
+//!                                   all SEVEN tiers including the TypeScript
+//!                                   reference, so it was fixed in all seven
+//!                                   together (F-098, user decision R35: the
+//!                                   directive propagates to every slot).
+//!
+//! `Assign.index_target` is omitted, correctly — the pass's contract is that it
+//! is null by the time ANF lowering runs. `PropertyNode.type_name` and
+//! `source_loc` are left empty/null on the synthesized leaves by design (see
+//! their docs in `ir/types.zig`).
 //!
 //! Every test below asserts on emitted bytes or on the ANF, never on "it
 //! compiles": broken and fixed both compile.
@@ -194,6 +202,8 @@ const SINGLE_FORKID: i32 = 0x43;
 fn hexOf(a: std.mem.Allocator, source: []const u8, file_name: []const u8) ![]const u8 {
     const r = try compiler_api.compileSource(a, source, file_name);
     if (r.artifact_json) |j| a.free(j);
+    for (r.warnings) |line| a.free(line);
+    a.free(r.warnings);
     return r.script_hex;
 }
 
@@ -334,14 +344,22 @@ test "N-086 FixedArray SINGLE differs from default at exactly the binding-flag b
     const dflt = try hexOf(a, boardSrc(""), "Boardy.runar.ts");
     defer a.free(dflt);
 
-    const moved = try flagSwapPositions(a, dflt, single, "41", "43");
-    defer a.free(moved);
-
     // Under the drop the two scripts are byte-IDENTICAL, so zero difference is
-    // the failure mode. Exactly two flag bytes move: the auto-injected
-    // `extractSigHashType(pre) === <mode>` assert push and the OP_PUSH_TX
-    // binding blob's appended DER sighash byte.
-    try std.testing.expectEqualSlices(usize, &[_]usize{ 394, 522 }, moved);
+    // the failure mode. N-038 (R64): the SINGLE continuation also drops the
+    // change segment and its params, which shifts stack depths from byte 486
+    // on, so the pure flag-swap comparison now covers the prologue before
+    // that: exactly one flag byte moves there, the OP_PUSH_TX binding blob's
+    // appended DER sighash byte (394). The other flag byte, the auto-injected
+    // `extractSigHashType(pre) === <mode>` push (`01<mode>9d`, flag at 522), is
+    // checked in place. The scripts must also differ in length (the dropped
+    // change segment), which the drop would also erase.
+    try std.testing.expect(single.len < dflt.len);
+    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 486], single[0 .. 2 * 486], "41", "43");
+    defer a.free(moved);
+    try std.testing.expectEqualSlices(usize, &[_]usize{394}, moved);
+    try std.testing.expectEqualStrings("01437e2102b405d7f032", single[2 * 393 .. 2 * 403]);
+    try std.testing.expectEqualStrings("01439d", single[2 * 521 .. 2 * 524]);
+    try std.testing.expectEqualStrings("01419d", dflt[2 * 521 .. 2 * 524]);
 }
 
 test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
@@ -351,9 +369,14 @@ test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
     const dflt = try hexOf(a, plainSrc(""), "Boardy.runar.ts");
     defer a.free(dflt);
 
-    const moved = try flagSwapPositions(a, dflt, single, "41", "43");
+    // N-038 (R64): compared over the prologue only (see the test above); the
+    // sighash-type assert push's flag byte sits at 521 in this contract.
+    try std.testing.expect(single.len < dflt.len);
+    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 486], single[0 .. 2 * 486], "41", "43");
     defer a.free(moved);
-    try std.testing.expectEqual(@as(usize, 2), moved.len);
+    try std.testing.expectEqual(@as(usize, 1), moved.len);
+    try std.testing.expectEqualStrings("01439d", single[2 * 520 .. 2 * 523]);
+    try std.testing.expectEqualStrings("01419d", dflt[2 * 520 .. 2 * 523]);
 }
 
 // ---------------------------------------------------------------------------
@@ -416,4 +439,40 @@ test "N-086 expansion keeps asm<ByteString> so `+` still lowers to OP_CAT" {
     try std.testing.expectEqualStrings("0076767e8277529d0000a077", without);
     // Under the drop the FixedArray variant reads "007676938277529d0000a077".
     try std.testing.expectEqualStrings(without, with_array);
+}
+
+// ---------------------------------------------------------------------------
+// PropertyNode.embed_always (F-098 / R35)
+// ---------------------------------------------------------------------------
+
+/// A FixedArray property no method reads. `directive` goes before it.
+fn embedArraySrc(comptime directive: []const u8) []const u8 {
+    return "import { SmartContract, assert } from 'runar-lang';\n" ++
+        "class Arr extends SmartContract {\n" ++
+        "  " ++ directive ++ "\n" ++
+        "  readonly tags: FixedArray<bigint, 2> = [7n, 9n];\n" ++
+        "  constructor() {\n" ++
+        "    super();\n" ++
+        "  }\n" ++
+        "  public unlock(x: bigint) {\n" ++
+        "    assert(x === 0n);\n" ++
+        "  }\n" ++
+        "}\n";
+}
+
+// The golden is the TS reference output, which equals the same contract
+// hand-written as two annotated scalars (7n, 9n): an oracle that never runs the
+// expansion pass. Proves both slots survive, byte-identical to TS, in both fold
+// modes, and the un-annotated control still loses them. Does not prove on-chain
+// spending (a conformance fixture with a real-crypto witness is N-093).
+test "N-086 expansion keeps @embedAlways on every FixedArray slot (both fold modes)" {
+    const a = std.testing.allocator;
+    for ([_]bool{ true, false }) |disable_fold| {
+        const on = try compiler_api.compileSourceWithOptions(a, embedArraySrc("/** @embedAlways */"), "Arr.runar.ts", disable_fold);
+        defer on.deinit(a);
+        try std.testing.expectEqualStrings("57597b917777", on.script_hex);
+        const off = try compiler_api.compileSourceWithOptions(a, embedArraySrc(""), "Arr.runar.ts", disable_fold);
+        defer off.deinit(a);
+        try std.testing.expectEqualStrings("91", off.script_hex);
+    }
 }

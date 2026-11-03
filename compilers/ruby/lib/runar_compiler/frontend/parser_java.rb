@@ -31,6 +31,8 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "input_limits"
+require_relative "sighash_directive"
 
 module RunarCompiler
   module Frontend
@@ -84,6 +86,11 @@ module RunarCompiler
       TOK_MINUSMINUS  = 42  # --
       TOK_LSHIFT      = 43  # <<
       TOK_RSHIFT      = 44  # >>
+      TOK_LSHIFTEQ    = 45  # <<=
+      TOK_RSHIFTEQ    = 46  # >>=
+      TOK_AMPEQ       = 47  # &=
+      TOK_PIPEEQ      = 48  # |=
+      TOK_CARETEQ     = 49  # ^=
       # Keywords
       TOK_PACKAGE          = 60
       TOK_IMPORT           = 61
@@ -111,7 +118,9 @@ module RunarCompiler
     end
 
     # A single token produced by the Java tokenizer.
-    JavaToken = Struct.new(:kind, :value, :line, :col, keyword_init: true)
+    # F-026: +raw+ is a number token's text as written; +neg_only+ marks
+    # `2147483648` / `9223372036854775808L`, legal only under a unary minus.
+    JavaToken = Struct.new(:kind, :value, :line, :col, :raw, :neg_only, keyword_init: true)
 
     # -----------------------------------------------------------------------
     # Java type mapping -- Java/Runar type name -> Runar canonical type
@@ -197,12 +206,12 @@ module RunarCompiler
       java_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_java(source)
+    def self.tokenize_java(source, lex = [], file_name = "")
       tokens = []
       n = source.length
       i = 0
       line = 1
-      col = 1
+      col = 0
 
       while i < n
         ch = source[i]
@@ -216,7 +225,7 @@ module RunarCompiler
         if ch == "\n"
           i += 1
           line += 1
-          col = 1
+          col = 0
           next
         end
 
@@ -235,7 +244,7 @@ module RunarCompiler
           while i + 1 < n
             if source[i] == "\n"
               line += 1
-              col = 1
+              col = 0
               i += 1
               next
             end
@@ -258,7 +267,11 @@ module RunarCompiler
           i += 1
           col += 1
           val = +""
-          while i < n && source[i] != '"'
+          # F-011: a Java string literal cannot span lines; one that reaches
+          # a line break (escaped or not) or end of file is unterminated.
+          while i < n && source[i] != '"' && source[i] != "\n" && source[i] != "\r"
+            break if source[i] == "\\" && (i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r")
+
             if source[i] == "\\" && i + 1 < n
               nx = source[i + 1]
               case nx
@@ -279,7 +292,11 @@ module RunarCompiler
               col += 1
             end
           end
-          i += 1 if i < n # closing quote
+          if i < n && source[i] == '"'
+            i += 1 # closing quote
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, start_line, start_col)
+          end
           col += 1
           tokens << JavaToken.new(kind: JavaTokens::TOK_STRING, value: val, line: start_line, col: start_col)
           next
@@ -287,6 +304,8 @@ module RunarCompiler
 
         # Character literal (parsed but not used in Runar subset; rejected later)
         if ch == "'"
+          # F-011: refused exactly as the TS reference refuses it.
+          lex << Frontend.lex_error(JAVA_CHAR_LITERAL, file_name, start_line, start_col)
           i += 1
           col += 1
           val = +""
@@ -307,39 +326,15 @@ module RunarCompiler
           next
         end
 
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one Java integer
+        # literal (JLS 3.10.1), with Java's value: hex / octal / binary int and
+        # long literals wrap to two's complement.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          # Hex / bin / octal prefixes
-          if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-            i += 2
-            col += 2
-            while i < n && source[i].match?(/[0-9a-fA-F_]/)
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "b" || source[i + 1] == "B")
-            i += 2
-            col += 2
-            while i < n && source[i].match?(/[01_]/)
-              i += 1
-              col += 1
-            end
-          else
-            while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-              i += 1
-              col += 1
-            end
-          end
-          # Java integer literal suffix L/l (ignored)
-          if i < n && (source[i] == "L" || source[i] == "l")
-            i += 1
-            col += 1
-          end
-          val = source[num_start...i].delete("_")
-          # Strip trailing L/l from the captured text
-          val = val.sub(/[Ll]\z/, "")
-          tokens << JavaToken.new(kind: JavaTokens::TOK_NUMBER, value: val, line: start_line, col: start_col)
+          stop, val, lit, raw = IntLiteral.lex_number("java", source, i, lex, file_name, start_line, start_col)
+          col += stop - i
+          i = stop
+          tokens << JavaToken.new(kind: JavaTokens::TOK_NUMBER, value: val, line: start_line, col: start_col,
+                                  raw: raw, neg_only: lit&.neg_only || false)
           next
         end
 
@@ -360,6 +355,17 @@ module RunarCompiler
           next
         end
 
+        # Three-character operators: <<= and >>= (N-134). `>>>` / `>>>=` are
+        # not supported and fall through to two-character tokens, as before.
+        three = source[i, 3]
+        if three == "<<=" || three == ">>="
+          kind = three == "<<=" ? JavaTokens::TOK_LSHIFTEQ : JavaTokens::TOK_RSHIFTEQ
+          tokens << JavaToken.new(kind: kind, value: three, line: start_line, col: start_col)
+          i += 3
+          col += 3
+          next
+        end
+
         # Two-character operators (check longer first)
         if i + 1 < n
           two = source[i, 2]
@@ -375,6 +381,9 @@ module RunarCompiler
                      when "*=" then JavaTokens::TOK_STAREQ
                      when "/=" then JavaTokens::TOK_SLASHEQ
                      when "%=" then JavaTokens::TOK_PERCENTEQ
+                     when "&=" then JavaTokens::TOK_AMPEQ
+                     when "|=" then JavaTokens::TOK_PIPEEQ
+                     when "^=" then JavaTokens::TOK_CARETEQ
                      when "++" then JavaTokens::TOK_PLUSPLUS
                      when "--" then JavaTokens::TOK_MINUSMINUS
                      when "<<" then JavaTokens::TOK_LSHIFT
@@ -423,7 +432,9 @@ module RunarCompiler
           next
         end
 
-        # Skip unknown
+        # N-214: an unrecognised character is refused, as the TS reference
+        # does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        lex << Frontend.lex_error("Unexpected character '#{ch}'", file_name, start_line, start_col)
         i += 1
         col += 1
       end
@@ -437,6 +448,8 @@ module RunarCompiler
     # -----------------------------------------------------------------------
 
     class JavaParser
+      include InputLimits::NestingCounter
+
       include JavaTokens
 
       INT64_MAX = 9_223_372_036_854_775_807
@@ -560,8 +573,8 @@ module RunarCompiler
                          when "StatefulSmartContract" then "StatefulSmartContract"
                          when "UnsafeSmartContract"   then "UnsafeSmartContract"
                          else
-                           fatal("contract class in #{@file_name} must extend " \
-                                 "SmartContract, StatefulSmartContract, or UnsafeSmartContract, got #{base_name}")
+                           fatal("unknown parent class: '#{base_name}', expected " \
+                                 "SmartContract, StatefulSmartContract, or UnsafeSmartContract")
                          end
         else
           fatal("contract class in #{@file_name} must extend " \
@@ -604,7 +617,7 @@ module RunarCompiler
 
         constructor = constructor_method || synthetic_constructor(properties)
 
-        ContractNode.new(
+        contract = ContractNode.new(
           name: @contract_name,
           parent_class: parent_class,
           properties: properties,
@@ -612,6 +625,96 @@ module RunarCompiler
           methods: methods,
           source_file: @file_name
         )
+        check_bare_property_assignments(contract)
+        contract
+      end
+
+      # N-023 (R49). In Java a bare name inside a method that no local or
+      # parameter shadows IS the field, so `count = ...`, `count += ...`,
+      # `count++` and `--count` write contract state. Lowering them as a local
+      # rebind dropped the state write silently, so the bare form is refused
+      # (mirrors the TS reference's checkBarePropertyAssignments). Shadowing
+      # follows Java block scope: parameters, a local from its declaration to
+      # the end of its block, a for-loop variable inside the loop. Bare reads
+      # are not touched.
+      def check_bare_property_assignments(contract)
+        # F-213 measure (B) before the recursive walk below.
+        InputLimits.assert_ast_nesting!(contract)
+        props = contract.properties.map(&:name)
+        return if props.empty?
+
+        ([contract.constructor] + contract.methods).each do |m|
+          bare_walk_block(m.body || [], [(m.params || []).map(&:name)], props)
+        end
+      end
+
+      def bare_check_target(expr, scope, props, loc)
+        return unless expr.is_a?(Identifier) && props.include?(expr.name)
+        return if scope.any? { |s| s.include?(expr.name) }
+
+        @errors << Diagnostic.new(message: Frontend.bare_java_property_assignment_message(expr.name),
+                                  severity: Severity::ERROR, loc: loc)
+      end
+
+      def bare_walk_block(body, outer, props)
+        scope = outer + [[]]
+        body.each { |s| bare_walk_stmt(s, scope, props) }
+      end
+
+      def bare_walk_stmt(stmt, scope, props)
+        return if stmt.nil?
+
+        loc = stmt.respond_to?(:source_location) ? stmt.source_location : nil
+        case stmt
+        when VariableDeclStmt
+          bare_walk_expr(stmt.init, scope, props, loc)
+          scope.last << stmt.name
+        when AssignmentStmt
+          bare_check_target(stmt.target, scope, props, loc)
+          bare_walk_expr(stmt.target, scope, props, loc)
+          bare_walk_expr(stmt.value, scope, props, loc)
+        when IfStmt
+          bare_walk_expr(stmt.condition, scope, props, loc)
+          bare_walk_block(stmt.then || [], scope, props)
+          bare_walk_block(stmt.else_, scope, props) if stmt.else_
+        when ForStmt
+          loop_scope = scope + [[]]
+          bare_walk_stmt(stmt.init, loop_scope, props)
+          bare_walk_expr(stmt.condition, loop_scope, props, loc)
+          bare_walk_stmt(stmt.update, loop_scope, props)
+          bare_walk_block(stmt.body || [], loop_scope, props)
+        when ReturnStmt
+          bare_walk_expr(stmt.value, scope, props, loc)
+        when ExpressionStmt
+          bare_walk_expr(stmt.expr, scope, props, loc)
+        end
+      end
+
+      def bare_walk_expr(expr, scope, props, loc)
+        case expr
+        when IncrementExpr, DecrementExpr
+          bare_check_target(expr.operand, scope, props, loc)
+          bare_walk_expr(expr.operand, scope, props, loc)
+        when BinaryExpr
+          bare_walk_expr(expr.left, scope, props, loc)
+          bare_walk_expr(expr.right, scope, props, loc)
+        when UnaryExpr
+          bare_walk_expr(expr.operand, scope, props, loc)
+        when CallExpr
+          bare_walk_expr(expr.callee, scope, props, loc)
+          (expr.args || []).each { |a| bare_walk_expr(a, scope, props, loc) }
+        when MemberExpr
+          bare_walk_expr(expr.object, scope, props, loc)
+        when TernaryExpr
+          bare_walk_expr(expr.condition, scope, props, loc)
+          bare_walk_expr(expr.consequent, scope, props, loc)
+          bare_walk_expr(expr.alternate, scope, props, loc)
+        when IndexAccessExpr
+          bare_walk_expr(expr.object, scope, props, loc)
+          bare_walk_expr(expr.index, scope, props, loc)
+        when ArrayLiteralExpr
+          (expr.elements || []).each { |e| bare_walk_expr(e, scope, props, loc) }
+        end
       end
 
       # -- Package and imports ---------------------------------------------
@@ -638,11 +741,14 @@ module RunarCompiler
       # -- Annotation parsing -----------------------------------------------
 
       # Parse an annotation: @Name [(args)]
-      # Returns the simple annotation name string.
+      # Returns the simple annotation name string. N-093: the argument tokens
+      # (`(` ... `)`, or empty) are kept in +@last_annotation_args+ for
+      # `@Sighash("FLAGS")`.
       def parse_annotation
         expect(TOK_AT, "'@'")
         name = expect_type_simple_name
-        # Optional annotation arguments (we consume them but ignore content).
+        arg_start = @pos
+        # Optional annotation arguments (consumed; only @Sighash reads them).
         if check(TOK_LPAREN)
           advance
           depth = 1
@@ -659,6 +765,7 @@ module RunarCompiler
             advance
           end
         end
+        @last_annotation_args = @tokens[arg_start...@pos] || []
         name
       end
 
@@ -682,22 +789,40 @@ module RunarCompiler
         readonly = false
         is_public_annotated = false
         is_stateful_annotated = false
+        # N-093: `@EmbedAlways` / `@Sighash("FLAGS")`, the native spellings of
+        # the `@embedAlways` / `@sighash` directives.
+        embed_always_loc = nil
+        sighash_specs = []
+        sighash_loc = nil
 
-        # Annotations
+        # Annotations. F-205: an annotation whose simple name Rúnar does not
+        # recognize is a loud "unsupported annotation" diagnostic, matching
+        # the TS reference (01-parse-java.ts, parseMember) — never a silent
+        # visibility downgrade.
         while check(TOK_AT)
+          ann_loc = loc
           ann_name = parse_annotation
+          args = @last_annotation_args
           case ann_name
           when "Readonly" then readonly = true
           when "Public"   then is_public_annotated = true
           when "Stateful" then is_stateful_annotated = true
-            # Any other annotation is ignored at parse time (parity with
-            # the Java reference, which rejects unknown annotations in a
-            # later pass but accepts them at parse).
+          when "EmbedAlways" then embed_always_loc = ann_loc
+          when "Sighash"
+            sighash_loc ||= ann_loc
+            sighash_specs << (args.length == 3 && args[1].kind == TOK_STRING ? args[1].value : nil)
+          when "Override", "SuppressWarnings"
+            # accepted but ignored
+          else
+            @errors << Diagnostic.new(message: "unsupported annotation @#{ann_name}",
+                                      severity: Severity::ERROR, loc: ann_loc)
           end
         end
 
         # Modifiers (public/private/protected/static/final/abstract)
+        is_static = false
         while JAVA_MODIFIER_KINDS.include?(peek.kind)
+          is_static = true if peek.kind == TOK_STATIC
           advance
         end
 
@@ -709,6 +834,15 @@ module RunarCompiler
           advance # ctor name
           ctor = parse_method_body(is_constructor: true, visibility: "public",
                                     location: member_loc)
+          # N-093: the constructor is neither a spending entry point nor a field.
+          unless sighash_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                      severity: Severity::ERROR, loc: sighash_loc)
+          end
+          unless embed_always_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@embedAlways"),
+                                      severity: Severity::ERROR, loc: embed_always_loc)
+          end
           return { kind: :constructor, node: ctor }
         end
 
@@ -724,6 +858,12 @@ module RunarCompiler
 
         if check(TOK_LPAREN)
           # Method
+          if is_static
+            # N-050: a static method is not a contract method (`@Public
+            # static` used to become a spending entry point).
+            @errors << Diagnostic.new(message: Frontend.static_method_message(name),
+                                      severity: Severity::ERROR, loc: member_loc)
+          end
           visibility = is_public_annotated ? "public" : "private"
           method = parse_method_body(
             is_constructor: false,
@@ -732,7 +872,21 @@ module RunarCompiler
             visibility: visibility,
             location: member_loc
           )
+          unless embed_always_loc.nil?
+            @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@embedAlways"),
+                                      severity: Severity::ERROR, loc: embed_always_loc)
+          end
+          sighash = SighashDirective.resolve_native_sighash(name, is_public_annotated, sighash_specs)
+          if sighash && sighash[:error]
+            @errors << Diagnostic.new(message: sighash[:error], severity: Severity::ERROR, loc: member_loc)
+          elsif sighash
+            method.sighash_type = sighash[:value]
+          end
           return { kind: :method, node: method }
+        end
+        unless sighash_loc.nil?
+          @errors << Diagnostic.new(message: SighashDirective.lost_directive_message("@sighash"),
+                                    severity: Severity::ERROR, loc: sighash_loc)
         end
 
         # Field: optional initializer, terminated by ';'
@@ -747,6 +901,7 @@ module RunarCompiler
           type: type_node,
           readonly: readonly,
           initializer: initializer,
+          embed_always: !embed_always_loc.nil?,
           source_location: member_loc
         )
         { kind: :property, node: prop }
@@ -755,6 +910,8 @@ module RunarCompiler
       # Parse parameter list and method body.
       def parse_method_body(is_constructor:, visibility:, location:,
                             method_name: nil, return_type: nil)
+        # The AST keeps no return type; N-331 refuses an unknown name.
+        Frontend.reject_unknown_return_type(@errors, return_type, method_name, location, visibility == "public") unless is_constructor
         expect(TOK_LPAREN, "'('")
         params = []
         while !check(TOK_RPAREN) && !check(TOK_EOF)
@@ -848,7 +1005,7 @@ module RunarCompiler
         if check(TOK_LT)
           if simple == "FixedArray"
             advance # <
-            element = parse_type
+            element = nested { parse_type }
             expect(TOK_COMMA, "','")
             # Length must be an integer literal
             if !check(TOK_NUMBER)
@@ -873,7 +1030,17 @@ module RunarCompiler
       # -- Statement parsing ------------------------------------------------
 
       def parse_statement
+        nested { parse_statement_inner }
+      end
+
+      def parse_statement_inner
         location = loc
+
+        # N-053: an empty statement `;` is a no-op, as in the TS reference.
+        if check(TOK_SEMI)
+          advance
+          return nil
+        end
 
         # return [expr];
         if check(TOK_RETURN)
@@ -988,6 +1155,22 @@ module RunarCompiler
         )
       end
 
+      # N-134: compound assignment token -> binary operator, exactly TS's ten
+      # (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+      # `t = t op e`.
+      COMPOUND_OPS = {
+        TOK_PLUSEQ    => "+",
+        TOK_MINUSEQ   => "-",
+        TOK_STAREQ    => "*",
+        TOK_SLASHEQ   => "/",
+        TOK_PERCENTEQ => "%",
+        TOK_AMPEQ     => "&",
+        TOK_PIPEEQ    => "|",
+        TOK_CARETEQ   => "^",
+        TOK_LSHIFTEQ  => "<<",
+        TOK_RSHIFTEQ  => ">>",
+      }.freeze
+
       # Turn a top-level expression into a statement, handling assignments
       # and postfix ++/-- as statement forms.
       def build_expression_stmt(expr, location)
@@ -1001,14 +1184,7 @@ module RunarCompiler
         end
 
         # Compound assignments
-        compound_ops = {
-          TOK_PLUSEQ    => "+",
-          TOK_MINUSEQ   => "-",
-          TOK_STAREQ    => "*",
-          TOK_SLASHEQ   => "/",
-          TOK_PERCENTEQ => "%",
-        }
-        compound_ops.each do |kind, bin_op|
+        COMPOUND_OPS.each do |kind, bin_op|
           if match_tok(kind)
             rhs = parse_expression
             expect(TOK_SEMI, "';'")
@@ -1051,7 +1227,9 @@ module RunarCompiler
         else_block = nil
         if match_tok(TOK_ELSE)
           if check(TOK_IF)
-            else_block = [parse_if_statement(loc)]
+            # +1 as a statement of the else branch: the TS reference reaches
+            # this if through parseBlockOrSingle -> parseStatement.
+            else_block = [nested { parse_if_statement(loc) }]
           else
             else_block = parse_block_or_single_statement
           end
@@ -1112,18 +1290,12 @@ module RunarCompiler
           update = AssignmentStmt.new(
             target: update_expr, value: rhs, source_location: update_loc
           )
-        elsif match_tok(TOK_PLUSEQ)
+        elsif (bin_op = COMPOUND_OPS[peek.kind])
+          advance
           rhs = parse_expression
           update = AssignmentStmt.new(
             target: update_expr,
-            value: BinaryExpr.new(op: "+", left: update_expr, right: rhs),
-            source_location: update_loc
-          )
-        elsif match_tok(TOK_MINUSEQ)
-          rhs = parse_expression
-          update = AssignmentStmt.new(
-            target: update_expr,
-            value: BinaryExpr.new(op: "-", left: update_expr, right: rhs),
+            value: BinaryExpr.new(op: bin_op, left: update_expr, right: rhs),
             source_location: update_loc
           )
         else
@@ -1159,7 +1331,7 @@ module RunarCompiler
       #   postfix (. [] () postfix ++ --)
 
       def parse_expression
-        parse_ternary
+        nested { parse_ternary }
       end
 
       def parse_ternary
@@ -1178,57 +1350,65 @@ module RunarCompiler
       end
 
       def parse_or
+        start = loc
         left = parse_and
         while match_tok(TOK_PIPEPIPE)
           right = parse_and
-          left = BinaryExpr.new(op: "||", left: left, right: right)
+          left = BinaryExpr.new(op: "||", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_and
+        start = loc
         left = parse_bit_or
         while match_tok(TOK_AMPAMP)
           right = parse_bit_or
-          left = BinaryExpr.new(op: "&&", left: left, right: right)
+          left = BinaryExpr.new(op: "&&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_or
+        start = loc
         left = parse_bit_xor
         while match_tok(TOK_PIPE)
           right = parse_bit_xor
-          left = BinaryExpr.new(op: "|", left: left, right: right)
+          left = BinaryExpr.new(op: "|", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_xor
+        start = loc
         left = parse_bit_and
         while match_tok(TOK_CARET)
           right = parse_bit_and
-          left = BinaryExpr.new(op: "^", left: left, right: right)
+          left = BinaryExpr.new(op: "^", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_bit_and
+        start = loc
         left = parse_equality
         while match_tok(TOK_AMP)
           right = parse_equality
-          left = BinaryExpr.new(op: "&", left: left, right: right)
+          left = BinaryExpr.new(op: "&", left: left, right: right, source_location: start)
         end
         left
       end
 
       def parse_equality
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = loc
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
-            left = fold_compare_to_zero("===", left, parse_comparison)
+            left = fold_compare_to_zero("===", left, parse_comparison, start)
           elsif match_tok(TOK_BANGEQ)
-            left = fold_compare_to_zero("!==", left, parse_comparison)
+            left = fold_compare_to_zero("!==", left, parse_comparison, start)
           else
             break
           end
@@ -1237,16 +1417,19 @@ module RunarCompiler
       end
 
       def parse_comparison
+        # N-505: a comparison node is located at its first token, as the TS
+        # reference's Java parser locates it (folded compareTo included).
+        start = loc
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = fold_compare_to_zero("<", left, parse_shift)
+            left = fold_compare_to_zero("<", left, parse_shift, start)
           elsif match_tok(TOK_LTEQ)
-            left = fold_compare_to_zero("<=", left, parse_shift)
+            left = fold_compare_to_zero("<=", left, parse_shift, start)
           elsif match_tok(TOK_GT)
-            left = fold_compare_to_zero(">", left, parse_shift)
+            left = fold_compare_to_zero(">", left, parse_shift, start)
           elsif match_tok(TOK_GTEQ)
-            left = fold_compare_to_zero(">=", left, parse_shift)
+            left = fold_compare_to_zero(">=", left, parse_shift, start)
           else
             break
           end
@@ -1262,18 +1445,18 @@ module RunarCompiler
       # Rúnar AST matches the IR produced by +<a> <cmp> <b>+ in other
       # formats. Any other shape leaves +compareTo+ as an unknown call
       # (which the typechecker rejects loudly).
-      def fold_compare_to_zero(op, left, right)
+      def fold_compare_to_zero(op, left, right, start)
         if left_pair = compare_to_receiver_arg(left)
           if right.is_a?(BigIntLiteral) && right.value == 0
-            return BinaryExpr.new(op: op, left: left_pair[0], right: left_pair[1])
+            return BinaryExpr.new(op: op, left: left_pair[0], right: left_pair[1], source_location: start)
           end
         end
         if right_pair = compare_to_receiver_arg(right)
           if left.is_a?(BigIntLiteral) && left.value == 0
-            return BinaryExpr.new(op: op, left: right_pair[1], right: right_pair[0])
+            return BinaryExpr.new(op: op, left: right_pair[1], right: right_pair[0], source_location: start)
           end
         end
-        BinaryExpr.new(op: op, left: left, right: right)
+        BinaryExpr.new(op: op, left: left, right: right, source_location: start)
       end
 
       def compare_to_receiver_arg(e)
@@ -1284,12 +1467,13 @@ module RunarCompiler
       end
 
       def parse_shift
+        start = loc
         left = parse_additive
         loop do
           if match_tok(TOK_LSHIFT)
-            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive, source_location: start)
           elsif match_tok(TOK_RSHIFT)
-            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive, source_location: start)
           else
             break
           end
@@ -1298,12 +1482,13 @@ module RunarCompiler
       end
 
       def parse_additive
+        start = loc
         left = parse_multiplicative
         loop do
           if match_tok(TOK_PLUS)
-            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "+", left: left, right: parse_multiplicative, source_location: start)
           elsif match_tok(TOK_MINUS)
-            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative)
+            left = BinaryExpr.new(op: "-", left: left, right: parse_multiplicative, source_location: start)
           else
             break
           end
@@ -1312,14 +1497,15 @@ module RunarCompiler
       end
 
       def parse_multiplicative
+        start = loc
         left = parse_unary
         loop do
           if match_tok(TOK_STAR)
-            left = BinaryExpr.new(op: "*", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "*", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_SLASH)
-            left = BinaryExpr.new(op: "/", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "/", left: left, right: parse_unary, source_location: start)
           elsif match_tok(TOK_PERCENT)
-            left = BinaryExpr.new(op: "%", left: left, right: parse_unary)
+            left = BinaryExpr.new(op: "%", left: left, right: parse_unary, source_location: start)
           else
             break
           end
@@ -1328,24 +1514,28 @@ module RunarCompiler
       end
 
       def parse_unary
+        op_loc = loc
         if match_tok(TOK_BANG)
-          return UnaryExpr.new(op: "!", operand: parse_unary)
+          return UnaryExpr.new(op: "!", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_MINUS)
-          return UnaryExpr.new(op: "-", operand: parse_unary)
+          # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+          # legal only as the direct operand of this minus.
+          peek.neg_only = false if check(TOK_NUMBER)
+          return UnaryExpr.new(op: "-", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_PLUS)
           # Unary plus is a no-op in Java (+x == x).
-          return parse_unary
+          return nested { parse_unary }
         end
         if match_tok(TOK_TILDE)
-          return UnaryExpr.new(op: "~", operand: parse_unary)
+          return UnaryExpr.new(op: "~", operand: nested { parse_unary }, source_location: op_loc)
         end
         if match_tok(TOK_PLUSPLUS)
-          return IncrementExpr.new(operand: parse_unary, prefix: true)
+          return IncrementExpr.new(operand: nested { parse_unary }, prefix: true)
         end
         if match_tok(TOK_MINUSMINUS)
-          return DecrementExpr.new(operand: parse_unary, prefix: true)
+          return DecrementExpr.new(operand: nested { parse_unary }, prefix: true)
         end
         parse_postfix(parse_primary)
       end
@@ -1471,7 +1661,7 @@ module RunarCompiler
         if method_name == "fromHex" && args.length == 1
           arg = args[0]
           if arg.is_a?(ByteStringLiteral)
-            return ByteStringLiteral.new(value: arg.value)
+            return ByteStringLiteral.new(value: arg.value, source_location: arg.source_location)
           end
           # fromHex with a non-literal string is not supported here; fall
           # through to a regular call expression.
@@ -1580,6 +1770,7 @@ module RunarCompiler
 
         # Number literal -> BigIntLiteral (Rúnar has no Number type)
         if tok.kind == TOK_NUMBER
+          @errors << Frontend.lex_error(IntLiteral.invalid_integer_literal("java", tok.raw), @file_name, tok.line, tok.col) if tok.neg_only
           advance
           return parse_number(tok.value)
         end
@@ -1594,12 +1785,12 @@ module RunarCompiler
           # so that the common fromHex use-case works byte-for-byte with
           # the authoritative Java parser.
           advance
-          return ByteStringLiteral.new(value: tok.value)
+          return ByteStringLiteral.new(value: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Character literal -- rejected.
         if tok.kind == TOK_CHAR
-          fatal("char literals are unsupported in #{@file_name}")
+          fatal(JAVA_CHAR_LITERAL)
         end
 
         # Booleans
@@ -1730,7 +1921,7 @@ module RunarCompiler
         # Identifier
         if tok.kind == TOK_IDENT
           advance
-          return Identifier.new(name: tok.value)
+          return Identifier.new(name: tok.value, source_location: SourceLocation.new(file: @file_name, line: tok.line, column: tok.col))
         end
 
         # Fallback: consume to avoid infinite loop, surface as zero.
@@ -1770,12 +1961,25 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_java(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
+      lex = []
+      Frontend.with_lex_errors(
+        InputLimits.with_nesting_limit(file_name) { _parse_java_tokens(source, file_name, lex) }, lex
+      )
+    end
+
+    def self._parse_java_tokens(source, file_name, lex)
       p = JavaParser.new(file_name)
-      p.tokens = tokenize_java(source)
+      p.tokens = tokenize_java(source, lex, file_name)
       p.pos = 0
 
       begin
         contract = p.parse_contract
+      rescue InputLimits::SourceNestingError
+        raise
       rescue => e
         return ParseResult.new(
           errors: [Diagnostic.new(message: e.message, severity: Severity::ERROR)]

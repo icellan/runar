@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -245,49 +246,6 @@ func buildFundingTx(alice, bob *Wallet, aliceUTXO, bobUTXO *UTXO, lockingScriptH
 	return tx.String(), nil
 }
 
-func buildSpendingTx(alice, bob *Wallet, contractUTXO *UTXO, winnerP2PKH string, contractSats uint64) (string, error) {
-	tx := transaction.NewTransaction()
-
-	if err := tx.AddInputFrom(contractUTXO.Txid, contractUTXO.Vout, contractUTXO.Script, contractSats, nil); err != nil {
-		return "", fmt.Errorf("add contract input: %w", err)
-	}
-
-	winnerScript, err := script.NewFromHex(winnerP2PKH)
-	if err != nil {
-		return "", fmt.Errorf("parse winner script: %w", err)
-	}
-	tx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      contractSats,
-		LockingScript: winnerScript,
-	})
-
-	sigHash, err := tx.CalcInputSignatureHash(0, sighash.AllForkID)
-	if err != nil {
-		return "", fmt.Errorf("calc sighash: %w", err)
-	}
-
-	aliceSig, err := alice.PrivKey.Sign(sigHash)
-	if err != nil {
-		return "", fmt.Errorf("alice sign: %w", err)
-	}
-	aliceSigBytes := append(aliceSig.Serialize(), byte(sighash.AllForkID))
-
-	bobSig, err := bob.PrivKey.Sign(sigHash)
-	if err != nil {
-		return "", fmt.Errorf("bob sign: %w", err)
-	}
-	bobSigBytes := append(bobSig.Serialize(), byte(sighash.AllForkID))
-
-	unlockScript := &script.Script{}
-	_ = unlockScript.AppendPushData(aliceSigBytes)
-	_ = unlockScript.AppendPushData(bobSigBytes)
-	_ = unlockScript.AppendOpcodes(script.Op1)
-
-	tx.Inputs[0].UnlockingScript = unlockScript
-
-	return tx.String(), nil
-}
-
 func broadcastTx(txHex string) (string, error) {
 	result, err := rpcCall("sendrawtransaction", txHex)
 	if err != nil {
@@ -330,3 +288,86 @@ func findAllUTXOs(txid, expectedScript string) ([]*UTXO, error) {
 	return utxos, nil
 }
 
+// pushMinimal appends data with the shortest push a strict (MINIMALDATA) node
+// accepts: OP_0 for empty, OP_1..OP_16 / OP_1NEGATE for those single bytes.
+// AppendPushData always uses a length prefix, which such a node rejects.
+func pushMinimal(s *script.Script, data []byte) error {
+	switch {
+	case len(data) == 0:
+		return s.AppendOpcodes(script.Op0)
+	case len(data) == 1 && data[0] >= 1 && data[0] <= 16:
+		return s.AppendOpcodes(script.Op1 + data[0] - 1)
+	case len(data) == 1 && data[0] == 0x81:
+		return s.AppendOpcodes(script.Op1NEGATE)
+	default:
+		return s.AppendPushData(data)
+	}
+}
+
+// scriptNum is the minimal Script-number encoding of a non-negative v.
+func scriptNum(v *big.Int) []byte {
+	b := leBytes(v)
+	if len(b) > 0 && b[len(b)-1]&0x80 != 0 {
+		b = append(b, 0x00)
+	}
+	return b
+}
+
+// Contract slots of PriceBet.settle's two signature parameters.
+const (
+	aliceSigSlot = 0 // checked when price > strikePrice
+	bobSigSlot   = 1 // checked otherwise
+)
+
+// buildSettleTx spends a PriceBet through settle(price, rabinSig, padding,
+// aliceSig, bobSig) — the oracle path (F-162). Only the winner signs: signer's
+// signature goes in signerSlot and the other, unchecked, slot is left empty,
+// so the loser's cooperation is not needed.
+func buildSettleTx(contractUTXO *UTXO, payToP2PKH string, contractSats uint64,
+	price int64, rabinSig, padding *big.Int, signer *Wallet, signerSlot int) (string, error) {
+	tx := transaction.NewTransaction()
+
+	if err := tx.AddInputFrom(contractUTXO.Txid, contractUTXO.Vout, contractUTXO.Script, contractSats, nil); err != nil {
+		return "", fmt.Errorf("add contract input: %w", err)
+	}
+
+	payTo, err := script.NewFromHex(payToP2PKH)
+	if err != nil {
+		return "", fmt.Errorf("parse payout script: %w", err)
+	}
+	tx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      contractSats,
+		LockingScript: payTo,
+	})
+
+	sigHash, err := tx.CalcInputSignatureHash(0, sighash.AllForkID)
+	if err != nil {
+		return "", fmt.Errorf("calc sighash: %w", err)
+	}
+	sig, err := signer.PrivKey.Sign(sigHash)
+	if err != nil {
+		return "", fmt.Errorf("sign: %w", err)
+	}
+	slots := [2][]byte{}
+	slots[signerSlot] = append(sig.Serialize(), byte(sighash.AllForkID))
+
+	unlock := &script.Script{}
+	for _, push := range [][]byte{
+		scriptNum(big.NewInt(price)),
+		leBytes(rabinSig),
+		leBytes(padding),
+		slots[aliceSigSlot],
+		slots[bobSigSlot],
+	} {
+		if err := pushMinimal(unlock, push); err != nil {
+			return "", err
+		}
+	}
+	// Method selector: settle is PriceBet's first public method.
+	if err := unlock.AppendOpcodes(script.Op0); err != nil {
+		return "", err
+	}
+	tx.Inputs[0].UnlockingScript = unlock
+
+	return tx.String(), nil
+}

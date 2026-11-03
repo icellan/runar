@@ -12,27 +12,27 @@ class BitwiseOps < Runar::SmartContract
     @b = b
   end
 
-  # Verify shift operators compile and run.
-  runar_public
-  def test_shift
+  # Check the caller-supplied shift results.
+  runar_public expected_left: Bigint, expected_right: Bigint
+  def test_shift(expected_left, expected_right)
     left = @a << 2
     right = @a >> 1
-    assert left >= 0 || left < 0
-    assert right >= 0 || right < 0
-    assert true
+    assert left == expected_left
+    assert right == expected_right
   end
 
-  # Verify bitwise operators compile and run.
-  runar_public
-  def test_bitwise
+  # Check the caller-supplied AND/OR/XOR results; ~ is checked by double
+  # inversion and De Morgan's law (see the TS source for why).
+  runar_public expected_and: Bigint, expected_or: Bigint, expected_xor: Bigint
+  def test_bitwise(expected_and, expected_or, expected_xor)
     and_result = @a & @b
     or_result = @a | @b
     xor_result = @a ^ @b
     not_result = ~@a
-    assert and_result >= 0 || and_result < 0
-    assert or_result >= 0 || or_result < 0
-    assert xor_result >= 0 || xor_result < 0
-    assert not_result >= 0 || not_result < 0
-    assert true
+    assert and_result == expected_and
+    assert or_result == expected_or
+    assert xor_result == expected_xor
+    assert ~not_result == @a
+    assert ~(@a | @b) == (not_result & ~@b)
   end
 end

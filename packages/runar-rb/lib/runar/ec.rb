@@ -39,8 +39,12 @@ module Runar
         [g, y - (b / a) * x, x]
       end
 
+      # inv(0) = 0, as the compiled script's Fermat inverse gives (N-111). An
+      # off-curve (x, 0) doubling no longer reaches it: the script aborts (N-110).
       def modinv(a, m)
-        a = a % m if a < 0
+        a %= m
+        return 0 if a.zero?
+
         g, x, = extended_gcd(a, m)
         raise ArgumentError, 'Modular inverse does not exist' unless g == 1
 
@@ -53,6 +57,8 @@ module Runar
 
         if x1 == x2
           return [0, 0] if y1 != y2
+          # N-110: the compiled tangent OP_VERIFYs py != 0 (O + O returned above).
+          raise ArgumentError, 'ec_add: cannot double a point with y = 0 (the tangent is vertical)' if y1 == 0
 
           # Point doubling
           lam = (3 * x1 * x1 * modinv(2 * y1, EC_P)) % EC_P
@@ -63,6 +69,14 @@ module Runar
         x3 = (lam * lam - x1 - x2) % EC_P
         y3 = (lam * (x1 - x3) - y1) % EC_P
         [x3, y3]
+      end
+
+      # R-117 (N-111): the compiled ec_add / ec_negate OP_VERIFY x < p and
+      # y < p before any field arithmetic, so a non-canonical coordinate aborts.
+      def require_canonical(fn, x, y)
+        return if x < EC_P && y < EC_P
+
+        raise ArgumentError, "#{fn}: point coordinate is not a canonical field element (x and y must be < p)"
       end
 
       def point_mul(x, y, k)
@@ -101,6 +115,16 @@ module Runar
 
       # Check if point is on the secp256k1 curve.
       def ec_on_curve(p)
+        # N-184: a predicate over untrusted bytes must stay total. The
+        # compiled emitPointLengthGate ANDs a width flag into the result
+        # instead of aborting, so a 63- or 65-byte blob is false, not a raise
+        # -- matching the `if ec_on_curve(p) ... else ... end` idiom this
+        # module tells contract authors to write. decode_point raises on the
+        # wrong width, which is correct for ec_add/ec_mul/ec_negate (the
+        # script aborts there too) but wrong here, so this check must run
+        # before it.
+        return false unless p.length == 128
+
         x, y = decode_point(p)
         # The all-zero blob is this codegen's encoding of the point at infinity,
         # and it is NOT on the curve: the emitted ec_on_curve is exactly
@@ -109,6 +133,16 @@ module Runar
         # stands in for, so `assert(ec_on_curve(r))` passed off-chain and failed
         # on-chain for r = O -- an unspendable output found only after deploy.
         # O is now reachable from ec_add(P, -P), so this matters in practice.
+        #
+        # CL-BUG-161 / F-243: coordinate canonicity. decode_point parses each
+        # half as an unsigned big-endian integer with no range check, so a
+        # coordinate written as x0 + EC_P (still 32 bytes, still a valid script
+        # number) reaches the field arithmetic below, which reduces it mod
+        # EC_P and silently accepts it as if it were x0. The compiled script
+        # range-checks x < EC_P and y < EC_P BEFORE the curve-equation check
+        # (GAP-301), so this mock must reject what the script rejects.
+        return false if x >= EC_P || y >= EC_P
+
         lhs = (y * y) % EC_P
         rhs = (x * x * x + 7) % EC_P
         lhs == rhs
@@ -117,6 +151,7 @@ module Runar
       # Negate a point (reflect over x-axis).
       def ec_negate(p)
         x, y = decode_point(p)
+        require_canonical('ec_negate', x, y)
         encode_point(x, (EC_P - y) % EC_P)
       end
 
@@ -129,6 +164,8 @@ module Runar
       def ec_add(a, b)
         x1, y1 = decode_point(a)
         x2, y2 = decode_point(b)
+        require_canonical('ec_add', x1, y1)
+        require_canonical('ec_add', x2, y2)
         rx, ry = point_add(x1, y1, x2, y2)
         encode_point(rx, ry)
       end
@@ -136,6 +173,12 @@ module Runar
       # Scalar multiplication.
       def ec_mul(p, k)
         x, y = decode_point(p)
+        # R-157 (N-111): the compiled ec_mul OP_VERIFYs `on_curve(P) || P == O`
+        # before its ladder, whose +3n trick is sound only for points of order n.
+        unless (x.zero? && y.zero?) || ec_on_curve(p)
+          raise ArgumentError, 'ec_mul: point is neither on secp256k1 nor the point at infinity'
+        end
+
         rx, ry = point_mul(x, y, k)
         encode_point(rx, ry)
       end
@@ -148,6 +191,11 @@ module Runar
 
       # Create a Point from x, y integer coordinates.
       def ec_make_point(x, y)
+        # N-183 / R-156: the script requires 0 <= v < p for each coordinate.
+        unless x >= 0 && x < EC_P && y >= 0 && y < EC_P
+          raise ArgumentError, 'ec_make_point: coordinate is not a field element (0 <= v < p)'
+        end
+
         encode_point(x, y)
       end
 

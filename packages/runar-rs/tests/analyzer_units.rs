@@ -7,7 +7,7 @@
 
 use runar_lang::analyzer::{
     analyze_script, analyze_script_with_options, opcode_concerns::format_kb, script_parser,
-    serialize_report, AnalyzeOptions, RawScriptSpan,
+    serialize_report, AnalyzeOptions, AnalyzerError, RawScriptSpan,
 };
 
 /// Helper: filter findings by code.
@@ -79,6 +79,29 @@ fn checksig_result_dropped() {
     assert!(codes(&r).contains(&"CHECKSIG_RESULT_DROPPED"));
     // OP_CHECKSIG also satisfies hasCheckSig, so NO_SIG_CHECK should NOT fire.
     assert!(!codes(&r).contains(&"NO_SIG_CHECK"));
+}
+
+// F-234: OP_2DROP pops the CHECKSIG result as surely as OP_DROP does, so
+// `OP_CHECKSIG OP_2DROP OP_1` used to verify clean. Proves the immediate
+// OP_2DROP form is flagged with the spec §5.1 message and that OP_NIP (which
+// removes the item BELOW the result) is not. Does not prove that longer
+// discard sequences (OP_SWAP OP_NIP, OP_TOALTSTACK, ...) are caught: the rule
+// only looks at the next opcode.
+#[test]
+fn checksig_result_dropped_by_2drop() {
+    for (hex, want, offset) in [
+        ("0000ac6d51", "OP_CHECKSIG result is dropped by OP_2DROP — signature check has no effect", 2),
+        ("000000ae6d51", "OP_CHECKMULTISIG result is dropped by OP_2DROP — signature check has no effect", 3),
+    ] {
+        let r = analyze_script(hex).unwrap();
+        let got: Vec<_> = r.findings.iter().filter(|f| f.code == "CHECKSIG_RESULT_DROPPED").collect();
+        assert_eq!(got.len(), 1, "{hex}: {:?}", codes(&r));
+        assert_eq!(got[0].message, want);
+        assert_eq!(got[0].offset, Some(offset));
+    }
+    // OP_0 OP_0 OP_CHECKSIG OP_NIP — the result survives on top; not flagged.
+    let r = analyze_script("0000ac77").unwrap();
+    assert!(!codes(&r).contains(&"CHECKSIG_RESULT_DROPPED"));
 }
 
 #[test]
@@ -230,15 +253,56 @@ fn large_script_not_emitted_at_500_000() {
 }
 
 #[test]
-fn format_kb_round_half_to_even() {
+fn format_kb_non_tie_cases() {
+    // None of these land on an exact tie at the tenths digit, so
+    // round-half-up and round-half-to-even agree on all of them.
     // 1024 → "1.0"
     assert_eq!(format_kb(1024), "1.0");
     // 1536 (1024 + 512, exactly 1.5 KB) → "1.5" (no half).
     assert_eq!(format_kb(1536), "1.5");
     // 51 → 51/1024 = 0.04980... → "0.0"
     assert_eq!(format_kb(51), "0.0");
-    // 52 → 52/1024 = 0.05078 → "0.1" (banker still rounds 0.05->0.0 in halves, but this is 0.0508)
+    // 52 → 52/1024 = 0.05078 → "0.1"
     assert_eq!(format_kb(52), "0.1");
+}
+
+#[test]
+fn format_kb_breaks_ties_like_js_not_half_to_even() {
+    // 500992/1024 = 489.25 exactly (1024 is a power of two, so the
+    // division has no rounding error). Scaled by 10 that is 4892.5 — an
+    // exact tie at the tenths digit. JS Number.prototype.toFixed(1) does
+    // NOT use round-half-to-even: per spec it picks the integer n for
+    // which n/10 - x is closest to zero, and on a tie picks the LARGER n.
+    // Verified live: node -e "console.log((500992/1024).toFixed(1))" ->
+    // "489.3". Round-half-to-even rounds 4892.5 down to 4892 (already
+    // even), producing the wrong "489.2".
+    assert_eq!(format_kb(500_992), "489.3");
+}
+
+#[test]
+fn format_kb_does_not_move_existing_analyzer_goldens() {
+    // Pins the two LARGE_SCRIPT conformance goldens
+    // (conformance/analyzer/{ec-demo,schnorr-zkp}) so the tie-rounding fix
+    // above is proven not to move them — neither size lands on an exact
+    // .5 tie at the tenths digit.
+    assert_eq!(format_kb(1_337_343), "1306.0");
+    assert_eq!(format_kb(877_253), "856.7");
+}
+
+#[test]
+fn analyze_script_normalize_strips_js_whitespace_set() {
+    // The TS reference strips exactly what JS's /\s/g matches: a fixed
+    // 25-codepoint set (ECMA-262 WhiteSpace + LineTerminator). NBSP
+    // (U+00A0) and the BOM (U+FEFF) are both in that set. Verified
+    // against the live TS analyzer: both inputs below normalize to
+    // "76a988ac".
+    let r = analyze_script("76\u{00a0}a9\u{00a0}88\u{00a0}ac").unwrap();
+    assert_eq!(r.script, "76a988ac");
+    assert_eq!(r.script_size, 4);
+
+    let r = analyze_script("\u{feff}76a988ac").unwrap();
+    assert_eq!(r.script, "76a988ac");
+    assert_eq!(r.script_size, 4);
 }
 
 #[test]
@@ -246,7 +310,7 @@ fn raw_span_collapse_drops_inner_opcodes() {
     // 4 bytes that decode to OP_NOP × 4. Provide a single span covering
     // bytes [1, 3). Opcodes at offsets 1 and 2 should collapse to one
     // RAW_SPAN; opcodes at 0 and 3 stay.
-    let opcodes = script_parser::parse_script("61616161");
+    let opcodes = script_parser::parse_script("61616161").unwrap();
     let spans = vec![RawScriptSpan {
         offset: 1,
         length: 2,
@@ -293,4 +357,88 @@ fn serializer_omits_optional_fields() {
     assert!(!s.contains("\"offset\""));
     assert!(!s.contains("\"opcode\""));
     assert!(!s.contains("\"path\""));
+}
+
+/// The seven Chronicle opcodes the compiler emits, with the (pops, pushes)
+/// the @bsv/sdk interpreter (Spend.ts) gives them.
+const CHRONICLE: [(&str, &str, i64, i64); 7] = [
+    ("8d", "OP_2MUL", 1, 1),
+    ("8e", "OP_2DIV", 1, 1),
+    ("b3", "OP_SUBSTR", 3, 1),
+    ("b4", "OP_LEFT", 2, 1),
+    ("b5", "OP_RIGHT", 2, 1),
+    ("b6", "OP_LSHIFTNUM", 2, 1),
+    ("b7", "OP_RSHIFTNUM", 2, 1),
+];
+
+/// F-131. Proves: the Chronicle opcodes are named per spec §4.1 and modelled
+/// with their real stack effect, in the lookup and in the observable report
+/// (underflow message, stackDepthAtEnd, maxStackDepth). Does not prove runtime
+/// semantics (the analyzer is static) and does not re-derive the arities from
+/// the interpreter.
+#[test]
+fn chronicle_opcodes_names_and_effects() {
+    use runar_lang::analyzer::stack_analyzer::{analyze_stack_linear, stack_effect};
+    for (b, name, pops, pushes) in CHRONICLE {
+        let ops = script_parser::parse_script(b).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].name, name, "0x{b} name");
+        assert_eq!(stack_effect(&ops[0]), (pops, pushes), "{name} effect");
+
+        // OP_DROP empties a stack of known depth 1, then the opcode needs `pops` items.
+        let lin = analyze_stack_linear(&script_parser::parse_script(&format!("75{b}")).unwrap(), 1);
+        let want = format!("{name} requires {pops} stack item(s) but only 0 available");
+        assert!(
+            lin.findings.iter().any(|f| f.code == "STACK_UNDERFLOW" && f.message == want),
+            "{name}: missing underflow {want:?}"
+        );
+
+        // `pops` pushes of OP_1 then the opcode leave exactly `pushes` items.
+        let r = analyze_script(&format!("{}{b}", "51".repeat(pops as usize))).unwrap();
+        assert_eq!(r.paths[0].stack_depth_at_end, pushes, "{name} depth at end");
+        assert_eq!(r.summary.max_stack_depth, pushes, "{name} maxStackDepth");
+    }
+
+    // A genuinely unknown byte keeps the OP_UNKNOWN name and (0, 0) effect.
+    let ops = script_parser::parse_script("b8").unwrap();
+    assert_eq!(ops[0].name, "OP_UNKNOWN(0xb8)");
+    assert_eq!(stack_effect(&ops[0]), (0, 0));
+}
+
+/// N-176. Proves: a hex string carrying a byte that survives JS-`\s`
+/// normalisation but is not a hex digit — a C0 separator (U+001C, kept by
+/// `normalize_hex` per F-272) or a plain non-hex letter pair ("zz") — makes
+/// `analyze_script` return `Err(AnalyzerError::InvalidHex)` with the TS
+/// reference's exact diagnostic text, instead of silently treating the
+/// invalid hex as an empty byte stream (the pre-existing
+/// `decode_hex(..).unwrap_or_default()` leniency). Also covers the odd-length
+/// case the same `decode_hex` call used to swallow. Does not prove every
+/// non-hex byte or every odd length is handled identically — only these two
+/// representative shapes.
+#[test]
+fn invalid_hex_is_refused_not_silently_emptied() {
+    // A C0 separator (U+001C) is not JS `\s` and is kept by normalize_hex,
+    // then rejected as a non-hex character — matching the TS reference's
+    // `hexVal` throw. (Even length overall, so the odd-length check below
+    // does not fire first.)
+    let err = analyze_script("76\u{1c}a90").unwrap_err();
+    assert!(
+        matches!(&err, AnalyzerError::InvalidHex(msg) if msg.contains("Invalid hex character")),
+        "expected InvalidHex mentioning the TS diagnostic, got {err:?}"
+    );
+
+    // Two non-hex-digit letters.
+    let err = analyze_script("zz").unwrap_err();
+    assert!(
+        matches!(&err, AnalyzerError::InvalidHex(msg) if msg.contains("Invalid hex character")),
+        "expected InvalidHex mentioning the TS diagnostic, got {err:?}"
+    );
+
+    // Odd length (after normalization) — the TS reference's other
+    // `hexToBytes` throw.
+    let err = analyze_script("abc").unwrap_err();
+    assert!(
+        matches!(&err, AnalyzerError::InvalidHex(msg) if msg.contains("odd length")),
+        "expected InvalidHex mentioning odd length, got {err:?}"
+    );
 }

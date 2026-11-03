@@ -1,0 +1,36 @@
+{
+  "fixture": "shift-ops",
+  "kind": "stateless-signed",
+  "note": "F-167: the contract used to assert only tautologies (`x >= 0 || x < 0`), so no input could make it fail and the golden pinned bytes that constrained nothing. The caller now supplies the expected shift results and the contract checks them. Every expected value below is worked out by hand from the source with a = 12 (0x0c) — a one-byte operand whose shifted results stay minimal and below 0x80 — not taken from compiler output. No signature is involved; this spec runs the fixture's compiled bytes through @bsv/sdk's consensus Spend.validate() for an accept AND wrong-value near-miss rejects.",
+  "constructorArgs": { "a": "12n" },
+  "spends": [
+    {
+      "method": "testShift",
+      "args": ["96n", "3n"],
+      "expect": "accept",
+      "note": "0x0c << 3 = 0x60 = 96; 0x0c >> 2 = 0x03 = 3"
+    },
+    {
+      "method": "testShift",
+      "args": ["97n", "3n"],
+      "expect": "reject",
+      "note": "near-miss: wrong precomputed left-shift result (97 != 96) — OP_NUMEQUALVERIFY fails"
+    },
+    {
+      "method": "testShift",
+      "args": ["96n", "2n"],
+      "expect": "reject",
+      "note": "near-miss: wrong precomputed right-shift result (2 != 3) — the final OP_NUMEQUAL leaves false"
+    },
+    {
+      "method": "testShift",
+      "args": ["3n", "96n"],
+      "expect": "reject",
+      "note": "near-miss: results swapped — what an OP_LSHIFT/OP_RSHIFT mix-up would produce"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "8c37371800680eccd39ffd4d0d8c4043e38bd6a68c4b3f3893001b1b42c7df8a",
+    "expected-ir.json": "c578c370fe50811e4606bc47ed56bb278ceab92dd3e4d763c19ab4afa0821899"
+  }
+}

@@ -43,6 +43,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.rb} (Ruby) source into a Rúnar {@link ContractNode}.
@@ -77,9 +78,24 @@ public final class RbParser {
 
     /** Parse Ruby source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser parser = new Parser(tokens, filename);
-        ContractNode contract = parser.parseTop();
+        // F-213: measures (A) and (B). parseClass's recursive bare-call
+        // rewrite runs inside this guard, so the StackOverflowError backstop
+        // covers it on a loop-built tree too deep for it.
+        ContractNode contract = SourceNesting.guard(parser::parseTop, ParseException::new);
+        String collision = parser.idents.message();
+        if (contract != null && collision != null) parser.errors.add(collision);
         if (!parser.errors.isEmpty()) {
             throw new ParseException(String.join("\n", parser.errors));
         }
@@ -306,6 +322,7 @@ public final class RbParser {
         m.put("Integer", "bigint");
         m.put("Int", "bigint");
         m.put("Boolean", "boolean");
+        m.put("Bool", "boolean");
         m.put("ByteString", "ByteString");
         m.put("PubKey", "PubKey");
         m.put("Sig", "Sig");
@@ -336,17 +353,32 @@ public final class RbParser {
     // ---------------------------------------------------------------
 
     private static boolean isIdentStart(char c) {
-        return Character.isLetter(c) || c == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(c) || c == '_';
     }
 
     private static boolean isIdentPart(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return LexDiag.isAsciiLetter(c) || (c >= '0' && c <= '9') || c == '_';
     }
 
-    private static List<Token> tokenize(String source) throws ParseException {
+    /**
+     * Whether {@code line} starts at column 0 with {@code marker}
+     * ({@code =begin} or {@code =end}) as a whole word: followed by ASCII
+     * whitespace (Ruby's {@code \s}) or end of line.
+     */
+    private static boolean isEmbeddedDocMarker(String line, String marker) {
+        if (!line.startsWith(marker)) return false;
+        if (line.length() == marker.length()) return true;
+        return " \t\n\u000b\f\r".indexOf(line.charAt(marker.length())) >= 0;
+    }
+
+    private static List<Token> tokenize(String source, String filename, List<String> lex) throws ParseException {
         List<Token> tokens = new ArrayList<>();
         String[] lines = source.split("\n", -1);
         int parenDepth = 0;
+        // Line number of an open `=begin` embedded document, or 0.
+        int blockCommentStart = 0;
 
         for (int lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             int lineNum = lineIdx + 1;
@@ -356,6 +388,22 @@ public final class RbParser {
                 raw = raw.substring(0, raw.length() - 1);
             }
             String line = raw;
+
+            // N-021: Ruby embedded documents, the Ruby tier's F-018 rule
+            // (Ruby's own). `=begin` / `=end` open and close a block comment
+            // only at column 0 and only as a whole word (followed by
+            // whitespace or end of line). Every line from `=begin` through
+            // `=end` is a comment. Before this, a method "commented out" this
+            // way compiled as a live spend path and the `end` of `=end`
+            // closed the class early.
+            if (blockCommentStart != 0) {
+                if (isEmbeddedDocMarker(line, "=end")) blockCommentStart = 0;
+                continue;
+            }
+            if (isEmbeddedDocMarker(line, "=begin")) {
+                blockCommentStart = lineNum;
+                continue;
+            }
 
             // Detect blank or comment-only lines
             int firstNonSpace = 0;
@@ -370,7 +418,7 @@ public final class RbParser {
             int pos = firstNonSpace;
             while (pos < line.length()) {
                 char ch = line.charAt(pos);
-                int col = pos + 1;
+                int col = pos;
 
                 if (ch == ' ' || ch == '\t') {
                     pos++;
@@ -390,6 +438,12 @@ public final class RbParser {
                     String name = line.substring(nameStart, pos);
                     if (!name.isEmpty()) {
                         tokens.add(new Token(TK.IVAR, name, lineNum, col));
+                    } else {
+                        // N-214: a bare `@` was dropped, so `a + @ b` compiled
+                        // as `a + b`. The TS reference lexes it as its own token
+                        // and refuses it in the expression; refuse it with TS's
+                        // diagnostic.
+                        lex.add(LexDiag.at(filename, lineNum, col, "Unexpected token in expression: '@'"));
                     }
                     continue;
                 }
@@ -515,6 +569,9 @@ public final class RbParser {
                         }
                     }
                     if (pos < line.length()) pos++; // closing quote
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    else lex.add(LexDiag.at(filename, lineNum, col, LexDiag.UNTERMINATED_STRING_LITERAL));
                     tokens.add(new Token(TK.HEXSTRING, val.toString(), lineNum, col));
                     continue;
                 }
@@ -534,41 +591,16 @@ public final class RbParser {
                         }
                     }
                     if (pos < line.length()) pos++;
+                    else lex.add(LexDiag.at(filename, lineNum, col, LexDiag.UNTERMINATED_STRING_LITERAL));
                     tokens.add(new Token(TK.STRING, val.toString(), lineNum, col));
                     continue;
                 }
 
-                // Number (decimal or hex)
-                if (Character.isDigit(ch)) {
-                    StringBuilder buf = new StringBuilder();
-                    if (ch == '0' && pos + 1 < line.length()
-                        && (line.charAt(pos + 1) == 'x' || line.charAt(pos + 1) == 'X')) {
-                        buf.append("0x");
-                        pos += 2;
-                        while (pos < line.length()) {
-                            char c2 = line.charAt(pos);
-                            if (c2 == '_') { pos++; continue; }
-                            if (Character.isDigit(c2)
-                                || (c2 >= 'a' && c2 <= 'f') || (c2 >= 'A' && c2 <= 'F')) {
-                                buf.append(c2);
-                                pos++;
-                            } else {
-                                break;
-                            }
-                        }
-                    } else {
-                        while (pos < line.length()) {
-                            char c2 = line.charAt(pos);
-                            if (c2 == '_') { pos++; continue; }
-                            if (Character.isDigit(c2)) {
-                                buf.append(c2);
-                                pos++;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    tokens.add(new Token(TK.NUMBER, buf.toString(), lineNum, col));
+                // Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+                if (ch >= '0' && ch <= '9') {
+                    IntLiteral.Scan sc = IntLiteral.lex("rb", line, pos, lex, filename, lineNum, col);
+                    pos = sc.end();
+                    tokens.add(new Token(TK.NUMBER, sc.value(), lineNum, col));
                     continue;
                 }
 
@@ -593,17 +625,24 @@ public final class RbParser {
                     continue;
                 }
 
-                // Unknown character — skip rather than crash. Mirrors the
-                // Python tokeniser behaviour.
+                // N-214: an unrecognised character is refused, as the TS reference
+                // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+                lex.add(LexDiag.at(filename, lineNum, col, "Unexpected character '" + ch + "'"));
                 pos++;
             }
 
             if (parenDepth == 0) {
-                tokens.add(new Token(TK.NEWLINE, "", lineNum, line.length() + 1));
+                tokens.add(new Token(TK.NEWLINE, "", lineNum, line.length()));
             }
         }
 
-        tokens.add(new Token(TK.EOF, "", lines.length + 1, 1));
+        if (blockCommentStart != 0) {
+            // `file:N:` with no column is how the Go tier prints this
+            // diagnostic's column-0 location.
+            lex.add(filename + ":" + blockCommentStart + ": unterminated '=begin' block comment starting at line "
+                + blockCommentStart + ": missing '=end'");
+        }
+        tokens.add(new Token(TK.EOF, "", lines.length + 1, 0));
         return tokens;
     }
 
@@ -628,7 +667,11 @@ public final class RbParser {
         final String file;
         int pos;
         final List<String> errors = new ArrayList<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
         Set<String> declaredLocals = new HashSet<>();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         Parser(List<Token> tokens, String file) {
             this.tokens = tokens;
@@ -693,7 +736,17 @@ public final class RbParser {
                 parseRequireLine();
                 skipNewlines();
             }
-            return parseClass();
+            ContractNode contract = parseClass();
+            if (contract != null) {
+                // N-004: nothing may follow the class's `end`.
+                skipNewlines();
+                Token trailing = peek();
+                if (trailing.kind != TK.EOF) {
+                    errors.add(file + ":" + trailing.line + ":" + trailing.col + ": "
+                        + LexDiag.unexpectedTokenAfterClass(trailing.value));
+                }
+            }
+            return contract;
         }
 
         void parseRequireLine() {
@@ -735,7 +788,8 @@ public final class RbParser {
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                 case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 default -> {
-                    errors.add(file + ":" + firstPart.line + ": unknown parent class: " + parentClassName);
+                    errors.add(file + ":" + firstPart.line + ": unknown parent class: '" + parentClassName
+                        + "', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract");
                     return null;
                 }
             }
@@ -746,6 +800,10 @@ public final class RbParser {
 
             String pendingVisibility = null;
             Map<String, TypeNode> pendingParamTypes = null;
+            // N-093: pending `runar_sighash` specs (null = malformed) for the
+            // next def, each with the location of its macro.
+            List<String> pendingSighash = new ArrayList<>();
+            List<SourceLocation> pendingSighashLocs = new ArrayList<>();
 
             while (peek().kind != TK.END && peek().kind != TK.EOF) {
                 skipNewlines();
@@ -754,6 +812,22 @@ public final class RbParser {
                 if (checkIdent("prop")) {
                     PropertyNode p = parseProp(parentClass);
                     if (p != null) properties.add(p);
+                    skipNewlines();
+                    continue;
+                }
+                // N-093: `runar_sighash 'FLAGS'` is the native spelling of the
+                // `@sighash` directive; it applies to the next `def`.
+                if (checkIdent("runar_sighash")) {
+                    pendingSighashLocs.add(loc());
+                    advance(); // 'runar_sighash'
+                    Token arg = peek();
+                    int count = 0;
+                    while (peek().kind != TK.NEWLINE && peek().kind != TK.EOF) {
+                        advance();
+                        count++;
+                    }
+                    boolean isStr = arg.kind == TK.STRING || arg.kind == TK.HEXSTRING;
+                    pendingSighash.add(count == 1 && isStr ? arg.value : null);
                     skipNewlines();
                     continue;
                 }
@@ -773,19 +847,53 @@ public final class RbParser {
                 if (peek().kind == TK.DEF) {
                     MethodNode m = parseMethod(pendingVisibility, pendingParamTypes);
                     if ("constructor".equals(m.name())) {
+                        // N-093: the constructor is not a spending entry point.
+                        for (SourceLocation sl : pendingSighashLocs) {
+                            errors.add(file + ":" + sl.line() + ":" + sl.column() + ": "
+                                + SighashDirective.lostDirectiveMessage("@sighash"));
+                        }
                         constructor = m;
                     } else {
+                        SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                            m.name(), m.visibility() == Visibility.PUBLIC, pendingSighash);
+                        if (sighash != null && sighash.isError()) {
+                            SourceLocation ml = m.sourceLocation();
+                            errors.add(file + ":" + ml.line() + ":" + ml.column() + ": " + sighash.error());
+                        } else if (sighash != null) {
+                            m = new MethodNode(m.name(), m.params(), m.body(), m.visibility(),
+                                m.sourceLocation(), sighash.value());
+                        }
                         methods.add(m);
                     }
                     pendingVisibility = null;
                     pendingParamTypes = null;
+                    pendingSighash = new ArrayList<>();
+                    pendingSighashLocs = new ArrayList<>();
                     skipNewlines();
                     continue;
                 }
-                // Skip unknown tokens defensively.
-                advance();
+                // Ruby's bare visibility markers are no-ops here (visibility
+                // comes from `runar_public`); examples/ruby uses them.
+                if (checkIdent("private") || checkIdent("public")) {
+                    advance();
+                    continue;
+                }
+                // N-004: refuse anything else (an indented `=begin` lexes as `=`).
+                Token stray = advance();
+                errors.add(file + ":" + stray.line + ":" + stray.col + ": "
+                    + LexDiag.unexpectedClassBodyToken(stray.value));
             }
-            match(TK.END);
+            // N-093: a `runar_sighash` with no `def` after it annotates nothing.
+            for (SourceLocation sl : pendingSighashLocs) {
+                errors.add(file + ":" + sl.line() + ":" + sl.column() + ": "
+                    + SighashDirective.lostDirectiveMessage("@sighash"));
+            }
+            // N-319: the class `end` is required; EOF here means it is missing.
+            if (!match(TK.END)) {
+                Token eofTok = peek();
+                errors.add(file + ":" + eofTok.line + ":" + eofTok.col
+                    + ": unterminated class: missing closing 'end'");
+            }
 
             if (constructor == null) {
                 constructor = autoGenerateConstructor(properties);
@@ -837,7 +945,7 @@ public final class RbParser {
                     }
                 }
                 rewritten.add(new MethodNode(
-                    m.name(), m.params(), body, m.visibility(), m.sourceLocation()
+                    m.name(), m.params(), body, m.visibility(), m.sourceLocation(), m.sighashType()
                 ));
             }
 
@@ -884,11 +992,28 @@ public final class RbParser {
             TypeNode typeNode = parseType();
 
             boolean isReadonly = false;
+            boolean embedAlways = false;
             Expression initializer = null;
+            boolean optionError = false;
 
             while (peek().kind == TK.COMMA) {
                 advance();
-                if (checkIdent("readonly")) {
+                if (checkIdent("embed_always")) {
+                    // N-093: the native spelling of the `@embedAlways` directive.
+                    advance();
+                    expect(TK.COLON, ":");
+                    if (peek().kind == TK.TRUE) {
+                        advance();
+                        embedAlways = true;
+                    } else if (peek().kind == TK.FALSE) {
+                        advance();
+                        embedAlways = false;
+                    } else {
+                        badBooleanPropOption("embed_always");
+                        optionError = true;
+                        break;
+                    }
+                } else if (checkIdent("readonly")) {
                     advance();
                     expect(TK.COLON, ":");
                     if (peek().kind == TK.TRUE) {
@@ -897,12 +1022,41 @@ public final class RbParser {
                     } else if (peek().kind == TK.FALSE) {
                         advance();
                         isReadonly = false;
+                    } else {
+                        badBooleanPropOption("readonly");
+                        optionError = true;
+                        break;
                     }
                 } else if (checkIdent("default")) {
                     advance();
                     expect(TK.COLON, ":");
-                    initializer = parsePrimary();
+                    if (peek().kind == TK.NIL) {
+                        // N-414: `nil` is not a Rúnar literal; refused, never read as 0.
+                        errors.add(file + ":" + peek().line + ":" + peek().col
+                            + ": prop default 'nil' is not a literal (expected a number, true, false or a hex string)");
+                        advance(); // 'nil'
+                    } else {
+                        initializer = parseUnary();
+                    }
+                } else {
+                    // N-301: an unknown option (e.g. a typo of `embed_always`) is
+                    // refused, never silently dropped. Same text in all seven tiers.
+                    errors.add(file + ":" + peek().line + ":" + peek().col
+                        + ": unknown prop option '" + peek().value
+                        + "' (expected readonly, embed_always or default)");
+                    optionError = true;
+                    break;
                 }
+            }
+
+            // N-413: nothing may follow the type or an option value except `,`
+            // (the next option) or end of line, so `default: 1 + 2` is refused
+            // rather than silently truncated to its first operand. Same text in
+            // all seven tiers.
+            if (!optionError && peek().kind != TK.NEWLINE && peek().kind != TK.EOF) {
+                errors.add(file + ":" + peek().line + ":" + peek().col
+                    + ": unexpected '" + peek().value
+                    + "' in prop declaration (expected ',' or end of line)");
             }
 
             // Stateless contracts (SmartContract and UnsafeSmartContract):
@@ -916,13 +1070,25 @@ public final class RbParser {
             while (peek().kind != TK.NEWLINE && peek().kind != TK.EOF) advance();
 
             return new PropertyNode(
-                snakeToCamel(rawName),
+                idents.declare(rawName, snakeToCamel(rawName)),
                 typeNode,
                 isReadonly,
                 initializer,
                 propLoc,
-                null
+                null,
+                embedAlways
             );
+        }
+
+        /** N-313: {@code readonly:} / {@code embed_always:} take a literal true or
+         *  false. Any other value is refused, never silently dropped. Same text
+         *  in all seven tiers. */
+        private void badBooleanPropOption(String option) {
+            Token t = peek();
+            String got = (t.kind == TK.NEWLINE || t.kind == TK.EOF) ? "<end of line>" : t.value;
+            errors.add(file + ":" + t.line + ":" + t.col
+                + ": invalid value '" + got + "' for prop option '" + option
+                + "' (expected true or false)");
         }
 
         TypeNode parseType() {
@@ -930,10 +1096,18 @@ public final class RbParser {
             String rawName = t.value;
             if ("FixedArray".equals(rawName) && peek().kind == TK.LBRACKET) {
                 advance(); // '['
-                TypeNode elem = parseType();
+                TypeNode elem = nest.nested(this::parseType);
                 expect(TK.COMMA, ",");
                 Token sizeTok = expect(TK.NUMBER, "number");
-                int size = parseIntLiteral(sizeTok.value);
+                int size;
+                try {
+                    size = parseIntLiteral(sizeTok.value);
+                } catch (NumberFormatException ex) {
+                    // expect() already logged the token-mismatch diagnostic
+                    // above; fall back to 0 instead of letting the raw
+                    // exception escape the parser.
+                    size = 0;
+                }
                 expect(TK.RBRACKET, "]");
                 return new FixedArrayType(elem, size);
             }
@@ -945,6 +1119,13 @@ public final class RbParser {
             expect(TK.DEF, "def");
 
             Token nameTok = advance();
+            // N-050: `def self.m` / `def Vault.m` declares a singleton
+            // (class-level) method, not a contract method.
+            if (peek().kind == TK.DOT) {
+                advance(); // '.'
+                nameTok = advance();
+                errors.add(file + ":" + nameTok.line + ":" + nameTok.col + ": " + LexDiag.staticMethod(nameTok.value));
+            }
             String rawName = nameTok.value;
             declaredLocals = new HashSet<>();
 
@@ -966,7 +1147,7 @@ public final class RbParser {
             }
             boolean isPublic = "public".equals(pendingVisibility);
             return new MethodNode(
-                snakeToCamel(rawName),
+                idents.declare(rawName, snakeToCamel(rawName)),
                 params,
                 body,
                 isPublic ? Visibility.PUBLIC : Visibility.PRIVATE,
@@ -979,7 +1160,7 @@ public final class RbParser {
             while (peek().kind != TK.RPAREN && peek().kind != TK.EOF) {
                 Token nameTok = advance();
                 String rawName = nameTok.value;
-                String camelName = snakeToCamel(rawName);
+                String camelName = idents.declare(rawName, snakeToCamel(rawName));
                 TypeNode t = paramTypes != null ? paramTypes.get(rawName) : null;
                 out.add(new ParamNode(camelName, t != null ? t : new CustomType("unknown")));
                 if (!match(TK.COMMA)) break;
@@ -1037,6 +1218,10 @@ public final class RbParser {
         }
 
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation l = loc();
             TK k = peek().kind;
             return switch (k) {
@@ -1048,7 +1233,19 @@ public final class RbParser {
                 case SUPER -> parseSuperCall(l);
                 case IVAR -> parseIvarStatement(l);
                 case IDENT -> parseIdentStatement(l);
-                default -> { advance(); yield null; }
+                // N-053: a token that can begin an expression begins an
+                // expression statement (a private helper's last one is its
+                // implicit return value). Skipping it dropped `!` / `(` /
+                // literals.
+                case NUMBER, STRING, HEXSTRING, TRUE, FALSE, NIL,
+                     LPAREN, LBRACKET, MINUS, TILDE, BANG, NOT ->
+                    new ExpressionStatement(parseExpression(), l);
+                // N-053: any other token is refused.
+                default -> {
+                    Token t = advance();
+                    errors.add(file + ":" + t.line + ":" + t.col + ": " + LexDiag.unsupportedStatement(t.value));
+                    yield null;
+                }
             };
         }
 
@@ -1078,7 +1275,8 @@ public final class RbParser {
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
-                elseStmts.add(parseElsifStatement(elifLoc));
+                // F-213 A1: an elsif is a statement of the else branch.
+                elseStmts.add(nest.nested(() -> parseElsifStatement(elifLoc)));
                 declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
@@ -1102,7 +1300,8 @@ public final class RbParser {
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
-                elseStmts.add(parseElsifStatement(elifLoc));
+                // F-213 A1: an elsif is a statement of the else branch.
+                elseStmts.add(nest.nested(() -> parseElsifStatement(elifLoc)));
                 declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
@@ -1144,7 +1343,7 @@ public final class RbParser {
         Statement parseForStatement(SourceLocation l) {
             advance(); // 'for'
             Token iterTok = advance();
-            String varName = snakeToCamel(iterTok.value);
+            String varName = idents.declare(iterTok.value, snakeToCamel(iterTok.value));
             expect(TK.IN, "in");
             Expression startExpr = parseExpression();
 
@@ -1243,6 +1442,7 @@ public final class RbParser {
         }
 
         Statement parseIvarStatement(SourceLocation l) {
+            int start = pos;
             Token ivarTok = advance();
             String propName = snakeToCamel(ivarTok.value);
             Expression target = new PropertyAccessExpr(propName);
@@ -1269,9 +1469,13 @@ public final class RbParser {
                 return new AssignmentStatement(target, value, l);
             }
 
-            // Bare expression starting with @ivar (e.g. @x.method(...))
-            Expression expr = parsePostfixFrom(target);
-            return new ExpressionStatement(expr, l);
+            // Bare expression starting with @ivar (@x on its own line,
+            // @x.method(...), or a private helper's implicit return such as
+            // `@x + 1`). N-053: re-parse from the ivar as a whole expression;
+            // continuing only the postfix chain left `+ 1` behind, and the
+            // statement dispatcher skipped it.
+            pos = start;
+            return new ExpressionStatement(parseExpression(), l);
         }
 
         Statement parseIdentStatement(SourceLocation l) {
@@ -1282,7 +1486,7 @@ public final class RbParser {
                 advance(); // ident
                 advance(); // '='
                 Expression value = parseExpression();
-                String camel = snakeToCamel(rawName);
+                String camel = idents.declare(rawName, snakeToCamel(rawName));
                 if (declaredLocals.contains(camel)) {
                     return new AssignmentStatement(new Identifier(camel), value, l);
                 }
@@ -1311,7 +1515,7 @@ public final class RbParser {
         // ----------------------------------------------------------
 
         Expression parseExpression() {
-            return parseTernary();
+            return nest.nested(this::parseTernary);
         }
 
         Expression parseTernary() {
@@ -1327,82 +1531,90 @@ public final class RbParser {
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (peek().kind == TK.OR || peek().kind == TK.PIPEPIPE) {
                 advance();
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseNot();
             while (peek().kind == TK.AND || peek().kind == TK.AMPAMP) {
                 advance();
                 Expression right = parseNot();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseNot() {
+            SourceLocation opLoc = loc();
             if (peek().kind == TK.NOT || peek().kind == TK.BANG) {
                 advance();
-                Expression operand = parseNot();
-                return new UnaryExpr(Expression.UnaryOp.NOT, operand);
+                Expression operand = nest.nested(this::parseNot);
+                return new UnaryExpr(Expression.UnaryOp.NOT, operand, opLoc);
             }
             return parseBitOr();
         }
 
         Expression parseBitOr() {
+            SourceLocation start = loc();
             Expression left = parseBitXor();
             while (peek().kind == TK.PIPE) {
                 advance();
                 Expression right = parseBitXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitXor() {
+            SourceLocation start = loc();
             Expression left = parseBitAnd();
             while (peek().kind == TK.CARET) {
                 advance();
                 Expression right = parseBitAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (peek().kind == TK.AMP) {
                 advance();
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.EQEQ) {
                     advance();
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (k == TK.NOTEQ) {
                     advance();
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else break;
             }
             return left;
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 TK k = peek().kind;
@@ -1416,72 +1628,76 @@ public final class RbParser {
                 if (op == null) break;
                 advance();
                 Expression right = parseShift();
-                left = new BinaryExpr(op, left, right);
+                left = new BinaryExpr(op, left, right, start);
             }
             return left;
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAddSub();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.LSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, parseAddSub(), start);
                 } else if (k == TK.RSHIFT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub());
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, parseAddSub(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseAddSub() {
+            SourceLocation start = loc();
             Expression left = parseMulDiv();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.PLUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, parseMulDiv(), start);
                 } else if (k == TK.MINUS) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv());
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, parseMulDiv(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseMulDiv() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 TK k = peek().kind;
                 if (k == TK.STAR) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, parseUnary(), start);
                 } else if (k == TK.SLASH) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, parseUnary(), start);
                 } else if (k == TK.PERCENT) {
                     advance();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary());
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, parseUnary(), start);
                 } else break;
             }
             return left;
         }
 
         Expression parseUnary() {
+            SourceLocation opLoc = loc();
             TK k = peek().kind;
             if (k == TK.MINUS) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (k == TK.TILDE) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (k == TK.BANG) {
                 advance();
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             return parsePower();
         }
@@ -1490,7 +1706,7 @@ public final class RbParser {
             Expression base = parsePostfix();
             if (peek().kind == TK.STARSTAR) {
                 advance();
-                Expression exp = parsePower(); // right-associative
+                Expression exp = nest.nested(this::parsePower); // right-associative
                 return new CallExpr(new Identifier("pow"), List.of(base, exp));
             }
             return base;
@@ -1554,9 +1770,15 @@ public final class RbParser {
                 }
                 case TRUE -> { advance(); return new BoolLiteral(true); }
                 case FALSE -> { advance(); return new BoolLiteral(false); }
-                case HEXSTRING -> { advance(); return new ByteStringLiteral(t.value); }
-                case STRING -> { advance(); return new ByteStringLiteral(t.value); }
-                case NIL -> { advance(); return new BigIntLiteral(BigInteger.ZERO); }
+                case HEXSTRING -> { advance(); return new ByteStringLiteral(t.value, new SourceLocation(file, t.line, t.col)); }
+                case STRING -> { advance(); return new ByteStringLiteral(t.value, new SourceLocation(file, t.line, t.col)); }
+                case NIL -> {
+                    // N-416: `nil` is not a Rúnar value; refused, never read as 0.
+                    errors.add(file + ":" + t.line + ":" + t.col
+                        + ": 'nil' is not a Rúnar value (use a number, true, false or a hex string)");
+                    advance();
+                    return new BigIntLiteral(BigInteger.ZERO);
+                }
                 case IVAR -> {
                     advance();
                     return new PropertyAccessExpr(snakeToCamel(t.value));
@@ -1580,7 +1802,7 @@ public final class RbParser {
                 case IDENT, ASSERT -> {
                     advance();
                     String raw = t.value;
-                    return new Identifier(mapBuiltinName(raw));
+                    return new Identifier(mapBuiltinName(raw), new SourceLocation(file, t.line, t.col));
                 }
                 case SUPER -> { advance(); return new Identifier("super"); }
                 default -> {
@@ -1698,10 +1920,10 @@ public final class RbParser {
             if (e instanceof BinaryExpr be) {
                 return new BinaryExpr(be.op(),
                     rewriteExpr(be.left(), methodNames),
-                    rewriteExpr(be.right(), methodNames));
+                    rewriteExpr(be.right(), methodNames), be.sourceLocation());
             }
             if (e instanceof UnaryExpr ue) {
-                return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames));
+                return new UnaryExpr(ue.op(), rewriteExpr(ue.operand(), methodNames), ue.sourceLocation());
             }
             if (e instanceof TernaryExpr te) {
                 return new TernaryExpr(

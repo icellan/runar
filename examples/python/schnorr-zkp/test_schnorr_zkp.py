@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 from conftest import load_contract
 
 contract_mod = load_contract(str(Path(__file__).parent / "SchnorrZKP.runar.py"))
@@ -42,13 +43,12 @@ def test_schnorr_wrong_s():
     s = (r + e * k) % EC_N
 
     c = SchnorrZKP(pub_key=pub_key)
-    try:
+    # F-061: was `try: ...; assert False; except AssertionError/Exception: pass`,
+    # which caught the AssertionError the `assert False` line itself raises —
+    # the test was green no matter what verify() did. pytest.raises makes the
+    # expected-failure signal come from the actual `with` block under test.
+    with pytest.raises(AssertionError):
         c.verify(r_point, s + 1)
-        assert False, "expected assertion failure"
-    except AssertionError:
-        pass
-    except Exception:
-        pass  # any failure is acceptable for wrong s
 
 
 def test_compile():
@@ -73,11 +73,11 @@ def test_rejects_s_at_n():
     r = 67890
     r_point = ec_mul_gen(r)
     c = SchnorrZKP(pub_key=pub_key)
-    try:
+    # F-061: was `try: ...; assert False; except (AssertionError, Exception): pass`,
+    # which caught the AssertionError the `assert False` line itself raises —
+    # the test was green regardless of whether verify() rejects s = n.
+    with pytest.raises(AssertionError):
         c.verify(r_point, EC_N)
-        assert False, "expected assertion failure for s = n"
-    except (AssertionError, Exception):
-        pass
 
 
 def test_rejects_s_zero():
@@ -87,11 +87,11 @@ def test_rejects_s_zero():
     r = 67890
     r_point = ec_mul_gen(r)
     c = SchnorrZKP(pub_key=pub_key)
-    try:
+    # F-061: was `try: ...; assert False; except (AssertionError, Exception): pass`,
+    # which caught the AssertionError the `assert False` line itself raises —
+    # the test was green regardless of whether verify() rejects s = 0.
+    with pytest.raises(AssertionError):
         c.verify(r_point, 0)
-        assert False, "expected assertion failure for s = 0"
-    except (AssertionError, Exception):
-        pass
 
 
 def test_nonce_reuse_recovers_key():

@@ -33,6 +33,12 @@ fn deploy_game(
     contract
 }
 
+/// Call options whose continuation holds `satoshis`. N-027: join must add
+/// exactly the bet to the pot, and deploy_game funds the pot with 10000.
+fn paying(satoshis: i64) -> runar_lang::sdk::CallOptions {
+    runar_lang::sdk::CallOptions { satoshis: Some(satoshis), ..Default::default() }
+}
+
 // ---------------------------------------------------------------------------
 // Compile
 // ---------------------------------------------------------------------------
@@ -102,7 +108,7 @@ fn test_tic_tac_toe_join() {
             &[SdkValue::Bytes(player_o_wallet.pub_key_hex.clone()), SdkValue::Auto],
             &mut provider,
             &*signer_o,
-            None,
+            Some(&paying(10000 + 5000)),
         )
         .expect("join failed");
     assert!(!txid.is_empty());
@@ -136,7 +142,7 @@ fn test_tic_tac_toe_move() {
             &[SdkValue::Bytes(player_o_wallet.pub_key_hex.clone()), SdkValue::Auto],
             &mut provider,
             &*signer_o,
-            None,
+            Some(&paying(10000 + 5000)),
         )
         .expect("join failed");
 
@@ -183,7 +189,7 @@ fn test_tic_tac_toe_full_game() {
     contract.call(
         "join",
         &[SdkValue::Bytes(po.clone()), SdkValue::Auto],
-        &mut provider, &*signer_o, None,
+        &mut provider, &*signer_o, Some(&paying(10000 + bet_amount)),
     ).expect("join failed");
 
     // X@0, O@3, X@1, O@4 — set up X to win with position 2 (top row)
@@ -264,7 +270,7 @@ fn test_tic_tac_toe_wrong_player_rejected() {
     contract.call(
         "join",
         &[SdkValue::Bytes(po.clone()), SdkValue::Auto],
-        &mut provider, &*signer_o, None,
+        &mut provider, &*signer_o, Some(&paying(10000 + 5000)),
     ).expect("join failed");
 
     // Player O tries to move on player X's turn — should fail
@@ -302,7 +308,7 @@ fn test_tic_tac_toe_join_after_playing_rejected() {
     contract.call(
         "join",
         &[SdkValue::Bytes(po.clone()), SdkValue::Auto],
-        &mut provider, &*signer_o, None,
+        &mut provider, &*signer_o, Some(&paying(10000 + 5000)),
     ).expect("join failed");
 
     // Try joining again — status is now 1 (playing), assert(status==0) should fail
@@ -311,7 +317,7 @@ fn test_tic_tac_toe_join_after_playing_rejected() {
     let result = contract.call(
         "join",
         &[SdkValue::Bytes(intruder.pub_key_hex.clone()), SdkValue::Auto],
-        &mut provider, &*intruder_signer, None,
+        &mut provider, &*intruder_signer, Some(&paying(10000 + 5000 + 5000)),
     );
     assert!(result.is_err(), "join after game started should be rejected");
 }

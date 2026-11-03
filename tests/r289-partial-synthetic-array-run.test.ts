@@ -98,14 +98,6 @@ interface Tier {
   fromIr: (irPath: string, artPath: string) => { argv: string[]; toStdout: boolean };
 }
 
-/**
- * Java has NO re-grouper, so it has nothing to refuse. `Cli.java` says so in
- * its "Known gaps vs. the Go assembler" list: `AnfProperty` carries no
- * synthetic-array chain, so expanded FixedArray siblings appear as individual
- * ABI params / state fields. Asserting the refusal there would be asserting
- * something the tier structurally cannot do, so it gets the case below
- * instead — which fails the day Java gains a re-grouper and needs this guard.
- */
 const TIERS: Tier[] = [
   {
     id: 'go',
@@ -141,6 +133,18 @@ const TIERS: Tier[] = [
     cwd: join(ROOT, 'compilers/zig'),
     emitIr: (src) => ({ argv: ['--source', src, '--emit-ir'], toStdout: true }),
     fromIr: (ir) => ({ argv: ['compile-ir', ir], toStdout: true }),
+  },
+  {
+    // N-086/N-229 gave Java a FixedArray re-grouper (StateFieldRegroup.java),
+    // and the shared IR-loader syntheticArrayChain rule (N-096,
+    // AnfLoader -> SyntheticArrayChain.check) refuses a malformed run before
+    // the regrouper ever sees it — same diagnostic shape as every other tier.
+    // Java has no `--output` flag; `--emit-artifact` is its equivalent.
+    id: 'java',
+    binary: findJavaBinary(),
+    cwd: join(ROOT, 'compilers/java'),
+    emitIr: (src, ir) => ({ argv: ['--source', src, '--emit-ir-to', ir, '--hex'], toStdout: false }),
+    fromIr: (ir, art) => ({ argv: ['--ir', ir, '--emit-artifact', art], toStdout: false }),
   },
 ];
 
@@ -225,16 +229,23 @@ describe('R-289: a malformed synthetic-array run is refused, not silently ungrou
           `${tier.id} accepted a malformed synthetic-array run and emitted the wrong ABI shape`,
         ).toBe('refused');
 
-        // And it must refuse for THIS reason. There are two guards — a run
-        // whose head is missing, and a run that is short — and either one
-        // would catch this input, so a bare "it refused" assertion passes with
-        // the partial-run guard deleted. Pinning the wording keeps the guard
-        // under test the one this input is built for.
+        // And it must refuse for THIS reason. Several guards would catch this
+        // input, so a bare "it refused" assertion passes with the one it is
+        // built for deleted. Pinning the wording keeps that guard under test.
+        //
+        // N-096: since the shared syntheticArrayChain rule, the IR loader
+        // refuses this input before the regrouper sees it — the head declares
+        // 5 elements, so the next sibling (length 4) does not continue the
+        // expansion. The regrouper's own short-run guard ("declares 5 elements
+        // but the contiguous run has 1") is still there, now behind it.
         const said = `${badRun.stderr}\n${badRun.stdout}`;
         expect(
           said,
           `${tier.id} refused, but not with the short-run diagnostic this input is built to trigger`,
-        ).toMatch(/declares 5 elements but the contiguous run has 1/);
+        ).toContain(
+          "IR validation: malformed syntheticArrayChain on property 'table__1': " +
+            "'table' expects its element 'table__1' here (type bigint, level lengths [5])",
+        );
         expect(said, `${tier.id} refused without naming the array`).toMatch(/table/);
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -242,42 +253,4 @@ describe('R-289: a malformed synthetic-array run is refused, not silently ungrou
     }, 300_000);
   }
 
-  const javaBinary = findJavaBinary();
-  const javaRun = javaBinary === null ? it.skip : it;
-
-  javaRun('java has no re-grouper to fix, and still says so', () => {
-    // Two halves, and both must hold. If Java ever groups the entry, the first
-    // fails and this finding needs a Java arm. If the documented gap is edited
-    // away while the behaviour stays, the second fails.
-    const dir = mkdtempSync(join(tmpdir(), 'r289-java-'));
-    try {
-      const src = join(dir, 'ArrayWrite.runar.ts');
-      writeFileSync(src, SOURCE);
-      const art = join(dir, 'art.json');
-      const tier: Tier = {
-        id: 'java',
-        binary: javaBinary,
-        cwd: join(ROOT, 'compilers/java'),
-        emitIr: () => ({ argv: [], toStdout: false }),
-        fromIr: () => ({ argv: [], toStdout: false }),
-      };
-      const res = run(tier, ['--source', src, '--emit-artifact', art]);
-      expect(res.code, res.stderr.slice(0, 400)).toBe(0);
-      expect(
-        stateFieldNames(readFileSync(art, 'utf-8')),
-        'java grouped the FixedArray — it now has a re-grouper, so it needs the R-289 refusal too',
-      ).toEqual(['table__0', 'table__1', 'table__2', 'table__3']);
-
-      const cli = readFileSync(
-        join(ROOT, 'compilers/java/src/main/java/runar/compiler/Cli.java'),
-        'utf-8',
-      );
-      expect(
-        cli,
-        'the documented gap that explains the shape above is gone from Cli.java',
-      ).toMatch(/fixedArray\} regrouping/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 300_000);
 });

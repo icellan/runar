@@ -33,4 +33,38 @@ module CodegenTestHelpers
     program = RunarCompiler.send(:_lower_to_anf, parse_result.contract)
     RunarCompiler.compile_from_program(program, disable_constant_folding: true)
   end
+
+  # Walk a hex-encoded script byte-by-byte, skipping over push-data payloads,
+  # and return only the bytes that are actually interpreted as opcodes.
+  #
+  # F-329: a plain `hex.include?('ae')` substring search is not aligned to
+  # opcode boundaries. Hex digits from the END of one push-data byte and the
+  # START of the next can spell out "ae" or "af" (e.g. the byte sequence
+  # 0x1a, 0xe3 encodes as the string "1ae3", which contains "ae" even though
+  # neither byte equals 0xae and no OP_CHECKMULTISIG is present). Callers
+  # that need to confirm an opcode byte is actually present must scan at
+  # opcode-aligned positions, which requires decoding Bitcoin Script's push
+  # encodings (direct push, OP_PUSHDATA1/2/4) to know how many following
+  # bytes are data rather than the next opcode.
+  def aligned_opcode_bytes(hex)
+    bytes = hex.scan(/../).map { |b| b.to_i(16) }
+    opcodes = []
+    i = 0
+    while i < bytes.length
+      b = bytes[i]
+      if b >= 1 && b <= 75 # direct push of b bytes
+        i += 1 + b
+      elsif b == 0x4c # OP_PUSHDATA1
+        i += 2 + bytes[i + 1]
+      elsif b == 0x4d # OP_PUSHDATA2 (little-endian 2-byte length)
+        i += 3 + (bytes[i + 1] | (bytes[i + 2] << 8))
+      elsif b == 0x4e # OP_PUSHDATA4 (little-endian 4-byte length)
+        i += 5 + (bytes[i + 1] | (bytes[i + 2] << 8) | (bytes[i + 3] << 16) | (bytes[i + 4] << 24))
+      else
+        opcodes << b
+        i += 1
+      end
+    end
+    opcodes
+  end
 end

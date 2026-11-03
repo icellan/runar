@@ -9,6 +9,8 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "sighash_validate"
+require_relative "reserved_names"
+require_relative "input_limits"
 
 module RunarCompiler
   module Frontend
@@ -77,7 +79,14 @@ module RunarCompiler
       ctx.validate_properties
       ctx.validate_constructor
       ctx.validate_methods
-      ctx.check_no_recursion
+      call_depth_exceeded = ctx.check_no_recursion
+      ctx.check_reserved_names
+      # N-180: the Rabin-provenance and sighash passes walk the private-method
+      # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
+      # refuses, so stop here.
+      return ValidationResult.new(errors: ctx.errors, warnings: ctx.warnings) if call_depth_exceeded
+
+      ctx.check_rabin_pubkey_provenance
 
       # Issue #123: reject preimage-field reads / output bindings that are
       # unsound under a method's declared @sighash mode (security core). This
@@ -138,6 +147,12 @@ module RunarCompiler
               loc: prop.source_location
             )
           end
+
+          # N-414 (peer of TS F-265): the shape checks above never validate a
+          # ByteStringLiteral's HEX FORMAT; that lives in validate_expression,
+          # which a property initializer never reached. An odd-length literal
+          # used to surface two passes later as an opaque stack-lowering error.
+          validate_expression(prop.initializer)
         end
 
         # SmartContract (and the asm-escape-hatch UnsafeSmartContract) require
@@ -232,6 +247,7 @@ module RunarCompiler
               loc: ctor.source_location
             )
           end
+          reject_unknown_param_type(param, "constructor", ctor.source_location)
         end
 
         # Validate constructor body
@@ -395,6 +411,8 @@ module RunarCompiler
       # Recursion detection
       # -------------------------------------------------------------------
 
+      # Reports recursion and the N-180 call depth; true iff MAX_CALL_DEPTH
+      # was exceeded.
       def check_no_recursion
         call_graph = {}
         method_names = Set.new
@@ -402,25 +420,485 @@ module RunarCompiler
         @contract.methods.each do |method|
           method_names.add(method.name)
           calls = Set.new
-          collect_method_calls(method.body, calls)
+          collect_method_calls(method.body, calls, true)
           call_graph[method.name] = calls
         end
 
-        # Check for cycles using DFS
+        # N-180: one iterative pass answers, for every method, whether it
+        # reaches a cycle and how deep its call chain is, in O(methods +
+        # calls). The old per-method DFS restarted for each method (quadratic
+        # on a chain) and recursed once per link (SystemStackError at ~2000).
+        reaches_cycle, depth = analyze_call_graph(call_graph, method_names)
+
         @contract.methods.each do |method|
-          visited = Set.new
-          stack = Set.new
-          if has_cycle?(method.name, call_graph, method_names, visited, stack)
-            add_error(
-              "recursion detected: method '#{method.name}' calls itself " \
-              "directly or indirectly",
-              loc: method.source_location
-            )
+          next unless reaches_cycle[method.name]
+
+          add_error(
+            "recursion detected: method '#{method.name}' calls itself " \
+            "directly or indirectly",
+            loc: method.source_location
+          )
+        end
+
+        # N-180: private methods are inlined at every call site, so the call
+        # depth is the inlining depth. Report the first method (declaration
+        # order) past it.
+        @contract.methods.each do |method|
+          next if reaches_cycle[method.name] || depth[method.name] <= InputLimits::MAX_CALL_DEPTH
+
+          add_error(InputLimits.call_depth_message(method.name), loc: method.source_location)
+          return true
+        end
+        false
+      end
+
+      # N-180: for every method, whether it reaches a call cycle, and (when it
+      # does not) its call depth: 0 if it calls no contract method, else 1 +
+      # the largest call depth among the contract methods it calls. Iterative
+      # three-colour DFS with memoisation: O(methods + calls), no recursion.
+      # reaches_cycle matches what a fresh DFS from each method reports.
+      def analyze_call_graph(call_graph, method_names)
+        reaches_cycle = {}
+        depth = {}
+        on_stack = Set.new
+
+        @contract.methods.each do |root|
+          next if reaches_cycle.key?(root.name)
+
+          # frame: [name, callees, next, cyc, depth]
+          stack = [[root.name, (call_graph[root.name] || Set.new).to_a, 0, false, 0]]
+          on_stack.add(root.name)
+          until stack.empty?
+            top = stack.last
+            if top[2] < top[1].length
+              callee = top[1][top[2]]
+              top[2] += 1
+              next unless method_names.include?(callee)
+
+              if on_stack.include?(callee)
+                top[3] = true
+              elsif reaches_cycle.key?(callee)
+                if reaches_cycle[callee]
+                  top[3] = true
+                else
+                  top[4] = [top[4], 1 + depth[callee]].max
+                end
+              else
+                on_stack.add(callee)
+                stack << [callee, (call_graph[callee] || Set.new).to_a, 0, false, 0]
+              end
+              next
+            end
+            stack.pop
+            name, _callees, _next, cyc, d = top
+            on_stack.delete(name)
+            reaches_cycle[name] = cyc
+            depth[name] = d
+            parent = stack.last
+            next if parent.nil?
+
+            if cyc
+              parent[3] = true
+            else
+              parent[4] = [parent[4], 1 + d].max
+            end
           end
+        end
+        [reaches_cycle, depth]
+      end
+
+      # F-286: the one diagnostic every tier emits (user decision R78).
+      RABIN_PUBKEY_PROVENANCE_MESSAGE =
+        "verifyRabinSig public key (4th argument) must be a contract property or a literal; " \
+        "a spender-supplied Rabin modulus lets anyone forge a signature"
+
+      # F-286: verifyRabinSig's modulus must not be chosen by the spender.
+      # A spender who picks +n+ forges any message (+n = 1+, +sig = 0+ passes
+      # on chain). Port of +checkRabinPubKeyProvenance+ in the TS reference
+      # (02-validate.ts). Trusted values for the 4th argument:
+      #   - a property read (+PropertyAccessExpr+, or +MemberExpr+ on +this+),
+      #     or a bare identifier naming a property that no parameter or local
+      #     of the method shadows (the Java surface's bare field);
+      #   - a bigint literal;
+      #   - a local whose initialiser AND every assignment to it are trusted
+      #     (+++/--+ on it makes it untrusted; the +mutable+ flag is irrelevant);
+      #   - a parameter of a PRIVATE method that every call site (at least one)
+      #     binds to a trusted value in the caller (least fixed point).
+      # Everything else -- public and constructor parameters, arithmetic,
+      # ternaries, calls -- is refused.
+      def check_rabin_pubkey_provenance
+        property_names = Set.new(@contract.properties.map(&:name))
+        private_methods = {}
+        @contract.methods.each do |m|
+          private_methods[m.name] = m if m.visibility == "private"
+        end
+
+        scopes = [rabin_scope_of(@contract.constructor, true)]
+        @contract.methods.each { |m| scopes << rabin_scope_of(m, false) }
+
+        trusted_params = {}
+        private_methods.each_key { |name| trusted_params[name] = Set.new }
+
+        call_sites = {}
+        private_methods.each_key { |name| call_sites[name] = [] }
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            callee = rabin_private_callee(e, private_methods)
+            call_sites[callee] << { args: e.args, scope: scope } unless callee.nil?
+          })
+        end
+
+        # Least fixed point: a parameter becomes trusted once every call site
+        # binds it to a trusted value. Monotone, so it terminates.
+        changed = true
+        while changed
+          changed = false
+          private_methods.each do |name, method|
+            sites = call_sites[name]
+            next if sites.empty?
+
+            trusted = trusted_params[name]
+            method.params.each_index do |i|
+              next if trusted.include?(i)
+
+              all_ok = sites.all? do |site|
+                !site[:args][i].nil? &&
+                  rabin_trusted?(site[:args][i], site[:scope], Set.new, property_names, trusted_params)
+              end
+              if all_ok
+                trusted.add(i)
+                changed = true
+              end
+            end
+          end
+        end
+
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            next unless e.is_a?(CallExpr) &&
+                        e.callee.is_a?(Identifier) &&
+                        e.callee.name == "verifyRabinSig" &&
+                        e.args.length >= 4
+            next if rabin_trusted?(e.args[3], scope, Set.new, property_names, trusted_params)
+
+            # N-464 (user decision R186): anchored at the 4th argument itself;
+            # the method only when the argument has no location.
+            add_error(
+              RABIN_PUBKEY_PROVENANCE_MESSAGE,
+              loc: TypeChecker.expr_loc(e.args[3]) || scope[:method].source_location
+            )
+          })
+        end
+
+        check_rabin_key_writes(scopes, property_names, private_methods, call_sites, trusted_params)
+      end
+
+      # N-205 (a): the diagnostic every tier emits when a mutable key property
+      # is written, outside the constructor, with a value F-286 does not trust.
+      def self.rabin_key_write_message(prop)
+        "verifyRabinSig public key property '#{prop}' may only be assigned a contract property or a literal " \
+          "outside the constructor; a spender-supplied Rabin modulus lets anyone forge a signature"
+      end
+
+      # N-205 (a): a MUTABLE property used as the key is state the previous
+      # spend chose, so outside the constructor it may only be written with a
+      # value +rabin_trusted?+ accepts. KEY properties: those whose value
+      # reaches a 4th argument, closed under "is written into a key property".
+      # Port of the N-205 block of +checkRabinPubKeyProvenance+ (02-validate.ts).
+      def check_rabin_key_writes(scopes, property_names, private_methods, call_sites, trusted_params)
+        key_props = Set.new
+        scopes.each do |scope|
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            next unless e.is_a?(CallExpr) &&
+                        e.callee.is_a?(Identifier) &&
+                        e.callee.name == "verifyRabinSig" &&
+                        e.args.length >= 4
+
+            rabin_sources_of(e.args[3], scope, key_props, Set.new, property_names, call_sites)
+          })
+        end
+
+        mutable_props = @contract.properties.reject(&:readonly).map(&:name)
+        # value nil = ++/--, which no value makes trusted.
+        writes = []
+        scopes.each do |scope|
+          next if scope[:is_ctor]
+
+          rabin_collect_assignments(scope[:method].body, scope, property_names, writes)
+          rabin_walk_body(scope[:method].body, lambda { |e|
+            loc = scope[:method].source_location
+            if e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)
+              prop = rabin_written_prop(e.operand, scope, property_names)
+              writes << { prop: prop, value: nil, scope: scope, loc: loc } unless prop.nil?
+            elsif e.is_a?(CallExpr) &&
+                  (e.callee.is_a?(PropertyAccessExpr) || e.callee.is_a?(MemberExpr)) &&
+                  e.callee.property == "addOutput"
+              # addOutput(satoshis, ...values): values are positional over the
+              # mutable properties in declaration order. A single array-literal
+              # value list (the Zig tuple form) is unpacked, as ANF lowering's
+              # _flatten_add_output_args does.
+              values = e.args.length == 2 && e.args[1].is_a?(ArrayLiteralExpr) ? e.args[1].elements : e.args.drop(1)
+              values.each_with_index do |value, i|
+                prop = mutable_props[i]
+                writes << { prop: prop, value: value, scope: scope, loc: loc } unless prop.nil?
+              end
+            end
+          })
+        end
+
+        loop do
+          before = key_props.size
+          writes.each do |w|
+            next unless key_props.include?(w[:prop]) && !w[:value].nil? &&
+                        rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
+
+            rabin_sources_of(w[:value], w[:scope], key_props, Set.new, property_names, call_sites)
+          end
+          break if key_props.size == before
+        end
+
+        mutable = Set.new(mutable_props)
+        writes.each do |w|
+          next unless key_props.include?(w[:prop]) && mutable.include?(w[:prop])
+          next if !w[:value].nil? && rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
+
+          add_error(self.class.rabin_key_write_message(w[:prop]), loc: w[:loc])
+        end
+      end
+
+      # N-065 / N-060: refuse a declared identifier spelled like a name a
+      # compiler pass mints (see reserved_names.rb). Checks properties, method
+      # names, constructor and method parameters, locals and loop variables.
+      # A stateful `txPreimage` PROPERTY keeps its older V27 diagnostic.
+      def check_reserved_names
+        stateful = @contract.parent_class == "StatefulSmartContract"
+        check = lambda do |name, loc|
+          if ReservedNames.reserved_source_name?(name, stateful)
+            add_error(ReservedNames.message(name), loc: loc)
+          end
+        end
+        walk = lambda do |stmts|
+          (stmts || []).each do |st|
+            case st
+            when VariableDeclStmt
+              check.call(st.name, st.source_location)
+            when IfStmt
+              walk.call(st.then)
+              walk.call(st.else_)
+            when ForStmt
+              check.call(st.init.name, st.init.source_location) if st.init.is_a?(VariableDeclStmt)
+              walk.call(st.body)
+            end
+          end
+        end
+
+        @contract.properties.each do |prop|
+          next if stateful && prop.name == "txPreimage"
+
+          check.call(prop.name, prop.source_location)
+        end
+        ctor = @contract.constructor
+        if ctor
+          (ctor.params || []).each { |pr| check.call(pr.name, ctor.source_location) }
+          walk.call(ctor.body)
+        end
+        @contract.methods.each do |m|
+          check.call(m.name, m.source_location) unless m.name == "constructor"
+          (m.params || []).each { |pr| check.call(pr.name, m.source_location) }
+          walk.call(m.body)
         end
       end
 
       private
+
+      # -------------------------------------------------------------------
+      # F-286 helpers
+      # -------------------------------------------------------------------
+
+      # Per method: local name -> every value bound to it (inits +
+      # assignments), and names that are ever ++/-- (never trusted).
+      def rabin_scope_of(method, is_ctor)
+        scope = {
+          method: method,
+          is_ctor: is_ctor,
+          params: method.params.map(&:name),
+          bindings: {},
+          mutated: Set.new,
+          # N-205: names declared as locals (a bare property write also lands
+          # in +bindings+).
+          declared: Set.new,
+        }
+        bind = lambda do |name, value|
+          (scope[:bindings][name] ||= []) << value
+        end
+        visit_expr = lambda do |expr|
+          walk_expr(expr, lambda { |e|
+            if (e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)) && e.operand.is_a?(Identifier)
+              scope[:mutated].add(e.operand.name)
+            end
+          })
+        end
+        visit = nil
+        visit = lambda do |stmts|
+          (stmts || []).each do |stmt|
+            case stmt
+            when VariableDeclStmt
+              scope[:declared].add(stmt.name)
+              bind.call(stmt.name, stmt.init)
+              visit_expr.call(stmt.init)
+            when AssignmentStmt
+              bind.call(stmt.target.name, stmt.value) if stmt.target.is_a?(Identifier)
+              visit_expr.call(stmt.target)
+              visit_expr.call(stmt.value)
+            when ExpressionStmt
+              visit_expr.call(stmt.expr)
+            when IfStmt
+              visit_expr.call(stmt.condition)
+              visit.call(stmt.then)
+              visit.call(stmt.else_)
+            when ForStmt
+              visit.call([stmt.init].compact)
+              visit_expr.call(stmt.condition)
+              visit.call([stmt.update].compact)
+              visit.call(stmt.body)
+            when ReturnStmt
+              visit_expr.call(stmt.value) unless stmt.value.nil?
+            end
+          end
+        end
+        visit.call(method.body)
+        scope
+      end
+
+      def rabin_trusted?(expr, scope, visiting, property_names, trusted_params)
+        case expr
+        when PropertyAccessExpr, BigIntLiteral
+          true
+        when MemberExpr
+          expr.object.is_a?(Identifier) && expr.object.name == "this"
+        when Identifier
+          name = expr.name
+          is_param = scope[:params].include?(name)
+          locals = scope[:bindings][name]
+          return property_names.include?(name) if !is_param && locals.nil?
+          return false if scope[:mutated].include?(name)
+
+          if is_param
+            method = scope[:method]
+            return false if scope[:is_ctor] || method.visibility != "private"
+
+            idx = method.params.index { |p| p.name == name }
+            return false unless trusted_params.fetch(method.name, Set.new).include?(idx)
+          end
+          unless locals.nil?
+            return false if visiting.include?(name)
+
+            visiting.add(name)
+            ok = locals.all? { |v| rabin_trusted?(v, scope, visiting, property_names, trusted_params) }
+            visiting.delete(name)
+            return false unless ok
+          end
+          true
+        else
+          false
+        end
+      end
+
+      # N-205: the property names a trusted value can come from, through
+      # local aliases and private-helper call sites.
+      def rabin_sources_of(expr, scope, out, visiting, property_names, call_sites)
+        case expr
+        when PropertyAccessExpr
+          out.add(expr.property)
+        when MemberExpr
+          out.add(expr.property) if expr.object.is_a?(Identifier) && expr.object.name == "this"
+        when Identifier
+          name = expr.name
+          is_param = scope[:params].include?(name)
+          locals = scope[:bindings][name]
+          if !is_param && locals.nil?
+            out.add(name) if property_names.include?(name)
+            return
+          end
+          key = [scope[:method].object_id, name]
+          return if visiting.include?(key)
+
+          visiting.add(key)
+          (locals || []).each { |v| rabin_sources_of(v, scope, out, visiting, property_names, call_sites) }
+          method = scope[:method]
+          if is_param && !scope[:is_ctor] && method.visibility == "private"
+            idx = method.params.index { |p| p.name == name }
+            (call_sites[method.name] || []).each do |site|
+              arg = site[:args][idx]
+              rabin_sources_of(arg, site[:scope], out, visiting, property_names, call_sites) unless arg.nil?
+            end
+          end
+        end
+      end
+
+      # N-205: the property an assignment / ++ / -- target writes, or nil.
+      def rabin_written_prop(target, scope, property_names)
+        case target
+        when PropertyAccessExpr
+          target.property
+        when MemberExpr
+          target.object.is_a?(Identifier) && target.object.name == "this" ? target.property : nil
+        when Identifier
+          name = target.name
+          if property_names.include?(name) && !scope[:params].include?(name) && !scope[:declared].include?(name)
+            name
+          end
+        end
+      end
+
+      def rabin_collect_assignments(stmts, scope, property_names, writes)
+        (stmts || []).each do |stmt|
+          case stmt
+          when AssignmentStmt
+            prop = rabin_written_prop(stmt.target, scope, property_names)
+            writes << { prop: prop, value: stmt.value, scope: scope, loc: stmt.source_location } unless prop.nil?
+          when IfStmt
+            rabin_collect_assignments(stmt.then, scope, property_names, writes)
+            rabin_collect_assignments(stmt.else_, scope, property_names, writes)
+          when ForStmt
+            rabin_collect_assignments([stmt.init, stmt.update].compact, scope, property_names, writes)
+            rabin_collect_assignments(stmt.body, scope, property_names, writes)
+          end
+        end
+      end
+
+      def rabin_private_callee(expr, private_methods)
+        return nil unless expr.is_a?(CallExpr)
+
+        c = expr.callee
+        name =
+          if c.is_a?(PropertyAccessExpr)
+            c.property
+          elsif c.is_a?(MemberExpr) && c.object.is_a?(Identifier) && c.object.name == "this"
+            c.property
+          end
+        !name.nil? && private_methods.key?(name) ? name : nil
+      end
+
+      # Like +walk_expressions_in_body+, but also visits every +for+ loop's
+      # init and update, at any nesting depth.
+      def rabin_walk_body(stmts, visitor)
+        (stmts || []).each do |stmt|
+          case stmt
+          when IfStmt
+            walk_expr(stmt.condition, visitor)
+            rabin_walk_body(stmt.then, visitor)
+            rabin_walk_body(stmt.else_, visitor)
+          when ForStmt
+            rabin_walk_body([stmt.init].compact, visitor)
+            walk_expr(stmt.condition, visitor)
+            rabin_walk_body([stmt.update].compact, visitor)
+            rabin_walk_body(stmt.body, visitor)
+          else
+            walk_expressions_in_stmt(stmt, visitor)
+          end
+        end
+      end
 
       def add_error(msg, loc: nil)
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
@@ -524,7 +1002,26 @@ module RunarCompiler
       # Method validation (private)
       # -------------------------------------------------------------------
 
+      # N-325: a parameter whose type is a name that is not a Rúnar type.
+      # "unknown" is the missing-annotation case, diagnosed by the parser;
+      # StatefulContext is the explicit context parameter of the Zig/Go/Move
+      # stateful surfaces, dropped by ANF lowering.
+      def reject_unknown_param_type(param, where, loc)
+        t = param.type
+        return unless t.is_a?(CustomType)
+        return if t.name == "unknown" || t.name == "StatefulContext"
+
+        add_error(
+          "type '#{t.name}' of parameter '#{param.name}' in #{where} is not a Rúnar type",
+          loc: loc
+        )
+      end
+
       def validate_method(method)
+        method.params.each do |param|
+          reject_unknown_param_type(param, "method '#{method.name}'", method.source_location)
+        end
+
         # `return` is a PRIVATE-helper construct only (NEW-012).
         reject_return_in_public_method(method) if method.visibility == "public"
 
@@ -677,6 +1174,7 @@ module RunarCompiler
           end
           validate_expression(stmt.init)
         when AssignmentStmt
+          validate_index_assignment_target(stmt)
           validate_expression(stmt.target)
           validate_expression(stmt.value)
         when IfStmt
@@ -692,6 +1190,28 @@ module RunarCompiler
         end
       end
 
+      # N-002 (F-013's rule, shared verbatim by all seven tiers): only a
+      # FixedArray property is index-writable. Any other index target (a
+      # ByteString property, a local, a parameter, a member-chained root) is
+      # left alone by expand_fixed_arrays and ANF lowering lowers it as a READ,
+      # dropping the write. Reject it here with a location instead.
+      def validate_index_assignment_target(stmt)
+        return unless stmt.target.is_a?(IndexAccessExpr)
+
+        root = stmt.target
+        root = root.object while root.is_a?(IndexAccessExpr)
+        fixed = root.is_a?(PropertyAccessExpr) && @contract.properties.any? do |p|
+          p.name == root.property && p.type.is_a?(FixedArrayType)
+        end
+        return if fixed
+
+        add_error(
+          'index assignment is only supported on FixedArray contract properties; ' \
+          'the target here is not a FixedArray property',
+          loc: stmt.source_location
+        )
+      end
+
       def validate_for_statement(stmt)
         validate_expression(stmt.condition)
 
@@ -701,7 +1221,7 @@ module RunarCompiler
         # lowering binds iterVar = start + i*step on each unrolled iteration.
         if stmt.condition.is_a?(BinaryExpr)
           unless compile_time_constant?(stmt.condition.right)
-            add_error("for loop bound must be a compile-time constant")
+            add_error(for_loop_bound_diagnostic(stmt.condition.right))
           end
         end
 
@@ -751,7 +1271,8 @@ module RunarCompiler
       OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
 
       # Build the R-127 rejection. Shared verbatim with the other six
-      # tiers.
+      # tiers and with the pass-4 backstop in anf_lower's
+      # _lower_for_statement (N-006).
       def self.loop_output_intrinsic_msg(intrinsic, via)
         via_clause = via ? " (reached through private method '#{via}')" : ""
         "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a loop " \
@@ -759,6 +1280,38 @@ module RunarCompiler
           "the method's output list, so the continuation hash would commit to fewer outputs " \
           "than the transaction actually creates: the spend is rejected by every shipped SDK " \
           "and any successor it produces is unspendable. Move the call out of the loop."
+      end
+
+      # Build the N-049 rejection. Shared verbatim with the other six tiers
+      # (TS reference: ternaryOutputIntrinsicDiagnostic in 02-validate.ts) and
+      # with the pass-4 backstop in anf_lower's _lower_ternary_expr.
+      def self.ternary_output_intrinsic_msg(intrinsic, via)
+        via_clause = via ? " (reached through private method '#{via}')" : ""
+        "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a conditional " \
+          "(ternary) expression arm. A ternary arm lowers into its own scope whose declared " \
+          "outputs never reach the method's output list, so the continuation hash would commit " \
+          "to fewer outputs than the transaction actually creates: a spender can drop the output " \
+          "and the honest spend is rejected. Use an if/else statement instead."
+      end
+
+      # Reject an output intrinsic in either arm of a ternary (N-049).
+      #
+      # `anf_lower`'s _lower_ternary_expr lowers each arm into a sub-context
+      # whose output refs are dropped -- unlike the if-statement lowering, which
+      # merges each arm's refs into the parent -- so the continuation hash would
+      # omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout
+      # was accepted on every tier). Private helpers are followed because they
+      # are inlined into the arm. A ternary that only selects values is
+      # untouched.
+      def validate_no_output_intrinsic_in_ternary_arm(expr)
+        [expr.consequent, expr.alternate].each do |arm|
+          found = find_output_intrinsic_in_expr(arm, nil, Set.new)
+          next if found.nil?
+
+          intrinsic, via, = found
+          add_error(self.class.ternary_output_intrinsic_msg(intrinsic, via))
+          return
+        end
       end
 
       # Reject an output intrinsic called inside a loop body (R-127).
@@ -849,6 +1402,15 @@ module RunarCompiler
 
           find_output_intrinsic((stmt.then || []) + (stmt.else_ || []), seen)
         when ForStmt
+          found = find_output_intrinsic_in_statement(stmt.init, seen) unless stmt.init.nil?
+          return found unless found.nil?
+
+          found = find_output_intrinsic_in_expr(stmt.condition, stmt.source_location, seen)
+          return found unless found.nil?
+
+          found = find_output_intrinsic_in_statement(stmt.update, seen) unless stmt.update.nil?
+          return found unless found.nil?
+
           find_output_intrinsic(stmt.body, seen)
         end
       end
@@ -885,6 +1447,7 @@ module RunarCompiler
         when UnaryExpr then [expr.operand]
         when TernaryExpr then [expr.condition, expr.consequent, expr.alternate]
         when IndexAccessExpr then [expr.object, expr.index]
+        when ArrayLiteralExpr then expr.elements || []
         else []
         end
       end
@@ -934,7 +1497,11 @@ module RunarCompiler
       # `i = i - 1` / `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and
       # Java parsers; and the effect-free no-op sentinel (a literal or a bare
       # identifier) that the while-shaped parsers synthesize when the source has
-      # no continue expression at all.
+      # no continue expression at all -- but only on a loop whose condition
+      # does not test its declared iterator (already refused by the condition
+      # rule). On a real iterator a no-op update never advances it:
+      # `var i = 3; while (i < 5) : (i)` compiled two laps over i = 3, 4
+      # (N-116).
       #
       # The advanced variable must be the declared iterator or the identifier
       # the condition tests. Both are needed: the Zig parser only folds
@@ -949,7 +1516,15 @@ module RunarCompiler
           allowed << stmt.condition.left.name
         end
 
-        return if representable_for_update?(allowed, stmt.update)
+        # N-116: the no-op sentinel is tolerated only on a loop the condition
+        # rule already refuses (placeholder iterator). On a real iterator it
+        # never advances, yet the unrolled loop would still step by one.
+        cond_tests_iter = !stmt.init.nil? &&
+                          stmt.condition.is_a?(BinaryExpr) &&
+                          stmt.condition.left.is_a?(Identifier) &&
+                          stmt.condition.left.name == stmt.init.name
+
+        return if representable_for_update?(allowed, stmt.update, !cond_tests_iter)
 
         add_error(LOOP_UPDATE_DIAGNOSTIC, loc: stmt.source_location)
       end
@@ -965,7 +1540,7 @@ module RunarCompiler
         expr.is_a?(BigIntLiteral) && expr.value == 1
       end
 
-      def representable_for_update?(allowed, update)
+      def representable_for_update?(allowed, update, accept_no_op_sentinel)
         case update
         when ExpressionStmt
           e = update.expr
@@ -974,8 +1549,10 @@ module RunarCompiler
           # The no-op sentinel a while-shaped frontend synthesizes when the
           # source carries no continue expression: zig's `while (c) {}`, move's
           # `while (c) {}`, go's `for c {}`. Reading a literal or a bare
-          # identifier has no effect, so discarding it loses nothing.
-          e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier)
+          # identifier has no effect, so discarding it loses nothing -- on a
+          # loop the condition rule already refuses (N-116).
+          accept_no_op_sentinel &&
+            (e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier))
         when AssignmentStmt
           # `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
           return false unless allowed_loop_var?(allowed, update.target)
@@ -1021,6 +1598,7 @@ module RunarCompiler
         when MemberExpr
           validate_expression(expr.object)
         when TernaryExpr
+          validate_no_output_intrinsic_in_ternary_arm(expr)
           validate_expression(expr.condition)
           validate_expression(expr.consequent)
           validate_expression(expr.alternate)
@@ -1031,18 +1609,24 @@ module RunarCompiler
           validate_expression(expr.operand)
         when DecrementExpr
           validate_expression(expr.operand)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| validate_expression(el) }
         when ByteStringLiteral
           val = expr.value
           if val.length > 0
-            if val.length.odd?
+            # N-436: TS counts UTF-16 code units; String#length counts code points.
+            units = val.encode("UTF-16LE").bytesize / 2
+            if units.odd?
               add_error(
-                "ByteString literal '#{val}' has odd length (#{val.length}) " \
-                "\u2014 hex strings must have an even number of characters"
+                "ByteString literal '#{val}' has odd length (#{units}) " \
+                "\u2014 hex strings must have an even number of characters",
+                loc: expr.source_location
               )
             elsif !val.match?(/\A[0-9a-fA-F]*\z/)
               add_error(
                 "ByteString literal '#{val}' contains non-hex characters " \
-                "\u2014 only 0-9, a-f, A-F are allowed"
+                "\u2014 only 0-9, a-f, A-F are allowed",
+                loc: expr.source_location
               )
             end
           end
@@ -1284,6 +1868,22 @@ module RunarCompiler
       # rejected here with a graceful diagnostic — anf-lower's
       # _extract_loop_shape would otherwise raise. Mirrors the reference TS
       # compiler's observable behavior: only literal loop bounds compile.
+      #
+      # N-026: the sentence for a refused bound is the reference tier's. Its
+      # validator trusts a bare identifier (or boolean literal, or a negation of
+      # one) as "could be a const" and lets ANF lowering refuse it with the
+      # "Cannot determine" sentence; every other non-literal shape (`this.x`, an
+      # expression) gets the "must be a compile-time constant" sentence. Both
+      # are shared verbatim by all seven tiers.
+      def for_loop_bound_diagnostic(bound)
+        bound = bound.operand while bound.is_a?(UnaryExpr) && bound.op == "-"
+        if bound.is_a?(Identifier) || bound.is_a?(BoolLiteral)
+          "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
+        else
+          "For loop bound must be a compile-time constant (literal or const variable)"
+        end
+      end
+
       def compile_time_constant?(expr)
         return false if expr.nil?
         return true if expr.is_a?(BigIntLiteral)
@@ -1495,7 +2095,9 @@ module RunarCompiler
           walk_expressions_in_body(stmt.then, visitor)
           walk_expressions_in_body(stmt.else_, visitor)
         when ForStmt
+          walk_expressions_in_stmt(stmt.init, visitor)
           walk_expr(stmt.condition, visitor)
+          walk_expressions_in_stmt(stmt.update, visitor)
           walk_expressions_in_body(stmt.body, visitor)
         when ReturnStmt
           walk_expr(stmt.value, visitor) unless stmt.value.nil?
@@ -1529,6 +2131,8 @@ module RunarCompiler
           walk_expr(expr.operand, visitor)
         when DecrementExpr
           walk_expr(expr.operand, visitor)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| walk_expr(el, visitor) }
         end
       end
 
@@ -1536,32 +2140,34 @@ module RunarCompiler
       # Recursion detection helpers
       # -------------------------------------------------------------------
 
-      def collect_method_calls(stmts, calls)
-        stmts.each { |stmt| collect_method_calls_in_stmt(stmt, calls) }
+      def collect_method_calls(stmts, calls, bare = false)
+        stmts.each { |stmt| collect_method_calls_in_stmt(stmt, calls, bare) }
       end
 
-      def collect_method_calls_in_stmt(stmt, calls)
+      def collect_method_calls_in_stmt(stmt, calls, bare = false)
         case stmt
         when ExpressionStmt
-          collect_method_calls_in_expr(stmt.expr, calls)
+          collect_method_calls_in_expr(stmt.expr, calls, bare)
         when VariableDeclStmt
-          collect_method_calls_in_expr(stmt.init, calls)
+          collect_method_calls_in_expr(stmt.init, calls, bare)
         when AssignmentStmt
-          collect_method_calls_in_expr(stmt.target, calls)
-          collect_method_calls_in_expr(stmt.value, calls)
+          collect_method_calls_in_expr(stmt.target, calls, bare)
+          collect_method_calls_in_expr(stmt.value, calls, bare)
         when IfStmt
-          collect_method_calls_in_expr(stmt.condition, calls)
-          collect_method_calls(stmt.then, calls)
-          collect_method_calls(stmt.else_, calls)
+          collect_method_calls_in_expr(stmt.condition, calls, bare)
+          collect_method_calls(stmt.then, calls, bare)
+          collect_method_calls(stmt.else_, calls, bare)
         when ForStmt
-          collect_method_calls_in_expr(stmt.condition, calls)
-          collect_method_calls(stmt.body, calls)
+          collect_method_calls_in_stmt(stmt.init, calls, bare) unless stmt.init.nil?
+          collect_method_calls_in_expr(stmt.condition, calls, bare)
+          collect_method_calls_in_stmt(stmt.update, calls, bare) unless stmt.update.nil?
+          collect_method_calls(stmt.body, calls, bare)
         when ReturnStmt
-          collect_method_calls_in_expr(stmt.value, calls) unless stmt.value.nil?
+          collect_method_calls_in_expr(stmt.value, calls, bare) unless stmt.value.nil?
         end
       end
 
-      def collect_method_calls_in_expr(expr, calls)
+      def collect_method_calls_in_expr(expr, calls, bare = false)
         return if expr.nil?
 
         case expr
@@ -1574,44 +2180,35 @@ module RunarCompiler
               calls.add(expr.callee.property)
             end
           end
-          collect_method_calls_in_expr(expr.callee, calls)
-          expr.args.each { |arg| collect_method_calls_in_expr(arg, calls) }
+          # N-180: the Solidity, Move and Java surfaces may call a helper as a
+          # bare `m(...)`. Counted only for the recursion / call-depth graph
+          # (bare), and only names of contract methods count there
+          # (analyze_call_graph filters by method_names), so builtins are
+          # unaffected.
+          calls.add(expr.callee.name) if bare && expr.callee.is_a?(Identifier)
+          collect_method_calls_in_expr(expr.callee, calls, bare)
+          expr.args.each { |arg| collect_method_calls_in_expr(arg, calls, bare) }
         when BinaryExpr
-          collect_method_calls_in_expr(expr.left, calls)
-          collect_method_calls_in_expr(expr.right, calls)
+          collect_method_calls_in_expr(expr.left, calls, bare)
+          collect_method_calls_in_expr(expr.right, calls, bare)
         when UnaryExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
         when MemberExpr
-          collect_method_calls_in_expr(expr.object, calls)
+          collect_method_calls_in_expr(expr.object, calls, bare)
         when TernaryExpr
-          collect_method_calls_in_expr(expr.condition, calls)
-          collect_method_calls_in_expr(expr.consequent, calls)
-          collect_method_calls_in_expr(expr.alternate, calls)
+          collect_method_calls_in_expr(expr.condition, calls, bare)
+          collect_method_calls_in_expr(expr.consequent, calls, bare)
+          collect_method_calls_in_expr(expr.alternate, calls, bare)
         when IndexAccessExpr
-          collect_method_calls_in_expr(expr.object, calls)
-          collect_method_calls_in_expr(expr.index, calls)
+          collect_method_calls_in_expr(expr.object, calls, bare)
+          collect_method_calls_in_expr(expr.index, calls, bare)
         when IncrementExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
         when DecrementExpr
-          collect_method_calls_in_expr(expr.operand, calls)
+          collect_method_calls_in_expr(expr.operand, calls, bare)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| collect_method_calls_in_expr(el, calls, bare) }
         end
-      end
-
-      def has_cycle?(name, call_graph, method_names, visited, stack)
-        return true if stack.include?(name)
-        return false if visited.include?(name)
-
-        visited.add(name)
-        stack.add(name)
-
-        (call_graph[name] || Set.new).each do |callee|
-          if method_names.include?(callee)
-            return true if has_cycle?(callee, call_graph, method_names, visited, stack)
-          end
-        end
-
-        stack.delete(name)
-        false
       end
     end
   end

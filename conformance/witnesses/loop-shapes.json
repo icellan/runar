@@ -3,7 +3,7 @@
   "_note": "R-102. Before this fixture the repository contained two `for` loops, both zero-start and incrementing, so the ANF loop node's `start` field — which every tier implements and carries explicitly — was exercised by nothing. Two wrong-value miscompiles were living behind that: Go's constant folder dropped Start and Step (N-128), and Zig's .runar.go / .runar.java parsers dropped the init value (N-129). Both produced a script computing a DIFFERENT NUMBER than the source, and both were invisible to a corpus of zero-start loops.",
   "goldenHashes": {
     "expected-script.hex": "f333f739f4cd44dba75a9b39343a1dc976cf393fe351df69d84cf85fa31c8dac",
-    "expected-ir.json": "5065769243d3aa503b080dba6daa48e5ce45a24f9078af9097948f09c3e07f11"
+    "expected-ir.json": "f52185083a39aa0be0b074ea0fa5a4d0bc6d5e99d2bf6898411e706049af26d5"
   },
   "constructorArgs": {
     "target": "18n"

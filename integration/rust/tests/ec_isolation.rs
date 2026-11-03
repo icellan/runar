@@ -201,12 +201,12 @@ class EcNegateTest extends SmartContract {
     assert_eq!(artifact.contract_name, "EcNegateTest");
 
     // Compute negated point using k256
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::sec1::ToSec1Point;
     use k256::{ProjectivePoint, Scalar};
     let scalar = Scalar::from(10u64);
     let point = (ProjectivePoint::GENERATOR * scalar).to_affine();
     let neg_point = (-ProjectivePoint::from(point)).to_affine();
-    let neg_enc = neg_point.to_encoded_point(false);
+    let neg_enc = neg_point.to_sec1_point(false);
     let neg_x_hex: String = neg_enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let neg_y_hex: String = neg_enc.y().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let neg_point_hex = encode_point(&neg_x_hex, &neg_y_hex);
@@ -404,7 +404,7 @@ class EcMulGenTest extends SmartContract {
     let k = hex_to_bigint("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364100");
 
     // Compute k*G using k256
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::sec1::ToSec1Point;
     use k256::{ProjectivePoint, Scalar};
     use k256::elliptic_curve::ops::Reduce;
     use k256::U256;
@@ -418,9 +418,9 @@ class EcMulGenTest extends SmartContract {
         arr
     };
     let k_u256 = U256::from_be_slice(&k_bytes);
-    let k_scalar = <Scalar as Reduce<U256>>::reduce(k_u256);
+    let k_scalar = <Scalar as Reduce<U256>>::reduce(&k_u256);
     let point = (ProjectivePoint::GENERATOR * k_scalar).to_affine();
-    let enc = point.to_encoded_point(false);
+    let enc = point.to_sec1_point(false);
     let rx_hex: String = enc.x().unwrap().iter().map(|b| format!("{:02x}", b)).collect();
     let rx = hex_to_bigint(&rx_hex);
     let rx_script = bigint_to_script_num_hex(&rx);

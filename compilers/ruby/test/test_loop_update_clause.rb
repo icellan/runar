@@ -217,4 +217,134 @@ class TestLoopUpdateClause < Minitest::Test
     ok, _hex, msg = compile_source(source, "Countdown.runar.ts")
     assert ok, "a countdown loop must still compile: #{msg}"
   end
+
+  # N-132: `for (let i = 0n; i < 3n; )` never advances `i` in the source, yet
+  # this tier filled the empty slot with a `0n` placeholder and the unrolled
+  # loop advanced it anyway (938 hex chars, byte-identical to `i++`). The TS
+  # reference refuses it in its parser with the text below.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses an empty update slot with the
+  # reference's text. Does not prove: anything about other surfaces (their
+  # empty-update shapes are pinned by the conformance negatives N180/N181).
+  def test_n132_empty_ts_update_is_rejected
+    ok, hex, msg = compile_source(ts_with_update(""), "UpdateProbe.runar.ts")
+    refute ok, "an empty for-update must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have an update expression"
+  end
+
+  # N-116: the validator accepted a bare identifier / literal update as the
+  # "no-op sentinel" the while-shaped parsers synthesize, and the step was then
+  # inferred as +1 from the comparison direction -- so `var i = 3;
+  # while (i < 5) : (i)`, a source loop that never terminates, unrolled to two
+  # laps over i = 3, 4.
+  #
+  # Proves: the refusal, with the shared R-065 sentence, on the Zig continue
+  # expression and the TS for-update surface. Does not prove: anything about
+  # while loops whose update lives in the body (those keep a placeholder
+  # iterator and the condition rule refuses them).
+  def test_n116_non_advancing_update_rejected
+    zig = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+          .sub("var i: i64 = 0;", "var i: i64 = 3;")
+          .sub("while (i < 5) : (i += 1)", "while (i < 5) : (i)")
+    [
+      ["zig continue reads iterator", zig, "BoundedLoop.runar.zig"],
+      ["ts update reads iterator", ts_with_update("i"), "UpdateProbe.runar.ts"],
+      ["ts update literal", ts_with_update("0n"), "UpdateProbe.runar.ts"]
+    ].each do |name, source, file|
+      ok, hex, msg = compile_source(source, file)
+      refute ok, "#{name}: a non-advancing update must not compile; got #{hex}"
+      assert_includes msg, LOOP_UPDATE_DIAGNOSTIC, name
+    end
+  end
+
+  # N-135: `for (let i = 0n; ; i++)` has no exit test in the source. The TS
+  # reference refuses it in its parser with the text below; this tier refused
+  # it only by accident (the `let` declaration consumed its own `;`, a second
+  # `match(;)` swallowed the empty slot's `;`, and `i++` was misparsed as the
+  # condition).
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses an empty condition slot with
+  # the reference's text. Does not prove: other surfaces or tiers (pinned by
+  # the conformance negatives N274/N275).
+  def test_n135_empty_ts_condition_is_rejected
+    src = ts_with_update("i++").sub("0n; i < 3n; i++)", "0n; ; i++)")
+    ok, hex, msg = compile_source(src, "UpdateProbe.runar.ts")
+    refute ok, "an empty for-condition must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have a condition"
+  end
+
+  # N-135: `for (let i = 0n;; i < 3n; i++)` is not valid TypeScript (empty
+  # condition slot, last two clauses shifted left). The second `match(;)` after
+  # the initializer swallowed the empty slot's `;` and this tier compiled it
+  # exactly like `for (let i = 0n; i < 3n; i++)`.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses the shifted header with the
+  # reference's condition diagnostic. Does not prove: other surfaces or tiers
+  # (pinned by the conformance negative N275).
+  def test_n135_shifted_ts_header_is_rejected
+    src = ts_with_update("i++").sub("0n; i < 3n; i++)", "0n;; i < 3n; i++)")
+    ok, hex, msg = compile_source(src, "UpdateProbe.runar.ts")
+    refute ok, "a shifted for-header must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have a condition"
+  end
+
+  # ---------------------------------------------------------------------------
+  # N-306: a non-declaration for-initializer on the C-style `.runar.ts` header
+  # ---------------------------------------------------------------------------
+
+  NON_DECLARATION_INITIALIZER_DIAGNOSTIC = "For loop must have a variable declaration initializer"
+
+  # A stateful contract parameterised on the for-loop HEADER, with a body that
+  # never references the loop variable by name -- unlike `ts_with_update`'s
+  # body (`acc = acc + i`), so a substituted `_i = 0` iterator can't be caught
+  # by an accidental "undefined variable 'i'" typecheck error instead of the
+  # parser's own diagnostic.
+  def ts_for_initializer(init)
+    <<~TS
+      import { StatefulSmartContract, assert } from 'runar-lang';
+
+      class InitProbe extends StatefulSmartContract {
+        count: bigint;
+
+        constructor(count: bigint) { super(count); this.count = count; }
+
+        public unlock(expected: bigint): void {
+          let acc: bigint = 0n;
+          for (#{init}; _i < 3n; _i++) {
+            acc = acc + 1n;
+          }
+          assert(acc === expected);
+        }
+      }
+    TS
+  end
+
+  # N-306: `for (i = 0n; _i < 3n; _i++)` has no `let`/`const` in the
+  # initializer slot. The TS reference refuses it in its parser with the text
+  # below. This tier's `parse_for` instead silently substituted the synthetic
+  # `_i = 0` iterator for the whole initializer, discarding `i = 0n` with no
+  # diagnostic at all -- invisible as long as the condition/update still
+  # reference the original name `i`, because an unrelated validator check (the
+  # unrolled loop's "condition must compare the loop variable" rule) then
+  # catches the name mismatch by accident and refuses the program anyway.
+  # Writing the condition/update against the substituted name `_i` instead --
+  # exactly what a developer who noticed the generated variable would do --
+  # defeats that accidental catch and the garbage initializer compiled clean.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses a non-declaration
+  # for-initializer with the reference's text, even when the rest of the
+  # header is written against the substituted name. Does not prove: other
+  # surfaces or tiers (pinned by the conformance negatives N277-N279).
+  def test_n306_non_declaration_initializer_is_rejected
+    ok, hex, msg = compile_source(ts_for_initializer("i = 0n"), "InitProbe.runar.ts")
+    refute ok, "a non-declaration for-initializer must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, NON_DECLARATION_INITIALIZER_DIAGNOSTIC
+  end
+
+  # Control: a well-formed `let` initializer must keep compiling clean -- the
+  # fix narrows only the non-declaration branch of the initializer dispatch.
+  def test_n306_let_initializer_still_compiles
+    ok, _hex, msg = compile_source(ts_for_initializer("let _i: bigint = 0n"), "InitProbe.runar.ts")
+    assert ok, "a `let` for-initializer must still compile: #{msg}"
+  end
 end

@@ -348,4 +348,200 @@ class TestParserJava < Minitest::Test
     refute_nil result.contract
     assert_equal "P2PKH", result.contract.name
   end
+  # ---------------------------------------------------------------------------
+  # N-023 (R49): a bare assignment to a property name is refused
+  # ---------------------------------------------------------------------------
+  #
+  # On the .runar.java surface a bare name that no local or parameter shadows
+  # IS the field, so `count = ...` writes state in Java. The parser used to
+  # lower it as a local rebind: a stateful contract compiled with no
+  # update_prop and its state never changed. Every tier refuses the bare form
+  # with the TS reference's diagnostic.
+  #
+  # Proves: the Ruby Java parser refuses each assignment spelling (=, op=,
+  # ++/--, statement or nested, any method incl. the constructor) on an
+  # unshadowed property, and accepts this.x writes plus local / parameter /
+  # for-variable shadowing, honouring Java block scope.
+  # Does not prove: other tiers (conformance/negatives N166 covers them), or
+  # anything about bare reads, which R49 leaves alone.
+
+  N023_MSG = "bare assignment to property 'count' is not allowed; write `this.count = ...`"
+  N023_CTOR = "super(count);\n        this.count = count;"
+
+  def n023_source(body, params: "", ctor_param: "count", ctor_body: N023_CTOR)
+    <<~JAVA
+      package p;
+      import runar.lang.StatefulSmartContract;
+      import runar.lang.annotations.Public;
+      import runar.lang.types.Bigint;
+      import static runar.lang.Builtins.assertThat;
+
+      class BareCounter extends StatefulSmartContract {
+          Bigint count;
+
+          BareCounter(Bigint #{ctor_param}) {
+              #{ctor_body}
+          }
+
+          @Public
+          void increment(#{params}) {
+              #{body}
+          }
+      }
+    JAVA
+  end
+
+  def n023_errors(src)
+    parse(src, "BareCounter.runar.java").errors
+      .select { |e| e.severity == RunarCompiler::Frontend::Severity::ERROR }
+      .map(&:message)
+  end
+
+  N023_REFUSED = [
+    "count = count.plus(Bigint.ONE);",
+    "count += Bigint.ONE;",
+    "count++;",
+    "--count;",
+    "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }",
+    "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }",
+    "assertThat((count++).gt(Bigint.ZERO));",
+    "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;",
+    "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;",
+  ].freeze
+
+  def test_n023_refuses_bare_property_assignment
+    N023_REFUSED.each do |body|
+      assert_includes n023_errors(n023_source(body)), N023_MSG, "not refused: #{body}"
+    end
+    src = n023_source("this.count = this.count.plus(Bigint.ONE);",
+                      ctor_param: "c", ctor_body: "super(c);\n        count = c;")
+    assert_includes n023_errors(src), N023_MSG, "constructor bare write not refused"
+  end
+
+  def test_n023_accepts_shadowed_or_explicit_assignment
+    [
+      ["this.count = this.count.plus(Bigint.ONE);", ""],
+      ["Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""],
+      ["count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"],
+      ["for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n" \
+       "        this.count = this.count.plus(Bigint.ONE);", ""],
+      ["this.count = count.plus(Bigint.ONE);", ""],
+    ].each do |body, params|
+      assert_empty n023_errors(n023_source(body, params: params)), "control refused: #{body}"
+    end
+  end
+
+  # N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>)
+  # lower `t op= e` to `t = t op e`, as a statement and in a for-header
+  # update slot (where the loop rule, not the parser, refuses a non-unit
+  # step). Before N-134 Ruby refused `<<= >>= &= |= ^=` everywhere and
+  # `*= /= %=` in a for update. Proves the parsed shape for all ten on a
+  # local, a bigint property and a ByteString property, and in a for update.
+  # Does not prove byte parity with the other tiers
+  # (conformance/negatives/java-compound-assign-parity.test.ts pins that).
+  N134_OPS = [["+=", "+"], ["-=", "-"], ["*=", "*"], ["/=", "/"], ["%=", "%"],
+              ["<<=", "<<"], [">>=", ">>"], ["&=", "&"], ["|=", "|"], ["^=", "^"]].freeze
+
+  def n134_name(e)
+    return e.name if e.is_a?(Identifier)
+    assert_kind_of PropertyAccessExpr, e
+    e.property
+  end
+
+  def n134_assert_compound(stmt, target, op)
+    assert_kind_of AssignmentStmt, stmt
+    assert_equal target, n134_name(stmt.target)
+    assert_kind_of BinaryExpr, stmt.value
+    assert_equal op, stmt.value.op
+    assert_equal target, n134_name(stmt.value.left)
+  end
+
+  def test_n134_compound_assignment_all_ten_operators
+    lines = ["Bigint t = d;"]
+    want = []
+    N134_OPS.each do |tok, op|
+      lines << "t #{tok} 3;" << "this.count #{tok} t;"
+      want << ["t", op] << ["count", op]
+    end
+    N134_OPS[7..].each do |tok, op|
+      lines << "this.tag #{tok} m;"
+      want << ["tag", op]
+    end
+    src = <<~JAVA
+      package p;
+      import runar.lang.StatefulSmartContract;
+      import runar.lang.annotations.Public;
+      import runar.lang.types.Bigint;
+      import runar.lang.types.ByteString;
+
+      class C extends StatefulSmartContract {
+          Bigint count;
+          ByteString tag;
+
+          C(Bigint count, ByteString tag) {
+              super(count, tag);
+              this.count = count;
+              this.tag = tag;
+          }
+
+          @Public
+          void step(Bigint d, ByteString m) {
+              #{lines.join("\n        ")}
+          }
+      }
+    JAVA
+    r = parse(src, "C.runar.java")
+    assert_empty r.errors.map(&:message)
+    stmts = r.contract.methods[0].body
+    assert_equal want.size + 1, stmts.size
+    want.each_with_index { |(target, op), i| n134_assert_compound(stmts[i + 1], target, op) }
+  end
+
+  def test_n134_compound_assignment_in_for_update
+    N134_OPS.each do |tok, op|
+      r = parse(n023_source("for (Bigint i = Bigint.ZERO; i < 2; i #{tok} 2) { assertThat(true); }"),
+                "BareCounter.runar.java")
+      assert_empty r.errors.map(&:message), "#{tok} refused"
+      f = r.contract.methods[0].body[0]
+      assert_kind_of ForStmt, f
+      n134_assert_compound(f.update, "i", op)
+    end
+  end
+
+  # -------------------------------------------------------------------
+  # F-205: annotation names — a qualified `@pkg.Public` must be read, and
+  # an unrecognized annotation must be a loud diagnostic (never a silent
+  # visibility downgrade), matching the TS reference
+  # (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+  # -------------------------------------------------------------------
+
+  def test_qualified_public_annotation_is_recognized
+    source = <<~JAVA
+      class C extends SmartContract {
+          C() { super(); }
+          @runar.lang.annotations.Public
+          void check() { assertThat(true); }
+      }
+    JAVA
+    result = parse(source, "C.runar.java")
+    assert_empty result.errors.map(&:message)
+    assert_equal 1, result.contract.methods.size
+    assert_equal "public", result.contract.methods[0].visibility
+  end
+
+  def test_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade
+    # Claim (2): a misspelled annotation (@Publlic) must be refused with a
+    # diagnostic, exactly as the TS reference refuses it ("unsupported
+    # annotation @Publlic"). Before the fix this parsed with zero errors
+    # and the method silently stayed private.
+    source = <<~JAVA
+      class C extends SmartContract {
+          C() { super(); }
+          @Publlic
+          void check() { assertThat(true); }
+      }
+    JAVA
+    result = parse(source, "C.runar.java")
+    assert_equal ["unsupported annotation @Publlic"], result.errors.map(&:message)
+  end
 end

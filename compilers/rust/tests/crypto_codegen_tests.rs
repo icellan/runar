@@ -38,7 +38,7 @@ fn count_op_tree(ops: &[StackOp]) -> usize {
     let mut total = 0usize;
     for op in ops {
         total += 1;
-        if let StackOp::If { then_ops, else_ops } = op {
+        if let StackOp::If { then_ops, else_ops, .. } = op {
             total += count_op_tree(then_ops);
             total += count_op_tree(else_ops);
         }
@@ -182,6 +182,33 @@ fn test_emit_verify_ecdsa_p384_nontrivial() {
     );
 }
 
+// F-338: emit_verify_ecdsa_p384 is the largest emitter in this crate (453K+
+// tree ops) and, unlike its p384_add/p384_mul/p384_mul_gen/p384_negate
+// siblings above and verify_ecdsa_p256 below, had NO count_op_tree golden —
+// only the ops.len() > 100 threshold test above, which cannot detect a
+// regression confined to an `if` branch body (see count_op_tree's doc
+// comment) or indeed almost any regression, since the real program is 4500x
+// the threshold. Verified: injecting one extra StackOp at the end of
+// emit_verify_ecdsa_p384 left test_emit_verify_ecdsa_p384_nontrivial green.
+//
+// Cross-tier check: Go's countOpTree for EmitVerifyECDSA_P384 (not itself
+// pinned in compilers/go/codegen/crypto_codegen_test.go, measured directly)
+// is 453369, Δ8 from this tier's 453361. That Δ8 is the same raw-StackOp
+// quirk already pinned and explained for verify_ecdsa_p256 above (Δ8 =
+// "two mul/mul_gen invocations x the 4-op divergence" — see
+// test_verify_ecdsa_p256_op_count_golden and the p256_mul/p384_mul comments):
+// c_emit_verify_ecdsa calls the scalar-multiplication ladder (c_emit_mul,
+// the same ladder p384_mul uses) twice internally (u1*G and u2*Q), same as
+// p256, so it inherits the same per-ladder Δ4 x 2 = Δ8. Final
+// script bytes are byte-identical across tiers (conformance/tests/p384-wallet
+// exercises verifyECDSA_P384 end to end at 7-tier parity), confirming this is
+// the known pre-peephole StackOp-count divergence, not a codegen bug.
+#[test]
+fn test_verify_ecdsa_p384_op_count_golden() {
+    let ops = collect(|s| emit_verify_ecdsa_p384(s));
+    assert_eq!(count_op_tree(&ops), 453361, "verify_ecdsa_p384 op count drift");
+}
+
 // ---------------------------------------------------------------------------
 // SLH-DSA codegen
 // ---------------------------------------------------------------------------
@@ -197,18 +224,20 @@ fn test_emit_verify_slh_dsa_128s_nontrivial() {
     );
 }
 
+// F-385: this test used to be a byte-for-byte copy of
+// `test_emit_verify_slh_dsa_128s_nontrivial` above (same `collect` call, same
+// threshold, same message). All six valid FIPS 205 SHA-2 parameter sets are already
+// exercised exhaustively — and more precisely — by
+// `test_emit_verify_slh_dsa_op_counts_match_go_reference` below, so a second
+// "does 128s emit something huge" check added no coverage.
+//
+// Repurposed to cover a nearby case nothing tests: `slh_params` (private to
+// `slh_dsa.rs`, invoked at the top of `emit_verify_slh_dsa`) panics on any key
+// outside the six FIPS 205 SHA-2 sets. No test exercised that guard.
 #[test]
-fn test_emit_verify_slh_dsa_128s_baseline() {
-    // SHA2_128s is the parameter set used by examples and integration tests
-    // (see PostQuantumSLHDSANaiveInsecure / SPHINCSWallet). All six FIPS 205
-    // SHA-2 parameter sets are exercised by
-    // `test_emit_verify_slh_dsa_all_param_sets` below.
-    let ops = collect(|s| emit_verify_slh_dsa(s, "SHA2_128s"));
-    assert!(
-        ops.len() > 10_000,
-        "verify_slh_dsa SHA2_128s should emit a huge program, got {}",
-        ops.len()
-    );
+#[should_panic(expected = "Unknown SLH-DSA params: SHA2_512s")]
+fn test_emit_verify_slh_dsa_unknown_param_set_panics() {
+    let _ = collect(|s| emit_verify_slh_dsa(s, "SHA2_512s"));
 }
 
 #[test]
@@ -220,13 +249,43 @@ fn test_emit_verify_slh_dsa_deterministic() {
 }
 
 /// Cross-language byte-equality canary: the Rust StackOp counts for every
-/// FIPS 205 SHA-2 parameter set must match the Go reference implementation.
-/// These numbers come from running the equivalent loop against
-/// `compilers/go/codegen` (see `EmitVerifySLHDSA`). Go and TS are the
-/// golden references; deviation indicates the Rust port has drifted.
+/// FIPS 205 SHA-2 parameter set must match the Go/TS reference
+/// implementations. Go and TS are the golden references; deviation
+/// indicates the Rust port has drifted.
+///
+/// F-339: this canary used to pin the flat `ops.len()` -- exactly the metric
+/// `count_op_tree`'s own doc comment (above) warns is blind inside an `if`
+/// body, and WOTS+/SLH-DSA are almost entirely conditional. Verified by
+/// temporarily injecting one extra `StackOp` into an `else` branch inside
+/// `emit_slh_merkle`'s authentication-path loop (section 6, the XMSS root
+/// computation) in `compilers/rust/src/codegen/slh_dsa.rs` (reverted after
+/// the measurement): the OLD assertion (`ops.len()`), unmodified, still
+/// reported `ok` because the mutated op never changed the length of the
+/// top-level `Vec<StackOp>` -- only the branch body it lives inside -- while
+/// the NEW assertion below (`count_op_tree`) went red (179322 vs 179259 for
+/// SHA2_128s, h=63 loop iterations x 1 extra op). `count_op_tree` catches it
+/// because it recurses into `StackOp::If` bodies, which is also why its
+/// counts below are far larger than the old flat ones (e.g. SHA2_128s: 29577
+/// flat vs 179259 tree).
+///
+/// Values cross-checked against both reference tiers for all six parameter
+/// sets (not just the two Go/TS already pin as goldens:
+/// compilers/go/codegen/crypto_codegen_test.go's TestSlhdsaEmitOpCountGoldens,
+/// packages/runar-compiler/src/__tests__/slh-dsa-codegen.test.ts):
+///   - Go: `countOpTree` run directly against `EmitVerifySLHDSA` for all six
+///     sets (compilers/go/codegen, package-internal helper already used by
+///     the pinned goldens).
+///   - TS: `countOpTree` run directly against `emitVerifySLHDSA` for all six
+///     sets (packages/runar-compiler/src/passes/slh-dsa-codegen.ts).
+/// Go and TS agree with each other and with the counts below for every one
+/// of the six sets; 128f/192s also match the pre-existing pinned Go/TS
+/// goldens exactly (514175 / 256948).
 #[test]
 fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
-    // (key, expected_op_count_from_go)
+    // Change history below predates F-339 and was measured under the OLD
+    // flat `ops.len()` metric; kept as provenance, not as tree-count
+    // arithmetic for the (much larger) values pinned further down.
+    //
     // BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
     // guard (+5 ops per parameter set) before the existing FORS / Merkle
     // path expansion. Counts updated in lockstep with the Go reference
@@ -247,20 +306,27 @@ fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
     //     key pair address after set_type(WOTS_PK) (FIPS 205 Alg. 8 lines 8-11),
     //     turning a 1-op 4-zero-byte push into a 2-op push-depth + PICK.
     // d = 7, 22, 7, 22, 8, 17 for 128s, 128f, 192s, 192f, 256s, 256f.
+    //
+    // F-034: 256f now uses FIPS 205's FORS height a=9 (one more auth level
+    // per FORS tree) and a 9-byte first tree-address encoding.
+    //
+    // F-339: switched the metric itself from flat `ops.len()` to
+    // `count_op_tree`; see the function doc comment above for why and the
+    // cross-tier check. (key, expected_op_tree_count_from_go_and_ts)
     let expected = [
-        ("SHA2_128s", 29577usize),
-        ("SHA2_128f", 85793),
-        ("SHA2_192s", 41964),
-        ("SHA2_192f", 121740),
-        ("SHA2_256s", 61207),
-        ("SHA2_256f", 123020),
+        ("SHA2_128s", 179259usize),
+        ("SHA2_128f", 514175),
+        ("SHA2_192s", 256948),
+        ("SHA2_192f", 741052),
+        ("SHA2_256s", 350411),
+        ("SHA2_256f", 703277),
     ];
     for (key, want) in expected {
         let ops = collect(|s| emit_verify_slh_dsa(s, key));
         assert_eq!(
-            ops.len(),
+            count_op_tree(&ops),
             want,
-            "verify_slh_dsa {} op count diverged from Go reference",
+            "verify_slh_dsa {} op-tree count diverged from Go/TS reference",
             key
         );
     }
@@ -330,7 +396,7 @@ fn test_emit_verify_slh_dsa_all_param_sets() {
 #[test]
 fn test_blake3_compress_op_count_golden() {
     let ops = collect(|s| emit_blake3_compress(s));
-    assert_eq!(count_op_tree(&ops), 10373, "blake3_compress op count drift");
+    assert_eq!(count_op_tree(&ops), 10379, "blake3_compress op count drift");
 }
 
 #[test]
@@ -370,7 +436,8 @@ fn test_p256_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 6737, "p256_add op count drift");
+    // N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+    assert_eq!(count_op_tree(&ops), 6749, "p256_add op count drift");
 }
 
 #[test]
@@ -467,7 +534,8 @@ fn test_p384_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 11543, "p384_add op count drift");
+    // N-252, the y = 0 tangent guard: pNNNAdd +12 (three picks + OP_SWAP OP_NOT OP_BOOLAND OP_BOOLAND OP_NOT OP_VERIFY); verifyECDSA_* +0, it does not take the guard.
+    assert_eq!(count_op_tree(&ops), 11555, "p384_add op count drift");
 }
 
 #[test]

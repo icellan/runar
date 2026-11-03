@@ -80,6 +80,7 @@ public final class BuiltinArity {
         Map.entry("checkSig", List.of(2)),
         Map.entry("clamp", List.of(3)),
         Map.entry("currentBlockHeight", List.of(0)),
+        Map.entry("continuationAmount", List.of(0)),
         Map.entry("divmod", List.of(2)),
         Map.entry("ecAdd", List.of(2)),
         Map.entry("ecEncodeCompressed", List.of(1)),

@@ -6,6 +6,8 @@
  *  (a) positional arrays (natural guess, but keys match no property names)
  *  (b) keys that don't match any contract property (typos)
  *  (c) referenced readonly properties left unbaked after applying the args
+ *  (d) values whose kind or byte width does not match the property's
+ *      declared type (F-101)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -113,6 +115,69 @@ describe('constructorArgs validation', () => {
     expect(result.artifact!.script).toContain(HASH);
     const slots = result.artifact!.constructorSlots;
     expect(slots === undefined || slots.length === 0).toBe(true);
+  });
+
+  // F-101 — (d) type / width check. Before the fix every case below compiled
+  // with success === true: `true` baked as OP_1 and `42n` as a 1-byte push
+  // where HASH160's 20-byte output is compared (76a95188ac / 76a9012a88ac),
+  // a 6-byte hex string baked as a 6-byte push — all unspendable, no
+  // diagnostic. Proves: compile() refuses each mismatch and names the
+  // property, its declared type and the expected shape. Does NOT prove
+  // anything about the deploy-time SDK path (constructorSlots), which never
+  // goes through constructorArgs.
+  describe('rejects a value that does not match the property type (F-101)', () => {
+    const p2pkh = (t: string) => `
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: ${t};
+  constructor(pubKeyHash: ${t}) { super(pubKeyHash); this.pubKeyHash = pubKeyHash; }
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}`;
+    const cases: [string, string, unknown, RegExp][] = [
+      ['ByteString <- boolean', 'ByteString', true, /must be a hex string, got a boolean/],
+      ['Addr <- boolean', 'Addr', true, /must be exactly 20 bytes of hex, got a boolean/],
+      ['Addr <- bigint', 'Addr', 42n, /must be exactly 20 bytes of hex, got an integer/],
+      ['Addr <- 6-byte hex', 'Addr', 'aabbccddeeff', /must be exactly 20 bytes of hex, got 6 bytes of hex/],
+      ['Addr <- non-hex', 'Addr', 'zzzz-not-hex', /must be exactly 20 bytes of hex, got a non-hex string/],
+      ['ByteString <- odd-length hex', 'ByteString', 'abc', /must be a hex string, got a non-hex string/],
+    ];
+    for (const [label, type, value, re] of cases) {
+      it(label, () => {
+        const result = compile(p2pkh(type), {
+          constructorArgs: { pubKeyHash: value as string },
+        });
+        expect(result.success).toBe(false);
+        const msgs = errorMessages(result);
+        expect(msgs).toContain(`property 'pubKeyHash' (${type})`);
+        expect(msgs).toMatch(re);
+      });
+    }
+
+    it('bigint <- string / boolean <- bigint', () => {
+      const flagged = `
+class Flagged extends SmartContract {
+  readonly target: bigint;
+  readonly on: boolean;
+  constructor(target: bigint, on: boolean) { super(target, on); this.target = target; this.on = on; }
+  public check(x: bigint) { assert(this.on); assert(x === this.target); }
+}`;
+      const result = compile(flagged, {
+        constructorArgs: { target: '2a' as unknown as bigint, on: 1n as unknown as boolean },
+      });
+      expect(result.success).toBe(false);
+      const msgs = errorMessages(result);
+      expect(msgs).toMatch(/property 'target' \(bigint\) must be an integer, got 1 bytes of hex/);
+      expect(msgs).toMatch(/property 'on' \(boolean\) must be a boolean, got an integer/);
+    });
+
+    it('accepts correctly typed values of every family', () => {
+      const ok = compile(p2pkh('Addr'), { constructorArgs: { pubKeyHash: 'AB'.repeat(20) } });
+      expect(ok.success).toBe(true);
+      const bs = compile(p2pkh('ByteString'), { constructorArgs: { pubKeyHash: '' } });
+      expect(bs.success).toBe(true);
+    });
   });
 
   it('still compiles placeholder artifacts when no constructorArgs given', () => {

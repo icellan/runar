@@ -6,8 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use num_bigint::BigInt;
+
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::side_effect_summary::{compute_side_effect_summary, MethodEffects, SideEffectSummary};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -26,10 +29,17 @@ impl TypeCheckResult {
 }
 
 /// Type-check a Rúnar AST. Returns any type errors found.
+/// F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+pub const CONTINUATION_AMOUNT_READ_ONLY: &str = "continuationAmount() is read-only and cannot be assigned";
+
+/// N-321: cap on a typecheck message; mirrored in every tier.
+pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
+
 pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut checker = TypeChecker::new(contract, &mut errors);
 
+    checker.check_property_initializers();
     checker.check_constructor();
     for method in &contract.methods {
         checker.check_method(method);
@@ -79,6 +89,22 @@ pub fn builtin_allowed_arity(name: &str) -> Option<Vec<usize>> {
         _ => {}
     }
     builtin_functions().get(name).map(|sig| vec![sig.params.len()])
+}
+
+/// Does the builtin `name` return a ByteString-family value?
+///
+/// N-347: `anf_lower.rs` answers "is `f(x)` a byte string?" from this, i.e.
+/// from the `return_type` column of `builtin_functions()`, instead of keeping
+/// its own hand-written list. That list drifted twice (N-054, N-345) and was
+/// still missing merkleRootSha256 / merkleRootHash256 / bn254G1Add /
+/// bn254G1Negate / bn254G1ScalarMul, so `f(a) === f(b)` on them compiled to
+/// OP_NUMEQUAL. The table is built once: this runs for every call operand.
+pub(crate) fn builtin_returns_bytes(name: &str) -> bool {
+    static TABLE: std::sync::OnceLock<HashMap<&'static str, FuncSig>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(builtin_functions)
+        .get(name)
+        .is_some_and(|sig| is_bytestring_subtype(sig.return_type))
 }
 
 fn builtin_functions() -> HashMap<&'static str, FuncSig> {
@@ -234,8 +260,35 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("extractPrevOutputScript", FuncSig { params: vec!["bigint", "ByteString"], return_type: "ByteString" });
     m.insert("requireOutputP2PKH", FuncSig { params: vec!["bigint", "ByteString", "bigint"], return_type: "void" });
     m.insert("currentBlockHeight", FuncSig { params: vec![], return_type: "bigint" });
+    // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+    // satoshis of the default single-output state continuation.
+    m.insert("continuationAmount", FuncSig { params: vec![], return_type: "bigint" });
 
     m
+}
+
+/// Builtins that exist (the Go tier implements them, and this tier's own
+/// codegen carries a dispatched — if unexercised — port) but are deliberately
+/// absent from `builtin_functions()`: they belong to proof-system families
+/// CLAUDE.md scopes to the Go reference compiler by policy (R-037). Their
+/// absence from the typecheck table is policy, not a gap; what would be a
+/// gap is reporting them the same way as an actual typo. Mirrors Python's
+/// `GO_ONLY_BUILTINS` (R-258/R-259) -- family labels match that table
+/// exactly. N-238 extended this past the single F-387 entry to the other
+/// seven Go-only builtins, which used to hit the same generic "unknown
+/// function" message in this tier.
+fn go_only_builtin_family(name: &str) -> Option<&'static str> {
+    match name {
+        "merkleRootPoseidon2KB" => Some("Poseidon2 Merkle"),
+        "assertGroth16WitnessAssisted" => Some("BN254 + Groth16"),
+        "assertGroth16WitnessAssistedWithMSM" => Some("BN254 + Groth16"),
+        "groth16PublicInput" => Some("BN254 + Groth16"),
+        "bn254Pairing" => Some("BN254 pairing"),
+        "bn254MultiPairing3" => Some("BN254 pairing"),
+        "bn254MultiPairing4" => Some("BN254 pairing"),
+        "verifySP1FRI" => Some("SP1 FRI"),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +459,48 @@ impl TypeEnv {
         }
         None
     }
+
+    /// Index of the innermost scope binding `name`, or -1 if none does.
+    fn scope_index_of(&self, name: &str) -> i64 {
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// F-110: whether a for-statement may execute its body two or more times.
+/// Mirrors the trip count `extract_loop_shape` (anf_lower) unrolls; a shape it
+/// cannot resolve is refused elsewhere and is treated as repeating here.
+fn loop_may_run_twice(init: &Statement, condition: &Expression) -> bool {
+    fn literal(e: &Expression) -> Option<num_bigint::BigInt> {
+        match e {
+            Expression::BigIntLiteral { value } => Some(value.clone()),
+            Expression::UnaryExpr { op, operand, .. } if *op == UnaryOp::Neg => literal(operand).map(|v| -v),
+            _ => None,
+        }
+    }
+    let start = match init {
+        Statement::VariableDecl { init: e, .. } => literal(e),
+        _ => None,
+    };
+    let (start, op, bound) = match (start, condition) {
+        (Some(s), Expression::BinaryExpr { op, right, .. }) => match literal(right) {
+            Some(b) => (s, op, b),
+            None => return true,
+        },
+        _ => return true,
+    };
+    let count = match op {
+        BinaryOp::Lt => bound - start,
+        BinaryOp::Le => bound - start + 1,
+        BinaryOp::Gt => start - bound,
+        BinaryOp::Ge => start - bound + 1,
+        _ => return true,
+    };
+    count >= num_bigint::BigInt::from(2)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +523,48 @@ fn consuming_param_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
+/// N-109 / N-288: what a contract method consumes when it is called (it is
+/// inlined): the indices of its affine parameters and the `prop:<name>`
+/// origin keys of the affine properties it consumes.
+#[derive(Clone, Default)]
+struct MethodConsumption {
+    params: Vec<usize>,
+    props: Vec<String>,
+}
+
+/// N-109: run the affine checker over each method body with throwaway
+/// diagnostics and record which parameters (and, N-288, which `prop:<name>`
+/// property origins) end up consumed. Reusing the checker
+/// inherits alias, if-arm and loop handling. Consumption only grows as
+/// summaries grow, so iterating until no entry changes terminates, also for
+/// recursive call graphs (refused separately by the validator). Mirrors
+/// `consumedParamSummary` in the TS reference 03-typecheck.ts.
+fn consumed_param_summary(contract: &ContractNode) -> HashMap<String, MethodConsumption> {
+    let mut summary: HashMap<String, MethodConsumption> = contract
+        .methods
+        .iter()
+        .map(|m| (m.name.clone(), MethodConsumption::default()))
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for method in &contract.methods {
+            let mut scratch_errors = Vec::new();
+            let mut scratch = TypeChecker::new(contract, &mut scratch_errors);
+            scratch.consumed_params = Some(summary.clone());
+            let consumed = scratch.consumed_param_indices(method);
+            let (prev_params, prev_props) = summary
+                .get(&method.name)
+                .map_or((0, 0), |v| (v.params.len(), v.props.len()));
+            if consumed.params.len() != prev_params || consumed.props.len() != prev_props {
+                summary.insert(method.name.clone(), consumed);
+                changed = true;
+            }
+        }
+    }
+    summary
+}
+
 struct TypeChecker<'a> {
     contract: &'a ContractNode,
     errors: &'a mut Vec<Diagnostic>,
@@ -443,7 +580,24 @@ struct TypeChecker<'a> {
     /// aliases. Populated when a variable_decl of affine type is
     /// initialized from another affine origin.
     affine_aliases: HashMap<String, String>,
+    /// F-110: for every enclosing loop that may run two or more times, the
+    /// env scope index its init/body bindings live at (innermost last). A
+    /// bounded loop is unrolled `count` times, so consuming an affine value
+    /// bound below the innermost index happens once per iteration.
+    repeating_loop_scopes: Vec<i64>,
     current_method_loc: Option<SourceLocation>,
+    /// N-462: location of the statement being checked (the TS reference's
+    /// `currentStmtLoc`); an error with no finer anchor reports it in
+    /// preference to the method's location.
+    current_stmt_loc: Option<SourceLocation>,
+    /// Lazily computed side-effect summary (F-075).
+    side_effects: Option<SideEffectSummary>,
+    /// N-109: for every contract method, the indices of the parameters it
+    /// consumes (directly or through further helper calls). Private helpers
+    /// are inlined, so a call consumes the arguments at those positions.
+    /// N-288: also the `prop:<name>` origins it consumes, which a call
+    /// consumes in the caller. Computed lazily by `consumed_param_summary`.
+    consumed_params: Option<HashMap<String, MethodConsumption>>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -481,13 +635,126 @@ impl<'a> TypeChecker<'a> {
             builtins: builtin_functions(),
             consumed_values: HashSet::new(),
             affine_aliases: HashMap::new(),
+            repeating_loop_scopes: Vec::new(),
             current_method_loc: None,
+            current_stmt_loc: None,
+            side_effects: None,
+            consumed_params: None,
         }
     }
 
     /// Push a type-check error using the current method's source location.
+    /// N-321: a message longer than MAX_DIAGNOSTIC_BYTES (it may echo user-written
+    /// type text of any length) is cut and ends `...(N more bytes elided)`.
     fn add_error(&mut self, msg: impl Into<String>) {
-        self.errors.push(Diagnostic::error(msg, self.current_method_loc.clone()));
+        let mut msg: String = msg.into();
+        if msg.len() > MAX_DIAGNOSTIC_BYTES {
+            let mut cut = MAX_DIAGNOSTIC_BYTES;
+            while !msg.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let elided = msg.len() - cut;
+            msg.truncate(cut);
+            msg.push_str(&format!("...({} more bytes elided)", elided));
+        }
+        let loc = self.current_stmt_loc.clone().or_else(|| self.current_method_loc.clone());
+        self.errors.push(Diagnostic::error(msg, loc));
+    }
+
+    /// N-463: `add_error` anchored at `at`, as the TS reference anchors an
+    /// error about an expression, when its position is known (the
+    /// `.runar.ts` parser records it); otherwise at the method, as before.
+    fn add_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
+        match expr_loc(at) {
+            Some(loc) => {
+                let saved = self.current_stmt_loc.replace(loc.clone());
+                self.add_error(msg);
+                self.current_stmt_loc = saved;
+            }
+            None => self.add_error(msg),
+        }
+    }
+
+    /// N-472: an operand type error is anchored at the operand with no
+    /// fallback, as TS does with `operand.sourceLocation`. A bigint or boolean
+    /// literal carries no location in any TS parser, so the diagnostic prints
+    /// none rather than the statement. Any other operand without a recorded
+    /// position (a surface that does not record it) keeps `add_error_at`'s
+    /// anchor.
+    fn add_operand_error_at(&mut self, msg: impl Into<String>, at: &Expression) {
+        if expr_loc(at).is_none()
+            && matches!(at, Expression::BigIntLiteral { .. } | Expression::BoolLiteral { .. })
+        {
+            let mut msg: String = msg.into();
+            if msg.len() > MAX_DIAGNOSTIC_BYTES {
+                let mut cut = MAX_DIAGNOSTIC_BYTES;
+                while !msg.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let elided = msg.len() - cut;
+                msg.truncate(cut);
+                msg.push_str(&format!("...({} more bytes elided)", elided));
+            }
+            self.errors.push(Diagnostic::error(msg, None));
+            return;
+        }
+        self.add_error_at(msg, at);
+    }
+
+    /// N-472: `add_error` anchored at an already-known position (the unary
+    /// operator token), else at the statement as before.
+    fn add_error_at_loc(&mut self, msg: impl Into<String>, loc: Option<&SourceLocation>) {
+        match loc {
+            Some(loc) => {
+                let saved = self.current_stmt_loc.replace(loc.clone());
+                self.add_error(msg);
+                self.current_stmt_loc = saved;
+            }
+            None => self.add_error(msg),
+        }
+    }
+
+    /// F-024 (R14): `continuationAmount()` is a read-only view of the
+    /// auto-injected `_newAmount`. Without this check an assignment to it
+    /// would lower as a plain read and silently drop the write.
+    fn refuse_continuation_amount_write(&mut self, target: &Expression) {
+        if let Expression::CallExpr { callee, .. } = target {
+            if matches!(callee.as_ref(), Expression::Identifier { name, .. } if name == "continuationAmount") {
+                self.add_error(CONTINUATION_AMOUNT_READ_ONLY);
+            }
+        }
+    }
+
+    /// N-234: a scalar property initializer whose literal type does not
+    /// match the declared property type compiled without complaint on every
+    /// tier (`readonly x: bigint = toByteString('ab')` emitted a locking
+    /// script that pushes a byte string where the contract's own arithmetic
+    /// expects a script NUMBER). The validator only checks that an
+    /// initializer IS a literal of one of the three families, never that it
+    /// is a literal OF THE DECLARED TYPE. FixedArray properties are skipped
+    /// here: their element-type check already lives in
+    /// expand_fixed_arrays.rs (N-133), which runs on the expanded array
+    /// elements, not the whole-array initializer this pass sees. Mirrors
+    /// the TS reference's method of the same name in 03-typecheck.ts.
+    fn check_property_initializers(&mut self) {
+        for prop in &self.contract.properties {
+            let Some(initializer) = &prop.initializer else { continue };
+            if matches!(prop.prop_type, TypeNode::FixedArray { .. }) {
+                continue;
+            }
+            let init_type = infer_expr_type_static(initializer);
+            if init_type == "<unknown>" {
+                continue;
+            }
+            let declared_type = type_node_to_ttype(&prop.prop_type);
+            if !is_subtype(&init_type, &declared_type) {
+                self.current_method_loc = Some(prop.source_location.clone());
+                self.add_error(format!(
+                    "Type '{}' is not assignable to type '{}'",
+                    init_type, declared_type
+                ));
+            }
+        }
     }
 
     fn check_constructor(&mut self) {
@@ -514,6 +781,15 @@ impl<'a> TypeChecker<'a> {
         self.check_statements(&ctor.body, &mut env);
     }
 
+    /// The named method's effects, following private helpers (F-075).
+    fn method_effects(&mut self, name: &str) -> MethodEffects {
+        let contract = self.contract;
+        let summary = self
+            .side_effects
+            .get_or_insert_with(|| compute_side_effect_summary(contract));
+        summary.get(name).copied().unwrap_or_default()
+    }
+
     fn check_method(&mut self, method: &MethodNode) {
         let mut env = TypeEnv::new();
 
@@ -537,8 +813,16 @@ impl<'a> TypeChecker<'a> {
         // silently wrong when an OP_RETURN output (variable length)
         // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
         // relax with a variable-stride decoder.
-        let has_require_p2pkh = body_calls_builtin(&method.body, "requireOutputP2PKH");
-        let has_add_data_output = body_calls_add_data_output(&method.body);
+        //
+        // F-075: all three guards here read the method's effects from
+        // compute_side_effect_summary, which follows the private-helper call
+        // graph — the same analysis ANF lowering injects the continuation
+        // from, and ANF lowering inlines private helpers. A body-local walk
+        // let a developer disable every guard by moving the triggering call
+        // into a helper.
+        let effects = self.method_effects(&method.name);
+        let has_require_p2pkh = effects.calls_require_output_p2pkh;
+        let has_add_data_output = effects.has_data_output;
         if has_require_p2pkh && has_add_data_output {
             self.add_error(format!(
                 "method '{}' mixes requireOutputP2PKH() with addDataOutput() — \
@@ -567,21 +851,13 @@ split the addDataOutput call into a separate method",
         // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         // Mirrors the TS reference in 03-typecheck.ts.
         if self.contract.parent_class == "StatefulSmartContract" {
-            let mutable_props: HashSet<String> = self
-                .contract
-                .properties
-                .iter()
-                .filter(|p| !p.readonly)
-                .map(|p| p.name.clone())
-                .collect();
-            let sig = analyze_method_output_signals(&method.body, &mutable_props);
-            if has_require_p2pkh && sig.has_state_output {
+            if has_require_p2pkh && effects.has_state_output {
                 self.add_error(format!(
                     "method '{}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — the intrinsic reads output i at byte offset i*34, which is only correct when every earlier output is exactly 34 bytes, and a state-continuation output never is (codePart plus serialised state). The assertion would read bytes from the middle of the contract's own locking script, so the contract would be permanently unspendable. Assert the payment from a separate method that emits no output of its own",
                     method.name
                 ));
             }
-            if sig.requires_output_p2pkh_zero && sig.mutates_state && !sig.has_state_output {
+            if effects.requires_output_p2pkh_zero && effects.mutates_state && !effects.has_state_output {
                 self.add_error(format!(
                     "method '{}' calls requireOutputP2PKH(0, ...) but also mutates state \
 without this.addOutput()/addRawOutput() — the auto-injected single-output state \
@@ -602,6 +878,18 @@ terminal (no state mutation)",
     }
 
     fn check_statement(&mut self, stmt: &Statement, env: &mut TypeEnv) {
+        // N-462: a statement with a real position anchors the errors raised
+        // inside it; the enclosing statement's anchor is restored on exit.
+        let loc = stmt.source_location();
+        let prev = self.current_stmt_loc.clone();
+        if loc.line > 0 {
+            self.current_stmt_loc = Some(loc.clone());
+        }
+        self.check_statement_inner(stmt, env);
+        self.current_stmt_loc = prev;
+    }
+
+    fn check_statement_inner(&mut self, stmt: &Statement, env: &mut TypeEnv) {
         match stmt {
             Statement::VariableDecl {
                 name,
@@ -635,6 +923,7 @@ terminal (no state mutation)",
             }
 
             Statement::Assignment { target, value, .. } => {
+                self.refuse_continuation_amount_write(target);
                 let target_type = self.infer_expr_type(target, env);
                 let value_type = self.infer_expr_type(value, env);
                 if !is_subtype(&value_type, &target_type) {
@@ -658,14 +947,21 @@ terminal (no state mutation)",
                         cond_type
                     ));
                 }
+                // F-222: the arms are mutually exclusive, so each is checked
+                // against the consumed set as it stood before the if;
+                // afterwards a value consumed in either arm counts as consumed.
+                let consumed_before = self.consumed_values.clone();
                 env.push_scope();
                 self.check_statements(then_branch, env);
                 env.pop_scope();
+                let consumed_after_then =
+                    std::mem::replace(&mut self.consumed_values, consumed_before);
                 if let Some(else_stmts) = else_branch {
                     env.push_scope();
                     self.check_statements(else_stmts, env);
                     env.pop_scope();
                 }
+                self.consumed_values.extend(consumed_after_then);
             }
 
             Statement::ForStatement {
@@ -675,6 +971,8 @@ terminal (no state mutation)",
                 body,
                 ..
             } => {
+                let loop_scope = env.scopes.len() as i64;
+                let repeats = loop_may_run_twice(init, condition);
                 env.push_scope();
                 self.check_statement(init, env);
                 let cond_type = self.infer_expr_type(condition, env);
@@ -694,7 +992,15 @@ terminal (no state mutation)",
                 // what catches an unknown name on the `--ir`-adjacent paths
                 // that skip validation.
                 self.check_statement(update, env);
+                // F-110: the body runs once per iteration; see
+                // `repeating_loop_scopes`.
+                if repeats {
+                    self.repeating_loop_scopes.push(loop_scope);
+                }
                 self.check_statements(body, env);
+                if repeats {
+                    self.repeating_loop_scopes.pop();
+                }
                 env.pop_scope();
             }
 
@@ -719,7 +1025,7 @@ terminal (no state mutation)",
 
             Expression::ByteStringLiteral { .. } => BYTESTRING.to_string(),
 
-            Expression::Identifier { name } => {
+            Expression::Identifier { name, .. } => {
                 if name == "this" {
                     return "<this>".to_string();
                 }
@@ -791,7 +1097,7 @@ terminal (no state mutation)",
                 "<unknown>".to_string()
             }
 
-            Expression::PropertyAccess { property } => {
+            Expression::PropertyAccess { property, .. } => {
                 if let Some(t) = self.prop_types.get(property) {
                     return t.clone();
                 }
@@ -828,7 +1134,7 @@ terminal (no state mutation)",
                 }
 
                 // SigHash.ALL, SigHash.FORKID, etc.
-                if let Expression::Identifier { name } = object.as_ref() {
+                if let Expression::Identifier { name, .. } = object.as_ref() {
                     if name == "SigHash" {
                         return BIGINT.to_string();
                     }
@@ -837,11 +1143,15 @@ terminal (no state mutation)",
                 "<unknown>".to_string()
             }
 
-            Expression::BinaryExpr { op, left, right } => {
-                self.check_binary_expr(op, left, right, env)
+            Expression::BinaryExpr { op, left, right, .. } => {
+                self.check_binary_expr(expr, op, left, right, env)
             }
 
-            Expression::UnaryExpr { op, operand } => self.check_unary_expr(op, operand, env),
+            Expression::UnaryExpr {
+                op,
+                operand,
+                source_location,
+            } => self.check_unary_expr(op, operand, source_location.as_ref(), env),
 
             Expression::CallExpr {
                 callee,
@@ -871,10 +1181,13 @@ terminal (no state mutation)",
                     if is_subtype(&cons_type, &alt_type) {
                         return alt_type;
                     }
-                    self.add_error(format!(
-                        "Ternary branches have incompatible types: '{}' and '{}'",
-                        cons_type, alt_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "Ternary branches have incompatible types: '{}' and '{}'",
+                            cons_type, alt_type
+                        ),
+                        expr,
+                    );
                 }
                 cons_type
             }
@@ -899,6 +1212,7 @@ terminal (no state mutation)",
 
             Expression::IncrementExpr { operand, .. }
             | Expression::DecrementExpr { operand, .. } => {
+                self.refuse_continuation_amount_write(operand);
                 let operand_type = self.infer_expr_type(operand, env);
                 if !is_bigint_family(&operand_type) {
                     let op_str = if matches!(expr, Expression::IncrementExpr { .. }) {
@@ -915,19 +1229,31 @@ terminal (no state mutation)",
             }
 
             Expression::ArrayLiteral { elements } => {
-                // Infer element type from the first element; treat as element-type array.
-                if let Some(first) = elements.first() {
-                    let elem_type = self.infer_expr_type(first, env);
-                    format!("{}[]", elem_type)
-                } else {
-                    "<unknown>[]".to_string()
+                // F-063: infer EVERY element, not just the first — a call nested
+                // in a later element must reach the unknown-function rule, and a
+                // mistyped later element must be compared. Ported from the TS
+                // reference, wording included.
+                let Some(first) = elements.first() else {
+                    return "<unknown>[]".to_string();
+                };
+                let elem_type = self.infer_expr_type(first, env);
+                for el in &elements[1..] {
+                    let et = self.infer_expr_type(el, env);
+                    if !is_subtype(&et, &elem_type) && et != "<unknown>" {
+                        self.add_error(format!(
+                            "Array element type mismatch: expected '{}', got '{}'",
+                            elem_type, et
+                        ));
+                    }
                 }
+                format!("{}[]", elem_type)
             }
         }
     }
 
     fn check_binary_expr(
         &mut self,
+        whole: &Expression,
         op: &BinaryOp,
         left: &Expression,
         right: &Expression,
@@ -943,18 +1269,24 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -962,18 +1294,24 @@ terminal (no state mutation)",
             // Arithmetic: bigint x bigint -> bigint
             BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -981,18 +1319,24 @@ terminal (no state mutation)",
             // Comparison: bigint x bigint -> boolean
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BOOLEAN.to_string()
             }
@@ -1003,12 +1347,15 @@ terminal (no state mutation)",
                     && !is_subtype(&right_type, &left_type)
                 {
                     if left_type != "<unknown>" && right_type != "<unknown>" {
-                        self.add_error(format!(
-                            "Cannot compare '{}' and '{}' with '{}'",
-                            left_type,
-                            right_type,
-                            op.as_str()
-                        ));
+                        self.add_error_at(
+                            format!(
+                                "Cannot compare '{}' and '{}' with '{}'",
+                                left_type,
+                                right_type,
+                                op.as_str()
+                            ),
+                            whole,
+                        );
                     }
                 }
                 BOOLEAN.to_string()
@@ -1017,18 +1364,24 @@ terminal (no state mutation)",
             // Logical: boolean x boolean -> boolean
             BinaryOp::And | BinaryOp::Or => {
                 if left_type != BOOLEAN && left_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be boolean, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be boolean, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if right_type != BOOLEAN && right_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be boolean, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be boolean, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BOOLEAN.to_string()
             }
@@ -1039,18 +1392,24 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1058,18 +1417,24 @@ terminal (no state mutation)",
             // Shift: bigint x bigint -> bigint
             BinaryOp::Shl | BinaryOp::Shr => {
                 if !is_bigint_family(&left_type) {
-                    self.add_error(format!(
-                        "Left operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        left_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Left operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            left_type
+                        ),
+                        left,
+                    );
                 }
                 if !is_bigint_family(&right_type) {
-                    self.add_error(format!(
-                        "Right operand of '{}' must be bigint, got '{}'",
-                        op.as_str(),
-                        right_type
-                    ));
+                    self.add_operand_error_at(
+                        format!(
+                            "Right operand of '{}' must be bigint, got '{}'",
+                            op.as_str(),
+                            right_type
+                        ),
+                        right,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1080,6 +1445,7 @@ terminal (no state mutation)",
         &mut self,
         op: &UnaryOp,
         operand: &Expression,
+        op_loc: Option<&SourceLocation>,
         env: &mut TypeEnv,
     ) -> TType {
         let operand_type = self.infer_expr_type(operand, env);
@@ -1087,19 +1453,25 @@ terminal (no state mutation)",
         match op {
             UnaryOp::Not => {
                 if operand_type != BOOLEAN && operand_type != "<unknown>" {
-                    self.add_error(format!(
-                        "Operand of '!' must be boolean, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of '!' must be boolean, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BOOLEAN.to_string()
             }
             UnaryOp::Neg => {
                 if !is_bigint_family(&operand_type) {
-                    self.add_error(format!(
-                        "Operand of unary '-' must be bigint, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of unary '-' must be bigint, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1108,10 +1480,13 @@ terminal (no state mutation)",
                     return BYTESTRING.to_string();
                 }
                 if !is_bigint_family(&operand_type) {
-                    self.add_error(format!(
-                        "Operand of '~' must be bigint or ByteString, got '{}'",
-                        operand_type
-                    ));
+                    self.add_error_at_loc(
+                        format!(
+                            "Operand of '~' must be bigint or ByteString, got '{}'",
+                            operand_type
+                        ),
+                        op_loc,
+                    );
                 }
                 BIGINT.to_string()
             }
@@ -1215,10 +1590,13 @@ terminal (no state mutation)",
             if !normalized.is_empty() {
                 let sat_type = self.infer_expr_type(&normalized[0], env);
                 if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
-                    self.add_error(format!(
-                        "addOutput() first argument (satoshis) must be bigint, got '{}'",
-                        sat_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "addOutput() first argument (satoshis) must be bigint, got '{}'",
+                            sat_type
+                        ),
+                        &normalized[0],
+                    );
                 }
             }
             let mut i = 0;
@@ -1226,13 +1604,16 @@ terminal (no state mutation)",
                 let arg_type = self.infer_expr_type(&normalized[i + 1], env);
                 let prop_type = type_node_to_ttype(&mutable_props[i].1);
                 if !is_subtype(&arg_type, &prop_type) && arg_type != "<unknown>" {
-                    self.add_error(format!(
-                        "addOutput() argument {} ({}) must be '{}', got '{}'",
-                        i + 2,
-                        mutable_props[i].0,
-                        prop_type,
-                        arg_type
-                    ));
+                    self.add_error_at(
+                        format!(
+                            "addOutput() argument {} ({}) must be '{}', got '{}'",
+                            i + 2,
+                            mutable_props[i].0,
+                            prop_type,
+                            arg_type
+                        ),
+                        &normalized[i + 1],
+                    );
                 }
                 i += 1;
             }
@@ -1255,10 +1636,13 @@ terminal (no state mutation)",
         if !args.is_empty() {
             let sat_type = self.infer_expr_type(&args[0], env);
             if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
-                self.add_error(format!(
-                    "{}() first argument (satoshis) must be bigint, got '{}'",
-                    name, sat_type
-                ));
+                self.add_error_at(
+                    format!(
+                        "{}() first argument (satoshis) must be bigint, got '{}'",
+                        name, sat_type
+                    ),
+                    &args[0],
+                );
             }
         }
         if args.len() >= 2 {
@@ -1266,10 +1650,13 @@ terminal (no state mutation)",
             // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
             let script_type = self.infer_expr_type(&args[1], env);
             if !is_subtype(&script_type, "ByteString") && script_type != "<unknown>" {
-                self.add_error(format!(
-                    "{}() second argument (scriptBytes) must be ByteString, got '{}'",
-                    name, script_type
-                ));
+                self.add_error_at(
+                    format!(
+                        "{}() second argument (scriptBytes) must be ByteString, got '{}'",
+                        name, script_type
+                    ),
+                    &args[1],
+                );
             }
         }
         VOID.to_string()
@@ -1283,7 +1670,7 @@ terminal (no state mutation)",
         env: &mut TypeEnv,
     ) -> TType {
         // super() call in constructor
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if name == "super" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
@@ -1298,7 +1685,7 @@ terminal (no state mutation)",
         // form returns void; the expression form asm<T>({...}) carries the
         // captured return type on asm_return_type and produces a value of that
         // type.
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if name == "asm" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
@@ -1311,21 +1698,54 @@ terminal (no state mutation)",
         }
 
         // Direct builtin call: assert(...), checkSig(...), sha256(...), etc.
-        if let Expression::Identifier { name } = callee {
+        if let Expression::Identifier { name, .. } = callee {
             if let Some(sig) = self.builtins.get(name.as_str()) {
                 let sig_params = sig.params.clone();
                 let sig_return_type = sig.return_type;
-                return self.check_call_args(name, &sig_params, sig_return_type, args, env);
+                return self.check_call_args(name, &sig_params, sig_return_type, args, env, false);
             }
 
             // Check if it's a known contract method
             if let Some((params, return_type)) = self.method_sigs.get(name).cloned() {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-                return self.check_call_args(name, &param_strs, &return_type, args, env);
+                return self.check_call_args(name, &param_strs, &return_type, args, env, false);
             }
 
-            // Check if it's a local variable
+            // Check if it's a local variable -- F-208: Rúnar has no
+            // first-class functions, so a bound local can never be called.
+            // This used to return "<unknown>" with no diagnostic, silently
+            // accepting `const f: bigint = a; const r = f(a, a, a);`.
             if env.lookup(name).is_some() {
+                self.add_error(format!(
+                    "local variable '{}' is not callable — Rúnar has no first-class functions; only built-in functions and contract methods can be called",
+                    name
+                ));
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                return "<unknown>".to_string();
+            }
+
+            // F-387 (CL-GAP-065): `merkleRootPoseidon2KB` IS a real Rúnar
+            // builtin -- `is_merkle_builtin` in codegen/stack.rs and
+            // ir/loader.rs both know its name -- but it is scoped to the Go
+            // reference compiler by project policy (CLAUDE.md, "EVM/STARK
+            // proof-system primitives are scoped to the Go tier by project
+            // policy"; conformance/go-only-parity/, R-037). `runar-lang`
+            // does not declare the symbol, so no source frontend can offer
+            // it; reporting it as "unknown function" told the author a real
+            // builtin does not exist, which sends them looking for a typo
+            // or a missing import -- the one thing that is not wrong. Same
+            // fix as Python's `GO_ONLY_BUILTINS` table (R-258/R-259).
+            if let Some(family) = go_only_builtin_family(name) {
+                self.add_error(format!(
+                    "builtin '{}' belongs to the {} family, which is scoped to the Go tier by \
+                     project policy — see CLAUDE.md (\"EVM/STARK proof-system primitives\") and \
+                     conformance/README.md (\"Per-fixture compiler allowlist\"). Compile this \
+                     contract with the Go compiler, or opt the fixture out of the Rust tier via \
+                     source.json's \"compilers\" allowlist.",
+                    name, family
+                ));
                 for arg in args {
                     self.infer_expr_type(arg, env);
                 }
@@ -1343,7 +1763,7 @@ terminal (no state mutation)",
         }
 
         // this.method(...) via PropertyAccess
-        if let Expression::PropertyAccess { property } = callee {
+        if let Expression::PropertyAccess { property, .. } = callee {
             if property == "getStateScript" {
                 if !args.is_empty() {
                     self.add_error("getStateScript() takes no arguments");
@@ -1358,7 +1778,7 @@ terminal (no state mutation)",
             // Check contract method signatures
             if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {
                 let param_strs: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
-                return self.check_call_args(property, &param_strs, &return_type, args, env);
+                return self.check_call_args(property, &param_strs, &return_type, args, env, true);
             }
 
             self.add_error(format!(
@@ -1381,7 +1801,7 @@ terminal (no state mutation)",
             let obj_type = self.infer_expr_type(object, env);
 
             if obj_type == "<this>"
-                || matches!(object.as_ref(), Expression::Identifier { name } if name == "this")
+                || matches!(object.as_ref(), Expression::Identifier { name, .. } if name == "this")
             {
                 if property == "getStateScript" {
                     return BYTESTRING.to_string();
@@ -1399,13 +1819,14 @@ terminal (no state mutation)",
                         &return_type,
                         args,
                         env,
+                        true,
                     );
                 }
             }
 
             // Not this.method — reject (e.g. std::process::exit)
             let obj_name = match object.as_ref() {
-                Expression::Identifier { name } => name.clone(),
+                Expression::Identifier { name, .. } => name.clone(),
                 _ => "<expr>".to_string(),
             };
             self.add_error(format!(
@@ -1436,6 +1857,7 @@ terminal (no state mutation)",
         return_type: &str,
         args: &[Expression],
         env: &mut TypeEnv,
+        is_method: bool,
     ) -> TType {
         // Special case: assert can take 1 or 2 args
         if func_name == "assert" {
@@ -1463,7 +1885,9 @@ terminal (no state mutation)",
         // Special case: checkSig — strict type enforcement
         // arg0 must be Sig (not just any ByteString subtype)
         // arg1 must be PubKey (not just any ByteString subtype)
-        if func_name == "checkSig" {
+        // N-404: only the builtin. A contract method that happens to be named
+        // checkSig is checked against its own signature, as in every other tier.
+        if func_name == "checkSig" && !is_method {
             if args.len() != 2 {
                 self.add_error(format!(
                     "checkSig() expects 2 argument(s), got {}",
@@ -1512,7 +1936,7 @@ terminal (no state mutation)",
                 use num_traits::ToPrimitive;
                 let idx_lit: Option<i128> = match &args[0] {
                     Expression::BigIntLiteral { value } => value.to_i128(),
-                    Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
+                    Expression::UnaryExpr { op: UnaryOp::Neg, operand, .. } => {
                         if let Expression::BigIntLiteral { value } = operand.as_ref() {
                             // R-068: this arm exists ONLY to reach the
                             // "must be >= 0" message below, so it must
@@ -1618,10 +2042,13 @@ terminal (no state mutation)",
             return return_type.to_string();
         }
 
-        // requireOutputP2PKH and currentBlockHeight need the
-        // auto-injected txPreimage — only available in
+        // requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        // the auto-injected txPreimage / _newAmount — only available in
         // StatefulSmartContract methods.
-        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight" {
+        if func_name == "requireOutputP2PKH"
+            || func_name == "currentBlockHeight"
+            || func_name == "continuationAmount"
+        {
             if self.contract.parent_class != "StatefulSmartContract" {
                 self.add_error(format!(
                     "{}() is only available in StatefulSmartContract methods",
@@ -1648,6 +2075,40 @@ terminal (no state mutation)",
                 return return_type.to_string();
             }
             // Fall through to the standard subtype check below.
+        }
+
+        // F-265: substr(witness, start, len) lowers to a raw OP_SPLIT
+        // argument. A literal negative start used to type-check as plain
+        // 'bigint' (the standard subtype loop below never inspects a
+        // literal's VALUE) and compile to a script that aborts at runtime
+        // -- `-5n` minimal-encodes to `<85>`, which OP_SPLIT rejects.
+        // Catch the literal case (bare or unary-negated BigIntLiteral) at
+        // compile time, mirroring the extractPrevOutputScript /
+        // requireOutputP2PKH "must be >= 0" pattern above. Compares the
+        // arbitrary-precision `BigInt` directly rather than narrowing to
+        // `i128` first -- a literal outside `i128` range must not silently
+        // escape this check. A non-literal start (a variable or computed
+        // expression) has no static value to check and is unaffected.
+        if func_name == "substr" && args.len() >= 2 {
+            let start_lit: Option<BigInt> = match &args[1] {
+                Expression::BigIntLiteral { value } => Some(value.clone()),
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand, .. } => {
+                    if let Expression::BigIntLiteral { value } = operand.as_ref() {
+                        Some(-value.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(start) = start_lit {
+                if start < BigInt::from(0) {
+                    self.add_error(format!(
+                        "substr() argument 2 (start) must be >= 0; got {}",
+                        start
+                    ));
+                }
+            }
         }
 
         // Standard argument count check
@@ -1699,12 +2160,25 @@ terminal (no state mutation)",
         args: &[Expression],
         env: &mut TypeEnv,
     ) {
-        let indices = match consuming_param_indices(func_name) {
-            Some(indices) => indices,
-            None => return,
+        let MethodConsumption { params: indices, props: consumed_props } = match consuming_param_indices(func_name) {
+            Some(indices) => MethodConsumption { params: indices.to_vec(), props: Vec::new() },
+            None => {
+                // N-109: a call to a contract method consumes the arguments
+                // at the parameter positions that method consumes.
+                if self.builtins.contains_key(func_name)
+                    || !self.method_sigs.contains_key(func_name)
+                {
+                    return;
+                }
+                let contract = self.contract;
+                let summary = self
+                    .consumed_params
+                    .get_or_insert_with(|| consumed_param_summary(contract));
+                summary.get(func_name).cloned().unwrap_or_default()
+            }
         };
 
-        for &param_index in indices {
+        for param_index in indices {
             if param_index >= args.len() {
                 continue;
             }
@@ -1725,20 +2199,83 @@ terminal (no state mutation)",
 
             // Render a short label (source-form) for the diagnostic.
             let label = match arg {
-                Expression::Identifier { name } => name.clone(),
-                Expression::PropertyAccess { property } => format!("this.{}", property),
+                Expression::Identifier { name, .. } => name.clone(),
+                Expression::PropertyAccess { property, .. } => format!("this.{}", property),
                 _ => origin.clone(),
             };
 
-            if self.consumed_values.contains(&origin) {
-                self.add_error(format!(
-                    "affine value '{}' has already been consumed",
-                    label
-                ));
+            if self.consumed_values.contains(&origin)
+                || self.consumed_per_loop_iteration(&origin, env)
+            {
+                self.add_error_at(
+                    format!("affine value '{}' has already been consumed", label),
+                    arg,
+                );
             } else {
                 self.consumed_values.insert(origin);
             }
         }
+
+        // N-288: the call also consumes every property the method consumes.
+        for origin in consumed_props {
+            if self.consumed_values.contains(&origin)
+                || self.consumed_per_loop_iteration(&origin, env)
+            {
+                let msg = format!(
+                    "affine value 'this.{}' has already been consumed",
+                    origin.trim_start_matches("prop:")
+                );
+                match args.first() {
+                    Some(first) => self.add_error_at(msg, first),
+                    None => self.add_error(msg),
+                }
+            } else {
+                self.consumed_values.insert(origin);
+            }
+        }
+    }
+
+    /// N-109: the indices of `method`'s parameters its body consumes, and
+    /// (N-288) the `prop:<name>` property origins it consumes.
+    fn consumed_param_indices(&mut self, method: &MethodNode) -> MethodConsumption {
+        let mut env = TypeEnv::new();
+        self.current_method_loc = Some(method.source_location.clone());
+        self.consumed_values.clear();
+        self.affine_aliases.clear();
+        for param in &method.params {
+            env.define(&param.name, type_node_to_ttype(&param.param_type));
+        }
+        self.check_statements(&method.body, &mut env);
+        let params = method
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| self.consumed_values.contains(&p.name))
+            .map(|(i, _)| i)
+            .collect();
+        let mut props: Vec<String> = self
+            .consumed_values
+            .iter()
+            .filter(|o| o.starts_with("prop:"))
+            .cloned()
+            .collect();
+        props.sort();
+        MethodConsumption { params, props }
+    }
+
+    /// F-110: true when `origin` is bound outside the innermost enclosing loop
+    /// that may run two or more times, so this one syntactic consumption is
+    /// executed once per iteration -- a double use. A property, or a name the
+    /// env does not bind (a bare-identifier property), is always outside.
+    fn consumed_per_loop_iteration(&self, origin: &str, env: &TypeEnv) -> bool {
+        let innermost = match self.repeating_loop_scopes.last() {
+            Some(i) => *i,
+            None => return false,
+        };
+        if origin.starts_with("prop:") {
+            return true;
+        }
+        env.scope_index_of(origin) < innermost
     }
 
     /// Resolve the canonical origin key for affine tracking.
@@ -1746,13 +2283,13 @@ terminal (no state mutation)",
     /// "prop:<name>" namespace; everything else returns None.
     fn affine_origin_of_expr(&self, expr: &Expression) -> Option<String> {
         match expr {
-            Expression::Identifier { name } => Some(
+            Expression::Identifier { name, .. } => Some(
                 self.affine_aliases
                     .get(name)
                     .cloned()
                     .unwrap_or_else(|| name.clone()),
             ),
-            Expression::PropertyAccess { property } => Some(format!("prop:{}", property)),
+            Expression::PropertyAccess { property, .. } => Some(format!("prop:{}", property)),
             _ => None,
         }
     }
@@ -1762,8 +2299,8 @@ terminal (no state mutation)",
     /// prop-types map.
     fn affine_expr_type(&self, expr: &Expression, env: &TypeEnv) -> Option<TType> {
         match expr {
-            Expression::Identifier { name } => env.lookup(name).cloned(),
-            Expression::PropertyAccess { property } => self.prop_types.get(property).cloned(),
+            Expression::Identifier { name, .. } => env.lookup(name).cloned(),
+            Expression::PropertyAccess { property, .. } => self.prop_types.get(property).cloned(),
             _ => None,
         }
     }
@@ -1844,12 +2381,45 @@ fn collect_return_types(stmts: &[Statement]) -> Vec<TType> {
 /// Lightweight static expression type inference without a type environment.
 /// Used for inferring return types of private methods before the full
 /// type-check pass runs.
+/// N-463: the position of `expr`'s first token, or `None` when unknown.
+/// Only identifiers (`this` included), `this.x` and ByteString literals
+/// record a position, and only on `.runar.ts`. A composite expression starts
+/// where its leftmost child starts, which is the position TS reports for it
+/// (a parenthesised leftmost child is the exception: TS points at the `(`).
+pub(crate) fn expr_loc(expr: &Expression) -> Option<&SourceLocation> {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expression::Identifier { source_location, .. }
+            | Expression::PropertyAccess { source_location, .. }
+            | Expression::ByteStringLiteral { source_location, .. } => {
+                return source_location.as_ref()
+            }
+            Expression::BinaryExpr { left, source_location, .. } => {
+                // N-472: the parser records where the whole
+                // expression starts, which a leading `(` moves left of the
+                // leftmost leaf.
+                if let Some(loc) = source_location {
+                    return Some(loc);
+                }
+                left
+            }
+            // N-472: the operator token.
+            Expression::UnaryExpr { source_location, .. } => return source_location.as_ref(),
+            Expression::CallExpr { callee, .. } => callee,
+            Expression::MemberExpr { object, .. } | Expression::IndexAccess { object, .. } => object,
+            Expression::TernaryExpr { condition, .. } => condition,
+            _ => return None,
+        };
+    }
+}
+
 fn infer_expr_type_static(expr: &Expression) -> TType {
     match expr {
         Expression::BigIntLiteral { .. } => BIGINT.to_string(),
         Expression::BoolLiteral { .. } => BOOLEAN.to_string(),
         Expression::ByteStringLiteral { .. } => BYTESTRING.to_string(),
-        Expression::Identifier { name } => {
+        Expression::Identifier { name, .. } => {
             if name == "true" || name == "false" {
                 BOOLEAN.to_string()
             } else {
@@ -1879,7 +2449,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
             ..
         } => {
             let builtins = builtin_functions();
-            if let Expression::Identifier { name } = callee.as_ref() {
+            if let Expression::Identifier { name, .. } = callee.as_ref() {
                 // Expression-form asm<T>({...}) statically yields type T.
                 if name == "asm" {
                     if let Some(t) = asm_return_type {
@@ -1890,7 +2460,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
                     return sig.return_type.to_string();
                 }
             }
-            if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if let Expression::PropertyAccess { property, .. } = callee.as_ref() {
                 if let Some(sig) = builtins.get(property.as_str()) {
                     return sig.return_type.to_string();
                 }
@@ -1912,6 +2482,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
         Expression::IncrementExpr { .. } | Expression::DecrementExpr { .. } => {
             BIGINT.to_string()
         }
+        Expression::ArrayLiteral { .. } => "<unknown>[]".to_string(),
         _ => "<unknown>".to_string(),
     }
 }
@@ -1929,325 +2500,6 @@ fn type_node_to_ttype(node: &TypeNode) -> TType {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Body-walk helpers for the Crit-3 requireOutputP2PKH / addDataOutput
-// rejection. Recursively scans every statement and expression in a method
-// body looking for a top-level builtin call by identifier name (Identifier
-// callee) or an `obj.addDataOutput(...)` / `this.addDataOutput()` call
-// (MemberExpr / PropertyAccess callee). Mirrors the Go reference impl in
-// compilers/go/frontend/typecheck.go.
-// ---------------------------------------------------------------------------
-
-fn body_calls_builtin(body: &[Statement], name: &str) -> bool {
-    body.iter().any(|s| stmt_contains_call_to(s, name))
-}
-
-fn body_calls_add_data_output(body: &[Statement]) -> bool {
-    body.iter().any(stmt_contains_add_data_output)
-}
-
-fn stmt_contains_call_to(stmt: &Statement, name: &str) -> bool {
-    match stmt {
-        Statement::ExpressionStatement { expression, .. } => {
-            expr_contains_call_to(expression, name)
-        }
-        Statement::VariableDecl { init, .. } => expr_contains_call_to(init, name),
-        Statement::Assignment { target, value, .. } => {
-            expr_contains_call_to(target, name) || expr_contains_call_to(value, name)
-        }
-        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
-            if expr_contains_call_to(condition, name) {
-                return true;
-            }
-            if then_branch.iter().any(|s| stmt_contains_call_to(s, name)) {
-                return true;
-            }
-            if let Some(else_b) = else_branch {
-                if else_b.iter().any(|s| stmt_contains_call_to(s, name)) {
-                    return true;
-                }
-            }
-            false
-        }
-        Statement::ForStatement { body, .. } => {
-            body.iter().any(|s| stmt_contains_call_to(s, name))
-        }
-        Statement::ReturnStatement { value, .. } => {
-            value.as_ref().map_or(false, |e| expr_contains_call_to(e, name))
-        }
-    }
-}
-
-fn expr_contains_call_to(expr: &Expression, name: &str) -> bool {
-    match expr {
-        Expression::CallExpr { callee, args, .. } => {
-            if let Expression::Identifier { name: id_name } = callee.as_ref() {
-                if id_name == name {
-                    return true;
-                }
-            }
-            args.iter().any(|a| expr_contains_call_to(a, name))
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            expr_contains_call_to(left, name) || expr_contains_call_to(right, name)
-        }
-        Expression::UnaryExpr { operand, .. } => expr_contains_call_to(operand, name),
-        Expression::TernaryExpr { condition, consequent, alternate } => {
-            expr_contains_call_to(condition, name)
-                || expr_contains_call_to(consequent, name)
-                || expr_contains_call_to(alternate, name)
-        }
-        Expression::IndexAccess { object, index } => {
-            expr_contains_call_to(object, name) || expr_contains_call_to(index, name)
-        }
-        Expression::ArrayLiteral { elements } => {
-            elements.iter().any(|e| expr_contains_call_to(e, name))
-        }
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => expr_contains_call_to(operand, name),
-        Expression::MemberExpr { object, .. } => expr_contains_call_to(object, name),
-        _ => false,
-    }
-}
-
-fn stmt_contains_add_data_output(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::ExpressionStatement { expression, .. } => {
-            expr_contains_add_data_output(expression)
-        }
-        Statement::VariableDecl { init, .. } => expr_contains_add_data_output(init),
-        Statement::Assignment { target, value, .. } => {
-            expr_contains_add_data_output(target) || expr_contains_add_data_output(value)
-        }
-        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
-            if expr_contains_add_data_output(condition) {
-                return true;
-            }
-            if then_branch.iter().any(stmt_contains_add_data_output) {
-                return true;
-            }
-            if let Some(else_b) = else_branch {
-                if else_b.iter().any(stmt_contains_add_data_output) {
-                    return true;
-                }
-            }
-            false
-        }
-        Statement::ForStatement { body, .. } => {
-            body.iter().any(stmt_contains_add_data_output)
-        }
-        Statement::ReturnStatement { value, .. } => {
-            value.as_ref().map_or(false, expr_contains_add_data_output)
-        }
-    }
-}
-
-fn expr_contains_add_data_output(expr: &Expression) -> bool {
-    match expr {
-        Expression::CallExpr { callee, args, .. } => {
-            match callee.as_ref() {
-                Expression::PropertyAccess { property } if property == "addDataOutput" => {
-                    return true;
-                }
-                Expression::MemberExpr { property, .. } if property == "addDataOutput" => {
-                    return true;
-                }
-                _ => {}
-            }
-            args.iter().any(expr_contains_add_data_output)
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            expr_contains_add_data_output(left) || expr_contains_add_data_output(right)
-        }
-        Expression::UnaryExpr { operand, .. } => expr_contains_add_data_output(operand),
-        Expression::TernaryExpr { condition, consequent, alternate } => {
-            expr_contains_add_data_output(condition)
-                || expr_contains_add_data_output(consequent)
-                || expr_contains_add_data_output(alternate)
-        }
-        Expression::IndexAccess { object, index } => {
-            expr_contains_add_data_output(object) || expr_contains_add_data_output(index)
-        }
-        Expression::ArrayLiteral { elements } => {
-            elements.iter().any(expr_contains_add_data_output)
-        }
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => expr_contains_add_data_output(operand),
-        Expression::MemberExpr { object, .. } => expr_contains_add_data_output(object),
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ---------------------------------------------------------------------------
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the TS
-// reference `analyzeMethodOutputSignals` in
-// packages/runar-compiler/src/passes/03-typecheck.ts.
-
-const STATE_OUTPUT_METHOD_NAMES: &[&str] = &["addOutput", "addRawOutput"];
-
-#[derive(Default)]
-struct MethodOutputSignals {
-    /// assigns to / ++/-- a non-readonly property
-    mutates_state: bool,
-    /// calls this.addOutput() or this.addRawOutput()
-    has_state_output: bool,
-    /// calls requireOutputP2PKH(0n, ...)
-    requires_output_p2pkh_zero: bool,
-}
-
-fn analyze_method_output_signals(
-    body: &[Statement],
-    mutable_props: &HashSet<String>,
-) -> MethodOutputSignals {
-    let mut sig = MethodOutputSignals::default();
-    for stmt in body {
-        walk_stmt_for_output_signals(stmt, mutable_props, &mut sig);
-    }
-    sig
-}
-
-fn walk_stmt_for_output_signals(
-    stmt: &Statement,
-    mutable_props: &HashSet<String>,
-    sig: &mut MethodOutputSignals,
-) {
-    match stmt {
-        Statement::Assignment { target, value, .. } => {
-            if let Expression::PropertyAccess { property } = target {
-                if mutable_props.contains(property) {
-                    sig.mutates_state = true;
-                }
-            }
-            walk_expr_for_output_signals(target, mutable_props, sig);
-            walk_expr_for_output_signals(value, mutable_props, sig);
-        }
-        Statement::ExpressionStatement { expression, .. } => {
-            walk_expr_for_output_signals(expression, mutable_props, sig);
-        }
-        Statement::VariableDecl { init, .. } => {
-            walk_expr_for_output_signals(init, mutable_props, sig);
-        }
-        Statement::IfStatement {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            for s in then_branch {
-                walk_stmt_for_output_signals(s, mutable_props, sig);
-            }
-            if let Some(else_b) = else_branch {
-                for s in else_b {
-                    walk_stmt_for_output_signals(s, mutable_props, sig);
-                }
-            }
-        }
-        Statement::ForStatement {
-            init,
-            condition,
-            update,
-            body,
-            ..
-        } => {
-            walk_stmt_for_output_signals(init, mutable_props, sig);
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            walk_stmt_for_output_signals(update, mutable_props, sig);
-            for s in body {
-                walk_stmt_for_output_signals(s, mutable_props, sig);
-            }
-        }
-        Statement::ReturnStatement { value, .. } => {
-            if let Some(v) = value {
-                walk_expr_for_output_signals(v, mutable_props, sig);
-            }
-        }
-    }
-}
-
-fn walk_expr_for_output_signals(
-    expr: &Expression,
-    mutable_props: &HashSet<String>,
-    sig: &mut MethodOutputSignals,
-) {
-    match expr {
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property } = operand.as_ref() {
-                if mutable_props.contains(property) {
-                    sig.mutates_state = true;
-                }
-            }
-            walk_expr_for_output_signals(operand, mutable_props, sig);
-        }
-        Expression::CallExpr { callee, args, .. } => {
-            match callee.as_ref() {
-                Expression::PropertyAccess { property }
-                    if STATE_OUTPUT_METHOD_NAMES.contains(&property.as_str()) =>
-                {
-                    sig.has_state_output = true;
-                }
-                Expression::MemberExpr { property, .. }
-                    if STATE_OUTPUT_METHOD_NAMES.contains(&property.as_str()) =>
-                {
-                    sig.has_state_output = true;
-                }
-                Expression::Identifier { name } if name == "requireOutputP2PKH" => {
-                    if let Some(Expression::BigIntLiteral { value }) = args.first() {
-                        use num_traits::Zero;
-                        if value.is_zero() {
-                            sig.requires_output_p2pkh_zero = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            for arg in args {
-                walk_expr_for_output_signals(arg, mutable_props, sig);
-            }
-            if !matches!(callee.as_ref(), Expression::Identifier { .. }) {
-                walk_expr_for_output_signals(callee, mutable_props, sig);
-            }
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            walk_expr_for_output_signals(left, mutable_props, sig);
-            walk_expr_for_output_signals(right, mutable_props, sig);
-        }
-        Expression::UnaryExpr { operand, .. } => {
-            walk_expr_for_output_signals(operand, mutable_props, sig);
-        }
-        Expression::TernaryExpr {
-            condition,
-            consequent,
-            alternate,
-        } => {
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            walk_expr_for_output_signals(consequent, mutable_props, sig);
-            walk_expr_for_output_signals(alternate, mutable_props, sig);
-        }
-        Expression::IndexAccess { object, index } => {
-            walk_expr_for_output_signals(object, mutable_props, sig);
-            walk_expr_for_output_signals(index, mutable_props, sig);
-        }
-        Expression::MemberExpr { object, .. } => {
-            walk_expr_for_output_signals(object, mutable_props, sig);
-        }
-        Expression::ArrayLiteral { elements } => {
-            for el in elements {
-                walk_expr_for_output_signals(el, mutable_props, sig);
-            }
-        }
-        _ => {}
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2592,5 +2844,446 @@ class Bad extends SmartContract {
         }
         // If parse itself fails (e.g. because the parser rejects member calls on unknown objects),
         // that also counts as rejection — just not at the typecheck level
+    }
+
+    // -----------------------------------------------------------------------
+    // F-208: Rúnar has no first-class functions. A bound local variable used
+    // as a callee used to fall into the "local variable" branch and return
+    // "<unknown>" with NO diagnostic, silently accepting the call.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f208_local_variable_called_as_function_rejected() {
+        let source = r#"
+class C extends SmartContract {
+    readonly a: bigint;
+    constructor(a: bigint) { super(a); this.a = a; }
+    public check(a: bigint) {
+        const f: bigint = a;
+        const r = f(a, a, a);
+        assert(this.a >= 0n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            !result.errors.is_empty(),
+            "expected typecheck errors for calling local variable 'f' as a function"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("not callable")),
+            "expected 'not callable' error, got: {:?}",
+            result.errors
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-063: infer_expr_type walks EVERY array-literal element.
+    //
+    // The ArrayLiteral arm inferred only the first element, so a call nested
+    // in any later element never reached the unknown-function rule and a
+    // mistyped later element was never compared. Ported from the TS reference.
+    //
+    // Proves: typecheck() refuses each shape with the TS reference's
+    // diagnostic (or this tier's existing unknown-function diagnostic). Does
+    // not prove: CLI exit status or cross-tier parity (conformance/negatives).
+    // -----------------------------------------------------------------------
+
+    fn f063_type_errors(source: &str) -> Vec<String> {
+        typecheck(&parse_and_validate(source))
+            .errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    #[test]
+    fn f063_unknown_function_inside_array_literal_rejected() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }
+}
+"#,
+        );
+        assert!(
+            errs.iter().any(|m| m.contains("unknown function 'totallyBogusFunction'")),
+            "got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn f063_array_element_type_mismatch_rejected() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }
+}
+"#,
+        );
+        assert!(
+            errs.iter().any(|m| m.contains("Array element type mismatch: expected 'PubKey', got 'bigint'")),
+            "got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn f063_well_typed_check_multisig_accepted() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly pk2: PubKey;
+  constructor(pk: PubKey, pk2: PubKey) { super(pk, pk2); this.pk = pk; this.pk2 = pk2; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk2])); }
+}
+"#,
+        );
+        assert!(errs.is_empty(), "got: {:?}", errs);
+    }
+
+    /// F-110: a bounded loop is unrolled `count` times, so an affine value
+    /// bound outside a loop that runs two or more times and consumed in its
+    /// body is consumed once per iteration and must get the same diagnostic as
+    /// a sequential double use. Single-iteration loops stay legal. Proves the
+    /// type checker's verdict only; consumption inside private helpers is out
+    /// of scope (the affine check is intra-method).
+    #[test]
+    fn f110_affine_consumption_in_repeating_loop() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+            ("preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"),
+            ("sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", ""),
+            ("sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", ""),
+        ];
+        for (params, body, want) in cases {
+            let source = format!(
+                "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    /// N-288: the N-109 summary covered parameters only. A helper that
+    /// consumes a PROPERTY (`checkSig(this.sig, ..)`,
+    /// `checkPreimage(this.txPreimage)`) is inlined at every call site, so
+    /// calling it twice must get the diagnostic a direct double use of the
+    /// property gets, also per loop iteration, after a direct consume, through
+    /// an alias and transitively; a single call, one call per if/else arm, and
+    /// a helper that only reads the property stay legal. Proves the type
+    /// checker's verdict only, not the emitted script.
+    #[test]
+    fn n288_affine_property_consumption_through_helpers() {
+        let h = "private h(): void { assert(checkSig(this.sig, this.pk)); }";
+        let double = "affine value 'this.sig' has already been consumed";
+        let stateless = "class C extends SmartContract {\n  readonly pk: PubKey;\n  readonly sig: Sig;\n  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }\n";
+        let stateful = "class C extends StatefulSmartContract {\n  count: bigint;\n  constructor(count: bigint) { super(count); this.count = count; }\n";
+        let transitive = format!("{} private g(t: bigint): void {{ assert(t > 0n); this.h(); }}", h);
+        let cases: Vec<(&str, &str, &str, &str, &str)> = vec![
+            (stateless, h, "", "this.h(); this.h();", double),
+            (stateless, h, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", double),
+            (stateless, h, "", "assert(checkSig(this.sig, this.pk)); this.h();", double),
+            (stateless, &transitive, "", "this.g(1n); this.g(2n);", double),
+            (stateless, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", double),
+            (stateful, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"),
+            (stateless, h, "", "this.h();", ""),
+            (stateless, h, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", ""),
+            (stateless, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", ""),
+        ];
+        for (header, helpers, params, body, want) in cases {
+            let source = format!(
+                "{}  {}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                header, helpers, params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    /// N-109: private helpers are inlined, so a call consumes the arguments at
+    /// the parameter positions the helper consumes (directly, through an
+    /// alias, or transitively through another helper). `this.h(sig)` twice, or
+    /// once in a 2-iteration loop, must get the same diagnostic as a sequential
+    /// double use; a single call, one call per if/else arm, and a helper that
+    /// takes a Sig without consuming it stay legal. Proves the type checker's
+    /// verdict only; a helper consuming a PROPERTY is not covered.
+    #[test]
+    fn n109_affine_consumption_through_helpers() {
+        let h = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }";
+        let double = "affine value 'sig' has already been consumed";
+        let transitive = format!("{} private g(t: bigint, s2: Sig): void {{ assert(t > 0n); this.h(s2); }}", h);
+        let cases: Vec<(&str, &str, &str, &str)> = vec![
+            (h, "sig: Sig", "this.h(sig); this.h(sig);", double),
+            (h, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", double),
+            (h, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", double),
+            (&transitive, "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", double),
+            ("private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", double),
+            ("private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"),
+            (h, "sig: Sig", "this.h(sig);", ""),
+            (h, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", ""),
+            (h, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", ""),
+            ("private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", ""),
+        ];
+        for (helpers, params, body, want) in cases {
+            let source = format!(
+                "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  {}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                helpers, params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    /// F-222: the then and else arms of an if are mutually exclusive, so a Sig
+    /// consumed once in each arm is consumed once on every path and must
+    /// typecheck. Every shape where some path consumes twice (an arm plus after
+    /// the if, before plus an arm, twice in one arm, once per arm inside a
+    /// 2-iteration loop) must still be refused. Proves the type checker's
+    /// verdict only; the ternary form is not an if statement and is untouched.
+    #[test]
+    fn f222_affine_consumption_across_if_else_arms() {
+        const DOUBLE: &str = "affine value 'sig' has already been consumed";
+        let cases: &[(&str, &str)] = &[
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""),
+            ("if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", ""),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", DOUBLE),
+            ("assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", DOUBLE),
+            ("if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", DOUBLE),
+            ("if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", DOUBLE),
+            ("for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", DOUBLE),
+        ];
+        for (body, want) in cases {
+            let source = format!(
+                "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m(sig: Sig, flag: boolean) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-265 -- substr() literal negative start is a compile-time error
+    //
+    // substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+    // enforced start >= 0: a literal negative start
+    // (`substr(a, -5n, 3n)`) type-checked as plain 'bigint' (the standard
+    // subtype loop never inspects a literal's VALUE) and compiled to a
+    // script that aborts at runtime -- `-5n` minimal-encodes to `<85>`,
+    // which OP_SPLIT rejects as out of range.
+    //
+    // Proves: a literal (bare or unary-negated BigIntLiteral) negative start
+    // is now a typecheck-time diagnostic, mirroring the existing
+    // extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+    // pattern above. Does not prove: anything about a NON-literal negative
+    // start (a variable or computed expression) -- that remains a runtime
+    // abort, unchanged, because the stack model has no static value range
+    // for a non-literal.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f265_substr_literal_negative_start_rejected() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock() {
+        assert(substr(this.a, -5n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("substr() argument 2 (start) must be >= 0; got -5")),
+            "expected a substr() start-bound error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn f265_substr_literal_non_negative_start_accepted() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock() {
+        assert(substr(this.a, 0n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn f265_substr_non_literal_start_unchanged() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class C extends SmartContract {
+    readonly a: ByteString;
+
+    constructor(a: ByteString) {
+        super(a);
+        this.a = a;
+    }
+
+    public unlock(n: bigint) {
+        assert(substr(this.a, n, 3n) === this.a);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    // N-234: a property initializer of the wrong literal family compiled
+    // without complaint. Proves only the Rust tier's
+    // check_property_initializers; the 7-tier cross-compiler shape is
+    // conformance/negatives/N233-*.
+
+    #[test]
+    fn n234_rejects_bytestring_initializer_for_bigint_property() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+    readonly x: bigint = 'ab';
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n234_rejects_to_bytestring_call_initializer_for_bigint_property() {
+        let source = r#"
+import { SmartContract, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+    readonly x: bigint = toByteString('ab');
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Type 'ByteString' is not assignable to type 'bigint'")),
+            "expected the not-assignable diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn n234_still_accepts_well_typed_scalar_initializer() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+    readonly x: bigint = 1n;
+
+    constructor() {
+        super();
+    }
+
+    public check() {
+        assert(this.x === 1n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors, got: {:?}",
+            result.errors
+        );
     }
 }

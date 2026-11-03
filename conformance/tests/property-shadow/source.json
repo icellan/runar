@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/property-shadow/PropertyShadow.runar.ts",
+    ".runar.sol": "../../../examples/sol/property-shadow/PropertyShadow.runar.sol",
+    ".runar.move": "../../../examples/move/property-shadow/PropertyShadow.runar.move",
+    ".runar.go": "../../../examples/go/property-shadow/PropertyShadow.runar.go",
+    ".runar.rs": "../../../examples/rust/property-shadow/PropertyShadow.runar.rs",
+    ".runar.py": "../../../examples/python/property-shadow/PropertyShadow.runar.py",
+    ".runar.zig": "../../../examples/zig/property-shadow/PropertyShadow.runar.zig",
+    ".runar.rb": "../../../examples/ruby/property-shadow/PropertyShadow.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/property-shadow/PropertyShadow.runar.java"
+  }
+}

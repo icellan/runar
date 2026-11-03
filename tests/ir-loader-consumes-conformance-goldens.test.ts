@@ -35,7 +35,7 @@ const fixturesDir = join(repoRoot, 'conformance', 'tests');
 
 interface Golden { name: string; irPath: string; hexPath: string }
 
-const goldens: Golden[] = readdirSync(fixturesDir)
+const allGoldens: Golden[] = readdirSync(fixturesDir)
   .sort()
   .map(name => ({
     name,
@@ -44,11 +44,36 @@ const goldens: Golden[] = readdirSync(fixturesDir)
   }))
   .filter(g => existsSync(g.irPath) && existsSync(g.hexPath));
 
+/**
+ * N-314 (R144): goldens the TS compiler cannot compile because their
+ * `compilers` allowlist excludes ts and TS has no codegen for them (today the
+ * Go-only BN254 pairing). Skipped BY NAME, only when also allowlisted away
+ * from ts, and the skipped set is pinned below so a new one fails loudly.
+ * Every other allowlisted golden is still compiled.
+ */
+const EXPECTED_NOT_TS_COMPILABLE = ['bn254-pairing'];
+
+function excludesTs(name: string): boolean {
+  const sj = join(fixturesDir, name, 'source.json');
+  if (!existsSync(sj)) return false;
+  const cfg = JSON.parse(readFileSync(sj, 'utf8')) as { compilers?: string[] };
+  return Array.isArray(cfg.compilers) && !cfg.compilers.includes('ts');
+}
+
+const skippedNotTs = allGoldens
+  .filter(g => excludesTs(g.name) && EXPECTED_NOT_TS_COMPILABLE.includes(g.name))
+  .map(g => g.name);
+const goldens = allGoldens.filter(g => !skippedNotTs.includes(g.name));
+
 describe('TS --ir loader vs the conformance goldens', () => {
   it('finds the golden corpus', () => {
     // Anti-vacuity: an empty list would make every assertion below a no-op,
     // which is exactly how a path typo hides a regression.
     expect(goldens.length).toBeGreaterThanOrEqual(70);
+  });
+
+  it('skips exactly the expected goldens whose allowlist excludes ts (N-314)', () => {
+    expect(skippedNotTs).toEqual(EXPECTED_NOT_TS_COMPILABLE);
   });
 
   it.each(goldens.map(g => [g.name, g] as const))(
@@ -90,12 +115,35 @@ describe('loadANFFromJSON number handling', () => {
     expect((anf.methods[0]!.body[0]!.value as { value: unknown }).value).toBe(true);
   });
 
-  it('rejects an integer JSON.parse has already rounded rather than compiling the rounded value', () => {
-    // 2^53 + 1 does not survive JSON.parse. Silently pushing 2^53 would be a
-    // wrong locking script with no diagnostic; peer emitters encode anything
-    // this large as a "…n" decimal string precisely to avoid the round trip.
+  it('decodes 2^53+1 exactly rather than compiling the value JSON.parse already rounded (or refuses it without context.source)', () => {
+    // 9007199254740993 (2^53 + 1) does not survive JSON.parse as a number —
+    // it rounds to 9007199254740992. N-212 (R82: parse exactly everywhere)
+    // reads the undamaged token from the reviver's `context.source`
+    // (Node >= 21) for the `value` / `initialValue` positions and returns
+    // the exact BigInt instead of silently compiling the rounded value. On a
+    // runtime without `context.source` the digits are unrecoverable and the
+    // pre-N-212 refusal is still the correct answer — asserted here, not
+    // skipped, same as packages/runar-compiler/src/__tests__/n212-ir-bare-big-integer.test.ts.
+    //
+    // Proves: on this runtime, loadANFFromJSON yields the exact bigint
+    // 9007199254740993n for a bare too-large JSON integer, not 2^53 and not
+    // a JS number.
+    // Does not prove: the compiled script hex (see n212-ir-bare-big-integer.test.ts),
+    // other tiers, or the `initialValue` / `loop.start` positions.
+    let hasSource = false;
+    JSON.parse('1', function (this: unknown, _k: string, v: unknown, ctx?: { source?: string }) {
+      hasSource = ctx?.source === '1';
+      return v;
+    } as never);
+
     const tooBig = wrap('[{"name":"t0","value":{"kind":"load_const","value":9007199254740993}}]');
-    expect(() => loadANFFromJSON(tooBig)).toThrow(/precision|safe integer/i);
+    if (!hasSource) {
+      expect(() => loadANFFromJSON(tooBig)).toThrow(/safe-integer precision/);
+      return;
+    }
+    const value = (loadANFFromJSON(tooBig).methods[0]!.body[0]!.value as { value: unknown }).value;
+    expect(typeof value).toBe('bigint');
+    expect(value).toBe(9007199254740993n);
   });
 
   it('decodes a numeric loop start as a bigint', () => {

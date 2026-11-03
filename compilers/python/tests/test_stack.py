@@ -6,8 +6,11 @@ pass produces correct StackOp sequences for common ANF IR patterns.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from runar_compiler.compiler import compile_from_ir_bytes
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -533,12 +536,16 @@ class TestLoop:
 
 
 # ---------------------------------------------------------------------------
-# Test: log2 uses bit-scanning (not byte-size approximation)
+# Test: log2 reads the minimal encoding exactly (N-103)
 # ---------------------------------------------------------------------------
 
 class TestLog2:
-    def test_bit_scanning(self):
-        """log2 should use OP_GREATERTHAN for bit-scanning loop, not OP_SIZE."""
+    def test_exact_encoding_read(self):
+        """N-103 (user decision R86): the 64-iteration halving loop this used to
+        pin (OP_DIV, no OP_SIZE / OP_MUL, 64 if-ops; capped at 64) became an
+        exact, branch-free read of the operand's minimal encoding. Pins the
+        whole sequence; execution is covered by
+        conformance/negatives/n103-log2-exact-parity.test.ts."""
         program = ANFProgram(
             contract_name="Log2Test",
             properties=[],
@@ -563,28 +570,14 @@ class TestLog2:
 
         asm = _ops_to_string(check.ops)
 
-        # Must use OP_GREATERTHAN (bit-scanning loop), not OP_SIZE (byte approximation)
-        assert "OP_GREATERTHAN" in asm, (
-            f"log2 should use OP_GREATERTHAN for bit-scanning loop, got: {asm}"
-        )
-
-        # Must use OP_DIV for numeric halving
-        assert "OP_DIV" in asm, f"log2 should use OP_DIV for bit-scanning loop, got: {asm}"
-
-        # Must NOT use the old OP_SIZE byte-approximation approach
-        assert "OP_SIZE" not in asm, f"log2 should NOT use OP_SIZE (old byte approx), got: {asm}"
-        assert "OP_MUL" not in asm, f"log2 should NOT use OP_MUL (old byte approx), got: {asm}"
-
-        # The bit-scanning loop should have 64 if-ops with OP_DIV + OP_1ADD inside
-        if_count = sum(
-            1 for op in check.ops
-            if op.op == "if"
-            and "OP_DIV" in _ops_to_string(op.then)
-            and "OP_1ADD" in _ops_to_string(op.then)
-        )
-        assert if_count == 64, (
-            f"log2 should have 64 if-ops for bit-scanning iterations, got {if_count}"
-        )
+        want = ["OP_BIN2NUM", "OP_DUP", "PUSH(0)", "OP_GREATERTHAN", "OP_VERIFY",
+                "OP_SIZE", "OP_1SUB", "OP_TUCK", "OP_SPLIT", "OP_NIP", "OP_BIN2NUM",
+                "OP_SWAP", "PUSH(8)", "OP_MUL", "OP_1SUB"]
+        for c in (1, 2, 4, 8, 16, 32, 64):
+            want += ["OP_OVER", f"PUSH({c})", "OP_GREATERTHANOREQUAL", "OP_ADD"]
+        want.append("OP_NIP")
+        assert " ".join(want) in asm, f"log2 should emit the N-103 sequence, got: {asm}"
+        assert all(op.op != "if" for op in check.ops), f"log2 must be branch-free, got: {asm}"
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +741,44 @@ class TestWithInitialValues:
         assert len(placeholders) == 0, (
             f"with initial values, there should be no Placeholder ops, found: {placeholders}"
         )
+
+    def test_non_literal_initial_value_is_loud_error_not_op0(self):
+        """F-258 / CL-BUG-151: a property's `initialValue` is supposed to be a
+        literal -- the language only allows BigIntLiteral / BoolLiteral /
+        ByteStringLiteral initializers (see CLAUDE.md "Property
+        initializers"). The frontend enforces that, but `--ir` bypasses the
+        frontend entirely, so a hand-written IR file can give a property an
+        array (or object) `initialValue`.
+
+        Before the fix, `_push_property_value`'s fallback silently pushed a
+        bare OP_0 for any non-bool/int/float/str value: this IR compiled
+        cleanly to a 1-byte script (`00`) that always reads `secret` as 0,
+        instead of being refused. This test proves ONLY that: it does not
+        prove anything about `load_const`'s own equivalent fallback (that one
+        is already unreachable -- every producer of a `load_const` binding,
+        including the `--ir` loader's `decode_constants`, sets one of
+        const_bool/const_int/const_string or raises first).
+        """
+        ir = json.dumps({
+            "contractName": "HostilePropInit",
+            "properties": [
+                {"name": "secret", "type": "bigint", "readonly": True, "initialValue": [1, 2, 3]},
+            ],
+            "methods": [
+                {
+                    "name": "reveal",
+                    "params": [],
+                    "body": [
+                        {"name": "t0", "value": {"kind": "load_prop", "name": "secret"}},
+                        {"name": "t1", "value": {"kind": "assert", "value": "t0"}},
+                    ],
+                    "isPublic": True,
+                }
+            ],
+        }).encode("utf-8")
+
+        with pytest.raises(RuntimeError, match="Refusing to emit a silent OP_0"):
+            compile_from_ir_bytes(ir)
 
 
 # ---------------------------------------------------------------------------

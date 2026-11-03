@@ -2,6 +2,8 @@ package runar
 
 import (
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -67,4 +69,45 @@ func TestSha256Finalize_CrossVerify(t *testing.T) {
 			}
 		})
 	}
+}
+
+// F-142: the compiled script accepts 0..119 bytes of `remaining` (its
+// two-block path pads to 120) and aborts on more. Proves the boundary lengths
+// equal standard SHA-256 over a chained state and that 120 is refused instead
+// of returning a digest the chain never reproduces. Does not prove anything
+// about the compiled script itself.
+func f142ChainedState() (ByteString, []byte) {
+	iv, _ := hex.DecodeString("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19")
+	first := make([]byte, 64)
+	for i := range first {
+		first[i] = byte(i)
+	}
+	return Sha256Compress(ByteString(iv), ByteString(first)), first
+}
+
+func TestSha256Finalize_BoundaryLengthsMatchStandardSha256(t *testing.T) {
+	state, first := f142ChainedState()
+	for _, n := range []int{0, 1, 55, 56, 63, 64, 65, 100, 118, 119} {
+		tail := make([]byte, n)
+		for i := range tail {
+			tail[i] = byte(0xA0 + i)
+		}
+		got := Sha256Finalize(state, ByteString(tail), int64((64+n)*8))
+		want := Sha256Hash(ByteString(append(append([]byte(nil), first...), tail...)))
+		if got != want {
+			t.Fatalf("remaining len %d: got %x want %x", n, []byte(got), []byte(want))
+		}
+	}
+}
+
+func TestSha256Finalize_Refuses120Bytes(t *testing.T) {
+	state, _ := f142ChainedState()
+	defer func() {
+		r := recover()
+		if r == nil || !strings.Contains(fmt.Sprint(r), "Sha256Finalize: remaining must be 0-119 bytes") {
+			t.Fatalf("expected refusal panic for 120-byte remaining, got %v", r)
+		}
+	}()
+	got := Sha256Finalize(state, ByteString(make([]byte, 120)), 184*8)
+	t.Fatalf("120-byte remaining returned %x; the compiled script aborts", []byte(got))
 }

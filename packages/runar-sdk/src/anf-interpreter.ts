@@ -13,13 +13,19 @@
  *     skips `assert` predicates so the SDK can pre-compute the post-state
  *     even when arguments wouldn't actually pass the on-chain script. This
  *     is the canonical use: auto-deriving `newState` for the next call.
- *  2. **Strict** (`executeStrict`) — evaluates every `assert` predicate and
- *     throws `AssertionFailureError` (carrying the contract method + ANF
- *     binding name of the failing predicate) on the first false assert. Use
- *     for "will this call go through?" / "would the asserts hold" smoke
- *     tests off-chain before paying broadcast fees. Crypto built-ins
- *     (`checkSig`, `checkMultiSig`, `checkPreimage`) still mock-return
- *     `true` — only explicit `assert(...)` predicates are enforced.
+ *  2. **Strict** (`executeStrict`) — evaluates every developer-written
+ *     `assert` predicate and throws `AssertionFailureError` (carrying the
+ *     contract method + ANF binding name of the failing predicate) on the
+ *     first false assert. Use for "will this call go through?" / "would
+ *     the asserts hold" smoke tests off-chain before paying broadcast
+ *     fees. Crypto built-ins (`checkSig`, `checkMultiSig`, `checkPreimage`)
+ *     still mock-return `true` — and so does the compiler's own
+ *     auto-injected stateful-method prologue (the `checkPreimage` assert
+ *     and the sighash-type assert `emitStatefulPrologue` puts at the start
+ *     of every public `StatefulSmartContract` method, detected
+ *     structurally by {@link detectAutoInjectedPrologueAsserts} — F-164).
+ *     Only explicit, developer-written `assert(...)` predicates — anywhere
+ *     outside that fixed prologue shape — are enforced.
  *  3. **On-chain authoritative** (`executeOnChainAuthoritative`) — strict
  *     assert enforcement PLUS real ECDSA / SHA-256 preimage verification
  *     against a caller-supplied `sighash`. The signature shape requires the
@@ -38,7 +44,7 @@ import type {
   ANFBinding,
   ANFValue,
 } from 'runar-ir-schema';
-import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
+import { Hash, Utils, PublicKey, Signature, BigNumber, TransactionSignature } from '@bsv/sdk';
 // `verify` from @bsv/sdk's ECDSA module performs raw ECDSA verification
 // against an already-hashed digest. We use this rather than
 // `pubKey.verify(...)` (which internally sha256s its first arg) so the
@@ -47,6 +53,7 @@ import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
 // the BIP-143 sighash directly with no extra hashing.
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 import { decodeScriptNumber } from './script-utils.js';
+import { isStrictDerSignature } from './der.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -122,10 +129,44 @@ export function computeNewState(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): Record<string, unknown> {
   return computeNewStateAndDataOutputs(
-    anf, methodName, currentState, args, constructorArgs,
+    anf, methodName, currentState, args, constructorArgs, continuation,
   ).state;
+}
+
+/**
+ * F-024 (R14): the values of the spend that the default state continuation
+ * reads. `inputAmount` is the satoshis of the UTXO being spent — what
+ * `extractAmount(txPreimage)` returns on-chain. The continuation's own
+ * satoshis (`continuationAmount()`) are passed as the `_newAmount` arg. When
+ * `inputAmount` is omitted, `extractAmount` keeps its historical dummy answer.
+ *
+ * R67: `scriptCode` is the CompactSize-prefixed bytes `extractScriptCode(txPreimage)`
+ * returns on-chain — the contract's own codePart, exactly as `contract.ts`
+ * computes it via `getSubscriptForSigning(getCodePartHex(), methodIndex)`.
+ * When omitted, `extractScriptCode` keeps its historical empty-string dummy.
+ */
+export interface ContinuationContext {
+  inputAmount?: bigint;
+  scriptCode?: string;
+}
+
+/** Stand-in for `txPreimage` when the caller supplied the input amount and/or scriptCode. */
+interface MockPreimageValue {
+  readonly __runarMockPreimage: true;
+  readonly amount?: bigint;
+  readonly scriptCode?: string;
+}
+
+/** N-360: the source name of a param bound under its `<name>@local` slot, else undefined. */
+function renamedParamSource(name: string): string | undefined {
+  return name.endsWith('@local') ? name.slice(0, -'@local'.length) : undefined;
+}
+
+function isMockPreimage(v: unknown): v is MockPreimageValue {
+  return typeof v === 'object' && v !== null && (v as MockPreimageValue).__runarMockPreimage === true;
 }
 
 /**
@@ -142,8 +183,9 @@ export function computeNewStateAndDataOutputs(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): ExecutionResult {
-  return runMethod(anf, methodName, currentState, args, constructorArgs, null);
+  return runMethod(anf, methodName, currentState, args, constructorArgs, null, continuation);
 }
 
 /**
@@ -171,8 +213,10 @@ export class AssertionFailureError extends Error {
  * `assert(predicate)` whose predicate evaluates to a falsy value. Use this
  * before broadcasting a transaction to surface guard failures off-chain
  * instead of relying on a node rejection. Crypto built-ins (`checkSig`,
- * `checkMultiSig`, `checkPreimage`) still mock-return `true` — strict mode
- * only enforces explicit `assert(...)` predicates.
+ * `checkMultiSig`, `checkPreimage`) still mock-return `true`, and so does
+ * the compiler's own auto-injected stateful-method prologue (F-164) —
+ * strict mode only enforces explicit, developer-written `assert(...)`
+ * predicates outside that fixed prologue shape.
  */
 export function executeStrict(
   anf: ANFProgram,
@@ -180,10 +224,11 @@ export function executeStrict(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): ExecutionResult {
   return runMethod(anf, methodName, currentState, args, constructorArgs, {
     methodName,
-  });
+  }, continuation);
 }
 
 /**
@@ -194,12 +239,19 @@ export function executeStrict(
  * `LocalSigner.sign(...)` before broadcasting). The interpreter:
  *
  *  - verifies `checkSig(sig, pk)` by parsing `pk` as a compressed/uncompressed
- *    secp256k1 point, parsing `sig` as DER (with optional trailing sighash byte
- *    stripped), and calling `pubKey.verify(sighash, signature)` — a real
- *    ECDSA verification. Any mismatch returns `false`, which then trips the
- *    enclosing `assert(...)` and throws.
- *  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
- *    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
+ *    secp256k1 point, parsing `sig` as DER followed by its one sighash-type
+ *    byte (checksig format — bare DER aborts, as in `Spend`, N-255), and calling `pubKey.verify(sighash, signature)` — a real
+ *    ECDSA verification. An EMPTY signature returns `false`, which then
+ *    trips the enclosing `assert(...)` and throws. A non-empty, well-formed
+ *    signature that does not verify throws a plain `Error`: a node aborts
+ *    the script there under NULLFAIL (BIP146, N-198). A malformed encoding — a non-empty signature that is not strict
+ *    DER or has a high S, or a public key that is not 02/03+33 / 04+65 bytes
+ *    on the curve — throws a plain `Error` instead, because `OP_CHECKSIG`
+ *    aborts the script there rather than pushing false (N-197).
+ *  - verifies `checkMultiSig(sigs, pks)` as `OP_CHECKMULTISIG` does: last
+ *    signature against last key first, the same encoding gates on every pair
+ *    it examines, and NULLFAIL on a failing check with a non-empty signature
+ *    (N-259, see `verifyMultiSig`).
  *  - verifies `checkPreimage(preimage)` by computing `hash256(preimage)`
  *    (i.e. `SHA256(SHA256(preimage))`) and comparing it to `sighash`
  *    byte-for-byte — the on-chain `OP_PUSH_TX` semantic.
@@ -239,6 +291,74 @@ interface StrictCtx {
   methodName: string;
   /** When set, crypto built-ins verify against this 32-byte sighash. */
   realCrypto?: { sighash: number[] };
+  /**
+   * F-164 (round 2): the specific `assert` ANFValue objects (by reference)
+   * that are the auto-injected stateful-method prologue's own asserts
+   * (checkPreimage's assert + the sighash-type assert) — see
+   * {@link detectAutoInjectedPrologueAsserts}. Mocked (skipped) in plain
+   * strict mode; left enforced in `executeOnChainAuthoritative` (unchanged).
+   */
+  mockedPrologueAsserts?: Set<ANFValue>;
+}
+
+/**
+ * F-164 (round 2): structural (shape-based, NOT binding-name-based)
+ * detection of the fixed sequence `emitStatefulPrologue` (stateful-
+ * scaffold.ts) injects at the START of every public `StatefulSmartContract`
+ * method's body:
+ *
+ *   [0] load_param txPreimage
+ *   [1] check_preimage(preimage: [0])
+ *   [2] assert([1])                              <- mocked in strict mode
+ *   [3] load_param txPreimage
+ *   [4] call extractSigHashType([3])
+ *   [5] load_const <declared sighash mode>
+ *   [6] bin_op === ([4], [5])
+ *   [7] assert([6])                              <- mocked in strict mode
+ *
+ * This exact 8-binding sequence can ONLY appear at index 0 of a method
+ * body: the compiler emits it unconditionally, before lowering a single
+ * line of the developer's own code, for every public stateful method — so
+ * user code can never occupy these positions. A developer who writes their
+ * own `assert(checkPreimage(...))` or `assert(extractSigHashType(...) ===
+ * ...)` has that code lowered AFTER this prologue, at a LATER index, so it
+ * is never matched here and remains fully enforced (see the
+ * "user-written-assert-not-mocked" test in anf-interpreter-strict.spec.ts).
+ *
+ * We cannot mark these two ANF nodes with the existing
+ * `isAutoInjectedStateCheck` field the way the exit-time continuation-hash
+ * assert is marked (stateful-scaffold.ts:171,188): that field is part of
+ * the serialized ANF IR, and setting it on the prologue asserts would add
+ * a key to each fixture's `conformance/tests/<fixture>/expected-ir.json`
+ * golden — a compiler-golden move this item must not cause. This function
+ * is the interpreter-only equivalent of that marker.
+ */
+function detectAutoInjectedPrologueAsserts(body: ANFBinding[]): Set<ANFValue> {
+  const result = new Set<ANFValue>();
+  if (body.length < 8) return result;
+  const [b0, b1, b2, b3, b4, b5, b6, b7] = body;
+  const isLoadTxPreimage = (b: ANFBinding): boolean =>
+    b.value.kind === 'load_param' && (b.value as { name: string }).name === 'txPreimage';
+  if (!isLoadTxPreimage(b0!)) return result;
+  if (b1!.value.kind !== 'check_preimage' || (b1!.value as { preimage: string }).preimage !== b0!.name) return result;
+  if (b2!.value.kind !== 'assert' || (b2!.value as { value: string }).value !== b1!.name) return result;
+  if (!isLoadTxPreimage(b3!)) return result;
+  if (
+    b4!.value.kind !== 'call' ||
+    (b4!.value as { func: string }).func !== 'extractSigHashType' ||
+    (b4!.value as { args: string[] }).args[0] !== b3!.name
+  ) return result;
+  if (b5!.value.kind !== 'load_const') return result;
+  if (
+    b6!.value.kind !== 'bin_op' ||
+    (b6!.value as { op: string }).op !== '===' ||
+    (b6!.value as { left: string }).left !== b4!.name ||
+    (b6!.value as { right: string }).right !== b5!.name
+  ) return result;
+  if (b7!.value.kind !== 'assert' || (b7!.value as { value: string }).value !== b6!.name) return result;
+  result.add(b2!.value);
+  result.add(b7!.value);
+  return result;
 }
 
 function normalizeSighash(sighash: string | Uint8Array): number[] {
@@ -263,6 +383,7 @@ function runMethod(
   args: Record<string, unknown>,
   constructorArgs: unknown[],
   strict: StrictCtx | null,
+  continuation?: ContinuationContext,
 ): ExecutionResult {
   // Find the method in ANF
   const method = anf.methods.find(
@@ -302,10 +423,30 @@ function runMethod(
     '_changePKH', '_changeAmount', '_newAmount', 'txPreimage',
   ]);
   for (const param of method.params) {
-    if (implicitParams.has(param.name)) continue;
+    // F-024 (R14): `_newAmount` is what `continuationAmount()` reads and what
+    // the injected `_newAmount >= extractAmount(txPreimage)` check compares,
+    // so a caller that knows the continuation's satoshis binds it.
+    if (implicitParams.has(param.name) && !(param.name === '_newAmount' && param.name in args)) continue;
     if (param.name in args) {
       env[param.name] = args[param.name];
+    } else {
+      // N-360: a property-named public param the method reassigns is bound in
+      // the ANF under its `<name>@local` slot; the caller's args (and the ABI)
+      // use the source name.
+      const source = renamedParamSource(param.name);
+      if (source !== undefined && source in args) env[param.name] = args[source];
     }
+  }
+  if (
+    (continuation?.inputAmount !== undefined || continuation?.scriptCode !== undefined)
+    && method.params.some((p) => p.name === 'txPreimage')
+  ) {
+    const mock: MockPreimageValue = {
+      __runarMockPreimage: true,
+      amount: continuation?.inputAmount,
+      scriptCode: continuation?.scriptCode,
+    };
+    env['txPreimage'] = mock;
   }
 
   // Track state mutations, data outputs, and raw outputs.
@@ -319,8 +460,15 @@ function runMethod(
   // Ordered state-class outputs (state continuation + raw) in source order.
   const outputs: OrderedOutputEntry[] = [];
 
+  // F-164 (round 2): compute the mocked-prologue-assert set once per method,
+  // for plain strict mode only (on-chain mode keeps enforcing both asserts
+  // for real, unchanged).
+  const strictWithPrologue: StrictCtx | null = (strict && !strict.realCrypto)
+    ? { ...strict, mockedPrologueAsserts: detectAutoInjectedPrologueAsserts(method.body) }
+    : strict;
+
   // Walk bindings
-  evalBindings(method.body, env, stateDelta, dataOutputs, rawOutputs, outputs, anf, strict);
+  evalBindings(method.body, env, stateDelta, dataOutputs, rawOutputs, outputs, anf, strictWithPrologue);
 
   return { state: { ...currentState, ...stateDelta }, dataOutputs, rawOutputs, outputs };
 }
@@ -527,6 +675,16 @@ function evalValue(
         if ((value as { isAutoInjectedStateCheck?: boolean }).isAutoInjectedStateCheck === true) {
           return undefined;
         }
+        // F-164 (round 2): the auto-injected prologue's checkPreimage assert
+        // and sighash-type assert (detected structurally — see
+        // detectAutoInjectedPrologueAsserts) are mocked in plain strict
+        // mode, matching PROTOCOL.md's documented "crypto built-ins still
+        // mock-return true" contract. Never set for executeOnChainAuthoritative
+        // (runMethod only populates mockedPrologueAsserts when realCrypto is
+        // absent), so on-chain mode keeps enforcing both for real.
+        if (strict.mockedPrologueAsserts?.has(value)) {
+          return undefined;
+        }
         const predicate = env[value.value];
         if (!isTruthy(predicate)) {
           throw new AssertionFailureError(strict.methodName, bindingName);
@@ -596,15 +754,57 @@ function evalValue(
       return undefined;
     }
 
+    // F-164: the auto-injected stateful-method prologue
+    // (`emitStatefulPrologue` in stateful-scaffold.ts) emits
+    // `check_preimage` immediately followed by an UN-marked `assert` on
+    // its result — unlike the exit-time continuation-hash assert, this one
+    // carries no `isAutoInjectedStateCheck` flag, so strict mode enforces
+    // it. PROTOCOL.md and this module's own doc comments promise that
+    // `checkPreimage` (along with `checkSig` / `checkMultiSig`) still
+    // mock-returns `true` in strict mode and only performs real
+    // verification in `executeOnChainAuthoritative` — mirror the mock/real
+    // split `evalCall`'s `checkPreimage` builtin case already uses below,
+    // instead of unconditionally returning `undefined` (which `isTruthy`
+    // treats as false and trips the un-marked assert on every stateful
+    // method).
+    case 'check_preimage': {
+      if (!strict?.realCrypto) return true;
+      return verifyPreimage(env[value.preimage], strict.realCrypto.sighash);
+    }
+
     // On-chain-only operations — skip in simulation. These ANF kinds are
     // markers consumed by the codegen, not by the off-chain interpreter.
-    case 'check_preimage':
     case 'deserialize_state':
     case 'get_state_script':
       return undefined;
 
+    // N-259: the element values, in order. Its only consumer is
+    // `checkMultiSig`, which lenient mode mocks to true and on-chain mode
+    // verifies over these lists; returning `undefined` here made on-chain
+    // `checkMultiSig` answer false for every input, a valid multisig included.
+    case 'array_literal':
+      return value.elements.map(e => env[e]);
+
+    // F-145: an opaque asm span. With out_arity 0 it produces no value
+    // (a check, like a lenient-mode assert); with out_arity >= 1 its result
+    // cannot be computed off-chain, so it falls through to the refusal.
+    case 'raw_script':
+      if (value.out_arity === 0) return undefined;
+      throw new Error(
+        `ANF interpreter does not model the ANF binding kind 'raw_script' (binding '${bindingName}', ` +
+          `out_arity ${value.out_arity}). Its result cannot be computed off-chain.`,
+      );
+
     default:
-      return undefined;
+      // F-145: FAIL CLOSED. Returning `undefined` here let an ANF kind this
+      // interpreter does not model (including opaque `raw_script` spans)
+      // flow silently into state, so the `try/catch` guard in `contract.ts`
+      // could never fire and the call built a continuation the covenant
+      // rejects.
+      throw new Error(
+        `ANF interpreter does not model the ANF binding kind '${(value as { kind: string }).kind}' ` +
+          `(binding '${bindingName}'). Its result cannot be computed off-chain.`,
+      );
   }
 }
 
@@ -795,8 +995,15 @@ function evalBinOp(
     case '+': return l + r;
     case '-': return l - r;
     case '*': return l * r;
-    case '/': return r === 0n ? 0n : l / r;
-    case '%': return r === 0n ? 0n : l % r;
+    // F-145: OP_DIV / OP_MOD abort the script on a zero divisor, so there is
+    // no post-state to compute. Returning 0n here serialised a state the
+    // deployed script can never produce.
+    case '/':
+      if (r === 0n) throw new Error('OP_DIV: division by zero (the script aborts here)');
+      return l / r;
+    case '%':
+      if (r === 0n) throw new Error('OP_MOD: modulo by zero (the script aborts here)');
+      return l % r;
     case '==': case '===': return l === r;
     case '!=': case '!==': return l !== r;
     case '<': return l < r;
@@ -810,7 +1017,9 @@ function evalBinOp(
     case '^': return scriptNumberBitwise('^', l, r);
     case '<<': return scriptNumberShift('<<', l, r);
     case '>>': return scriptNumberShift('>>', l, r);
-    default: return 0n;
+    default:
+      // F-145: fail closed instead of inventing 0n.
+      throw new Error(`ANF interpreter does not model the binary operator '${op}' on numeric operands`);
   }
 }
 
@@ -823,7 +1032,8 @@ function evalBytesBinOp(op: string, left: string, right: string): unknown {
     case '!=': case '!==':
       return left !== right;
     default:
-      return '';
+      // F-145: fail closed instead of inventing ''.
+      throw new Error(`ANF interpreter does not model the binary operator '${op}' on ByteString operands`);
   }
 }
 
@@ -840,7 +1050,8 @@ function evalUnaryOp(op: string, operand: unknown, resultType?: string): unknown
       for (let i = 0; i < bytes.length; i++) bytes[i] = ~bytes[i]! & 0xff;
       return Utils.toHex(bytes);
     }
-    return operand;
+    // F-145: fail closed instead of passing the operand through unchanged.
+    throw new Error(`ANF interpreter does not model the unary operator '${op}' on ByteString operands`);
   }
 
   const val = toBigInt(operand);
@@ -848,7 +1059,9 @@ function evalUnaryOp(op: string, operand: unknown, resultType?: string): unknown
     case '-': return -val;
     case '!': return !isTruthy(operand);
     case '~': return scriptNumberInvert(val);
-    default: return val;
+    default:
+      // F-145: fail closed instead of passing the operand through unchanged.
+      throw new Error(`ANF interpreter does not model the unary operator '${op}' on numeric operands`);
   }
 }
 
@@ -865,7 +1078,30 @@ function evalCall(
     // Crypto — mocked unless real-crypto context is present.
     case 'checkSig': {
       if (!realCrypto) return true;
-      return verifyEcdsa(args[0], args[1], realCrypto.sighash);
+      // N-197: OP_CHECKSIG ABORTS on a malformed signature or public-key
+      // encoding; it does not push false. Answering false let
+      // `checkSig(a, A) || checkSig(b, B)` take the other arm and accept a
+      // spend the chain aborts on.
+      const encodingError = checkSigEncodingError(args[0], args[1]);
+      if (encodingError !== null) {
+        throw new Error(
+          `checkSig: ${encodingError} — OP_CHECKSIG aborts the script on a malformed ` +
+            'signature or public key encoding, it does not push false',
+        );
+      }
+      const ok = verifyEcdsa(args[0], args[1], realCrypto.sighash);
+      // N-198: NULLFAIL (BIP146). On a node, a NON-EMPTY signature that does
+      // not verify aborts the script; only an empty one pushes false. So the
+      // arm of `checkSig(a, A) || checkSig(b, B)` that must fail takes an
+      // empty signature (EMPTY_SIG, issue #106). `Spend` has no NULLFAIL.
+      if (!ok && (toByteArray(args[0])?.length ?? 0) > 0) {
+        throw new Error(
+          'checkSig: the signature is non-empty and does not verify (NULLFAIL) — ' +
+            'OP_CHECKSIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+            'the arm that must fail takes an empty signature (EMPTY_SIG)',
+        );
+      }
+      return ok;
     }
     case 'checkMultiSig': {
       if (!realCrypto) return true;
@@ -897,11 +1133,29 @@ function evalCall(
     case 'cat': {
       return String(args[0] ?? '') + String(args[1] ?? '');
     }
+    // R67: `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length>
+    // OP_SPLIT OP_DROP` — TWO chained OP_SPLITs, the second against the
+    // REMAINDER `size(data) - start`. It ABORTS whenever `start` is outside
+    // [0, size(data)] or `length` is outside [0, size(data) - start], which
+    // collapses to: start<0, length<0, or start+length>size(data) (see the
+    // native fix for the full derivation and the oracle vectors in
+    // n171-split-substr-builtins-onchain.json). This used to clamp via
+    // `.slice()`; `extractScriptCode` now supplies a realistic scriptCode
+    // (R67) so the one caller that fed this an empty placeholder
+    // (FungibleToken.merge) no longer hits the abort path either.
     case 'substr': {
       const hex = String(args[0] ?? '');
-      const start = Number(toBigInt(args[1]));
-      const len = Number(toBigInt(args[2]));
-      return hex.slice(start * 2, (start + len) * 2);
+      const start = toBigInt(args[1]);
+      const len = toBigInt(args[2]);
+      const s = Number(start) * 2;
+      const l = Number(len) * 2;
+      if (start < 0n || len < 0n || s + l > hex.length) {
+        throw new Error(
+          `substr: start ${start}, length ${len} is outside a ${hex.length / 2}-byte value — ` +
+            'OP_SPLIT aborts on a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return hex.slice(s, s + l);
     }
     case 'reverseBytes': {
       const hex = String(args[0] ?? '');
@@ -913,6 +1167,61 @@ function evalCall(
       const hex = String(args[0] ?? '');
       return BigInt(hex.length / 2);
     }
+    // F-274: `left`/`right` compile to an OP_SPLIT-based script that ABORTS
+    // whenever the computed split position is outside [0, size(data)] —
+    // `left` splits at `length` directly, `right` splits at
+    // `size(data) - length` (05-stack-lower.ts: BUILTIN_OPCODES.left,
+    // lowerRight). A negative or past-the-end `length` must throw, never
+    // return a clamped value.
+    case 'left': {
+      const data = String(args[0] ?? '');
+      const length = toBigInt(args[1]);
+      const n = Number(length) * 2;
+      if (length < 0n || n > data.length) {
+        throw new Error(
+          `left: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(0, n);
+    }
+    case 'right': {
+      const data = String(args[0] ?? '');
+      const length = toBigInt(args[1]);
+      const n = Number(length) * 2;
+      if (length < 0n || n > data.length) {
+        throw new Error(
+          `right: length ${length} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(data.length - n);
+    }
+    // N-171 (sibling of F-274): `split` is a bare OP_SPLIT and binds the
+    // RIGHT half. It ABORTS whenever `index` is outside [0, size(data)].
+    // Unmodelled before this (fell through to the `default` refusal below),
+    // the same bug shape F-274 fixed for `left`/`right`.
+    //
+    // `substr` above is deliberately NOT given this abort check: its
+    // default `extractScriptCode` mock is `''`, and `FungibleToken.merge`
+    // computes `substr(sc, 0, 1)` on that placeholder during off-chain
+    // state derivation — a POSITIVE overflow this check would have to
+    // reject, breaking `RunarContract.call('merge')` for every
+    // token-ft-shaped contract (confirmed empirically:
+    // w8-token-ft-solo-merge-known-broken.test.ts fails 2/49 with the
+    // NEW-006 fail-closed error). Escalated as a follow-up, not fixed here.
+    case 'split': {
+      const data = String(args[0] ?? '');
+      const index = toBigInt(args[1]);
+      const n = Number(index) * 2;
+      if (index < 0n || n > data.length) {
+        throw new Error(
+          `split: index ${index} is outside a ${data.length / 2}-byte value — OP_SPLIT aborts on ` +
+            'a position below zero or past the end of the element, it does not clamp',
+        );
+      }
+      return data.slice(n);
+    }
 
     // Math builtins
     case 'abs': return toBigInt(args[0]) < 0n ? -toBigInt(args[0]) : toBigInt(args[0]);
@@ -922,19 +1231,27 @@ function evalCall(
       const x = toBigInt(args[0]);
       return x >= toBigInt(args[1]) && x < toBigInt(args[2]);
     }
+    // The division-shaped builtins and pow/sqrt ABORT where the compiled
+    // script aborts (zero divisor in OP_DIV/OP_MOD, the pow exponent guard,
+    // the sqrt domain guards) instead of inventing a value, like the other
+    // opcode-abort paths in this module (F-134).
     case 'safediv': {
       const d = toBigInt(args[1]);
-      return d === 0n ? 0n : toBigInt(args[0]) / d;
+      if (d === 0n) throw new Error('safediv: division by zero');
+      return toBigInt(args[0]) / d;
     }
     case 'safemod': {
       const d = toBigInt(args[1]);
-      return d === 0n ? 0n : toBigInt(args[0]) % d;
+      if (d === 0n) throw new Error('safemod: modulo by zero');
+      return toBigInt(args[0]) % d;
     }
     case 'clamp': {
       const v = toBigInt(args[0]);
       const lo = toBigInt(args[1]);
       const hi = toBigInt(args[2]);
-      return v < lo ? lo : v > hi ? hi : v;
+      // The script is `OP_MAX` then `OP_MIN`: min(max(v, lo), hi) (N-030).
+      const m = v > lo ? v : lo;
+      return m < hi ? m : hi;
     }
     case 'sign': {
       const v = toBigInt(args[0]);
@@ -943,14 +1260,17 @@ function evalCall(
     case 'pow': {
       const base = toBigInt(args[0]);
       const exp = toBigInt(args[1]);
-      if (exp < 0n) return 0n;
+      if (exp < 0n) throw new Error('pow: negative exponent');
+      if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
       let result = 1n;
       for (let i = 0n; i < exp; i++) result *= base;
       return result;
     }
     case 'sqrt': {
       const v = toBigInt(args[0]);
-      if (v <= 0n) return 0n;
+      if (v < 0n) throw new Error('sqrt: negative input');
+      if (v >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
+      if (v === 0n) return 0n;
       let x = v;
       let y = (x + 1n) / 2n;
       while (y < x) { x = y; y = (x + v / x) / 2n; }
@@ -961,27 +1281,28 @@ function evalCall(
       let b = toBigInt(args[1]);
       if (a < 0n) a = -a;
       if (b < 0n) b = -b;
-      while (b !== 0n) { const t = b; b = a % b; a = t; }
+      // The script unrolls exactly 256 Euclid steps (N-030).
+      for (let i = 0; i < 256 && b !== 0n; i++) { const t = b; b = a % b; a = t; }
       return a;
     }
     case 'divmod': {
       const a = toBigInt(args[0]);
       const b = toBigInt(args[1]);
-      if (b === 0n) return 0n;
+      if (b === 0n) throw new Error('divmod: division by zero');
       // Returns quotient; in ANF the second result is in a separate binding
       return a / b;
     }
     case 'log2': {
       const v = toBigInt(args[0]);
-      if (v <= 0n) return 0n;
-      let bits = 0n;
-      let x = v;
-      while (x > 1n) { x >>= 1n; bits++; }
-      return bits;
+      // The script is exact for every n > 0 and aborts for n <= 0 (N-103).
+      if (v <= 0n) throw new Error('log2: non-positive input');
+      return BigInt(v.toString(2).length - 1);
     }
     case 'bool': return isTruthy(args[0]) ? 1n : 0n;
     case 'mulDiv': {
-      return (toBigInt(args[0]) * toBigInt(args[1])) / toBigInt(args[2]);
+      const c = toBigInt(args[2]);
+      if (c === 0n) throw new Error('mulDiv: division by zero');
+      return (toBigInt(args[0]) * toBigInt(args[1])) / c;
     }
     case 'percentOf': {
       return (toBigInt(args[0]) * toBigInt(args[1])) / 10000n;
@@ -1007,8 +1328,11 @@ function evalCall(
     }
 
     // Preimage intrinsics — return dummy values in simulation
-    case 'extractOutputHash':
     case 'extractAmount':
+      // F-024 (R14): the spent UTXO's satoshis when the caller supplied them.
+      if (isMockPreimage(args[0]) && args[0].amount !== undefined) return args[0].amount;
+      return '00'.repeat(32);
+    case 'extractOutputHash':
       return '00'.repeat(32);
     case 'extractLocktime':
       return 0n;
@@ -1038,11 +1362,13 @@ function evalCall(
       return '00'.repeat(32);
     case 'extractOutpoint':
       return '00'.repeat(36);
-    // Dummy empty scriptCode. The real bytes are a property of a transaction
-    // that does not exist yet during off-chain state derivation; lenient mode
-    // skips the on-chain asserts that bind them. Without this arm `prepareCall`
-    // fails closed on every `merge` that reads extractScriptCode (NEW-006).
+    // R67: the contract's own real codePart when the caller supplied it
+    // (see `ContinuationContext.scriptCode`'s doc comment) — `contract.ts`
+    // always supplies it from `prepareCall` now. Falls back to the
+    // historical empty dummy for a bare `computeNewState` call with no
+    // `continuation` (e.g. a hand-built ANF probe in a test).
     case 'extractScriptCode':
+      if (isMockPreimage(args[0]) && args[0].scriptCode !== undefined) return args[0].scriptCode;
       return '';
 
     // A-3, KNOWN REMAINING GAP: `extractSigHashType` IS a real runar-lang
@@ -1088,8 +1414,9 @@ function evalCall(
       // made the `try/catch` guard in `contract.ts` structurally unable to
       // fire for the 76 of runar-lang's 105 builtins this interpreter does
       // not model — every EC op, every NIST P-256/P-384 op, all six SLH-DSA
-      // verifies, Rabin, `left`/`right`/`split`, `sha256Compress`,
-      // `merkleRootSha256`. `contract.ts` then spreads the result over the
+      // verifies, Rabin, `sha256Compress`, `merkleRootSha256` (F-274 modelled
+      // `left`/`right`, above; N-171 modelled `split` the same way, above).
+      // `contract.ts` then spreads the result over the
       // real state and the `undefined` wins, so a `boolean` state field fed
       // by a signature verifier silently became false and the eventual error
       // pointed at the covenant instead of at this gap. Naming the builtin
@@ -1153,7 +1480,11 @@ function evalMethodCall(
       return undefined;
     }
   }
-  return undefined;
+  // F-145: fail closed. No private method of that name exists in the ANF, so
+  // its return value and any state it would mutate are unknown.
+  throw new Error(
+    `ANF interpreter cannot resolve method_call '${methodName}': no private method of that name in the ANF IR`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,11 +1622,56 @@ function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<ty
   } else {
     pure = bytes;
   }
+  // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. Signature.fromDER
+  // alone accepts an unpadded high-bit INTEGER.
+  if (!isStrictDerSignature(pure)) return null;
   try {
     return Signature.fromDER(pure);
   } catch {
     return null;
   }
+}
+
+/**
+ * N-197: why `OP_CHECKSIG` would ABORT the whole script on these operands, or
+ * `null` when it would run and push a boolean. Mirrors `@bsv/sdk` `Spend`'s
+ * `checkSignatureEncoding` then `checkPublicKeyEncoding` (version-1 rules):
+ * a non-empty signature must be strict DER (BIP66) with a low S; the public
+ * key — checked even when the signature is empty — must be 33 bytes behind
+ * 0x02/0x03 or 65 bytes behind 0x04 and decode to a curve point. An empty
+ * signature, or a well-formed one that does not verify, is not an ENCODING
+ * abort (`Spend` has no NULLFAIL; it pushes false) — the call site applies
+ * NULLFAIL after verification (N-198). A non-empty signature is in checksig
+ * format, DER followed by exactly one sighash-type byte, as `Spend` requires:
+ * bare DER with no sighash byte aborts (N-255).
+ * Operands that are not bytes at all are left to {@link verifyEcdsa}.
+ */
+function checkSigEncodingError(sigVal: unknown, pkVal: unknown): string | null {
+  const sigBytes = toByteArray(sigVal);
+  const pkBytes = toByteArray(pkVal);
+  if (!sigBytes || !pkBytes) return null;
+  if (sigBytes.length > 0) {
+    if (sigBytes.length < 2 || sigBytes.length !== sigBytes[1]! + 3) {
+      return 'the signature is not strict DER';
+    }
+    const der = sigBytes.slice(0, -1);
+    if (!isStrictDerSignature(der)) return 'the signature is not strict DER';
+    const sig = Signature.fromDER(der);
+    if (!new TransactionSignature(sig.r, sig.s, 0).hasLowS()) {
+      return 'the signature does not have a low S value';
+    }
+  }
+  const prefix = pkBytes[0];
+  const len = pkBytes.length;
+  const shapeOk =
+    ((prefix === 0x02 || prefix === 0x03) && len === 33) || (prefix === 0x04 && len === 65);
+  if (!shapeOk) return 'the public key is not a 33-byte compressed or 65-byte uncompressed key';
+  try {
+    PublicKey.fromDER(pkBytes);
+  } catch {
+    return 'the public key is not a point on secp256k1';
+  }
+  return null;
 }
 
 function verifyEcdsa(
@@ -1323,24 +1699,54 @@ function verifyEcdsa(
   }
 }
 
+/**
+ * N-259: `OP_CHECKMULTISIG` as `@bsv/sdk` `Spend` runs it over the compiled
+ * layout `0 <sig1..sigN> N <pk1..pkM> M`. It examines the LAST signature
+ * against the LAST key first and walks both lists toward the first, so:
+ *  - each EXAMINED pair passes the N-197 encoding gates first, and a malformed
+ *    one aborts the script (a pair never reached is never checked);
+ *  - a signature that verifies consumes its key; a key is consumed either way;
+ *  - the check fails as soon as fewer keys remain than signatures.
+ * N > M aborts, as in `Spend`. NULLFAIL (BIP146, N-198): when the check fails
+ * and ANY signature is non-empty a node aborts; `Spend` has no NULLFAIL and
+ * pushes false. Only an all-empty failing check pushes false here.
+ */
 function verifyMultiSig(
   sigsVal: unknown,
   pksVal: unknown,
   sighash: number[],
 ): boolean {
   if (!Array.isArray(sigsVal) || !Array.isArray(pksVal)) return false;
-  if (sigsVal.length > pksVal.length) return false;
-  let pkIdx = 0;
-  for (const sig of sigsVal) {
-    let matched = false;
-    while (pkIdx < pksVal.length) {
-      const ok = verifyEcdsa(sig, pksVal[pkIdx], sighash);
-      pkIdx++;
-      if (ok) { matched = true; break; }
-    }
-    if (!matched) return false;
+  if (sigsVal.length > pksVal.length) {
+    throw new Error(
+      `checkMultiSig: ${sigsVal.length} signatures for ${pksVal.length} public keys — ` +
+        'OP_CHECKMULTISIG aborts the script when there are more signatures than keys',
+    );
   }
-  return true;
+  let isig = sigsVal.length - 1;
+  let ikey = pksVal.length - 1;
+  let success = true;
+  while (success && isig >= 0) {
+    const encodingError = checkSigEncodingError(sigsVal[isig], pksVal[ikey]);
+    if (encodingError !== null) {
+      throw new Error(
+        `checkMultiSig: ${encodingError} — OP_CHECKMULTISIG aborts the script on a malformed ` +
+          'signature or public key encoding, it does not push false',
+      );
+    }
+    const sigLen = toByteArray(sigsVal[isig])?.length ?? 0;
+    if (sigLen > 0 && verifyEcdsa(sigsVal[isig], pksVal[ikey], sighash)) isig--;
+    ikey--;
+    if (isig > ikey) success = false; // fewer keys left than signatures
+  }
+  if (!success && sigsVal.some(s => (toByteArray(s)?.length ?? 0) > 0)) {
+    throw new Error(
+      'checkMultiSig: a signature is non-empty and the check fails (NULLFAIL) — ' +
+        'OP_CHECKMULTISIG aborts the script under NULLFAIL (BIP146) rather than push false; ' +
+        'a multisig that must fail takes empty signatures (EMPTY_SIG)',
+    );
+  }
+  return success;
 }
 
 /**

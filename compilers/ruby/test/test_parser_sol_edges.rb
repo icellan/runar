@@ -15,7 +15,6 @@ class TestParserSolEdges < Minitest::Test
   def test_immutable_keyword_flags_readonly
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Demo is SmartContract {
           Addr immutable owner;
@@ -40,7 +39,6 @@ class TestParserSolEdges < Minitest::Test
   def test_stateful_no_immutable_is_mutable
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Counter is StatefulSmartContract {
           int count;
@@ -65,7 +63,6 @@ class TestParserSolEdges < Minitest::Test
   def test_multiple_methods
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Multi is SmartContract {
           int immutable x;
@@ -89,7 +86,6 @@ class TestParserSolEdges < Minitest::Test
   def test_bool_type_parses
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract B is SmartContract {
           bool immutable flag;
@@ -114,7 +110,6 @@ class TestParserSolEdges < Minitest::Test
   def test_bytes_type_parses
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Bytes is SmartContract {
           ByteString immutable data;
@@ -136,8 +131,18 @@ class TestParserSolEdges < Minitest::Test
   end
 
   def test_garbage_input_does_not_crash
+    # Proves two things: (1) the parser does not raise on unparseable input,
+    # and (2) it does not silently accept it as a valid contract — matching
+    # the TS reference (packages/runar-compiler/src/passes/01-parse-sol.ts),
+    # which reports "Unexpected character '@'" plus downstream parse errors
+    # for this exact input. We assert only on error presence, not message
+    # text or count: TS's errors and Ruby's single "expected 'contract'
+    # keyword" diagnostic differ in wording, but both agree the input is
+    # rejected. Does not prove: diagnostic text/count parity with TS, or
+    # anything about the `contract` field's shape when errors are present.
     begin
-      parse('@@@ not solidity !!!', 'garbage.runar.sol')
+      result = parse('@@@ not solidity !!!', 'garbage.runar.sol')
+      refute_empty result.errors, 'expected diagnostics for garbage input'
     rescue StandardError => e
       flunk "parser crashed: #{e.class}: #{e.message}"
     end
@@ -146,7 +151,6 @@ class TestParserSolEdges < Minitest::Test
   def test_arithmetic_in_method_body
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract Arith is SmartContract {
           int immutable target;
@@ -168,7 +172,6 @@ class TestParserSolEdges < Minitest::Test
   def test_methods_with_distinct_param_counts
     source = <<~SOL
       pragma runar ^1.0.0;
-      import "runar-lang";
 
       contract M is SmartContract {
           int immutable x;

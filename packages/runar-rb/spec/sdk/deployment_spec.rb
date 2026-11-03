@@ -52,6 +52,51 @@ RSpec.describe 'Runar::SDK deployment helpers' do
       expect { Runar::SDK.build_p2pkh_script('1Badx') }
         .to raise_error(ArgumentError, /invalid address length/)
     end
+
+    # F-043: Ruby must accept exactly what the Go / Python / TS SDKs accept,
+    # with the same result, using a real key: the secp256k1 generator G.
+    #
+    # PROVES: a 66-char compressed and a 130-char uncompressed pubkey are hashed
+    # with HASH160 (values cross-checked against Go BuildP2PKHScript and Python
+    # build_p2pkh_script); a Base58Check address has its SHA256d checksum
+    # verified (the Genesis address with its last character flipped still
+    # decodes to 25 bytes and must raise) and its version byte checked (P2SH
+    # 0x05 refused, testnet 0x6f accepted); a non-Base58 character raises
+    # ArgumentError, never TypeError.
+    # DOES NOT PROVE: that the pubkey is a valid curve point (no SDK checks it).
+    G_PUB_COMPRESSED   = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'.freeze
+    G_PUB_UNCOMPRESSED = ('0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' \
+                          '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8').freeze
+    G_PKH              = '751e76e8199196d454941c45d1b3a323f1433bd6'.freeze
+    G_UNCOMPRESSED_PKH = '91b24bf9f5288532960ac687abb035127b1d28a5'.freeze
+
+    it 'hashes a 66-char compressed pubkey with HASH160 (F-043)' do
+      expect(Runar::SDK.build_p2pkh_script(G_PUB_COMPRESSED)).to eq("76a914#{G_PKH}88ac")
+    end
+
+    it 'hashes a 130-char uncompressed pubkey with HASH160 (F-043)' do
+      expect(Runar::SDK.build_p2pkh_script(G_PUB_UNCOMPRESSED)).to eq("76a914#{G_UNCOMPRESSED_PKH}88ac")
+    end
+
+    it 'decodes the mainnet and testnet addresses of G to HASH160(G) (F-043)' do
+      expect(Runar::SDK.build_p2pkh_script('1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH')).to eq("76a914#{G_PKH}88ac")
+      expect(Runar::SDK.build_p2pkh_script('mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r')).to eq("76a914#{G_PKH}88ac")
+    end
+
+    it 'rejects the Genesis address with its last character flipped (bad checksum) (F-043)' do
+      expect { Runar::SDK.build_p2pkh_script('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb') }
+        .to raise_error(ArgumentError, /checksum/)
+    end
+
+    it 'rejects an invalid Base58 character with ArgumentError, not TypeError (F-043)' do
+      expect { Runar::SDK.build_p2pkh_script('1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf0a') }
+        .to raise_error(ArgumentError, /invalid Base58 character/)
+    end
+
+    it 'rejects a P2SH address (version byte 0x05) (F-043)' do
+      expect { Runar::SDK.build_p2pkh_script('3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy') }
+        .to raise_error(ArgumentError, /version byte/)
+    end
   end
 
   # ---------------------------------------------------------------------------

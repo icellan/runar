@@ -62,9 +62,9 @@ class ECPrimitives extends SmartContract {
 
   // Method 8: check make point roundtrip
   public checkMakePoint(x: bigint, y: bigint, expectedX: bigint, expectedY: bigint) {
-    const pt = ecMakePoint(x, y);
-    assert(ecPointX(pt) === expectedX);
-    assert(ecPointY(pt) === expectedY);
+    const point = ecMakePoint(x, y);
+    assert(ecPointX(point) === expectedX);
+    assert(ecPointY(point) === expectedY);
   }
 
   // Method 9: check compressed encoding

@@ -1,0 +1,27 @@
+{
+  "_doc": "N-171: sibling of F-274 (packages/runar-zig/src/fixtures/f274-split-builtins-onchain.json) for `split(data, index)` and `substr(data, start, length)`. `split` compiles to a bare OP_SPLIT (05-stack-lower.ts: BUILTIN_OPCODES.split, with an OP_NIP appended in the same pass) and binds the RIGHT half; it ABORTS whenever `index` is outside `[0, size(data)]`. `substr` compiles to `<data> <start> OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP` (lowerSubstr) -- TWO chained OP_SPLITs, the second against the REMAINDER `size(data) - start` -- so it ABORTS whenever `start` is outside `[0, size(data)]` OR `length` is outside `[0, size(data) - start]`, which collapses to: start<0, length<0, or start+length>size(data). Every row here is the COMPILED SCRIPT's verdict on @bsv/sdk Spend.validate, asserted by packages/runar-testing/src/__tests__/n171-split-substr-builtins-onchain.test.ts (accept at `expect`, reject at a flipped witness; an `abort` row rejects both the eq and ne probe). Every native runtime and SDK ANF interpreter that models `split`/`substr` must replay this file and agree: a value for an in-range split, an error -- never a value -- for an out-of-range one. `data`/`expect` are hex strings; `expect: \"abort\"` is the abort marker.",
+  "cases": [
+    { "fn": "split", "data": "aabbccdd", "a": 0, "b": 0, "expect": "aabbccdd" },
+    { "fn": "split", "data": "aabbccdd", "a": 1, "b": 0, "expect": "bbccdd" },
+    { "fn": "split", "data": "aabbccdd", "a": 2, "b": 0, "expect": "ccdd" },
+    { "fn": "split", "data": "aabbccdd", "a": 4, "b": 0, "expect": "" },
+    { "fn": "split", "data": "aabbccdd", "a": 5, "b": 0, "expect": "abort" },
+    { "fn": "split", "data": "aabbccdd", "a": -1, "b": 0, "expect": "abort" },
+    { "fn": "split", "data": "", "a": 0, "b": 0, "expect": "" },
+    { "fn": "split", "data": "", "a": 1, "b": 0, "expect": "abort" },
+
+    { "fn": "substr", "data": "aabbccdd", "a": 0, "b": 0, "expect": "" },
+    { "fn": "substr", "data": "aabbccdd", "a": 0, "b": 4, "expect": "aabbccdd" },
+    { "fn": "substr", "data": "aabbccdd", "a": 4, "b": 0, "expect": "" },
+    { "fn": "substr", "data": "aabbccdd", "a": 2, "b": 2, "expect": "ccdd" },
+    { "fn": "substr", "data": "aabbccdd", "a": 1, "b": 2, "expect": "bbcc" },
+    { "fn": "substr", "data": "aabbccdd", "a": 5, "b": 0, "expect": "abort" },
+    { "fn": "substr", "data": "aabbccdd", "a": 0, "b": 5, "expect": "abort" },
+    { "fn": "substr", "data": "aabbccdd", "a": 3, "b": 2, "expect": "abort" },
+    { "fn": "substr", "data": "aabbccdd", "a": -1, "b": 1, "expect": "abort" },
+    { "fn": "substr", "data": "aabbccdd", "a": 0, "b": -1, "expect": "abort" },
+    { "fn": "substr", "data": "", "a": 0, "b": 0, "expect": "" },
+    { "fn": "substr", "data": "", "a": 0, "b": 1, "expect": "abort" },
+    { "fn": "substr", "data": "", "a": 1, "b": 0, "expect": "abort" }
+  ]
+}

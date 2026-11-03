@@ -10,10 +10,12 @@
 //
 //   match forms:
 //     "$name"                    pattern variable (binds on first use,
-//                                must equal on repeat use)
+//                                must equal on repeat use — the same
+//                                binding through @ref: aliases, F-269)
 //     0, 1, ...                  integer literal (matches load_const bigint)
 //     { "func": F, "args": [...] }   nested call; resolves the arg through
-//                                the ANF value map
+//                                the ANF value map, following @ref:
+//                                aliases (F-269, canonicalName)
 //     { "const": "INFINITY" | "G" }  named constant (matches load_const
 //                                with the corresponding hex payload)
 //
@@ -28,6 +30,14 @@
 //                                when both operands are constants, modulo
 //                                the curve order; otherwise emitted as a
 //                                runtime bin_op).
+//
+//   gate (optional): { "of": "ecAdd" | "ecMul" | "ecAddNegCancel", "operand": "$name" }
+//                                N-104: the rewrite replaces a builtin that
+//                                validates the bound operand first; emit that
+//                                validation (as plain ANF, before the
+//                                rewritten binding) so the rewrite cannot
+//                                accept an operand the builtin would reject.
+//                                See emitOperandGate.
 //
 // A rule may carry an optional "supported" list of compiler targets. If
 // present and it does not contain "go", the rule is skipped by this engine.
@@ -61,7 +71,16 @@ type ecRule struct {
 	Name      string
 	Match     ecPattern
 	Replace   ecReplace
+	Gate      *ecGate  // N-104: operand validation the rewrite must keep, or nil
+	Fuses     []int    // N-460: operand positions holding the inner calls a fusion subsumes, or nil
 	Supported []string // empty = supported by all compilers
+}
+
+// ecGate names the builtin whose operand validation a rewrite keeps, and the
+// pattern variable bound to that operand.
+type ecGate struct {
+	Of      string // "ecAdd", "ecMul" or "ecAddNegCancel"
+	Operand string // pattern variable name, without the '$'
 }
 
 // ecPattern represents a single match pattern element.
@@ -185,6 +204,36 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: replace: %w", name, err)
 		}
+		var gate *ecGate
+		if gateRaw, ok := rr["gate"]; ok {
+			gm, ok := gateRaw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("rule %q: gate must be an object", name)
+			}
+			of, _ := gm["of"].(string)
+			if of != "ecAdd" && of != "ecMul" && of != "ecAddNegCancel" {
+				return nil, fmt.Errorf("rule %q: gate.of must be ecAdd, ecMul or ecAddNegCancel, got %q", name, of)
+			}
+			operand, _ := gm["operand"].(string)
+			if len(operand) < 2 || operand[0] != '$' {
+				return nil, fmt.Errorf("rule %q: gate.operand must be a $var", name)
+			}
+			gate = &ecGate{Of: of, Operand: operand[1:]}
+		}
+		var fuses []int
+		if fRaw, ok := rr["fuses"]; ok {
+			fl, ok := fRaw.([]interface{})
+			if !ok {
+				return nil, fmt.Errorf("rule %q: fuses must be an array", name)
+			}
+			for _, f := range fl {
+				n, ok := f.(float64)
+				if !ok || n < 0 || n != float64(int(n)) {
+					return nil, fmt.Errorf("rule %q: fuses must hold operand positions", name)
+				}
+				fuses = append(fuses, int(n))
+			}
+		}
 		var supported []string
 		if supRaw, ok := rr["supported"]; ok {
 			sl, ok := supRaw.([]interface{})
@@ -202,6 +251,8 @@ func parseECRulesJSON(data []byte) ([]ecRule, error) {
 			Name:      name,
 			Match:     match,
 			Replace:   replace,
+			Gate:      gate,
+			Fuses:     fuses,
 			Supported: supported,
 		})
 	}
@@ -316,7 +367,7 @@ type ecBindings map[string]string
 
 // matchRule attempts to match rule against binding b. Returns bindings on
 // success.
-func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (ecBindings, bool) {
+func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool) (ecBindings, bool) {
 	if rule.Match.Call == nil {
 		// Top-level must be a call pattern — rules cannot match a bare
 		// variable or constant at the root.
@@ -334,7 +385,7 @@ func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (e
 	}
 	binds := ecBindings{}
 	for i, pat := range rule.Match.Call.Args {
-		if !matchPatternArg(pat, v.Args[i], lookup, binds) {
+		if !matchPatternArg(pat, v.Args[i], false, lookup, rebound, binds) {
 			return nil, false
 		}
 	}
@@ -343,38 +394,52 @@ func matchRule(rule ecRule, b *ir.ANFBinding, lookup map[string]*ir.ANFValue) (e
 
 // matchPatternArg matches a pattern against the value referenced by argName.
 // For nested-call patterns, resolves argName through lookup and matches the
-// resulting value.
-func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFValue, binds ecBindings) bool {
+// resulting value. Every lookup follows @ref: aliases (F-269, canonicalName);
+// a pattern variable still binds the LITERAL argument name, so a rewrite
+// emits the names it matched.
+//
+// F-269 attempt 2: a name without a fixed identity (rebound, or an alias
+// cycle; see canonicalName) never satisfies a repeated $var, and a $var bound
+// INSIDE a nested call pattern must have one — that name is lifted out of an
+// earlier binding and the replace template or gate may emit it at this later
+// site, where a rebound name already holds a different value (R7's $x, R9's
+// $p, R8r's $x; R9/R10's nested scalars only need a constant, which an
+// unstable name never resolves to anyway).
+func matchPatternArg(pat ecPattern, argName string, nested bool, lookup map[string]*ir.ANFValue, rebound map[string]bool, binds ecBindings) bool {
 	switch {
 	case pat.Var != "":
 		if prev, ok := binds[pat.Var]; ok {
-			// Same-var must bind to the same underlying argument. We check
-			// both the literal arg name and, failing that, whether both
-			// arguments resolve to the same constant value — this matters
-			// for rule 11 ($p appears twice).
-			if prev == argName {
-				return true
+			// Same-var must bind to the same underlying binding, through
+			// aliases (the TS sameBinding rule). Two distinct bindings that
+			// merely hold equal constants are NOT the same $x (N-353): every
+			// tier decides operand identity by name.
+			cp, okP := canonicalName(prev, lookup, rebound)
+			ca, okA := canonicalName(argName, lookup, rebound)
+			return okP && okA && cp == ca
+		}
+		if nested {
+			if _, ok := canonicalName(argName, lookup, rebound); !ok {
+				return false
 			}
-			return sameResolvedValue(prev, argName, lookup)
 		}
 		binds[pat.Var] = argName
 		return true
 
 	case pat.IntLit != nil:
-		v := lookup[argName]
+		v := resolveValue(argName, lookup, rebound)
 		if v == nil || v.Kind != "load_const" || v.ConstBigInt == nil {
 			return false
 		}
 		return v.ConstBigInt.Cmp(pat.IntLit) == 0
 
 	case pat.ConstName == "INFINITY":
-		return isInfinityOrZeroMulGen(argName, lookup)
+		return isInfinityOrZeroMulGen(argName, lookup, rebound)
 
 	case pat.ConstName == "G":
-		return isGOrOneMulGen(argName, lookup)
+		return isGOrOneMulGen(argName, lookup, rebound)
 
 	case pat.Call != nil:
-		v := lookup[argName]
+		v := resolveValue(argName, lookup, rebound)
 		if v == nil || v.Kind != "call" || v.Func != pat.Call.Func {
 			return false
 		}
@@ -382,7 +447,7 @@ func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFVal
 			return false
 		}
 		for i, sub := range pat.Call.Args {
-			if !matchPatternArg(sub, v.Args[i], lookup, binds) {
+			if !matchPatternArg(sub, v.Args[i], true, lookup, rebound, binds) {
 				return false
 			}
 		}
@@ -391,33 +456,57 @@ func matchPatternArg(pat ecPattern, argName string, lookup map[string]*ir.ANFVal
 	return false
 }
 
-// sameResolvedValue reports whether two arg names refer to the same value —
-// either by name, or both being load_const with the same payload.
-func sameResolvedValue(a, b string, lookup map[string]*ir.ANFValue) bool {
-	if a == b {
-		return true
+// canonicalName returns the binding argName ultimately names, following
+// load_const "@ref:<x>" aliases — pass 04's `const y = <expr>` and the ones
+// alias-producing rules leave behind (F-269, user decision R77; the TS
+// anf-ec.ts canonicalName).
+//
+// ok is false when argName has no position-independent identity: ANF re-emits
+// a local's name when the source reassigns it (top level or in an if/loop
+// arm), so a REBOUND name means different values at different sites, and the
+// lookup (last-wins over the whole body) holds only one of them. Two uses of
+// a rebound name are not "the same $x", and nothing lifted out of an earlier
+// binding may name one. An alias cycle (only hand-written --ir) is not ok
+// either. A hop is never taken INTO a rebound name: the chain stops at the
+// last name bound once, which is itself a fixed value (`const y = a` captured
+// the `a` of its own position), and its value is the opaque alias.
+func canonicalName(argName string, lookup map[string]*ir.ANFValue, rebound map[string]bool) (string, bool) {
+	if rebound[argName] {
+		return "", false
 	}
-	va := lookup[a]
-	vb := lookup[b]
-	if va == nil || vb == nil {
-		return false
+	seen := map[string]bool{argName: true}
+	cur := argName
+	for {
+		v := lookup[cur]
+		if v == nil || v.Kind != "load_const" || v.ConstString == nil || len(*v.ConstString) <= 5 || (*v.ConstString)[:5] != "@ref:" {
+			return cur, true
+		}
+		next := (*v.ConstString)[5:]
+		if rebound[next] {
+			return cur, true
+		}
+		if seen[next] {
+			return "", false
+		}
+		seen[next] = true
+		cur = next
 	}
-	if va.Kind != "load_const" || vb.Kind != "load_const" {
-		return false
+}
+
+// resolveValue is the value argName resolves to through aliases, or nil when
+// it has no fixed identity (canonicalName's ok == false).
+func resolveValue(argName string, lookup map[string]*ir.ANFValue, rebound map[string]bool) *ir.ANFValue {
+	c, ok := canonicalName(argName, lookup, rebound)
+	if !ok {
+		return nil
 	}
-	if va.ConstString != nil && vb.ConstString != nil {
-		return *va.ConstString == *vb.ConstString
-	}
-	if va.ConstBigInt != nil && vb.ConstBigInt != nil {
-		return va.ConstBigInt.Cmp(vb.ConstBigInt) == 0
-	}
-	return false
+	return lookup[c]
 }
 
 // isInfinityOrZeroMulGen matches either a load_const INFINITY or an
 // ecMulGen(0) call — both are representations of the point at infinity.
-func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
+func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
+	v := resolveValue(name, lookup, rebound)
 	if v == nil {
 		return false
 	}
@@ -425,7 +514,7 @@ func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 		return true
 	}
 	if v.Kind == "call" && v.Func == "ecMulGen" && len(v.Args) == 1 {
-		inner := lookup[v.Args[0]]
+		inner := resolveValue(v.Args[0], lookup, rebound)
 		if inner != nil && inner.Kind == "load_const" && inner.ConstBigInt != nil && inner.ConstBigInt.Sign() == 0 {
 			return true
 		}
@@ -434,8 +523,8 @@ func isInfinityOrZeroMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 }
 
 // isGOrOneMulGen matches either a load_const G or an ecMulGen(1) call.
-func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
+func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
+	v := resolveValue(name, lookup, rebound)
 	if v == nil {
 		return false
 	}
@@ -443,7 +532,7 @@ func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 		return true
 	}
 	if v.Kind == "call" && v.Func == "ecMulGen" && len(v.Args) == 1 {
-		inner := lookup[v.Args[0]]
+		inner := resolveValue(v.Args[0], lookup, rebound)
 		if inner != nil && inner.Kind == "load_const" && inner.ConstBigInt != nil && inner.ConstBigInt.Cmp(big.NewInt(1)) == 0 {
 			return true
 		}
@@ -470,7 +559,7 @@ func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 // tier for the same source, which conformance invariant 2 forbids. Rather
 // than let a byte-level divergence hide behind "both are correct", the
 // engine now declines the rewrite exactly where the other tiers decline it.
-func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANFValue) bool {
+func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANFValue, rebound map[string]bool) bool {
 	if rule.Replace.Call == nil {
 		return true
 	}
@@ -478,10 +567,10 @@ func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANF
 		if a.Op == nil {
 			continue
 		}
-		if resolveConstBigInt(binds[a.Op.Lhs], lookup) == nil {
+		if resolveConstBigInt(binds[a.Op.Lhs], lookup, rebound) == nil {
 			return false
 		}
-		if resolveConstBigInt(binds[a.Op.Rhs], lookup) == nil {
+		if resolveConstBigInt(binds[a.Op.Rhs], lookup, rebound) == nil {
 			return false
 		}
 	}
@@ -490,7 +579,7 @@ func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANF
 
 // applyReplace mutates b.Value according to the rule's replace template.
 // Returns any extra bindings to insert before b.
-func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue) []ir.ANFBinding {
+func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) []ir.ANFBinding {
 	r := rule.Replace
 	switch {
 	case r.Var != "":
@@ -514,7 +603,7 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 			case a.Var != "":
 				callArgs = append(callArgs, binds[a.Var])
 			case a.Op != nil:
-				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup)
+				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup, used, rebound)
 				extra = append(extra, helperBinding)
 				callArgs = append(callArgs, helperName)
 				// Register immediately so subsequent helpers (if any) see it
@@ -539,13 +628,14 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 // the fold — and therefore the mod-n reduction — unconditional here, and what
 // keeps this engine byte-compatible with the six hand-written tiers, none of
 // which fires a scalar-fusing rule on runtime operands.
-func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue) (string, ir.ANFBinding) {
+func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool) (string, ir.ANFBinding) {
 	lhsName := binds[op.Lhs]
 	rhsName := binds[op.Rhs]
-	helperName := nextTempName(b.Name+"_sum", lookup)
+	// N-112: `<binding>_k`, the TS anf-ec.ts freshName(`${binding.name}_k`, usedNames).
+	helperName := nextTempName(b.Name+"_k", lookup, used)
 
-	lhsVal := resolveConstBigInt(lhsName, lookup)
-	rhsVal := resolveConstBigInt(rhsName, lookup)
+	lhsVal := resolveConstBigInt(lhsName, lookup, rebound)
+	rhsVal := resolveConstBigInt(rhsName, lookup, rebound)
 	if lhsVal == nil || rhsVal == nil {
 		panic(fmt.Sprintf("ec rule %q: buildOpHelper reached with non-constant operands (%q, %q) — opOperandsAreConst should have declined the rule", rule.Name, lhsName, rhsName))
 	}
@@ -559,14 +649,12 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 		folded = new(big.Int).Mul(lhsVal, rhsVal)
 		folded.Mod(folded, curveN)
 	}
-	raw, _ := json.Marshal(folded.String())
+	// N-112: the canonical bigint encoding (a JSON number, or "<n>n" when
+	// wider than 2^53) every other load_const uses. It used to be a bare "5"
+	// string in --emit-ir, unlike TS and the other tiers.
 	return helperName, ir.ANFBinding{
-		Name: helperName,
-		Value: ir.ANFValue{
-			Kind:        "load_const",
-			RawValue:    raw,
-			ConstBigInt: folded,
-		},
+		Name:  helperName,
+		Value: makeLoadConstInt(folded),
 	}
 }
 
@@ -576,23 +664,248 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 
 // applyECRules tries each rule in order on binding b. Returns any extra
 // bindings and whether a rewrite occurred.
-func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
+func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool, rebound map[string]bool, scope *fusionScope) ([]ir.ANFBinding, bool) {
 	for _, rule := range ecRules {
 		if !ruleAppliesToGo(rule) {
 			continue
 		}
-		binds, ok := matchRule(rule, b, lookup)
+		binds, ok := matchRule(rule, b, lookup, rebound)
 		if !ok {
 			continue
 		}
 		// Checked BEFORE applyReplace: applyReplace mutates b.Value and
 		// registers helper bindings in lookup, so there is no way to back out
 		// of it once started.
-		if !opOperandsAreConst(rule, binds, lookup) {
+		if !opOperandsAreConst(rule, binds, lookup, rebound) {
 			continue
 		}
-		extra := applyReplace(rule, b, binds, lookup)
-		return extra, true
+		// N-460: a fusing rule fires only when it lets an inner call go.
+		// N-465: R9 (ec-mul-associative) alone discounts its sibling readers.
+		if len(rule.Fuses) > 0 && scope != nil && !fusionEliminates(rule.Fuses, b, lookup, rebound, scope, rule.Name == "ec-mul-associative") {
+			continue
+		}
+		var gate []ir.ANFBinding
+		if rule.Gate != nil {
+			gate = emitOperandGate(rule.Gate.Of, b.Name, binds[rule.Gate.Operand], lookup, used)
+		}
+		extra := applyReplace(rule, b, binds, lookup, used, rebound)
+		return append(gate, extra...), true
 	}
 	return nil, false
+}
+
+// ---------------------------------------------------------------------------
+// N-460 fusion guard
+// ---------------------------------------------------------------------------
+
+// fusionScope is what a fusing rule (a rule with "fuses": R9, R10, R11)
+// needs to know at its fire site — the TS reference's FusionScope
+// (packages/runar-compiler/src/optimizer/anf-ec.ts).
+//
+// A fusion replaces the outer call with ONE new scalar multiplication, so it
+// shrinks the script only if removeGateSubsumedEcCalls then drops an inner
+// call it read. Each fusing rule therefore fires only when at least one of its
+// inner operands is ELIMINABLE (fusionEliminates):
+//
+//   - every name on its alias chain (the operand, each @ref: hop, the call
+//     binding itself — canonicalName's walk) has exactly one referrer: the
+//     rewritten binding for the operand, the previous hop for the rest. Any
+//     other reader keeps the inner call alive after the fusion;
+//   - the call is an ecMulGen bound in the current scope or an enclosing one
+//     inside the same loop body (frame). It needs no witness, but one bound
+//     outside a loop the fusion sits in would trade one multiplication for one
+//     per iteration;
+//   - or the call is an ecMul bound in the current scope itself (local): the
+//     fused ecMul on the same point is then its witness. One bound in an
+//     enclosing scope has no witness (the fused call is nested) and stays.
+//
+// referrers is computed once per sweep, from the body the sweep starts with
+// (countReferrers), and not updated as the sweep rewrites. A rewrite only adds
+// a reference to a name its own binding, or the inner binding it lifts from,
+// already read, so a stale count is never too low. Every tier computes it the
+// same way, because which rules fire decides the bytes.
+//
+// N-465: R9 alone (shared) also accepts a name whose every referrer is one of
+// mulReaders: a binding of the current scope ecMul(<name>, k) with k a
+// constant other than 0 and 1 (ec-mul-one/ec-mul-zero would rewrite it first
+// and keep reading the name). Each such reader fires R9 in this same sweep —
+// everything R9 checks besides k is a property of the shared inner, the same
+// for all of them — so the inner loses every reader, and the fused calls,
+// ecMuls on its point in its own scope, are its witness. R10/R11 never use
+// this: an ecAdd reader beside R9 readers is not one of them, so the two
+// would decide differently and the inner would stay.
+type fusionScope struct {
+	referrers  func() map[string]int
+	local      map[string]bool
+	frame      map[string]bool
+	mulReaders func() map[string]int
+}
+
+// countMulReaders is N-465's per-name count of the bindings of this scope
+// (body, not its arms or loop bodies) that are ecMul(<name>, k) with k
+// resolving to a constant other than 0 and 1 — resolved as R9 will resolve it
+// at that binding, against the bindings before it (outer is the enclosing
+// lookup, hidden a loop's iteration variable). Taken from the body the sweep
+// starts with: a rewrite never turns a binding into an integer constant, so k
+// resolves the same way after the rewrites ahead of it.
+func countMulReaders(body []ir.ANFBinding, outer map[string]*ir.ANFValue, hidden string, rebound map[string]bool) map[string]int {
+	lookup := make(map[string]*ir.ANFValue, len(outer)+len(body))
+	for k, v := range outer {
+		lookup[k] = v
+	}
+	if hidden != "" {
+		delete(lookup, hidden)
+	}
+	counts := make(map[string]int)
+	for i := range body {
+		v := &body[i].Value
+		lookup[body[i].Name] = v
+		if v.Kind != "call" || v.Func != "ecMul" || len(v.Args) != 2 {
+			continue
+		}
+		k := resolveConstBigInt(v.Args[1], lookup, rebound)
+		if k == nil || k.Sign() == 0 || k.Cmp(big.NewInt(1)) == 0 {
+			continue
+		}
+		counts[v.Args[0]]++
+	}
+	return counts
+}
+
+// countReferrers is the N-460 referrer count per name: the bindings, at any
+// depth, whose value reads it (once per binding, however many operands name
+// it; an if reads its Cond, its arms' bindings are counted themselves), plus
+// one for each name in an if's Results and one for a private method's return
+// binding (F-108): the two things removeGateSubsumedEcCalls protects.
+func countReferrers(body []ir.ANFBinding, method *ir.ANFMethod) map[string]int {
+	counts := make(map[string]int)
+	var walk func(bindings []ir.ANFBinding)
+	walk = func(bindings []ir.ANFBinding) {
+		for i := range bindings {
+			v := &bindings[i].Value
+			reads := make(map[string]bool)
+			switch v.Kind {
+			case "if":
+				reads[v.Cond] = true
+				for _, r := range v.Results {
+					reads[r] = true
+				}
+			case "loop":
+			default:
+				collectValueRefs(v, reads)
+			}
+			for name := range reads {
+				counts[name]++
+			}
+			switch v.Kind {
+			case "if":
+				walk(v.Then)
+				walk(v.Else)
+			case "loop":
+				walk(v.Body)
+			}
+		}
+	}
+	walk(body)
+	if returnsLastBinding(method) && len(body) > 0 {
+		counts[body[len(body)-1].Name]++
+	}
+	return counts
+}
+
+// fusionEliminates reports whether fusing the inner operands at positions
+// `fuses` of b's call lets at least one inner call go (N-460).
+func fusionEliminates(fuses []int, b *ir.ANFBinding, lookup map[string]*ir.ANFValue, rebound map[string]bool, scope *fusionScope, shared bool) bool {
+	for _, pos := range fuses {
+		if pos >= len(b.Value.Args) {
+			continue
+		}
+		operand := b.Value.Args[pos]
+		c, ok := canonicalName(operand, lookup, rebound)
+		if !ok {
+			continue
+		}
+		// canonicalName already walked this chain, so every hop is an @ref:.
+		single := true
+		for cur := operand; ; {
+			if n := scope.referrers()[cur]; n != 1 && !(shared && n > 1 && n == scope.mulReaders()[cur]) {
+				single = false
+				break
+			}
+			if cur == c {
+				break
+			}
+			cur = (*lookup[cur].ConstString)[5:]
+		}
+		if !single {
+			continue
+		}
+		v := lookup[c]
+		if v == nil || v.Kind != "call" {
+			continue
+		}
+		if (v.Func == "ecMulGen" && scope.frame[c]) || (v.Func == "ecMul" && scope.local[c]) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// N-104 operand gate
+// ---------------------------------------------------------------------------
+
+// fieldP is the secp256k1 field prime.
+var fieldP, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
+
+// emitOperandGate returns the bindings that re-check, at runtime, what the
+// builtin `of` would have checked about operand q before computing anything.
+// Byte-for-byte the TS reference (emitAddOperandGate / emitMulOperandGate in
+// packages/runar-compiler/src/optimizer/anf-ec.ts):
+//
+//	ecAdd: assert(ecPointX(q) < p && ecPointY(q) < p)   width (CL-BUG-095) + canonicity (R-117)
+//	ecMul: assert(q === O || ecOnCurve(q))               on-curve-or-O (R-157)
+//	ecAddNegCancel: assert(ecPointX(q) === 0 || ecPointY(q) !== 0)
+//	       the adder's y = 0 doubling abort (N-110), kept by R8/R8r (N-251,
+//	       emitNegCancelGate); the px == 0 term keeps O + O = O
+//
+// Built only from forms no rule matches, because this engine runs to a fixed
+// point and TS makes one pass: a gate a later pass could rewrite would split
+// the tiers. Each gate ends in an assert, which DCE keeps along with what it
+// reads.
+func emitOperandGate(of, base, q string, lookup map[string]*ir.ANFValue, used map[string]bool) []ir.ANFBinding {
+	var out []ir.ANFBinding
+	add := func(suffix string, v ir.ANFValue) string {
+		name := nextTempName(base+suffix, lookup, used)
+		out = append(out, ir.ANFBinding{Name: name, Value: v})
+		return name
+	}
+	if of == "ecAdd" {
+		px := add("_px", ir.ANFValue{Kind: "call", Func: "ecPointX", Args: []string{q}})
+		py := add("_py", ir.ANFValue{Kind: "call", Func: "ecPointY", Args: []string{q}})
+		fp := add("_fp", ir.ANFValue{Kind: "load_const", RawValue: ir.BigIntToRawJSON(fieldP), ConstBigInt: new(big.Int).Set(fieldP)})
+		xOk := add("_pxok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: px, Right: fp})
+		yOk := add("_pyok", ir.ANFValue{Kind: "bin_op", Op: "<", Left: py, Right: fp})
+		ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "&&", Left: xOk, Right: yOk})
+		add("_gate", makeAssert(ok))
+		return out
+	}
+	if of == "ecAddNegCancel" {
+		px := add("_px", ir.ANFValue{Kind: "call", Func: "ecPointX", Args: []string{q}})
+		py := add("_py", ir.ANFValue{Kind: "call", Func: "ecPointY", Args: []string{q}})
+		zero := add("_zero", makeLoadConstInt(big.NewInt(0)))
+		xZero := add("_pxz", ir.ANFValue{Kind: "bin_op", Op: "===", Left: px, Right: zero})
+		yNonZero := add("_pynz", ir.ANFValue{Kind: "bin_op", Op: "!==", Left: py, Right: zero})
+		ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "||", Left: xZero, Right: yNonZero})
+		add("_gate", makeAssert(ok))
+		return out
+	}
+	infHex := infinityHex
+	rawInf, _ := json.Marshal(infHex)
+	inf := add("_inf", ir.ANFValue{Kind: "load_const", RawValue: rawInf, ConstString: &infHex})
+	isInf := add("_isinf", ir.ANFValue{Kind: "bin_op", Op: "===", Left: q, Right: inf, ResultType: "bytes"})
+	onCurve := add("_oncurve", ir.ANFValue{Kind: "call", Func: "ecOnCurve", Args: []string{q}})
+	ok := add("_ok", ir.ANFValue{Kind: "bin_op", Op: "||", Left: isInf, Right: onCurve})
+	add("_gate", makeAssert(ok))
+	return out
 }

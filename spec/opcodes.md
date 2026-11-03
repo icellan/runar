@@ -404,7 +404,7 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
 | `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
 
-`OP_CODESEPARATOR` (`0xab`) used to be listed here as "not used by Rúnar". It is used: the compiler inserts exactly one, at byte offset 1, in every contract with a public method that needs a BIP-143 sighash subscript — that is, every stateful contract. The artifact records its position in `codeSeparatorIndex` / `codeSeparatorIndices` (see `artifact-format.md` §3.15).
+`OP_CODESEPARATOR` (`0xab`) used to be listed here as "not used by Rúnar". It is used: the compiler inserts exactly one, at byte offset 1, in every contract with a public method that needs a BIP-143 sighash subscript — that is, every stateful contract. The artifact records its position in `codeSeparatorIndex` / `codeSeparatorIndices` (see `artifact-format.md` §3.16).
 
 ---
 

@@ -43,6 +43,24 @@ def _reload_with_bsv_unavailable():
             sys.modules[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _restore_local_signer_module():
+    """``_reload_with_bsv_unavailable()`` calls ``importlib.reload`` while
+    ``sys.modules['bsv']`` is poisoned, which re-executes
+    ``runar.sdk.local_signer``'s module body with the fallback path and
+    rebinds its globals (``_BSV_SDK_AVAILABLE``, ``PrivateKey``, etc.) in
+    place. That helper only restores ``sys.modules`` afterwards — the
+    module object itself is left in the fallback state. Without restoring
+    it here, any later test in the suite that needs the real bsv-sdk
+    backend would be silently switched to the pure-Python fallback.
+    """
+    import runar.sdk.local_signer as ls_module
+    was_bsv_available = ls_module._BSV_SDK_AVAILABLE
+    yield
+    if ls_module._BSV_SDK_AVAILABLE != was_bsv_available:
+        importlib.reload(ls_module)
+
+
 # ---------------------------------------------------------------------------
 # Pubkey derivation matches known secp256k1 fixture
 # ---------------------------------------------------------------------------
@@ -173,3 +191,25 @@ class TestFallbackSign:
         LocalSigner, _ = _reload_with_bsv_unavailable()
         with pytest.raises(ValueError):
             LocalSigner('ab' * 16)  # 32 hex chars instead of 64
+
+
+def test_module_left_on_real_bsv_backend_after_fallback_tests():
+    """Regression (N-169 sweep): every test above calls
+    ``_reload_with_bsv_unavailable()``, which reloads
+    ``runar.sdk.local_signer`` while ``bsv`` is poisoned in ``sys.modules``.
+    ``importlib.reload`` re-executes the module's own body in place, so
+    without the ``_restore_local_signer_module`` autouse fixture restoring
+    it afterwards, the module stays switched to the pure-Python fallback
+    (``_BSV_SDK_AVAILABLE is False``) for every test that runs later in the
+    suite, including ones in other files that expect the real bsv-sdk
+    backend. ``bsv-sdk`` is a required dev dependency of this package (see
+    ``pyproject.toml``'s ``dev`` extra), so it is always installed here.
+    Proves: this file's own tests do not leave the shared
+    ``runar.sdk.local_signer`` module in the fallback state. Does not
+    prove: that a test outside this file observing the real backend
+    actually fails when the leak is present — the order-dependent
+    cross-file pytest run documented in the remediation log is the
+    authoritative proof of that (it fails on 7 tests in
+    test_bip143_interop.py / test_local_signer_sighash_spend.py at HEAD)."""
+    import runar.sdk.local_signer as ls_module
+    assert ls_module._BSV_SDK_AVAILABLE is True

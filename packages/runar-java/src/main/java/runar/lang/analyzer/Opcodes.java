@@ -23,6 +23,7 @@ final class Opcodes {
     static final int OP_VERIFY = 0x69;
     static final int OP_RETURN = 0x6a;
 
+    static final int OP_2DROP = 0x6d;
     static final int OP_DROP = 0x75;
     static final int OP_EQUALVERIFY = 0x88;
     static final int OP_NUMEQUALVERIFY = 0x9d;
@@ -96,6 +97,8 @@ final class Opcodes {
         NAMES[0x88] = "OP_EQUALVERIFY";
         NAMES[0x8b] = "OP_1ADD";
         NAMES[0x8c] = "OP_1SUB";
+        NAMES[0x8d] = "OP_2MUL"; // Chronicle
+        NAMES[0x8e] = "OP_2DIV"; // Chronicle
         NAMES[0x8f] = "OP_NEGATE";
         NAMES[0x90] = "OP_ABS";
         NAMES[0x91] = "OP_NOT";
@@ -129,6 +132,12 @@ final class Opcodes {
         NAMES[0xad] = "OP_CHECKSIGVERIFY";
         NAMES[0xae] = "OP_CHECKMULTISIG";
         NAMES[0xaf] = "OP_CHECKMULTISIGVERIFY";
+        // Chronicle (re-allocated from OP_NOP4..OP_NOP8)
+        NAMES[0xb3] = "OP_SUBSTR";
+        NAMES[0xb4] = "OP_LEFT";
+        NAMES[0xb5] = "OP_RIGHT";
+        NAMES[0xb6] = "OP_LSHIFTNUM";
+        NAMES[0xb7] = "OP_RSHIFTNUM";
     }
 
     /**

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -76,6 +78,10 @@ type WalletProviderOptions struct {
 	OverlayTopics []string
 	Network       string  // "mainnet" or "testnet"
 	FeeRate       float64 // default 100
+	// ArcTimeout bounds the ARC broadcast HTTP request (N-040). Without it, a
+	// hung ARC deployment (accepts the connection, never responds) blocks
+	// Broadcast forever. Default: 30s.
+	ArcTimeout time.Duration
 }
 
 // WalletProvider implements the Provider interface using a BRC-100 WalletClient
@@ -121,6 +127,10 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 	if feeRate == 0 {
 		feeRate = 100
 	}
+	arcTimeout := opts.ArcTimeout
+	if arcTimeout == 0 {
+		arcTimeout = 30 * time.Second
+	}
 	return &WalletProvider{
 		wallet:        opts.Wallet,
 		signer:        opts.Signer,
@@ -132,7 +142,7 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 		network:       network,
 		feeRate:       feeRate,
 		txCache:       make(map[string]string),
-		client:        &http.Client{},
+		client:        &http.Client{Timeout: arcTimeout},
 	}
 }
 
@@ -173,8 +183,13 @@ func (p *WalletProvider) GetUtxos(address string) ([]UTXO, error) {
 		if !out.Spendable {
 			continue
 		}
+		// N-043: an output without a usable locking script is dropped
+		// (fail-closed), matching the TypeScript reference.
+		if out.LockingScript == "" {
+			continue
+		}
 		// Filter by P2PKH match if we have a signer pubkey.
-		if expectedScript != "" && out.LockingScript != "" && out.LockingScript != expectedScript {
+		if expectedScript != "" && out.LockingScript != expectedScript {
 			continue
 		}
 		txid, vout := parseOutpoint(out.Outpoint)
@@ -225,13 +240,63 @@ func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) 
 		return "", fmt.Errorf("WalletProvider.Broadcast: ARC returned %d: %s", resp.StatusCode, string(body))
 	}
 
+	txid, err := checkArcAccepted(body, tx.TxID().String())
+	if err != nil {
+		return "", err
+	}
+
 	// Cache the raw tx for later lookups.
-	txid := tx.TxID().String()
 	p.mu.Lock()
 	p.txCache[txid] = rawHex
 	p.mu.Unlock()
 
 	return txid, nil
+}
+
+// arcRejectedTxStatuses are the ARC txStatus values returned with HTTP 200 for
+// a transaction ARC did not accept. Mirrors @bsv/sdk's ARC broadcaster; any
+// status or extraInfo containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a
+// failure.
+var arcRejectedTxStatuses = map[string]bool{
+	"DOUBLE_SPEND_ATTEMPTED": true,
+	"REJECTED":               true,
+	"INVALID":                true,
+	"MALFORMED":              true,
+	"MINED_IN_STALE_BLOCK":   true,
+}
+
+// checkArcAccepted validates a 2xx ARC /v1/tx body (F-042). It returns ARC's
+// txid only when ARC accepted the transaction and that txid is localTxid.
+func checkArcAccepted(body []byte, localTxid string) (string, error) {
+	var r struct {
+		Txid      *string     `json:"txid"`
+		TxStatus  string      `json:"txStatus"`
+		ExtraInfo string      `json:"extraInfo"`
+		Status    interface{} `json:"status"`
+		Title     string      `json:"title"`
+		Detail    string      `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC returned a non-JSON body: %s", string(body))
+	}
+	if code, ok := r.Status.(float64); ok && (code < 200 || code > 299) {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC broadcast failed (status %v): %s",
+			code, strings.TrimSpace(r.Title+" "+r.Detail))
+	}
+	st := strings.ToUpper(r.TxStatus)
+	if arcRejectedTxStatuses[st] || strings.Contains(st, "ORPHAN") ||
+		strings.Contains(strings.ToUpper(r.ExtraInfo), "ORPHAN") {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC did not accept the transaction (txStatus %s): %s",
+			r.TxStatus, r.ExtraInfo)
+	}
+	if r.Txid == nil || *r.Txid == "" {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC response carries no txid: %s", string(body))
+	}
+	if strings.ToLower(*r.Txid) != localTxid {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC reported txid %s but the transaction sent has txid %s",
+			*r.Txid, localTxid)
+	}
+	return localTxid, nil
 }
 
 // GetTransaction fetches transaction data. Checks local cache first, then
@@ -443,6 +508,12 @@ func (s *WalletSigner) Sign(txHex string, inputIndex int, subscript string, sato
 	flag := sighash.AllForkID
 	if sigHashType != nil {
 		flag = sighash.Flag(*sigHashType)
+	}
+
+	// F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+	// signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+	if subscript == "" {
+		return "", fmt.Errorf("WalletSigner.Sign: refusing to sign input %d with an empty subscript (scriptCode); pass the locking script of the UTXO being spent", inputIndex)
 	}
 
 	tx, err := transaction.NewTransactionFromHex(txHex)

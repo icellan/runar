@@ -151,15 +151,23 @@ def pinCodePartLength (stack : StackProgram) (props : List ANFProperty) :
 /-- R-095: overwrite the 4-byte zero field in every
 `OP_DUP <04 00 00 00 00> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL)
 OP_VERIFY` pin with `scriptLen + delta`, and rewrite the comparison to
-NUMEQUAL when `exact`. In-place overwrite keeps the length stable. -/
-def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
+NUMEQUAL. In-place overwrite keeps the length stable.
+
+N-051: the comparison is NUMEQUAL whether or not the length is exact at
+compile time. A lower bound (GREATERTHANOREQUAL) accepted a truncated
+`_codePart` ending at a 0x6a inside a baked readonly value. When the
+length is not exact, `scriptLen + delta` is a placeholder the deploying
+SDK overwrites (artifact `codePartLenSlots`); the script bytes the
+compilers emit, which is what this model reproduces, are unchanged by
+that. -/
+def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (_exact : Bool) :
     ByteArray :=
   let len := bs.size + delta
   let b0 : UInt8 := UInt8.ofNat (len &&& 0xff)
   let b1 : UInt8 := UInt8.ofNat ((len >>> 8) &&& 0xff)
   let b2 : UInt8 := UInt8.ofNat ((len >>> 16) &&& 0xff)
   let b3 : UInt8 := UInt8.ofNat ((len >>> 24) &&& 0xff)
-  let cmp : UInt8 := if exact then 0x9c else 0xa2
+  let cmp : UInt8 := 0x9c
   -- Accumulator form so a 10 KB WOTS script does not blow the 8 MB stack.
   let rec go (acc : List UInt8) : List UInt8 → List UInt8
     | 0x76 :: 0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest =>
@@ -350,6 +358,29 @@ private def isUnknownOpcodeFixtureError : Except CompileError Unit → Bool
 
 #guard isUnknownOpcodeFixtureError
   (validateStackOp "m" (.opcode "OP_NOT_A_REAL_OPCODE"))
+
+/-- N-457: hex of one method body after the EXECUTED peephole chain
+(`peepholeProgram`, the one `hoistStack` / `compileSafe` /
+`compileHexSafe` run) and `Emit.emitFast`. -/
+private def peepholeEmitHexForGuard (ops : List StackOp) : String :=
+  Emit.bytesToHex (Emit.emitFast (peepholeProgram
+    { contractName := "T", methods := [{ name := "m", ops := ops }] }))
+
+/- N-457: the executed peephole pass fuses `[OP_CHECKMULTISIG, OP_VERIFY]`
+into `OP_CHECKMULTISIGVERIFY` (0xaf), as `peephole.ts` and all seven
+compiler tiers do. The op list is the tail of the `multisig-verify-fused`
+conformance fixture (`assert(checkMultiSig(..)); return x > 0`), whose
+golden ends `…53af00a0`; before the fix Lean emitted `…53ae6900a0`.
+Proves: the rule is wired into the pass `compileHexSafe` executes, and a
+bare `OP_CHECKMULTISIG` with no `OP_VERIFY` after it is left alone.
+Does not prove: soundness (that is `checkMultiSigVerifyFuse_pass_sound`,
+now composed into `passAllInner15_sound`), nor byte equality on any
+whole fixture (that is `pipelineGolden`). -/
+#guard peepholeEmitHexForGuard
+  [.opcode "OP_CHECKMULTISIG", .opcode "OP_VERIFY",
+   .push (.bigint 0), .opcode "OP_GREATERTHAN"] == "af00a0"
+
+#guard peepholeEmitHexForGuard [.opcode "OP_CHECKMULTISIG"] == "ae"
 
 /-! ## Shape-preservation theorems -/
 
@@ -4353,7 +4384,9 @@ def peepholedLoweredMethod (p : ANFProgram) (anfM : ANFMethod) : StackMethod :=
 /-- `lowerMethod` preserves the method name. -/
 theorem lowerMethod_name (progMethods : List ANFMethod)
     (props : List ANFProperty) (m : ANFMethod) :
-    (Lower.lowerMethod progMethods props m).name = m.name := rfl
+    (Lower.lowerMethod progMethods props m).name = m.name :=
+  -- N-007: the shadow-rename keeps the name, propositionally.
+  Lower.lowerMethod_name progMethods props m
 
 /-- **Shape derivation — both `hPublicSingleton` and `hStackBody`.**
 
@@ -4386,7 +4419,8 @@ theorem peepholeProgram_single_public_shape
     rw [hLowMethods]; rfl
   -- The lowered method's name is `anfM.name`, which is not "constructor",
   -- so `isPublicStackMethod` holds on the post-peephole method.
-  have hPubName : (peepholedLoweredMethod p anfM).name = anfM.name := rfl
+  have hPubName : (peepholedLoweredMethod p anfM).name = anfM.name :=
+    Lower.lowerMethod_name p.methods p.properties anfM
   have hIsPublic : Emit.isPublicStackMethod (peepholedLoweredMethod p anfM) = true := by
     unfold Emit.isPublicStackMethod
     rw [hPubName]
@@ -4639,7 +4673,7 @@ theorem arithOnlyBody_of_emittableArithChainReadyNoDblNeg
       | assert _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | updateProp _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | getStateScript => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
-      | checkPreimage _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
+      | checkPreimage _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | deserializeState _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | addOutput _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | addRawOutput _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
@@ -4683,6 +4717,23 @@ theorem bindingsUseDeserializeState_false_of_arithOnly :
   | (.mk _ (.unaryOp _ _ _) _) :: rest, h => by
       simp only [Lower.bindingsUseDeserializeState, Bool.false_or]
       exact bindingsUseDeserializeState_false_of_arithOnly rest h
+
+/-- `bodyEndsInDirectAssert` is `false` on an `arithOnlyBody` (F-148: the
+one-level arm check `bodyEndsInAssert` applies to a terminal `if`). -/
+theorem bodyEndsInDirectAssert_false_of_arithOnly :
+    ∀ (body : List ANFBinding), arithOnlyBody body →
+      Lower.bodyEndsInDirectAssert body = false
+  | [], _ => rfl
+  | [.mk _ (.binOp _ _ _ _) _], _ => rfl
+  | [.mk _ (.unaryOp _ _ _) _], _ => rfl
+  | (.mk _ (.binOp _ _ _ _) _) :: (b2 :: rest), h => by
+      have hTail : arithOnlyBody (b2 :: rest) := h
+      have := bodyEndsInDirectAssert_false_of_arithOnly (b2 :: rest) hTail
+      simpa only [Lower.bodyEndsInDirectAssert] using this
+  | (.mk _ (.unaryOp _ _ _) _) :: (b2 :: rest), h => by
+      have hTail : arithOnlyBody (b2 :: rest) := h
+      have := bodyEndsInDirectAssert_false_of_arithOnly (b2 :: rest) hTail
+      simpa only [Lower.bodyEndsInDirectAssert] using this
 
 /-- `bodyEndsInAssert` is `false` on an `arithOnlyBody`: the last binding
 is a `binOp` / `unaryOp`, never an `assert`. -/
@@ -4768,7 +4819,7 @@ theorem noMethodCallBindings_true_of_mathByteNoLen :
       | .assert r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp n r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
-      | .checkPreimage pr => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
+      | .checkPreimage pr _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .deserializeState pr => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .addOutput sa sv pre => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .addRawOutput sa sb => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
@@ -5913,7 +5964,7 @@ theorem peepholeMethodOps_single_opcode (op : String) :
   have hFlat : Peephole.peepholePassAllFlat [StackOp.opcode op] = [StackOp.opcode op] := by
     simp [Peephole.peepholePassAllFlat, Peephole.applyEqualVerifyFuse,
       Peephole.applyCheckSigVerifyFuse, Peephole.applyNumEqualVerifyFuse,
-      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyDoubleDrop,
+      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop,
       Peephole.applyDoubleOver, Peephole.applyDoubleNot, Peephole.applyDoubleNegate,
       Peephole.applyOneSub, Peephole.applyOneAdd, Peephole.applySubZero,
       Peephole.applyAddZero, Peephole.applyPushPushMul, Peephole.applyPushPushSub,
@@ -6286,7 +6337,7 @@ theorem peepholeMethodOps_hashAssert_sha256 :
     simp +decide [AgreesHashCall.hashAssertOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6318,7 +6369,7 @@ theorem peepholeMethodOps_hashAssert_hash160 :
     simp +decide [AgreesHashCall.hashAssertOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6583,7 +6634,7 @@ theorem peepholeMethodOps_hashChain_sha256_hash160 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6604,7 +6655,7 @@ theorem peepholeMethodOps_hashChain_hash160_sha256 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6625,7 +6676,7 @@ theorem peepholeMethodOps_hashChain_hash160_hash160 :
     (by simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -6658,7 +6709,7 @@ theorem peepholeMethodOps_hashChain_sha256_sha256 :
     simp +decide [AgreesHashCall.hashChainOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -7109,7 +7160,7 @@ theorem peepholeMethodOps_statefulPrologue :
     simp +decide [AgreesStateful.statefulPrologueOps,
       Peephole.peepholePassAllFlat, Peephole.applyEqualVerifyFuse,
       Peephole.applyCheckSigVerifyFuse, Peephole.applyNumEqualVerifyFuse,
-      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256,
+      Peephole.applyZeroNumEqual, Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse,
       Peephole.applyDoubleDrop, Peephole.applyDoubleOver, Peephole.applyDoubleNot,
       Peephole.applyDoubleNegate, Peephole.applyOneSub, Peephole.applyOneAdd,
       Peephole.applySubZero, Peephole.applyAddZero, Peephole.applyPushPushMul,
@@ -7289,7 +7340,8 @@ private def rollPickFoldOpNoopB : StackOp → Bool
   | _ => true
 
 private theorem rollPickFoldOpNoop_of_b (op : StackOp)
-    (h : rollPickFoldOpNoopB op = true) : Peephole.rollPickFoldOpNoop op := by
+    (h : rollPickFoldOpNoopB op = true) :
+    Peephole.rollPickFoldOpNoop op ∨ op = .rot := by
   cases op with
   | roll n =>
       cases n with
@@ -7308,6 +7360,7 @@ private theorem rollPickFoldOpNoop_of_b (op : StackOp)
         cases n1 with
         | zero => simp [rollPickFoldOpNoopB] at h
         | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | rot => exact Or.inr rfl
   | _ => simp [Peephole.rollPickFoldOpNoop]
 
 set_option maxRecDepth 8192 in
@@ -7331,13 +7384,18 @@ theorem peepholeMethodOps_statefulFull :
     with_unfolding_all rfl
   have hRollB : AgreesStateful.statefulFullOps.all rollPickFoldOpNoopB = true := by
     native_decide
-  have hRoll : Peephole.rollPickFoldFlatNoop AgreesStateful.statefulFullOps := by
+  have hRoll : ∀ op, op ∈ AgreesStateful.statefulFullOps →
+      Peephole.rollPickFoldOpNoop op ∨ op = .rot := by
     intro op hop
     exact rollPickFoldOpNoop_of_b op ((List.all_eq_true.mp hRollB) op hop)
+  -- N-376: the ops carry `.rot`s but no `[rot, rot, rot]` run.
+  have hRot3 : Peephole.applyRot3Elim AgreesStateful.statefulFullOps
+      = AgreesStateful.statefulFullOps := by
+    with_unfolding_all rfl
   rw [hPost,
     Peephole.peepholeChainFold_eq_self_of_noIfOp_stepId _ hNoIf (by
       with_unfolding_all rfl),
-    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf hRoll]
+    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_rotOK _ hNoIf hRoll hRot3]
 
 /-- **Widened stateful consume theorem (prologue + state-output epilogue,
 acceptance bit).**
@@ -7544,7 +7602,11 @@ theorem lowerMethod_ops_passthrough
     (hBody : anfM.body = [ANFBinding.mk bn (.loadParam x) src])
     (hPub : anfM.isPublic = true) :
     (Lower.lowerMethod progMethods props anfM).ops = [] := by
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter shadow-rename
+  -- is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   have hWit : Lower.lowerValueP progMethods props Lower.defaultInlineBudget 0
       (Lower.computeLastUses [ANFBinding.mk bn (.loadParam x) src]) [] [bn]
@@ -7600,7 +7662,8 @@ private theorem filter_isPublic_map_peeped
       have hmName : m.name ≠ "constructor" := hNames m (List.mem_cons_self ..)
       have hIsPub : Emit.isPublicStackMethod (peepholedLoweredMethod p m) = true := by
         unfold Emit.isPublicStackMethod
-        have hN : (peepholedLoweredMethod p m).name = m.name := rfl
+        have hN : (peepholedLoweredMethod p m).name = m.name :=
+          Lower.lowerMethod_name p.methods p.properties m
         rw [hN]
         exact bne_iff_ne.mpr hmName
       simp only [List.map_cons, List.filter, hIsPub]
@@ -8498,8 +8561,11 @@ private theorem ifval_consume_completion
     simp only [Lower.bindingsUseDeserializeState, Bool.or_false,
       bindingsUseDeserializeState_false_of_arithOnly thn hThnArith,
       bindingsUseDeserializeState_false_of_arithOnly els hElsArith]
+  -- F-148: a terminal `if` counts as `bodyEndsInAssert` when both arms end in
+  -- an assert; these arms are arith-only, so they do not.
   have hNoTerminalAssert : Lower.bodyEndsInAssert anfM.body = false := by
-    rw [hBodyEq]; rfl
+    rw [hBodyEq]
+    simp [Lower.bodyEndsInAssert, bodyEndsInDirectAssert_false_of_arithOnly thn hThnArith]
   -- The raw lowered op list of the single-`.ifVal` body.
   let RAW :=
       (Stack.Lower.lowerBindingsP p.methods p.properties
@@ -8696,8 +8762,13 @@ theorem compileSafe_observational_correct_ifval_consume
     p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack Γ
     hSinglePublic hName bn cond k thn els src branchTsm hBodyEq hAgrees hFrag
     hUntag hTypedEntry hTsmTyped hCoh hCondBool hCondHead hLast hIPThn hIPEls
+  -- F-148: the arms are arith chains, so neither ends in an assert and the
+  -- single `if` is not a terminal-assert body.
   have hNoTA : Lower.bodyEndsInAssert anfM.body = false := by
-    rw [hBodyEq]; simp [Lower.bodyEndsInAssert]
+    rw [hBodyEq] at hFrag ⊢
+    obtain ⟨hThnChain, _, _⟩ := hFrag
+    simp [Lower.bodyEndsInAssert, bodyEndsInDirectAssert_false_of_arithOnly thn
+      (arithOnlyBody_of_emittableArithChainReadyNoDblNeg _ thn _ 0 false hThnChain)]
   exact Stack.Eval.acceptAgrees_of_completion_of_truthy hOld (hTopTruthy hNoTA)
 
 /-- **Wave 51 Step 1 — the dispatch-level consume-`math_byte` correctness
@@ -8949,7 +9020,7 @@ theorem peepholeMethodOps_catOps :
     simp +decide [AgreesCat.catOps, Peephole.peepholePassAllFlat,
       Peephole.applyEqualVerifyFuse, Peephole.applyCheckSigVerifyFuse,
       Peephole.applyNumEqualVerifyFuse, Peephole.applyZeroNumEqual,
-      Peephole.applyDoubleSha256, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
+      Peephole.applyDoubleSha256, Peephole.applyCheckMultiSigVerifyFuse, Peephole.applyDoubleDrop, Peephole.applyDoubleOver,
       Peephole.applyDoubleNot, Peephole.applyDoubleNegate, Peephole.applyOneSub,
       Peephole.applyOneAdd, Peephole.applySubZero, Peephole.applyAddZero,
       Peephole.applyPushPushMul, Peephole.applyPushPushSub, Peephole.applyPushPushAdd,
@@ -9958,7 +10029,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ .getStateScript _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
-                | [.mk _ (.checkPreimage _) _] =>
+                | [.mk _ (.checkPreimage _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.deserializeState _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])

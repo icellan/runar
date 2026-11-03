@@ -46,8 +46,23 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{
+    bare_java_property_assignment_message, lex_error, static_method_message, unknown_return_type_message,
+    Diagnostic, JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
+use super::input_limits::{enforce_ast_nesting, nesting_refusal, DepthTracker, NestingCounter};
 use super::parser::ParseResult;
+use super::sighash_directive::{lost_directive_message, resolve_native_sighash};
+
+// F-205: the annotation names Rúnar recognizes at member position, matching
+// the TS reference (01-parse-java.ts, parseMember). Anything else is a loud
+// "unsupported annotation" diagnostic rather than a silent visibility
+// downgrade. N-093 adds `@EmbedAlways` / `@Sighash("FLAGS")`, the native
+// spellings of the `@embedAlways` / `@sighash` directives.
+const F205_KNOWN_ANNOTATIONS: [&str; 7] =
+    ["Readonly", "Public", "Stateful", "Override", "SuppressWarnings", "EmbedAlways", "Sighash"];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -55,14 +70,35 @@ use super::parser::ParseResult;
 
 /// Parse a Java-format Rúnar contract source.
 pub fn parse_java(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
+    // F-213: the parse runs on its own stack segment, so its bounded
+    // recursion fits whatever stack the caller runs on (a 2 MiB thread,
+    // a debug build).
+    super::input_limits::run_on_parse_stack(|| parse_java_on_parse_stack(source, file_name))
+}
+
+/// The body of [`parse_java`], on the parse stack segment.
+fn parse_java_on_parse_stack(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.java");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
+    let tokens = tokenize(source, file, &mut errors);
     let mut parser = JavaParser::new(tokens, file, &mut errors);
     let contract = parser.parse();
+    // F-213 measure (A), then measure (B) on the finished tree.
+    if parser.nest.exceeded() {
+        return nesting_refusal(None);
+    }
 
-    ParseResult { contract, errors, source_size_err: None }
+    enforce_ast_nesting(ParseResult { contract, errors, source_size_err: None })
 }
 
 // ---------------------------------------------------------------------------
@@ -155,14 +191,41 @@ enum TokenType {
     StarEq,   // *=
     SlashEq,  // /=
     PercentEq, // %=
+    ShlEq,    // <<=
+    ShrEq,    // >>=
+    AmpEq,    // &=
+    PipeEq,   // |=
+    CaretEq,  // ^=
     PlusPlus, // ++
     MinusMinus, // --
     // Literals
     Ident(String),
     Number(i128),
+    /// F-026: `2147483648` / `9223372036854775808L` (value, text as written):
+    /// legal only as the direct operand of a unary minus.
+    NegOnlyNumber(i128, String),
     StringLit(String),
     // End
     Eof,
+}
+
+/// N-134: the binary operator of a compound assignment token -- exactly TS's
+/// ten (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+/// `t = t op e`.
+fn compound_op(t: &TokenType) -> Option<BinaryOp> {
+    match t {
+        TokenType::PlusEq => Some(BinaryOp::Add),
+        TokenType::MinusEq => Some(BinaryOp::Sub),
+        TokenType::StarEq => Some(BinaryOp::Mul),
+        TokenType::SlashEq => Some(BinaryOp::Div),
+        TokenType::PercentEq => Some(BinaryOp::Mod),
+        TokenType::AmpEq => Some(BinaryOp::BitAnd),
+        TokenType::PipeEq => Some(BinaryOp::BitOr),
+        TokenType::CaretEq => Some(BinaryOp::BitXor),
+        TokenType::ShlEq => Some(BinaryOp::Shl),
+        TokenType::ShrEq => Some(BinaryOp::Shr),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +239,7 @@ struct Token {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens: Vec<Token> = Vec::new();
     let mut pos = 0usize;
@@ -189,7 +252,9 @@ fn tokenize(source: &str) -> Vec<Token> {
         let c = col;
 
         // Whitespace
-        if ch.is_whitespace() {
+        // N-407: exactly the TS reference's whitespace (' ', '\t', '\r', '\n'); a
+        // non-ASCII space such as U+00A0 is refused as an unexpected character.
+        if matches!(ch, ' ' | '\t' | '\r' | '\n') {
             if ch == '\n' {
                 line += 1;
                 col = 1;
@@ -234,7 +299,13 @@ fn tokenize(source: &str) -> Vec<Token> {
             let mut val = String::new();
             pos += 1;
             col += 1;
-            while pos < chars.len() && chars[pos] != '"' {
+            // F-011: a Java string literal cannot span lines; one that
+            // reaches a line break (escaped or not) or end of file is
+            // unterminated and must never run on into the following lines.
+            while pos < chars.len() && chars[pos] != '"' && chars[pos] != '\n' && chars[pos] != '\r' {
+                if chars[pos] == '\\' && (pos + 1 >= chars.len() || chars[pos + 1] == '\n' || chars[pos + 1] == '\r') {
+                    break;
+                }
                 if chars[pos] == '\\' && pos + 1 < chars.len() {
                     pos += 1;
                     col += 1;
@@ -257,9 +328,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                 pos += 1;
                 col += 1;
             }
-            if pos < chars.len() {
+            if pos < chars.len() && chars[pos] == '"' {
                 pos += 1;
                 col += 1;
+            } else {
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c - 1));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;
@@ -268,6 +341,9 @@ fn tokenize(source: &str) -> Vec<Token> {
         // Single-quoted char literal — tokenize as string so the parser can
         // reject it uniformly as "bare String / char literals not allowed".
         if ch == '\'' {
+            // F-011: refused exactly as the TS reference refuses it. As a
+            // bare string it used to reach `ByteString.fromHex('cafe')`.
+            errors.push(lex_error(JAVA_CHAR_LITERAL, file, l, c - 1));
             let mut val = String::new();
             pos += 1;
             col += 1;
@@ -289,6 +365,16 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
+        // Three-char operators: <<= and >>= (N-134). `>>>` / `>>>=` are not
+        // supported and fall through to two-char tokens, as before.
+        if pos + 2 < chars.len() && chars[pos + 2] == '=' && chars[pos + 1] == ch && (ch == '<' || ch == '>') {
+            let typ = if ch == '<' { TokenType::ShlEq } else { TokenType::ShrEq };
+            tokens.push(Token { typ, line: l, col: c });
+            pos += 3;
+            col += 3;
+            continue;
+        }
+
         // Two-char operators
         if pos + 1 < chars.len() {
             let two = (ch, chars[pos + 1]);
@@ -304,6 +390,9 @@ fn tokenize(source: &str) -> Vec<Token> {
                 ('*', '=') => Some(TokenType::StarEq),
                 ('/', '=') => Some(TokenType::SlashEq),
                 ('%', '=') => Some(TokenType::PercentEq),
+                ('&', '=') => Some(TokenType::AmpEq),
+                ('|', '=') => Some(TokenType::PipeEq),
+                ('^', '=') => Some(TokenType::CaretEq),
                 ('+', '+') => Some(TokenType::PlusPlus),
                 ('-', '-') => Some(TokenType::MinusMinus),
                 ('<', '<') => Some(TokenType::Shl),
@@ -354,32 +443,35 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Number literal (allow optional trailing L/l suffix for long
-        // literals, and underscores between digits).
+        // Number literal (F-026): the whole glued [0-9A-Za-z_] run is one
+        // Java integer literal (JLS 3.10.1), with Java's value: hex / octal /
+        // binary int and long literals wrap to two's complement.
         if ch.is_ascii_digit() {
-            let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '_') {
-                if chars[pos] != '_' {
-                    val.push(chars[pos]);
+            let end = scan_number_end(&chars, pos);
+            let text: String = chars[pos..end].iter().collect();
+            col += end - pos;
+            pos = end;
+            let typ = match parse_int_literal("java", &text) {
+                Some(lit) => {
+                    let n: i128 = lit.value.to_string().parse().unwrap_or(0);
+                    if lit.neg_only { TokenType::NegOnlyNumber(n, text) } else { TokenType::Number(n) }
                 }
-                pos += 1;
-                col += 1;
-            }
-            // optional L / l long suffix
-            if pos < chars.len() && (chars[pos] == 'L' || chars[pos] == 'l') {
-                pos += 1;
-                col += 1;
-            }
-            let n: i128 = val.parse().unwrap_or(0);
-            tokens.push(Token { typ: TokenType::Number(n), line: l, col: c });
+                None => {
+                    errors.push(lex_error(&invalid_integer_literal("java", &text), file, l, c - 1));
+                    TokenType::Number(0)
+                }
+            };
+            tokens.push(Token { typ, line: l, col: c });
             continue;
         }
 
         // Identifier / keyword
-        if ch.is_alphabetic() || ch == '_' || ch == '$' {
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is refused
+        // as an unexpected character.
+        if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' {
             let mut val = String::new();
             while pos < chars.len()
-                && (chars[pos].is_alphanumeric() || chars[pos] == '_' || chars[pos] == '$')
+                && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_' || chars[pos] == '$')
             {
                 val.push(chars[pos]);
                 pos += 1;
@@ -416,7 +508,9 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Skip unknown character silently
+        // N-214: an unrecognised character is refused, as the TS reference
+        // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+        errors.push(lex_error(&format!("Unexpected character '{}'", ch), file, l, c - 1));
         pos += 1;
         col += 1;
     }
@@ -441,6 +535,8 @@ struct JavaParser<'a> {
     /// Name of the enclosing contract class (used to distinguish the
     /// constructor from a method with the same name).
     contract_name: String,
+    /// F-213 measure (A): parse nesting.
+    nest: NestingCounter,
 }
 
 impl<'a> JavaParser<'a> {
@@ -452,7 +548,38 @@ impl<'a> JavaParser<'a> {
             errors,
             type_args_depth: 0,
             contract_name: String::new(),
+            nest: NestingCounter::new(),
         }
+    }
+
+    /// F-213: the source is too deep. Latch the refusal and treat the rest
+    /// of the input as ended, so every loop above unwinds without building
+    /// anything deeper.
+    fn bail(&mut self) {
+        self.nest.refuse();
+        self.pos = self.tokens.len();
+    }
+
+    /// Run `f` one counted nesting level deeper (measure A), or return
+    /// `fallback` once the limit is reached.
+    fn nested<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.nest.enter() {
+            self.bail();
+            return fallback;
+        }
+        let out = f(self);
+        self.nest.exit();
+        out
+    }
+
+    /// May a loop wrap `acc` (and `others`) in one more node? Refuses once
+    /// that node would be deeper than MAX_SOURCE_NESTING (F-213).
+    fn grow(&mut self, dt: &mut DepthTracker, acc: &Expression, others: &[&Expression]) -> bool {
+        if dt.wrap(acc, others) {
+            return true;
+        }
+        self.bail();
+        false
     }
 
     fn current(&self) -> &Token {
@@ -599,8 +726,8 @@ impl<'a> JavaParser<'a> {
                 "UnsafeSmartContract" => "UnsafeSmartContract".to_string(),
                 other => {
                     self.error(format!(
-                        "contract class in {} must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got {}",
-                        self.file, other
+                        "unknown parent class: '{}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract",
+                        other
                     ));
                     return None;
                 }
@@ -640,14 +767,16 @@ impl<'a> JavaParser<'a> {
 
         let ctor = constructor.unwrap_or_else(|| synthesize_constructor(&properties, &self.file));
 
-        Some(ContractNode {
+        let contract = ContractNode {
             name: class_name,
             parent_class,
             properties,
             constructor: ctor,
             methods,
             source_file: self.file.clone(),
-        })
+        };
+        check_bare_property_assignments(&contract, self.errors);
+        Some(contract)
     }
 
     fn skip_qualified_name(&mut self) {
@@ -710,12 +839,30 @@ impl<'a> JavaParser<'a> {
         constructor: &mut Option<MethodNode>,
         methods: &mut Vec<MethodNode>,
     ) {
-        // Collect annotations.
+        // Collect annotations. F-205: a qualified name
+        // (@runar.lang.annotations.Public) is read in full — the rightmost
+        // segment is the simple name — and a simple name Rúnar does not
+        // recognize is a loud "unsupported annotation" diagnostic (matching
+        // the TS reference's parseMember), never a silent visibility
+        // downgrade.
+        let start_loc = self.loc();
         let mut annotations: Vec<String> = Vec::new();
+        // N-093: `@EmbedAlways` / `@Sighash("FLAGS")` locations and specs.
+        let mut embed_always: Option<SourceLocation> = None;
+        let mut sighash_specs: Vec<Option<String>> = Vec::new();
+        let mut sighash_loc: Option<SourceLocation> = None;
         while matches!(self.current().typ, TokenType::At) {
+            let at_loc = self.loc();
             self.advance();
-            let name = self.expect_ident();
+            let mut name = self.expect_ident();
+            while matches!(self.current().typ, TokenType::Dot)
+                && matches!(self.peek_at(1).typ, TokenType::Ident(_))
+            {
+                self.advance(); // .
+                name = self.expect_ident();
+            }
             // Annotations may carry arguments (e.g. `@Foo("bar")`).
+            let arg_start = self.pos;
             if matches!(self.current().typ, TokenType::LParen) {
                 self.advance();
                 let mut depth = 1usize;
@@ -738,10 +885,29 @@ impl<'a> JavaParser<'a> {
                     }
                 }
             }
+            // `(` ... `)`, or empty.
+            let args: Vec<TokenType> = self.tokens[arg_start..self.pos].iter().map(|t| t.typ.clone()).collect();
+            if name == "EmbedAlways" {
+                embed_always = Some(at_loc.clone());
+            } else if name == "Sighash" {
+                sighash_loc.get_or_insert_with(|| at_loc.clone());
+                sighash_specs.push(match args.as_slice() {
+                    [TokenType::LParen, TokenType::StringLit(v), TokenType::RParen] => Some(v.clone()),
+                    _ => None,
+                });
+            }
+            if !F205_KNOWN_ANNOTATIONS.contains(&name.as_str()) {
+                self.errors.push(Diagnostic::error(
+                    format!("unsupported annotation @{name}"),
+                    Some(at_loc),
+                ));
+            }
             annotations.push(name);
         }
 
-        // Visibility / modifier keywords. We tolerate them but don't rely on them.
+        // Visibility / modifier keywords. We tolerate them but don't rely on
+        // them, except `static` (N-050).
+        let mut is_static = false;
         while matches!(
             self.current().typ,
             TokenType::Public
@@ -751,6 +917,9 @@ impl<'a> JavaParser<'a> {
                 | TokenType::Final
                 | TokenType::Abstract
         ) {
+            if matches!(self.current().typ, TokenType::Static) {
+                is_static = true;
+            }
             self.advance();
         }
 
@@ -773,12 +942,19 @@ impl<'a> JavaParser<'a> {
                 if constructor.is_some() {
                     self.error(format!("{} has more than one constructor", class_name));
                 }
+                // N-093: the constructor is neither a spending entry point nor a field.
+                if let Some(loc) = sighash_loc {
+                    self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
+                }
+                if let Some(loc) = embed_always {
+                    self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
+                }
                 *constructor = Some(MethodNode {
                     name: "constructor".to_string(),
                     params,
                     body,
                     visibility: Visibility::Public,
-                    source_location: member_loc,
+                    source_location: start_loc,
                     sighash_type: None,
                 });
                 return;
@@ -813,6 +989,11 @@ impl<'a> JavaParser<'a> {
 
         if matches!(self.current().typ, TokenType::LParen) {
             // Method declaration.
+            // N-050: a static method is not a contract method (`@Public static`
+            // used to become a spending entry point).
+            if is_static {
+                self.errors.push(Diagnostic::error(static_method_message(&member_name), Some(member_loc.clone())));
+            }
             let params = self.parse_param_list();
             while !matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
                 self.advance();
@@ -831,16 +1012,35 @@ impl<'a> JavaParser<'a> {
                 Visibility::Private
             };
 
-            let _ = member_type; // return type not used structurally
+            if let Some(loc) = embed_always {
+                self.errors.push(Diagnostic::error(lost_directive_message("@embedAlways"), Some(loc)));
+            }
+            let sighash_type =
+                match resolve_native_sighash(&member_name, visibility == Visibility::Public, &sighash_specs) {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(msg)) => {
+                        self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
+                        None
+                    }
+                    None => None,
+                };
+
+            // The return type is not used structurally; N-331 refuses an unknown name.
+            if let Some(msg) = unknown_return_type_message(&member_type, &member_name, visibility == Visibility::Public) {
+                self.errors.push(Diagnostic::error(msg, Some(member_loc.clone())));
+            }
             methods.push(MethodNode {
                 name: member_name,
                 params,
                 body,
                 visibility,
-                source_location: member_loc,
-                sighash_type: None,
+                source_location: start_loc,
+                sighash_type,
             });
             return;
+        }
+        if let Some(loc) = sighash_loc {
+            self.errors.push(Diagnostic::error(lost_directive_message("@sighash"), Some(loc)));
         }
 
         // Field declaration: optional `= initializer`, then `;`.
@@ -861,7 +1061,7 @@ impl<'a> JavaParser<'a> {
             initializer,
             source_location: member_loc,
             synthetic_array_chain: None,
-            embed_always: false,
+            embed_always: embed_always.is_some(),
         });
     }
 
@@ -951,7 +1151,8 @@ impl<'a> JavaParser<'a> {
                     self.advance();
                     length_arg = Some(n as usize);
                 } else {
-                    let inner = self.parse_type();
+                    // F-213: a nested type argument is one level deeper (+1).
+                    let inner = self.nested(TypeNode::Custom("_error".to_string()), |p| p.parse_type());
                     args.push(inner);
                 }
                 if !self.match_tok(&TokenType::Comma) {
@@ -1029,6 +1230,10 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        self.nested(None, |p| p.parse_statement_inner())
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         let loc = self.loc();
 
         match self.current().typ.clone() {
@@ -1234,74 +1439,16 @@ impl<'a> JavaParser<'a> {
                     source_location: loc,
                 })
             }
-            TokenType::PlusEq => {
+            ref t if compound_op(t).is_some() => {
+                let op = compound_op(t).unwrap();
                 self.advance();
                 let rhs = self.parse_expr()?;
                 self.match_tok(&TokenType::Semi);
                 let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Add,
+                    op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Sub,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::StarEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Mul,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::SlashEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Div,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::PercentEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Mod,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment {
                     target: lhs,
@@ -1394,27 +1541,15 @@ impl<'a> JavaParser<'a> {
                     source_location: loc,
                 })
             }
-            TokenType::PlusEq => {
+            ref t if compound_op(t).is_some() => {
+                let op = compound_op(t).unwrap();
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Add,
+                    op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Sub,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
+                    source_location: None,
                 };
                 Some(Statement::Assignment {
                     target: lhs,
@@ -1454,7 +1589,7 @@ impl<'a> JavaParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_expr(&mut self) -> Option<Expression> {
-        self.parse_ternary()
+        self.nested(None, |p| p.parse_ternary())
     }
 
     fn parse_ternary(&mut self) -> Option<Expression> {
@@ -1474,77 +1609,101 @@ impl<'a> JavaParser<'a> {
     }
 
     fn parse_or(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_and()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::PipePipe) {
             self.advance();
             let right = self.parse_and()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::Or,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_and(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::AmpAmp) {
             self.advance();
             let right = self.parse_bitor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::And,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitxor()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Pipe) {
             self.advance();
             let right = self.parse_bitxor()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitOr,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitxor(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_bitand()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Caret) {
             self.advance();
             let right = self.parse_bitand()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitXor,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_bitand(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_equality()?;
+        let mut dt = DepthTracker::new();
         while matches!(self.current().typ, TokenType::Amp) {
             self.advance();
             let right = self.parse_equality()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op: BinaryOp::BitAnd,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_equality(&mut self) -> Option<Expression> {
+        // N-505: a comparison node is located at its first token, as the TS
+        // reference's Java parser locates it (folded `compareTo` included).
+        let start = self.loc();
         let mut left = self.parse_relational()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::EqEq => BinaryOp::StrictEq,
@@ -1553,13 +1712,23 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_relational()?;
-            left = fold_compare_to_zero(op, left, right);
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            // compareTo folding can make the node shallower; re-measure then.
+            let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
+            left = fold_compare_to_zero(op, left, right, start.clone());
+            if refolds {
+                dt = DepthTracker::new();
+            }
         }
         Some(left)
     }
 
     fn parse_relational(&mut self) -> Option<Expression> {
+        // N-505: a comparison node is located at its first token, as the TS
+        // reference's Java parser locates it (folded `compareTo` included).
+        let start = self.loc();
         let mut left = self.parse_shift()?;
+        let mut dt = DepthTracker::new();
         loop {
             // Inside a generic type-argument list, `>` is a closer, not an operator.
             if self.type_args_depth > 0
@@ -1576,13 +1745,21 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_shift()?;
-            left = fold_compare_to_zero(op, left, right);
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
+            // compareTo folding can make the node shallower; re-measure then.
+            let refolds = compare_to_receiver_arg(&left).is_some() || compare_to_receiver_arg(&right).is_some();
+            left = fold_compare_to_zero(op, left, right, start.clone());
+            if refolds {
+                dt = DepthTracker::new();
+            }
         }
         Some(left)
     }
 
     fn parse_shift(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_additive()?;
+        let mut dt = DepthTracker::new();
         loop {
             if self.type_args_depth > 0 && matches!(self.current().typ, TokenType::Shr) {
                 break;
@@ -1594,17 +1771,21 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_additive()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_additive(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_multiplicative()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Plus => BinaryOp::Add,
@@ -1613,17 +1794,21 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_multiplicative()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
+        let start = self.loc();
         let mut left = self.parse_unary()?;
+        let mut dt = DepthTracker::new();
         loop {
             let op = match self.current().typ {
                 TokenType::Star => BinaryOp::Mul,
@@ -1633,49 +1818,60 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_unary()?;
+            if !self.grow(&mut dt, &left, &[&right]) { break; }
             left = Expression::BinaryExpr {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                source_location: Some(start.clone()),
             };
         }
         Some(left)
     }
 
     fn parse_unary(&mut self) -> Option<Expression> {
+        let op_loc = self.loc();
         match self.current().typ.clone() {
             TokenType::Bang => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Not,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::Minus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                // F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L`
+                // are legal only as the direct operand of this minus.
+                if let TokenType::NegOnlyNumber(n, _) = self.current().typ.clone() {
+                    self.tokens[self.pos].typ = TokenType::Number(n);
+                }
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::Plus => {
-                // Unary `+` is identity.
+                // Unary `+` is identity. F-213: it still recurses (+1).
                 self.advance();
-                self.parse_unary()
+                self.nested(None, |p| p.parse_unary())
             }
             TokenType::Tilde => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: Box::new(operand),
+                    source_location: Some(op_loc.clone()),
                 })
             }
             TokenType::PlusPlus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::IncrementExpr {
                     operand: Box::new(operand),
                     prefix: true,
@@ -1683,7 +1879,7 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::MinusMinus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(None, |p| p.parse_unary())?;
                 Some(Expression::DecrementExpr {
                     operand: Box::new(operand),
                     prefix: true,
@@ -1695,15 +1891,22 @@ impl<'a> JavaParser<'a> {
 
     fn parse_postfix(&mut self) -> Option<Expression> {
         let mut expr = self.parse_primary()?;
+        let mut dt = DepthTracker::new();
 
         loop {
             match self.current().typ.clone() {
                 TokenType::Dot => {
                     self.advance();
                     let prop = self.expect_ident();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
 
                     if matches!(self.current().typ, TokenType::LParen) {
                         let args = self.parse_call_args();
+                        // The member node above is accounted; now the call.
+                        let arg_refs: Vec<&Expression> = args.iter().collect();
+                        if !self.grow(&mut dt, &expr, &arg_refs) { break; }
+                        // A promoted literal is a leaf: re-measure from it.
+                        dt = DepthTracker::new();
                         expr = promote_literal_calls(Expression::CallExpr {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(expr),
@@ -1723,6 +1926,7 @@ impl<'a> JavaParser<'a> {
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect_tok(&TokenType::RBracket);
+                    if !self.grow(&mut dt, &expr, &[&index]) { break; }
                     expr = Expression::IndexAccess {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -1730,6 +1934,10 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::LParen => {
                     let args = self.parse_call_args();
+                    let arg_refs: Vec<&Expression> = args.iter().collect();
+                    if !self.grow(&mut dt, &expr, &arg_refs) { break; }
+                    // A promoted literal is a leaf: re-measure from it.
+                    dt = DepthTracker::new();
                     expr = promote_literal_calls(Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1738,6 +1946,7 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::PlusPlus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::IncrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1745,6 +1954,7 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::MinusMinus => {
                     self.advance();
+                    if !self.grow(&mut dt, &expr, &[]) { break; }
                     expr = Expression::DecrementExpr {
                         operand: Box::new(expr),
                         prefix: false,
@@ -1785,6 +1995,11 @@ impl<'a> JavaParser<'a> {
                 self.advance();
                 Some(Expression::BigIntLiteral { value: BigInt::from(n) })
             }
+            TokenType::NegOnlyNumber(n, text) => {
+                self.error(invalid_integer_literal("java", &text));
+                self.advance();
+                Some(Expression::BigIntLiteral { value: BigInt::from(n) })
+            }
             TokenType::True => {
                 self.advance();
                 Some(Expression::BoolLiteral { value: true })
@@ -1800,8 +2015,9 @@ impl<'a> JavaParser<'a> {
                 // checker reject any free-standing string usage — matches
                 // the Go/Python/Ruby parser behaviour. `promote_literal_calls`
                 // unwraps the `fromHex(...)` wrapper after the postfix parse.
+                let lit_loc = self.loc();
                 self.advance();
-                Some(Expression::ByteStringLiteral { value: s })
+                Some(Expression::ByteStringLiteral { value: s, source_location: Some(lit_loc) })
             }
             TokenType::Null => {
                 self.error(format!("null literals are unsupported in {}", self.file));
@@ -1828,6 +2044,7 @@ impl<'a> JavaParser<'a> {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(Expression::Identifier {
                                     name: "this".to_string(),
+                                    source_location: None,
                                 }),
                                 property: prop,
                             }),
@@ -1835,10 +2052,11 @@ impl<'a> JavaParser<'a> {
                             asm_return_type: None,
                         });
                     }
-                    return Some(Expression::PropertyAccess { property: prop });
+                    return Some(Expression::PropertyAccess { property: prop, source_location: None });
                 }
                 Some(Expression::Identifier {
                     name: "this".to_string(),
+                    source_location: None,
                 })
             }
             TokenType::Super => {
@@ -1849,6 +2067,7 @@ impl<'a> JavaParser<'a> {
                     return Some(Expression::CallExpr {
                         callee: Box::new(Expression::Identifier {
                             name: "super".to_string(),
+                            source_location: None,
                         }),
                         args,
                         asm_return_type: None,
@@ -1858,6 +2077,7 @@ impl<'a> JavaParser<'a> {
                 // by postfix handling.
                 Some(Expression::Identifier {
                     name: "super".to_string(),
+                    source_location: None,
                 })
             }
             TokenType::New => {
@@ -1948,6 +2168,7 @@ impl<'a> JavaParser<'a> {
                 Some(Expression::ArrayLiteral { elements })
             }
             TokenType::Ident(name) => {
+                let ident_loc = self.loc();
                 self.advance();
                 // `BigInteger.ZERO/ONE/TWO/TEN` or `Bigint.ZERO/ONE/TWO/TEN`
                 // → BigIntLiteral. The Bigint wrapper re-exports the same
@@ -1992,7 +2213,7 @@ impl<'a> JavaParser<'a> {
                         }
                     }
                 }
-                Some(Expression::Identifier { name })
+                Some(Expression::Identifier { name, source_location: Some(ident_loc) })
             }
             _ => {
                 self.error(format!(
@@ -2063,8 +2284,8 @@ fn promote_literal_calls(expr: Expression) -> Expression {
         if args.len() == 1 {
             if let Expression::MemberExpr { property, .. } = callee.as_ref() {
                 if property == "fromHex" {
-                    if let Expression::ByteStringLiteral { value } = &args[0] {
-                        return Expression::ByteStringLiteral { value: value.clone() };
+                    if let Expression::ByteStringLiteral { value, source_location } = &args[0] {
+                        return Expression::ByteStringLiteral { value: value.clone(), source_location: source_location.clone() };
                     }
                     // Support the Java literal being a string literal converted
                     // to ByteStringLiteral above or arriving as BigIntLiteral-
@@ -2131,6 +2352,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                         op,
                         left: object.clone(),
                         right: Box::new(args[0].clone()),
+                        source_location: None,
                     };
                 }
             }
@@ -2138,6 +2360,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::UnaryExpr {
                     op: UnaryOp::Neg,
                     operand: object.clone(),
+                    source_location: None,
                 };
             }
             // `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not();
@@ -2147,11 +2370,12 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::UnaryExpr {
                     op: UnaryOp::BitNot,
                     operand: object.clone(),
+                    source_location: None,
                 };
             }
             if args.is_empty() && property == "abs" {
                 return Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "abs".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "abs".to_string(), source_location: None }),
                     args: vec![(**object).clone()],
                     asm_return_type: None,
                 };
@@ -2164,16 +2388,17 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                     op: BinaryOp::StrictEq,
                     left: object.clone(),
                     right: Box::new(args[0].clone()),
+                    source_location: None,
                 };
             }
         }
         // Static-imported `assertThat(cond)` is a builtin alias for `assert`
         // in the canonical Java BuiltinRegistry. Peer typecheckers only know
         // `assert`, so rewrite the callee here.
-        if let Expression::Identifier { name } = callee.as_ref() {
+        if let Expression::Identifier { name, .. } = callee.as_ref() {
             if name == "assertThat" {
                 return Expression::CallExpr {
-                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string(), source_location: None }),
                     args: args.clone(),
                     asm_return_type: None,
                 };
@@ -2229,7 +2454,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
     if property != "valueOf" {
         return false;
     }
-    if let Expression::Identifier { name } = object.as_ref() {
+    if let Expression::Identifier { name, .. } = object.as_ref() {
         if name == "BigInteger" {
             return true;
         }
@@ -2239,7 +2464,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
         if outer_prop == "BigInteger" {
             if let Expression::MemberExpr { object: base, property: mid_prop } = outer.as_ref() {
                 if mid_prop == "math" {
-                    if let Expression::Identifier { name } = base.as_ref() {
+                    if let Expression::Identifier { name, .. } = base.as_ref() {
                         if name == "java" {
                             return true;
                         }
@@ -2255,7 +2480,7 @@ fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
 fn is_bigint_of_callee(callee: &Expression) -> bool {
     if let Expression::MemberExpr { object, property } = callee {
         if property == "of" {
-            if let Expression::Identifier { name } = object.as_ref() {
+            if let Expression::Identifier { name, .. } = object.as_ref() {
                 return name == "Bigint";
             }
         }
@@ -2270,10 +2495,10 @@ fn is_bigint_of_callee(callee: &Expression) -> bool {
 /// BinaryExpr so the canonical Rúnar AST matches the IR produced by
 /// `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
 /// unknown call (which the typechecker rejects loudly).
-fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Expression {
+fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression, start: SourceLocation) -> Expression {
     use num_traits::Zero;
     if !is_comparison_op(op.clone()) {
-        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) };
     }
     if let Some((a, b)) = compare_to_receiver_arg(&left) {
         if matches!(&right, Expression::BigIntLiteral { value } if value.is_zero()) {
@@ -2281,6 +2506,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(a),
                 right: Box::new(b),
+                source_location: Some(start),
             };
         }
     }
@@ -2290,10 +2516,11 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
                 op,
                 left: Box::new(b),
                 right: Box::new(a),
+                source_location: Some(start),
             };
         }
     }
-    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
+    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right), source_location: Some(start) }
 }
 
 fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {
@@ -2317,6 +2544,131 @@ fn is_comparison_op(op: BinaryOp) -> bool {
 // Synthetic constructor (same shape as the other parsers)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// N-023 (R49): bare property assignment
+// ---------------------------------------------------------------------------
+
+/// In Java a bare name inside a method that no local or parameter shadows IS
+/// the field, so `count = ...`, `count += ...`, `count++` and `--count` write
+/// contract state. Lowering them as a local rebind dropped the state write
+/// silently, so the bare form is refused (mirrors the TS reference's
+/// `checkBarePropertyAssignments`). Shadowing follows Java block scope:
+/// parameters, a local from its declaration to the end of its block, a
+/// for-loop variable inside the loop. Bare reads are not touched.
+fn check_bare_property_assignments(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    use std::collections::HashSet;
+    let props: HashSet<&str> = contract.properties.iter().map(|p| p.name.as_str()).collect();
+    if props.is_empty() {
+        return;
+    }
+
+    struct Walker<'c> {
+        props: HashSet<&'c str>,
+        errors: Vec<Diagnostic>,
+    }
+
+    impl<'c> Walker<'c> {
+        fn check_target(&mut self, e: &Expression, scope: &[HashSet<String>], loc: &SourceLocation) {
+            if let Expression::Identifier { name, .. } = e {
+                if self.props.contains(name.as_str()) && !scope.iter().any(|s| s.contains(name)) {
+                    self.errors.push(Diagnostic::error(
+                        bare_java_property_assignment_message(name),
+                        Some(loc.clone()),
+                    ));
+                }
+            }
+        }
+
+        fn expr(&mut self, e: &Expression, scope: &[HashSet<String>], loc: &SourceLocation) {
+            match e {
+                Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                    self.check_target(operand, scope, loc);
+                    self.expr(operand, scope, loc);
+                }
+                Expression::BinaryExpr { left, right, .. } => {
+                    self.expr(left, scope, loc);
+                    self.expr(right, scope, loc);
+                }
+                Expression::UnaryExpr { operand, .. } => self.expr(operand, scope, loc),
+                Expression::CallExpr { callee, args, .. } => {
+                    self.expr(callee, scope, loc);
+                    for a in args {
+                        self.expr(a, scope, loc);
+                    }
+                }
+                Expression::MemberExpr { object, .. } => self.expr(object, scope, loc),
+                Expression::TernaryExpr { condition, consequent, alternate } => {
+                    self.expr(condition, scope, loc);
+                    self.expr(consequent, scope, loc);
+                    self.expr(alternate, scope, loc);
+                }
+                Expression::IndexAccess { object, index } => {
+                    self.expr(object, scope, loc);
+                    self.expr(index, scope, loc);
+                }
+                Expression::ArrayLiteral { elements } => {
+                    for el in elements {
+                        self.expr(el, scope, loc);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn stmt(&mut self, s: &Statement, scope: &mut Vec<HashSet<String>>) {
+            match s {
+                Statement::VariableDecl { name, init, source_location, .. } => {
+                    self.expr(init, scope, source_location);
+                    scope.last_mut().expect("scope").insert(name.clone());
+                }
+                Statement::Assignment { target, value, source_location } => {
+                    self.check_target(target, scope, source_location);
+                    self.expr(target, scope, source_location);
+                    self.expr(value, scope, source_location);
+                }
+                Statement::IfStatement { condition, then_branch, else_branch, source_location } => {
+                    self.expr(condition, scope, source_location);
+                    self.block(then_branch, scope);
+                    if let Some(e) = else_branch {
+                        self.block(e, scope);
+                    }
+                }
+                Statement::ForStatement { init, condition, update, body, source_location } => {
+                    let mut loop_scope = scope.clone();
+                    loop_scope.push(HashSet::new());
+                    self.stmt(init, &mut loop_scope);
+                    self.expr(condition, &loop_scope, source_location);
+                    self.stmt(update, &mut loop_scope);
+                    self.block(body, &loop_scope);
+                }
+                Statement::ReturnStatement { value, source_location } => {
+                    if let Some(v) = value {
+                        self.expr(v, scope, source_location);
+                    }
+                }
+                Statement::ExpressionStatement { expression, source_location } => {
+                    self.expr(expression, scope, source_location);
+                }
+            }
+        }
+
+        fn block(&mut self, body: &[Statement], outer: &[HashSet<String>]) {
+            let mut scope = outer.to_vec();
+            scope.push(HashSet::new());
+            for s in body {
+                self.stmt(s, &mut scope);
+            }
+        }
+    }
+
+    let mut w = Walker { props, errors: Vec::new() };
+    for m in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        let params: HashSet<String> = m.params.iter().map(|p| p.name.clone()).collect();
+        w.block(&m.body, &[params]);
+    }
+    errors.extend(w.errors);
+}
+
 fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     let loc = JavaParser::loc_at(file, 0, 0);
     let mut params: Vec<ParamNode> = Vec::new();
@@ -2333,6 +2685,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         });
         super_args.push(Expression::Identifier {
             name: prop.name.clone(),
+            source_location: None,
         });
     }
 
@@ -2340,6 +2693,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         expression: Expression::CallExpr {
             callee: Box::new(Expression::Identifier {
                 name: "super".to_string(),
+                source_location: None,
             }),
             args: super_args,
             asm_return_type: None,
@@ -2354,9 +2708,11 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: prop.name.clone(),
+                source_location: None,
             },
             value: Expression::Identifier {
                 name: prop.name.clone(),
+                source_location: None,
             },
             source_location: loc.clone(),
         });
@@ -2445,12 +2801,12 @@ mod tests {
             Statement::ExpressionStatement { expression, .. } => match expression {
                 Expression::CallExpr { callee, args, .. } => {
                     match callee.as_ref() {
-                        Expression::Identifier { name } => assert_eq!(name, "super"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "super"),
                         other => panic!("expected super identifier, got {:?}", other),
                     }
                     assert_eq!(args.len(), 1);
                     match &args[0] {
-                        Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                         other => panic!("expected identifier, got {:?}", other),
                     }
                 }
@@ -2462,13 +2818,13 @@ mod tests {
         match &ctor.body[1] {
             Statement::Assignment { target, value, .. } => {
                 match target {
-                    Expression::PropertyAccess { property } => {
+                    Expression::PropertyAccess { property, .. } => {
                         assert_eq!(property, "pubKeyHash")
                     }
                     other => panic!("expected PropertyAccess, got {:?}", other),
                 }
                 match value {
-                    Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                     other => panic!("expected Identifier, got {:?}", other),
                 }
             }
@@ -2508,7 +2864,7 @@ mod tests {
         let first_call = match first {
             Expression::CallExpr { callee, args, .. } => {
                 match callee.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "assert"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "assert"),
                     other => panic!("expected assert callee, got {:?}", other),
                 }
                 assert_eq!(args.len(), 1);
@@ -2520,17 +2876,17 @@ mod tests {
         // to a canonical BinaryExpr(StrictEq, ...) so cross-format
         // compilation produces identical IR and script.
         match first_call {
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
                     Expression::CallExpr { callee: inner, .. } => match inner.as_ref() {
-                        Expression::Identifier { name } => assert_eq!(name, "hash160"),
+                        Expression::Identifier { name, .. } => assert_eq!(name, "hash160"),
                         other => panic!("expected hash160 callee, got {:?}", other),
                     },
                     other => panic!("expected hash160 call on LHS, got {:?}", other),
                 }
                 match right.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "pubKeyHash"),
                     other => panic!("expected pubKeyHash identifier, got {:?}", other),
                 }
             }
@@ -2612,7 +2968,7 @@ mod tests {
             Expression::BinaryExpr { op, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match right.as_ref() {
-                    Expression::ByteStringLiteral { value } => assert_eq!(value, "deadbeef"),
+                    Expression::ByteStringLiteral { value, .. } => assert_eq!(value, "deadbeef"),
                     other => panic!("expected ByteStringLiteral on RHS, got {:?}", other),
                 }
             }
@@ -2643,10 +2999,10 @@ mod tests {
             other => panic!("expected assertThat call, got {:?}", other),
         };
         match &assert_args[0] {
-            Expression::BinaryExpr { op, left, right } => {
+            Expression::BinaryExpr { op, left, right, .. } => {
                 assert_eq!(*op, BinaryOp::StrictEq);
                 match left.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "x"),
+                    Expression::Identifier { name, .. } => assert_eq!(name, "x"),
                     other => panic!("expected identifier x, got {:?}", other),
                 }
                 match right.as_ref() {
@@ -2792,5 +3148,207 @@ mod tests {
         let c = result.contract.unwrap();
         assert_eq!(c.name, "P2PKH");
         assert_eq!(c.parent_class, "SmartContract");
+    }
+    // N-023 (R49): on the .runar.java surface a bare name that no local or
+    // parameter shadows IS the field, so `count = ...` writes state in Java.
+    // The parser used to lower it as a local rebind: a stateful contract
+    // compiled with no update_prop and its state never changed. Every tier
+    // refuses the bare form with the TS reference's diagnostic.
+    //
+    // Proves: the Rust Java parser refuses each assignment spelling (=, op=,
+    // ++/--, statement or nested, any method incl. the constructor) on an
+    // unshadowed property, and accepts this.x writes plus local / parameter /
+    // for-variable shadowing, honouring Java block scope.
+    // Does not prove: other tiers (conformance/negatives N166 covers them), or
+    // anything about bare reads, which R49 leaves alone.
+    const BARE_JAVA_MSG: &str =
+        "bare assignment to property 'count' is not allowed; write `this.count = ...`";
+    const BARE_DEFAULT_CTOR: &str = "super(count);\n        this.count = count;";
+
+    fn bare_counter(body: &str, params: &str, ctor_param: &str, ctor_body: &str) -> String {
+        format!(
+            "package p;\nimport runar.lang.StatefulSmartContract;\nimport runar.lang.annotations.Public;\n\
+             import runar.lang.types.Bigint;\nimport static runar.lang.Builtins.assertThat;\n\n\
+             class BareCounter extends StatefulSmartContract {{\n    Bigint count;\n\n\
+             \x20   BareCounter(Bigint {ctor_param}) {{\n        {ctor_body}\n    }}\n\n\
+             \x20   @Public\n    void increment({params}) {{\n        {body}\n    }}\n}}\n"
+        )
+    }
+
+    fn bare_errors(src: &str) -> Vec<String> {
+        parse_java(src, Some("BareCounter.runar.java"))
+            .errors
+            .iter()
+            .filter(|d| matches!(d.severity, super::super::diagnostic::Severity::Error))
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn n023_refuses_bare_property_assignment() {
+        let cases: &[(&str, &str)] = &[
+            ("plain =", "count = count.plus(Bigint.ONE);"),
+            ("compound +=", "count += Bigint.ONE;"),
+            ("postfix ++", "count++;"),
+            ("prefix --", "--count;"),
+            ("inside an if arm", "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }"),
+            ("in a for update", "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }"),
+            ("nested in an expression", "assertThat((count++).gt(Bigint.ZERO));"),
+            ("after an if-scoped local",
+             "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;"),
+            ("before the shadowing local",
+             "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;"),
+        ];
+        for (label, body) in cases {
+            let errs = bare_errors(&bare_counter(body, "", "count", BARE_DEFAULT_CTOR));
+            assert!(errs.iter().any(|e| e == BARE_JAVA_MSG), "{label}: expected {BARE_JAVA_MSG:?}, got {errs:?}");
+        }
+        let errs = bare_errors(&bare_counter(
+            "this.count = this.count.plus(Bigint.ONE);", "", "c", "super(c);\n        count = c;",
+        ));
+        assert!(errs.iter().any(|e| e == BARE_JAVA_MSG), "constructor: got {errs:?}");
+    }
+
+    #[test]
+    fn n023_accepts_shadowed_or_explicit_property_assignment() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("this.count = ...", "this.count = this.count.plus(Bigint.ONE);", ""),
+            ("local shadow",
+             "Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""),
+            ("parameter shadow", "count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"),
+            ("for-variable shadow",
+             "for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n        this.count = this.count.plus(Bigint.ONE);", ""),
+            ("bare read", "this.count = count.plus(Bigint.ONE);", ""),
+        ];
+        for (label, body, params) in cases {
+            let errs = bare_errors(&bare_counter(body, params, "count", BARE_DEFAULT_CTOR));
+            assert!(errs.is_empty(), "{label}: expected no errors, got {errs:?}");
+        }
+    }
+
+    // N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>)
+    // lower `t op= e` to `t = t op e`, as a statement and in a for-header
+    // update slot (where the loop rule, not the parser, refuses a non-unit
+    // step). Before N-134 Rust refused `<<= >>= &= |= ^=` everywhere
+    // ("unsupported expression token Eq") and `*= /= %=` in a for update.
+    // Proves: the parsed shape for all ten operators on a local, a bigint
+    // property and a ByteString property, and in a for update. Does not prove:
+    // byte parity with the other tiers (conformance/negatives/
+    // java-compound-assign-parity.test.ts pins that).
+    const N134_OPS: &[(&str, &str)] = &[
+        ("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%"),
+        ("<<=", "<<"), (">>=", ">>"), ("&=", "&"), ("|=", "|"), ("^=", "^"),
+    ];
+
+    fn n134_target_name(e: &Expression) -> String {
+        match e {
+            Expression::Identifier { name, .. } => name.clone(),
+            Expression::PropertyAccess { property, .. } => property.clone(),
+            other => panic!("unexpected compound target {:?}", other),
+        }
+    }
+
+    fn n134_assert_compound(stmt: &Statement, target: &str, op: &str) {
+        match stmt {
+            Statement::Assignment { target: t, value, .. } => {
+                assert_eq!(n134_target_name(t), target);
+                match value {
+                    Expression::BinaryExpr { op: o, left, .. } => {
+                        assert_eq!(o.as_str(), op);
+                        assert_eq!(n134_target_name(left), target);
+                    }
+                    other => panic!("expected BinaryExpr {op}, got {:?}", other),
+                }
+            }
+            other => panic!("expected Assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn n134_compound_assignment_all_ten_operators() {
+        let mut body = String::from("Bigint t = d;\n");
+        let mut want: Vec<(&str, &str)> = Vec::new();
+        for (tok, op) in N134_OPS {
+            body.push_str(&format!("        t {tok} 3;\n        this.count {tok} t;\n"));
+            want.push(("t", op));
+            want.push(("count", op));
+        }
+        for (tok, op) in &N134_OPS[7..] {
+            body.push_str(&format!("        this.tag {tok} m;\n"));
+            want.push(("tag", op));
+        }
+        let src = format!(
+            "package p;\nimport runar.lang.StatefulSmartContract;\nimport runar.lang.annotations.Public;\n\
+             import runar.lang.types.Bigint;\nimport runar.lang.types.ByteString;\n\n\
+             class C extends StatefulSmartContract {{\n    Bigint count;\n    ByteString tag;\n\n\
+             \x20   C(Bigint count, ByteString tag) {{\n        super(count, tag);\n        this.count = count;\n        this.tag = tag;\n    }}\n\n\
+             \x20   @Public\n    void step(Bigint d, ByteString m) {{\n        {body}    }}\n}}\n"
+        );
+        let r = parse_java(&src, Some("C.runar.java"));
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        let c = r.contract.unwrap();
+        let stmts = &c.methods[0].body;
+        assert_eq!(stmts.len(), want.len() + 1);
+        for (i, (target, op)) in want.iter().enumerate() {
+            n134_assert_compound(&stmts[i + 1], target, op);
+        }
+    }
+
+    #[test]
+    fn n134_compound_assignment_in_for_update() {
+        for (tok, op) in N134_OPS {
+            let body = format!("for (Bigint i = Bigint.ZERO; i < 2; i {tok} 2) {{ assertThat(true); }}");
+            let r = parse_java(&bare_counter(&body, "", "count", BARE_DEFAULT_CTOR), Some("BareCounter.runar.java"));
+            assert!(r.errors.is_empty(), "{tok}: errors: {:?}", r.errors);
+            let c = r.contract.unwrap();
+            match &c.methods[0].body[0] {
+                Statement::ForStatement { update, .. } => n134_assert_compound(update, "i", op),
+                other => panic!("{tok}: expected ForStatement, got {:?}", other),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-205 — annotation names: a qualified `@pkg.Public` must be read, and
+    // an unrecognized annotation must be a loud diagnostic (never a silent
+    // visibility downgrade), matching the TS reference
+    // (packages/runar-compiler/src/passes/01-parse-java.ts, parseMember).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f205_qualified_public_annotation_is_recognized() {
+        // Claim (1): a qualified annotation name must be read, not rejected
+        // with an unrelated "expected type, got Dot" parse error.
+        let src = r#"
+            import runar.lang.SmartContract;
+            class C extends SmartContract {
+                C() { super(); }
+                @runar.lang.annotations.Public
+                void check() { assertThat(true); }
+            }
+        "#;
+        let r = parse_java(src, Some("C.runar.java"));
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        let c = r.contract.expect("should produce a contract");
+        assert_eq!(c.methods[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn f205_misspelled_annotation_is_a_loud_error_not_a_silent_downgrade() {
+        // Claim (2): a misspelled annotation (@Publlic) must be refused
+        // with a diagnostic, exactly as the TS reference refuses it
+        // ("unsupported annotation @Publlic"). Before the fix this parsed
+        // with zero errors and the method silently stayed private.
+        let src = r#"
+            import runar.lang.SmartContract;
+            class C extends SmartContract {
+                C() { super(); }
+                @Publlic
+                void check() { assertThat(true); }
+            }
+        "#;
+        let r = parse_java(src, Some("C.runar.java"));
+        let messages: Vec<&str> = r.errors.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages, vec!["unsupported annotation @Publlic"]);
     }
 }

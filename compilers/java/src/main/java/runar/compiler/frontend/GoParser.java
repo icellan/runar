@@ -1,10 +1,15 @@
 package runar.compiler.frontend;
 
 import java.math.BigInteger;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
@@ -38,6 +43,7 @@ import runar.compiler.ir.ast.TypeNode;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
+import runar.compiler.passes.SighashDirective;
 
 /**
  * Parses {@code .runar.go} source into a Rúnar {@link ContractNode}.
@@ -76,12 +82,27 @@ public final class GoParser {
 
     /** Parse Go contract source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
+        List<String> lex = new ArrayList<>();
+        List<GoDirective> directives = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex, directives);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         ParserState state = new ParserState(filename, tokens);
-        ContractNode contract = state.parseFile();
+        state.directives.addAll(directives);
+        // F-213: measures (A) and (B).
+        ContractNode contract = SourceNesting.guard(state::parseFile, ParseException::new);
+        String collision = state.idents.message();
+        if (contract != null && collision != null) state.errors.add(collision);
         if (contract == null) {
             if (state.errors.isEmpty()) {
-                throw new ParseException("no Rúnar contract struct found in Go source: " + filename);
+                throw new ParseException(GO_NO_CONTRACT_MESSAGE);
             }
             throw new ParseException(String.join("; ", state.errors));
         }
@@ -90,6 +111,34 @@ public final class GoParser {
         }
         return contract;
     }
+
+    // F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser
+    // (TS reference: goNoContractMessage / goMultipleContractsMessage /
+    // goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+    static final String GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source";
+
+    static String goMultipleContractsMessage(String first, String second) {
+        return "multiple Rúnar contract structs found in Go source: '" + first + "' and '" + second + "'; "
+            + "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract";
+    }
+
+    static String goForeignReceiverMessage(String method, String receiverType, String contract) {
+        return "method '" + method + "' has receiver type '" + receiverType + "', not the contract type '"
+            + contract + "'; methods on other types are not allowed";
+    }
+
+    /** A parsed {@code func}: the method, its Go name, and its receiver type or null. */
+    private record FuncDecl(MethodNode method, String goName, String receiverType) {}
+
+    /**
+     * N-093: a Go DSL directive comment {@code //runar:<name> <args>} (Go's own
+     * {@code //go:} convention: no space after {@code //}). {@code tokenIndex}
+     * is the index of the first token after the comment, so a directive
+     * attaches to the declaration that follows it, with only comments and
+     * blank lines in between. Mirrors GoDirective in the TS reference
+     * (01-parse-go.ts).
+     */
+    private record GoDirective(String name, String args, int tokenIndex) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -123,6 +172,8 @@ public final class GoParser {
         final String value;
         final int line;
         final int col;
+        /** Tok.STRING only (N-435): the Go string's bytes, one per char (latin-1 style). */
+        String raw;
 
         Token(Tok kind, String value, int line, int col) {
             this.kind = kind;
@@ -189,7 +240,6 @@ public final class GoParser {
         GO_TYPE_MAP.put("P384Point", "P384Point");
 
         GO_NATIVE_TYPE_MAP.put("int64", "bigint");
-        GO_NATIVE_TYPE_MAP.put("int", "bigint");
         GO_NATIVE_TYPE_MAP.put("bool", "boolean");
 
         GO_BUILTIN_MAP.put("Assert", "assert");
@@ -239,6 +289,7 @@ public final class GoParser {
         GO_BUILTIN_MAP.put("ExtractPrevOutputScript", "extractPrevOutputScript");
         GO_BUILTIN_MAP.put("RequireOutputP2PKH", "requireOutputP2PKH");
         GO_BUILTIN_MAP.put("CurrentBlockHeight", "currentBlockHeight");
+        GO_BUILTIN_MAP.put("ContinuationAmount", "continuationAmount");
         GO_BUILTIN_MAP.put("ExtractSequence", "extractSequence");
         GO_BUILTIN_MAP.put("ExtractVersion", "extractVersion");
         GO_BUILTIN_MAP.put("ExtractAmount", "extractAmount");
@@ -336,7 +387,9 @@ public final class GoParser {
     // Tokenizer
     // ------------------------------------------------------------------
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(
+        String source, String filename, List<String> lex, List<GoDirective> directives
+    ) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -376,7 +429,18 @@ public final class GoParser {
 
             // Line comment
             if (ch == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
+                int start = i;
                 while (i < n && source.charAt(i) != '\n' && source.charAt(i) != '\r') i++;
+                // N-093: `//runar:<name> <args>` is a directive, not prose.
+                String text = source.substring(start, i);
+                if (text.startsWith("//runar:")) {
+                    String body = text.substring("//runar:".length());
+                    int nameEnd = 0;
+                    while (nameEnd < body.length() && body.charAt(nameEnd) != ' ' && body.charAt(nameEnd) != '\t') {
+                        nameEnd++;
+                    }
+                    directives.add(new GoDirective(body.substring(0, nameEnd), body.substring(nameEnd), tokens.size()));
+                }
                 continue;
             }
 
@@ -405,6 +469,7 @@ public final class GoParser {
 
             // Backtick raw string (struct tags)
             if (ch == '`') {
+                int tickLine = line;
                 i++;
                 col++;
                 int start = i;
@@ -418,9 +483,13 @@ public final class GoParser {
                     i++;
                 }
                 String val = source.substring(start, i);
+                // F-011: this literal may span lines; only end of file leaves
+                // it unterminated.
                 if (i < n) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, tickLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(Tok.BACKTICK_STRING, val, line, startCol));
                 continue;
@@ -431,43 +500,42 @@ public final class GoParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != '"') {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != '"' && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
-                    if (i < n) {
-                        i++;
-                        col++;
-                    }
-                }
-                String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
                     i++;
                     col++;
                 }
-                tokens.add(new Token(Tok.STRING, processGoStringEscapes(val), line, startCol));
+                String val = source.substring(start, Math.min(i, n));
+                if (i < n && source.charAt(i) == '"') {
+                    i++;
+                    col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
+                }
+                // N-437: decode with Go's string-literal rules; an escape Go
+                // refuses is refused here too.
+                GoString dec = decodeGoString(val);
+                if (dec.error() != null) {
+                    lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                }
+                Token stringTok = new Token(Tok.STRING, dec.val(), line, startCol);
+                stringTok.raw = dec.raw();
+                tokens.add(stringTok);
                 continue;
             }
 
-            // Number
-            if (Character.isDigit(ch)) {
-                int start = i;
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isHexDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else {
-                    while (i < n && (Character.isDigit(source.charAt(i)) || source.charAt(i) == '_')) {
-                        i++;
-                        col++;
-                    }
-                }
-                String numStr = source.substring(start, i).replace("_", "");
-                tokens.add(new Token(Tok.NUMBER, numStr, line, startCol));
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("go", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(Tok.NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -503,7 +571,9 @@ public final class GoParser {
                 continue;
             }
 
-            // Unknown — skip to keep parsing robust.
+            // N-214: an unrecognised character is refused, as the TS reference
+            // does, rather than skipped: skipping compiled `a + § b` as `a + b`.
+            lex.add(LexDiag.at(filename, line, startCol, "Unexpected character '" + ch + "'"));
             i++;
             col++;
         }
@@ -520,11 +590,13 @@ public final class GoParser {
     }
 
     private static boolean isIdentStart(char c) {
-        return Character.isLetter(c) || c == '_';
+        // N-407: ASCII only, as the TS reference; a non-ASCII letter is
+        // refused as an unexpected character.
+        return LexDiag.isAsciiLetter(c) || c == '_';
     }
 
     private static boolean isIdentPart(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return LexDiag.isAsciiLetter(c) || (c >= '0' && c <= '9') || c == '_';
     }
 
     private static boolean isHexDigit(char c) {
@@ -582,55 +654,186 @@ public final class GoParser {
         }
     }
 
-    private static String processGoStringEscapes(String s) {
-        StringBuilder out = new StringBuilder(s.length());
+    /**
+     * N-437: the decoded body of a Go interpreted string literal, per
+     * https://go.dev/ref/spec#String_literals. {@code raw} is the Go string's
+     * BYTES, one latin-1 char per byte: literal text and {@code \}u / {@code \}U
+     * escapes are UTF-8 encoded, {@code \}xNN and octal {@code \}NNN (at most
+     * 255) are the single byte (what {@code []byte(s)} yields in Go).
+     * {@code val} keeps one char per escape for the bare-literal (hex) path.
+     * {@code error} is the shared invalid-escape diagnostic for an escape Go
+     * refuses, or null.
+     */
+    private record GoString(String val, String raw, String error) {}
+
+    private static void appendUtf8(StringBuilder raw, int cp) {
+        for (byte bt : new String(Character.toChars(cp)).getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            raw.append((char) (bt & 0xff));
+        }
+    }
+
+    private static GoString decodeGoString(String s) {
+        StringBuilder val = new StringBuilder(s.length());
+        StringBuilder raw = new StringBuilder(s.length());
         int i = 0;
-        while (i < s.length()) {
+        int len = s.length();
+        while (i < len) {
             char c = s.charAt(i);
-            if (c == '\\' && i + 1 < s.length()) {
-                char n = s.charAt(i + 1);
-                switch (n) {
-                    case 'n': out.append('\n'); i += 2; break;
-                    case 't': out.append('\t'); i += 2; break;
-                    case 'r': out.append('\r'); i += 2; break;
-                    case '\\': out.append('\\'); i += 2; break;
-                    case '"': out.append('"'); i += 2; break;
-                    case 'x':
-                        if (i + 3 < s.length()) {
-                            String hex = s.substring(i + 2, i + 4);
-                            try {
-                                out.append((char) Integer.parseInt(hex, 16));
-                            } catch (NumberFormatException ex) {
-                                out.append(s, i, i + 4);
-                            }
-                            i += 4;
-                        } else {
-                            out.append(c);
-                            i++;
-                        }
-                        break;
-                    default:
-                        out.append(c);
-                        i++;
+            if (c != '\\') {
+                int cp = s.codePointAt(i);
+                val.appendCodePoint(cp);
+                appendUtf8(raw, cp);
+                i += Character.charCount(cp);
+                continue;
+            }
+            char e = i + 1 < len ? s.charAt(i + 1) : 0;
+            int simple = switch (e) {
+                case 'a' -> 0x07;
+                case 'b' -> 0x08;
+                case 'f' -> 0x0c;
+                case 'n' -> 0x0a;
+                case 'r' -> 0x0d;
+                case 't' -> 0x09;
+                case 'v' -> 0x0b;
+                case '\\' -> '\\';
+                case '"' -> '"';
+                default -> -1;
+            };
+            if (simple >= 0) {
+                val.append((char) simple);
+                raw.append((char) simple);
+                i += 2;
+            } else if (e == 'x') {
+                if (i + 4 > len || !isHexDigit(s.charAt(i + 2)) || !isHexDigit(s.charAt(i + 3))) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\x"));
                 }
+                int b = Integer.parseInt(s.substring(i + 2, i + 4), 16);
+                val.append((char) b);
+                raw.append((char) b);
+                i += 4;
+            } else if (e == 'u' || e == 'U') {
+                int width = e == 'u' ? 4 : 8;
+                boolean ok = i + 2 + width <= len;
+                for (int k = 0; ok && k < width; k++) ok = isHexDigit(s.charAt(i + 2 + k));
+                long cp = ok ? Long.parseLong(s.substring(i + 2, i + 2 + width), 16) : -1;
+                if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\" + e));
+                }
+                val.appendCodePoint((int) cp);
+                appendUtf8(raw, (int) cp);
+                i += 2 + width;
+            } else if (e >= '0' && e <= '7') {
+                int j = i + 1;
+                while (j < len && j < i + 4 && s.charAt(j) >= '0' && s.charAt(j) <= '7') j++;
+                String run = s.substring(i + 1, j);
+                if (run.length() < 3 || Integer.parseInt(run, 8) > 0xff) {
+                    return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence("\\" + run));
+                }
+                int b = Integer.parseInt(run, 8);
+                val.append((char) b);
+                raw.append((char) b);
+                i += 4;
             } else {
-                out.append(c);
-                i++;
+                String esc = e == 0 ? "\\" : "\\" + new String(Character.toChars(s.codePointAt(i + 1)));
+                return new GoString(val.toString(), raw.toString(), LexDiag.invalidEscapeSequence(esc));
             }
         }
-        return out.toString();
+        return new GoString(val.toString(), raw.toString(), null);
     }
 
     // ------------------------------------------------------------------
     // Parser state
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+    // ------------------------------------------------------------------
+    //
+    // Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C
+    // ladder (this parser): MulDiv > AddSub > Shift > Comparison > Equality >
+    // BitAnd > BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups
+    // left iff prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class)
+    // pairs on which the schemes disagree: 23 class pairs, 72 operator pairs.
+    // `&^` lexes as `&` over a prefix `^`, i.e. `&`.
+
+    static final Set<String> GO_AMBIGUOUS_PRECEDENCE_PAIRS = Set.of(
+        "shift mul", "shift add",
+        "and mul", "and shift", "and add", "and rel", "and eq",
+        "add shift", "add and",
+        "or add", "or xor", "or rel", "or eq",
+        "xor add", "xor rel", "xor eq",
+        "rel and", "rel or", "rel xor",
+        "eq and", "eq or", "eq xor", "eq rel"
+    );
+
+    private static String goPrecedenceClass(Expression.BinaryOp op) {
+        return switch (op) {
+            case MUL, DIV, MOD -> "mul";
+            case SHL, SHR -> "shift";
+            case BIT_AND -> "and";
+            case ADD, SUB -> "add";
+            case BIT_OR -> "or";
+            case BIT_XOR -> "xor";
+            case LT, LE, GT, GE -> "rel";
+            case EQ, NEQ -> "eq";
+            case AND -> "land";
+            case OR -> "lor";
+        };
+    }
+
+    static boolean isGoAmbiguousPrecedence(Expression.BinaryOp first, Expression.BinaryOp second) {
+        return GO_AMBIGUOUS_PRECEDENCE_PAIRS.contains(goPrecedenceClass(first) + " " + goPrecedenceClass(second));
+    }
+
+    static String goAmbiguousPrecedenceMessage(Expression.BinaryOp first, Expression.BinaryOp second) {
+        return "ambiguous operator precedence in .runar.go: `a " + goSpelling(first) + " b "
+            + goSpelling(second) + " c` groups differently under Go precedence than in "
+            + "Rúnar's other surfaces; add parentheses";
+    }
+
+    private static String goSpelling(Expression.BinaryOp op) {
+        return switch (op) {
+            case EQ -> "==";
+            case NEQ -> "!=";
+            default -> op.canonical();
+        };
+    }
+
+    /** N-093: the {@code runar} key of a struct tag. */
+    private static final java.util.regex.Pattern RUNAR_TAG =
+        java.util.regex.Pattern.compile("(?:^|\\s)runar:\"([^\"]*)\"");
+
+    /**
+     * N-093: the segment rule of extractSighashDirective: the flag text
+     * starts with a space/tab and holds only flag-name characters, {@code |},
+     * spaces and tabs.
+     */
+    private static final java.util.regex.Pattern GO_SIGHASH_ARGS =
+        java.util.regex.Pattern.compile("[ \t][A-Za-z0-9_| \t]*");
+
     private static final class ParserState {
         final String fileName;
         final List<Token> tokens;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-448: token indexes of string literals whose bare use is legal (a runar.Asm body). */
+        final Set<Integer> bareLiteralOk = new java.util.HashSet<>();
+        /** F-213 measure (A): parse nesting. */
+        final SourceNesting.Counter nest = new SourceNesting.Counter();
+        /** N-056: expression operands (primaries, calls, parenthesised groups). */
+        final Set<Expression> goAtoms = Collections.newSetFromMap(new IdentityHashMap<>());
+        /**
+         * N-233: operand -> location of its first token, so the N-056 refusal
+         * is anchored where the TS reference anchors it (the ambiguous
+         * expression's leftmost operand).
+         */
+        final Map<Expression, SourceLocation> goStarts = new IdentityHashMap<>();
         String receiverName = "";
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /** N-093: every {@code //runar:} directive in the file, in source order. */
+        final List<GoDirective> directives = new ArrayList<>();
+        final Set<GoDirective> consumedDirectives = Collections.newSetFromMap(new IdentityHashMap<>());
 
         ParserState(String fileName, List<Token> tokens) {
             this.fileName = fileName;
@@ -726,8 +929,11 @@ public final class GoParser {
             String contractName = "";
             String parentClass = "";
             List<PropertyNode> properties = new ArrayList<>();
-            List<MethodNode> methods = new ArrayList<>();
+            List<FuncDecl> funcs = new ArrayList<>();
             boolean structFound = false;
+            // N-490: the synthesized constructor is anchored at the contract's
+            // `struct` keyword, not a fake 1:1.
+            SourceLocation ctorLoc = new SourceLocation(fileName, 1, 0);
 
             while (!check(Tok.EOF)) {
                 skipSemicolons();
@@ -736,20 +942,39 @@ public final class GoParser {
                 if (checkIdent("type")) {
                     TypeDeclResult result = parseTypeDecl();
                     if (result != null) {
+                        if (structFound) {
+                            // F-010: exactly one contract struct; never merged.
+                            addError(goMultipleContractsMessage(contractName, result.name));
+                            continue;
+                        }
                         contractName = result.name;
                         parentClass = result.parent;
                         properties = result.properties;
+                        ctorLoc = result.structLoc;
                         structFound = true;
                     }
                 } else if (checkIdent("func")) {
-                    MethodNode m = parseFuncDecl(contractName);
-                    if (m != null) methods.add(m);
+                    FuncDecl f = parseFuncDecl();
+                    if (f != null) funcs.add(f);
                 } else {
                     advance();
                 }
             }
+            reportStrayDirectives();
 
             if (!structFound) return null;
+
+            // F-010: a method whose receiver (value or pointer) is not the
+            // contract type is refused -- checked once the whole file is read,
+            // so a method declared before the contract struct is judged the same way.
+            List<MethodNode> methods = new ArrayList<>();
+            for (FuncDecl f : funcs) {
+                if (f.receiverType() != null && !f.receiverType().equals(contractName)) {
+                    addError(goForeignReceiverMessage(f.goName(), f.receiverType(), contractName));
+                    continue;
+                }
+                methods.add(f.method());
+            }
 
             // Fold init() into property initializers.
             List<MethodNode> finalMethods = new ArrayList<>();
@@ -767,7 +992,8 @@ public final class GoParser {
                                         prop.readonly(),
                                         as.value(),
                                         prop.sourceLocation(),
-                                        prop.syntheticArrayChain()
+                                        prop.syntheticArrayChain(),
+                                        prop.embedAlways()
                                     ));
                                     break;
                                 }
@@ -788,7 +1014,7 @@ public final class GoParser {
                 constructorParams.add(new ParamNode(p.name(), p.type()));
                 superArgs.add(new Identifier(p.name()));
             }
-            SourceLocation synthLoc = new SourceLocation(fileName, 1, 1);
+            SourceLocation synthLoc = ctorLoc;
             List<Statement> constructorBody = new ArrayList<>();
             constructorBody.add(new ExpressionStatement(
                 new CallExpr(new Identifier("super"), superArgs),
@@ -843,11 +1069,14 @@ public final class GoParser {
             final String name;
             final String parent;
             final List<PropertyNode> properties;
+            /** N-490: the {@code struct} keyword, where the synthesized constructor is anchored. */
+            final SourceLocation structLoc;
 
-            TypeDeclResult(String name, String parent, List<PropertyNode> properties) {
+            TypeDeclResult(String name, String parent, List<PropertyNode> properties, SourceLocation structLoc) {
                 this.name = name;
                 this.parent = parent;
                 this.properties = properties;
+                this.structLoc = structLoc;
             }
         }
 
@@ -856,6 +1085,7 @@ public final class GoParser {
             Token nameTok = expect(Tok.IDENT);
             String typeName = nameTok.value;
 
+            SourceLocation structLoc = loc();
             if (!matchIdent("struct")) {
                 skipToSemicolonOrBrace();
                 return null;
@@ -894,23 +1124,33 @@ public final class GoParser {
                     }
                     TypeNode fieldType = parseType();
 
+                    // Struct tag. The `runar` key holds comma-separated options
+                    // (N-093): `readonly`, and `embedAlways` — the native
+                    // spelling of the `@embedAlways` directive — in any order.
                     boolean readonly = false;
+                    boolean embedAlways = false;
                     if (check(Tok.BACKTICK_STRING)) {
                         Token tagTok = advance();
-                        if (tagTok.value.contains("runar:\"readonly\"")) {
-                            readonly = true;
+                        java.util.regex.Matcher runarTag = RUNAR_TAG.matcher(tagTok.value);
+                        if (runarTag.find()) {
+                            for (String o : runarTag.group(1).split(",", -1)) {
+                                String option = o.trim();
+                                if (option.equals("readonly")) readonly = true;
+                                if (option.equals("embedAlways")) embedAlways = true;
+                            }
                         }
                     }
 
                     for (String fname : fieldNames) {
-                        String propName = goFieldToCamel(fname);
+                        String propName = idents.declare(fname, goFieldToCamel(fname));
                         properties.add(new PropertyNode(
                             propName,
                             fieldType,
                             readonly,
                             null,
                             fieldLoc,
-                            null
+                            null,
+                            embedAlways
                         ));
                     }
 
@@ -925,7 +1165,7 @@ public final class GoParser {
             expect(Tok.RBRACE);
 
             if (parentClass.isEmpty()) return null;
-            return new TypeDeclResult(typeName, parentClass, properties);
+            return new TypeDeclResult(typeName, parentClass, properties, structLoc);
         }
 
         boolean isEmbedField() {
@@ -969,16 +1209,16 @@ public final class GoParser {
                         addError("line " + sizeTok.line + ": array size must be integer");
                     }
                     expect(Tok.RBRACKET);
-                    TypeNode elem = parseType();
+                    TypeNode elem = nest.nested(this::parseType);
                     return new FixedArrayType(elem, size);
                 }
                 expect(Tok.RBRACKET);
-                return parseType();
+                return nest.nested(this::parseType);
             }
 
             if (check(Tok.STAR)) {
                 advance();
-                return parseType();
+                return nest.nested(this::parseType);
             }
 
             Token tok = peek();
@@ -1003,12 +1243,18 @@ public final class GoParser {
 
         // -- Func declaration --------------------------------------------
 
-        MethodNode parseFuncDecl(String contractName) {
+        /**
+         * Parse one {@code func}. The receiver type ({@code *} stripped, or null
+         * for a free function) is checked against the contract in parseFile (F-010).
+         */
+        FuncDecl parseFuncDecl() {
             SourceLocation location = loc();
+            // N-093: the `//runar:sighash` directives directly above this func.
+            int funcTokenIndex = pos;
             expectIdent("func");
 
             boolean hasReceiver = false;
-            boolean isContractMethod = false;
+            String receiverType = null;
             String localReceiverName = "";
 
             if (check(Tok.LPAREN)) {
@@ -1018,13 +1264,20 @@ public final class GoParser {
                     pos = saved;
                     expect(Tok.LPAREN);
                     Token recvTok = expect(Tok.IDENT);
-                    localReceiverName = recvTok.value;
-                    match(Tok.STAR);
-                    Token typeTok = expect(Tok.IDENT);
-                    expect(Tok.RPAREN);
-                    if (typeTok.value.equals(contractName)) {
-                        isContractMethod = true;
+                    if (check(Tok.RPAREN)) {
+                        // N-018: unnamed receiver `(Type)` -- the only
+                        // identifier is the type. Real Go forbids
+                        // referencing it in the method body at all, so no
+                        // name is bound.
+                        localReceiverName = "";
+                        receiverType = recvTok.value;
+                    } else {
+                        localReceiverName = recvTok.value;
+                        match(Tok.STAR);
+                        Token typeTok = expect(Tok.IDENT);
+                        receiverType = typeTok.value;
                     }
+                    expect(Tok.RPAREN);
                 } else {
                     pos = saved;
                 }
@@ -1036,32 +1289,63 @@ public final class GoParser {
             this.receiverName = hasReceiver ? localReceiverName : "";
 
             Visibility visibility;
-            if (hasReceiver && isContractMethod) {
+            if (hasReceiver) {
                 visibility = Character.isUpperCase(funcName.charAt(0)) ? Visibility.PUBLIC : Visibility.PRIVATE;
-            } else if (!hasReceiver) {
+            } else {
+                // Standalone functions: skip init and main. F-010: an exported
+                // standalone function is a private helper, as in the TS reference.
                 if ("init".equals(funcName) || "main".equals(funcName)) {
-                    skipFuncBody();
-                    return null;
-                }
-                if (Character.isUpperCase(funcName.charAt(0))) {
+                    // N-093: refused as on a private func, as the TS
+                    // reference (which parses these as private helpers) does.
+                    SighashDirective.Result skipped = SighashDirective.resolveNativeSighash(
+                        goFieldToCamel(funcName), false, takeSighashDirectives(funcTokenIndex));
+                    if (skipped != null && skipped.isError()) addError(skipped.error());
                     skipFuncBody();
                     return null;
                 }
                 visibility = Visibility.PRIVATE;
-            } else {
-                skipFuncBody();
-                return null;
             }
 
-            String methodName = goFieldToCamel(funcName);
+            String methodName = idents.declare(funcName, goFieldToCamel(funcName));
             List<ParamNode> params = parseFuncParams();
 
             if (!check(Tok.LBRACE)) {
+                checkReturnType(methodName, visibility == Visibility.PUBLIC);
                 skipReturnType();
             }
             List<Statement> body = parseBlock();
 
-            return new MethodNode(methodName, params, body, visibility, location);
+            SighashDirective.Result sighash = SighashDirective.resolveNativeSighash(
+                methodName, visibility == Visibility.PUBLIC, takeSighashDirectives(funcTokenIndex));
+            if (sighash != null && sighash.isError()) addError(sighash.error());
+
+            return new FuncDecl(new MethodNode(methodName, params, body, visibility, location,
+                sighash == null || sighash.isError() ? null : sighash.value()), funcName, receiverType);
+        }
+
+        /**
+         * N-093: the flag specs of the {@code //runar:sighash} directives
+         * attached to the declaration starting at token {@code tokenIndex}
+         * ({@code null} for a malformed one).
+         */
+        List<String> takeSighashDirectives(int tokenIndex) {
+            List<String> specs = new ArrayList<>();
+            for (GoDirective d : directives) {
+                if (d.tokenIndex() != tokenIndex || !d.name().equals("sighash")) continue;
+                consumedDirectives.add(d);
+                specs.add(d.args().isEmpty() || GO_SIGHASH_ARGS.matcher(d.args()).matches() ? d.args() : null);
+            }
+            return specs;
+        }
+
+        /** N-093: refuse every directive that is unknown or attached to no func. */
+        void reportStrayDirectives() {
+            for (GoDirective d : directives) {
+                if (consumedDirectives.contains(d)) continue;
+                addError(d.name().equals("sighash")
+                    ? SighashDirective.lostDirectiveMessage("@sighash")
+                    : SighashDirective.unknownGoDirectiveMessage(d.name() + d.args()));
+            }
         }
 
         boolean looksLikeReceiver() {
@@ -1091,6 +1375,13 @@ public final class GoParser {
                     pos = saved;
                     return result;
                 }
+            } else if (check(Tok.RPAREN)) {
+                // N-018: unnamed receiver `(Type)` -- only the type, no
+                // receiver name.
+                advance();
+                boolean result = check(Tok.IDENT);
+                pos = saved;
+                return result;
             }
             pos = saved;
             return false;
@@ -1116,7 +1407,7 @@ public final class GoParser {
 
                 TypeNode paramType = parseType();
                 for (String pname : names) {
-                    params.add(new ParamNode(goFieldToCamel(pname), paramType));
+                    params.add(new ParamNode(idents.declare(pname, goFieldToCamel(pname)), paramType));
                 }
 
                 if (!match(Tok.COMMA)) break;
@@ -1144,6 +1435,31 @@ public final class GoParser {
                 return Character.isLowerCase(tok.value.charAt(0));
             }
             return Character.isLowerCase(tok.value.charAt(0));
+        }
+
+        /**
+         * N-331: the AST keeps no return type, so a result type that is not a
+         * Rúnar type is refused where it is spelled: a single type, or each
+         * entry of a parenthesised result list (named or not). The rest is
+         * left to {@link #skipReturnType()}.
+         */
+        void checkReturnType(String methodName, boolean isPublic) {
+            if (check(Tok.LPAREN)) {
+                advance();
+                while (!check(Tok.RPAREN) && !check(Tok.LBRACE) && !check(Tok.EOF)) {
+                    Token next = peekAt(1);
+                    if (check(Tok.IDENT) && next.kind != Tok.DOT && next.kind != Tok.COMMA && next.kind != Tok.RPAREN) {
+                        advance(); // result name
+                    }
+                    String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName, isPublic);
+                    if (unknownReturn != null) addError(unknownReturn);
+                    if (!match(Tok.COMMA)) break;
+                }
+                match(Tok.RPAREN);
+            } else {
+                String unknownReturn = LexDiag.unknownReturnType(parseType(), methodName, isPublic);
+                if (unknownReturn != null) addError(unknownReturn);
+            }
         }
 
         void skipReturnType() {
@@ -1194,17 +1510,53 @@ public final class GoParser {
             expect(Tok.LBRACE);
             List<Statement> stmts = new ArrayList<>();
             while (!check(Tok.RBRACE) && !check(Tok.EOF)) {
-                skipSemicolons();
+                skipStatementSeparators();
                 if (check(Tok.RBRACE) || check(Tok.EOF)) break;
+                // N-153: a `{` cannot start a statement (no block statement,
+                // and not a brace composite literal). Refuse it, as the TS
+                // reference does, and skip the balanced braces.
+                if (check(Tok.LBRACE)) {
+                    addError("Unexpected token in expression: '{'");
+                    int depth = 0;
+                    do {
+                        Tok kind = advance().kind;
+                        if (kind == Tok.LBRACE) depth++;
+                        else if (kind == Tok.RBRACE) depth--;
+                    } while (depth > 0 && !check(Tok.EOF));
+                    continue;
+                }
                 Statement s = parseStatement();
                 if (s != null) stmts.add(s);
             }
             expect(Tok.RBRACE);
-            skipSemicolons();
+            skipStatementSeparators();
             return stmts;
         }
 
+        /**
+         * N-153: a {@code ;} that ends a statement on the same line separates
+         * it from the next one (what go/parser accepts; an inserted newline
+         * {@code ;} always does). Any other {@code ;} -- at the start of a
+         * block, after another {@code ;}, or on a later line than the token
+         * before it -- is an EMPTY statement, which the TS reference and the
+         * Go tier refuse.
+         */
+        void skipStatementSeparators() {
+            while (check(Tok.SEMICOLON)) {
+                Token prev = pos > 0 ? tokens.get(pos - 1) : null;
+                boolean separates = prev != null
+                    && prev.kind != Tok.LBRACE && prev.kind != Tok.SEMICOLON
+                    && prev.line == peek().line;
+                if (!separates) addError("Unexpected token in expression: ';'");
+                advance();
+            }
+        }
+
         Statement parseStatement() {
+            return nest.nested(this::parseStatementInner);
+        }
+
+        Statement parseStatementInner() {
             SourceLocation location = loc();
             if (checkIdent("if")) return parseIf(location);
             if (checkIdent("for")) return parseFor(location);
@@ -1222,7 +1574,8 @@ public final class GoParser {
             if (matchIdent("else")) {
                 if (checkIdent("if")) {
                     SourceLocation elifLoc = loc();
-                    Statement elif = parseIf(elifLoc);
+                    // F-213 A1: an else-if is a statement of the else branch.
+                    Statement elif = nest.nested(() -> parseIf(elifLoc));
                     elseBlock = new ArrayList<>();
                     elseBlock.add(elif);
                 } else {
@@ -1282,14 +1635,14 @@ public final class GoParser {
             if (!check(Tok.SEMICOLON) && !check(Tok.RBRACE) && !check(Tok.EOF)) {
                 value = parseExpression();
             }
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new ReturnStatement(value, loc);
         }
 
         Statement parseVarDecl(SourceLocation loc) {
             expectIdent("var");
             Token nameTok = expect(Tok.IDENT);
-            String varName = goFieldToCamel(nameTok.value);
+            String varName = idents.declare(nameTok.value, goFieldToCamel(nameTok.value));
 
             TypeNode typeNode = null;
             if (!check(Tok.ASSIGN)) typeNode = parseType();
@@ -1298,14 +1651,14 @@ public final class GoParser {
             if (match(Tok.ASSIGN)) init = parseExpression();
             if (init == null) init = new BigIntLiteral(BigInteger.ZERO);
 
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new VariableDeclStatement(varName, typeNode, init, loc);
         }
 
         Statement parseConstDecl(SourceLocation loc) {
             expectIdent("const");
             Token nameTok = expect(Tok.IDENT);
-            String varName = goFieldToCamel(nameTok.value);
+            String varName = idents.declare(nameTok.value, goFieldToCamel(nameTok.value));
 
             TypeNode typeNode = null;
             if (!check(Tok.ASSIGN)) typeNode = parseType();
@@ -1313,15 +1666,16 @@ public final class GoParser {
             expect(Tok.ASSIGN);
             Expression init = parseExpression();
 
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new VariableDeclStatement(varName, typeNode, init, loc);
         }
 
         Statement parseExprStatement(SourceLocation loc, boolean consumeSemis) {
+            Token targetTok = peek();
             Expression expr = parseExpression();
             if (expr == null) {
                 advance();
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return null;
             }
 
@@ -1329,15 +1683,18 @@ public final class GoParser {
             if (match(Tok.COLONEQ)) {
                 Expression init = parseExpression();
                 String name = "";
-                if (expr instanceof Identifier id) name = id.name();
-                if (consumeSemis) skipSemicolons();
+                if (expr instanceof Identifier id) {
+                    name = id.name();
+                    if (targetTok.kind == Tok.IDENT) idents.declare(targetTok.value, name);
+                }
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new VariableDeclStatement(name, null, init, loc);
             }
 
             // Plain assignment
             if (match(Tok.ASSIGN)) {
                 Expression value = parseExpression();
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new AssignmentStatement(expr, value, loc);
             }
 
@@ -1350,7 +1707,7 @@ public final class GoParser {
             for (int i = 0; i < compoundTokens.length; i++) {
                 if (match(compoundTokens[i])) {
                     Expression right = parseExpression();
-                    if (consumeSemis) skipSemicolons();
+                    if (consumeSemis) match(Tok.SEMICOLON);
                     Expression value = new BinaryExpr(compoundOps[i], expr, right);
                     return new AssignmentStatement(expr, value, loc);
                 }
@@ -1358,78 +1715,119 @@ public final class GoParser {
 
             // Postfix increment/decrement
             if (match(Tok.PLUSPLUS)) {
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new ExpressionStatement(new IncrementExpr(expr, false), loc);
             }
             if (match(Tok.MINUSMINUS)) {
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new ExpressionStatement(new DecrementExpr(expr, false), loc);
             }
 
-            if (consumeSemis) skipSemicolons();
+            if (consumeSemis) match(Tok.SEMICOLON);
             return new ExpressionStatement(expr, loc);
         }
 
         // -- Expressions --------------------------------------------------
 
         Expression parseExpression() {
-            return parseOr();
+            return nest.nested(this::parseExpressionInner);
+        }
+
+        Expression parseExpressionInner() {
+            Expression expr = parseOr();
+            // N-056: refuse an unparenthesised operand edge that groups
+            // differently under Go precedence; nested ( ... ) groups were
+            // checked by their own parseExpression call and are atoms here.
+            Deque<Expression> work = new ArrayDeque<>();
+            work.push(expr);
+            while (!work.isEmpty()) {
+                if (!(work.pop() instanceof BinaryExpr e) || goAtoms.contains(e)) continue;
+                if (e.left() instanceof BinaryExpr l && !goAtoms.contains(l)) {
+                    if (isGoAmbiguousPrecedence(l.op(), e.op())) {
+                        addError(atLeftmost(e, goAmbiguousPrecedenceMessage(l.op(), e.op())));
+                        return expr;
+                    }
+                    work.push(l);
+                }
+                if (e.right() instanceof BinaryExpr r && !goAtoms.contains(r)) {
+                    if (isGoAmbiguousPrecedence(e.op(), r.op())) {
+                        addError(atLeftmost(e, goAmbiguousPrecedenceMessage(e.op(), r.op())));
+                        return expr;
+                    }
+                    work.push(r);
+                }
+            }
+            return expr;
+        }
+
+        /** N-233: {@code message} located at the first token of {@code e}. */
+        String atLeftmost(BinaryExpr e, String message) {
+            Expression leftmost = e;
+            while (leftmost instanceof BinaryExpr b && !goAtoms.contains(b)) leftmost = b.left();
+            SourceLocation start = goStarts.get(leftmost);
+            return start == null ? message : LexDiag.at(fileName, start.line(), start.column(), message);
         }
 
         Expression parseOr() {
+            SourceLocation start = loc();
             Expression left = parseAnd();
             while (match(Tok.PIPEPIPE)) {
                 Expression right = parseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.OR, left, right, start);
             }
             return left;
         }
 
         Expression parseAnd() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseOr();
             while (match(Tok.AMPAMP)) {
                 Expression right = parseBitwiseOr();
-                left = new BinaryExpr(Expression.BinaryOp.AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.AND, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseOr() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseXor();
             while (match(Tok.PIPE)) {
                 Expression right = parseBitwiseXor();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_OR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseXor() {
+            SourceLocation start = loc();
             Expression left = parseBitwiseAnd();
             while (match(Tok.CARET)) {
                 Expression right = parseBitwiseAnd();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_XOR, left, right, start);
             }
             return left;
         }
 
         Expression parseBitwiseAnd() {
+            SourceLocation start = loc();
             Expression left = parseEquality();
             while (match(Tok.AMP)) {
                 Expression right = parseEquality();
-                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right);
+                left = new BinaryExpr(Expression.BinaryOp.BIT_AND, left, right, start);
             }
             return left;
         }
 
         Expression parseEquality() {
+            SourceLocation start = loc();
             Expression left = parseComparison();
             while (true) {
                 if (match(Tok.EQEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.EQ, left, right, start);
                 } else if (match(Tok.NOTEQ)) {
                     Expression right = parseComparison();
-                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.NEQ, left, right, start);
                 } else {
                     break;
                 }
@@ -1438,20 +1836,21 @@ public final class GoParser {
         }
 
         Expression parseComparison() {
+            SourceLocation start = loc();
             Expression left = parseShift();
             while (true) {
                 if (match(Tok.LT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LT, left, right, start);
                 } else if (match(Tok.LTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.LE, left, right, start);
                 } else if (match(Tok.GT)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GT, left, right, start);
                 } else if (match(Tok.GTEQ)) {
                     Expression right = parseShift();
-                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.GE, left, right, start);
                 } else {
                     break;
                 }
@@ -1460,14 +1859,15 @@ public final class GoParser {
         }
 
         Expression parseShift() {
+            SourceLocation start = loc();
             Expression left = parseAdditive();
             while (true) {
                 if (match(Tok.LSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHL, left, right, start);
                 } else if (match(Tok.RSHIFT)) {
                     Expression right = parseAdditive();
-                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SHR, left, right, start);
                 } else {
                     break;
                 }
@@ -1476,14 +1876,15 @@ public final class GoParser {
         }
 
         Expression parseAdditive() {
+            SourceLocation start = loc();
             Expression left = parseMultiplicative();
             while (true) {
                 if (match(Tok.PLUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.ADD, left, right, start);
                 } else if (match(Tok.MINUS)) {
                     Expression right = parseMultiplicative();
-                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.SUB, left, right, start);
                 } else {
                     break;
                 }
@@ -1492,17 +1893,18 @@ public final class GoParser {
         }
 
         Expression parseMultiplicative() {
+            SourceLocation start = loc();
             Expression left = parseUnary();
             while (true) {
                 if (match(Tok.STAR)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MUL, left, right, start);
                 } else if (match(Tok.SLASH)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.DIV, left, right, start);
                 } else if (match(Tok.PERCENT)) {
                     Expression right = parseUnary();
-                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right);
+                    left = new BinaryExpr(Expression.BinaryOp.MOD, left, right, start);
                 } else {
                     break;
                 }
@@ -1511,17 +1913,27 @@ public final class GoParser {
         }
 
         Expression parseUnary() {
+            SourceLocation start = loc();
+            Expression expr = parseUnaryOperand();
+            goStarts.put(expr, start);
+            return expr;
+        }
+
+        Expression parseUnaryOperand() {
+            SourceLocation opLoc = loc();
             if (match(Tok.MINUS)) {
-                return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NEG, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Tok.BANG)) {
-                return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.NOT, nest.nested(this::parseUnary), opLoc);
             }
             if (match(Tok.CARET)) {
                 // Go uses ^ as unary bitwise NOT.
-                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
+                return new UnaryExpr(Expression.UnaryOp.BIT_NOT, nest.nested(this::parseUnary), opLoc);
             }
-            return parsePostfix();
+            Expression expr = parsePostfix();
+            goAtoms.add(expr); // N-056: an operand is an atom
+            return expr;
         }
 
         Expression parsePostfix() {
@@ -1564,8 +1976,13 @@ public final class GoParser {
         }
 
         boolean isReceiver(String name) {
-            if (!receiverName.isEmpty() && name.equals(receiverName)) return true;
-            return "c".equals(name) || "self".equals(name);
+            // N-018: this must be an exact match on the actual declared
+            // receiver name, never a hardcoded "c"/"self" -- that wrongly
+            // turned ANY same-spelled parameter or local into a
+            // self-reference even when the receiver was named something
+            // else, or unnamed (receiverName == "", which real Go forbids
+            // referencing at all).
+            return !receiverName.isEmpty() && name.equals(receiverName);
         }
 
         Expression parsePrimary() {
@@ -1575,9 +1992,18 @@ public final class GoParser {
                 advance();
                 return parseNumberLiteral(tok.value);
             }
-            if (tok.kind == Tok.STRING) {
+            // N-448: a bare non-empty literal is refused (natively ASCII text, to
+            // the compiler hex). Exempt: "" and a runar.Asm body.
+            // N-439: a raw (backtick) literal is its text verbatim with carriage
+            // returns discarded (Go spec), then goes through the hex check.
+            if (tok.kind == Tok.STRING || tok.kind == Tok.BACKTICK_STRING) {
+                int idx = pos;
                 advance();
-                return new ByteStringLiteral(tok.value);
+                String value = tok.kind == Tok.STRING ? tok.value : tok.value.replace("\r", "");
+                if (!value.isEmpty() && !bareLiteralOk.contains(idx)) {
+                    addError(LexDiag.at(fileName, tok.line, tok.col, LexDiag.goBareStringLiteral(value)));
+                }
+                return new ByteStringLiteral(value, new SourceLocation(fileName, tok.line, tok.col));
             }
             if (tok.kind == Tok.IDENT) {
                 advance();
@@ -1607,14 +2033,43 @@ public final class GoParser {
                         }
                     }
 
+                    // N-448: runar.HexToBytes("deadbeef") is the explicit hex spelling.
+                    if ("HexToBytes".equals(selName) && check(Tok.LPAREN)) {
+                        Token argTok = pos + 1 < tokens.size() ? tokens.get(pos + 1) : null;
+                        Token closeTok = pos + 2 < tokens.size() ? tokens.get(pos + 2) : null;
+                        if (argTok != null && (argTok.kind == Tok.STRING || argTok.kind == Tok.BACKTICK_STRING)
+                            && closeTok != null && closeTok.kind == Tok.RPAREN) {
+                            advance(); // '('
+                            advance(); // literal
+                            advance(); // ')'
+                            return new ByteStringLiteral(argTok.kind == Tok.STRING
+                                ? argTok.value : argTok.value.replace("\r", ""),
+                                new SourceLocation(fileName, argTok.line, argTok.col));
+                        }
+                        addError(LexDiag.at(fileName, tok.line, tok.col,
+                            "runar.HexToBytes expects a single string literal argument"));
+                    }
+
+                    // N-448: the first argument of runar.Asm(...) is an opcode body.
+                    if ("Asm".equals(selName) && check(Tok.LPAREN) && pos + 1 < tokens.size()
+                        && (tokens.get(pos + 1).kind == Tok.STRING || tokens.get(pos + 1).kind == Tok.BACKTICK_STRING)) {
+                        bareLiteralOk.add(pos + 1);
+                    }
+
                     if ("ByteString".equals(selName) && check(Tok.LPAREN)) {
                         int savedPos = pos;
                         advance(); // consume '('
-                        if (check(Tok.STRING)) {
+                        if (check(Tok.STRING) || check(Tok.BACKTICK_STRING)) {
                             Token strTok = advance();
                             if (check(Tok.RPAREN)) {
                                 advance();
-                                String hex = bytesToHex(strTok.value);
+                                // N-437: a raw string is its text verbatim as UTF-8,
+                                // carriage returns discarded (Go spec).
+                                String bytes = strTok.kind == Tok.BACKTICK_STRING
+                                    ? new String(strTok.value.replace("\r", "").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                        java.nio.charset.StandardCharsets.ISO_8859_1)
+                                    : (strTok.raw != null ? strTok.raw : strTok.value);
+                                String hex = bytesToHex(bytes);
                                 return new ByteStringLiteral(hex);
                             }
                         }
@@ -1650,9 +2105,9 @@ public final class GoParser {
 
                 if (check(Tok.LPAREN)) {
                     List<Expression> args = parseCallArgs();
-                    return new CallExpr(new Identifier(converted), args);
+                    return new CallExpr(new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col)), args);
                 }
-                return new Identifier(converted);
+                return new Identifier(converted, new SourceLocation(fileName, tok.line, tok.col));
             }
 
             if (tok.kind == Tok.LPAREN) {
@@ -1734,7 +2189,8 @@ public final class GoParser {
             List<Expression> elements = new ArrayList<>();
             while (!check(Tok.RBRACE) && !check(Tok.EOF)) {
                 if (check(Tok.LBRACE)) {
-                    elements.add(parseBraceLiteral());
+                    // F-213 A2: a nested brace element is an array element.
+                    elements.add(nest.nested(this::parseBraceLiteral));
                 } else {
                     elements.add(parseExpression());
                 }

@@ -102,7 +102,7 @@ func TestTicTacToe_Join(t *testing.T) {
 	// sig is nil (auto-computed), opponentPK is playerO's pubkey
 	txid, _, err := contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
-		provider, playerOSigner, nil)
+		provider, playerOSigner, &runar.CallOptions{Satoshis: 10000}) // N-027: the join pays the 5000 bet
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestTicTacToe_Move(t *testing.T) {
 	// Join
 	_, _, err = contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
-		provider, signerO, nil)
+		provider, signerO, &runar.CallOptions{Satoshis: 10000}) // N-027: the join pays the 5000 bet
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestTicTacToe_WrongPlayerRejected(t *testing.T) {
 	// Join
 	_, _, err = contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
-		provider, playerOSigner, nil)
+		provider, playerOSigner, &runar.CallOptions{Satoshis: 10000}) // N-027: the join pays the 5000 bet
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestTicTacToe_JoinAfterPlayingRejected(t *testing.T) {
 	// Join
 	_, _, err = contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
-		provider, playerOSigner, nil)
+		provider, playerOSigner, &runar.CallOptions{Satoshis: 10000}) // N-027: the join pays the 5000 bet
 	if err != nil {
 		t.Fatalf("join: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestTicTacToe_JoinAfterPlayingRejected(t *testing.T) {
 	// Try to join again — should fail because status != 0
 	_, _, err = contract.Call("join",
 		[]interface{}{playerO.PubKeyHex(), nil},
-		provider, playerOSigner, nil)
+		provider, playerOSigner, &runar.CallOptions{Satoshis: 15000}) // N-027: paid, so only the status guard can reject it
 	if err == nil {
 		t.Fatalf("expected second join to be rejected, but it succeeded")
 	}

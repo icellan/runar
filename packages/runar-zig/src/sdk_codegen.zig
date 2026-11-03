@@ -29,7 +29,8 @@ const types = @import("sdk_types.zig");
 //
 // `Sig` and `SigHashPreimage` parameters are elided from the user-visible
 // signature (auto-resolved by the SDK at call time). Stateful internals
-// (`_changePKH`, `_changeAmount`, `_newAmount`) are entirely hidden.
+// (`_changePKH`, `_changeAmount`, `_newAmount`) and the intent-intrinsic
+// witnesses (`_prevOutScript_<i>`, `_serialisedOutputs`) are entirely hidden.
 
 /// Map a Rúnar ABI type to a Zig type for the user-visible signature.
 fn mapTypeToZig(abi_type: []const u8) []const u8 {
@@ -65,12 +66,9 @@ const ParamRole = enum {
 
 fn classifyParam(p: types.ABIParam, is_stateful: bool) ParamRole {
     if (std.mem.eql(u8, p.type_name, "Sig")) return .hidden_in_args;
-    if (is_stateful) {
-        if (std.mem.eql(u8, p.type_name, "SigHashPreimage")) return .internal;
-        if (std.mem.eql(u8, p.name, "_changePKH")) return .internal;
-        if (std.mem.eql(u8, p.name, "_changeAmount")) return .internal;
-        if (std.mem.eql(u8, p.name, "_newAmount")) return .internal;
-    } else if (std.mem.eql(u8, p.type_name, "SigHashPreimage")) {
+    // Same predicate as RunarContract.call's arity check (F-245).
+    if (types.isSdkSuppliedParam(p, is_stateful)) return .internal;
+    if (!is_stateful and std.mem.eql(u8, p.type_name, "SigHashPreimage")) {
         return .hidden_in_args;
     }
     return .user_visible;
@@ -79,10 +77,8 @@ fn classifyParam(p: types.ABIParam, is_stateful: bool) ParamRole {
 fn isTerminal(m: types.ABIMethod, is_stateful: bool) bool {
     if (!is_stateful) return true;
     if (m.is_terminal) |t| return t;
-    for (m.params) |p| {
-        if (std.mem.eql(u8, p.name, "_changePKH")) return false;
-    }
-    return true;
+    // N-038: a SIGHASH_SINGLE method continues without declaring `_changePKH`.
+    return !m.hasContinuation();
 }
 
 fn methodHasSig(m: types.ABIMethod) bool {
@@ -190,26 +186,18 @@ pub fn generateZig(allocator: std.mem.Allocator, artifact: *const types.RunarArt
         try appendFmt(&out, allocator, "        artifact: *sdk.RunarArtifact,\n", .{});
         try appendFmt(&out, allocator, "        args: {s}ConstructorArgs,\n", .{name});
         try appendFmt(&out, allocator, "    ) !{s}Contract {{\n", .{name});
-        try appendFmt(&out, allocator, "        var ctor_args = [_]sdk.StateValue{{\n", .{});
+        try appendFmt(&out, allocator, "        const ctor_args = [_]sdk.StateValue{{\n", .{});
         for (ctor_params) |p| {
-            const expr = try toStateValueExpr(allocator, p.name, p.type_name);
+            const field_ref = try std.fmt.allocPrint(allocator, "args.{s}", .{p.name});
+            defer allocator.free(field_ref);
+            const expr = try toStateValueExpr(allocator, field_ref, p.type_name);
             defer allocator.free(expr);
             try appendFmt(&out, allocator, "            {s},\n", .{expr});
-            try appendFmt(&out, allocator, "            // arg.{s}\n", .{p.name});
         }
         try appendFmt(&out, allocator, "        }};\n", .{});
-        try appendFmt(&out, allocator, "        // ^ scratch buffer; sliced below into the SDK call.\n", .{});
-        try appendFmt(&out, allocator, "        const ctor_count = ctor_args.len / 2;\n", .{});
-        try appendFmt(&out, allocator, "        var packed_args = try allocator.alloc(sdk.StateValue, ctor_count);\n", .{});
-        try appendFmt(&out, allocator, "        var i: usize = 0;\n", .{});
-        try appendFmt(&out, allocator, "        var j: usize = 0;\n", .{});
-        try appendFmt(&out, allocator, "        while (i < ctor_args.len) : (i += 2) {{\n", .{});
-        try appendFmt(&out, allocator, "            packed_args[j] = ctor_args[i];\n", .{});
-        try appendFmt(&out, allocator, "            j += 1;\n", .{});
-        try appendFmt(&out, allocator, "        }}\n", .{});
         try appendFmt(&out, allocator, "        const inner = try allocator.create(sdk.RunarContract);\n", .{});
-        try appendFmt(&out, allocator, "        inner.* = try sdk.RunarContract.init(allocator, artifact, packed_args);\n", .{});
-        try appendFmt(&out, allocator, "        allocator.free(packed_args);\n", .{});
+        try appendFmt(&out, allocator, "        errdefer allocator.destroy(inner);\n", .{});
+        try appendFmt(&out, allocator, "        inner.* = try sdk.RunarContract.init(allocator, artifact, &ctor_args);\n", .{});
         try appendFmt(&out, allocator, "        return .{{ .allocator = allocator, .inner = inner }};\n", .{});
         try appendFmt(&out, allocator, "    }}\n\n", .{});
     } else {
@@ -245,7 +233,17 @@ pub fn generateZig(allocator: std.mem.Allocator, artifact: *const types.RunarArt
     try appendFmt(&out, allocator, "        output_index: i32,\n", .{});
     try appendFmt(&out, allocator, "        provider: sdk.Provider,\n", .{});
     try appendFmt(&out, allocator, "    ) !{s}Contract {{\n", .{name});
-    try appendFmt(&out, allocator, "        const utxo = try provider.getUtxo(allocator, txid, output_index) orelse return error.UtxoNotFound;\n", .{});
+    try appendFmt(&out, allocator, "        var tx = try provider.getTransaction(allocator, txid);\n", .{});
+    try appendFmt(&out, allocator, "        defer tx.deinit(allocator);\n", .{});
+    try appendFmt(&out, allocator, "        if (output_index < 0) return error.OutputIndexOutOfRange;\n", .{});
+    try appendFmt(&out, allocator, "        const out_idx: usize = @intCast(output_index);\n", .{});
+    try appendFmt(&out, allocator, "        if (out_idx >= tx.outputs.len) return error.OutputIndexOutOfRange;\n", .{});
+    try appendFmt(&out, allocator, "        const utxo = sdk.UTXO{{\n", .{});
+    try appendFmt(&out, allocator, "            .txid = txid,\n", .{});
+    try appendFmt(&out, allocator, "            .output_index = output_index,\n", .{});
+    try appendFmt(&out, allocator, "            .satoshis = tx.outputs[out_idx].satoshis,\n", .{});
+    try appendFmt(&out, allocator, "            .script = tx.outputs[out_idx].script,\n", .{});
+    try appendFmt(&out, allocator, "        }};\n", .{});
     try appendFmt(&out, allocator, "        return fromUtxo(allocator, artifact, utxo);\n", .{});
     try appendFmt(&out, allocator, "    }}\n\n", .{});
 
@@ -424,10 +422,21 @@ fn emitMethodBody(
         try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
     } else if (is_stateful) {
+        // The wrapper's `OutputSpec` is a distinct (layout-identical) type from
+        // `sdk.OutputSpec`, so convert element-wise (N-428).
+        try appendFmt(out, allocator, "        var sdk_outputs: ?[]sdk.OutputSpec = null;\n", .{});
+        try appendFmt(out, allocator, "        defer if (sdk_outputs) |so| self.allocator.free(so);\n", .{});
+        try appendFmt(out, allocator, "        if (options) |o| if (o.outputs) |specs| {{\n", .{});
+        try appendFmt(out, allocator, "            const converted = try self.allocator.alloc(sdk.OutputSpec, specs.len);\n", .{});
+        try appendFmt(out, allocator, "            for (specs, 0..) |spec, i| converted[i] = .{{ .satoshis = spec.satoshis, .state = spec.state }};\n", .{});
+        try appendFmt(out, allocator, "            sdk_outputs = converted;\n", .{});
+        try appendFmt(out, allocator, "        }};\n", .{});
         try appendFmt(out, allocator, "        const sdk_opts: ?sdk.CallOptions = if (options) |o| .{{\n", .{});
         try appendFmt(out, allocator, "            .satoshis = o.satoshis orelse 0,\n", .{});
         try appendFmt(out, allocator, "            .change_address = o.change_address,\n", .{});
+        try appendFmt(out, allocator, "            .change_pub_key = o.change_pub_key,\n", .{});
         try appendFmt(out, allocator, "            .new_state = o.new_state,\n", .{});
+        try appendFmt(out, allocator, "            .outputs = sdk_outputs,\n", .{});
         try appendFmt(out, allocator, "        }} else null;\n", .{});
         try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
@@ -516,6 +525,14 @@ test "generateZig emits constructor args record + wrapper struct for stateful co
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const CounterContract = struct") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn fromUtxo(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn fromTxId(") != null);
+    // N-190: fromTxId must fetch via the real Provider.getTransaction, not a
+    // nonexistent `provider.getUtxo(...)` (sdk_provider.zig's Provider.VTable
+    // has never had a `getUtxo` method). This substring check is cheap and
+    // catches the specific regression fast; it does NOT prove the body
+    // compiles — `zig build codegen-compile-check` (wired into
+    // `zig build test`) does that by actually compiling + running it.
+    try std.testing.expect(std.mem.indexOf(u8, src, "provider.getTransaction(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "provider.getUtxo(") == null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn connect(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn attachInscription(") != null);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub fn getLockingScript(") != null);
@@ -594,6 +611,71 @@ test "generateZig emits prepare/finalize for Sig-bearing P2PKH unlock" {
     try std.testing.expect(std.mem.indexOf(u8, src, "StatefulCallOptions") == null);
     // Stateless terminal ⇒ TerminalOutput record emitted
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const TerminalOutput = struct") != null);
+}
+
+// N-038: a stateful SIGHASH_SINGLE method declares no `_changePKH` and the
+// compiler writes `isTerminal` only when true, so the fallback must not read
+// the missing change param as "terminal". Explicit isTerminal still wins and
+// the default-mode fallback is unchanged.
+test "isTerminal: N-038 SINGLE method without change params is a continuation" {
+    var preimage_only = [_]types.ABIParam{.{ .name = "txPreimage", .type_name = "SigHashPreimage" }};
+    var with_change = [_]types.ABIParam{
+        .{ .name = "_changePKH", .type_name = "Ripemd160" },
+        .{ .name = "_changeAmount", .type_name = "bigint" },
+        .{ .name = "txPreimage", .type_name = "SigHashPreimage" },
+    };
+    for ([_]i64{ 0x43, 0xc3 }) |st| {
+        try std.testing.expect(!isTerminal(.{ .name = "bump", .params = &preimage_only, .is_public = true, .sig_hash_type = st }, true));
+        try std.testing.expect(isTerminal(.{ .name = "bump", .params = &preimage_only, .is_public = true, .is_terminal = true, .sig_hash_type = st }, true));
+    }
+    try std.testing.expect(isTerminal(.{ .name = "close", .params = &preimage_only, .is_public = true }, true));
+    try std.testing.expect(!isTerminal(.{ .name = "bump", .params = &with_change, .is_public = true }, true));
+}
+
+// F-245: the intent-intrinsic witness params (`_prevOutScript_<i>`,
+// `_serialisedOutputs`) are supplied by the SDK from setPrevOutScript /
+// setSerialisedOutputs and excluded from RunarContract.call's arity check.
+// Proves: the generated wrapper neither declares nor forwards them; the only
+// forwarded user arg is `amount`. Does not prove: that the generated source
+// compiles, or that a call through it spends on-chain.
+test "generateZig excludes intent-intrinsic witness params from signature and args" {
+    const allocator = std.testing.allocator;
+
+    var params = [_]types.ABIParam{
+        .{ .name = "amount", .type_name = "bigint" },
+        .{ .name = "_changePKH", .type_name = "Ripemd160" },
+        .{ .name = "_changeAmount", .type_name = "bigint" },
+        .{ .name = "_newAmount", .type_name = "bigint" },
+        .{ .name = "txPreimage", .type_name = "SigHashPreimage" },
+        .{ .name = "_prevOutScript_0", .type_name = "ByteString" },
+        .{ .name = "_serialisedOutputs", .type_name = "ByteString" },
+    };
+    var methods = [_]types.ABIMethod{.{
+        .name = "advance",
+        .params = &params,
+        .is_public = true,
+        .is_terminal = false,
+    }};
+    var ctor_params = [_]types.ABIParam{.{ .name = "count", .type_name = "bigint" }};
+    var state_fields = [_]types.StateField{.{ .name = "count", .type_name = "bigint", .index = 0 }};
+
+    const artifact = types.RunarArtifact{
+        .allocator = allocator,
+        .contract_name = "IntentWitnessTest",
+        .abi = .{
+            .constructor = .{ .params = &ctor_params },
+            .methods = &methods,
+        },
+        .state_fields = &state_fields,
+    };
+
+    const src = try generateZig(allocator, &artifact);
+    defer allocator.free(src);
+
+    try std.testing.expect(std.mem.indexOf(u8, src, "pub fn advance(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "amount: i64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_prevOutScript_0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "_serialisedOutputs") == null);
 }
 
 test "generateZig with no constructor params emits parameterless init" {

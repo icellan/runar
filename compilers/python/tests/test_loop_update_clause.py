@@ -224,3 +224,178 @@ class Countdown extends SmartContract {
 """
     ok, _, diags = compile_source(source, "Countdown.runar.ts")
     assert ok, f"a countdown loop must still compile: {diags}"
+
+
+# ---------------------------------------------------------------------------
+# N-132: an EMPTY update slot on the C-style `.runar.ts` header
+# ---------------------------------------------------------------------------
+
+
+EMPTY_UPDATE_DIAGNOSTIC = "For loop must have an update expression"
+
+
+def test_n132_empty_ts_update_is_rejected():
+    """N-132: ``for (let i = 0n; i < 3n; )`` never advances ``i`` in the source,
+    yet this tier filled the empty slot with a ``0n`` placeholder and the
+    unrolled loop advanced it anyway (938 hex chars, byte-identical to ``i++``).
+    The TS reference refuses it in its parser with the diagnostic below.
+
+    Proves: the Python ``.runar.ts`` parser refuses an empty update slot with
+    the reference's text. Does not prove: anything about other surfaces (their
+    empty-update shapes are pinned by the conformance negatives N180/N181)."""
+    ok, hex_out, diags = compile_source(ts_with_update(""), "UpdateProbe.runar.ts")
+    assert not ok, (
+        f"an empty for-update must not compile ({len(hex_out)} hex chars emitted)"
+    )
+    assert EMPTY_UPDATE_DIAGNOSTIC in diags, diags
+
+
+# ---------------------------------------------------------------------------
+# N-116: an update that reads the iterator (or is a literal) without advancing it
+# ---------------------------------------------------------------------------
+
+
+def _zig_continue_reads_iterator() -> str:
+    source = example("examples/zig/bounded-loop/BoundedLoop.runar.zig")
+    source = source.replace("var i: i64 = 0;", "var i: i64 = 3;", 1)
+    return source.replace("while (i < 5) : (i += 1)", "while (i < 5) : (i)", 1)
+
+
+@pytest.mark.parametrize(
+    "source_fn,file_name",
+    [
+        (_zig_continue_reads_iterator, "BoundedLoop.runar.zig"),
+        (lambda: ts_with_update("i"), "UpdateProbe.runar.ts"),
+        (lambda: ts_with_update("0n"), "UpdateProbe.runar.ts"),
+    ],
+    ids=["zig-continue-reads-iterator", "ts-update-reads-iterator", "ts-update-literal"],
+)
+def test_n116_non_advancing_update_is_rejected(source_fn, file_name):
+    """N-116: the validator accepted a bare identifier / literal update as the
+    "no-op sentinel" the while-shaped parsers synthesize, and the step was then
+    inferred as +1 from the comparison direction -- so ``var i = 3;
+    while (i < 5) : (i)``, a source loop that never terminates, unrolled to two
+    laps over i = 3, 4.
+
+    Proves: the refusal, with the shared R-065 sentence, on the Zig continue
+    expression and the TS for-update surface. Does not prove: anything about
+    while loops whose update lives in the body (those keep a placeholder
+    iterator and the condition rule refuses them)."""
+    ok, hex_out, diags = compile_source(source_fn(), file_name)
+    assert not ok, f"a non-advancing update must not compile; got {hex_out}"
+    assert LOOP_UPDATE_DIAGNOSTIC in diags, diags
+
+
+# ---------------------------------------------------------------------------
+# N-135: an EMPTY condition slot on the C-style `.runar.ts` header
+# ---------------------------------------------------------------------------
+
+
+EMPTY_CONDITION_DIAGNOSTIC = "For loop must have a condition"
+
+
+def test_n135_empty_ts_condition_is_rejected():
+    """N-135: ``for (let i = 0n; ; i++)`` has no exit test in the source. The TS
+    reference refuses it in its parser with the diagnostic below; this tier
+    refused it only by accident (the ``let`` declaration consumed its own
+    ``;``, a second ``match(;)`` swallowed the empty slot's ``;``, and ``i++``
+    was misparsed as the condition).
+
+    Proves: the Python ``.runar.ts`` parser refuses an empty condition slot with
+    the reference's text. Does not prove: other surfaces or tiers (pinned by
+    the conformance negatives N274/N275)."""
+    src = ts_with_update("i++").replace("0n; i < 3n; i++)", "0n; ; i++)")
+    ok, hex_out, diags = compile_source(src, "UpdateProbe.runar.ts")
+    assert not ok, (
+        f"an empty for-condition must not compile ({len(hex_out)} hex chars emitted)"
+    )
+    assert EMPTY_CONDITION_DIAGNOSTIC in diags, diags
+
+
+def test_n135_shifted_ts_header_is_rejected():
+    """N-135: ``for (let i = 0n;; i < 3n; i++)`` is not valid TypeScript (its
+    condition slot is empty and the last two clauses shift left). The second
+    ``match(;)`` after the initializer swallowed the empty slot's ``;`` and this
+    tier compiled it exactly like ``for (let i = 0n; i < 3n; i++)``.
+
+    Proves: the Python ``.runar.ts`` parser refuses the shifted header with the
+    reference's condition diagnostic. Does not prove: other surfaces or tiers
+    (pinned by the conformance negative N275)."""
+    src = ts_with_update("i++").replace("0n; i < 3n; i++)", "0n;; i < 3n; i++)")
+    ok, hex_out, diags = compile_source(src, "UpdateProbe.runar.ts")
+    assert not ok, (
+        f"a shifted for-header must not compile ({len(hex_out)} hex chars emitted)"
+    )
+    assert EMPTY_CONDITION_DIAGNOSTIC in diags, diags
+
+
+# ---------------------------------------------------------------------------
+# N-306: a non-declaration for-initializer on the C-style `.runar.ts` header
+# ---------------------------------------------------------------------------
+
+
+NON_DECLARATION_INITIALIZER_DIAGNOSTIC = (
+    "For loop must have a variable declaration initializer"
+)
+
+
+def ts_for_initializer(init: str) -> str:
+    """A stateful contract parameterised on the for-loop HEADER, with a body
+    that never references the loop variable by name -- unlike
+    ``ts_with_update``'s body (``acc = acc + i``), so a substituted
+    ``_i = 0`` iterator can't be caught by an accidental "undefined variable
+    'i'" typecheck error instead of the parser's own diagnostic."""
+    return f"""import {{ StatefulSmartContract, assert }} from 'runar-lang';
+
+class InitProbe extends StatefulSmartContract {{
+  count: bigint;
+
+  constructor(count: bigint) {{ super(count); this.count = count; }}
+
+  public unlock(expected: bigint): void {{
+    let acc: bigint = 0n;
+    for ({init}; _i < 3n; _i++) {{
+      acc = acc + 1n;
+    }}
+    assert(acc === expected);
+  }}
+}}
+"""
+
+
+def test_n306_non_declaration_initializer_is_rejected():
+    """N-306: ``for (i = 0n; _i < 3n; _i++)`` has no ``let``/``const`` in the
+    initializer slot. The TS reference refuses it in its parser with the
+    diagnostic below. This tier's ``_parse_for`` instead silently substituted
+    the synthetic ``_i = 0`` iterator for the whole initializer, discarding
+    ``i = 0n`` with no diagnostic at all -- invisible as long as the
+    condition/update still reference the original name ``i``, because an
+    unrelated validator check (the unrolled loop's "condition must compare
+    the loop variable" rule) then catches the name mismatch by accident and
+    refuses the program anyway. Writing the condition/update against the
+    substituted name ``_i`` instead -- exactly what a developer who noticed
+    the generated variable would do -- defeats that accidental catch and the
+    garbage initializer compiled clean.
+
+    Proves: the Python ``.runar.ts`` parser refuses a non-declaration
+    for-initializer with the reference's text, even when the rest of the
+    header is written against the substituted name. Does not prove: other
+    surfaces or tiers (pinned by the conformance negatives N277-N279)."""
+    ok, hex_out, diags = compile_source(
+        ts_for_initializer("i = 0n"), "InitProbe.runar.ts"
+    )
+    assert not ok, (
+        f"a non-declaration for-initializer must not compile "
+        f"({len(hex_out)} hex chars emitted)"
+    )
+    assert NON_DECLARATION_INITIALIZER_DIAGNOSTIC in diags, diags
+
+
+def test_n306_let_initializer_still_compiles():
+    """Control: a well-formed ``let`` initializer must keep compiling clean --
+    the fix narrows only the non-declaration branch of the initializer
+    dispatch."""
+    ok, _, diags = compile_source(
+        ts_for_initializer("let _i: bigint = 0n"), "InitProbe.runar.ts"
+    )
+    assert ok, f"a `let` for-initializer must still compile: {diags}"

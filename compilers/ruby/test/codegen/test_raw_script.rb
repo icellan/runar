@@ -91,7 +91,15 @@ class TestRawScript < Minitest::Test
     TS
     artifact = compile_ts_source(source, 'Anyone.runar.ts')
     assert_equal '51', artifact.script
-    assert_equal 'UnsafeSmartContract', 'UnsafeSmartContract' # parent-class accepted
+    # The compiled artifact must record the actual base class the contract
+    # extends, not merely "compilation did not raise". Before this fix the
+    # line compared two identical string literals to each other -- always
+    # true regardless of what artifact.parent_class actually is. This only
+    # checks the in-memory Artifact#parent_class field; it does not exercise
+    # the separate JSON-serialization path (compiler.rb's `d["parentClass"]
+    # = ...`) or cross-tier agreement on parentClass, which is conformance's
+    # job.
+    assert_equal 'UnsafeSmartContract', artifact.parent_class # parent-class accepted
     refute_nil artifact.raw_script_spans
     assert_equal 1, artifact.raw_script_spans.length
   end

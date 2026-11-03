@@ -349,7 +349,10 @@ class StackMap {
 // Use analysis — determine last-use sites for each variable
 // ---------------------------------------------------------------------------
 
-function computeLastUses(bindings: ANFBinding[]): Map<string, number> {
+function computeLastUses(
+  bindings: ANFBinding[],
+  inheritedArrays?: ReadonlyMap<string, string[]>,
+): Map<string, number> {
   const lastUse = new Map<string, number>();
 
   // Pre-scan: map each array_literal binding to its element refs. Used to
@@ -357,10 +360,27 @@ function computeLastUses(bindings: ANFBinding[]): Map<string, number> {
   // pure metadata in the stack-lowerer — see lowerArrayLiteral — so its
   // elements must remain live until the array's consumer, not until the
   // array_literal binding itself).
-  const arrayElems = new Map<string, string[]>();
+  //
+  // F-081: an if-arm or loop body can consume an array declared in an
+  // ENCLOSING scope. Its bindings do not contain that array_literal, so the
+  // enclosing scope's array metadata is seeded first; without it an element
+  // reached only through the outer array had no last-use here and was
+  // consumed at its first read.
+  const arrayElems = new Map<string, string[]>(inheritedArrays ?? []);
   for (const b of bindings) {
     if (b.value.kind === 'array_literal') {
       arrayElems.set(b.name, [...b.value.elements]);
+    } else if (
+      // F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus the
+      // alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS. Without
+      // following it the elements got no last-use at all and were consumed
+      // at the first checkMultiSig, so a second read failed.
+      b.value.kind === 'load_const' &&
+      typeof b.value.value === 'string' &&
+      b.value.value.startsWith('@ref:')
+    ) {
+      const elems = arrayElems.get(b.value.value.slice(5));
+      if (elems) arrayElems.set(b.name, [...elems]);
     }
   }
 
@@ -678,6 +698,55 @@ function checkFixedArity(table: Record<string, number>, func: string, args: stri
   }
 }
 
+/**
+ * N-264: a suspended step of the lowering — `lowerBindings`, `lowerBinding`,
+ * `lowerIf`, `lowerLoop`, `lowerMethodCall` and `inlineMethodCall` are
+ * generators, and each place one used to CALL another (an `if`'s two arms, a
+ * loop body, an inlined private method's body) now YIELDS the child task
+ * instead. `runLowerTasks` keeps the suspended parents on an explicit heap
+ * stack, so lowering depth no longer consumes host stack.
+ *
+ * Why: private methods are inlined at every call site, so F-213's per-method
+ * nesting bound (128) and N-180's call-depth bound (128) compose
+ * multiplicatively — a chain of D helpers that each call the next under K
+ * nested ifs is D*K nested ifs here, and the recursive lowering overflowed
+ * the JS stack at D=16 x 120 (user decision R106: lower iteratively).
+ *
+ * A generator resumes exactly where it yielded, so every statement runs in
+ * the same order with the same state as the recursive version did — the
+ * emitted ops are byte-identical. Never `yield*` a child: V8 resumes a
+ * delegation chain recursively, which would put the depth back on the stack.
+ */
+type LowerTask = Generator<LowerTask, void, undefined>;
+
+/** Run `root` and every task it yields, depth-first, on an explicit stack. */
+function runLowerTasks(root: LowerTask): void {
+  const stack: LowerTask[] = [root];
+  let error: { value: unknown } | null = null;
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1]!;
+    let step: IteratorResult<LowerTask, void>;
+    try {
+      if (error) {
+        const e = error.value;
+        error = null;
+        step = top.throw(e);
+      } else {
+        step = top.next();
+      }
+    } catch (e) {
+      // `top` threw (or did not catch what a child threw): it is finished,
+      // and its parent sees the exception at the `yield` it is suspended on.
+      stack.pop();
+      if (stack.length === 0) throw e;
+      error = { value: e };
+      continue;
+    }
+    if (step.done) stack.pop();
+    else stack.push(step.value);
+  }
+}
+
 class LoweringContext {
   private stackMap: StackMap;
   private ops: StackOp[] = [];
@@ -970,6 +1039,11 @@ class LoweringContext {
    *   - len <= 75:     1-byte length prefix
    *   - len 76-255:    0x4c + 1-byte length
    *   - len 256-65535: 0x4d + 2-byte LE length
+   *   - len >= 65536:  0x4e + 4-byte LE length (N-044 / F-083: this arm was
+   *                    missing, so a >= 64 KiB value was framed as 0x4d with
+   *                    its length silently truncated mod 65536)
+   *
+   * Every length is UNSIGNED — `emitPushDataDecode` reads it back that way.
    *
    * Uses save/restore of the stack map at each OP_ELSE to correctly
    * track all branches.
@@ -1073,7 +1147,23 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
     // Restore stack map to inner branch point for inner ELSE
     this.stackMap = smAfterInnerIf.clone();
-    // --- ELSE: len >= 256 → OP_PUSHDATA2: 0x4d + 2-byte LE length ---
+    // --- ELSE: len >= 256 ---
+    // Stack: [..., bs_value, size]
+    this.emitOp({ op: 'dup' }); // [..., bs_value, size, size]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 65536n }); // [..., bs_value, size, size, 65536]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., bs_value, size, size<65536]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop(); // pop condition
+    // Save stack map state at the PUSHDATA2/4 branch point: [..., bs_value, size]
+    const smAfterPd4If = this.stackMap.clone();
+
+    // --- THEN: 256 <= len <= 65535 → OP_PUSHDATA2: 0x4d + 2-byte LE length ---
     // Stack: [..., bs_value, size]
     // Use NUM2BIN 4 + SPLIT to get unsigned 2-byte LE
     this.emitOp({ op: 'push', value: 4n });
@@ -1106,6 +1196,43 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., prefix || bs_value]
     this.stackMap.push(null);
 
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAfterPd4If.clone();
+    // --- ELSE: len >= 65536 → OP_PUSHDATA4: 0x4e + 4-byte LE length ---
+    // Stack: [..., bs_value, size]
+    // NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length (a script
+    // number below 2^32 needs at most 5 sign-magnitude bytes).
+    this.emitOp({ op: 'push', value: 5n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [..., bs_value, size_5bytes]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 4n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., bs_value, low4bytes, highByte]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.stackMap.push(null);
+    this.emitOp({ op: 'drop' }); // [..., bs_value, low4bytes]
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: new Uint8Array([0x4e]) }); // [..., bs_value, low4bytes, 0x4e]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., bs_value, 0x4e, low4bytes]
+    this.stackMap.swap();
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., bs_value, 0x4e || len_4LE]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., 0x4e || len_4LE, bs_value]
+    this.stackMap.swap();
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., prefix || bs_value]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // Restore to the target end state (same for all branches)
@@ -1119,10 +1246,16 @@ class LoweringContext {
    * Expects stack: [..., state_bytes]
    * Leaves stack:  [..., data, remaining_state]
    *
-   * Push-data format:
-   *   - first byte < 76:  that IS the length → split at that length
-   *   - first byte == 76 (0x4c): read 1 more byte as length
-   *   - first byte == 77 (0x4d): read 2 more bytes as LE length
+   * Push-data format (the exact set `emitPushDataEncode` writes):
+   *   - header < 76 (0x4c): the header IS the length
+   *   - header == 0x4c:     1 more byte of length
+   *   - header == 0x4d:     2 more bytes of LE length
+   *   - header == 0x4e:     4 more bytes of LE length
+   *   - any other header:   the script fails (OP_NUMEQUALVERIFY)
+   * The header and every length are read UNSIGNED (`emitUnsignedBin2Num`):
+   * bare OP_BIN2NUM treats the top bit as a sign bit, so a length framed as
+   * `80` (128) or `00 80` (32768) read back as 0, and `81`..`ff` negative
+   * (N-044).
    *
    * Uses save/restore of the stack map at each OP_ELSE to correctly
    * track all branches.
@@ -1131,30 +1264,29 @@ class LoweringContext {
     // Stack: [..., state_bytes]
     this.emitOp({ op: 'push', value: 1n });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., first_byte, rest]
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., header, rest]
     this.stackMap.pop();
     this.stackMap.pop();
-    this.stackMap.push(null); // first_byte
+    this.stackMap.push(null); // header
     this.stackMap.push(null); // rest
-    this.emitOp({ op: 'swap' }); // [..., rest, first_byte]
+    this.emitOp({ op: 'swap' }); // [..., rest, header]
     this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest, fb_num]
-    this.emitOp({ op: 'dup' }); // [..., rest, fb_num, fb_num]
+    this.emitUnsignedBin2Num(); // [..., rest, hb]  (0..255)
+    this.emitOp({ op: 'dup' }); // [..., rest, hb, hb]
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 76n }); // [..., rest, fb_num, fb_num, 76]
+    this.emitOp({ op: 'push', value: 76n }); // [..., rest, hb, hb, 76]
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., rest, fb_num, fb<76]
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., rest, hb, hb<76]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null);
 
     this.emitOp({ op: 'opcode', code: 'OP_IF' });
     this.stackMap.pop(); // pop condition
-    // Save stack map at branch point: [..., rest, fb_num]
+    // Save stack map at branch point: [..., rest, hb]
     const smAfterOuterIf = this.stackMap.clone();
 
-    // --- THEN: fb_num < 76 → fb_num IS the length ---
-    // Stack: [..., rest, fb_num]
+    // --- THEN: hb < 76 → hb IS the length ---
     this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
     this.stackMap.pop();
     this.stackMap.pop();
@@ -1164,72 +1296,115 @@ class LoweringContext {
     const smEndTarget = this.stackMap.clone();
 
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-    // Restore stack map to branch point
     this.stackMap = smAfterOuterIf.clone();
-    // --- ELSE: fb_num >= 76 ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'dup' }); // [..., rest, fb_num, fb_num]
+    // --- ELSE: hb >= 76 → map the header to its length width (1, 2 or 4) ---
+    // Stack: [..., rest, hb]
+    this.emitOp({ op: 'dup' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 77n }); // [..., rest, fb_num, fb_num, 77]
+    this.emitOp({ op: 'push', value: 76n });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, fb_num, fb==77]
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, hb, hb==0x4c]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null);
-
     this.emitOp({ op: 'opcode', code: 'OP_IF' });
-    this.stackMap.pop(); // pop condition
-    // Save stack map at inner branch point: [..., rest, fb_num]
-    const smAfterInnerIf = this.stackMap.clone();
-
-    // --- THEN: fb_num == 77 (0x4d) → 2-byte LE length ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'drop' }); // [..., rest]
     this.stackMap.pop();
-    this.emitOp({ op: 'push', value: 2n });
+    const smAfterPd1If = this.stackMap.clone();
+    // --- 0x4c → width 1 ---
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 1n }); // [..., rest, 1]
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_2LE, rest2]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // len_2LE
-    this.stackMap.push(null); // rest2
-    this.emitOp({ op: 'swap' }); // [..., rest2, len_2LE]
-    this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest2, len]
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // data
-    this.stackMap.push(null); // remaining
+    const smWidth = this.stackMap.clone();
 
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-    // Restore stack map to inner branch point
-    this.stackMap = smAfterInnerIf.clone();
-    // --- ELSE: fb_num == 76 (0x4c) → 1-byte length ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'drop' }); // [..., rest]
-    this.stackMap.pop();
-    this.emitOp({ op: 'push', value: 1n });
+    this.stackMap = smAfterPd1If.clone();
+    this.emitOp({ op: 'dup' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_1byte, rest2]
+    this.emitOp({ op: 'push', value: 77n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, hb, hb==0x4d]
     this.stackMap.pop();
     this.stackMap.pop();
-    this.stackMap.push(null); // len_1byte
-    this.stackMap.push(null); // rest2
-    this.emitOp({ op: 'swap' }); // [..., rest2, len_1byte]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAfterPd2If = this.stackMap.clone();
+    // --- 0x4d → width 2 ---
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 2n }); // [..., rest, 2]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAfterPd2If.clone();
+    // --- 0x4e → width 4; any other header fails the script ---
+    this.emitOp({ op: 'push', value: 78n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' }); // [..., rest]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 4n }); // [..., rest, 4]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.stackMap = smWidth;
+    // Stack: [..., rest, width]
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_bytes, rest2]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., rest2, len_bytes]
     this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest2, len]
+    this.emitUnsignedBin2Num(); // [..., rest2, len]
     this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null); // data
     this.stackMap.push(null); // remaining
 
-    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // Restore to the target end state (same for all branches)
     this.stackMap = smEndTarget;
     // --- Stack: [..., data, remaining] ---
+  }
+
+  /**
+   * `[..., rest]` → `[...]`, failing the script unless `rest` is empty: the
+   * last state field must consume the state section exactly (N-044).
+   */
+  private emitAssertStateConsumed(): void {
+    this.emitOp({ op: 'push', value: 0n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+  }
+
+  /**
+   * N-045: before a fixed-width state value (Sha256, PubKey, Addr, Ripemd160,
+   * Point, P256Point, P384Point) is committed to a continuation, assert it
+   * has exactly its declared width:
+   *
+   *   [..., value]  OP_SIZE <width> OP_NUMEQUALVERIFY  -> [..., value]
+   *
+   * The writer copies these values as they are, and the next spend's reader
+   * slices each one at its declared width. A wrong-width value therefore
+   * shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22` is read
+   * as root = R and owner = pubkey. No-op for every other type.
+   */
+  private emitFixedWidthStateCheck(type: string): void {
+    const width = fixedWidthStateBytes(type);
+    if (width === undefined) return;
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: BigInt(width) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+    this.stackMap.pop();
+    this.stackMap.pop();
   }
 
   /**
@@ -1347,9 +1522,21 @@ class LoweringContext {
    * OP_VERIFY so its result stays on the stack — required by Bitcoin Script
    * which checks the top-of-stack for truthiness after execution.
    */
-  lowerBindings(bindings: ANFBinding[], terminalAssert = false): void {
+  lowerBindings(
+    bindings: ANFBinding[],
+    terminalAssert = false,
+    inheritedArrays?: ReadonlyMap<string, string[]>,
+  ): void {
+    runLowerTasks(this.lowerBindingsTask(bindings, terminalAssert, inheritedArrays));
+  }
+
+  private *lowerBindingsTask(
+    bindings: ANFBinding[],
+    terminalAssert = false,
+    inheritedArrays?: ReadonlyMap<string, string[]>,
+  ): LowerTask {
     this.localBindings = new Set(bindings.map(b => b.name));
-    const lastUses = computeLastUses(bindings);
+    const lastUses = computeLastUses(bindings, inheritedArrays);
 
     // Protect parent-scope refs that are still needed after this scope
     // (e.g., txPreimage used both inside an if-branch and after the if).
@@ -1362,19 +1549,18 @@ class LoweringContext {
     // Find the terminal binding index (if terminalAssert is set).
     // If the last binding is an 'if' whose branches end in asserts,
     // that 'if' is the terminal point (not an earlier standalone assert).
+    // Only an assert that IS the last binding may leave its value as the
+    // result (N-005): any later binding (e.g. a terminal asm() raw_script with
+    // out_arity 1) pushes its own result, the cleanup NIPs the assert's value
+    // away, and the check is never enforced. Such an assert gets OP_VERIFY.
     let lastAssertIdx = -1;
     let terminalIfIdx = -1;
     if (terminalAssert) {
       const lastBinding = bindings[bindings.length - 1];
       if (lastBinding && lastBinding.value.kind === 'if') {
         terminalIfIdx = bindings.length - 1;
-      } else {
-        for (let i = bindings.length - 1; i >= 0; i--) {
-          if (bindings[i]!.value.kind === 'assert') {
-            lastAssertIdx = i;
-            break;
-          }
-        }
+      } else if (lastBinding && lastBinding.value.kind === 'assert') {
+        lastAssertIdx = bindings.length - 1;
       }
     }
 
@@ -1387,20 +1573,20 @@ class LoweringContext {
         this.lowerAssert(binding.value.value, i, lastUses, true);
       } else if (binding.value.kind === 'if' && i === terminalIfIdx) {
         // Terminal if: propagate terminalAssert into both branches
-        this.lowerIf(binding.name, binding.value.cond, binding.value.then, binding.value.else, binding.value.results ?? [], i, lastUses, true);
+        yield this.lowerIfTask(binding.name, binding.value.cond, binding.value.then, binding.value.else, binding.value.results ?? [], i, lastUses, true);
       } else {
-        this.lowerBinding(binding, i, lastUses);
+        yield this.lowerBindingTask(binding, i, lastUses);
       }
       this.currentSourceLoc = undefined;
     }
 
   }
 
-  private lowerBinding(
+  private *lowerBindingTask(
     binding: ANFBinding,
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
     const { name, value } = binding;
 
     switch (value.kind) {
@@ -1423,13 +1609,13 @@ class LoweringContext {
         this.lowerCall(name, value.func, value.args, bindingIndex, lastUses);
         break;
       case 'method_call':
-        this.lowerMethodCall(name, value.object, value.method, value.args, bindingIndex, lastUses);
+        yield this.lowerMethodCallTask(name, value.object, value.method, value.args, bindingIndex, lastUses);
         break;
       case 'if':
-        this.lowerIf(name, value.cond, value.then, value.else, value.results ?? [], bindingIndex, lastUses);
+        yield this.lowerIfTask(name, value.cond, value.then, value.else, value.results ?? [], bindingIndex, lastUses);
         break;
       case 'loop':
-        this.lowerLoop(name, value.count, value.body, value.iterVar, value.start, value.step, bindingIndex, lastUses);
+        yield this.lowerLoopTask(name, value.count, value.body, value.iterVar, value.start, value.step, bindingIndex, lastUses);
         break;
       case 'assert':
         this.lowerAssert(value.value, bindingIndex, lastUses);
@@ -1579,7 +1765,11 @@ class LoweringContext {
     // Properties are embedded as constants in the script.
     // Look up the property value from the contract properties.
     const prop = this._properties.find(p => p.name === propName);
-    if (this.stackMap.has(propName)) {
+    // N-016: only a MUTABLE property ever lives on the stack (deserialize_state
+    // / update_prop). A readonly property is a deploy-time constant, so a slot
+    // that merely shares its name is a param, local or temp — reading it made
+    // `this.target` return whatever that slot held.
+    if (prop?.readonly !== true && this.stackMap.has(propName)) {
       // If the property has been updated (via update_prop), it lives on the stack.
       // Must check this BEFORE initialValue — after update_prop, we need the
       // updated value, not the original constant.
@@ -1587,6 +1777,9 @@ class LoweringContext {
       this.stackMap.pop();
     } else if (prop && prop.initialValue !== undefined) {
       this.pushValue(prop.initialValue);
+      // F-111: remember which push carries a baked property value so the
+      // requireBaked check can confirm it survived peephole optimization.
+      bakedPropPushOrigin.set(this.ops[this.ops.length - 1]!, propName);
     } else {
       // Property value will be provided at deployment time; emit a placeholder.
       // The emitter records byte offsets so the SDK can splice in real values.
@@ -1777,8 +1970,7 @@ class LoweringContext {
     if (func === 'assert') {
       // assert(value) => value OP_VERIFY
       // A zero-argument call would emit no OP_VERIFY at all — silently deleting
-      // the check the contract relies on — and would skip the stackMap.push
-      // below, desyncing every later binding. Rejected here rather than
+      // the check the contract relies on. Rejected here rather than
       // defended against with extra opcodes (which would move bytes for every
       // valid contract). Checking in the lowerer as well as the typechecker
       // covers the `--ir` input path, which never runs a typecheck.
@@ -1791,15 +1983,16 @@ class LoweringContext {
         this.bringToTop(arg, isLast);
         this.stackMap.pop();
         this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
-        // assert produces no result value, push a dummy
-        this.stackMap.push(bindingName);
+        // OP_VERIFY leaves nothing behind, so no stack slot is recorded for
+        // the (void) result — a model-only slot would put every later
+        // PICK/ROLL one item too deep (F-072). Same model as lowerAssert.
       }
       return;
     }
 
     if (func === 'exit') {
       // exit(condition) => condition OP_VERIFY — same as assert, and the same
-      // zero-argument hazard: no OP_VERIFY emitted, no stack slot registered.
+      // zero-argument hazard: no OP_VERIFY emitted.
       if (args.length < 1) {
         throw new Error(`exit requires 1 argument, got ${args.length}`);
       }
@@ -1809,7 +2002,7 @@ class LoweringContext {
         this.bringToTop(arg, isLast);
         this.stackMap.pop();
         this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
-        this.stackMap.push(bindingName);
+        // No result slot: OP_VERIFY produces nothing (F-072).
       }
       return;
     }
@@ -1836,7 +2029,7 @@ class LoweringContext {
     if (func === 'super') {
       // super() in constructor — no opcode emission needed, it's a
       // no-op at the script level. Constructor args are already on the stack.
-      this.stackMap.push(bindingName);
+      // No opcode, so no stack slot either (F-072).
       return;
     }
 
@@ -2120,6 +2313,13 @@ class LoweringContext {
    * analysis for the array's element refs is patched in `computeLastUses` so
    * the elements stay live past this binding through to `checkMultiSig`.
    */
+  /** F-081: copy the enclosing context's array_literal metadata into this
+   *  (branch) context. Copies, so an arm-local array does not leak out. */
+  inheritArrays(parent: LoweringContext): void {
+    for (const [name, elems] of parent.arrayElements) this.arrayElements.set(name, [...elems]);
+    for (const [name, len] of parent.arrayLengths) this.arrayLengths.set(name, len);
+  }
+
   private lowerArrayLiteral(
     bindingName: string,
     elements: string[],
@@ -2229,14 +2429,14 @@ class LoweringContext {
     this.trackDepth();
   }
 
-  private lowerMethodCall(
+  private *lowerMethodCallTask(
     bindingName: string,
     object: string,
     method: string,
     args: string[],
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
     // Method calls on `this` are treated as builtin calls
     // e.g. this.getStateScript(), this.buildP2PKH(addr)
     if (method === 'getStateScript') {
@@ -2259,7 +2459,7 @@ class LoweringContext {
         this.emitOp({ op: 'drop' });
         this.stackMap.pop();
       }
-      this.inlineMethodCall(bindingName, privateMethod, args, bindingIndex, lastUses);
+      yield this.inlineMethodCallTask(bindingName, privateMethod, args, bindingIndex, lastUses);
       return;
     }
 
@@ -2267,13 +2467,15 @@ class LoweringContext {
     this.lowerCall(bindingName, method, args, bindingIndex, lastUses);
   }
 
-  private inlineMethodCall(
+  private *inlineMethodCallTask(
     bindingName: string,
     method: ANFMethod,
     args: string[],
     bindingIndex: number,
     lastUses: Map<string, number>,
-  ): void {
+  ): LowerTask {
+    if (containsOutputIntrinsic(method.body)) throw new Error(IR_OUTPUT_DELEGATION_ERROR);
+
     // Track shadowed names so we can restore them after the body runs.
     // When a param name already exists on the stack, temporarily rename
     // the existing entry to avoid duplicate names which break Set-based
@@ -2339,7 +2541,7 @@ class LoweringContext {
       }
     }
 
-    this.lowerBindings(method.body);
+    yield this.lowerBindingsTask(method.body);
 
     // Restore shadowed names so the caller's scope sees its original entries.
     for (const { paramName, shadowedName } of shadowed) {
@@ -2381,7 +2583,7 @@ class LoweringContext {
     this.stackMap.pop();
   }
 
-  private lowerIf(
+  private *lowerIfTask(
     bindingName: string,
     cond: string,
     thenBindings: ANFBinding[],
@@ -2396,7 +2598,7 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
     terminalAssert = false,
-  ): void {
+  ): LowerTask {
     // The ANF wire format has no version field, and `--ir` / `--ir-parity` are
     // documented surfaces that feed a checked-in ANF JSON straight into this
     // pass. An ANF produced BEFORE the multi-result node carries the trailing
@@ -2532,8 +2734,20 @@ class LoweringContext {
     // `checkPreimage` inside an if-branch emits a stray per-method separator,
     // which executes AFTER the script-level one and re-narrows `scriptCode`.
     thenCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
+    // N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+    // `__param_<name>` slot for a param that shadows a mutable property, so the
+    // arm must resolve `load_param` through the same map. A fresh context
+    // starts with it EMPTY, and the arm then read the same-named deserialized
+    // PROPERTY slot — the stale on-chain state — in place of the caller's
+    // witness argument.
+    for (const [param, slot] of this.renamedParams) thenCtx.renamedParams.set(param, slot);
+    // F-081: the same holds for array_literal metadata. An array declared
+    // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+    // there needs its element refs; a fresh context has none and threw
+    // "array_literal metadata missing".
+    thenCtx.inheritArrays(this);
     thenCtx._insideBranch = true;
-    thenCtx.lowerBindings(thenBindings, terminalAssert);
+    yield thenCtx.lowerBindingsTask(thenBindings, terminalAssert, this.arrayElements);
 
     thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -2562,14 +2776,26 @@ class LoweringContext {
         thenCtx.stackMap.removeAtDepth(1);
       }
     }
+    // N-072: under a terminal assert the arm's one remaining slot is its
+    // VERDICT, which nothing reads by name. It must not keep the name of the
+    // parent local it asserted (`const x = a; if (c) { assert(x); } else
+    // { assert(b); }`): phase 1 below would then see "the else-arm consumed
+    // `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+    // the depth back with OP_0 — an arm that always fails.
+    if (terminalAssert && thenCtx.stackMap.depth >= 1) {
+      thenCtx.stackMap.pop();
+      thenCtx.stackMap.push(null);
+    }
 
     // Lower else-branch
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
+    for (const [param, slot] of this.renamedParams) elseCtx.renamedParams.set(param, slot); // N-007, see thenCtx
+    elseCtx.inheritArrays(this); // F-081, see thenCtx
     elseCtx._insideBranch = true;
-    elseCtx.lowerBindings(elseBindings, terminalAssert);
+    yield elseCtx.lowerBindingsTask(elseBindings, terminalAssert, this.arrayElements);
 
     elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -2579,6 +2805,10 @@ class LoweringContext {
         elseCtx.emitOp({ op: 'nip' });
         elseCtx.stackMap.removeAtDepth(1);
       }
+    }
+    if (terminalAssert && elseCtx.stackMap.depth >= 1) { // N-072, see thenCtx
+      elseCtx.stackMap.pop();
+      elseCtx.stackMap.push(null);
     }
 
     // Balance stack between branches so both end at the same depth.
@@ -2815,11 +3045,24 @@ class LoweringContext {
         }
         elseCtx.stackMap.push(thenName);
       } else {
+        // N-262: padding an EMPTY else arm is the legitimate #99 fallback;
+        // padding a NON-EMPTY one writes a placeholder the post-ENDIF code
+        // reads as a value. Same sentence as Go's R-161 guard.
+        if (elseBindings.length !== 0) {
+          throw new Error(
+            `internal codegen error: conditional needs ${thenCtx.stackMap.depth - elseCtx.stackMap.depth} placeholder push(es) to balance a NON-EMPTY else arm (then depth ${thenCtx.stackMap.depth} != else depth ${elseCtx.stackMap.depth}); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding="${bindingName}"`,
+          );
+        }
         elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
         elseCtx.stackMap.push(null);
       }
     }
     while (elseCtx.stackMap.depth > thenCtx.stackMap.depth) {
+      if (thenBindings.length !== 0) {
+        throw new Error(
+          `internal codegen error: conditional needs ${elseCtx.stackMap.depth - thenCtx.stackMap.depth} placeholder push(es) to balance a NON-EMPTY then arm (else depth ${elseCtx.stackMap.depth} != then depth ${thenCtx.stackMap.depth}); binding="${bindingName}"`,
+        );
+      }
       thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
       thenCtx.stackMap.push(null);
     }
@@ -2937,7 +3180,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -2970,7 +3213,7 @@ class LoweringContext {
         for (let j = 0; j < sinkBelow; j++) {
           this.emitOp({ op: 'push', value: BigInt(windowSize - 1) });
           this.stackMap.push(null);
-          this.emitOp({ op: 'roll', depth: windowSize });
+          this.emitOp({ op: 'roll', depth: windowSize - 1 });
           this.stackMap.pop();
           const lifted = this.stackMap.removeAtDepth(windowSize - 1);
           this.stackMap.push(lifted);
@@ -3022,7 +3265,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -3051,7 +3294,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -3078,7 +3321,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -3151,7 +3394,7 @@ class LoweringContext {
     }
   }
 
-  private lowerLoop(
+  private *lowerLoopTask(
     _bindingName: string,
     count: number,
     body: ANFBinding[],
@@ -3160,7 +3403,7 @@ class LoweringContext {
     step: 1 | -1,
     loopBindingIndex?: number,
     enclosingLastUses?: Map<string, number>,
-  ): void {
+  ): LowerTask {
     // Names (re)defined anywhere inside the loop body, nested branches
     // included. A name the body itself binds is NOT an outer ref —
     // reassigned locals (e.g. `off = off + ...` inside an if) flow through
@@ -3193,6 +3436,16 @@ class LoweringContext {
       if (name !== _iterVar) outerRefs.add(name);
     }
 
+    // F-081: an outer array_literal binding is metadata only — its ELEMENTS
+    // are the stack slots. Protecting the array name protects nothing, so
+    // the first iteration consumed the elements and the second failed with
+    // "Value 't0' not found on stack". Protect the elements themselves.
+    const outerArrays = new Map(this.arrayElements);
+    for (const ref of [...outerRefs]) {
+      const elems = outerArrays.get(ref);
+      if (elems) for (const e of elems) outerRefs.add(e);
+    }
+
     // Temporarily extend localBindings with body binding names so
     // @ref: to body-internal values can consume on last use.
     const prevLocalBindings = this.localBindings;
@@ -3207,7 +3460,7 @@ class LoweringContext {
       this.emitOp({ op: 'push', value: start + BigInt(i) * BigInt(step) });
       this.stackMap.push(_iterVar);
 
-      const lastUses = computeLastUses(body);
+      const lastUses = computeLastUses(body, outerArrays);
 
       // Prevent outer-scope refs from being consumed by setting their
       // last-use beyond any body binding index:
@@ -3230,8 +3483,14 @@ class LoweringContext {
         }
       }
 
+      // F-259: each body binding's ops carry that binding's own location (a
+      // binding without one keeps the loop's). The iteration-variable push
+      // above and the cleanup below stay on the loop's location.
+      const loopLoc = this.currentSourceLoc;
       for (let j = 0; j < body.length; j++) {
-        this.lowerBinding(body[j]!, j, lastUses);
+        this.currentSourceLoc = body[j]!.sourceLoc ?? loopLoc;
+        yield this.lowerBindingTask(body[j]!, j, lastUses);
+        this.currentSourceLoc = loopLoc;
       }
 
       // Clean up the iteration variable if it was not consumed by the body.
@@ -3323,7 +3582,7 @@ class LoweringContext {
           } else {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -3368,6 +3627,9 @@ class LoweringContext {
         this.emitOp({ op: 'push', value: 0n });
         this.stackMap.push(null);
       }
+
+      // N-045: a fixed-width byte value must have its declared width.
+      this.emitFixedWidthStateCheck(prop.type);
 
       // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
@@ -3722,6 +3984,9 @@ class LoweringContext {
       const consume = this.operandConsume(valueRef, outputOperands, bindingIndex, lastUses);
       this.bringToTop(valueRef, consume);
 
+      // N-045: a fixed-width byte value must have its declared width.
+      this.emitFixedWidthStateCheck(prop.type);
+
       // Convert numeric/boolean values to fixed-width bytes.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
       if (prop.type === 'bigint' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
@@ -4014,10 +4279,10 @@ class LoweringContext {
       if (stateProps.length === 1) {
         const prop = stateProps[0]!;
         if (isVariableLengthStateType(prop.type)) {
-          // Single variable-length field: decode push-data prefix, drop trailing empty
+          // Single variable-length field: decode push-data prefix; the
+          // remainder MUST be empty (exact consumption, N-044).
           this.emitPushDataDecode(); // [..., data, remaining]
-          this.emitOp({ op: 'drop' }); // drop remaining (should be empty for single field)
-          this.stackMap.pop();
+          this.emitAssertStateConsumed(); // [..., data]
         } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
           this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
         }
@@ -4061,14 +4326,22 @@ class LoweringContext {
               this.stackMap.push(null);
             }
           } else {
-            // Last property — remaining bytes are this property
+            // Last property — it must consume the state section exactly
+            // (N-044): a trailing byte fails the script instead of being
+            // folded into (or silently dropped after) the last field.
             if (isVariableLengthStateType(prop.type)) {
-              // Last variable-length field: decode push-data prefix, drop trailing empty
               this.emitPushDataDecode(); // [..., data, remaining]
-              this.emitOp({ op: 'drop' }); // drop remaining (should be empty)
-              this.stackMap.pop();
-            } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
-              this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+              this.emitAssertStateConsumed(); // [..., data]
+            } else {
+              this.emitOp({ op: 'push', value: BigInt(propSizes[i]!) });
+              this.stackMap.push(null);
+              this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., field, rest]
+              this.stackMap.pop(); this.stackMap.pop();
+              this.stackMap.push(null); this.stackMap.push(null);
+              this.emitAssertStateConsumed(); // [..., field]
+              if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
+                this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+              }
             }
             this.stackMap.pop();
             this.stackMap.push(prop.name);
@@ -4411,9 +4684,10 @@ class LoweringContext {
     if (this.hasStateSection() && this.fixedStateSectionLength() === null) {
       // delta / exact are refined by `pinCodePartLength` once every method has
       // been lowered and the full placeholder set is known. The defaults here
-      // are the SOUND ones: a lower bound of `emittedLength + 0` holds for any
-      // deployment, so a caller that lowers a method in isolation still gets a
-      // script that honest spends satisfy.
+      // are the SAFE ones: `exact: false` makes the length a deploy-time slot
+      // (N-051) that the SDK fills with the real deployed code-part length, so
+      // a caller that lowers a method in isolation still gets a script that
+      // honest spends satisfy and no truncated `_codePart` can.
       this.emitOp({ op: 'verify_code_part_len', delta: 0, exact: false });
     }
 
@@ -5464,15 +5738,22 @@ class LoweringContext {
   }
 
   /**
-   * Lower log2(n) — exact floor(log2(n)) via bit-scanning.
+   * Lower log2(n) — exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103,
+   * user decision R86). No iteration cap: the bit length is read off the
+   * minimal Script-number encoding.
    *
-   * Uses a bounded unrolled loop (64 iterations for bigint range):
-   *   counter = 0
-   *   while input > 1: input >>= 1, counter++
-   *   result = counter
+   *   OP_BIN2NUM                              n        (minimal re-encoding)
+   *   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+   *   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+   *   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+   *   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+   *   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+   *   OP_NIP                                  b + #{c : t >= c}
    *
-   * Stack layout during loop: <input> <counter>
-   * Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+   * t = 0 only as the sign-padding byte, where n's bit length is exactly
+   * 8(s-1), i.e. b with no comparison set. The leading OP_BIN2NUM keeps a
+   * non-minimally encoded operand from inflating OP_SIZE; the second one makes
+   * t a minimal number (0x00 is a non-minimal zero).
    */
   private lowerLog2(
     bindingName: string,
@@ -5487,36 +5768,29 @@ class LoweringContext {
     this.bringToTop(n, nIsLast);
     this.stackMap.pop();
 
-    // Stack: <n>
-    // Push counter = 0
-    this.emitOp({ op: 'push', value: 0n }); // n 0
-
-    // 64 iterations (sufficient for Bitcoin Script bigint range)
-    const LOG2_ITERATIONS = 64;
-    for (let i = 0; i < LOG2_ITERATIONS; i++) {
-      // Stack: input counter
-      this.emitOp({ op: 'swap' });              // counter input
-      this.emitOp({ op: 'opcode', code: 'OP_DUP' }); // counter input input
-      this.emitOp({ op: 'push', value: 1n });    // counter input input 1
-      this.emitOp({ op: 'opcode', code: 'OP_GREATERTHAN' }); // counter input (input>1)
-      this.emitOp({
-        op: 'if',
-        then: [
-          { op: 'push', value: 2n },              // counter input 2
-          { op: 'opcode', code: 'OP_DIV' },       // counter (input/2)
-          { op: 'swap' },                         // (input/2) counter
-          { op: 'opcode', code: 'OP_1ADD' },      // (input/2) (counter+1)
-          { op: 'swap' },                         // (counter+1) (input/2)
-        ],
-        else: undefined,
-      });
-      // Stack: counter input  (or input counter if swapped back)
-      // After the if: stack is counter input (swap at start, then if-branch swaps back)
-      this.emitOp({ op: 'swap' });              // input counter
+    const op = (code: string): void => this.emitOp({ op: 'opcode', code });
+    op('OP_BIN2NUM');
+    op('OP_DUP');
+    this.emitOp({ op: 'push', value: 0n });
+    op('OP_GREATERTHAN');
+    op('OP_VERIFY');
+    op('OP_SIZE');
+    op('OP_1SUB');
+    op('OP_TUCK');
+    op('OP_SPLIT');
+    op('OP_NIP');
+    op('OP_BIN2NUM');
+    op('OP_SWAP');
+    this.emitOp({ op: 'push', value: 8n });
+    op('OP_MUL');
+    op('OP_1SUB');
+    for (const c of [1n, 2n, 4n, 8n, 16n, 32n, 64n]) {
+      op('OP_OVER');
+      this.emitOp({ op: 'push', value: c });
+      op('OP_GREATERTHANOREQUAL');
+      op('OP_ADD');
     }
-    // Stack: input counter
-    // Drop input, keep counter
-    this.emitOp({ op: 'nip' }); // counter
+    op('OP_NIP');
 
     this.stackMap.push(bindingName);
     this.trackDepth();
@@ -6373,6 +6647,16 @@ function hexToBytes(hex: string): Uint8Array {
 // ---------------------------------------------------------------------------
 
 /**
+ * F-111 (requireBaked): identity side-table mapping each `push` op that
+ * materialises a compile-time-baked property value (`load_prop` of a property
+ * with `initialValue`) to that property's name. Kept off the op object itself
+ * so Stack IR serialization and emitted bytes are unchanged. A peephole rule
+ * that folds or drops the push yields new/no op objects, so absence of a
+ * tagged op after optimization means the baked value has no commitment left.
+ */
+export const bakedPropPushOrigin = new WeakMap<StackOp, string>();
+
+/**
  * Lower an ANF program to Stack IR.
  *
  * For each method, parameters are assumed to already be on the stack
@@ -6473,8 +6757,8 @@ function pushHeaderLen(valueBytes: number): number {
  * A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
  * placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
  * Script number) and `ByteString` (arbitrary-length data push) depend on the
- * VALUE, which the compiler never sees — those return `null` and demote the
- * pin to a lower bound.
+ * VALUE, which the compiler never sees — those return `null` and turn the pin
+ * into a deploy-time slot (N-051) that the SDK fills in.
  */
 function constructorSlotGrowth(type: string | undefined): number | null {
   if (type === undefined) return null;
@@ -6498,11 +6782,27 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
   const pins: StackOp[] = [];
   const placeholders: number[] = [];
 
-  const walk = (ops: StackOp[]): void => {
-    for (const op of ops) {
+  // N-264: pre-order over nested if arms on an explicit stack — inlined
+  // private methods nest D*K if-ops here, too deep to recurse on.
+  const walk = (root: StackOp[]): void => {
+    const stack: StackOp[][] = [root];
+    const at: number[] = [0];
+    while (stack.length > 0) {
+      const top = stack.length - 1;
+      const ops = stack[top]!;
+      if (at[top]! >= ops.length) {
+        stack.pop();
+        at.pop();
+        continue;
+      }
+      const op = ops[at[top]!++]!;
       if (op.op === 'if') {
-        walk(op.then);
-        if (op.else) walk(op.else);
+        if (op.else) {
+          stack.push(op.else);
+          at.push(0);
+        }
+        stack.push(op.then);
+        at.push(0);
       } else if (op.op === 'placeholder') {
         placeholders.push(op.paramIndex);
       } else if (op.op === 'verify_code_part_len') {
@@ -6528,8 +6828,8 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
   for (const paramIndex of placeholders) {
     const growth = constructorSlotGrowth(ctorProps[paramIndex]?.type);
     if (growth === null) {
-      // No compile-time width. Growth is never negative, so the running sum
-      // stays a sound lower bound — just not an exact one.
+      // No compile-time width: the emitter records the length field as a
+      // deploy-time `codePartLenSlots` entry (N-051) and the SDK patches it.
       exact = false;
     } else {
       delta += growth;
@@ -6552,23 +6852,39 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
 function methodUsesCheckPreimage(
   bindings: ANFBinding[],
   privateMethods?: Map<string, ANFMethod>,
-  seen: Set<string> = new Set(),
 ): boolean {
-  for (const b of bindings) {
-    if (b.value.kind === 'check_preimage') return true;
-    if (b.value.kind === 'if') {
-      if (methodUsesCheckPreimage(b.value.then, privateMethods, seen)) return true;
-      if (methodUsesCheckPreimage(b.value.else, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'loop') {
-      if (methodUsesCheckPreimage(b.value.body, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'method_call' && privateMethods) {
-      const target = privateMethods.get(b.value.method);
-      if (target && !seen.has(target.name)) {
-        const nextSeen = new Set(seen);
-        nextSeen.add(target.name);
-        if (methodUsesCheckPreimage(target.body, privateMethods, nextSeen)) return true;
+  return someReachableBinding(bindings, privateMethods, (b) => b.value.kind === 'check_preimage');
+}
+
+/**
+ * True when `pred` holds for some binding reachable from `bindings` through
+ * if arms, loop bodies and (when `privateMethods` is given) the bodies of
+ * called private methods. N-264: an explicit work list, not recursion — a
+ * chain of D helpers each calling the next under K nested ifs is D*K levels
+ * deep through those edges and overflowed the JS stack. The answer is plain
+ * reachability, exactly what the recursive walk (which pruned a method only
+ * when it was already on the current call path) computed.
+ */
+function someReachableBinding(
+  bindings: ANFBinding[],
+  privateMethods: Map<string, ANFMethod> | undefined,
+  pred: (b: ANFBinding) => boolean,
+): boolean {
+  const work: ANFBinding[][] = [bindings];
+  const seen = new Set<string>();
+  while (work.length > 0) {
+    for (const b of work.pop()!) {
+      if (pred(b)) return true;
+      if (b.value.kind === 'if') {
+        work.push(b.value.else, b.value.then);
+      } else if (b.value.kind === 'loop') {
+        work.push(b.value.body);
+      } else if (b.value.kind === 'method_call' && privateMethods) {
+        const target = privateMethods.get(b.value.method);
+        if (target && !seen.has(target.name)) {
+          seen.add(target.name);
+          work.push(target.body);
+        }
       }
     }
   }
@@ -6597,6 +6913,24 @@ function isVariableLengthStateType(type: string): boolean {
 }
 
 /**
+ * N-045: the declared byte width of a fixed-width byte state type, or
+ * `undefined` for every other type. MUST match the reader's size table in
+ * `lowerDeserializeState` (and runar-ir-schema's STATE_FIELD_WIDTHS).
+ */
+function fixedWidthStateBytes(type: string): number | undefined {
+  switch (type) {
+    case 'PubKey': return 33;
+    case 'Addr': return 20;
+    case 'Ripemd160': return 20;
+    case 'Sha256': return 32;
+    case 'Point': return 64;
+    case 'P256Point': return 64;
+    case 'P384Point': return 96;
+    default: return undefined;
+  }
+}
+
+/**
  * Whether a method READS (via load_prop) any property in `varLenProps`.
  *
  * Issue #100: such a terminal method needs `_codePart` for the preimage-relative
@@ -6618,25 +6952,36 @@ function methodReadsVarLenState(
   bindings: ANFBinding[],
   varLenProps: Set<string>,
   privateMethods?: Map<string, ANFMethod>,
-  seen: Set<string> = new Set(),
 ): boolean {
-  for (const b of bindings) {
-    if (b.value.kind === 'load_prop' && varLenProps.has(b.value.name)) return true;
-    if (b.value.kind === 'if') {
-      if (methodReadsVarLenState(b.value.then, varLenProps, privateMethods, seen) ||
-          methodReadsVarLenState(b.value.else, varLenProps, privateMethods, seen)) return true;
-    }
-    if (b.value.kind === 'loop' && methodReadsVarLenState(b.value.body, varLenProps, privateMethods, seen)) return true;
-    if (b.value.kind === 'method_call' && privateMethods) {
-      const target = privateMethods.get(b.value.method);
-      if (target && !seen.has(target.name)) {
-        const nextSeen = new Set(seen);
-        nextSeen.add(target.name);
-        if (methodReadsVarLenState(target.body, varLenProps, privateMethods, nextSeen)) return true;
-      }
-    }
-  }
-  return false;
+  return someReachableBinding(
+    bindings,
+    privateMethods,
+    (b) => b.value.kind === 'load_prop' && varLenProps.has(b.value.name),
+  );
+}
+
+/**
+ * N-055: the one diagnostic all seven tiers give an `--ir` program whose
+ * `method_call` reaches a private method that holds an output intrinsic. The
+ * source frontend inlines such helpers before ANF, so the intrinsic always sits
+ * in the public method; `--ir` has no delegation support, and the scaffolding
+ * check (N-101) and `methodUsesCodePart` only look at the public method's own
+ * bindings, so the delegated output would be built and then silently left out
+ * of the committed continuation.
+ */
+const IR_OUTPUT_DELEGATION_ERROR =
+  'output intrinsics must be called from the public method or an inlined helper; ' +
+  '--ir method_call delegation is not supported';
+
+/** True if `bindings`, at any `if` / `loop` depth, hold an output intrinsic. */
+function containsOutputIntrinsic(bindings: ANFBinding[]): boolean {
+  return bindings.some((b) => {
+    const v = b.value;
+    if (v.kind === 'add_output' || v.kind === 'add_raw_output' || v.kind === 'add_data_output') return true;
+    if (v.kind === 'if') return containsOutputIntrinsic(v.then) || containsOutputIntrinsic(v.else);
+    if (v.kind === 'loop') return containsOutputIntrinsic(v.body);
+    return false;
+  });
 }
 
 function methodUsesCodePart(bindings: ANFBinding[]): boolean {

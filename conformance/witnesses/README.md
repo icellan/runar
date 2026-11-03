@@ -48,9 +48,9 @@ Schema:
   own args.
 - Every fixture MUST have ≥1 `accept` and ≥1 `reject` (near-miss) spend, ENFORCED
   in code by `coverage-claims.test.ts` — not just documented here. A few
-  contracts have only tautological asserts (`x >= 0 || x < 0`) or are
-  anyone-can-spend, so no rejecting witness exists; those set a top-level
-  `"acceptOnly": true` field (see `bitwise-ops.json` / `shift-ops.json`) as an
+  contracts take no caller-controlled input or are anyone-can-spend, so no
+  rejecting witness exists; those set a top-level `"acceptOnly": true` field
+  (see `real-crypto/ec-unit.json`, which records why in `acceptOnlyReason`) as an
   explicit, machine-checked opt-out — a silently absent reject spend fails the
   gate. `coverage-claims.test.ts` also flags a spec that sets `acceptOnly` but
   actually has a reject spend (a stale opt-out).
@@ -85,6 +85,17 @@ interpreter — real secp256k1, real BIP-143 sighash, real `OP_CHECKSIG` /
   (`RunarContract` + a real `LocalSigner`) and re-validated on `Spend`
   (`runStatefulSpend`). This exercises the real auto-injected `checkPreimage`
   on-chain state binding (BUG-100) plus any user `checkSig`.
+- **`precompiled-hex`** (N-314) — for a constructor-less `SmartContract`
+  fixture whose `compilers` allowlist excludes `ts` (Go-only codegen), so no
+  TS compile can produce its bytes. `runPrecompiledHexSpend` executes the
+  COMMITTED `expected-script.hex` as-is on `Spend`, reading argument types from
+  the committed `expected-ir.json`; no compiler runs. The spec must pin both
+  files' sha256 in `goldenHashes` and `real-crypto-execution.test.ts` checks the
+  pins against the files on disk, so the spec always vouches for exactly the
+  bytes it ran — which is what makes it route (A) evidence for that golden. A
+  reject may set `vmErrorPattern` to pin the failure class as well as the
+  verdict. Used by `bn254-pairing` (the BN254 four-pair pairing check, a
+  ~4.7 MB script).
 
 Each fixture carries ≥1 accept and ≥1 reject/near-miss, ENFORCED in code by
 `coverage-claims.test.ts` (same `acceptOnly` opt-out convention as above). A

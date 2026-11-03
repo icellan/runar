@@ -1,0 +1,75 @@
+{
+  "fixture": "state-array-set",
+  "kind": "stateful",
+  "note": "ArraySet put(): FixedArray<bigint, 4> mutable state, the second witness for the shape fixed-array-write pins. Where fixed-array-write increments a slot, this assigns a caller-supplied value at a runtime index, so the write-back is pinned by hand rather than trusted to byte agreement.",
+  "signerKey": "alice",
+  "constructorArgs": [],
+  "spends": [
+    {
+      "method": "put",
+      "args": [
+        "2n",
+        "7n"
+      ],
+      "expect": "accept",
+      "note": "runtime index 2 := 7, every other slot untouched",
+      "expectedState": {
+        "slots": [
+          "0n",
+          "0n",
+          "7n",
+          "0n"
+        ]
+      }
+    },
+    {
+      "method": "put",
+      "args": [
+        "0n",
+        "5n"
+      ],
+      "expect": "accept",
+      "note": "first slot",
+      "expectedState": {
+        "slots": [
+          "5n",
+          "0n",
+          "0n",
+          "0n"
+        ]
+      }
+    },
+    {
+      "method": "put",
+      "args": [
+        "3n",
+        "9n"
+      ],
+      "expect": "accept",
+      "note": "last slot",
+      "expectedState": {
+        "slots": [
+          "0n",
+          "0n",
+          "0n",
+          "9n"
+        ]
+      }
+    },
+    {
+      "method": "put",
+      "args": [
+        "2n",
+        "7n"
+      ],
+      "expect": "reject",
+      "note": "tampered continuation output",
+      "tamperOutput": true,
+      "cryptoNearMiss": true
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "6fdb501bb2572f0fdec08b5467024e050b9ae1a606ef29ec9c4d7a44401c4592",
+    "expected-ir.json": "603326000b303cebf5827486c03a17b156488cd49af212ddb977f2bdbaa5a74f"
+  }
+}

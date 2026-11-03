@@ -129,11 +129,13 @@ class StaleStateUnrelatedVarLenTest {
     /**
      * Cross-tier pins, captured from the five tiers that already carry the fix
      * (TypeScript, Go, Rust, Python, Ruby). sha256 is taken over the ASCII hex
-     * string, exactly as the sibling Python and Zig tests do.
+     * string, exactly as the sibling Python and Zig tests do. N-044 re-stamp:
+     * the var-length reader reads PUSHDATA lengths unsigned, whitelists the
+     * header and asserts exact consumption (1280 -> 1308 hex chars).
      */
-    private static final int PROBE_FIXED_LEN = 1280;
+    private static final int PROBE_FIXED_LEN = 1308;
     private static final String PROBE_FIXED_SHA256 =
-        "782ca34bbffc1d3889b034d74e4af18b4d326fa1910229086a7b08befd64232d";
+        "0eff5de2f7274f45f37850f4aa186ca85ead5f1e7623c0798c059fcddfb07a04";
 
     /**
      * The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a

@@ -1,12 +1,17 @@
 package frontend
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -49,14 +54,16 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.zig -> ParseZig
 //   - .runar.java -> ParseJava
 //   - default -> Parse (existing TypeScript parser)
-// ackUnsoundSP1FriRE opts a contract in to the KNOWN-UNSOUND SP1 FRI verifier.
-// Scanned over the RAW SOURCE in ParseSource so every surface format honours it
-// identically — unlike @sighash / @embedAlways, which only the TypeScript
-// parser reads. See sp1_fri_soundness_warning.go for what is unsound and why
-// the default is a hard error.
-var ackUnsoundSP1FriRE = regexp.MustCompile(`@acknowledgeUnsoundSP1FriVerifier\b`)
-
 func ParseSource(source []byte, fileName string) *ParseResult {
+	result := parseSourceDispatch(source, fileName)
+	// N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
+	if result != nil {
+		normalizeLoopConditions(result.Contract)
+	}
+	return result
+}
+
+func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 	// DoS-bound size guard. Reject oversized source BEFORE any
 	// format-specific parser touches the input. BUG-008 follow-up.
 	if err := assertSourceBytesUnderLimit(source); err != nil {
@@ -72,85 +79,47 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 
 	lower := strings.ToLower(fileName)
 
-	// The TypeScript surface parser (Parse, the default branch) now honours the
+	// The TypeScript surface parser (Parse, the default branch) reads the
 	// `@sighash` (#123, per-method sighash type) and `@embedAlways` (#109,
-	// readonly-field DCE opt-out) comment directives, matching the TS reference
-	// compiler. The eight non-TS surface parsers below do NOT read comments, so
-	// they would silently drop these directives and change signing / DCE
-	// semantics. Fail closed on those formats rather than miscompile — this is
-	// strictly safer than the TS reference (which silently ignores the
-	// directives in its non-.ts frontends) and has zero conformance impact (no
-	// fixture uses the directives). The `.runar.ts` surface is exempt because
-	// Parse now implements the directives.
-	switch {
-	case strings.HasSuffix(lower, ".runar.sol"):
-		if msg := unsupportedDirectiveError(source, "Solidity"); msg != "" {
-			return directiveGuardResult(msg)
+	// readonly-field DCE opt-out) directives from COMMENTS. The eight non-TS
+	// surfaces spell both directives natively instead (N-093, user decision
+	// R38: a modifier mirroring each surface's readonly idiom — see
+	// nonTSSurfaces), and their parsers drop comments, so a COMMENT directive in
+	// one of those sources would be silently ignored and change signing / DCE
+	// semantics. Fail closed on those formats rather than miscompile, and name
+	// the native spelling to use. None of the native spellings contains either
+	// marker, so this guard never trips on them. Mirrors the TS reference
+	// (01-parse.ts NON_TS_SURFACES).
+	for _, s := range nonTSSurfaces {
+		if strings.HasSuffix(lower, s.ext) {
+			if msg := unsupportedDirectiveError(source, s); msg != "" {
+				return directiveGuardResult(msg)
+			}
+			result := s.parse(source, fileName)
+			// N-344: an immutable `.runar.rs` `let` / `.runar.zig` `const` local
+			// cannot be reassigned (the other surfaces have no such spelling).
+			if result != nil && (s.ext == ".runar.rs" || s.ext == ".runar.zig") {
+				result.Errors = append(result.Errors, checkConstReassignment(result.Contract)...)
+			}
+			return result
 		}
-		// R-147: stamped like every other surface. Two branches used to return
-		// without it, so `@acknowledgeUnsoundSP1FriVerifier` could never be
-		// honoured on .runar.sol or .runar.rs — the SP1-FRI refusal was
-		// unbypassable there and bypassable on the other seven. Safe, but a
-		// per-surface difference in a security gate, and frontend parity is
-		// this project's first invariant whichever way the odd ones lean.
-		return stampSP1FriAck(ParseSolidity(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.move"):
-		if msg := unsupportedDirectiveError(source, "Move"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParseMove(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.go"):
-		if msg := unsupportedDirectiveError(source, "Go DSL"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParseGoContract(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.py"):
-		if msg := unsupportedDirectiveError(source, "Python"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParsePython(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.rs"):
-		if msg := unsupportedDirectiveError(source, "Rust"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		// R-147: see the .runar.sol branch above.
-		return stampSP1FriAck(ParseRustMacro(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.rb"):
-		if msg := unsupportedDirectiveError(source, "Ruby"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParseRuby(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.zig"):
-		if msg := unsupportedDirectiveError(source, "Zig"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParseZig(source, fileName), source)
-	case strings.HasSuffix(lower, ".runar.java"):
-		if msg := unsupportedDirectiveError(source, "Java"); msg != "" {
-			return directiveGuardResult(msg)
-		}
-		return stampSP1FriAck(ParseJava(source, fileName), source)
-	default:
-		// TypeScript surface: honours @sighash / @embedAlways directly.
-		return stampSP1FriAck(Parse(source, fileName), source)
 	}
+	// TypeScript surface: honours @sighash / @embedAlways directly.
+	result := Parse(source, fileName)
+	// N-342: `const` locals cannot be reassigned (`.runar.ts` only).
+	if result != nil {
+		result.Errors = append(result.Errors, checkConstReassignment(result.Contract)...)
+	}
+	return result
 }
 
-// stampSP1FriAck records whether the raw source carried the
-// @acknowledgeUnsoundSP1FriVerifier directive. Applied to the parse RESULT so
-// it is independent of which surface parser ran.
-func stampSP1FriAck(res *ParseResult, source []byte) *ParseResult {
-	if res != nil && res.Contract != nil && ackUnsoundSP1FriRE.Match(source) {
-		res.Contract.AckUnsoundSP1Fri = true
-	}
-	return res
-}
-
-// Directive markers for the fail-closed guard. Word-boundary anchored to
-// mirror the TypeScript compiler's `/@sighash\b/` / `/@embedAlways\b/` scans,
-// so an identifier like `sighashType` does not trip the guard.
+// Directive markers for the fail-closed guard. `@embedAlways` is word-boundary
+// anchored so an identifier like `sighashType` does not trip the guard;
+// `@sighash` is not (N-244): N-039 made every occurrence of the marker a
+// directive, so a glued `@sighashSINGLE|FORKID` is refused here too, with the
+// message every tier shares.
 var (
-	sighashDirectiveRE     = regexp.MustCompile(`@sighash\b`)
+	sighashDirectiveRE     = regexp.MustCompile(`@sighash`)
 	embedAlwaysDirectiveRE = regexp.MustCompile(`@embedAlways\b`)
 )
 
@@ -158,36 +127,194 @@ func directiveGuardResult(msg string) *ParseResult {
 	return &ParseResult{Errors: []Diagnostic{{Message: msg, Severity: SeverityError}}}
 }
 
+// nonTSSurface is one non-TS surface: its extension, the human-readable
+// surface name for the diagnostic, its format doc, the native spelling of each
+// directive on it (N-093), and its parser. `.runar.ts` is intentionally absent:
+// the default branch implements the comment directives.
+type nonTSSurface struct {
+	ext, name, doc, sighashSpelling, embedSpelling string
+	parse                                          func([]byte, string) *ParseResult
+}
+
+var nonTSSurfaces = []nonTSSurface{
+	{".runar.sol", "Solidity", "solidity", "the function modifier sighash(<FLAGS>)", "the property modifier embedAlways", ParseSolidity},
+	{".runar.move", "Move", "move", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]", ParseMove},
+	{".runar.go", "Go DSL", "go", "the directive //runar:sighash <FLAGS>", `the struct tag option runar:"readonly,embedAlways"`, ParseGoContract},
+	{".runar.py", "Python", "python", `@public(sighash="<FLAGS>")`, "the wrapper type EmbedAlways[T]", ParsePython},
+	{".runar.rs", "Rust", "rust", "the attribute #[sighash(<FLAGS>)]", "the attribute #[embed_always]", ParseRustMacro},
+	{".runar.rb", "Ruby", "ruby", "runar_sighash '<FLAGS>'", "the prop option embed_always: true", ParseRuby},
+	{".runar.zig", "Zig", "zig", `the return type runar.Sighash("<FLAGS>")`, "the type function runar.EmbedAlways(T)", ParseZig},
+	{".runar.java", "Java", "java", `the annotation @Sighash("<FLAGS>")`, "the annotation @EmbedAlways", ParseJava},
+}
+
 // unsupportedDirectiveError returns a non-empty diagnostic message when the
-// source carries a `@sighash` (#123) or `@embedAlways` (#109) directive on a
-// surface format whose parser does not read comments (so the directive would be
-// silently dropped), or "" when the source is clean. surfaceName names the
-// non-TS format for the diagnostic.
-func unsupportedDirectiveError(source []byte, surfaceName string) string {
+// source carries a `@sighash` (#123) or `@embedAlways` (#109) COMMENT directive
+// on a non-TS surface whose parser ignores comments (so the directive would be
+// silently dropped), or "" when the source is clean. The message names the
+// surface's native spelling (N-093).
+func unsupportedDirectiveError(source []byte, s nonTSSurface) string {
 	if sighashDirectiveRE.Match(source) {
-		return fmt.Sprintf("@sighash directive (issue #123) is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @sighash is honoured", surfaceName)
+		return fmt.Sprintf("@sighash directive (issue #123) is not supported as a comment by the %s surface parser; write it as %s (see docs/formats/%s.md)", s.name, s.sighashSpelling, s.doc)
 	}
 	if embedAlwaysDirectiveRE.Match(source) {
-		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured", surfaceName)
+		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported as a comment by the %s surface parser; write it as %s (see docs/formats/%s.md)", s.name, s.embedSpelling, s.doc)
 	}
 	return ""
 }
 
 // Parse parses a TypeScript source string and extracts the Rúnar contract AST.
 func Parse(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard. Reject oversized source BEFORE the tokenizer
+	// touches it, even when Parse is called directly instead of via
+	// ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
+	return withNestingLimit(func() *ParseResult { return parseTsSurface(source, fileName) })
+}
+
+// firstNonASCIIOutsideTsLiterals is N-423's port of the TS reference's
+// firstNonAsciiOutsideLiterals (01-parse.ts): the byte offset of the first
+// non-ASCII character outside a comment or a string / template literal, or
+// -1. `//` comments end at '\n', '\r', U+2028 or U+2029; `/* */` at its
+// close or end of file; '..' / ".." at the matching quote or a '\n' / '\r';
+// templates at the matching backtick. A backslash in a string or template
+// skips the next character (or "\r\n").
+func firstNonASCIIOutsideTsLiterals(src []byte) int {
+	n := len(src)
+	for i := 0; i < n; {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < n && src[i+1] == '/':
+			i += 2
+			for i < n && src[i] != '\n' && src[i] != '\r' &&
+				!(bytes.HasPrefix(src[i:], []byte("\u2028")) || bytes.HasPrefix(src[i:], []byte("\u2029"))) {
+				i++
+			}
+		case c == '/' && i+1 < n && src[i+1] == '*':
+			end := bytes.Index(src[i+2:], []byte("*/"))
+			if end < 0 {
+				i = n
+			} else {
+				i += 2 + end + 2
+			}
+		case c == '\'' || c == '"' || c == '`':
+			i++
+			for i < n {
+				d := src[i]
+				if d == c {
+					i++
+					break
+				}
+				if c != '`' && (d == '\n' || d == '\r') {
+					break
+				}
+				if d == '\\' {
+					if bytes.HasPrefix(src[i+1:], []byte("\r\n")) {
+						i += 3
+					} else {
+						i += 2
+					}
+				} else {
+					i++
+				}
+			}
+		case c >= 0x80:
+			return i
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+// tsUTF16Position is the TS reference's locFromPos for byte offset i: line =
+// 1 + the number of '\n' before i; column (0-based) = UTF-16 units since the
+// last '\n' or '\r'.
+func tsUTF16Position(src []byte, i int) (int, int) {
+	line := 1 + bytes.Count(src[:i], []byte("\n"))
+	start := bytes.LastIndexAny(src[:i], "\n\r") + 1
+	col := 0
+	for _, r := range string(src[start:i]) {
+		col += utf16.RuneLen(r)
+	}
+	return line, col
+}
+
+// tsParseTimeLimit bounds the tree-sitter parse of a .runar.ts source (N-308).
+//
+// It is WALL-CLOCK, not an operation count: the go-tree-sitter binding exposes
+// no operation counter (its SetOperationLimit is ts_parser_set_timeout_micros,
+// whose clock is process CPU via clock() on macOS but CLOCK_MONOTONIC wall
+// time on Linux), so the bound is a context deadline, which tree-sitter polls
+// through its cancellation flag every 100 parse actions on every OS.
+// Generous on purpose: a valid source filling MAX_SOURCE_BYTES parses in
+// about a second; the quadratic recovery shapes run for minutes.
+const tsParseTimeLimit = 20 * time.Second
+
+// TsParseTooComplexMessage is the diagnostic for a .runar.ts source whose
+// tree-sitter parse exceeded tsParseTimeLimit.
+const TsParseTooComplexMessage = "source too complex to parse: tree-sitter parse of the .runar.ts source exceeded its time bound"
+
+// parseTsSurface is the .runar.ts surface: tree-sitter parse, then conversion
+// to the Rúnar AST.
+func parseTsSurface(source []byte, fileName string) *ParseResult {
+	// N-423 (user decision R163): tree-sitter accepts ECMAScript's Unicode
+	// identifiers and whitespace; Rúnar takes only ASCII outside comments
+	// and string literals, as the TS reference's pre-scan does.
+	if i := firstNonASCIIOutsideTsLiterals(source); i >= 0 {
+		r, _ := utf8.DecodeRune(source[i:])
+		line, col := tsUTF16Position(source, i)
+		return &ParseResult{Errors: []Diagnostic{lexDiag(fmt.Sprintf("Unexpected character '%c'", r), fileName, line, col)}}
+	}
+
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
 
-	tree, err := parser.ParseCtx(context.Background(), nil, source)
+	// N-308: tree-sitter's error recovery is quadratic on some bracket-free
+	// shapes (`|| || … a`, `lambda: lambda: … a`, `a and a … a` filling
+	// MAX_SOURCE_BYTES ran >137 s CPU inside the C parser). Bound the parse
+	// and refuse past the bound.
+	ctx, cancel := context.WithTimeout(context.Background(), tsParseTimeLimit)
+	defer cancel()
+	tree, err := parser.ParseCtx(ctx, nil, source)
+	if err != nil && ctx.Err() != nil {
+		return &ParseResult{Errors: []Diagnostic{{Message: TsParseTooComplexMessage, Severity: SeverityError}}}
+	}
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: fmt.Sprintf("parse error: %v", err), Severity: SeverityError}}}
+	}
+
+	// N-390: heal `a < (-1n & -2n)`, which tree-sitter reads as type arguments.
+	var inserted []insertedByte
+	if fixed, fixedTree, ins := repairLtParenNegativeLiteral(ctx, parser, source, tree); fixedTree != nil {
+		source, tree, inserted = fixed, fixedTree, ins
 	}
 
 	root := tree.RootNode()
 	p := &parseContext{
 		source:   source,
 		fileName: fileName,
+		inserted: inserted,
 	}
+
+	// F-213 measure (A), before anything walks the tree recursively.
+	// tree-sitter has no hook inside its parser, so the counter the
+	// hand-written surfaces keep is recomputed here, iteratively.
+	if bad := tsParseNestingViolation(root); bad != nil {
+		loc := p.loc(bad)
+		return sourceNestingResult(&loc)
+	}
+
+	// F-026: every number, extended over the [0-9A-Za-z_] characters glued to
+	// it (tree-sitter ends `0b102` at `0b10`), must be a TypeScript integer
+	// literal; `012`, `10_`, `0b102` are refused with the shared diagnostic.
+	p.checkNumericLiterals(root)
+
+	// N-121: the walk below ignores the `?.` of `this?.t` / `this?.m()` /
+	// `this.m?.()`, so each compiled as a plain access or call. Optional
+	// chaining is disallowed; refuse it.
+	p.checkOptionalChaining(root)
 
 	// tree-sitter is error-tolerant: malformed source still yields a tree, with
 	// the bad region marked ERROR/MISSING. Walking such a tree silently DROPS
@@ -210,7 +337,11 @@ func Parse(source []byte, fileName string) *ParseResult {
 
 	contract := p.findContract(root)
 	if contract == nil {
-		p.addError("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found")
+		p.errors = append(p.errors, Diagnostic{
+			Message:  "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found",
+			Severity: SeverityError,
+			Loc:      &SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		})
 		return &ParseResult{Errors: p.errors}
 	}
 
@@ -228,20 +359,184 @@ type parseContext struct {
 	source   []byte
 	fileName string
 	errors   []Diagnostic
+	// inserted lists the bytes repairLtParenNegativeLiteral added to source,
+	// so reported columns can be mapped back to the original text (N-390).
+	inserted []insertedByte
 }
 
-// firstBadNode returns the first ERROR or MISSING node in the tree, so the
-// diagnostic can point at the offending line instead of the whole file.
-func firstBadNode(n *sitter.Node) *sitter.Node {
-	if n.IsError() || n.IsMissing() {
-		return n
-	}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		if bad := firstBadNode(n.Child(i)); bad != nil {
-			return bad
+// insertedByte is the (row, column) of one byte repairLtParenNegativeLiteral
+// inserted, in the repaired source.
+type insertedByte struct{ row, col uint32 }
+
+// origCol maps a column of the repaired source back to the column of the
+// same character in the original source.
+func (p *parseContext) origCol(pt sitter.Point) int {
+	col := int(pt.Column)
+	for _, b := range p.inserted {
+		if b.row == pt.Row && b.col < pt.Column {
+			col--
 		}
 	}
-	return nil
+	return col
+}
+
+// checkNumericLiterals refuses every malformed .runar.ts numeric literal
+// (F-026, the TS reference's reportInvalidNumericLiterals).
+//
+// Iterative, in source order: it runs over the raw tree-sitter tree, and
+// measure (A) did not always bound every node kind (a 4 MiB `&&&…&Int` type
+// annotation is a valid ~4M-deep intersection_type chain, which (A) counts
+// only since N-311), so a recursive walk overflowed the 1 GB goroutine stack
+// (F-213 refuter, ref_type_rs).
+func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
+	coveredTo := -1
+	tsWalk(root, func(n *sitter.Node) bool {
+		// IsNamed: the anonymous `number` keyword token of a `: number` /
+		// `as number` type shares this node type but is not a literal (N-365).
+		if n.Type() == "number" && n.IsNamed() && int(n.StartByte()) >= coveredTo {
+			start, end := int(n.StartByte()), int(n.EndByte())
+			for end < len(p.source) && isNumberContinue(p.source[end]) {
+				end++
+			}
+			coveredTo = end
+			text := string(p.source[start:end])
+			if parseIntLiteral("ts", text) == nil {
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, p.origCol(n.StartPoint())))
+			}
+		}
+		return true
+	})
+}
+
+// checkOptionalChaining refuses the first .runar.ts `?.`, located at its `?`
+// (N-121, the TS reference's reportOptionalChaining). tree-sitter wraps the
+// `?.` of a member or subscript access in an optional_chain node but leaves
+// an optional call's `?.` as a bare anonymous token, so both are matched.
+// Iterative and in source order, like checkNumericLiterals.
+func (p *parseContext) checkOptionalChaining(root *sitter.Node) {
+	tsWalk(root, func(n *sitter.Node) bool {
+		if n.Type() == "optional_chain" || n.Type() == "?." {
+			p.errors = append(p.errors, lexDiag(OptionalChainingMsg, p.fileName, int(n.StartPoint().Row)+1, p.origCol(n.StartPoint())))
+			return false
+		}
+		return true
+	})
+}
+
+// tsWalk visits root and every node below it in pre-order (source order),
+// iteratively, with one TreeCursor, until visit returns false. It replaces
+// stack walks that pushed n.Child(i) for each i: n.Child(i) is not O(1) —
+// tree-sitter iterates from the first child on every call — so those walks
+// were quadratic in a node's child count, and error recovery on n unbalanced
+// openers leaves a node with ~n children (N-181: a 4 MiB `[[[…` ran for hours
+// before the syntax error was reported).
+func tsWalk(root *sitter.Node, visit func(*sitter.Node) bool) {
+	cur := sitter.NewTreeCursor(root)
+	defer cur.Close()
+	for {
+		if !visit(cur.CurrentNode()) {
+			return
+		}
+		if cur.GoToFirstChild() {
+			continue
+		}
+		for !cur.GoToNextSibling() {
+			if !cur.GoToParent() {
+				return
+			}
+		}
+	}
+}
+
+// repairLtParenNegativeLiteral works around a tree-sitter-typescript
+// ambiguity (N-390). In `a < (-1n & -2n)` the grammar prefers type arguments
+// (`a<(-1n & -2n)>`, `-1n` being a valid literal type) over a comparison, and
+// then fails on the missing `>`; the real TypeScript parser, and so the TS
+// reference, reads the comparison. A negative literal in a type position can
+// be told apart from the expression by writing it `-(1n)`, which is not a type
+// and which parseParenExpression reads straight through, so the AST is the one
+// the unparenthesised spelling denotes. The rewrite is used only when the
+// rewritten source parses with no error at all; otherwise it returns a nil
+// tree and the caller keeps (and reports) the original.
+func repairLtParenNegativeLiteral(ctx context.Context, parser *sitter.Parser, source []byte, tree *sitter.Tree) ([]byte, *sitter.Tree, []insertedByte) {
+	const maxSites = 64
+	root := tree.RootNode()
+	if !root.HasError() {
+		return nil, nil, nil
+	}
+	type site struct{ start, end uint32 }
+	var sites []site
+	tooMany := false
+	tsWalk(root, func(n *sitter.Node) bool {
+		if n.Type() != "unary_expression" {
+			return true
+		}
+		if par := n.Parent(); par == nil || par.Type() != "literal_type" {
+			return true
+		}
+		op, arg := n.ChildByFieldName("operator"), n.ChildByFieldName("argument")
+		if op == nil || arg == nil || op.Content(source) != "-" || arg.Type() != "number" {
+			return true
+		}
+		if len(sites) == maxSites {
+			tooMany = true
+			return false
+		}
+		sites = append(sites, site{arg.StartByte(), arg.EndByte()})
+		return true
+	})
+	if len(sites) == 0 || tooMany {
+		return nil, nil, nil
+	}
+	fixed := make([]byte, 0, len(source)+2*len(sites))
+	var inserted []insertedByte
+	row, lineStart := uint32(0), 0
+	// mark records the byte about to be appended at its (row, column) in fixed.
+	mark := func() {
+		inserted = append(inserted, insertedByte{row, uint32(len(fixed) - lineStart)})
+	}
+	// copyText appends src, tracking the row/line start of the repaired source.
+	copyText := func(src []byte) {
+		for _, c := range src {
+			fixed = append(fixed, c)
+			if c == '\n' {
+				row++
+				lineStart = len(fixed)
+			}
+		}
+	}
+	last := uint32(0)
+	for _, st := range sites {
+		copyText(source[last:st.start])
+		mark()
+		fixed = append(fixed, '(')
+		copyText(source[st.start:st.end])
+		mark()
+		fixed = append(fixed, ')')
+		last = st.end
+	}
+	fixed = append(fixed, source[last:]...)
+	fixedTree, err := parser.ParseCtx(ctx, nil, fixed)
+	if err != nil || fixedTree == nil || fixedTree.RootNode().HasError() {
+		return nil, nil, nil
+	}
+	return fixed, fixedTree, inserted
+}
+
+// firstBadNode returns the first ERROR or MISSING node in the tree (pre-order,
+// source order), so the diagnostic can point at the offending line instead of
+// the whole file. Iterative for the same reason as checkNumericLiterals:
+// tree-sitter error recovery can leave an arbitrarily deep subtree.
+func firstBadNode(root *sitter.Node) *sitter.Node {
+	var bad *sitter.Node
+	tsWalk(root, func(n *sitter.Node) bool {
+		if n.IsError() || n.IsMissing() {
+			bad = n
+			return false
+		}
+		return true
+	})
+	return bad
 }
 
 // snippet renders a short, single-line excerpt of the node's source span for
@@ -274,7 +569,7 @@ func (p *parseContext) loc(node *sitter.Node) SourceLocation {
 	return SourceLocation{
 		File:   p.fileName,
 		Line:   int(pos.Row) + 1,
-		Column: int(pos.Column),
+		Column: p.origCol(pos),
 	}
 }
 
@@ -295,7 +590,7 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 			c := p.tryParseContractClass(child)
 			if c != nil {
 				if contract != nil {
-					p.addError("only one SmartContract subclass allowed per file")
+					p.addOnlyOneContractError(child)
 				}
 				contract = c
 			}
@@ -312,7 +607,9 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 					c := p.tryParseContractClass(gc)
 					if c != nil {
 						if contract != nil {
-							p.addError("only one SmartContract subclass allowed per file")
+							// Located at `export`, the declaration's first
+							// token, as in the TS reference.
+							p.addOnlyOneContractError(child)
 						}
 						contract = c
 					}
@@ -324,6 +621,17 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 	return contract
 }
 
+// addOnlyOneContractError reports an extra valid contract class at the start
+// of its declaration, with the TS reference's diagnostic.
+func (p *parseContext) addOnlyOneContractError(decl *sitter.Node) {
+	loc := p.loc(decl)
+	p.errors = append(p.errors, Diagnostic{
+		Message:  "Only one SmartContract subclass is allowed per file",
+		Severity: SeverityError,
+		Loc:      &loc,
+	})
+}
+
 func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 	// Check if class extends SmartContract
 	heritage := p.findChildByType(node, "class_heritage")
@@ -331,19 +639,21 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 		return nil
 	}
 
-	// The heritage clause should contain "SmartContract",
-	// "StatefulSmartContract", or "UnsafeSmartContract". Order matters:
-	// both "StatefulSmartContract" and "UnsafeSmartContract" contain the
-	// substring "SmartContract", so they must be checked first.
-	heritageText := p.nodeText(heritage)
-	parentClass := ""
-	if strings.Contains(heritageText, "StatefulSmartContract") {
-		parentClass = "StatefulSmartContract"
-	} else if strings.Contains(heritageText, "UnsafeSmartContract") {
-		parentClass = "UnsafeSmartContract"
-	} else if strings.Contains(heritageText, "SmartContract") {
-		parentClass = "SmartContract"
-	} else {
+	// N-011: the `extends` expression must be EXACTLY a valid base, as in
+	// the TS reference (`ext.getExpression().getText()`). A substring match
+	// used to accept `extends NotSmartContract` as a SmartContract.
+	extends := p.findChildByType(heritage, "extends_clause")
+	if extends == nil {
+		return nil
+	}
+	value := extends.ChildByFieldName("value")
+	if value == nil {
+		return nil
+	}
+	parentClass := p.nodeText(value)
+	switch parentClass {
+	case "SmartContract", "StatefulSmartContract", "UnsafeSmartContract":
+	default:
 		return nil
 	}
 
@@ -368,11 +678,13 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 	var properties []PropertyNode
 	var constructor *MethodNode
 	var methods []MethodNode
+	var methodSpans, propSpans [][2]uint32
 
 	for i := 0; i < int(body.ChildCount()); i++ {
 		member := body.Child(i)
 		switch member.Type() {
 		case "public_field_definition":
+			propSpans = append(propSpans, memberCommentSpans(member)...)
 			prop := p.parseProperty(member)
 			if prop != nil {
 				properties = append(properties, *prop)
@@ -383,11 +695,15 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 				ctor := p.parseConstructor(member)
 				constructor = &ctor
 			} else {
+				methodSpans = append(methodSpans, memberCommentSpans(member)...)
 				method := p.parseMethod(member)
 				methods = append(methods, method)
 			}
 		}
 	}
+
+	// N-199 (R75): a directive in the class body that no member reads.
+	p.reportLostDirectives(body, methodSpans, propSpans)
 
 	if constructor == nil {
 		p.addError("contract must have a constructor")
@@ -467,12 +783,109 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 // or `// @embedAlways` directive is the immediately-preceding sibling of the
 // member it annotates. Stacked comments are concatenated (mirrors the TS
 // reference's JSDoc + leading-trivia scan).
+//
+// F-282: sibling adjacency alone is not enough — ts-morph's leading-comment
+// scan never attaches a comment that shares a line with the PRECEDING
+// token (verified directly against ts-morph: that comment is the preceding
+// token's own trailing trivia, not this node's leading trivia). Find the
+// nearest non-comment previous sibling and stop collecting at (and
+// including) the first comment that starts on the same row that sibling
+// ends on.
 func (p *parseContext) leadingCommentText(node *sitter.Node) string {
 	var parts []string
-	for prev := node.PrevSibling(); prev != nil && prev.Type() == "comment"; prev = prev.PrevSibling() {
-		parts = append(parts, p.nodeText(prev))
+	for _, c := range leadingCommentNodes(node) {
+		parts = append(parts, p.nodeText(c))
 	}
 	return strings.Join(parts, "\n")
+}
+
+// leadingCommentNodes returns the comment siblings leadingCommentText reads
+// (nearest first). N-199 uses their byte spans to find a directive that no
+// member reads.
+func leadingCommentNodes(node *sitter.Node) []*sitter.Node {
+	var prevNonComment *sitter.Node
+	for s := node.PrevSibling(); s != nil; s = s.PrevSibling() {
+		if s.Type() != "comment" {
+			prevNonComment = s
+			break
+		}
+	}
+	var boundaryRow uint32
+	hasBoundary := prevNonComment != nil
+	if hasBoundary {
+		boundaryRow = prevNonComment.EndPoint().Row
+	}
+	var out []*sitter.Node
+	for prev := node.PrevSibling(); prev != nil && prev.Type() == "comment"; prev = prev.PrevSibling() {
+		if hasBoundary && prev.StartPoint().Row <= boundaryRow {
+			break
+		}
+		out = append(out, prev)
+	}
+	return out
+}
+
+// memberCommentSpans returns the byte spans of node's leading comments.
+func memberCommentSpans(node *sitter.Node) [][2]uint32 {
+	var spans [][2]uint32
+	for _, c := range leadingCommentNodes(node) {
+		spans = append(spans, [2]uint32{c.StartByte(), c.EndByte()})
+	}
+	return spans
+}
+
+// LostDirectiveMsg is the N-199 (R75) diagnostic shared verbatim by all seven
+// tiers (TS: lostDirectiveMessage in sighash-directive.ts).
+func LostDirectiveMsg(directive string) string {
+	target := "property"
+	if directive == "@sighash" {
+		target = "method"
+	}
+	return fmt.Sprintf("%s directive is not attached to any %s and would be silently ignored; put the comment on its own line directly above the %s it annotates (a comment that shares a line with the preceding code belongs to that code)", directive, target, target)
+}
+
+var sighashMarkerRE = regexp.MustCompile(`@sighash`)
+
+// reportLostDirectives (N-199, user decision R75) refuses a `@sighash` /
+// `@embedAlways` marker inside the contract class body that is not in the
+// leading comments of a member of the kind that reads it (`@sighash` of a
+// method, `@embedAlways` of a property). A comment sharing a line with the
+// preceding token never attaches (F-282), so such a directive used to be
+// dropped silently. Text outside the class braces is prose and not scanned.
+// Mirrors reportLostDirectives in the TS reference (01-parse.ts).
+func (p *parseContext) reportLostDirectives(body *sitter.Node, methodSpans, propSpans [][2]uint32) {
+	start, end := body.StartByte()+1, body.EndByte()-1
+	if end <= start {
+		return
+	}
+	type lost struct {
+		pos       int
+		directive string
+	}
+	var found []lost
+	scan := func(re *regexp.Regexp, directive string, spans [][2]uint32) {
+		for _, m := range re.FindAllIndex(p.source[start:end], -1) {
+			pos := uint32(m[0]) + start
+			attached := false
+			for _, s := range spans {
+				if s[0] <= pos && pos < s[1] {
+					attached = true
+					break
+				}
+			}
+			if !attached {
+				found = append(found, lost{int(pos), directive})
+			}
+		}
+	}
+	scan(sighashMarkerRE, "@sighash", methodSpans)
+	scan(embedAlwaysDirectiveRE, "@embedAlways", propSpans)
+	sort.Slice(found, func(i, j int) bool { return found[i].pos < found[j].pos })
+	for _, f := range found {
+		lineStart := bytes.LastIndexByte(p.source[:f.pos], '\n') + 1
+		loc := SourceLocation{File: p.fileName, Line: bytes.Count(p.source[:f.pos], []byte{'\n'}) + 1, Column: p.origCol(sitter.Point{Row: uint32(bytes.Count(p.source[:f.pos], []byte{'\n'})), Column: uint32(f.pos - lineStart)})}
+		p.errors = append(p.errors, Diagnostic{Message: LostDirectiveMsg(f.directive), Severity: SeverityError, Loc: &loc})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +912,18 @@ func (p *parseContext) parseConstructor(node *sitter.Node) MethodNode {
 func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 	name := p.getMethodName(node)
 	params := p.parseMethodParams(node)
+	// N-331: the AST keeps no return type, so an unknown name is refused here.
+	if rt := p.findChildByType(node, "type_annotation"); rt != nil {
+		isPublic := false
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if c := node.Child(i); c.Type() == "accessibility_modifier" && p.nodeText(c) == "public" {
+				isPublic = true
+			}
+		}
+		if d := UnknownReturnTypeDiagnostic(p.parseTypeAnnotation(rt), name, p.loc(node), isPublic); d != nil {
+			p.errors = append(p.errors, *d)
+		}
+	}
 	body := p.parseMethodBody(node)
 
 	visibility := "private"
@@ -510,6 +935,12 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 			if modText == "public" {
 				visibility = "public"
 			}
+		}
+		// N-050: a static method is not a contract method; `public static`
+		// used to get a dispatch selector (an unsigned spend path).
+		if child.Type() == "static" {
+			loc := p.loc(node)
+			p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
 		}
 	}
 
@@ -539,15 +970,17 @@ func (p *parseContext) parseSighashOnMethod(node *sitter.Node, name, visibility 
 		return nil
 	}
 
+	// N-039 (R88a): located at the method declaration, like the TS reference.
+	loc := p.loc(node)
 	if visibility != "public" {
-		p.addError(fmt.Sprintf(
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf(
 			"@sighash directive on non-public method '%s' has no effect — only public methods are spending entry points",
-			name))
+			name), Severity: SeverityError, Loc: &loc})
 		return nil
 	}
 
 	if !result.ok() {
-		p.addError(fmt.Sprintf("Method '%s': %s", name, result.err))
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf("Method '%s': %s", name, result.err), Severity: SeverityError, Loc: &loc})
 		return nil
 	}
 	v := result.value
@@ -647,7 +1080,7 @@ func (p *parseContext) parseTypeExpr(node *sitter.Node) TypeNode {
 		case "void":
 			return PrimitiveType{Name: "void"}
 		case "number":
-			p.addError("use 'bigint' instead of 'number' in Rúnar contracts")
+			p.addError("'number' type is not allowed in Rúnar contracts; use 'bigint' instead")
 			return PrimitiveType{Name: "bigint"}
 		}
 		return CustomType{Name: text}
@@ -711,7 +1144,7 @@ func (p *parseContext) parseGenericType(node *sitter.Node) TypeNode {
 	sizeText := p.nodeText(typeArgs[1])
 	size, err := strconv.Atoi(sizeText)
 	if err != nil || size < 0 {
-		p.addError(fmt.Sprintf("FixedArray size must be a non-negative integer literal, got '%s'", sizeText))
+		p.addError(fmt.Sprintf("FixedArray size must be a positive integer literal, got '%s'", sizeText))
 		return CustomType{Name: typeName}
 	}
 
@@ -781,29 +1214,77 @@ func (p *parseContext) parseBlockStatements(node *sitter.Node) []Statement {
 }
 
 func (p *parseContext) parseStatement(node *sitter.Node) Statement {
+	errsBefore := len(p.errors)
+	var stmt Statement
 	switch node.Type() {
-	case "lexical_declaration":
-		return p.parseVariableDecl(node)
+	case "lexical_declaration", "variable_declaration":
+		// N-054: tree-sitter parses `const`/`let` as lexical_declaration and
+		// `var` as variable_declaration. `var` is a mutable `let` here.
+		stmt = p.parseVariableDecl(node)
 
 	case "expression_statement":
-		return p.parseExpressionStatement(node)
+		stmt = p.parseExpressionStatement(node)
 
 	case "if_statement":
-		return p.parseIfStatement(node)
+		stmt = p.parseIfStatement(node)
 
 	case "for_statement":
-		return p.parseForStatement(node)
+		stmt = p.parseForStatement(node)
 
 	case "return_statement":
-		return p.parseReturnStatement(node)
+		stmt = p.parseReturnStatement(node)
 
 	case "{", "}", "(", ")", ";", ",", "comment":
 		return nil
 
 	default:
-		// Skip unknown node types silently (e.g., punctuation)
+		// F-064: every other node is a statement Rúnar does not support
+		// (while, switch, try, a bare block, `;`, ...). Returning nil here
+		// used to drop it silently; refuse it with the TS reference's
+		// diagnostic instead.
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported statement kind: %s", p.tsStatementKindName(node)),
+			SeverityError, &loc))
 		return nil
 	}
+	// F-064 backstop: callers drop a nil statement, so a supported statement
+	// kind whose operands did not parse (e.g. `assert(a), assert(b);` — the
+	// expression parser returns nil for a sequence_expression) must not vanish
+	// without a diagnostic.
+	if stmt == nil && len(p.errors) == errsBefore {
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported expression in statement: '%s'", p.snippet(node)),
+			SeverityError, &loc))
+	}
+	return stmt
+}
+
+// tsStatementKindName maps a tree-sitter statement node type onto the
+// ts.SyntaxKind name the TS reference reports for the same statement, so every
+// tier emits one shared "Unsupported statement kind: <name>" diagnostic.
+func (p *parseContext) tsStatementKindName(node *sitter.Node) string {
+	switch node.Type() {
+	case "statement_block":
+		return "Block"
+	case "for_in_statement":
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if node.Child(i).Type() == "of" {
+				return "ForOfStatement"
+			}
+		}
+		return "ForInStatement"
+	}
+	// snake_case -> PascalCase: while_statement -> WhileStatement,
+	// class_declaration -> ClassDeclaration, empty_statement -> EmptyStatement.
+	parts := strings.Split(node.Type(), "_")
+	for i, part := range parts {
+		if part != "" {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +1293,7 @@ func (p *parseContext) parseStatement(node *sitter.Node) Statement {
 
 func (p *parseContext) parseVariableDecl(node *sitter.Node) Statement {
 	// lexical_declaration: (const|let) variable_declarator
+	// variable_declaration: var variable_declarator (N-054: mutable, as `let`)
 	isConst := false
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1008,7 +1490,12 @@ func (p *parseContext) parseAugmentedAssignment(node *sitter.Node, loc SourceLoc
 	case "%=":
 		binOp = "%"
 	default:
-		binOp = "+"
+		// Same set and diagnostic as the TS reference (01-parse.ts
+		// parseExpressionStatement): any other compound operator is refused.
+		opLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported binary operator: '%s'", opText), SeverityError, &opLoc))
+		return nil
 	}
 
 	target := p.parseExpression(leftNode)
@@ -1085,6 +1572,13 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 			if s != nil {
 				initStmt = *s
 			} else {
+				// N-306: the TS reference's parseForStatement refuses a
+				// non-declaration for-initializer with this diagnostic.
+				// This branch used to silently substitute a synthetic
+				// `_i = 0` for the real initializer expression, discarding
+				// it with no error.
+				initErrLoc := loc
+				p.errors = append(p.errors, MakeDiagnostic("For loop must have a variable declaration initializer", SeverityError, &initErrLoc))
 				initStmt = VariableDeclStmt{
 					Name:           "_i",
 					Mutable:        true,
@@ -1104,7 +1598,13 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 
 	// Parse condition
 	var condition Expression
-	if condNode != nil {
+	if condNode == nil || condNode.Type() == "empty_statement" {
+		// N-135: the TS reference refuses an empty condition slot (which
+		// tree-sitter hands over as an `empty_statement` node); the `false`
+		// placeholder below only keeps the AST well-formed.
+		condLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic("For loop must have a condition", SeverityError, &condLoc))
+	} else {
 		// The condition might be wrapped in an expression_statement node
 		if condNode.Type() == "expression_statement" && condNode.ChildCount() > 0 {
 			condition = p.parseExpression(condNode.Child(0))
@@ -1121,6 +1621,10 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 	if updateNode != nil {
 		update = p.parseForUpdate(updateNode, loc)
 	} else {
+		// N-132: the TS reference refuses an empty update slot; the
+		// placeholder below only keeps the AST well-formed.
+		updLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic("For loop must have an update expression", SeverityError, &updLoc))
 		update = ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}
 	}
 
@@ -1165,25 +1669,13 @@ func (p *parseContext) parseVariableDeclFromForInit(node *sitter.Node) *Variable
 }
 
 func (p *parseContext) parseForUpdate(node *sitter.Node, loc SourceLocation) Statement {
-	// R-065: `parseExpression` has no case for `assignment_expression` or
-	// `augmented_assignment_expression`, so `i = i + 2n` and `i += 2n` both
-	// returned nil and fell through to the no-op sentinel below -- the update
-	// clause was DISCARDED at parse time and the loop then unrolled with the
-	// step the comparison direction implied. Route both through the same
-	// desugaring an assignment in statement position gets (`i += 2n` becomes
-	// `i = i + 2n`), so the validator sees the real update and can accept the
-	// unit step / reject everything else.
-	switch node.Type() {
-	case "assignment_expression":
-		if stmt := p.parseAssignment(node, loc); stmt != nil {
-			return stmt
-		}
-	case "augmented_assignment_expression":
-		if stmt := p.parseAugmentedAssignment(node, loc); stmt != nil {
-			return stmt
-		}
-	}
-
+	// N-133: the TS reference's parseForUpdate accepts only `++`/`--` here
+	// and hands everything else to parseExpression, which refuses an
+	// assignment (`i = i + 1n`, `i += 1n`) or a comma sequence with
+	// "Unsupported binary operator: '<op>'". parseExpression's
+	// assignment / sequence arms emit that same diagnostic, so route every
+	// update through it rather than desugaring assignments into statements
+	// (which compiled the unit-step spellings on this tier alone).
 	expr := p.parseExpression(node)
 	if expr == nil {
 		return ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}
@@ -1268,7 +1760,7 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		if name == "false" {
 			return BoolLiteral{Value: false}
 		}
-		return Identifier{Name: name}
+		return Identifier{Name: name, SourceLocation: p.loc(node)}
 
 	case "number":
 		text := p.nodeText(node)
@@ -1299,12 +1791,17 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return p.parseStringLiteral(node)
 
 	case "template_string":
+		// Only a NoSubstitutionTemplateLiteral is a ByteString literal; one
+		// with `${...}` is a TemplateExpression the TS reference refuses.
+		if p.findChildByType(node, "template_substitution") != nil {
+			return p.unsupportedExpr(node, "TemplateExpression")
+		}
 		text := p.nodeText(node)
 		// Remove backticks
 		if len(text) >= 2 {
 			text = text[1 : len(text)-1]
 		}
-		return ByteStringLiteral{Value: text}
+		return ByteStringLiteral{Value: text, SourceLocation: p.loc(node)}
 
 	case "ternary_expression":
 		return p.parseTernaryExpression(node)
@@ -1313,13 +1810,17 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return p.parseParenExpression(node)
 
 	case "this":
-		return Identifier{Name: "this"}
+		return Identifier{Name: "this", SourceLocation: p.loc(node)}
 
 	case "super":
-		return Identifier{Name: "super"}
+		return Identifier{Name: "super", SourceLocation: p.loc(node)}
 
 	case "as_expression":
-		// Type assertion: ignore type, parse expression
+		// Type assertion: ignore type, parse expression -- except that an
+		// asserted `number` is refused like a `: number` annotation (N-365).
+		if t := node.Child(int(node.ChildCount()) - 1); t != nil && t.Type() == "predefined_type" && p.nodeText(t) == "number" {
+			p.parseTypeExpr(t)
+		}
 		return p.parseExpression(node.Child(0))
 
 	case "non_null_expression":
@@ -1339,9 +1840,113 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		}
 		return nil
 
+	case "undefined":
+		// ts-morph parses `undefined` as an Identifier, which the typechecker
+		// then refuses ("Undefined variable 'undefined'"). tree-sitter gives it
+		// its own node type.
+		return Identifier{Name: "undefined"}
+
+	case "sequence_expression":
+		// `a, b` is a BinaryExpression with a CommaToken in the TS reference.
+		return p.unsupportedBinaryOp(node, ",")
+
+	case "assignment_expression", "augmented_assignment_expression":
+		// Assignments are statements only (parseExpressionStatement intercepts
+		// them first); in expression position -- including a for-update -- the TS
+		// reference sees a BinaryExpression with an assignment operator.
+		op := "="
+		if opNode := node.ChildByFieldName("operator"); opNode != nil {
+			op = p.nodeText(opNode)
+		}
+		return p.unsupportedBinaryOp(node, op)
+
 	default:
-		return nil
+		// N-052: this arm used to return nil, which the binary / unary / update
+		// parsers turned into BigIntLiteral(0) — `(x, 0n)`, an arrow function or
+		// `null` compiled as 0. Anonymous tokens and comments are not
+		// expressions and still yield nil for the callers that skip them;
+		// every named node is an expression the TS reference refuses.
+		if !node.IsNamed() || node.Type() == "comment" {
+			return nil
+		}
+		return p.unsupportedExpr(node, tsExpressionKindName(node.Type()))
 	}
+}
+
+// tsExpressionKindName maps a tree-sitter expression node type onto the
+// ts.SyntaxKind name the TS reference reports for the same expression, so the
+// tiers share one "Unsupported expression kind: <name>" diagnostic.
+func tsExpressionKindName(t string) string {
+	switch t {
+	case "arrow_function":
+		return "ArrowFunction"
+	case "function_expression", "function", "generator_function":
+		return "FunctionExpression"
+	case "class":
+		return "ClassExpression"
+	case "new_expression":
+		return "NewExpression"
+	case "null":
+		return "NullKeyword"
+	case "regex":
+		return "RegularExpressionLiteral"
+	case "satisfies_expression":
+		return "SatisfiesExpression"
+	case "await_expression":
+		return "AwaitExpression"
+	case "yield_expression":
+		return "YieldExpression"
+	case "object":
+		return "ObjectLiteralExpression"
+	case "spread_element":
+		return "SpreadElement"
+	case "template_string":
+		return "TemplateExpression"
+	case "meta_property":
+		return "MetaProperty"
+	case "instantiation_expression":
+		return "ExpressionWithTypeArguments"
+	default:
+		return t
+	}
+}
+
+// unsupportedExpr emits the TS reference's
+// "Unsupported expression kind: <Kind> ('<text>')" diagnostic and, like the
+// reference, returns a 0 placeholder so parsing can continue and report more.
+func (p *parseContext) unsupportedExpr(node *sitter.Node, kind string) Expression {
+	text := []rune(p.nodeText(node))
+	if len(text) > 50 {
+		text = text[:50]
+	}
+	loc := p.loc(node)
+	p.errors = append(p.errors, MakeDiagnostic(
+		fmt.Sprintf("Unsupported expression kind: %s ('%s')", kind, string(text)),
+		SeverityError, &loc))
+	return BigIntLiteral{Value: big.NewInt(0)}
+}
+
+// unsupportedBinaryOp emits the TS reference's "Unsupported binary operator"
+// diagnostic at the operator token.
+func (p *parseContext) unsupportedBinaryOp(node *sitter.Node, op string) Expression {
+	loc := p.loc(node)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if c := node.Child(i); !c.IsNamed() && p.nodeText(c) == op {
+			loc = p.loc(c)
+			break
+		}
+	}
+	p.errors = append(p.errors, MakeDiagnostic(
+		fmt.Sprintf("Unsupported binary operator: '%s'", op), SeverityError, &loc))
+	return BigIntLiteral{Value: big.NewInt(0)}
+}
+
+// tsBinaryOps is the TS reference's OP_MAP (01-parse.ts parseBinaryExpression)
+// after the `==` / `!=` mapping.
+var tsBinaryOps = map[string]bool{
+	"+": true, "-": true, "*": true, "/": true, "%": true,
+	"===": true, "!==": true, "<": true, "<=": true, ">": true, ">=": true,
+	"&&": true, "||": true, "&": true, "|": true, "^": true, "<<": true, ">>": true,
 }
 
 func (p *parseContext) parseBinaryExpression(node *sitter.Node) Expression {
@@ -1383,8 +1988,11 @@ func (p *parseContext) parseBinaryExpression(node *sitter.Node) Expression {
 	if op == "!=" {
 		op = "!=="
 	}
+	if !tsBinaryOps[op] {
+		return p.unsupportedBinaryOp(node, op)
+	}
 
-	return BinaryExpr{Op: op, Left: left, Right: right}
+	return BinaryExpr{Op: op, Left: left, Right: right, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseUnaryExpression(node *sitter.Node) Expression {
@@ -1413,7 +2021,24 @@ func (p *parseContext) parseUnaryExpression(node *sitter.Node) Expression {
 		op = p.nodeText(opNode)
 	}
 
-	return UnaryExpr{Op: op, Operand: operand}
+	// The TS reference's UNARY_MAP is `!`, `-`, `~`; ts-morph parses `typeof`,
+	// `void` and `delete` as their own expression kinds.
+	switch op {
+	case "!", "-", "~":
+	case "typeof":
+		return p.unsupportedExpr(node, "TypeOfExpression")
+	case "void":
+		return p.unsupportedExpr(node, "VoidExpression")
+	case "delete":
+		return p.unsupportedExpr(node, "DeleteExpression")
+	default:
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			"Unsupported unary prefix operator", SeverityError, &loc))
+		return BigIntLiteral{Value: big.NewInt(0)}
+	}
+
+	return UnaryExpr{Op: op, Operand: operand, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseUpdateExpression(node *sitter.Node) Expression {
@@ -1471,6 +2096,12 @@ func (p *parseContext) parseCallExpression(node *sitter.Node) Expression {
 
 	if funcNode == nil {
 		return BigIntLiteral{Value: big.NewInt(0)}
+	}
+
+	// tree-sitter models a tagged template (foo`ab`) as a call whose
+	// arguments are a template_string.
+	if argsNode != nil && argsNode.Type() == "template_string" {
+		return p.unsupportedExpr(node, "TaggedTemplateExpression")
 	}
 
 	// Special-case asm({ body, in_arity?, out_arity? }) — normalise the
@@ -1854,7 +2485,7 @@ func (p *parseContext) parseMemberExpression(node *sitter.Node) Expression {
 
 	// this.x -> PropertyAccessExpr
 	if objNode.Type() == "this" {
-		return PropertyAccessExpr{Property: propName}
+		return PropertyAccessExpr{Property: propName, SourceLocation: p.loc(objNode)}
 	}
 
 	object := p.parseExpression(objNode)
@@ -1912,14 +2543,14 @@ func (p *parseContext) parseStringLiteral(node *sitter.Node) Expression {
 	if len(text) >= 2 {
 		text = text[1 : len(text)-1]
 	}
-	return ByteStringLiteral{Value: text}
+	return ByteStringLiteral{Value: text, SourceLocation: p.loc(node)}
 }
 
 func (p *parseContext) parseParenExpression(node *sitter.Node) Expression {
 	// parenthesized_expression: "(" expression ")"
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() != "(" && child.Type() != ")" {
+		if child.Type() != "(" && child.Type() != ")" && child.Type() != "comment" {
 			return p.parseExpression(child)
 		}
 	}
@@ -1967,4 +2598,172 @@ func (p *parseContext) findChildByType(node *sitter.Node, typeName string) *sitt
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// F-213 measure (A) for the .runar.ts surface
+// ---------------------------------------------------------------------------
+
+// tsNestFrame is one node on the iterative walk's path.
+type tsNestFrame struct {
+	typ   string
+	level int
+	// chain counts the edges above this node that each become one level of
+	// the Rúnar expression tree: a binary operand, a member / subscript
+	// object, a callee (see tsParseNestingViolation).
+	chain int
+	// condParen: a parenthesized_expression that is the syntactic condition
+	// of an if / while / do / switch (the TS AST has no node for it).
+	condParen bool
+	// prefix: an update_expression whose operator comes first (`++x`).
+	prefix bool
+	// genericArgs: a type_arguments list of a generic_type (`FixedArray<..>`).
+	genericArgs bool
+}
+
+func tsIsStatementType(t string) bool {
+	return t == "statement_block" || t == "lexical_declaration" || t == "variable_declaration" ||
+		strings.HasSuffix(t, "_statement")
+}
+
+// tsChildNestFrame is the frame of a child of parent, mirroring the TS
+// reference's tsChildNesting (packages/runar-compiler/src/passes/01-parse.ts)
+// over the tree-sitter tree: a statement inside a body (+1; a block is free
+// unless it is itself a nested statement), each expression slot of a
+// statement / declaration, a parenthesised group, a call or `new` argument,
+// a subscript index, an array element, a ternary arm, a prefix-unary operand,
+// a nested type argument, an operand of an intersection / union type. Binary
+// operands, member objects and callees add nothing. tree-sitter's else_clause, an if's condition parentheses and a
+// for's condition expression_statement have no TS AST node and are mapped
+// through.
+func tsChildNestFrame(parent tsNestFrame, child *sitter.Node, field string) tsNestFrame {
+	ct := child.Type()
+	f := tsNestFrame{typ: ct, level: parent.level, chain: parent.chain}
+	if !child.IsNamed() || ct == "comment" {
+		return f
+	}
+	switch parent.typ {
+	case "binary_expression":
+		f.chain++
+	case "member_expression", "subscript_expression":
+		if field == "object" {
+			f.chain++
+		}
+	case "call_expression":
+		if field == "function" {
+			f.chain++
+		}
+	}
+	pk := parent.typ
+	if pk == "else_clause" {
+		pk = "if_statement"
+	}
+	switch ct {
+	case "update_expression":
+		if first := child.Child(0); first != nil && !first.IsNamed() {
+			f.prefix = true
+		}
+	case "type_arguments":
+		f.genericArgs = pk == "generic_type"
+	}
+	if pk == "for_statement" {
+		switch field {
+		case "initializer", "condition":
+			return f
+		case "increment":
+			f.level++
+			return f
+		}
+	}
+	if tsIsStatementType(ct) && (pk == "statement_block" || tsIsStatementType(pk)) {
+		if !(ct == "statement_block" && pk != "statement_block") {
+			f.level++
+		}
+		return f
+	}
+	switch pk {
+	case "expression_statement", "return_statement", "throw_statement":
+		f.level++
+	case "if_statement", "while_statement", "do_statement", "switch_statement":
+		if field == "condition" || field == "value" {
+			f.level++
+			f.condParen = ct == "parenthesized_expression"
+		}
+	case "variable_declarator", "public_field_definition", "required_parameter", "optional_parameter":
+		if field == "value" {
+			f.level++
+		}
+	case "parenthesized_expression":
+		if !parent.condParen {
+			f.level++
+		}
+	case "unary_expression", "array", "arguments":
+		f.level++
+	case "update_expression":
+		if parent.prefix {
+			f.level++
+		}
+	case "subscript_expression":
+		if field == "index" {
+			f.level++
+		}
+	case "ternary_expression":
+		if field != "condition" {
+			f.level++
+		}
+	case "type_arguments":
+		if parent.genericArgs {
+			f.level++
+		}
+	case "intersection_type", "union_type":
+		// N-311: each operand of an intersection / union type. tree-sitter
+		// builds `A & B & C` left-deep, as intersection(intersection(A, B), C);
+		// the TS reference keeps it one flat list, so a same-operator left
+		// operand continues the list and adds nothing.
+		if !(ct == pk && child.PrevSibling() == nil) {
+			f.level++
+		}
+	}
+	return f
+}
+
+// tsParseNestingViolation returns the first node whose parse nesting
+// (measure A) exceeds MaxSourceNesting, or nil. It walks the tree with a
+// TreeCursor, iteratively, before any recursive pass touches the tree.
+//
+// It also refuses a node reached through more than MaxSourceNesting chain
+// edges (binary operand, member / subscript object, callee). The converter
+// turns each such parent into a Rúnar node holding the converted child, so a
+// path of k chain edges is a Rúnar expression at least k deep (k-1 if the
+// innermost edge is `this.x`, which becomes a leaf, plus 1 for the leaf):
+// measure (B) is then > MaxSourceNesting and withNestingLimit would refuse
+// the source anyway. Refusing it here keeps the recursive converter off the
+// left-deep chains the grammar builds by iteration (`a + a + …`, `a.b.b…`,
+// `a[0][0]…`), whose recursion on Go's stack is quadratic in GC stack
+// scanning and fatal past the 1 GB stack ceiling.
+func tsParseNestingViolation(root *sitter.Node) *sitter.Node {
+	cur := sitter.NewTreeCursor(root)
+	defer cur.Close()
+	stack := []tsNestFrame{{typ: root.Type()}}
+	for {
+		top := stack[len(stack)-1]
+		if top.level > MaxSourceNesting || top.chain > MaxSourceNesting {
+			return cur.CurrentNode()
+		}
+		if cur.GoToFirstChild() {
+			stack = append(stack, tsChildNestFrame(top, cur.CurrentNode(), cur.CurrentFieldName()))
+			continue
+		}
+		for {
+			if len(stack) == 1 {
+				return nil
+			}
+			if cur.GoToNextSibling() {
+				stack[len(stack)-1] = tsChildNestFrame(stack[len(stack)-2], cur.CurrentNode(), cur.CurrentFieldName())
+				break
+			}
+			cur.GoToParent()
+			stack = stack[:len(stack)-1]
+		}
+	}
 }

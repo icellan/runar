@@ -22,11 +22,11 @@ module Runar
           }
         end
 
-        # CHECKSIG_RESULT_DROPPED.
+        # CHECKSIG_RESULT_DROPPED: next opcode is OP_DROP (0x75) or OP_2DROP (0x6d).
         ops.each_with_index do |op, i|
           next unless op[:opcode] == 0xac || op[:opcode] == 0xae
           next_op = ops[i + 1]
-          next unless next_op && next_op[:opcode] == 0x75
+          next unless next_op && (next_op[:opcode] == 0x75 || next_op[:opcode] == 0x6d)
           findings << {
             severity: 'warning',
             code: 'CHECKSIG_RESULT_DROPPED',

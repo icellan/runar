@@ -129,7 +129,7 @@ class TsParserTest {
         String src = "import { SmartContract } from 'runar-lang';\n";
         TsParser.ParseException e = assertThrows(TsParser.ParseException.class,
             () -> TsParser.parse(src, "Empty.runar.ts"));
-        assertTrue(e.getMessage().contains("no class extending SmartContract"));
+        assertTrue(e.getMessage().contains("No class extending SmartContract"));
     }
 
     @Test
@@ -137,7 +137,7 @@ class TsParserTest {
         String src = "class Bad extends Frobulator { constructor() { super(); } }\n";
         TsParser.ParseException e = assertThrows(TsParser.ParseException.class,
             () -> TsParser.parse(src, "Bad.runar.ts"));
-        assertTrue(e.getMessage().contains("no class extending SmartContract"));
+        assertTrue(e.getMessage().contains("No class extending SmartContract"));
     }
 
     @Test
@@ -255,7 +255,7 @@ class TsParserTest {
     void parsesReturnWithAndWithoutValue() throws Exception {
         ContractNode c = parseSnippet("""
               constructor() { super(); }
-              public valued(): bigint {
+              private valued(): bigint {
                 return 7n;
               }
               public bare(): void {
@@ -440,7 +440,7 @@ class TsParserTest {
     void parsesTernaryExpression() throws Exception {
         ContractNode c = parseSnippet("""
               constructor() { super(); }
-              public foo(x: bigint): bigint {
+              private foo(x: bigint): bigint {
                 return x > 0n ? x : -x;
               }
             """);

@@ -506,6 +506,76 @@ func TestTypeCheck_UnknownStandaloneFunction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: F-208 — a bound local variable used as a callee is rejected
+//
+// Rúnar has no first-class functions. `const f: bigint = a; const r =
+// f(a, a, a);` used to fall into the "local variable" branch and return
+// "<unknown>" with NO diagnostic, silently accepting the call.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_LocalVariableCalledAsFunction(t *testing.T) {
+	contract := &ContractNode{
+		Name:        "Bad",
+		ParentClass: "SmartContract",
+		Properties:  []PropertyNode{},
+		Constructor: MethodNode{
+			Name:   "constructor",
+			Params: []ParamNode{},
+			Body: []Statement{
+				ExpressionStmt{
+					Expr: CallExpr{
+						Callee: Identifier{Name: "super"},
+						Args:   nil,
+					},
+				},
+			},
+		},
+		Methods: []MethodNode{
+			{
+				Name:       "check",
+				Visibility: "public",
+				Params:     []ParamNode{{Name: "a", Type: PrimitiveType{Name: "bigint"}}},
+				Body: []Statement{
+					// const f: bigint = a;
+					VariableDeclStmt{
+						Name: "f",
+						Type: PrimitiveType{Name: "bigint"},
+						Init: Identifier{Name: "a"},
+					},
+					// const r = f(a, a, a);
+					VariableDeclStmt{
+						Name: "r",
+						Init: CallExpr{
+							Callee: Identifier{Name: "f"},
+							Args:   []Expression{Identifier{Name: "a"}, Identifier{Name: "a"}, Identifier{Name: "a"}},
+						},
+					},
+					ExpressionStmt{
+						Expr: CallExpr{
+							Callee: Identifier{Name: "assert"},
+							Args:   []Expression{BoolLiteral{Value: true}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tcResult := TypeCheck(contract)
+
+	found := false
+	for _, e := range tcResult.Errors {
+		if strings.Contains(e.Message, "not callable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected type check error for calling local variable 'f' as a function, got: %v", tcResult.Errors)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: ByteString arithmetic subtraction produces type error
 // ---------------------------------------------------------------------------
 
@@ -2148,5 +2218,470 @@ class EcOnCurveTest extends SmartContract {
 	tcResult := TypeCheck(contract)
 	if len(tcResult.Errors) > 0 {
 		t.Errorf("expected no type errors for Point-typed property, got: %s", strings.Join(tcResult.ErrorStrings(), "; "))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-063: inferExprType walks array-literal elements
+// ---------------------------------------------------------------------------
+//
+// inferExprType had no ArrayLiteralExpr case, so every array literal typed as
+// "<unknown>" — which isSubtype accepts against anything — and its elements
+// were never visited. checkMultiSig's per-argument subtype check was therefore
+// vacuous, and a call nested in an element never reached checkCallExpr, so the
+// "only Rúnar built-ins" rule did not fire for it.
+//
+// Proves: TypeCheck refuses each shape with the TS reference's diagnostic (or
+// the tier's existing unknown-function diagnostic). Does not prove: CLI exit
+// status or cross-tier parity (conformance/negatives N99+).
+
+func typeCheckSourceF063(t *testing.T, source, fileName string) *TypeCheckResult {
+	t.Helper()
+	pr := ParseSource([]byte(source), fileName)
+	if len(pr.Errors) > 0 || pr.Contract == nil {
+		t.Fatalf("parse failed: %v", pr.ErrorStrings())
+	}
+	if v := Validate(pr.Contract); len(v.Errors) > 0 {
+		t.Fatalf("validation failed: %v", v.ErrorStrings())
+	}
+	return TypeCheck(pr.Contract)
+}
+
+func requireTypeError(t *testing.T, result *TypeCheckResult, substr string) {
+	t.Helper()
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, substr) {
+			return
+		}
+	}
+	t.Fatalf("expected a type error containing %q, got: %v", substr, result.ErrorStrings())
+}
+
+// The brief's testable assertion, on the Go DSL surface.
+func TestTypeCheck_F063_UnknownFunctionInsideArrayLiteral_GoSurface(t *testing.T) {
+	result := typeCheckSourceF063(t, `package contract
+
+import "runar"
+
+type C struct {
+	runar.SmartContract
+	Pk runar.PubKey `+"`runar:\"readonly\"`"+`
+}
+
+func (c *C) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckMultiSig([1]runar.Sig{sig}, [2]runar.PubKey{c.Pk, totallyBogusFunction(1)}))
+}
+`, "C.runar.go")
+	requireTypeError(t, result, "unknown function 'totallyBogusFunction'")
+}
+
+func TestTypeCheck_F063_UnknownFunctionInsideArrayLiteral(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "unknown function 'totallyBogusFunction'")
+}
+
+func TestTypeCheck_F063_ArrayElementTypeMismatch(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "Array element type mismatch: expected 'PubKey', got 'bigint'")
+}
+
+func TestTypeCheck_F063_CheckMultiSigWrongArrayTypes(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "expected 'Sig[]', got 'bigint[]'")
+	requireTypeError(t, result, "expected 'PubKey[]', got 'bigint[]'")
+}
+
+// Positive control: a well-typed checkMultiSig still typechecks cleanly, so the
+// refusals above are discrimination, not a blanket rejection of array literals.
+func TestTypeCheck_F063_WellTypedCheckMultiSigAccepted(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly pk2: PubKey;
+  constructor(pk: PubKey, pk2: PubKey) { super(pk, pk2); this.pk = pk; this.pk2 = pk2; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk2])); }
+}
+`, "C.runar.ts")
+	if len(result.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", result.ErrorStrings())
+	}
+}
+
+// TestTypeCheck_F110_AffineConsumptionInRepeatingLoop: a bounded loop is
+// unrolled count times, so an affine value bound outside a loop that runs two
+// or more times and consumed in its body is consumed once per iteration. It
+// must get the same diagnostic as a sequential double use. Single-iteration
+// loops stay legal. Proves the type checker's verdict only; it does not cover
+// consumption inside private helpers (the affine check is intra-method).
+func TestTypeCheck_F110_AffineConsumptionInRepeatingLoop(t *testing.T) {
+	cases := []struct {
+		name, params, body, want string
+	}{
+		{"loop2", "sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"},
+		{"countdown3", "preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"},
+		{"aliasInBody", "sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"},
+		{"nestedInner1", "sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"},
+		{"priorThenLoop1", "sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"},
+		{"loop1", "sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", ""},
+		{"nestedSingle", "sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, SigHashPreimage, PubKey, checkSig, checkPreimage } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
+// TestTypeCheck_F222_AffineConsumptionAcrossIfElseArms: the then and else arms
+// of an if are mutually exclusive, so a Sig consumed once in each arm is
+// consumed once on every path and must typecheck. Every shape where some path
+// consumes twice (an arm plus after the if, before plus an arm, twice in one
+// arm, once per arm inside a 2-iteration loop) must still be refused. Proves
+// the type checker's verdict only; the ternary form is not an if statement and
+// is untouched.
+func TestTypeCheck_F222_AffineConsumptionAcrossIfElseArms(t *testing.T) {
+	const double = "affine value 'sig' has already been consumed"
+	cases := []struct {
+		name, body, want string
+	}{
+		{"oncePerArm", "if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""},
+		{"aliasInOneArm", "if (flag) { const a: Sig = sig; assert(checkSig(a, this.pk)); } else { assert(checkSig(sig, this.pk)); }", ""},
+		{"nestedOncePerArm", "if (flag) { assert(checkSig(sig, this.pk)); } else { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", ""},
+		{"thenThenAfter", "if (flag) { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"elseThenAfter", "if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"bothThenAfter", "if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } assert(checkSig(sig, this.pk));", double},
+		{"nestedThenAfter", "if (flag) { if (flag) { assert(checkSig(sig, this.pk)); } } else { assert(true); } assert(checkSig(sig, this.pk));", double},
+		{"aliasThenAfter", "const a: Sig = sig; if (flag) { assert(checkSig(a, this.pk)); } else { assert(true); } assert(checkSig(sig, this.pk));", double},
+		{"beforeThenArm", "assert(checkSig(sig, this.pk)); if (flag) { assert(checkSig(sig, this.pk)); }", double},
+		{"twiceInThen", "if (flag) { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); } else { assert(true); }", double},
+		{"twiceInElse", "if (flag) { assert(true); } else { assert(checkSig(sig, this.pk)); assert(checkSig(sig, this.pk)); }", double},
+		{"oncePerArmInLoop2", "for (let i = 0n; i < 2n; i++) { if (flag) { assert(checkSig(sig, this.pk)); } else { assert(checkSig(sig, this.pk)); } }", double},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, PubKey, checkSig } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public m(sig: Sig, flag: boolean) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
+// TestTypeCheck_N109_AffineConsumptionThroughHelpers: private helpers are
+// inlined, so a call consumes the arguments at the parameter positions the
+// helper consumes (directly, through an alias, or transitively through another
+// helper). `this.h(sig)` twice, or once in a 2-iteration loop, must get the
+// same diagnostic as a sequential double use; a single call, one call per
+// if/else arm, and a helper that takes a Sig without consuming it stay legal.
+// Proves the type checker's verdict only; a helper consuming a PROPERTY is not
+// covered (the summary is over parameters).
+func TestTypeCheck_N109_AffineConsumptionThroughHelpers(t *testing.T) {
+	const h = "private h(s: Sig): void { assert(checkSig(s, this.pk)); }"
+	const double = "affine value 'sig' has already been consumed"
+	cases := []struct {
+		name, helpers, params, body, want string
+	}{
+		{"twice", h, "sig: Sig", "this.h(sig); this.h(sig);", double},
+		{"loop2", h, "sig: Sig", "for (let i = 0n; i < 2n; i++) { this.h(sig); }", double},
+		{"directThenHelper", h, "sig: Sig", "assert(checkSig(sig, this.pk)); this.h(sig);", double},
+		{"transitive", h + " private g(t: bigint, s2: Sig): void { assert(t > 0n); this.h(s2); }", "sig: Sig", "this.g(1n, sig); this.g(2n, sig);", double},
+		{"aliasInHelper", "private h(s: Sig): void { const a: Sig = s; assert(checkSig(a, this.pk)); }", "sig: Sig", "this.h(sig); this.h(sig);", double},
+		{"preimageTwice", "private p(x: SigHashPreimage): void { assert(checkPreimage(x)); }", "preimage: SigHashPreimage", "this.p(preimage); this.p(preimage);", "affine value 'preimage' has already been consumed"},
+		{"once", h, "sig: Sig", "this.h(sig);", ""},
+		{"oncePerArm", h, "sig: Sig, flag: boolean", "if (flag) { this.h(sig); } else { this.h(sig); }", ""},
+		{"twoSigs", h, "sig1: Sig, sig2: Sig", "this.h(sig1); this.h(sig2);", ""},
+		{"nonConsumingHelper", "private n(s: Sig): bigint { return len(s); }", "sig: Sig", "assert(this.n(sig) > 0n); assert(this.n(sig) > 0n); assert(checkSig(sig, this.pk));", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, SigHashPreimage, PubKey, checkSig, checkPreimage, len } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  ` + c.helpers + `
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
+// TestTypeCheck_N288_AffinePropertyConsumptionThroughHelpers: the N-109
+// summary covered parameters only. A helper that consumes a PROPERTY
+// (`checkSig(this.sig, ..)`, `checkPreimage(this.txPreimage)`) is inlined at
+// every call site, so calling it twice must get the diagnostic a direct double
+// use of the property gets, also per loop iteration, after a direct consume,
+// through an alias and transitively; a single call, one call per if/else arm,
+// and a helper that only reads the property stay legal. Proves the type
+// checker's verdict only, not the emitted script.
+func TestTypeCheck_N288_AffinePropertyConsumptionThroughHelpers(t *testing.T) {
+	const h = "private h(): void { assert(checkSig(this.sig, this.pk)); }"
+	const double = "affine value 'this.sig' has already been consumed"
+	const stateless = `class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly sig: Sig;
+  constructor(pk: PubKey, sig: Sig) { super(pk, sig); this.pk = pk; this.sig = sig; }
+`
+	const stateful = `class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+`
+	cases := []struct {
+		name, header, helpers, params, body, want string
+	}{
+		{"twice", stateless, h, "", "this.h(); this.h();", double},
+		{"loop2", stateless, h, "", "for (let i = 0n; i < 2n; i++) { this.h(); }", double},
+		{"directThenHelper", stateless, h, "", "assert(checkSig(this.sig, this.pk)); this.h();", double},
+		{"transitive", stateless, h + " private g(t: bigint): void { assert(t > 0n); this.h(); }", "", "this.g(1n); this.g(2n);", double},
+		{"aliasInHelper", stateless, "private h(): void { const a: Sig = this.sig; assert(checkSig(a, this.pk)); }", "", "this.h(); this.h();", double},
+		{"txPreimageTwice", stateful, "private h(): void { assert(checkPreimage(this.txPreimage)); }", "", "this.h(); this.h(); this.count = this.count + 1n;", "affine value 'this.txPreimage' has already been consumed"},
+		{"once", stateless, h, "", "this.h();", ""},
+		{"oncePerArm", stateless, h, "flag: boolean", "if (flag) { this.h(); } else { this.h(); }", ""},
+		{"readOnlyHelper", stateless, "private n(): bigint { return len(this.sig); }", "", "assert(this.n() > 0n); assert(this.n() > 0n); assert(checkSig(this.sig, this.pk));", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, StatefulSmartContract, assert, Sig, PubKey, checkSig, checkPreimage, len } from 'runar-lang';
+
+` + c.header + `  ` + c.helpers + `
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F-265: substr() literal negative start is a compile-time error
+//
+// substr(witness, start, len) lowers to a raw OP_SPLIT argument. No pass
+// enforced start >= 0: a literal negative start (`substr(a, -5n, 3n)`)
+// type-checked as plain 'bigint' (the standard subtype loop never inspects a
+// literal's VALUE) and compiled to a script that aborts at runtime -- `-5n`
+// minimal-encodes to `<85>`, which OP_SPLIT rejects as out of range.
+//
+// Proves: a literal (bare or unary-negated BigIntLiteral) negative start is
+// now a typecheck-time diagnostic, mirroring the existing
+// extractPrevOutputScript/requireOutputP2PKH "must be >= 0" literal-bound
+// pattern above. Does not prove: anything about a NON-literal negative start
+// (a variable or computed expression) -- that remains a runtime abort,
+// unchanged, because the stack model has no static value range for a
+// non-literal.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_F265_SubstrLiteralNegativeStartRejected(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(): void {
+    assert(substr(this.a, -5n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	for _, e := range res.Errors {
+		if strings.Contains(e.Message, "substr() argument 2 (start) must be >= 0; got -5") {
+			return
+		}
+	}
+	t.Fatalf("expected a substr() start-bound error, got: %v", res.ErrorStrings())
+}
+
+func TestTypeCheck_F265_SubstrLiteralNonNegativeStartAccepted(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(): void {
+    assert(substr(this.a, 0n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+	}
+}
+
+func TestTypeCheck_F265_SubstrNonLiteralStartUnchanged(t *testing.T) {
+	source := `
+import { SmartContract, assert, ByteString, substr } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly a: ByteString;
+  constructor(a: ByteString) { super(a); this.a = a; }
+  public unlock(n: bigint): void {
+    assert(substr(this.a, n, 3n) === this.a);
+  }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-234: a property initializer of the wrong literal family compiled
+// without complaint. Proves only the Go tier's checkPropertyInitializers;
+// the 7-tier cross-compiler shape is conformance/negatives/N233-*.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_N234_RejectsByteStringInitializerForBigintProperty(t *testing.T) {
+	source := `
+import { SmartContract, assert } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = 'ab';
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) == 0 {
+		t.Fatalf("expected a type error for a ByteString literal initializing a bigint property, got none")
+	}
+	joined := strings.Join(res.ErrorStrings(), "; ")
+	if !strings.Contains(joined, "type 'ByteString' is not assignable to type 'bigint'") {
+		t.Fatalf("expected the not-assignable diagnostic, got: %s", joined)
+	}
+}
+
+func TestTypeCheck_N234_RejectsToByteStringCallInitializerForBigintProperty(t *testing.T) {
+	source := `
+import { SmartContract, assert, toByteString } from 'runar-lang';
+
+class BadScalarInit extends SmartContract {
+  readonly x: bigint = toByteString('ab');
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) == 0 {
+		t.Fatalf("expected a type error for a toByteString(...) literal initializing a bigint property, got none")
+	}
+	joined := strings.Join(res.ErrorStrings(), "; ")
+	if !strings.Contains(joined, "type 'ByteString' is not assignable to type 'bigint'") {
+		t.Fatalf("expected the not-assignable diagnostic, got: %s", joined)
+	}
+}
+
+func TestTypeCheck_N234_StillAcceptsWellTypedScalarInitializer(t *testing.T) {
+	source := `
+import { SmartContract, assert } from 'runar-lang';
+
+class GoodScalarInit extends SmartContract {
+  readonly x: bigint = 1n;
+  constructor() { super(); }
+  public check(): void { assert(this.x === 1n); }
+}
+`
+	res := TypeCheck(mustParseTS(t, source))
+	if len(res.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
 	}
 }

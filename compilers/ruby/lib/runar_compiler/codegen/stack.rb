@@ -268,15 +268,31 @@ module RunarCompiler::Codegen
 
   # @param bindings [Array<IR::ANFBinding>]
   # @return [Hash{String => Integer}]
-  def self.compute_last_uses(bindings)
+  def self.compute_last_uses(bindings, inherited_arrays = nil)
     last_use = {}
     # Pre-scan: map each array_literal binding to its element refs. Used to
     # propagate last-use across the array indirection (the array binding is
     # pure metadata in _lower_array_literal -- its elements must remain live
     # until the array's consumer, not until the array_literal binding itself).
-    array_elems = {}
+    #
+    # F-081: an if-arm or loop body can consume an array declared in an
+    # ENCLOSING scope. Its bindings do not contain that array_literal, so the
+    # enclosing scope's array metadata is seeded first; without it an element
+    # reached only through the outer array had no last-use here and was
+    # consumed at its first read.
+    array_elems = (inherited_arrays || {}).dup
     bindings.each do |b|
-      array_elems[b.name] = Array(b.value.elements).dup if b.value.kind == "array_literal"
+      if b.value.kind == "array_literal"
+        array_elems[b.name] = Array(b.value.elements).dup
+      elsif b.value.kind == "load_const" && b.value.const_string &&
+            b.value.const_string.length > 5 && b.value.const_string[0, 5] == "@ref:"
+        # F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus the
+        # alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS. Without
+        # following it the elements got no last-use at all and were consumed
+        # at the first checkMultiSig, so a second read failed.
+        target = b.value.const_string[5..]
+        array_elems[b.name] = array_elems[target].dup if array_elems.key?(target)
+      end
     end
     bindings.each_with_index do |binding, i|
       # array_literal is metadata-only -- do NOT advance its elements'
@@ -613,25 +629,65 @@ module RunarCompiler::Codegen
   # @param seen [Set<String>] private methods currently on the recursion stack
   # @return [Boolean]
   def self.method_uses_check_preimage?(bindings, private_methods = nil, seen = nil)
-    seen ||= [].to_set
-    bindings.each do |b|
-      return true if b.value.kind == "check_preimage"
-      if b.value.kind == "if"
-        return true if method_uses_check_preimage?(b.value.then, private_methods, seen)
-        return true if b.value.else_ && method_uses_check_preimage?(b.value.else_, private_methods, seen)
-      end
-      if b.value.kind == "loop"
-        return true if method_uses_check_preimage?(b.value.body, private_methods, seen)
-      end
-      if b.value.kind == "method_call" && private_methods
-        target = private_methods[b.value.method]
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if method_uses_check_preimage?(target.body, private_methods, new_seen)
+    some_reachable_binding?(bindings, private_methods, seen) { |b| b.value.kind == "check_preimage" }
+  end
+
+  # True when the block holds for some binding reachable from +bindings+
+  # through if arms, loop bodies and (when +private_methods+ is given) the
+  # bodies of called private methods not in +seen+.
+  #
+  # N-264: an explicit work list, not recursion -- a chain of D helpers each
+  # calling the next under K nested ifs is D*K levels deep through those
+  # edges. The answer is plain reachability, exactly what the recursive walk
+  # (which pruned a method only when it was already on the current call path)
+  # computed.
+  def self.some_reachable_binding?(bindings, private_methods, seen)
+    visited = seen ? seen.dup : [].to_set
+    work = [bindings]
+    until work.empty?
+      work.pop.each do |b|
+        return true if yield(b)
+
+        case b.value.kind
+        when "if"
+          work.push(b.value.else_ || [])
+          work.push(b.value.then || [])
+        when "loop"
+          work.push(b.value.body || [])
+        when "method_call"
+          next unless private_methods
+
+          target = private_methods[b.value.method]
+          if target && !visited.include?(target.name)
+            visited.add(target.name)
+            work.push(target.body || [])
+          end
         end
       end
     end
     false
+  end
+
+  # N-055: the one diagnostic all seven tiers give an --ir program whose
+  # method_call reaches a private method holding an output intrinsic. The source
+  # frontend inlines such helpers before ANF, so the intrinsic always sits in the
+  # public method; --ir has no delegation support.
+  IR_OUTPUT_DELEGATION_ERROR = "output intrinsics must be called from the public method or an inlined helper; " \
+                               "--ir method_call delegation is not supported"
+
+  # True if bindings, at any if / loop depth, hold an output intrinsic.
+  #
+  # @param bindings [Array<IR::ANFBinding>]
+  # @return [Boolean]
+  def self.contains_output_intrinsic?(bindings)
+    bindings.any? do |b|
+      case b.value.kind
+      when "add_output", "add_raw_output", "add_data_output" then true
+      when "if" then contains_output_intrinsic?(b.value.then || []) || contains_output_intrinsic?(b.value.else_ || [])
+      when "loop" then contains_output_intrinsic?(b.value.body || [])
+      else false
+      end
+    end
   end
 
   # Check whether a method has add_output, add_raw_output, add_data_output,
@@ -678,26 +734,9 @@ module RunarCompiler::Codegen
   # @param seen [Set<String>, nil] private methods currently on the recursion stack
   # @return [Boolean]
   def self.method_reads_var_len_state?(bindings, var_len_props, private_methods = nil, seen = nil)
-    seen ||= [].to_set
-    bindings.each do |b|
-      return true if b.value.kind == "load_prop" && var_len_props.include?(b.value.name)
-
-      if b.value.kind == "if"
-        return true if method_reads_var_len_state?(b.value.then || [], var_len_props, private_methods, seen) ||
-                       method_reads_var_len_state?(b.value.else_ || [], var_len_props, private_methods, seen)
-      end
-      if b.value.kind == "loop"
-        return true if method_reads_var_len_state?(b.value.body || [], var_len_props, private_methods, seen)
-      end
-      if b.value.kind == "method_call" && private_methods
-        target = private_methods[b.value.method]
-        if target && !seen.include?(target.name)
-          new_seen = seen.dup.add(target.name)
-          return true if method_reads_var_len_state?(target.body, var_len_props, private_methods, new_seen)
-        end
-      end
+    some_reachable_binding?(bindings, private_methods, seen) do |b|
+      b.value.kind == "load_prop" && var_len_props.include?(b.value.name)
     end
-    false
   end
 
   # -----------------------------------------------------------------------
@@ -743,9 +782,82 @@ module RunarCompiler::Codegen
     VARIABLE_LENGTH_STATE_TYPES.include?(t)
   end
 
+  # N-045: declared byte width of each fixed-width byte state type. MUST match
+  # the reader's size table in _lower_deserialize_state and the shared
+  # STATE_FIELD_WIDTHS table.
+  FIXED_WIDTH_STATE_BYTES = {
+    "PubKey" => 33,
+    "Addr" => 20,
+    "Ripemd160" => 20,
+    "Sha256" => 32,
+    "Point" => 64,
+    "P256Point" => 64,
+    "P384Point" => 96,
+  }.freeze
+
+  # @param t [String]
+  # @return [Integer] the declared byte width, or 0 for any other type
+  def self.fixed_width_state_bytes(t)
+    FIXED_WIDTH_STATE_BYTES.fetch(t, 0)
+  end
+
   # -----------------------------------------------------------------------
   # LoweringContext -- mutable state for the stack-lowering pass
   # -----------------------------------------------------------------------
+
+  # N-264: a suspended step of the lowering. #step runs the task until it
+  # either finishes (nil) or needs a nested body lowered first: it then
+  # returns that child task and is stepped again once the child is done.
+  # lower_bindings, _lower_if, _lower_loop and _inline_method_call build such
+  # tasks; each place one used to CALL another (an if's two arms, a loop body,
+  # an inlined private method's body) now RETURNS the child instead, and
+  # .run_lower_tasks keeps the suspended parents on an explicit heap stack.
+  #
+  # Why: private methods are inlined at every call site, so F-213's
+  # per-method nesting bound (128) and N-180's call-depth bound (128) compose
+  # multiplicatively -- a chain of D helpers that each call the next under K
+  # nested ifs is D*K nested ifs here, and the recursive lowering raised
+  # SystemStackError at D=16 x 120 (user decision R106: lower iteratively).
+  # Every statement runs in the same order, against the same state, as in the
+  # recursive version, so the emitted ops are unchanged. An exception
+  # abandons the whole method's lowering, as before.
+  class LowerTask
+    def initialize(&step)
+      @step = step
+    end
+
+    def step
+      @step.call
+    end
+  end
+
+  # Run +root+ and every child it returns, depth-first, on an explicit stack.
+  def self.run_lower_tasks(root)
+    stack = [root]
+    until stack.empty?
+      child = stack.last.step
+      if child
+        stack.push(child)
+      else
+        stack.pop
+      end
+    end
+    nil
+  end
+
+  # A task that runs +phases+ (lambdas) in order; a phase that returns a child
+  # task suspends the sequence until that child is done.
+  def self.seq_task(*phases)
+    i = 0
+    LowerTask.new do
+      child = nil
+      while child.nil? && i < phases.length
+        child = phases[i].call
+        i += 1
+      end
+      child
+    end
+  end
 
   class LoweringContext
     attr_accessor :sm, :ops, :max_depth, :properties, :private_methods,
@@ -754,7 +866,11 @@ module RunarCompiler::Codegen
                   # R-010: true when the emitter supplies the script-level
                   # OP_CODESEPARATOR, so _lower_check_preimage must not emit
                   # its own.
-                  :script_level_code_separator
+                  :script_level_code_separator,
+                  # N-007: copied into each if-arm context (see _lower_if).
+                  :renamed_params,
+                  # F-081: copied into each if-arm context (see _lower_if).
+                  :array_elements, :array_lengths
 
     # OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
     #
@@ -1144,7 +1260,19 @@ module RunarCompiler::Codegen
       emit_opcode("OP_ELSE")
       @sm = sm_after_inner_if
 
-      # ELSE: >= 256 -> 0x4d + 2-byte LE
+      # ELSE: >= 256
+      emit_op({ op: "dup" })
+      @sm.push(@sm.peek_at_depth(0))
+      emit_push_int(65536)
+      @sm.push("")
+      emit_opcode("OP_LESSTHAN")
+      @sm.pop; @sm.pop; @sm.push("")
+
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_after_pd4_if = @sm.clone
+
+      # THEN: 256-65535 -> 0x4d + 2-byte LE
       emit_push_int(4)
       @sm.push("")
       emit_opcode("OP_NUM2BIN")
@@ -1165,6 +1293,33 @@ module RunarCompiler::Codegen
       emit_opcode("OP_CAT")
       @sm.push("")
 
+      emit_opcode("OP_ELSE")
+      @sm = sm_after_pd4_if
+
+      # ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044: this arm was missing, so
+      # the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+      # gives the unsigned 4-byte LE length.
+      emit_push_int(5)
+      @sm.push("")
+      emit_opcode("OP_NUM2BIN")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_push_int(4)
+      @sm.push("")
+      emit_opcode("OP_SPLIT")
+      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "drop" }); @sm.pop
+      emit_push_bytes([0x4E].pack("C"))
+      @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      @sm.pop; @sm.pop
+      emit_opcode("OP_CAT")
+      @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      @sm.pop; @sm.pop
+      emit_opcode("OP_CAT")
+      @sm.push("")
+
+      emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       @sm = sm_end_target
@@ -1174,13 +1329,19 @@ module RunarCompiler::Codegen
     #
     # Expects stack: [..., state_bytes]
     # Leaves stack:  [..., data, remaining_state]
+    #
+    # Accepts exactly the headers +emit_push_data_encode+ writes: < 76 (the
+    # header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+    # (4-byte LE); any other header fails the script. The header and every
+    # length are read UNSIGNED (+_emit_unsigned_bin2num+) -- bare OP_BIN2NUM
+    # read 0x80 as 0 and 0x81..0xff as negative (N-044).
     def emit_push_data_decode
       emit_push_int(1)
       @sm.push("")
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
+      _emit_unsigned_bin2num # [..., rest, hb]
       emit_op({ op: "dup" })
       @sm.push(@sm.peek_at_depth(0))
       emit_push_int(76)
@@ -1192,7 +1353,7 @@ module RunarCompiler::Codegen
       @sm.pop
       sm_after_outer_if = @sm.clone
 
-      # THEN: fb < 76 -> direct length
+      # THEN: hb < 76 -> direct length
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       sm_end_target = @sm.clone
@@ -1200,45 +1361,92 @@ module RunarCompiler::Codegen
       emit_opcode("OP_ELSE")
       @sm = sm_after_outer_if.clone
 
+      # ELSE: map the header to its length width (1, 2 or 4).
+      emit_op({ op: "dup" })
+      @sm.push(@sm.peek_at_depth(0))
+      emit_push_int(76)
+      @sm.push("")
+      emit_opcode("OP_NUMEQUAL")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_after_pd1_if = @sm.clone
+      # 0x4c -> width 1
+      emit_op({ op: "drop" }); @sm.pop
+      emit_push_int(1)
+      @sm.push("")
+      sm_width = @sm.clone
+
+      emit_opcode("OP_ELSE")
+      @sm = sm_after_pd1_if
       emit_op({ op: "dup" })
       @sm.push(@sm.peek_at_depth(0))
       emit_push_int(77)
       @sm.push("")
       emit_opcode("OP_NUMEQUAL")
       @sm.pop; @sm.pop; @sm.push("")
-
       emit_opcode("OP_IF")
       @sm.pop
-      sm_after_inner_if = @sm.clone
-
-      # THEN: fb == 77 -> 2-byte LE
+      sm_after_pd2_if = @sm.clone
+      # 0x4d -> width 2
       emit_op({ op: "drop" }); @sm.pop
       emit_push_int(2)
       @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
       emit_opcode("OP_ELSE")
-      @sm = sm_after_inner_if
-
-      # ELSE: fb == 76 -> 1-byte
-      emit_op({ op: "drop" }); @sm.pop
-      emit_push_int(1)
+      @sm = sm_after_pd2_if
+      # 0x4e -> width 4; any other header fails the script
+      emit_push_int(78)
       @sm.push("")
+      emit_opcode("OP_NUMEQUALVERIFY")
+      @sm.pop; @sm.pop
+      emit_push_int(4)
+      @sm.push("")
+
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
+      @sm = sm_width
+      # [..., rest, width]
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
+      _emit_unsigned_bin2num # [..., rest2, len]
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
       emit_opcode("OP_ENDIF")
-      emit_opcode("OP_ENDIF")
       @sm = sm_end_target
+    end
+
+    # Fail the script unless the value on top (the rest of the state section
+    # after the last field) is empty, and pop it: the last state field must
+    # consume the state section exactly (N-044).
+    def emit_assert_state_consumed
+      emit_push_int(0)
+      @sm.push("")
+      emit_opcode("OP_EQUALVERIFY")
+      @sm.pop; @sm.pop
+    end
+
+    # N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+    # Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
+    # assert it has exactly its declared width:
+    #
+    #   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+    #
+    # The writer copies these values as they are and the next spend's reader
+    # slices each at its declared width, so a wrong-width value shifts every
+    # later field. No-op for every other type.
+    def emit_fixed_width_state_check(type)
+      width = RunarCompiler::Codegen.fixed_width_state_bytes(type)
+      return if width.zero?
+
+      emit_opcode("OP_SIZE")
+      @sm.push("")
+      emit_push_int(width)
+      @sm.push("")
+      emit_opcode("OP_NUMEQUALVERIFY")
+      @sm.pop; @sm.pop
     end
 
     # -----------------------------------------------------------------
@@ -1451,10 +1659,16 @@ module RunarCompiler::Codegen
     #
     # @param bindings [Array<IR::ANFBinding>]
     # @param terminal_assert [Boolean]
-    def lower_bindings(bindings, terminal_assert)
+    def lower_bindings(bindings, terminal_assert, inherited_arrays = nil)
+      RunarCompiler::Codegen.run_lower_tasks(_lower_bindings_task(bindings, terminal_assert, inherited_arrays))
+    end
+
+    # lower_bindings as a resumable LowerTask (N-264). The setup below runs
+    # when the task is built, which is immediately before its first step.
+    def _lower_bindings_task(bindings, terminal_assert, inherited_arrays = nil)
       @local_bindings = {}
       bindings.each { |b| @local_bindings[b.name] = true }
-      last_uses = RunarCompiler::Codegen.compute_last_uses(bindings)
+      last_uses = RunarCompiler::Codegen.compute_last_uses(bindings, inherited_arrays)
 
       # Protect parent-scope refs that are still needed after this scope
       if @outer_protected_refs
@@ -1463,41 +1677,59 @@ module RunarCompiler::Codegen
         end
       end
 
-      # Find terminal binding index
+      # Find terminal binding index.
+      # Only an assert that IS the last binding may leave its value as the
+      # result (N-005): any later binding (e.g. a terminal asm() raw_script
+      # with out_arity 1) pushes its own result, the cleanup NIPs the assert's
+      # value away, and the check is never enforced. Such an assert gets
+      # OP_VERIFY.
       last_assert_idx = -1
       terminal_if_idx = -1
       if terminal_assert
         last_binding = bindings.last
         if last_binding && last_binding.value.kind == "if"
           terminal_if_idx = bindings.length - 1
-        else
-          (bindings.length - 1).downto(0) do |i|
-            if bindings[i].value.kind == "assert"
-              last_assert_idx = i
-              break
-            end
-          end
+        elsif last_binding && last_binding.value.kind == "assert"
+          last_assert_idx = bindings.length - 1
         end
       end
 
-      bindings.each_with_index do |binding, i|
-        # Propagate source location from ANF binding to StackOps
-        @current_source_loc = binding.source_loc
-        if binding.value.kind == "assert" && i == last_assert_idx
-          # Terminal assert: leave value on stack instead of OP_VERIFY
-          _lower_assert(binding.value.value_ref, i, last_uses, true)
-        elsif binding.value.kind == "if" && i == terminal_if_idx
-          # Terminal if: propagate terminalAssert into both branches
-          _lower_if(
-            binding.name, binding.value.cond,
-            binding.value.then, binding.value.else_,
-            binding.value.results || [],
-            i, last_uses, true
-          )
-        else
-          lower_binding(binding, i, last_uses)
+      i = 0
+      awaiting_child = false
+      LowerTask.new do
+        if awaiting_child
+          awaiting_child = false
+          @current_source_loc = nil
+          i += 1
         end
-        @current_source_loc = nil
+        child = nil
+        while i < bindings.length
+          binding = bindings[i]
+          # Propagate source location from ANF binding to StackOps
+          @current_source_loc = binding.source_loc
+          child =
+            if binding.value.kind == "assert" && i == last_assert_idx
+              # Terminal assert: leave value on stack instead of OP_VERIFY
+              _lower_assert(binding.value.value_ref, i, last_uses, true)
+              nil
+            elsif binding.value.kind == "if" && i == terminal_if_idx
+              # Terminal if: propagate terminalAssert into both branches
+              _lower_if_task(
+                binding.name, binding.value.cond,
+                binding.value.then, binding.value.else_,
+                binding.value.results || [],
+                i, last_uses, true
+              )
+            else
+              lower_binding_task(binding, i, last_uses)
+            end
+          break if child
+
+          @current_source_loc = nil
+          i += 1
+        end
+        awaiting_child = true if child
+        child
       end
     end
 
@@ -1530,6 +1762,15 @@ module RunarCompiler::Codegen
     # @param binding_index [Integer]
     # @param last_uses [Hash{String => Integer}]
     def lower_binding(binding, binding_index, last_uses)
+      RunarCompiler::Codegen.run_lower_tasks(
+        LowerTask.new { lower_binding_task(binding, binding_index, last_uses) }
+      )
+    end
+
+    # Lowers +binding+; for a binding that lowers a nested body (an inlined
+    # private call, an if, a loop) returns the task that does so instead, for
+    # the caller to run (N-264). Otherwise returns nil.
+    def lower_binding_task(binding, binding_index, last_uses)
       name = binding.name
       value = binding.value
       kind = value.kind
@@ -1548,7 +1789,7 @@ module RunarCompiler::Codegen
       when "call"
         _lower_call(name, value.func, value.args || [], binding_index, last_uses)
       when "method_call"
-        _lower_method_call(name, value.object, value.method, value.args || [], binding_index, last_uses)
+        return _lower_method_call_task(name, value.object, value.method, value.args || [], binding_index, last_uses)
       when "assert"
         _lower_assert(value.value_ref, binding_index, last_uses, false)
       when "update_prop"
@@ -1556,10 +1797,10 @@ module RunarCompiler::Codegen
 
       # --- Advanced kinds ---
       when "if"
-        _lower_if(name, value.cond, value.then, value.else_, value.results || [],
-                  binding_index, last_uses)
+        return _lower_if_task(name, value.cond, value.then, value.else_, value.results || [],
+                              binding_index, last_uses)
       when "loop"
-        _lower_loop(name, value.count, value.body, value.iter_var, value.start, value.step, binding_index, last_uses)
+        return _lower_loop_task(name, value.count, value.body, value.iter_var, value.start, value.step, binding_index, last_uses)
       when "check_preimage"
         _lower_check_preimage(name, value.preimage, value.sighash_flag, binding_index, last_uses)
       when "deserialize_state"
@@ -1583,6 +1824,7 @@ module RunarCompiler::Codegen
         # with no producing ops, corrupting downstream stack tracking.
         raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "stack-lower.lowerBinding")
       end
+      nil
     end
 
     private
@@ -1655,17 +1897,23 @@ module RunarCompiler::Codegen
     def _lower_load_prop(binding_name, prop_name)
       prop = @properties.find { |p| p.name == prop_name }
 
-      if @sm.has?(prop_name)
+      # N-016: only a MUTABLE property ever lives on the stack
+      # (deserialize_state / update_prop). A readonly property is a deploy-time
+      # constant, so a slot that merely shares its name is a param, local or
+      # temp -- reading it made `this.target` return whatever that slot held.
+      if (prop.nil? || !prop.readonly) && @sm.has?(prop_name)
         # Property has been updated -- use the stack value
         bring_to_top(prop_name, false)
         @sm.pop
       elsif prop && !prop.initial_value.nil?
-        _push_property_value(prop.initial_value)
+        _push_property_value(prop.initial_value, prop.name)
       else
         # Property value will be provided at deployment time; emit placeholder.
         # Initialized properties are excluded from the constructor, so the
         # deploy-time slot index counts only non-initialized props.
-        ctor_props = @properties.reject { |p| p.initial_value }
+        # F-097: test presence with nil?, not truthiness -- `false` is a
+        # legitimate initializer and must not count as a constructor param.
+        ctor_props = @properties.reject { |p| !p.initial_value.nil? }
         param_index = ctor_props.find_index { |p| p.name == prop_name }
         # #119 tail (H1): a property that reaches the placeholder fallback with
         # no matching constructor slot (param_index nil) has no deploy-time
@@ -1691,7 +1939,7 @@ module RunarCompiler::Codegen
       @sm.push(binding_name)
     end
 
-    def _push_property_value(val)
+    def _push_property_value(val, prop_name)
       case val
       when true, false
         emit_push_bool(val)
@@ -1702,7 +1950,16 @@ module RunarCompiler::Codegen
       when String
         emit_push_bytes(RunarCompiler::Codegen.hex_to_bytes(val))
       else
-        emit_push_int(0)
+        # F-258 / CL-BUG-151: a property initializer is supposed to be a
+        # literal (bool/int/float/str) -- the language only allows
+        # BigIntLiteral / BoolLiteral / ByteStringLiteral initializers.
+        # `--ir` skips the frontend that enforces that, so a hand-written
+        # IR file can hand this an array or object. Silently pushing 0
+        # compiled a working-looking script whose property always reads
+        # as 0 -- fail loudly instead.
+        raise "Stack lowering: property '#{prop_name}' has a non-literal initializer " \
+              "of type #{val.class} (#{val.inspect}). Refusing to emit a silent OP_0 " \
+              "placeholder."
       end
     end
 
@@ -1834,7 +2091,9 @@ module RunarCompiler::Codegen
           bring_to_top(args[0], is_last)
           @sm.pop
           emit_opcode("OP_VERIFY")
-          @sm.push(binding_name)
+          # No result slot: OP_VERIFY leaves nothing behind, and a
+          # model-only slot puts every later PICK/ROLL one item too
+          # deep (F-072). Same model as the dedicated assert lowering.
         end
         return
       end
@@ -1846,14 +2105,16 @@ module RunarCompiler::Codegen
           bring_to_top(args[0], is_last)
           @sm.pop
           emit_opcode("OP_VERIFY")
-          @sm.push(binding_name)
+          # No result slot: OP_VERIFY leaves nothing behind, and a
+          # model-only slot puts every later PICK/ROLL one item too
+          # deep (F-072). Same model as the dedicated assert lowering.
         end
         return
       end
 
       # super() in constructor
       if func_name == "super"
-        @sm.push(binding_name)
+        # No opcode, so no stack slot either (F-072).
         return
       end
 
@@ -2102,7 +2363,8 @@ module RunarCompiler::Codegen
     # method_call
     # -----------------------------------------------------------------
 
-    def _lower_method_call(binding_name, obj, method_name, args, binding_index, last_uses)
+    # Returns the inlining task for a private-method call (N-264), else nil.
+    def _lower_method_call_task(binding_name, obj, method_name, args, binding_index, last_uses)
       if method_name == "getStateScript"
         # Consume the @this object reference
         if @sm.has?(obj)
@@ -2111,7 +2373,7 @@ module RunarCompiler::Codegen
           @sm.pop
         end
         _lower_get_state_script(binding_name)
-        return
+        return nil
       end
 
       # Check if this is a private method call that should be inlined
@@ -2123,15 +2385,21 @@ module RunarCompiler::Codegen
           emit_op({ op: "drop" })
           @sm.pop
         end
-        _inline_method_call(binding_name, private_method, args, binding_index, last_uses)
-        return
+        return _inline_method_call_task(binding_name, private_method, args, binding_index, last_uses)
       end
 
       # For other method calls, treat like a function call
       _lower_call(binding_name, method_name, args, binding_index, last_uses)
+      nil
     end
 
-    def _inline_method_call(binding_name, method, args, binding_index, last_uses)
+    # _inline_method_call as a LowerTask (N-264): the arguments are bound now,
+    # the body is lowered in THIS context as a child task, then the shadowed
+    # names are restored and the result renamed.
+    def _inline_method_call_task(binding_name, method, args, binding_index, last_uses)
+      # N-055: see Codegen::IR_OUTPUT_DELEGATION_ERROR.
+      raise RunarCompiler::Codegen::IR_OUTPUT_DELEGATION_ERROR if RunarCompiler::Codegen.contains_output_intrinsic?(method.body)
+
       # Track shadowed names so we can restore them after the body runs.
       shadowed = []
 
@@ -2187,9 +2455,16 @@ module RunarCompiler::Codegen
         @sm.push(param_name)
       end
 
-      # Lower the method body
-      lower_bindings(method.body, false)
+      RunarCompiler::Codegen.seq_task(
+        -> { _lower_bindings_task(method.body, false) },
+        lambda do
+          _inline_method_call_tail(binding_name, method, shadowed)
+          nil
+        end
+      )
+    end
 
+    def _inline_method_call_tail(binding_name, method, shadowed)
       # Restore shadowed names
       shadowed.each do |entry|
         sn = entry[:shadowed_name]
@@ -2223,8 +2498,11 @@ module RunarCompiler::Codegen
     # IR::ANFValue#results). Empty for an +if+ that carries at most one
     # result, and then every path below behaves exactly as it did before the
     # multi-result contract existed.
-    def _lower_if(binding_name, cond, then_bindings, else_bindings, results,
-                  binding_index, last_uses, terminal_assert = false)
+    # _lower_if as a LowerTask (N-264): everything up to the then-arm runs when
+    # the task is built (immediately before its first step); each arm is
+    # lowered as a child task; the reconciliation after them is unchanged.
+    def _lower_if_task(binding_name, cond, then_bindings, else_bindings, results,
+                       binding_index, last_uses, terminal_assert = false)
       then_bindings ||= []
       else_bindings ||= []
       results ||= []
@@ -2359,496 +2637,555 @@ module RunarCompiler::Codegen
       # checkPreimage inside an if-branch emits a stray per-method separator,
       # which executes AFTER the script-level one and re-narrows scriptCode.
       then_ctx.script_level_code_separator = @script_level_code_separator
-      then_ctx.lower_bindings(then_bindings, terminal_assert)
+      # N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+      # `__param_<name>` slot for a param that shadows a mutable property, so the
+      # arm must resolve load_param through the same map. A fresh context starts
+      # with it EMPTY, and the arm then read the same-named deserialized PROPERTY
+      # slot -- the stale on-chain state -- in place of the caller's witness
+      # argument.
+      then_ctx.renamed_params = @renamed_params.dup
+      # F-081: the same holds for array_literal metadata. An array declared
+      # before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+      # there needs its element refs; a fresh context has none and failed with
+      # "array_literal metadata missing". Copied, so an arm-local array does
+      # not leak out.
+      then_ctx.array_elements = @array_elements.transform_values(&:dup)
+      then_ctx.array_lengths = @array_lengths.dup
+      else_ctx = nil
+      RunarCompiler::Codegen.seq_task(
+        -> { then_ctx._lower_bindings_task(then_bindings, terminal_assert, @array_elements) },
+        lambda do
 
-      then_ctx.drain_branch_private_residue(pre_if_names)
+        then_ctx.drain_branch_private_residue(pre_if_names)
 
-      if terminal_assert && then_ctx.sm.depth > 1
-        excess = then_ctx.sm.depth - 1
-        excess.times do
-          then_ctx.emit_op({ op: "nip" })
-          then_ctx.sm.remove_at_depth(1)
-        end
-      end
-
-      # Lower else-branch
-      else_ctx = LoweringContext.new(nil, @properties)
-      else_ctx.sm = @sm.clone
-      else_ctx.outer_protected_refs = protected_refs
-      else_ctx.inside_branch = true
-      else_ctx.private_methods = @private_methods
-      else_ctx.script_level_code_separator = @script_level_code_separator
-      else_ctx.lower_bindings(else_bindings, terminal_assert)
-
-      else_ctx.drain_branch_private_residue(pre_if_names)
-
-      if terminal_assert && else_ctx.sm.depth > 1
-        excess = else_ctx.sm.depth - 1
-        excess.times do
-          else_ctx.emit_op({ op: "nip" })
-          else_ctx.sm.remove_at_depth(1)
-        end
-      end
-
-      # Balance stack between branches
-      #
-      # NEW-018: counted by MULTIPLICITY, not by name-set membership.
-      #
-      # A parent stack legitimately holds the same name in more than one slot --
-      # a loop rebinding a local leaves one slot per unrolled iteration, all
-      # named +acc+, of which only the shallowest is ever read (the model
-      # resolves a name to its shallowest slot). When an arm ROLLs that live slot
-      # away, the name is STILL in the arm's name SET because the dead residue
-      # slot beneath it carries the same name -- so the set-difference this phase
-      # used to compute saw nothing consumed, emitted no matching drop in the
-      # sibling, and left the two arms one slot apart.
-      #
-      # Phase 3 then "fixed" the depth with an anonymous pad. A pad restores the
-      # COUNT but not the POSITION: the arm that lost a slot from the middle of
-      # the region gets a placeholder next to its result, while the sibling still
-      # holds the real value in the original slot. The two arms leave
-      # positionally different stacks, the parent adopts one of them, and every
-      # slot the other arm holds below the result is off by one:
-      #
-      #     let acc = p; let wacc = 0n;
-      #     for (...) for (...) { acc = acc + p; wacc = wacc + acc; }
-      #     let br0 = 0n; const sib0 = p;
-      #     if (p === 0n) { br0 = p; }
-      #     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
-      #
-      # The inner conditional is the CONDITION of the outer one. Its then-arm
-      # consumes the live +acc+; the parent holds +acc+ twice, so phase 1 missed
-      # it and the arms came back as <tt>[t . br0 sib0 ...]</tt> against
-      # <tt>[t br0 sib0 acc ...]</tt>. With p = 1 the source ACCEPTS and the AST
-      # interpreter accepts; the script engines reject the spend with "The top
-      # stack element must be truthy after script evaluation" -- an ordinary
-      # contract deployed to a permanently unspendable UTXO. It needs no
-      # <tt>&&</tt>: a plain nested ternary reaches it, and <tt>a && b && c</tt>
-      # is left-associative, so it is also what blocked the short-circuit
-      # desugar.
-      #
-      # Counting occurrences instead makes the sibling drop its matching slot,
-      # both arms end at the same depth with the same layout, and no pad is
-      # needed at all. Byte-neutral for every parent stack with no duplicated
-      # name.
-      pre_if_counts = @sm.name_counts
-      then_counts = then_ctx.sm.name_counts
-      else_counts = else_ctx.sm.name_counts
-      consumed_names = []
-      else_consumed_names = []
-      pre_if_counts.each do |name, held|
-        then_lost = [0, held - then_counts[name]].max
-        else_lost = [0, held - else_counts[name]].max
-        (then_lost - else_lost).times { consumed_names << name } if then_lost > else_lost
-        (else_lost - then_lost).times { else_consumed_names << name } if else_lost > then_lost
-      end
-
-      # Phase 2: perform ALL drops before any placeholder pushes.
-      if consumed_names.any?
-        depths = else_ctx.sm.drop_depths_for(consumed_names)
-        depths.each do |d|
-          if d == 0
-            else_ctx.emit_op({ op: "drop" })
-            else_ctx.sm.pop
-          elsif d == 1
-            else_ctx.emit_op({ op: "nip" })
-            else_ctx.sm.remove_at_depth(1)
-          else
-            else_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(d) })
-            else_ctx.sm.push("")
-            else_ctx.emit_op({ op: "roll", depth: d })
-            else_ctx.sm.pop
-            rolled = else_ctx.sm.remove_at_depth(d)
-            else_ctx.sm.push(rolled)
-            else_ctx.emit_op({ op: "drop" })
-            else_ctx.sm.pop
-          end
-        end
-      end
-      if else_consumed_names.any?
-        depths = then_ctx.sm.drop_depths_for(else_consumed_names)
-        depths.each do |d|
-          if d == 0
-            then_ctx.emit_op({ op: "drop" })
-            then_ctx.sm.pop
-          elsif d == 1
+        if terminal_assert && then_ctx.sm.depth > 1
+          excess = then_ctx.sm.depth - 1
+          excess.times do
             then_ctx.emit_op({ op: "nip" })
             then_ctx.sm.remove_at_depth(1)
-          else
-            then_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(d) })
-            then_ctx.sm.push("")
-            then_ctx.emit_op({ op: "roll", depth: d })
-            then_ctx.sm.pop
-            rolled = then_ctx.sm.remove_at_depth(d)
-            then_ctx.sm.push(rolled)
-            then_ctx.emit_op({ op: "drop" })
-            then_ctx.sm.pop
           end
         end
-      end
-
-      # Branch-merged locals: trim each arm down to exactly its K result slots.
-      #
-      # ANF lowering ends both arms with an identical K-binding block that
-      # rebinds every merged local from a +__merge$<i>+ temp (see
-      # _append_merged_local_results). That block leaves the K live values on
-      # top in the same canonical order in both arms -- but BENEATH them each
-      # arm still holds whatever its own body produced, and those differ per
-      # arm, which is exactly what the N>=2 reconcile further down compares.
-      # Everything beneath the K results is dead: the block copied each merged
-      # local before rebinding it, and a branch-local binding is not visible
-      # after the +if+.
-      #
-      # Runs AFTER the phase-2 consumption drops, so both arms have given up the
-      # same parent slots and share one base depth.
-      #
-      # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. Phase 1
-      # now makes both arms give up the same slot of a name the parent holds
-      # twice, so the base depth has to count that slot as given up too --
-      # otherwise +target_depth+ is one too high, the trim below does nothing,
-      # and the layout assertion fires on a well-formed program.
-      n_declared = results.length
-      if n_declared >= 1
-        still_held_counts = then_ctx.sm.name_counts
-        consumed_from_parent = pre_if_counts.sum { |name, held| [0, held - still_held_counts[name]].max }
-        target_depth = @sm.depth - consumed_from_parent + n_declared
-        [then_ctx, else_ctx].each do |arm_ctx|
-          arm_ctx.drop_slot_at_depth(n_declared) while arm_ctx.sm.depth > target_depth
+        # N-072: under a terminal assert the arm's one remaining slot is its
+        # VERDICT, which nothing reads by name. It must not keep the name of the
+        # parent local it asserted (`const x = a; if (c) { assert(x); } else
+        # { assert(b); }`): phase 1 below would then see "the else-arm consumed
+        # `x`, the then-arm did not", DROP the verdict to match, and phase 3 pad
+        # the depth back with OP_0 -- an arm that always fails.
+        if terminal_assert && then_ctx.sm.depth >= 1
+          then_ctx.sm.pop
+          then_ctx.sm.push("")
         end
 
-        # The declared contract, checked rather than assumed: after the trim,
-        # each arm's top N slots must BE the declared results, in the declared
-        # order (results[0] deepest). _append_branch_results is what makes this
-        # true; if it ever stops being true the arms disagree on layout, which
-        # is precisely the failure that produced the 2026-08 miscompile family.
-        # Emits no opcodes.
-        [["then", then_ctx], ["else", else_ctx]].each do |label, arm_ctx|
-          if arm_ctx.sm.depth != target_depth
-            raise "internal codegen error: branch result layout mismatch -- the " \
-                  "#{label}-arm of the conditional ends at depth #{arm_ctx.sm.depth}, " \
-                  "but its #{n_declared} declared result(s) require depth " \
-                  "#{target_depth}; binding=#{binding_name.inspect}"
-          end
-          n_declared.times do |i|
-            want = results[n_declared - 1 - i]
-            got = arm_ctx.sm.peek_at_depth(i)
-            next if got == want
+        # Lower else-branch
+        else_ctx = LoweringContext.new(nil, @properties)
+        else_ctx.sm = @sm.clone
+        else_ctx.outer_protected_refs = protected_refs
+        else_ctx.inside_branch = true
+        else_ctx.private_methods = @private_methods
+        else_ctx.script_level_code_separator = @script_level_code_separator
+        else_ctx.renamed_params = @renamed_params.dup # N-007, see then_ctx above
+        else_ctx.array_elements = @array_elements.transform_values(&:dup) # F-081, see then_ctx above
+        else_ctx.array_lengths = @array_lengths.dup
+          else_ctx._lower_bindings_task(else_bindings, terminal_assert, @array_elements)
+        end,
+        lambda do
 
-            raise "internal codegen error: branch result layout mismatch -- the " \
-                  "#{label}-arm of the conditional holds #{got.inspect} where the " \
-                  "node declares #{want.inspect} (slot #{n_declared - 1 - i} of " \
-                  "[#{results.join(', ')}]); every later operand would resolve to " \
-                  "the wrong slot; binding=#{binding_name.inspect}"
+        else_ctx.drain_branch_private_residue(pre_if_names)
+
+        if terminal_assert && else_ctx.sm.depth > 1
+          excess = else_ctx.sm.depth - 1
+          excess.times do
+            else_ctx.emit_op({ op: "nip" })
+            else_ctx.sm.remove_at_depth(1)
           end
         end
-      end
-
-      # Phase 3: depth-balance reconciliation after ALL drops.
-      #
-      # Compensate the FULL depth difference between the branches -- NOT just a
-      # single item. A conditional write of N state fields leaves N result
-      # values on the then-branch, so the (empty) else-branch must preserve N
-      # old values. Issue #99 Bug 1: the previous single-shot check only balanced
-      # a 1-item difference, leaving N>=2 conditional writes imbalanced by (N-1).
-      while then_ctx.sm.depth > else_ctx.sm.depth
-        result_depth = then_ctx.sm.depth - else_ctx.sm.depth - 1
-        then_name = then_ctx.sm.peek_at_depth(result_depth)
-        if else_bindings.empty? && then_name && !then_name.empty? && else_ctx.sm.has?(then_name)
-          var_depth = else_ctx.sm.find_depth(then_name)
-          if var_depth == 0
-            else_ctx.emit_op({ op: "dup" })
-          else
-            else_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(var_depth) })
-            else_ctx.sm.push("")
-            else_ctx.emit_op({ op: "pick", depth: var_depth })
-            else_ctx.sm.pop
-          end
-          else_ctx.sm.push(then_name)
-        else
-          else_ctx.emit_op({ op: "push", value: { kind: "bytes", bytes_val: "".b } })
+        # N-072, see then_ctx above
+        if terminal_assert && else_ctx.sm.depth >= 1
+          else_ctx.sm.pop
           else_ctx.sm.push("")
         end
-      end
-      while else_ctx.sm.depth > then_ctx.sm.depth
-        then_ctx.emit_op({ op: "push", value: { kind: "bytes", bytes_val: "".b } })
-        then_ctx.sm.push("")
-      end
 
-      # Layer B -- branch-balance invariant (#99 Bug 1 guard). After
-      # reconciliation the two arms of an OP_IF/OP_ELSE MUST leave the stack at
-      # identical depth; otherwise the post-ENDIF code (generated against a
-      # single assumed depth) is only correct for the branch the spender does
-      # not take, producing a silently-unspendable script.
-      if then_ctx.sm.depth != else_ctx.sm.depth
-        raise "internal codegen error: conditional emitted stack-imbalanced " \
-              "branches (then depth #{then_ctx.sm.depth} != else depth " \
-              "#{else_ctx.sm.depth}); would produce an unspendable script " \
-              "(see GitHub issue #99); binding=#{binding_name.inspect}"
-      end
-
-      # NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
-      # because the arms' op lists are consumed immediately after this point.
-      post_branch_counts = then_ctx.sm.name_counts
-
-      then_ops = then_ctx.ops
-      else_ops = else_ctx.ops
-
-      if_op = { op: "if", then: then_ops }
-      if_op[:else_ops] = else_ops if else_ops.any?
-      emit_op(if_op)
-
-      # Physical slots this method drops AFTER OP_ENDIF, while reconciling the
-      # parent stackMap against the arms' results. Counted because the invariant
-      # at the end of _lower_if cannot compare the two depths directly: the
-      # post-ENDIF reconcile legitimately ROLL/DROPs stale slots out from under
-      # the results, so those drops have to be added back before comparing.
-      post_endif_drops = 0
-
-      # Reconcile parent stackMap
-      #
-      # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. When
-      # the arms consume the live slot of a name the parent holds twice, the
-      # parent must give up one slot too -- the set test kept both, so the parent
-      # modelled one more slot than the arms physically left and the adopt below
-      # saw arm_depth == parent_depth and pushed nothing at all.
-      pre_if_counts.each do |name, held|
-        excess = held - post_branch_counts[name]
-        while excess > 0 && @sm.has?(name)
-          @sm.remove_at_depth(@sm.find_depth(name))
-          excess -= 1
-        end
-      end
-
-      # C27: the N>=2 result reconcile below also applies when the else-branch
-      # is PRESENT and BOTH arms wrote the same N mutable fields (each branch
-      # runs `this.a = ...; this.b = ...`). This is the else-present twin of the
-      # empty-else fix (#99 Bug 1). Without it, lower_if falls through to
-      # `push(binding_name)` further down -- registering ONE stackMap name for N
-      # physical results -- so the state serialization emits against the wrong
-      # slot (OP_NUM2BIN on a byte string) and the continuation is unspendable (a
-      # funds-safety bug). Only fire when both arms leave the identical top-N
-      # property names in the identical order, so a single post-ENDIF reconcile
-      # is valid regardless of which branch the spender takes. The single-field
-      # same-property case (N==1, "turn flip") is unaffected -- it still takes
-      # the dedicated path below. An empty ("") slot name is not a real match.
-      n_results = then_ctx.sm.depth - @sm.depth
-      else_matches_then_n_result_layout =
-        !else_bindings.empty? &&
-        n_results >= 2 &&
-        (else_ctx.sm.depth - @sm.depth == n_results) &&
-        (0...n_results).all? { |i|
-          tn = then_ctx.sm.peek_at_depth(i)
-          !tn.nil? && !tn.empty? &&
-            tn == else_ctx.sm.peek_at_depth(i)
-        }
-
-      # The if expression may produce a result value on top.
-      if n_declared >= 1
-        # DECLARED RESULTS. Both arms were normalised by _append_branch_results
-        # and the layout check above proved they hold exactly +results+, so the
-        # parent adopts them BY THE DECLARED ORDER -- no counting of trailing
-        # +__merge$+ bindings, no comparison of arm depths, no inference of
-        # which names are still live. results[0] is the deepest slot, matching
-        # the order pass 2 of the normalisation rebound them in.
+        # Balance stack between branches
         #
-        # Then each parent slot the block shadows (the pre-+if+ binding of a
-        # merged local, the stale value of a written property) is physically
-        # rolled out from under the results, exactly as the pre-existing N>=2
-        # reconcile did -- which is why the four +__merge$+ goldens keep their
-        # bytes.
-        results.each { |name| @sm.push(name) }
-        # How far below the result block the deepest stale slot sat. Adopting a
-        # result puts it ON TOP, but its pre-+if+ binding lived at depth +d+,
-        # i.e. BENEATH the +d - n_declared+ slots in between. Removing the stale
-        # copy does not reorder those in-between slots, so after the loop the
-        # adopted result has crossed them: the layout is rotated even though the
-        # NAME SET and the DEPTH are both unchanged. That is invisible to the
-        # reconcile's name-set check and to Layer C's depth check, and it is the
-        # whole of issue #149 -- see +sink_below+ below.
-        sink_below = 0
-        (n_declared - 1).downto(0) do |i|
-          name = results[i]
-          d = n_declared
-          while d < @sm.depth
-            if @sm.peek_at_depth(d) == name
-              emit_push_int(d)
+        # NEW-018: counted by MULTIPLICITY, not by name-set membership.
+        #
+        # A parent stack legitimately holds the same name in more than one slot --
+        # a loop rebinding a local leaves one slot per unrolled iteration, all
+        # named +acc+, of which only the shallowest is ever read (the model
+        # resolves a name to its shallowest slot). When an arm ROLLs that live slot
+        # away, the name is STILL in the arm's name SET because the dead residue
+        # slot beneath it carries the same name -- so the set-difference this phase
+        # used to compute saw nothing consumed, emitted no matching drop in the
+        # sibling, and left the two arms one slot apart.
+        #
+        # Phase 3 then "fixed" the depth with an anonymous pad. A pad restores the
+        # COUNT but not the POSITION: the arm that lost a slot from the middle of
+        # the region gets a placeholder next to its result, while the sibling still
+        # holds the real value in the original slot. The two arms leave
+        # positionally different stacks, the parent adopts one of them, and every
+        # slot the other arm holds below the result is off by one:
+        #
+        #     let acc = p; let wacc = 0n;
+        #     for (...) for (...) { acc = acc + p; wacc = wacc + acc; }
+        #     let br0 = 0n; const sib0 = p;
+        #     if (p === 0n) { br0 = p; }
+        #     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
+        #
+        # The inner conditional is the CONDITION of the outer one. Its then-arm
+        # consumes the live +acc+; the parent holds +acc+ twice, so phase 1 missed
+        # it and the arms came back as <tt>[t . br0 sib0 ...]</tt> against
+        # <tt>[t br0 sib0 acc ...]</tt>. With p = 1 the source ACCEPTS and the AST
+        # interpreter accepts; the script engines reject the spend with "The top
+        # stack element must be truthy after script evaluation" -- an ordinary
+        # contract deployed to a permanently unspendable UTXO. It needs no
+        # <tt>&&</tt>: a plain nested ternary reaches it, and <tt>a && b && c</tt>
+        # is left-associative, so it is also what blocked the short-circuit
+        # desugar.
+        #
+        # Counting occurrences instead makes the sibling drop its matching slot,
+        # both arms end at the same depth with the same layout, and no pad is
+        # needed at all. Byte-neutral for every parent stack with no duplicated
+        # name.
+        pre_if_counts = @sm.name_counts
+        then_counts = then_ctx.sm.name_counts
+        else_counts = else_ctx.sm.name_counts
+        consumed_names = []
+        else_consumed_names = []
+        pre_if_counts.each do |name, held|
+          then_lost = [0, held - then_counts[name]].max
+          else_lost = [0, held - else_counts[name]].max
+          (then_lost - else_lost).times { consumed_names << name } if then_lost > else_lost
+          (else_lost - then_lost).times { else_consumed_names << name } if else_lost > then_lost
+        end
+
+        # Phase 2: perform ALL drops before any placeholder pushes.
+        if consumed_names.any?
+          depths = else_ctx.sm.drop_depths_for(consumed_names)
+          depths.each do |d|
+            if d == 0
+              else_ctx.emit_op({ op: "drop" })
+              else_ctx.sm.pop
+            elsif d == 1
+              else_ctx.emit_op({ op: "nip" })
+              else_ctx.sm.remove_at_depth(1)
+            else
+              else_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(d) })
+              else_ctx.sm.push("")
+              else_ctx.emit_op({ op: "roll", depth: d })
+              else_ctx.sm.pop
+              rolled = else_ctx.sm.remove_at_depth(d)
+              else_ctx.sm.push(rolled)
+              else_ctx.emit_op({ op: "drop" })
+              else_ctx.sm.pop
+            end
+          end
+        end
+        if else_consumed_names.any?
+          depths = then_ctx.sm.drop_depths_for(else_consumed_names)
+          depths.each do |d|
+            if d == 0
+              then_ctx.emit_op({ op: "drop" })
+              then_ctx.sm.pop
+            elsif d == 1
+              then_ctx.emit_op({ op: "nip" })
+              then_ctx.sm.remove_at_depth(1)
+            else
+              then_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(d) })
+              then_ctx.sm.push("")
+              then_ctx.emit_op({ op: "roll", depth: d })
+              then_ctx.sm.pop
+              rolled = then_ctx.sm.remove_at_depth(d)
+              then_ctx.sm.push(rolled)
+              then_ctx.emit_op({ op: "drop" })
+              then_ctx.sm.pop
+            end
+          end
+        end
+
+        # Branch-merged locals: trim each arm down to exactly its K result slots.
+        #
+        # ANF lowering ends both arms with an identical K-binding block that
+        # rebinds every merged local from a +__merge$<i>+ temp (see
+        # _append_merged_local_results). That block leaves the K live values on
+        # top in the same canonical order in both arms -- but BENEATH them each
+        # arm still holds whatever its own body produced, and those differ per
+        # arm, which is exactly what the N>=2 reconcile further down compares.
+        # Everything beneath the K results is dead: the block copied each merged
+        # local before rebinding it, and a branch-local binding is not visible
+        # after the +if+.
+        #
+        # Runs AFTER the phase-2 consumption drops, so both arms have given up the
+        # same parent slots and share one base depth.
+        #
+        # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. Phase 1
+        # now makes both arms give up the same slot of a name the parent holds
+        # twice, so the base depth has to count that slot as given up too --
+        # otherwise +target_depth+ is one too high, the trim below does nothing,
+        # and the layout assertion fires on a well-formed program.
+        n_declared = results.length
+        if n_declared >= 1
+          still_held_counts = then_ctx.sm.name_counts
+          consumed_from_parent = pre_if_counts.sum { |name, held| [0, held - still_held_counts[name]].max }
+          target_depth = @sm.depth - consumed_from_parent + n_declared
+          [then_ctx, else_ctx].each do |arm_ctx|
+            arm_ctx.drop_slot_at_depth(n_declared) while arm_ctx.sm.depth > target_depth
+          end
+
+          # The declared contract, checked rather than assumed: after the trim,
+          # each arm's top N slots must BE the declared results, in the declared
+          # order (results[0] deepest). _append_branch_results is what makes this
+          # true; if it ever stops being true the arms disagree on layout, which
+          # is precisely the failure that produced the 2026-08 miscompile family.
+          # Emits no opcodes.
+          [["then", then_ctx], ["else", else_ctx]].each do |label, arm_ctx|
+            if arm_ctx.sm.depth != target_depth
+              raise "internal codegen error: branch result layout mismatch -- the " \
+                    "#{label}-arm of the conditional ends at depth #{arm_ctx.sm.depth}, " \
+                    "but its #{n_declared} declared result(s) require depth " \
+                    "#{target_depth}; binding=#{binding_name.inspect}"
+            end
+            n_declared.times do |i|
+              want = results[n_declared - 1 - i]
+              got = arm_ctx.sm.peek_at_depth(i)
+              next if got == want
+
+              raise "internal codegen error: branch result layout mismatch -- the " \
+                    "#{label}-arm of the conditional holds #{got.inspect} where the " \
+                    "node declares #{want.inspect} (slot #{n_declared - 1 - i} of " \
+                    "[#{results.join(', ')}]); every later operand would resolve to " \
+                    "the wrong slot; binding=#{binding_name.inspect}"
+            end
+          end
+        end
+
+        # Phase 3: depth-balance reconciliation after ALL drops.
+        #
+        # Compensate the FULL depth difference between the branches -- NOT just a
+        # single item. A conditional write of N state fields leaves N result
+        # values on the then-branch, so the (empty) else-branch must preserve N
+        # old values. Issue #99 Bug 1: the previous single-shot check only balanced
+        # a 1-item difference, leaving N>=2 conditional writes imbalanced by (N-1).
+        while then_ctx.sm.depth > else_ctx.sm.depth
+          result_depth = then_ctx.sm.depth - else_ctx.sm.depth - 1
+          then_name = then_ctx.sm.peek_at_depth(result_depth)
+          if else_bindings.empty? && then_name && !then_name.empty? && else_ctx.sm.has?(then_name)
+            var_depth = else_ctx.sm.find_depth(then_name)
+            if var_depth == 0
+              else_ctx.emit_op({ op: "dup" })
+            else
+              else_ctx.emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(var_depth) })
+              else_ctx.sm.push("")
+              else_ctx.emit_op({ op: "pick", depth: var_depth })
+              else_ctx.sm.pop
+            end
+            else_ctx.sm.push(then_name)
+          else
+            # N-262: padding an EMPTY else arm is the legitimate #99 fallback;
+            # padding a NON-EMPTY one writes a placeholder the post-ENDIF code
+            # reads as a value. Same sentence as Go's R-161 guard.
+            unless else_bindings.empty?
+              raise "internal codegen error: conditional needs #{then_ctx.sm.depth - else_ctx.sm.depth} " \
+                    "placeholder push(es) to balance a NON-EMPTY else arm (then depth #{then_ctx.sm.depth} " \
+                    "!= else depth #{else_ctx.sm.depth}); an empty push there becomes a value the " \
+                    "post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); " \
+                    "binding=\"#{binding_name}\""
+            end
+            else_ctx.emit_op({ op: "push", value: { kind: "bytes", bytes_val: "".b } })
+            else_ctx.sm.push("")
+          end
+        end
+        while else_ctx.sm.depth > then_ctx.sm.depth
+          unless then_bindings.empty?
+            raise "internal codegen error: conditional needs #{else_ctx.sm.depth - then_ctx.sm.depth} " \
+                  "placeholder push(es) to balance a NON-EMPTY then arm (else depth #{else_ctx.sm.depth} " \
+                  "!= then depth #{then_ctx.sm.depth}); binding=\"#{binding_name}\""
+          end
+          then_ctx.emit_op({ op: "push", value: { kind: "bytes", bytes_val: "".b } })
+          then_ctx.sm.push("")
+        end
+
+        # Layer B -- branch-balance invariant (#99 Bug 1 guard). After
+        # reconciliation the two arms of an OP_IF/OP_ELSE MUST leave the stack at
+        # identical depth; otherwise the post-ENDIF code (generated against a
+        # single assumed depth) is only correct for the branch the spender does
+        # not take, producing a silently-unspendable script.
+        if then_ctx.sm.depth != else_ctx.sm.depth
+          raise "internal codegen error: conditional emitted stack-imbalanced " \
+                "branches (then depth #{then_ctx.sm.depth} != else depth " \
+                "#{else_ctx.sm.depth}); would produce an unspendable script " \
+                "(see GitHub issue #99); binding=#{binding_name.inspect}"
+        end
+
+        # NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
+        # because the arms' op lists are consumed immediately after this point.
+        post_branch_counts = then_ctx.sm.name_counts
+
+        then_ops = then_ctx.ops
+        else_ops = else_ctx.ops
+
+        if_op = { op: "if", then: then_ops }
+        if_op[:else_ops] = else_ops if else_ops.any?
+        emit_op(if_op)
+
+        # Physical slots this method drops AFTER OP_ENDIF, while reconciling the
+        # parent stackMap against the arms' results. Counted because the invariant
+        # at the end of _lower_if cannot compare the two depths directly: the
+        # post-ENDIF reconcile legitimately ROLL/DROPs stale slots out from under
+        # the results, so those drops have to be added back before comparing.
+        post_endif_drops = 0
+
+        # Reconcile parent stackMap
+        #
+        # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. When
+        # the arms consume the live slot of a name the parent holds twice, the
+        # parent must give up one slot too -- the set test kept both, so the parent
+        # modelled one more slot than the arms physically left and the adopt below
+        # saw arm_depth == parent_depth and pushed nothing at all.
+        pre_if_counts.each do |name, held|
+          excess = held - post_branch_counts[name]
+          while excess > 0 && @sm.has?(name)
+            @sm.remove_at_depth(@sm.find_depth(name))
+            excess -= 1
+          end
+        end
+
+        # C27: the N>=2 result reconcile below also applies when the else-branch
+        # is PRESENT and BOTH arms wrote the same N mutable fields (each branch
+        # runs `this.a = ...; this.b = ...`). This is the else-present twin of the
+        # empty-else fix (#99 Bug 1). Without it, lower_if falls through to
+        # `push(binding_name)` further down -- registering ONE stackMap name for N
+        # physical results -- so the state serialization emits against the wrong
+        # slot (OP_NUM2BIN on a byte string) and the continuation is unspendable (a
+        # funds-safety bug). Only fire when both arms leave the identical top-N
+        # property names in the identical order, so a single post-ENDIF reconcile
+        # is valid regardless of which branch the spender takes. The single-field
+        # same-property case (N==1, "turn flip") is unaffected -- it still takes
+        # the dedicated path below. An empty ("") slot name is not a real match.
+        n_results = then_ctx.sm.depth - @sm.depth
+        else_matches_then_n_result_layout =
+          !else_bindings.empty? &&
+          n_results >= 2 &&
+          (else_ctx.sm.depth - @sm.depth == n_results) &&
+          (0...n_results).all? { |i|
+            tn = then_ctx.sm.peek_at_depth(i)
+            !tn.nil? && !tn.empty? &&
+              tn == else_ctx.sm.peek_at_depth(i)
+          }
+
+        # The if expression may produce a result value on top.
+        if n_declared >= 1
+          # DECLARED RESULTS. Both arms were normalised by _append_branch_results
+          # and the layout check above proved they hold exactly +results+, so the
+          # parent adopts them BY THE DECLARED ORDER -- no counting of trailing
+          # +__merge$+ bindings, no comparison of arm depths, no inference of
+          # which names are still live. results[0] is the deepest slot, matching
+          # the order pass 2 of the normalisation rebound them in.
+          #
+          # Then each parent slot the block shadows (the pre-+if+ binding of a
+          # merged local, the stale value of a written property) is physically
+          # rolled out from under the results, exactly as the pre-existing N>=2
+          # reconcile did -- which is why the four +__merge$+ goldens keep their
+          # bytes.
+          results.each { |name| @sm.push(name) }
+          # How far below the result block the deepest stale slot sat. Adopting a
+          # result puts it ON TOP, but its pre-+if+ binding lived at depth +d+,
+          # i.e. BENEATH the +d - n_declared+ slots in between. Removing the stale
+          # copy does not reorder those in-between slots, so after the loop the
+          # adopted result has crossed them: the layout is rotated even though the
+          # NAME SET and the DEPTH are both unchanged. That is invisible to the
+          # reconcile's name-set check and to Layer C's depth check, and it is the
+          # whole of issue #149 -- see +sink_below+ below.
+          sink_below = 0
+          (n_declared - 1).downto(0) do |i|
+            name = results[i]
+            d = n_declared
+            while d < @sm.depth
+              if @sm.peek_at_depth(d) == name
+                emit_push_int(d)
+                @sm.push("")
+                emit_op({ op: "roll", depth: d })
+                @sm.pop
+                rolled = @sm.remove_at_depth(d)
+                @sm.push(rolled)
+                emit_op({ op: "drop" })
+                @sm.pop
+                post_endif_drops += 1
+                sink_below = d - n_declared if d - n_declared > sink_below
+                break
+              end
+              d += 1
+            end
+          end
+
+          # Restore the inherited layout: sink the whole result block back under
+          # the +sink_below+ slots it just crossed, so BOTH paths of the enclosing
+          # +if+ leave the same slot order and every post-OP_ENDIF read resolves
+          # against the layout it was generated for. Rolling the deepest item of
+          # the +n_declared + sink_below+ window to the top, +sink_below+ times,
+          # lifts those slots back above the results while preserving their own
+          # relative order.
+          # Applied unconditionally, NOT gated on this +if+'s own else. The
+          # asymmetry that makes #149 unspendable belongs to the ENCLOSING +if+
+          # (whose fall-through path keeps the pre-+if+ layout), and +lower_if+
+          # has no view of its parent here. Gating on +else_bindings.empty?+ was
+          # measured and is WRONG: the #149 inner +if+ has a real else, so the
+          # gate disables the repair exactly where it is needed. Restoring the
+          # pre-+if+ order unconditionally keeps the parent's own model -- names
+          # at the depths it recorded before the branch -- true on every path.
+          if sink_below.positive?
+            window_size = n_declared + sink_below
+            sink_below.times do
+              emit_push_int(window_size - 1)
               @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
+              emit_op({ op: "roll", depth: window_size - 1 })
               @sm.pop
-              rolled = @sm.remove_at_depth(d)
-              @sm.push(rolled)
-              emit_op({ op: "drop" })
-              @sm.pop
+              lifted = @sm.remove_at_depth(window_size - 1)
+              @sm.push(lifted)
+            end
+          end
+        elsif then_ctx.sm.depth > @sm.depth &&
+              n_results >= 2 &&
+              (else_bindings.empty? || else_matches_then_n_result_layout)
+          # #99 Bug 1: a conditional write of N>=2 state fields leaves N result
+          # values on top; record them in their on-stack order, then remove the
+          # N stale old property values beneath them.
+          result_count = then_ctx.sm.depth - @sm.depth
+          (result_count - 1).downto(0) do |i|
+            name = then_ctx.sm.peek_at_depth(i)
+            @sm.push(name.nil? || name.empty? ? binding_name : name)
+          end
+          result_names = (0...result_count).map { |i| @sm.peek_at_depth(i) }
+          result_names.each do |name|
+            next if name.nil? || name.empty?
+
+            d = result_count
+            while d < @sm.depth
+              if @sm.peek_at_depth(d) == name
+                emit_push_int(d)
+                @sm.push("")
+                emit_op({ op: "roll", depth: d })
+                @sm.pop
+                rolled = @sm.remove_at_depth(d)
+                @sm.push(rolled)
+                emit_op({ op: "drop" })
+                @sm.pop
+                post_endif_drops += 1
+                break
+              end
+              d += 1
+            end
+          end
+        elsif then_ctx.sm.depth > @sm.depth
+          then_top = then_ctx.sm.peek_at_depth(0)
+          else_top = else_ctx.sm.depth > 0 ? else_ctx.sm.peek_at_depth(0) : ""
+          is_property = @properties.any? { |p| p.name == then_top }
+          if is_property && then_top && then_top == else_top && then_top != binding_name && @sm.has?(then_top)
+            # Both branches did update_prop for the same property
+            @sm.push(then_top)
+            (1...@sm.depth).each do |d|
+              next unless @sm.peek_at_depth(d) == then_top
+
+              if d == 1
+                emit_op({ op: "nip" })
+                @sm.remove_at_depth(1)
+              else
+                emit_push_int(d)
+                @sm.push("")
+                emit_op({ op: "roll", depth: d })
+                @sm.pop
+                rolled = @sm.remove_at_depth(d)
+                @sm.push(rolled)
+                emit_op({ op: "drop" })
+                @sm.pop
+              end
               post_endif_drops += 1
-              sink_below = d - n_declared if d - n_declared > sink_below
               break
             end
-            d += 1
-          end
-        end
+          elsif then_top && !is_property && else_bindings.empty? && then_top != binding_name && @sm.has?(then_top)
+            # If-without-else: then-branch reassigned a local variable
+            @sm.push(then_top)
+            (1...@sm.depth).each do |d|
+              next unless @sm.peek_at_depth(d) == then_top
 
-        # Restore the inherited layout: sink the whole result block back under
-        # the +sink_below+ slots it just crossed, so BOTH paths of the enclosing
-        # +if+ leave the same slot order and every post-OP_ENDIF read resolves
-        # against the layout it was generated for. Rolling the deepest item of
-        # the +n_declared + sink_below+ window to the top, +sink_below+ times,
-        # lifts those slots back above the results while preserving their own
-        # relative order.
-        # Applied unconditionally, NOT gated on this +if+'s own else. The
-        # asymmetry that makes #149 unspendable belongs to the ENCLOSING +if+
-        # (whose fall-through path keeps the pre-+if+ layout), and +lower_if+
-        # has no view of its parent here. Gating on +else_bindings.empty?+ was
-        # measured and is WRONG: the #149 inner +if+ has a real else, so the
-        # gate disables the repair exactly where it is needed. Restoring the
-        # pre-+if+ order unconditionally keeps the parent's own model -- names
-        # at the depths it recorded before the branch -- true on every path.
-        if sink_below.positive?
-          window_size = n_declared + sink_below
-          sink_below.times do
-            emit_push_int(window_size - 1)
-            @sm.push("")
-            emit_op({ op: "roll", depth: window_size })
-            @sm.pop
-            lifted = @sm.remove_at_depth(window_size - 1)
-            @sm.push(lifted)
-          end
-        end
-      elsif then_ctx.sm.depth > @sm.depth &&
-            n_results >= 2 &&
-            (else_bindings.empty? || else_matches_then_n_result_layout)
-        # #99 Bug 1: a conditional write of N>=2 state fields leaves N result
-        # values on top; record them in their on-stack order, then remove the
-        # N stale old property values beneath them.
-        result_count = then_ctx.sm.depth - @sm.depth
-        (result_count - 1).downto(0) do |i|
-          name = then_ctx.sm.peek_at_depth(i)
-          @sm.push(name.nil? || name.empty? ? binding_name : name)
-        end
-        result_names = (0...result_count).map { |i| @sm.peek_at_depth(i) }
-        result_names.each do |name|
-          next if name.nil? || name.empty?
-
-          d = result_count
-          while d < @sm.depth
-            if @sm.peek_at_depth(d) == name
-              emit_push_int(d)
-              @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
-              @sm.pop
-              rolled = @sm.remove_at_depth(d)
-              @sm.push(rolled)
-              emit_op({ op: "drop" })
-              @sm.pop
+              if d == 1
+                emit_op({ op: "nip" })
+                @sm.remove_at_depth(1)
+              else
+                emit_push_int(d)
+                @sm.push("")
+                emit_op({ op: "roll", depth: d })
+                @sm.pop
+                rolled = @sm.remove_at_depth(d)
+                @sm.push(rolled)
+                emit_op({ op: "drop" })
+                @sm.pop
+              end
               post_endif_drops += 1
               break
             end
-            d += 1
+          else
+            @sm.push(binding_name)
           end
-        end
-      elsif then_ctx.sm.depth > @sm.depth
-        then_top = then_ctx.sm.peek_at_depth(0)
-        else_top = else_ctx.sm.depth > 0 ? else_ctx.sm.peek_at_depth(0) : ""
-        is_property = @properties.any? { |p| p.name == then_top }
-        if is_property && then_top && then_top == else_top && then_top != binding_name && @sm.has?(then_top)
-          # Both branches did update_prop for the same property
-          @sm.push(then_top)
-          (1...@sm.depth).each do |d|
-            next unless @sm.peek_at_depth(d) == then_top
-
-            if d == 1
-              emit_op({ op: "nip" })
-              @sm.remove_at_depth(1)
-            else
-              emit_push_int(d)
-              @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
-              @sm.pop
-              rolled = @sm.remove_at_depth(d)
-              @sm.push(rolled)
-              emit_op({ op: "drop" })
-              @sm.pop
-            end
-            post_endif_drops += 1
-            break
-          end
-        elsif then_top && !is_property && else_bindings.empty? && then_top != binding_name && @sm.has?(then_top)
-          # If-without-else: then-branch reassigned a local variable
-          @sm.push(then_top)
-          (1...@sm.depth).each do |d|
-            next unless @sm.peek_at_depth(d) == then_top
-
-            if d == 1
-              emit_op({ op: "nip" })
-              @sm.remove_at_depth(1)
-            else
-              emit_push_int(d)
-              @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
-              @sm.pop
-              rolled = @sm.remove_at_depth(d)
-              @sm.push(rolled)
-              emit_op({ op: "drop" })
-              @sm.pop
-            end
-            post_endif_drops += 1
-            break
-          end
-        else
+        elsif else_ctx.sm.depth > @sm.depth
           @sm.push(binding_name)
+        else
+          # Otherwise a void if -- don't push phantom
         end
-      elsif else_ctx.sm.depth > @sm.depth
-        @sm.push(binding_name)
-      else
-        # Otherwise a void if -- don't push phantom
-      end
 
-      # Layer C -- branch result-depth invariant.
-      #
-      # The stackMap is the compiler's ONLY model of the stack, so a stackMap
-      # that names FEWER slots than the arms physically left is not detectable
-      # anywhere downstream: every later operand silently resolves N slots off.
-      # That single failure mode produced the whole 2026-08 branch/loop
-      # miscompile family -- wrong-but-accepted state continuations at best, and
-      # scripts the interpreter rejects outright (locked funds) at worst.
-      #
-      # What must hold when _lower_if returns: the parent stackMap describes
-      # exactly the physical stack. Both arms ended at arm_depth (the
-      # branch-balance guard above proves they agree), OP_ENDIF changes nothing,
-      # and the only physical effect after it is the post_endif_drops stale-slot
-      # drops the reconcile emitted. So:
-      #
-      #     @sm.depth + post_endif_drops == arm_depth
-      #
-      # The naive @sm.depth == arm_depth is WRONG -- the reconcile legitimately
-      # ROLL/DROPs stale slots out from under the results, which is exactly what
-      # post_endif_drops counts.
-      #
-      # A failure here is always a codegen bug, never a user error. Emits no
-      # opcodes: byte-neutral by construction. Same genre as the branch-balance
-      # guard (#99), added for the same reason.
-      arm_depth = then_ctx.sm.depth
-      if @sm.depth + post_endif_drops != arm_depth
-        raise "internal codegen error: branch result depth mismatch -- the " \
-              "parent stack model does not describe the physical stack after " \
-              "OP_ENDIF (stackMap depth #{@sm.depth} + #{post_endif_drops} " \
-              "post-ENDIF drop(s) != arm depth #{arm_depth}); the arms leave " \
-              "#{arm_depth - @sm.depth - post_endif_drops} more physical " \
-              "slot(s) than the compiler recorded, so every later operand " \
-              "would resolve to the wrong slot and the script would be wrong " \
-              "or unspendable; binding=#{binding_name.inspect}"
-      end
+        # Layer C -- branch result-depth invariant.
+        #
+        # The stackMap is the compiler's ONLY model of the stack, so a stackMap
+        # that names FEWER slots than the arms physically left is not detectable
+        # anywhere downstream: every later operand silently resolves N slots off.
+        # That single failure mode produced the whole 2026-08 branch/loop
+        # miscompile family -- wrong-but-accepted state continuations at best, and
+        # scripts the interpreter rejects outright (locked funds) at worst.
+        #
+        # What must hold when _lower_if returns: the parent stackMap describes
+        # exactly the physical stack. Both arms ended at arm_depth (the
+        # branch-balance guard above proves they agree), OP_ENDIF changes nothing,
+        # and the only physical effect after it is the post_endif_drops stale-slot
+        # drops the reconcile emitted. So:
+        #
+        #     @sm.depth + post_endif_drops == arm_depth
+        #
+        # The naive @sm.depth == arm_depth is WRONG -- the reconcile legitimately
+        # ROLL/DROPs stale slots out from under the results, which is exactly what
+        # post_endif_drops counts.
+        #
+        # A failure here is always a codegen bug, never a user error. Emits no
+        # opcodes: byte-neutral by construction. Same genre as the branch-balance
+        # guard (#99), added for the same reason.
+        arm_depth = then_ctx.sm.depth
+        if @sm.depth + post_endif_drops != arm_depth
+          raise "internal codegen error: branch result depth mismatch -- the " \
+                "parent stack model does not describe the physical stack after " \
+                "OP_ENDIF (stackMap depth #{@sm.depth} + #{post_endif_drops} " \
+                "post-ENDIF drop(s) != arm depth #{arm_depth}); the arms leave " \
+                "#{arm_depth - @sm.depth - post_endif_drops} more physical " \
+                "slot(s) than the compiler recorded, so every later operand " \
+                "would resolve to the wrong slot and the script would be wrong " \
+                "or unspendable; binding=#{binding_name.inspect}"
+        end
 
-      _track_depth
+        _track_depth
 
-      @max_depth = then_ctx.max_depth if then_ctx.max_depth > @max_depth
-      @max_depth = else_ctx.max_depth if else_ctx.max_depth > @max_depth
+        @max_depth = then_ctx.max_depth if then_ctx.max_depth > @max_depth
+        @max_depth = else_ctx.max_depth if else_ctx.max_depth > @max_depth
+          nil
+        end
+      )
     end
 
     # -----------------------------------------------------------------
     # loop
     # -----------------------------------------------------------------
 
-    def _lower_loop(binding_name, count, body, iter_var, start = 0, step = 1, loop_binding_index = nil, enclosing_last_uses = nil)
+    # _lower_loop as a LowerTask (N-264): the loop is unrolled exactly as
+    # before, but a body binding that lowers a nested body (if / inlined call /
+    # inner loop) runs as a child task. The setup runs when the task is built,
+    # immediately before its first step.
+    def _lower_loop_task(binding_name, count, body, iter_var, start = 0, step = 1, loop_binding_index = nil, enclosing_last_uses = nil)
       body ||= []
       count ||= 0
       # Iteration i binds iterVar = start + i*step (#121). Older ANF payloads
@@ -2889,82 +3226,127 @@ module RunarCompiler::Codegen
         outer_refs.add(ref) if ref != iter_var
       end
 
+      # F-081: an outer array_literal binding is metadata only -- its ELEMENTS
+      # are the stack slots. Protecting the array name protects nothing, so
+      # the first iteration consumed the elements and the second failed with
+      # "value 't0' not found on stack". Protect the elements themselves.
+      outer_arrays = @array_elements.transform_values(&:dup)
+      outer_refs.to_a.each do |ref|
+        outer_arrays.fetch(ref, []).each { |e| outer_refs.add(e) }
+      end
+
       # Temporarily extend localBindings with body binding names
       prev_local_bindings = @local_bindings
       new_local_bindings = prev_local_bindings.dup
       new_local_bindings.merge!(body_binding_names)
       @local_bindings = new_local_bindings
 
-      count.times do |i|
-        # Push the iteration variable value (in case the loop body uses it).
-        # Iteration i binds start + i*step (#121); zero-start counting-up loops
-        # (start=0, step=1) reduce to i, preserving byte-for-byte lowering.
-        emit_push_int(start + i * step)
-        @sm.push(iter_var)
-
-        lu = RunarCompiler::Codegen.compute_last_uses(body)
-
-        # Prevent outer-scope refs from being consumed by setting their
-        # last-use beyond any body binding index:
-        #  - non-final iterations: always (the next iteration re-reads them);
-        #  - final iteration: when the enclosing scope still references them
-        #    AFTER the loop. Previously the final iteration consumed every
-        #    outer ref at its last body use, so a method param (or const)
-        #    referenced after the loop was gone from the stack and was
-        #    silently lowered to an OP_0/empty push -- compilation succeeded,
-        #    the env-based interpreter passed, but the emitted Script failed
-        #    at runtime (silent interpreter <-> Script divergence).
-        is_final_iteration = i == count - 1
-        outer_refs.each do |ref_name|
-          used_after_loop =
-            !enclosing_last_uses.nil? &&
-            !loop_binding_index.nil? &&
-            (enclosing_last_uses[ref_name] || -1) > loop_binding_index
-          lu[ref_name] = body.length if !is_final_iteration || used_after_loop
+      i = 0
+      j = -1 # body index within iteration i; -1: iteration not begun
+      lu = nil
+      loop_loc = nil
+      awaiting_child = false
+      LowerTask.new do
+        if awaiting_child
+          awaiting_child = false
+          @current_source_loc = loop_loc
+          j += 1
         end
+        child = nil
+        while child.nil?
+          if j.negative?
+            break if i >= count
 
-        body.each_with_index do |b, j|
-          lower_binding(b, j, lu)
-        end
+            # Push the iteration variable value (in case the loop body uses it).
+            # Iteration i binds start + i*step (#121); zero-start counting-up loops
+            # (start=0, step=1) reduce to i, preserving byte-for-byte lowering.
+            emit_push_int(start + i * step)
+            @sm.push(iter_var)
 
-        # Clean up the iteration variable if it was not consumed
-        #
-        # R-186 / R-292: it is not always on TOP when that happens. A body whose
-        # last binding LEAVES a value -- the accumulator `sum = sum + x`, which
-        # rebinds `sum` in place and ends holding it -- buries the iteration
-        # variable one slot down. Dropping only at depth 0 left one slot behind
-        # per iteration, until the leak alone crossed MAX_STACK_DEPTH and the
-        # compiler refused a contract with a working set of three. Removing it
-        # wherever it sits is the same operation drain_branch_private_residue
-        # performs, spelled the same way.
-        if @sm.has?(iter_var)
-          depth = @sm.find_depth(iter_var)
-          if depth == 0
-            emit_op({ op: "drop" })
-            @sm.pop
-          elsif depth == 1
-            emit_op({ op: "nip" })
-            @sm.remove_at_depth(1)
-          else
-            emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
-            @sm.push("")
-            emit_op({ op: "roll", depth: depth })
-            @sm.pop
-            rolled = @sm.remove_at_depth(depth)
-            @sm.push(rolled)
-            emit_op({ op: "drop" })
-            @sm.pop
+            lu = RunarCompiler::Codegen.compute_last_uses(body, outer_arrays)
+
+            # Prevent outer-scope refs from being consumed by setting their
+            # last-use beyond any body binding index:
+            #  - non-final iterations: always (the next iteration re-reads them);
+            #  - final iteration: when the enclosing scope still references them
+            #    AFTER the loop. Previously the final iteration consumed every
+            #    outer ref at its last body use, so a method param (or const)
+            #    referenced after the loop was gone from the stack and was
+            #    silently lowered to an OP_0/empty push -- compilation succeeded,
+            #    the env-based interpreter passed, but the emitted Script failed
+            #    at runtime (silent interpreter <-> Script divergence).
+            is_final_iteration = i == count - 1
+            outer_refs.each do |ref_name|
+              used_after_loop =
+                !enclosing_last_uses.nil? &&
+                !loop_binding_index.nil? &&
+                (enclosing_last_uses[ref_name] || -1) > loop_binding_index
+              lu[ref_name] = body.length if !is_final_iteration || used_after_loop
+            end
+
+            # F-259: each body binding's ops carry that binding's own location (a
+            # binding without one keeps the loop's). The iteration-variable push
+            # above and the cleanup below stay on the loop's location.
+            loop_loc = @current_source_loc
+            j = 0
           end
+          while j < body.length
+            b = body[j]
+            @current_source_loc = b.source_loc unless b.source_loc.nil?
+            child = lower_binding_task(b, j, lu)
+            break if child
+
+            @current_source_loc = loop_loc
+            j += 1
+          end
+          break if child
+
+          # Clean up the iteration variable if it was not consumed
+          #
+          # R-186 / R-292: it is not always on TOP when that happens. A body whose
+          # last binding LEAVES a value -- the accumulator `sum = sum + x`, which
+          # rebinds `sum` in place and ends holding it -- buries the iteration
+          # variable one slot down. Dropping only at depth 0 left one slot behind
+          # per iteration, until the leak alone crossed MAX_STACK_DEPTH and the
+          # compiler refused a contract with a working set of three. Removing it
+          # wherever it sits is the same operation drain_branch_private_residue
+          # performs, spelled the same way.
+          if @sm.has?(iter_var)
+            depth = @sm.find_depth(iter_var)
+            if depth == 0
+              emit_op({ op: "drop" })
+              @sm.pop
+            elsif depth == 1
+              emit_op({ op: "nip" })
+              @sm.remove_at_depth(1)
+            else
+              emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
+              @sm.push("")
+              emit_op({ op: "roll", depth: depth })
+              @sm.pop
+              rolled = @sm.remove_at_depth(depth)
+              @sm.push(rolled)
+              emit_op({ op: "drop" })
+              @sm.pop
+            end
+          end
+          i += 1
+          j = -1
         end
+        if child
+          awaiting_child = true
+          next child
+        end
+
+        # Restore localBindings
+        @local_bindings = prev_local_bindings
+
+        # NOTE: loops are statements, not expressions -- they don't produce a
+        # physical stack value.  Do NOT push a dummy stackMap entry.
+        _ = binding_name
+        _track_depth
+        nil
       end
-
-      # Restore localBindings
-      @local_bindings = prev_local_bindings
-
-      # NOTE: loops are statements, not expressions -- they don't produce a
-      # physical stack value.  Do NOT push a dummy stackMap entry.
-      _ = binding_name
-      _track_depth
     end
 
     # -----------------------------------------------------------------
@@ -3006,7 +3388,7 @@ module RunarCompiler::Codegen
           else
             emit_push_int(d)
             @sm.push("")
-            emit_op({ op: "roll", depth: d + 1 })
+            emit_op({ op: "roll", depth: d })
             @sm.pop
             rolled = @sm.remove_at_depth(d)
             @sm.push(rolled)
@@ -3369,8 +3751,15 @@ module RunarCompiler::Codegen
               "integer literal. Got a runtime value for '#{depth_arg}'."
       end
       depth = depth_value
-      if depth < 1 || depth > 64
-        raise "merkleRootPoseidon2KB: depth must be between 1 and 64, got #{depth}"
+      # The bound is 32, not 64 (Go R-172 / Rust N-237 / Python F-260): the
+      # emitter (Poseidon2Merkle.emit_poseidon2_merkle_root) refuses anything
+      # above 32 itself -- its roll counts grow quadratically in depth -- so a
+      # gate at 64 let 33..64 pass this check only to die inside the emitter
+      # under a message naming emit_poseidon2_merkle_root, not the builtin a
+      # caller actually wrote. merkleRootSha256/merkleRootHash256 keep 1..64:
+      # their emitter carries no bound of its own.
+      if depth < 1 || depth > 32
+        raise "merkleRootPoseidon2KB: depth must be between 1 and 32, got #{depth}"
       end
 
       # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
@@ -3400,10 +3789,12 @@ module RunarCompiler::Codegen
       emit_fn = ->(op) { emit_op(op) }
       Poseidon2Merkle.emit_poseidon2_merkle_root(emit_fn, depth)
 
-      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
-      # The type system returns a single bigint, so only root_7 (top) is accessible.
-      # Drop the lower 7 elements with OP_NIP to keep the stack clean.
-      7.times { emit_op({ op: "nip" }) }
+      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on
+      # top). The type system returns a single bigint, so pack all eight
+      # limbs into one Script integer (CL-BUG-099 / R-056, matching Go's
+      # EmitPoseidon2RootPack) rather than keeping root_7 alone behind seven
+      # OP_NIPs -- which authenticated against a single ~31-bit field element.
+      Poseidon2Merkle.emit_poseidon2_root_pack(emit_fn)
 
       @sm.push(binding_name)
       _track_depth
@@ -3728,27 +4119,42 @@ module RunarCompiler::Codegen
       bring_to_top(args[0], is_last)
       @sm.pop
 
-      # Push counter = 0
+      # Exact floor(log2(n)) for every n > 0; n <= 0 aborts (N-103, user
+      # decision R86). No iteration cap: the bit length is read off the minimal
+      # Script-number encoding.
+      #
+      #   OP_BIN2NUM                              n        (minimal re-encoding)
+      #   OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY    n        (n <= 0 aborts)
+      #   OP_SIZE OP_1SUB OP_TUCK                 s-1 n s-1
+      #   OP_SPLIT OP_NIP OP_BIN2NUM              s-1 t    (t = top byte, 0..127)
+      #   OP_SWAP OP_8 OP_MUL OP_1SUB             t b      (b = 8(s-1) - 1)
+      #   7 x [OP_OVER <c> OP_GREATERTHANOREQUAL OP_ADD], c = 1,2,4,..,64
+      #   OP_NIP                                  b + #{c : t >= c}
+      #
+      # t = 0 only as the sign-padding byte, where n's bit length is exactly
+      # 8(s-1). Mirrors 05-stack-lower.ts#lowerLog2.
+      emit_opcode("OP_BIN2NUM")
+      emit_opcode("OP_DUP")
       emit_op({ op: "push", value: { kind: "bigint", big_int: 0 } })
-
-      log2_iterations = 64
-      log2_iterations.times do
-        emit_op({ op: "swap" })
-        emit_opcode("OP_DUP")
-        emit_op({ op: "push", value: { kind: "bigint", big_int: 1 } })
-        emit_opcode("OP_GREATERTHAN")
-        emit_op({ op: "if", then: [
-          { op: "push", value: { kind: "bigint", big_int: 2 } },
-          { op: "opcode", code: "OP_DIV" },
-          { op: "swap" },
-          { op: "opcode", code: "OP_1ADD" },
-          { op: "swap" },
-        ] })
-        emit_op({ op: "swap" })
+      emit_opcode("OP_GREATERTHAN")
+      emit_opcode("OP_VERIFY")
+      emit_opcode("OP_SIZE")
+      emit_opcode("OP_1SUB")
+      emit_opcode("OP_TUCK")
+      emit_opcode("OP_SPLIT")
+      emit_opcode("OP_NIP")
+      emit_opcode("OP_BIN2NUM")
+      emit_opcode("OP_SWAP")
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 8 } })
+      emit_opcode("OP_MUL")
+      emit_opcode("OP_1SUB")
+      [1, 2, 4, 8, 16, 32, 64].each do |c|
+        emit_opcode("OP_OVER")
+        emit_op({ op: "push", value: { kind: "bigint", big_int: c } })
+        emit_opcode("OP_GREATERTHANOREQUAL")
+        emit_opcode("OP_ADD")
       end
-
-      # Drop input, keep counter
-      emit_op({ op: "nip" })
+      emit_opcode("OP_NIP")
 
       @sm.push(binding_name)
       _track_depth
@@ -4004,8 +4410,9 @@ module RunarCompiler::Codegen
       #     VERIFYs), so the stack map is untouched.
       if _has_state_section && _fixed_state_section_length.nil?
         # delta / exact are refined by Codegen._pin_code_part_length once every
-        # method has been lowered; the defaults are the SOUND ones (a lower
-        # bound of emittedLength + 0 holds for any deployment).
+        # method has been lowered; the defaults are the SAFE ones: exact=false
+        # makes the length a deploy-time slot (N-051) that the SDK fills with
+        # the real deployed code-part length.
         emit_op({ op: "verify_code_part_len", code_part_len_delta: 0, code_part_len_exact: false })
       end
 
@@ -4246,12 +4653,15 @@ module RunarCompiler::Codegen
         if @sm.has?(prop.name)
           bring_to_top(prop.name, true) # consume
         elsif !prop.initial_value.nil?
-          _push_property_value(prop.initial_value)
+          _push_property_value(prop.initial_value, prop.name)
           @sm.push("")
         else
           emit_push_int(0)
           @sm.push("")
         end
+
+        # N-045: a fixed-width byte value must have its declared width.
+        emit_fixed_width_state_check(prop.type)
 
         # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
         # The width MUST come from `numeric_state_type_width` -- the same table
@@ -4421,7 +4831,7 @@ module RunarCompiler::Codegen
         prop = state_props[0]
         if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
           emit_push_data_decode
-          emit_op({ op: "drop" }); @sm.pop
+          emit_assert_state_consumed # the remainder must be empty (N-044)
         elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
           emit_opcode("OP_BIN2NUM")
         end
@@ -4445,11 +4855,15 @@ module RunarCompiler::Codegen
               @sm.push(prop.name); @sm.push("")
             end
           else
+            # Last field: it must consume the state section exactly (N-044).
             if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
               emit_push_data_decode
-              emit_op({ op: "drop" }); @sm.pop
-            elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
-              emit_opcode("OP_BIN2NUM")
+              emit_assert_state_consumed
+            else
+              emit_push_int(prop_sizes[i]); @sm.push("")
+              emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+              emit_assert_state_consumed
+              emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
             end
             @sm.pop
             @sm.push(prop.name)
@@ -4487,6 +4901,9 @@ module RunarCompiler::Codegen
 
         consume = _operand_consume(value_ref, output_operands, binding_index, last_uses)
         bring_to_top(value_ref, consume)
+
+        # N-045: a fixed-width byte value must have its declared width.
+        emit_fixed_width_state_check(prop.type)
 
         # Same table as the reader -- see `numeric_state_type_width`.
         numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
@@ -4903,7 +5320,8 @@ module RunarCompiler::Codegen
   # placeholder, so it grows the script by nothing. `bigint`
   # (minimally-encoded Script number) and `ByteString` (arbitrary-length data
   # push) depend on the VALUE, which the compiler never sees -- those are
-  # absent here and demote the pin to a lower bound.
+  # absent here and turn the pin into a deploy-time slot (N-051) that the SDK
+  # fills in.
   CONSTRUCTOR_SLOT_GROWTH = CONSTRUCTOR_SLOT_VALUE_BYTES
                             .transform_values { |n| _push_header_len(n) + n - 1 }
                             .merge("boolean" => 0)
@@ -4927,12 +5345,23 @@ module RunarCompiler::Codegen
     pins = []
     placeholders = []
 
-    walk = lambda do |ops|
-      ops.each do |op|
+    # N-264: pre-order over nested if arms on an explicit stack -- inlined
+    # private methods nest D*K if-ops here, too deep to recurse on.
+    walk = lambda do |root|
+      stack = [[root, 0]]
+      until stack.empty?
+        frame = stack.last
+        ops, i = frame
+        if i >= ops.length
+          stack.pop
+          next
+        end
+        frame[1] = i + 1
+        op = ops[i]
         case op[:op]
         when "if"
-          walk.call(op[:then] || op[:then_ops] || [])
-          walk.call(op[:else_ops] || [])
+          stack.push([op[:else_ops] || [], 0])
+          stack.push([op[:then] || op[:then_ops] || [], 0])
         when "placeholder"
           placeholders << op[:param_index]
         when "verify_code_part_len"
@@ -4961,8 +5390,8 @@ module RunarCompiler::Codegen
       prop = param_index.is_a?(Integer) && param_index >= 0 ? ctor_props[param_index] : nil
       growth = prop.nil? ? nil : CONSTRUCTOR_SLOT_GROWTH[prop.type]
       if growth.nil?
-        # No compile-time width. Growth is never negative, so the running sum
-        # stays a sound lower bound -- just not an exact one.
+        # No compile-time width: the emitter records the length field as a
+        # deploy-time `codePartLenSlots` entry (N-051) and the SDK patches it.
         exact = false
       else
         delta += growth

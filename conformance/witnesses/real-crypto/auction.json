@@ -1,7 +1,7 @@
 {
   "fixture": "auction",
   "kind": "stateful",
-  "note": "Auction: bid() verifies a real checkSig and reads NO preimage time field (W7 \u2014 nLockTime is a spender-chosen NOT-BEFORE and cannot bound the chain from above). close() verifies the auctioneer's checkSig plus extractLocktime(preimage) >= deadline AND extractSequence(preimage) !== 0xffffffff. The call tx nLockTime and nSequence are threaded via CallOptions, so both on-chain bindings are real. Real checkPreimage continuation.",
+  "note": "Auction: bid() verifies a real checkSig and reads NO preimage time field (W7 — nLockTime is a spender-chosen NOT-BEFORE and cannot bound the chain from above). close() verifies the auctioneer's checkSig plus extractLocktime(preimage) >= deadline AND extractSequence(preimage) !== 0xffffffff. The call tx nLockTime and nSequence are threaded via CallOptions, so both on-chain bindings are real. Real checkPreimage continuation. N-045: highestBidder (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. bid() copies the bidder argument into it, but checkSig(sig, bidder) already refuses a wrong-width key, so the WideHash attack is not a separate near-miss here; the accepted bids re-prove the honest path through the new check.",
   "spends": [
     {
       "method": "close",
@@ -92,14 +92,70 @@
       ],
       "signerKey": "alice",
       "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10100,
       "expect": "accept",
-      "note": "bidder sig + bid 100>1 + locktime 500 < deadline 1000",
+      "note": "bidder sig + bid 100>1 + locktime 500 < deadline 1000 N-027: the bid is paid, continuation 10000 -> 10100 = prior pot + bid, funded by the signer's UTXO.",
       "expectedState": {
         "highestBidder": {
           "$pubkey": "alice"
         },
         "highestBid": "100n"
       }
+    },
+    {
+      "method": "bid",
+      "args": [
+        null,
+        {
+          "$pubkey": "alice"
+        },
+        "100n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10000,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-027 UNPAID BID: bid 100 declared but the continuation stays at the 10000-sat prior pot. F-024's injected _newAmount >= extractAmount(txPreimage) floor accepts it; the example's own continuationAmount() >= extractAmount(txPreimage) + bidAmount must reject it on the Spend engine."
+    },
+    {
+      "method": "bid",
+      "args": [
+        null,
+        {
+          "$pubkey": "alice"
+        },
+        "100n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10099,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-027 SHORT BID: continuation 10099 is one satoshi short of prior pot 10000 + bid 100; the continuationAmount() >= extractAmount(txPreimage) + bidAmount rule must reject it."
     },
     {
       "method": "close",
@@ -171,8 +227,10 @@
       ],
       "signerKey": "alice",
       "lockTime": 2000,
+      "deploySatoshis": 10000,
+      "satoshis": 10100,
       "expect": "accept",
-      "note": "W7: a bid at nLockTime 2000, past the deadline of 1000, is accepted. bid() does not read nLockTime; the deadline guard that used to 'reject' this was satisfiable by any late bidder writing a stale locktime.",
+      "note": "W7: a bid at nLockTime 2000, past the deadline of 1000, is accepted. bid() does not read nLockTime; the deadline guard that used to 'reject' this was satisfiable by any late bidder writing a stale locktime. N-027: the bid is paid, continuation 10000 -> 10100 = prior pot + bid, funded by the signer's UTXO.",
       "expectedState": {
         "highestBidder": {
           "$pubkey": "alice"
@@ -182,6 +240,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "16b3bbaee407366a85a1a7c509e2a08c90184ff0fcdacba984a4310b11be43ea"
+    "expected-script.hex": "959db0d61cb299b47c13364d29807b26ec2722d26fbdd2f851880a1ac8a72eff"
   }
 }

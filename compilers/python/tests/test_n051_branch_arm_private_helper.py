@@ -157,12 +157,13 @@ def compile_script_hex(source: str, disable_constant_folding: bool) -> str:
         (
             "if-statement-arm",
             IF_STATEMENT_ARM,
-            "007800a0637c8b767676537a757777670076537a757768517a7500a2",
+            # N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
+            "007800a0637c8b767676537a757777670076537a7577687c7500a2",
         ),
         (
             "if-statement-arm-no-helper",
             IF_STATEMENT_ARM_NO_HELPER,
-            "007800a0637c8b7677670076537a757768517a7500a2",
+            "007800a0637c8b7677670076537a7577687c7500a2",
         ),
         ("statement-position", STATEMENT_POSITION, "8b00a2"),
     ],

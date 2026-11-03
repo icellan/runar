@@ -33,5 +33,6 @@
       "params": []
     }
   ],
+  "parentClass": "UnsafeSmartContract",
   "properties": []
 }

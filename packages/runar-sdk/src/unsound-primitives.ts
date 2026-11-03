@@ -9,6 +9,8 @@
  * other, carried no marker of the gap, and every SDK funded it in silence —
  * which is how an acknowledged proof-of-concept verifier reaches a
  * value-bearing deployment with no friction.
+ * F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+ * outright, so this gate only matters for artifacts from older compilers.
  *
  * The compiler now stamps `unsoundPrimitives` into the artifact. This guard is
  * the SDK half: every deploy path calls it BEFORE any signing or broadcast, and

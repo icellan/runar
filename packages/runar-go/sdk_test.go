@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -30,6 +32,31 @@ func makeArtifact(script string, abi ABI, overrides ...func(*RunarArtifact)) *Ru
 		override(a)
 	}
 	return a
+}
+
+// mustExtractConstructorArgs wraps ExtractConstructorArgs for existing tests
+// that assume a well-formed script and only want the result (F-238 added an
+// error return to catch malformed provider-supplied scripts; see
+// sdk_f238_malformed_script_test.go for the tests that exercise the error
+// path directly).
+func mustExtractConstructorArgs(t *testing.T, artifact *RunarArtifact, scriptHex string) map[string]interface{} {
+	t.Helper()
+	args, err := ExtractConstructorArgs(artifact, scriptHex)
+	if err != nil {
+		t.Fatalf("ExtractConstructorArgs(%q): unexpected error: %v", scriptHex, err)
+	}
+	return args
+}
+
+// mustMatchesArtifact wraps MatchesArtifact for existing tests that assume a
+// well-formed script and only want the bool result.
+func mustMatchesArtifact(t *testing.T, artifact *RunarArtifact, scriptHex string) bool {
+	t.Helper()
+	matched, err := MatchesArtifact(artifact, scriptHex)
+	if err != nil {
+		t.Fatalf("MatchesArtifact(%q): unexpected error: %v", scriptHex, err)
+	}
+	return matched
 }
 
 func makeUtxo(satoshis int64, outputIndex int) UTXO {
@@ -431,7 +458,20 @@ func TestGetLockingScript_MultipleConstructorSlots(t *testing.T) {
 	}
 }
 
-func TestGetLockingScript_FallbackAppend(t *testing.T) {
+// TestGetLockingScript_NoSlotArgIsNotAppended — R84. A ctor arg with no
+// ConstructorSlots entry used to fall back to being appended to the end of
+// the script ("backward compat" for pre-slot-splicing artifacts). That shape
+// — ConstructorSlots absent/empty, ABI constructor params non-empty — is
+// byte-identical to what TODAY's compiler emits when every ctor-needed
+// property is eliminated by DCE (no method ever reads it), so the old
+// fallback silently deployed a script that was NOT the compiled template:
+// the appended bytes leave extra items on the stack and the spend fails the
+// consensus clean-stack rule (proved against the real @bsv/sdk Spend oracle
+// in packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+// R84: drop the fallback, matching the Java SDK, which never had it — an arg
+// with no slot is simply not spliced anywhere, and the deployed script
+// equals the template.
+func TestGetLockingScript_NoSlotArgIsNotAppended(t *testing.T) {
 	pubKeyHash := strings.Repeat("ab", 20)
 	artifact := makeArtifact("76a90088ac", ABI{
 		Constructor: ABIConstructor{
@@ -439,14 +479,14 @@ func TestGetLockingScript_FallbackAppend(t *testing.T) {
 		},
 		Methods: []ABIMethod{{Name: "unlock", Params: nil, IsPublic: true}},
 	})
-	// No constructorSlots — old artifact format
+	// No constructorSlots.
 
 	c := NewRunarContract(artifact, []interface{}{pubKeyHash})
 	lockingScript := c.GetLockingScript()
 
-	// Old behavior: args appended to end of script
-	encodedHash := "14" + pubKeyHash
-	expected := "76a90088ac" + encodedHash
+	// New behavior (R84): nothing is appended; the deployed script is
+	// exactly the compiled template.
+	expected := "76a90088ac"
 	if lockingScript != expected {
 		t.Errorf("expected %s, got %s", expected, lockingScript)
 	}
@@ -873,6 +913,59 @@ func TestFindLastOpReturn_NoOpReturn(t *testing.T) {
 	pos := FindLastOpReturn("5193885187")
 	if pos != -1 {
 		t.Errorf("expected -1, got %d", pos)
+	}
+}
+
+// N-167 (sibling of F-367): FindLastOpReturn's doc comment must describe the
+// first-match walk it actually performs, not a "last OP_RETURN" search, and
+// the function must not keep a dead `lastPos` accumulator implying it tracks
+// a later match it never reassigns.
+//
+// Proves: the doc comment above func FindLastOpReturn in sdk_state.go no
+// longer claims to find the LAST OP_RETURN, and the dead lastPos variable is
+// gone. All seven SDKs implement the same "stop at the first opcode-boundary
+// 0x6a" walk, which is correct here (the on-chain interpreter stops at the
+// first OP_RETURN it executes, and the compiler emits exactly one
+// separator), so "first" and "last" coincide for every script this function
+// will ever see.
+// Does not prove: runtime behaviour — that is already pinned by
+// TestFindLastOpReturn_Simple / _SkipsPushData / _NoOpReturn above,
+// unchanged by this fix.
+func TestFindLastOpReturn_DocAndDeadCode(t *testing.T) {
+	src, err := os.ReadFile("sdk_state.go")
+	if err != nil {
+		t.Fatalf("read sdk_state.go: %v", err)
+	}
+	source := string(src)
+
+	fnIndex := strings.Index(source, "func FindLastOpReturn")
+	if fnIndex == -1 {
+		t.Fatal("func FindLastOpReturn not found in sdk_state.go")
+	}
+
+	commentStart := strings.LastIndex(source[:fnIndex], "// FindLastOpReturn")
+	if commentStart == -1 {
+		t.Fatal("doc comment above FindLastOpReturn not found")
+	}
+	doc := source[commentStart:fnIndex]
+
+	// Anchor: fails loudly (empty/short doc) if the slicing above ever
+	// points at the wrong comment instead of silently passing.
+	if !strings.Contains(doc, "OP_RETURN") {
+		t.Fatalf("doc slice does not mention OP_RETURN, wrong slice captured: %q", doc)
+	}
+
+	if matched, _ := regexp.MatchString(`(?i)last\s+OP_RETURN`, doc); matched {
+		t.Errorf("doc comment still claims to find the 'last' OP_RETURN:\n%s", doc)
+	}
+
+	body := source[fnIndex:]
+	bodyEnd := strings.Index(body, "\nfunc ")
+	if bodyEnd != -1 {
+		body = body[:bodyEnd]
+	}
+	if strings.Contains(body, "lastPos") {
+		t.Error("dead lastPos accumulator is still present in FindLastOpReturn")
 	}
 }
 
@@ -1680,6 +1773,37 @@ func TestFromTxId_OutOfRange(t *testing.T) {
 	_, err := FromTxId(artifact, fakeTxid, 5, provider)
 	if err == nil {
 		t.Fatal("expected error for out-of-range output index")
+	}
+	if !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// F-273: a negative output index must be rejected with a clear error, not
+// panic on an out-of-bounds slice access. Go slices do not support
+// negative indexing the way Python/Ruby arrays do (tx.Outputs[-1] does not
+// silently return the last element) — but without an explicit `< 0` guard
+// the lookup panics instead of returning a usable error.
+//
+// Proves: outputIndex=-1 returns a plain error containing "out of range"
+// instead of panicking on the slice access. Does not prove: behaviour for
+// other negative indices, or for Providers other than MockProvider.
+func TestFromTxId_NegativeOutputIndex(t *testing.T) {
+	fakeTxid := strings.Repeat("aa", 32)
+	provider := NewMockProvider("testnet")
+	provider.AddTransaction(makeTx(fakeTxid, []TxOutput{
+		{Satoshis: 5000, Script: "51"},
+		{Satoshis: 9999, Script: "76a9140000000000000000000000000000000000000088ac"},
+	}))
+
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods:     nil,
+	})
+
+	_, err := FromTxId(artifact, fakeTxid, -1, provider)
+	if err == nil {
+		t.Fatal("expected error for negative output index")
 	}
 	if !strings.Contains(err.Error(), "out of range") {
 		t.Fatalf("unexpected error: %v", err)
@@ -2574,8 +2698,17 @@ func TestBuildCodeScript_WithSlots_NoFallbackAppend(t *testing.T) {
 	}
 }
 
-func TestBuildCodeScript_WithoutSlots_FallbackAppends(t *testing.T) {
-	// Old artifact format: no constructor slots, args appended to script
+// TestBuildCodeScript_WithoutSlots_ArgIsNotAppended — R84. No
+// ConstructorSlots entry for "target" used to fall back to appending the arg
+// to the end of the script. That shape is byte-identical to what TODAY's
+// compiler emits when a ctor-needed property is eliminated by DCE, so the
+// old fallback silently deployed a script that was NOT the compiled
+// template and fails the consensus clean-stack rule on spend (proved against
+// the real @bsv/sdk Spend oracle in
+// packages/runar-sdk/src/__tests__/n013-dce-eliminated-ctor-args.test.ts).
+// R84: drop the fallback, matching Java — the arg is simply not spliced
+// anywhere and the deployed script equals the template.
+func TestBuildCodeScript_WithoutSlots_ArgIsNotAppended(t *testing.T) {
 	artifact := makeArtifact("009c", ABI{
 		Constructor: ABIConstructor{
 			Params: []ABIParam{{Name: "target", Type: "bigint"}},
@@ -2588,8 +2721,9 @@ func TestBuildCodeScript_WithoutSlots_FallbackAppends(t *testing.T) {
 	c := NewRunarContract(artifact, []interface{}{int64(42)})
 	lockingScript := c.GetLockingScript()
 
-	// Fallback: "009c" + encoded(42) = "009c" + "012a"
-	expected := "009c" + "012a"
+	// New behavior (R84): nothing is appended; the deployed script is
+	// exactly the compiled template.
+	expected := "009c"
 	if lockingScript != expected {
 		t.Errorf("expected locking script %q, got %q", expected, lockingScript)
 	}
@@ -2783,6 +2917,65 @@ func TestTerminalCall_TxStructure(t *testing.T) {
 	// Should have 1 input (no funding inputs)
 	if parsed.inputCount != 1 {
 		t.Errorf("expected 1 input, got %d", parsed.inputCount)
+	}
+}
+
+// N-271: a call that supplies BOTH TerminalOutputs and
+// AdditionalContractInputs must refuse with a named error. prepareCallTerminal
+// lays out exactly one contract input (plus an optional fee/funding input)
+// and never reads options.AdditionalContractInputs at all. Before the fix
+// this proves the extra UTXO is silently dropped instead of being rejected
+// or spent -- the call succeeds and reports a txid, but the broadcast tx has
+// only one input, not two.
+//
+// This does NOT prove AdditionalContractInputs could ever be made to work on
+// the terminal path (merging it validly) -- only that dropping it silently
+// is unacceptable and must become a refusal.
+func TestTerminalCall_AdditionalContractInputsFailsClosed(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "cancel", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
+
+	provider := NewAlwaysAckMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    100000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 50000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	payoutScript := "76a914" + strings.Repeat("bb", 20) + "88ac"
+	extraUtxo := UTXO{
+		Txid:        strings.Repeat("ee", 32),
+		OutputIndex: 0,
+		Satoshis:    1000,
+		Script:      "51",
+	}
+
+	_, _, err = contract.Call("cancel", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: payoutScript, Satoshis: 49000},
+		},
+		AdditionalContractInputs: []*UTXO{&extraUtxo},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil (additionalContractInputs was silently dropped)")
+	}
+	if !strings.Contains(err.Error(), "AdditionalContractInputs") {
+		t.Fatalf("expected error to name AdditionalContractInputs, got: %v", err)
 	}
 }
 
@@ -3084,7 +3277,9 @@ func TestExternalSigner_Sign_DelegatesToCallback(t *testing.T) {
 	)
 
 	txHex := "0100000001" + strings.Repeat("00", 32) + "00000000ffffffff00ffffffff0100000000000000001976a914" + strings.Repeat("00", 20) + "88ac00000000"
-	sig, err := signer.Sign(txHex, 2, "", 50000, nil)
+	// N-041: ExternalSigner now refuses an empty subscript, so pass a real
+	// P2PKH scriptCode instead of "".
+	sig, err := signer.Sign(txHex, 2, "76a914"+strings.Repeat("00", 20)+"88ac", 50000, nil)
 	if err != nil {
 		t.Fatalf("Sign error: %v", err)
 	}

@@ -3,7 +3,7 @@ const runar = @import("runar");
 pub const SimpleNFT = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    owner: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    owner: runar.PubKey = runar.hexToBytes("000000000000000000000000000000000000000000000000000000000000000000"),
     tokenId: runar.ByteString,
     metadata: runar.ByteString,
 
