@@ -112,12 +112,15 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
   // against this exact locking script — they stay valid while the blob's bytes
   // are stable, which the drift-guard test above already enforces):
   //   lockTime 1     → s ≤ n/2 (no malleation)
-  //   lockTime 2     → s > n/2 (n−s malleation)
-  //   lockTime 122   → s is 31 bytes (one leading zero stripped from DER)
-  //   lockTime 61496 → s is 30 bytes (two leading zeros stripped, ~2⁻¹⁶ case)
+  //   lockTime 4     → s > n/2 (n−s malleation)
+  //   lockTime 146   → s is 31 bytes (one leading zero stripped from DER)
+  //   lockTime 51410 → s is 30 bytes with its top bit set (~2⁻¹⁷ case): the
+  //                    0x00 sign byte becomes the DER pad. The former
+  //                    `DUP OP_0NOTEQUAL` fan-out REJECTED this class at
+  //                    nVersion = 1 (see binding-variant.test.ts).
   // (Re-derived for the C=1 blob, ports #170. The C=2²⁴⁸ blob's version-1
   // values were 2, 1, 234 and 8963; new script bytes move every sighash.)
-  it.each([[1], [2], [122], [61496]])(
+  it.each([[1], [4], [146], [51410]])(
     'ACCEPTS the genuine preimage at DER/low-S edge context lockTime=%i',
     (lockTime) => {
       const ctx = { ...CTX, lockTime };

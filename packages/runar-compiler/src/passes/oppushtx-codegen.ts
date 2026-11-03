@@ -257,9 +257,10 @@ export function checkPreimageBindingBytesLegacy(sighashFlag: number = SIGHASH_FL
 //      instead of branchless arithmetic on two more 33-byte constants. Uses
 //      the standard ECDSA malleation (r, n−s) ≡ (r, s) for the high-S fixup.
 //   5. s is reversed straight out of its minimal script-number encoding via
-//      31×(OP_DUP OP_0NOTEQUAL OP_SPLIT) — minimal LE encoding of a positive
-//      number IS the DER magnitude byte-reversed (low-S ⇒ MSB ≤ 0x7f ⇒ no
-//      sign pad; minimality ⇒ no leading zeros), so the legacy NUM2BIN(32) /
+//      31×(OP_SIZE OP_0NOTEQUAL OP_SPLIT) — minimal LE encoding of a positive
+//      number IS the DER integer byte-reversed (a shorter magnitude with its
+//      top bit set keeps its 0x00 sign byte, which is the DER sign pad;
+//      minimality ⇒ no other leading zeros), so the legacy NUM2BIN(32) /
 //      strip-zeros dance disappears. Splitting an exhausted (empty) remainder
 //      degrades to zero-length splits, so short s values need no branch.
 //
@@ -351,11 +352,17 @@ function anySBindingBytes(sighashFlag: number, variant: BindingVariant = 'lowS')
     pushHex('00'); op(OP.OP_CAT, OP.OP_1ADD);
   }
   // s (minimal LE script number) → big-endian DER magnitude: fan out one byte
-  // while the remainder is a nonzero number (empty splits once exhausted).
+  // while the remainder is non-empty (empty splits once exhausted). The split
+  // length is SIZE(remainder) != 0, NOT remainder != 0: when the magnitude is
+  // ≤ 30 bytes with its top bit set, the encoding ends in a 0x00 sign byte and
+  // the remainder reaches exactly [0x00], a non-minimal zero that OP_0NOTEQUAL
+  // refuses at nVersion = 1 (≈2⁻¹⁷ of genuine spends failed with the former
+  // `DUP OP_0NOTEQUAL OP_SPLIT`). OP_SIZE never reads it as a number, and the
+  // 0x00 lands in front as the DER sign pad. Same length as the DUP form.
   // low-S ⇒ s ≤ 32 bytes (31 fan-outs); 'all' can carry a 0x00 sign byte and
   // reach 33 bytes (32 fan-outs).
   const fan = compact ? 32 : 31;
-  for (let i = 0; i < fan; i++) op(OP.OP_DUP, OP.OP_0NOTEQUAL, OP.OP_SPLIT);
+  for (let i = 0; i < fan; i++) op(OP.OP_SIZE, OP.OP_0NOTEQUAL, OP.OP_SPLIT);
   for (let i = 0; i < fan; i++) op(OP.OP_SWAP, OP.OP_CAT);
   // sig = 0x30 ‖ totLen ‖ 0x02 0x20 Gx ‖ 0x02 ‖ len(s) ‖ s ‖ flag
   op(OP.OP_SIZE, OP.OP_SWAP, OP.OP_CAT);          // len(s) ‖ s

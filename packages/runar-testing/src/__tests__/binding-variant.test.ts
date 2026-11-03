@@ -116,15 +116,19 @@ describe('C=1 Any-S binding: pinned bytes', () => {
 
   it("'all' blob is the 376-byte C=1 form", () => {
     expect(CHECK_PREIMAGE_BINDING_ALL_HEX.length / 2).toBe(376);
-    expect(CHECK_PREIMAGE_BINDING_ALL_HEX).toContain('7c7e01007e8b7692');
+    expect(CHECK_PREIMAGE_BINDING_ALL_HEX).toContain('7c7e01007e8b82927f');
     expect(CHECK_PREIMAGE_BINDING_ALL_HEX.endsWith('01417e21' + C1_PUBKEY + 'ad')).toBe(true);
     // no mod-n / low-S block: the 33-byte n push is absent
     expect(CHECK_PREIMAGE_BINDING_ALL_HEX).not.toContain('21414136d0');
   });
 
-  it('the old 428-byte blob is exactly the lowS blob with the addend and key swapped back', () => {
-    const old = CHECK_PREIMAGE_BINDING_HEX.replace(LOWS_ADDEND, OLD_ADDEND).replace(C1_PUBKEY, OLD_C2_248_PUBKEY);
+  it("main's 428-byte blob is the lowS blob with the addend, key and s fan-out swapped back", () => {
+    const old = CHECK_PREIMAGE_BINDING_HEX
+      .replace(LOWS_ADDEND, OLD_ADDEND)
+      .replace(C1_PUBKEY, OLD_C2_248_PUBKEY)
+      .split('82927f').join('76927f');
     expect(old.length / 2).toBe(428);
+    expect(old.split('76927f').length - 1).toBe(31);
   });
 
   it('a non-default sighash flag only moves the flag push, for both variants', () => {
@@ -196,19 +200,70 @@ describe('C=1 Any-S binding: execution through @bsv/sdk Spend', () => {
     expect(accepted).toBe(0);
   });
 
-  it('lowS hits both low-S branches and short DER s values across the sweep', () => {
-    // Deterministic coverage report over the 200-spend sweep above.
+  it('the 200-spend sweep exercises both low-S branches', () => {
     let malleated = 0;
-    let short = 0;
     for (let i = 0; i < 200; i++) {
       const { z } = spend(CHECK_PREIMAGE_BINDING_HEX, 1, i);
-      let s = (z + 1n) % n;
-      if (s > HALF_N) { s = n - s; malleated++; }
-      if (s < 1n << 248n) short++;
+      if ((z + 1n) % n > HALF_N) malleated++;
     }
     expect(malleated).toBeGreaterThan(0);
     expect(malleated).toBeLessThan(200);
-    expect(short).toBeGreaterThan(0);
+  });
+});
+
+describe('s fan-out: SIZE, not DUP, picks the split length', () => {
+  // `DUP OP_0NOTEQUAL OP_SPLIT` reads the remainder of s as a script number.
+  // When the low-S magnitude is <= 30 bytes with its top bit set, the minimal
+  // encoding ends in a 0x00 sign byte, the remainder reaches exactly [0x00]
+  // before the 31 iterations run out, and OP_0NOTEQUAL refuses that
+  // non-minimal zero at nVersion = 1 (about 2^-17 of genuine spends). That
+  // fan-out shipped on main (428 B) and in #170 (422 B). `SIZE OP_0NOTEQUAL
+  // OP_SPLIT` never reads the remainder as a number; same length.
+  const FIXED_FAN = '82927f';
+  const OLD_FAN = '76927f';
+  const withOldFan = (hex: string) => hex.split(FIXED_FAN).join(OLD_FAN);
+  const main428 = withOldFan(CHECK_PREIMAGE_BINDING_HEX)
+    .replace(LOWS_ADDEND, OLD_ADDEND)
+    .replace(C1_PUBKEY, OLD_C2_248_PUBKEY);
+
+  /** Spend at a fixed lockTime (the edge contexts were searched off-chain). */
+  function spendAt(lockingHex: string, lockTime: number) {
+    const ctx = { ...BASE_CTX, transactionVersion: 1, lockTime };
+    const pre = Uint8Array.from(
+      TransactionSignature.formatBytes({ ...ctx, subscript: LockingScript.fromHex(lockingHex), scope: SCOPE }) as unknown as number[],
+    );
+    const sp = newConsensusSpend({
+      ...ctx,
+      lockingScript: LockingScript.fromHex(lockingHex),
+      unlockingScript: UnlockingScript.fromHex(pushData(pre)),
+    });
+    try { return { ok: sp.validate(), err: '' }; } catch (e) { return { ok: false, err: (e as Error).message }; }
+  }
+
+  it('the shipped blobs use the SIZE fan-out (31 in lowS, 32 in all)', () => {
+    expect(CHECK_PREIMAGE_BINDING_HEX.split(FIXED_FAN).length - 1).toBe(31);
+    expect(CHECK_PREIMAGE_BINDING_HEX).not.toContain(OLD_FAN);
+    expect(CHECK_PREIMAGE_BINDING_ALL_HEX.split(FIXED_FAN).length - 1).toBe(32);
+    expect(CHECK_PREIMAGE_BINDING_ALL_HEX).not.toContain(OLD_FAN);
+  });
+
+  it("main's 428-byte blob rejects a genuine nVersion = 1 spend (lockTime 14397: 30-byte s, top bit set)", () => {
+    expect(main428.length / 2).toBe(428);
+    const r = spendAt(main428, 14397);
+    expect(r.ok).toBe(false);
+    expect(r.err).toContain('non-minimally encoded script number');
+  });
+
+  it("#170's 422-byte blob rejects a genuine nVersion = 1 spend (lockTime 61496)", () => {
+    const r = spendAt(withOldFan(CHECK_PREIMAGE_BINDING_HEX), 61496);
+    expect(r.ok).toBe(false);
+    expect(r.err).toContain('non-minimally encoded script number');
+  });
+
+  it('the shipped blob accepts the same edge class (lockTime 51410: 30-byte s, top bit set, DER 00 pad)', () => {
+    const r = spendAt(CHECK_PREIMAGE_BINDING_HEX, 51410);
+    expect(r.err).toBe('');
+    expect(r.ok).toBe(true);
   });
 });
 
