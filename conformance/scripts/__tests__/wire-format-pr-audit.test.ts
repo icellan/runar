@@ -1248,12 +1248,22 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // version is gone the entry is spent and is deleted rather than
     // re-stamped. See the `DEAD entry` test above, which now keeps it that
     // way.
+    //
+    // 2026-11-04 — one entry, `compilers/go/codegen/stack.go` (PR sync of
+    // #173): the change adds a compile-time refusal of vk.json-pinned public
+    // inputs on the non-MSM Groth16 WA path; every script that still compiles
+    // is byte-identical (go-only-parity + bn254-pairing hex unchanged). It is
+    // spent, and must be deleted, on the next edit to stack.go.
+    //
+    // 2026-11-04 — DELETED, spent: the #179 port (#178 branch-arm order fix)
+    // edits stack.go and moves its own pins (conformance/anf-interpreter
+    // branch-permuted-* cases), so it needs no cover.
     const entries = loadExceptions(REPO_ROOT);
     expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
-      expect(e.expires).toBe('2026-11-26');
+      expect(e.expires).toBe('2027-05-02');
       expect(e.reviewer).toBe('gh:icellan');
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }

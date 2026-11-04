@@ -1419,6 +1419,129 @@ func (ctx *loweringContext) drainBranchPrivateResidue(preIfNames map[string]bool
 	}
 }
 
+// inheritedSlots returns the slots this arm inherited from the parent, as arm
+// stack indices (bottom = 0) in the arm's current order. A slot is matched to
+// the parent by name and multiplicity: for each name, the deepest
+// min(parent count, arm count) occurrences. Everything else the arm holds (its
+// results, a rebound local's new value) is not inherited.
+func (ctx *loweringContext) inheritedSlots(parent *stackMap) []int {
+	parentCounts := countNamedSlots(parent)
+	seen := make(map[string]int)
+	var inherited []int
+	for i, n := range ctx.sm.slots {
+		if n == "" {
+			continue
+		}
+		k := seen[n]
+		seen[n] = k + 1
+		if k < parentCounts[n] {
+			inherited = append(inherited, i)
+		}
+	}
+	return inherited
+}
+
+// parentOrder returns the parent's order for the slots this arm inherited: the
+// parent's named slots, bottom first, keeping for each name only its deepest
+// occurrences, as many as the arm inherited. Phase 2 drops the SHALLOWEST
+// occurrence of a name a sibling consumed, and the post-ENDIF reconcile removes
+// the parent's shallowest occurrence, so this is exactly the order the parent
+// goes on modelling after OP_ENDIF.
+func (ctx *loweringContext) parentOrder(parent *stackMap) []string {
+	want := make(map[string]int)
+	for _, i := range ctx.inheritedSlots(parent) {
+		want[ctx.sm.slots[i]]++
+	}
+	var order []string
+	for _, n := range parent.slots {
+		if n == "" {
+			continue
+		}
+		if want[n] > 0 {
+			order = append(order, n)
+			want[n]--
+		}
+	}
+	return order
+}
+
+// alignmentRolls returns the arm slots to roll to the top, in turn, so that
+// the inherited slots stand in `order` (names, bottom first) with everything
+// else above them in its current order. The longest run at the bottom already
+// in place stays. Same-named slots keep their relative order, so a name held
+// twice keeps its dead-below-live layout.
+func (ctx *loweringContext) alignmentRolls(parent *stackMap, order []string) []int {
+	inherited := ctx.inheritedSlots(parent)
+	byName := make(map[string][]int)
+	inSet := make(map[int]bool, len(inherited))
+	for _, i := range inherited {
+		n := ctx.sm.slots[i]
+		byName[n] = append(byName[n], i)
+		inSet[i] = true
+	}
+	target := make([]int, 0, ctx.sm.depth())
+	taken := make(map[string]int)
+	for _, n := range order {
+		k := taken[n]
+		taken[n] = k + 1
+		target = append(target, byName[n][k])
+	}
+	for i := 0; i < ctx.sm.depth(); i++ {
+		if !inSet[i] {
+			target = append(target, i)
+		}
+	}
+	// Slots never rolled keep their relative order and sink to the bottom, so
+	// the longest increasing prefix of target stays and the rest is rolled.
+	keep := 0
+	for keep < len(target) && (keep == 0 || target[keep] > target[keep-1]) {
+		keep++
+	}
+	return target[keep:]
+}
+
+// rollSequence replays rolls (arm indices, in turn) and returns the depth each
+// one rolls from.
+func rollSequence(depth int, rolls []int) []int {
+	current := make([]int, depth)
+	for i := range current {
+		current[i] = i
+	}
+	depths := make([]int, 0, len(rolls))
+	for _, index := range rolls {
+		pos := 0
+		for current[pos] != index {
+			pos++
+		}
+		depths = append(depths, len(current)-1-pos)
+		current = append(current[:pos], current[pos+1:]...)
+		current = append(current, index)
+	}
+	return depths
+}
+
+// alignInheritedLayout puts this arm's inherited slots in `order` (issue
+// #178): see alignmentRolls. Emits nothing when they already are.
+func (ctx *loweringContext) alignInheritedLayout(parent *stackMap, order []string) {
+	for _, depth := range rollSequence(ctx.sm.depth(), ctx.alignmentRolls(parent, order)) {
+		switch {
+		case depth == 0:
+		case depth == 1:
+			ctx.emitOp(StackOp{Op: "swap"})
+			ctx.sm.swap()
+		case depth == 2:
+			ctx.emitOp(StackOp{Op: "rot"})
+			ctx.sm.push(ctx.sm.removeAtDepth(2))
+		default:
+			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+			ctx.sm.push("")
+			ctx.emitOp(StackOp{Op: "roll", Depth: depth})
+			ctx.sm.pop()
+			ctx.sm.push(ctx.sm.removeAtDepth(depth))
+		}
+	}
+}
+
 func (ctx *loweringContext) isLastUse(ref string, currentIndex int, lastUses map[string]int) bool {
 	last, ok := lastUses[ref]
 	return !ok || last <= currentIndex
@@ -2679,6 +2802,29 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 		}
 	}
 
+	// Issue #178: both arms now hold the same inherited slots, but not
+	// necessarily in the parent's ORDER. Rebinding a local that is dead after the
+	// `if` consumes its slot and pushes the new value on top (`w = w - 1n` turns
+	// [w k] into [k w]); a nested `if` without `else` that rebinds a live local
+	// leaves the new value on top of its neighbours. Everything below reads the
+	// arms by position and the parent goes on modelling its own order, so a read
+	// of a moved slot on that path took its neighbour's value.
+	//
+	// Roll each arm's inherited slots back into the parent's pre-`if` order: the
+	// same contract the #149 sinkBelow repair keeps for declared results, one
+	// layer earlier, so the parent's model of every slot it does not adopt stays
+	// "the depth it recorded before the branch" on every path. Emits nothing for
+	// an arm already in that order. Before the result trim, which removes the
+	// slots just beneath the results and so needs every inherited slot below
+	// them.
+	inheritedOrder := thenCtx.parentOrder(ctx.sm)
+	elseInheritedOrder := elseCtx.parentOrder(ctx.sm)
+	if strings.Join(inheritedOrder, "\x00") != strings.Join(elseInheritedOrder, "\x00") {
+		panic(fmt.Sprintf("internal codegen error: the conditional's arms inherit different parent slots (%v after the then-arm, %v after the else-arm); binding=%q", inheritedOrder, elseInheritedOrder, bindingName))
+	}
+	thenCtx.alignInheritedLayout(ctx.sm, inheritedOrder)
+	elseCtx.alignInheritedLayout(ctx.sm, inheritedOrder)
+
 	// Trim each arm down to exactly its declared result slots.
 	//
 	// ANF lowering ends both arms with an identical N-binding block that
@@ -2813,6 +2959,19 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// The equality below is therefore an invariant, not a test, and is left as
 	// a comment rather than a panic that can never run.
 
+	// Layer D: equal depth is not enough, the arms must agree slot by slot on
+	// every name the parent can read after OP_ENDIF. A slot only one arm names
+	// is skipped: a phase-3 placeholder, or the `if`'s own value, which each arm
+	// binds under its own temporary. Two different parent names at the same
+	// depth mean one path reads its neighbour's value (#178). Emits no opcodes.
+	for d := 0; d < thenCtx.sm.depth(); d++ {
+		tn := thenCtx.sm.peekAtDepth(d)
+		en := elseCtx.sm.peekAtDepth(d)
+		if tn != "" && en != "" && tn != en && preIfNames[tn] && preIfNames[en] {
+			panic(fmt.Sprintf("internal codegen error: conditional arms leave different stack layouts (depth %d holds %q after the then-arm and %q after the else-arm), so every later read of either slot would take the wrong value on one path (see GitHub issue #178); binding=%q", d, tn, en, bindingName))
+		}
+	}
+
 	thenOps := thenCtx.ops
 	elseOps := elseCtx.ops
 
@@ -2843,6 +3002,21 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	for name, held := range preIfCounts {
 		for excess := held - postBranchCounts[name]; excess > 0 && ctx.sm.has(name); excess-- {
 			ctx.sm.removeAtDepth(ctx.sm.findDepth(name))
+		}
+	}
+
+	// #178: what the parent still models is exactly the slots both arms
+	// inherited, and the arms were rolled into the parent's order above. Checked
+	// rather than assumed. Emits no opcodes.
+	{
+		var modelled []string
+		for _, n := range ctx.sm.slots {
+			if n != "" {
+				modelled = append(modelled, n)
+			}
+		}
+		if strings.Join(modelled, "\x00") != strings.Join(inheritedOrder, "\x00") {
+			panic(fmt.Sprintf("internal codegen error: after OP_ENDIF the parent models %v but both arms leave their inherited slots as %v; binding=%q", modelled, inheritedOrder, bindingName))
 		}
 	}
 
@@ -6268,7 +6442,17 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 				method.Name,
 			)
 		}
-		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, methodUsesGroth16WAPreambleWithMSM(method.Body))
+		useMSM := methodUsesGroth16WAPreambleWithMSM(method.Body)
+		if !useMSM && opts.Groth16WAConfig.HasPinnedPublicInputs() {
+			// The raw variant never sees the public-input scalars, so a
+			// pin would be silently unenforced. Refuse rather than emit a
+			// verifier that does not do what the vk.json says.
+			return nil, fmt.Errorf(
+				"method %q calls assertGroth16WitnessAssisted but the Groth16 vk.json pins public inputs (pinnedPublicInputs); only assertGroth16WitnessAssistedWithMSM enforces pins — call that instead, or remove the field",
+				method.Name,
+			)
+		}
+		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, useMSM)
 		ctx.skipGroth16WAMarker = true
 	}
 

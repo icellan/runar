@@ -262,6 +262,12 @@ const LowerError = error{
     /// whole 2026-08 branch/loop miscompile family. Silent until the UTXO is
     /// already locked, so we fail loudly at compile time instead.
     BranchResultDepthMismatch,
+    /// Layer D (#178): the two arms of a conditional end at the same depth but
+    /// hold different parent names at the same slot, so every later read of
+    /// either slot takes the wrong value on one path. Also raised when the arms
+    /// inherit different parent slots, or the parent's post-ENDIF model is not
+    /// the inherited order the arms were rolled into.
+    BranchLayoutMismatch,
     /// N-111: a `method_call` passing MORE arguments than the callee declares.
     /// Surplus args were skipped by the binding loop, which is not the same as
     /// ignoring them: an unbound ref is never consumed, so it stays live on the
@@ -1416,6 +1422,158 @@ const LowerCtx = struct {
         for (drain_depths.items) |depth| {
             try removeBranchValueAtDepth(self, depth);
         }
+    }
+
+    /// The slots this arm inherited from the parent, as arm stack indices
+    /// (bottom = 0) in the arm's current order. A slot is matched to the parent
+    /// by name and multiplicity: for each name, the deepest
+    /// `min(parent count, arm count)` occurrences. Everything else the arm
+    /// holds (its results, a rebound local's new value) is not inherited.
+    fn inheritedSlots(self: *const LowerCtx, parent: *const StackMap) !std.ArrayListUnmanaged(usize) {
+        const a = self.allocator;
+        var parent_counts = try parent.nameCounts(a);
+        defer parent_counts.deinit(a);
+        var seen: std.StringHashMapUnmanaged(usize) = .empty;
+        defer seen.deinit(a);
+        var inherited: std.ArrayListUnmanaged(usize) = .empty;
+        errdefer inherited.deinit(a);
+        for (self.stack.slots.items, 0..) |slot, i| {
+            const name = slot orelse continue;
+            const gop = try seen.getOrPut(a, name);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            const k = gop.value_ptr.*;
+            gop.value_ptr.* += 1;
+            if (k < (parent_counts.get(name) orelse 0)) try inherited.append(a, i);
+        }
+        return inherited;
+    }
+
+    /// The parent's order for the slots this arm inherited: the parent's named
+    /// slots, bottom first, keeping for each name only its deepest occurrences,
+    /// as many as the arm inherited. Phase 2 drops the SHALLOWEST occurrence of
+    /// a name a sibling consumed, and the post-ENDIF reconcile removes the
+    /// parent's shallowest occurrence, so this is exactly the order the parent
+    /// goes on modelling after OP_ENDIF.
+    fn parentOrder(self: *const LowerCtx, parent: *const StackMap) !std.ArrayListUnmanaged([]const u8) {
+        const a = self.allocator;
+        var inherited = try self.inheritedSlots(parent);
+        defer inherited.deinit(a);
+        var want: std.StringHashMapUnmanaged(usize) = .empty;
+        defer want.deinit(a);
+        for (inherited.items) |i| {
+            const gop = try want.getOrPut(a, self.stack.slots.items[i].?);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+        }
+        var order: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer order.deinit(a);
+        for (parent.slots.items) |slot| {
+            const name = slot orelse continue;
+            const left = want.getPtr(name) orelse continue;
+            if (left.* == 0) continue;
+            try order.append(a, name);
+            left.* -= 1;
+        }
+        return order;
+    }
+
+    /// The arm slots to roll to the top, in turn, so that the inherited slots
+    /// stand in `order` (names, bottom first) with everything else above them
+    /// in its current order. The longest run at the bottom already in place
+    /// stays. Same-named slots keep their relative order, so a name held twice
+    /// keeps its dead-below-live layout.
+    fn alignmentRolls(self: *const LowerCtx, parent: *const StackMap, order: []const []const u8) !std.ArrayListUnmanaged(usize) {
+        const a = self.allocator;
+        var inherited = try self.inheritedSlots(parent);
+        defer inherited.deinit(a);
+        var target: std.ArrayListUnmanaged(usize) = .empty;
+        defer target.deinit(a);
+        var taken: std.StringHashMapUnmanaged(usize) = .empty;
+        defer taken.deinit(a);
+        for (order) |name| {
+            const gop = try taken.getOrPut(a, name);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            const k = gop.value_ptr.*;
+            gop.value_ptr.* += 1;
+            var c: usize = 0;
+            for (inherited.items) |i| {
+                if (!std.mem.eql(u8, self.stack.slots.items[i].?, name)) continue;
+                if (c == k) {
+                    try target.append(a, i);
+                    break;
+                }
+                c += 1;
+            }
+        }
+        const in_set = try a.alloc(bool, self.stack.slots.items.len);
+        defer a.free(in_set);
+        @memset(in_set, false);
+        for (inherited.items) |i| in_set[i] = true;
+        for (0..self.stack.slots.items.len) |i| {
+            if (!in_set[i]) try target.append(a, i);
+        }
+        // Slots never rolled keep their relative order and sink to the bottom,
+        // so the longest increasing prefix of `target` stays and the rest is
+        // rolled.
+        var keep: usize = 0;
+        while (keep < target.items.len and (keep == 0 or target.items[keep] > target.items[keep - 1])) : (keep += 1) {}
+        var rolls: std.ArrayListUnmanaged(usize) = .empty;
+        errdefer rolls.deinit(a);
+        try rolls.appendSlice(a, target.items[keep..]);
+        return rolls;
+    }
+
+    /// Replay `rolls` (arm indices, in turn) over a stack of `depth` slots and
+    /// return the depth each one rolls from.
+    fn rollSequence(a: Allocator, depth: usize, rolls: []const usize) !std.ArrayListUnmanaged(usize) {
+        var current: std.ArrayListUnmanaged(usize) = .empty;
+        defer current.deinit(a);
+        for (0..depth) |i| try current.append(a, i);
+        var depths: std.ArrayListUnmanaged(usize) = .empty;
+        errdefer depths.deinit(a);
+        for (rolls) |index| {
+            const pos = std.mem.indexOfScalar(usize, current.items, index).?;
+            try depths.append(a, current.items.len - 1 - pos);
+            _ = current.orderedRemove(pos);
+            try current.append(a, index);
+        }
+        return depths;
+    }
+
+    /// Put this arm's inherited slots in `order` (issue #178): see
+    /// `alignmentRolls`. Emits nothing when they already are.
+    fn alignInheritedLayout(self: *LowerCtx, parent: *const StackMap, order: []const []const u8) !void {
+        const a = self.allocator;
+        var rolls = try self.alignmentRolls(parent, order);
+        defer rolls.deinit(a);
+        var depths = try rollSequence(a, self.stack.slots.items.len, rolls.items);
+        defer depths.deinit(a);
+        for (depths.items) |d| {
+            switch (d) {
+                0 => {},
+                1 => {
+                    try self.emitOp(.op_swap);
+                    const items = self.stack.slots.items;
+                    std.mem.swap(?[]const u8, &items[items.len - 1], &items[items.len - 2]);
+                },
+                2 => {
+                    try self.emitOp(.op_rot);
+                    const name = self.stack.peekAtDepth(2);
+                    try self.stack.removeAtDepth(a, 2);
+                    try self.stack.push(a, name);
+                },
+                else => {
+                    try self.emitPushInt(@intCast(d));
+                    try self.stack.push(a, null);
+                    try self.emitOp(.op_roll);
+                    _ = self.stack.pop();
+                    const name = self.stack.peekAtDepth(d);
+                    try self.stack.removeAtDepth(a, d);
+                    try self.stack.push(a, name);
+                },
+            }
+        }
+        try self.stack.rebuildNameIndex(a);
     }
 
     // ========================================================================
@@ -6017,6 +6175,34 @@ const LowerCtx = struct {
             try removeBranchValueAtDepth(then_ctx, depth);
         }
 
+        // Issue #178: both arms now hold the same inherited slots, but not
+        // necessarily in the parent's ORDER. Rebinding a local that is dead
+        // after the `if` consumes its slot and pushes the new value on top
+        // (`w = w - 1n` turns `[w k]` into `[k w]`); a nested `if` without
+        // `else` that rebinds a live local leaves the new value on top of its
+        // neighbours. Everything below reads the arms by position and the
+        // parent goes on modelling its own order, so a read of a moved slot on
+        // that path took its neighbour's value.
+        //
+        // Roll each arm's inherited slots back into the parent's pre-`if`
+        // order: the same contract the #149 `sink_below` repair keeps for
+        // declared results, one layer earlier, so the parent's model of every
+        // slot it does not adopt stays "the depth it recorded before the
+        // branch" on every path. Emits nothing for an arm already in that
+        // order. Before the result trim, which removes the slots just beneath
+        // the results and so needs every inherited slot below them.
+        var inherited_order_list = try then_ctx.parentOrder(&self.stack);
+        defer inherited_order_list.deinit(self.allocator);
+        var else_inherited_order = try else_ctx.parentOrder(&self.stack);
+        defer else_inherited_order.deinit(self.allocator);
+        const inherited_order: []const []const u8 = inherited_order_list.items;
+        if (inherited_order.len != else_inherited_order.items.len) return LowerError.BranchLayoutMismatch;
+        for (inherited_order, else_inherited_order.items) |tn, en| {
+            if (!std.mem.eql(u8, tn, en)) return LowerError.BranchLayoutMismatch;
+        }
+        try then_ctx.alignInheritedLayout(&self.stack, inherited_order);
+        try else_ctx.alignInheritedLayout(&self.stack, inherited_order);
+
         // Branch-merged locals: trim each arm down to exactly its K result slots.
         //
         // ANF lowering ends both arms with an identical K-binding block that
@@ -6139,6 +6325,23 @@ const LowerCtx = struct {
             return LowerError.BranchStackMismatch;
         }
 
+        // Layer D: equal depth is not enough, the arms must agree slot by slot
+        // on every name the parent can read after OP_ENDIF. A slot only one arm
+        // names is skipped: a phase-3 placeholder, or the `if`'s own value,
+        // which each arm binds under its own temporary. Two different parent
+        // names at the same depth mean one path reads its neighbour's value
+        // (#178). Emits no opcodes.
+        {
+            var d: usize = 0;
+            while (d < then_ctx.stack.depth()) : (d += 1) {
+                const tn = then_ctx.stack.peekAtDepth(d) orelse continue;
+                const en = else_ctx.stack.peekAtDepth(d) orelse continue;
+                if (!std.mem.eql(u8, tn, en) and pre_if_names.contains(tn) and pre_if_names.contains(en)) {
+                    return LowerError.BranchLayoutMismatch;
+                }
+            }
+        }
+
         // N-100: an `else` CLAUSE exists only if the else arm still has a body
         // once the peephole has run over it.
         //
@@ -6238,6 +6441,21 @@ const LowerCtx = struct {
                 const d = self.stack.findDepth(entry.key_ptr.*) orelse break;
                 try self.stack.removeAtDepth(self.allocator, d);
             }
+        }
+
+        // #178: what the parent still models is exactly the slots both arms
+        // inherited, and the arms were rolled into the parent's order above.
+        // Checked rather than assumed. Emits no opcodes.
+        {
+            var k: usize = 0;
+            for (self.stack.slots.items) |slot| {
+                const name = slot orelse continue;
+                if (k >= inherited_order.len or !std.mem.eql(u8, name, inherited_order[k])) {
+                    return LowerError.BranchLayoutMismatch;
+                }
+                k += 1;
+            }
+            if (k != inherited_order.len) return LowerError.BranchLayoutMismatch;
         }
 
         // C27: the N>=2 result reconcile below also applies when the else-branch

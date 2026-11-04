@@ -76,6 +76,7 @@ test {
     _ = @import("tests/cli_source_read_cap.zig");
     _ = @import("tests/branch_outputs_merged_locals.zig");
     _ = @import("tests/branch_merge_dead_arm_k1.zig");
+    _ = @import("tests/branch_arm_inherited_order.zig");
     _ = @import("tests/n051_branch_arm_private_helper.zig");
     _ = @import("tests/n051_codepart_len_slots.zig");
     _ = @import("tests/r072_method_scope_branch_arm.zig");

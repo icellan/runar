@@ -38,6 +38,12 @@
       "type": "string",
       "description": "Optional free-form pointer to the upstream VK source (e.g. SP1 Solidity verifier file). Ignored by the compiler."
     },
+    "pinnedPublicInputs": {
+      "type": "object",
+      "description": "Optional. Public inputs fixed at compile time for the MSM-binding verifier, keyed by slot index ('0'..'4') with decimal scalar values in [0, r). A pinned slot's term pinned_i * IC[i+1] is folded into the accumulator's starting point when the script is generated and the on-chain check for that slot becomes a single OP_EQUALVERIFY of the witness scalar against the pinned value. Unpinned slots are multiplied on-chain as before.",
+      "propertyNames": { "pattern": "^[0-4]$" },
+      "additionalProperties": { "type": "string", "pattern": "^[0-9]+$" }
+    },
     "alphaG1": {
       "$ref": "#/$defs/G1Point",
       "description": "The α point of the verifying key, on G1. Stored POSITIVE: the compiler computes MillerLoop(α, -β) internally."

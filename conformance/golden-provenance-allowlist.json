@@ -3356,6 +3356,33 @@
       "reviewer": "fix-session: PR sync (ports #172), golden hand-checked 5 + 7777 = 7782 against the @bsv/sdk Spend oracle",
       "date": "2026-11-03",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/branch-permuted-dead-rebind.json",
+      "sha256": "f9af683341ab36f6bebc45b138fdc585ddd790b8343638ead7ef180bded2fcd2",
+      "verified-against": "differential-oracle",
+      "reason": "Ports #179 (issue #178): NEW strict-mode ANF-interpreter golden, no previous bytes. Pins conformance/anf-interpreter/programs/branch-permuted-parent-slots.anf.json from constructor state a=5, b=7, c=9; deadRebind(x=10, flag=1): k = x + 2 = 12, so a=12n, b=7n, c=9n, hand-derived from the source. The ANF is not what #178 broke (it is a stack-lowering bug), so this golden is the source value; the bytes it guards are the compiled script's. Verified-against: differential-oracle -- the input carries a scriptOracle, so cross-interpreter.test.ts deploys and spends the compiled script on @bsv/sdk Spend and decodes the same state from the continuation output. With the lowerIf arm alignment and Layer D removed from 05-stack-lower.ts (main's behaviour) that spend is refused by the SDK's pre-broadcast Spend check; with them it is accepted. No compiler golden moved.",
+      "reviewer": "fix-session: PR sync (ports #179), golden hand-checked against the source and the @bsv/sdk Spend oracle",
+      "date": "2026-11-04",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/branch-permuted-nested-rebind.json",
+      "sha256": "28bce51bec7f310c1733d7cec0c82fa7f43074616d5785b3bbf6ae3de18cc27f",
+      "verified-against": "differential-oracle",
+      "reason": "Ports #179 (issue #178): NEW strict-mode ANF-interpreter golden, no previous bytes. Pins conformance/anf-interpreter/programs/branch-permuted-parent-slots.anf.json from constructor state a=5, b=7, c=9; nestedRebind(x=30, outer=1, inner=1): na = x + 1 = 31, nb keeps 7, so a=31n, b=7n, c=9n, hand-derived from the source. The ANF is not what #178 broke (it is a stack-lowering bug), so this golden is the source value; the bytes it guards are the compiled script's. Verified-against: differential-oracle -- the input carries a scriptOracle, so cross-interpreter.test.ts deploys and spends the compiled script on @bsv/sdk Spend and decodes the same state from the continuation output. With the lowerIf arm alignment and Layer D removed from 05-stack-lower.ts (main's behaviour) that spend is refused by the SDK's pre-broadcast Spend check; with them it is accepted. No compiler golden moved.",
+      "reviewer": "fix-session: PR sync (ports #179), golden hand-checked against the source and the @bsv/sdk Spend oracle",
+      "date": "2026-11-04",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/branch-permuted-siblings-above.json",
+      "sha256": "e54d6e333d88365a881b9c029d67d7d98c297005048884d79af3a23e1e0328b7",
+      "verified-against": "differential-oracle",
+      "reason": "Ports #179 (issue #178): NEW strict-mode ANF-interpreter golden, no previous bytes. Pins conformance/anf-interpreter/programs/branch-permuted-parent-slots.anf.json from constructor state a=5, b=7, c=9; siblingsAbove(x=10, outer=1, inner=1): na = x = 10, b = 11 + 12 = 23, c = 13, hand-derived from the source. The ANF is not what #178 broke (it is a stack-lowering bug), so this golden is the source value; the bytes it guards are the compiled script's. Verified-against: differential-oracle -- the input carries a scriptOracle, so cross-interpreter.test.ts deploys and spends the compiled script on @bsv/sdk Spend and decodes the same state from the continuation output. With the lowerIf arm alignment and Layer D removed from 05-stack-lower.ts (main's behaviour) that spend is refused by the SDK's pre-broadcast Spend check; with them it is accepted. No compiler golden moved.",
+      "reviewer": "fix-session: PR sync (ports #179), golden hand-checked against the source and the @bsv/sdk Spend oracle",
+      "date": "2026-11-04",
+      "review-status": "reviewed"
     }
   ]
 }

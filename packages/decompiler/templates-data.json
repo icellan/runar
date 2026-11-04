@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-03T22:38:25.329Z",
+  "generatedAt": "2026-11-04T11:48:19.527Z",
   "compilerVersion": "0.5.0",
   "entries": [
     {
@@ -303,10 +303,10 @@
       "bytes": 17
     },
     {
-      "hex": "76009c6375000000547a9f635379517c53797f777c7f750051807e81547a515279937c547a7f777c7f75537a8763516778687b75517b9367537a757b756876635167769168777767519d767c8768",
+      "hex": "76009c6375000000547a9f635379517c53797f777c7f750051807e81547a515279937c547a7f777c7f75537a8763516778687b75517b937c67537a757b756876635167769168777767519d767c8768",
       "source": "import { SmartContract, assert, substr, bin2num, num2bin, cat } from 'runar-lang';\nimport type { ByteString } from 'runar-lang';\n\n/**\n * Regression test for issue #34 — cross-method parameter-name shadowing.\n *\n * The local `x: bigint` in `walk` must NOT inherit the byte type of the\n * `x: ByteString` parameter of `other`. Before the fix, the ANF param-type\n * lookup searched ALL methods' params, so `x` matched `other`'s parameter and\n * `1n + x` miscompiled to OP_CAT (byte concat, 0x7e) instead of OP_ADD (0x93),\n * making the compiled script diverge from the interpreter.\n */\nclass StackTrackerRepro extends SmartContract {\n  constructor() { super(); }\n\n  public walk(buf: ByteString, count: bigint, target: ByteString) {\n    let p: bigint = 0n;\n    let found: boolean = false;\n    if (0n < count) {\n      const x: bigint = bin2num(cat(substr(buf, p, 1n), num2bin(0n, 1n)));\n      const blob: ByteString = substr(buf, p, 1n + x);\n      if (blob === target) { found = true; }\n      p = p + 1n + x;\n    }\n    assert(found || !found);\n  }\n\n  public other(x: ByteString) { assert(x === x); }\n}\n",
       "origin": "examples/ts/nested-if-multi-reassign/StackTrackerRepro.runar.ts",
-      "bytes": 78
+      "bytes": 79
     },
     {
       "hex": "53795880537a537a00537a537a537a537a01007e817c01007e81760003000001a5697b01007e817653799f6976959378977ba801007e817b979d7c0350c300a06900ac",

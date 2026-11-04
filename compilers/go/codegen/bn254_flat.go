@@ -187,25 +187,15 @@ func (f *flatEmitter) tuck() {
 	}
 }
 
-// fetchQ copies q from stack bottom to TOS using the cheapest method.
-// For stack depth <= 16: push(depth) OP_PICK uses OP_1..OP_16 (1 byte) + OP_PICK = 2 bytes.
-// For stack depth 17-252: push(depth) OP_PICK uses 2 bytes + OP_PICK = 3 bytes (same as DEPTH method).
-// For stack depth > 252: OP_DEPTH OP_1SUB OP_PICK = 3 bytes (cheaper than multi-byte push).
-// stackSize += 1.
+// fetchQ copies q from the stack bottom to TOS. The flat emitter tracks the
+// stack size, so q's depth is known at codegen time and the fetch is a
+// push(depth) OP_PICK: one counted op (pushes are not counted against
+// maxopsperscriptpolicy) against three for OP_DEPTH OP_1SUB OP_PICK. In bytes
+// the static form is one shorter up to depth 16, equal up to depth 127 and
+// one longer beyond that (two-byte push), so the op-count saving costs at
+// most one byte per fetch. stackSize += 1.
 func (f *flatEmitter) fetchQ() {
-	qDepth := f.stackSize - 1
-	if qDepth <= 16 {
-		// OP_1..OP_16 is 1 byte, + OP_PICK = 2 bytes total. Saves 1 byte.
-		f.pick(qDepth)
-		return
-	}
-	// For depth > 16, OP_DEPTH OP_1SUB OP_PICK is 3 bytes.
-	// push(depth) OP_PICK is 2 bytes (push) + 1 byte (PICK) = 3 bytes for depth <= 252,
-	// or 3+ bytes for larger depths. So DEPTH method is always <= codegen method.
-	f.op("OP_DEPTH")
-	f.op("OP_1SUB")
-	f.op("OP_PICK")
-	f.stackSize++
+	f.pick(f.stackSize - 1)
 }
 
 // =========================================================================
