@@ -909,6 +909,13 @@ func anfEvalValue(
 							callEnv[prop.Name] = v
 						}
 					}
+					// A helper reads `this.txPreimage` as `load_prop txPreimage`,
+					// but it is not a property, so carry the caller's binding (the
+					// F-024 MockPreimageAmount) or extractAmount / extractScriptCode
+					// in the helper answer the placeholder (ports #172).
+					if v, ok := env["txPreimage"]; ok {
+						callEnv["txPreimage"] = v
+					}
 					// Map params to arg values
 					for j, param := range m.Params {
 						if j < len(argVals) {

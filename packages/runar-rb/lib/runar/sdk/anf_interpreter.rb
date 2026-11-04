@@ -1265,6 +1265,11 @@ module Runar
             name = prop['name']
             new_env[name] = caller_env[name] if caller_env.key?(name)
           end
+          # A helper reads +this.txPreimage+ as +load_prop txPreimage+, but it
+          # is not a property, so carry the caller's binding (the F-024 Integer
+          # input amount) or +extractAmount+ in the helper answers the
+          # placeholder (ports #172).
+          new_env['txPreimage'] = caller_env['txPreimage'] if caller_env.key?('txPreimage')
         end
 
         # Map positional args to the method's declared params.

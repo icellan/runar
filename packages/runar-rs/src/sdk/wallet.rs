@@ -109,8 +109,17 @@ pub trait WalletClient {
 // ---------------------------------------------------------------------------
 // WalletProvider options
 // ---------------------------------------------------------------------------
-/// The default ARC broadcaster. This is a MAINNET endpoint — see R-179.
+/// GorillaPool's MAINNET ARC endpoint. No longer the default; pass it as
+/// `arc_url` to keep broadcasting there.
 pub const MAINNET_ARC_URL: &str = "https://arc.gorillapool.io";
+
+/// The default broadcasters: the BSV Association's public BSV Broadcaster
+/// endpoints (called Arcade before 0.19.0, hence the hostnames). One per
+/// network, so the default always matches `network` — see R-179. BSV
+/// Broadcaster submits at `POST /tx`, not ARC's `POST /v1/tx`.
+pub const BSV_BROADCASTER_MAINNET_URL: &str = "https://arcade-us-1.bsvblockchain.tech";
+/// The testnet BSV Broadcaster endpoint; see [`BSV_BROADCASTER_MAINNET_URL`].
+pub const BSV_BROADCASTER_TESTNET_URL: &str = "https://arcade-v2-testnet-us-1.bsvblockchain.tech";
 
 
 /// Options for constructing a WalletProvider.
@@ -123,7 +132,7 @@ pub struct WalletProviderOptions<W: WalletClient> {
     pub basket: String,
     /// Tag for funding UTXOs within the basket (default: "funding").
     pub funding_tag: Option<String>,
-    /// ARC broadcast endpoint (default: "https://arc.gorillapool.io").
+    /// ARC broadcast endpoint (default: BSV Broadcaster for `network`).
     pub arc_url: Option<String>,
     /// Overlay service URL for tx lookups (optional).
     pub overlay_url: Option<String>,
@@ -164,7 +173,7 @@ pub trait Broadcaster {
 // ---------------------------------------------------------------------------
 
 /// Provider implementation that uses a BRC-100 wallet for UTXO management
-/// and GorillaPool ARC for broadcast.
+/// and BSV Broadcaster (or ARC, when `arc_url` is set) for broadcast.
 ///
 /// Mirrors the TypeScript `WalletProvider` from `runar-sdk`.
 pub struct WalletProvider<W: WalletClient> {
@@ -173,7 +182,11 @@ pub struct WalletProvider<W: WalletClient> {
     key_id: String,
     basket: String,
     funding_tag: String,
-    arc_url: String,
+    /// The caller's ARC endpoint, if any.
+    arc_url: Option<String>,
+    /// Where `broadcast` posts: ARC's `/v1/tx` or BSV Broadcaster's `/tx`.
+    /// Empty when the network has no default and no `arc_url` was given.
+    broadcast_url: String,
     overlay_url: Option<String>,
     network: String,
     fee_rate: i64,
@@ -206,23 +219,25 @@ impl<W: WalletClient> WalletProvider<W> {
         fee_rate: Option<i64>,
     ) -> Self {
         let resolved_network = network.unwrap_or_else(|| "mainnet".to_string());
+        // R-179: the default endpoint is derived from the network, so a
+        // provider the caller did not point anywhere broadcasts to the network
+        // it reports. An explicit arc_url is the caller's choice and is used as
+        // given. `new` returns Self and cannot refuse, so a network with no
+        // default is left with an empty broadcast_url and `broadcast` refuses.
+        let broadcast_url = match (&arc_url, resolved_network.as_str()) {
+            (Some(arc), _) => format!("{}/v1/tx", arc),
+            (None, "mainnet") => format!("{}/tx", BSV_BROADCASTER_MAINNET_URL),
+            (None, "testnet") => format!("{}/tx", BSV_BROADCASTER_TESTNET_URL),
+            (None, _) => String::new(),
+        };
         WalletProvider {
             wallet,
             protocol_id,
             key_id,
             basket,
             funding_tag: funding_tag.unwrap_or_else(|| "funding".to_string()),
-            // R-179: only mainnet has a default ARC endpoint, because the
-            // default IS a mainnet endpoint. A non-mainnet provider that names
-            // none is left with an empty arc_url and refuses in `broadcast`
-            // rather than sending a testnet-configured spend to real money.
-            arc_url: arc_url.unwrap_or_else(|| {
-                if resolved_network == "mainnet" {
-                    MAINNET_ARC_URL.to_string()
-                } else {
-                    String::new()
-                }
-            }),
+            arc_url,
+            broadcast_url,
             overlay_url,
             network: resolved_network.clone(),
             fee_rate: fee_rate.unwrap_or(100),
@@ -242,7 +257,7 @@ impl<W: WalletClient> WalletProvider<W> {
     /// Inject a shared broadcaster (issue #107).
     ///
     /// Additive and non-breaking: `broadcast()` delegates to `broadcaster` when
-    /// set, else falls back to the hardcoded ARC URL. Consumes and returns
+    /// set, else falls back to the default endpoint. Consumes and returns
     /// `self` for builder-style chaining, e.g.
     /// `WalletProvider::new(..).with_broadcaster(Box::new(my_broadcaster))`.
     pub fn with_broadcaster(mut self, broadcaster: Box<dyn Broadcaster>) -> Self {
@@ -361,15 +376,6 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
     }
 
     fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String> {
-        // R-179: see `new` — an empty arc_url means a non-mainnet provider was
-        // built without naming its own endpoint.
-        if self.arc_url.is_empty() {
-            return Err(format!(
-                "WalletProvider broadcast: no ARC endpoint for network '{}' — {} is a \
-                 MAINNET broadcaster; pass arc_url explicitly",
-                self.network, MAINNET_ARC_URL
-            ));
-        }
         let raw_hex = tx.to_hex().map_err(|e| format!("WalletProvider broadcast: to_hex failed: {}", e))?;
         let raw_bytes = hex_to_bytes(&raw_hex)?;
         let txid = compute_txid(&raw_bytes);
@@ -395,18 +401,29 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
             return Ok(reported_txid);
         }
 
-        // POST to ARC as application/octet-stream
-        let arc_endpoint = format!("{}/v1/tx", self.arc_url);
+        // R-179: see `new` — an empty broadcast_url means a network with no
+        // default broadcaster was built without naming its own endpoint.
+        if self.broadcast_url.is_empty() {
+            return Err(format!(
+                "WalletProvider broadcast: no default broadcaster for network '{}'; \
+                 pass arc_url explicitly",
+                self.network
+            ));
+        }
+        let service = if self.arc_url.is_some() { "ARC" } else { "BSV Broadcaster" };
+
+        // POST to BSV Broadcaster (or ARC) as application/octet-stream
+        let arc_endpoint = self.broadcast_url.clone();
         match ureq::post(&arc_endpoint)
             .timeout(self.arc_timeout)
             .set("Content-Type", "application/octet-stream")
             .send_bytes(&raw_bytes)
         {
-            // 2xx: ARC answered; the body still has to say it ACCEPTED this tx
-            // (F-042).
+            // 2xx: the broadcaster answered; the body still has to say it
+            // ACCEPTED this tx (F-042).
             Ok(resp) => {
                 let body = resp.into_string().map_err(|e| {
-                    format!("WalletProvider broadcast: reading ARC response from {}: {}", arc_endpoint, e)
+                    format!("WalletProvider broadcast: reading {} response from {}: {}", service, arc_endpoint, e)
                 })?;
                 let txid = check_arc_accepted(&body, &txid)?;
                 self.tx_cache.insert(txid.clone(), raw_hex);
@@ -419,16 +436,16 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 Err(format!(
-                    "WalletProvider broadcast: ARC HTTP {} from {}: {}",
-                    code, arc_endpoint, body
+                    "WalletProvider broadcast: {} HTTP {} from {}: {}",
+                    service, code, arc_endpoint, body
                 ))
             }
             // Transport failure (connection refused, DNS, TLS handshake). The
             // broadcast was never attempted/completed — surface it rather than
             // returning a synthetic txid the caller would treat as broadcast.
             Err(e) => Err(format!(
-                "WalletProvider broadcast: ARC network error against {}: {}",
-                arc_endpoint, e
+                "WalletProvider broadcast: {} network error against {}: {}",
+                service, arc_endpoint, e
             )),
         }
     }
@@ -1191,66 +1208,50 @@ mod tests {
 
     // R-179 (CL-BUG-072): arc_url and network were defaulted independently, so
     // a provider configured for testnet reported get_network() == "testnet" and
-    // broadcast every transaction to the MAINNET ARC. `new` returns Self and
-    // cannot refuse, so a non-mainnet provider that names no endpoint is left
-    // with an empty arc_url and `broadcast` refuses.
-    #[test]
-    fn r179_testnet_without_arc_url_does_not_inherit_the_mainnet_endpoint() {
-        let wallet = MockWalletClient::new();
-        let provider = WalletProvider::new(
-            wallet,
+    // broadcast every transaction to the MAINNET ARC. The default is now BSV
+    // Broadcaster, which has one endpoint per network, so the default follows
+    // the network.
+    fn provider_for(network: Option<&str>, arc_url: Option<&str>) -> WalletProvider<MockWalletClient> {
+        WalletProvider::new(
+            MockWalletClient::new(),
             (2, "test".to_string()),
             "1".to_string(),
             "my-basket".to_string(),
             None,
+            arc_url.map(str::to_string),
             None,
+            network.map(str::to_string),
             None,
-            Some("testnet".to_string()),
-            None,
-        );
-        assert_eq!(provider.get_network(), "testnet");
-        assert_eq!(
-            provider.arc_url, "",
-            "a testnet provider must not inherit the mainnet ARC endpoint"
-        );
+        )
     }
 
     #[test]
-    fn r179_testnet_with_an_explicit_arc_url_is_accepted() {
-        let wallet = MockWalletClient::new();
-        let provider = WalletProvider::new(
-            wallet,
-            (2, "test".to_string()),
-            "1".to_string(),
-            "my-basket".to_string(),
-            None,
-            Some("https://arc.testnet.example".to_string()),
-            None,
-            Some("testnet".to_string()),
-            None,
-        );
-        assert_eq!(provider.arc_url, "https://arc.testnet.example");
-        assert_eq!(provider.get_network(), "testnet");
-    }
-
-    #[test]
-    fn r179_mainnet_default_is_unchanged() {
-        for network in [None, Some("mainnet".to_string())] {
-            let wallet = MockWalletClient::new();
-            let provider = WalletProvider::new(
-                wallet,
-                (2, "test".to_string()),
-                "1".to_string(),
-                "my-basket".to_string(),
-                None,
-                None,
-                None,
-                network,
-                None,
-            );
-            assert_eq!(provider.get_network(), "mainnet");
-            assert_eq!(provider.arc_url, MAINNET_ARC_URL);
+    fn r179_default_endpoint_follows_network() {
+        for (network, url) in [
+            (None, "https://arcade-us-1.bsvblockchain.tech/tx"),
+            (Some("mainnet"), "https://arcade-us-1.bsvblockchain.tech/tx"),
+            (Some("testnet"), "https://arcade-v2-testnet-us-1.bsvblockchain.tech/tx"),
+        ] {
+            let provider = provider_for(network, None);
+            assert_eq!(provider.arc_url, None);
+            assert_eq!(provider.broadcast_url, url, "network {:?}", network);
         }
+    }
+
+    #[test]
+    fn r179_explicit_arc_url_keeps_the_arc_path() {
+        let provider = provider_for(Some("testnet"), Some("https://arc.testnet.example"));
+        assert_eq!(provider.get_network(), "testnet");
+        assert_eq!(provider.broadcast_url, "https://arc.testnet.example/v1/tx");
+    }
+
+    #[test]
+    fn r179_network_without_a_default_refuses_to_broadcast() {
+        let mut provider = provider_for(Some("regtest"), None);
+        assert_eq!(provider.broadcast_url, "");
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        let err = provider.broadcast(&tx).unwrap_err();
+        assert!(err.contains("regtest"), "the refusal must name the network, got: {}", err);
     }
 
     #[test]
@@ -1764,6 +1765,34 @@ mod tests {
         let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
         let result = provider.broadcast(&tx);
         assert_eq!(result.unwrap(), arc_txid, "R1: 2xx with txid body must return that txid");
+    }
+
+    #[test]
+    fn default_broadcast_accepts_a_bsv_broadcaster_202() {
+        // F-042 applies to BSV Broadcaster too: the body must echo THIS tx's txid.
+        let txid = f042_local_txid();
+        let body: &'static str = Box::leak(
+            format!("{{\"txid\":\"{}\",\"status\":202,\"txStatus\":\"RECEIVED\"}}", txid)
+                .into_boxed_str(),
+        );
+        let mut provider = provider_for(Some("testnet"), None);
+        provider.broadcast_url = format!("{}/tx", spawn_mock_arc("202 Accepted", body));
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        assert_eq!(provider.broadcast(&tx).unwrap(), txid);
+    }
+
+    #[test]
+    fn broadcast_errors_name_the_service() {
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+
+        let mut default = provider_for(Some("testnet"), None);
+        default.broadcast_url = format!("{}/tx", spawn_mock_arc("400 Bad Request", "{}"));
+        let msg = default.broadcast(&tx).unwrap_err();
+        assert!(msg.contains("BSV Broadcaster HTTP 400"), "got: {}", msg);
+
+        let mut arc = provider_with_arc(spawn_mock_arc("400 Bad Request", "{}"));
+        let msg = arc.broadcast(&tx).unwrap_err();
+        assert!(msg.contains("ARC HTTP 400"), "got: {}", msg);
     }
 
     #[test]

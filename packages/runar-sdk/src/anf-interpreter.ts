@@ -1456,6 +1456,11 @@ function evalMethodCall(
           methodEnv[prop.name] = callerEnv[prop.name];
         }
       }
+      // A helper reads `this.txPreimage` as `load_prop txPreimage`, but it is
+      // not a property, so carry the caller's binding (the F-024 / R67 mock
+      // preimage) or `extractAmount` / `extractScriptCode` in the helper answer
+      // the placeholder (ports #172).
+      if ('txPreimage' in callerEnv) methodEnv['txPreimage'] = callerEnv['txPreimage'];
 
       // Map method params to passed args
       for (let i = 0; i < method.params.length && i < args.length; i++) {

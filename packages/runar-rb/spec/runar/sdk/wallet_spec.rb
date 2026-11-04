@@ -76,25 +76,62 @@ RSpec.describe Runar::SDK::WalletProvider do
   end
 
   it 'returns the configured network override' do
-    # R-179: this used to omit arc_url, which built a testnet provider pointing
-    # at the MAINNET ARC. A non-mainnet provider now names its own endpoint.
-    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b',
-                             network: 'testnet', arc_url: 'https://arc.testnet.example')
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'testnet')
     expect(wp.get_network).to eq('testnet')
   end
 
-  it 'refuses a non-mainnet provider that names no ARC endpoint (R-179)' do
-    expect do
-      described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'testnet')
-    end.to raise_error(ArgumentError, /testnet.*arc\.gorillapool\.io|arc\.gorillapool\.io.*testnet/m)
+  # R-179: arc_url and network used to be defaulted independently, so a testnet
+  # provider broadcast to the MAINNET ARC. The default is now BSV Broadcaster,
+  # which has one endpoint per network, so the default follows the network.
+  it 'defaults to the BSV Broadcaster endpoint for its network (R-179)' do
+    {
+      {} => 'https://arcade-us-1.bsvblockchain.tech/tx',
+      { network: 'mainnet' } => 'https://arcade-us-1.bsvblockchain.tech/tx',
+      { network: 'testnet' } => 'https://arcade-v2-testnet-us-1.bsvblockchain.tech/tx'
+    }.each do |extra, url|
+      wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', **extra)
+      expect(wp.instance_variable_get(:@arc_url)).to be_nil
+      expect(wp.instance_variable_get(:@broadcast_url)).to eq(url)
+    end
   end
 
-  it 'keeps the mainnet default endpoint exactly as it was (R-179)' do
-    [{}, { network: 'mainnet' }].each do |extra|
-      wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', **extra)
-      expect(wp.get_network).to eq('mainnet')
-      expect(wp.instance_variable_get(:@arc_url)).to eq('https://arc.gorillapool.io')
+  it 'keeps the ARC path when arc_url is given (R-179)' do
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b',
+                             network: 'testnet', arc_url: 'https://arc.testnet.example')
+    expect(wp.instance_variable_get(:@broadcast_url)).to eq('https://arc.testnet.example/v1/tx')
+  end
+
+  it 'refuses a network with no default broadcaster (R-179)' do
+    expect do
+      described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'regtest')
+    end.to raise_error(ArgumentError, /regtest/)
+  end
+
+  it 'posts the raw tx to the BSV Broadcaster /tx endpoint by default' do
+    require 'net/http'
+    local_txid = Digest::SHA256.digest(Digest::SHA256.digest(['0100'].pack('H*'))).reverse.unpack1('H*')
+    sent = nil
+    fake_http = Object.new
+    fake_http.define_singleton_method(:use_ssl=) { |_| }
+    fake_http.define_singleton_method(:open_timeout=) { |_| }
+    fake_http.define_singleton_method(:read_timeout=) { |_| }
+    fake_http.define_singleton_method(:request) do |req|
+      sent = req
+      resp = Net::HTTPAccepted.new('1.1', '202', 'Accepted')
+      resp.instance_variable_set(:@read, true)
+      # F-042 applies to BSV Broadcaster too: the body must echo THIS tx's txid.
+      resp.instance_variable_set(:@body, %({"txid":"#{local_txid}","status":202,"txStatus":"RECEIVED"}))
+      resp
     end
+    host = nil
+    allow(Net::HTTP).to receive(:new) { |h, _port| host = h; fake_http }
+
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'testnet')
+    expect(wp.broadcast('0100')).to eq(local_txid)
+    expect(host).to eq('arcade-v2-testnet-us-1.bsvblockchain.tech')
+    expect(sent.path).to eq('/tx')
+    expect(sent['Content-Type']).to eq('application/octet-stream')
+    expect(sent.body).to eq(['0100'].pack('H*'))
   end
 
   it 'returns the configured fee rate (default 100)' do

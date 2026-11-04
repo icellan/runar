@@ -273,7 +273,8 @@ class TestWalletProviderConstructor:
 
         assert provider.basket == 'mybasket'
         assert provider.funding_tag == 'funding'
-        assert provider.arc_url == 'https://arc.gorillapool.io'
+        assert provider.arc_url is None
+        assert provider.broadcast_url == 'https://arcade-us-1.bsvblockchain.tech/tx'
         assert provider.overlay_url is None
         assert provider.get_network() == 'mainnet'
         assert provider.get_fee_rate() == 100
@@ -294,24 +295,29 @@ class TestWalletProviderConstructor:
 
         assert provider.funding_tag == 'fund'
         assert provider.arc_url == 'https://my-arc.example.com'
+        assert provider.broadcast_url == 'https://my-arc.example.com/v1/tx'
         assert provider.overlay_url == 'https://overlay.example.com'
         assert provider.get_network() == 'testnet'
         assert provider.get_fee_rate() == 50
 
-    def test_r179_testnet_without_arc_url_is_refused(self):
+    def test_r179_default_endpoint_follows_network(self):
         """R-179: arc_url and network were defaulted independently, so a
         testnet provider reported get_network() == 'testnet' and broadcast to
-        the MAINNET ARC. There is no canonical testnet ARC endpoint to default
-        to, so a non-mainnet provider must name its own."""
+        the MAINNET ARC. The default is now BSV Broadcaster, which has one
+        endpoint per network, so the default is derived from the network."""
         wallet = MockWalletClient()
         signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+        cases = [
+            ({}, 'https://arcade-us-1.bsvblockchain.tech/tx'),
+            ({'network': 'mainnet'}, 'https://arcade-us-1.bsvblockchain.tech/tx'),
+            ({'network': 'testnet'}, 'https://arcade-v2-testnet-us-1.bsvblockchain.tech/tx'),
+        ]
+        for kwargs, url in cases:
+            provider = WalletProvider(wallet, signer, basket='app', **kwargs)
+            assert provider.arc_url is None
+            assert provider.broadcast_url == url
 
-        with pytest.raises(ValueError) as excinfo:
-            WalletProvider(wallet, signer, basket='app', network='testnet')
-        assert 'testnet' in str(excinfo.value)
-        assert 'arc.gorillapool.io' in str(excinfo.value)
-
-    def test_r179_testnet_with_an_explicit_arc_url_is_accepted(self):
+    def test_r179_testnet_with_an_explicit_arc_url_keeps_the_arc_path(self):
         wallet = MockWalletClient()
         signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
         provider = WalletProvider(
@@ -320,14 +326,64 @@ class TestWalletProviderConstructor:
         )
         assert provider.get_network() == 'testnet'
         assert provider.arc_url == 'https://arc.testnet.example'
+        assert provider.broadcast_url == 'https://arc.testnet.example/v1/tx'
 
-    def test_r179_mainnet_default_is_unchanged(self):
+    def test_r179_network_without_a_default_is_refused(self):
         wallet = MockWalletClient()
         signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
-        for kwargs in ({}, {'network': 'mainnet'}):
-            provider = WalletProvider(wallet, signer, basket='app', **kwargs)
-            assert provider.get_network() == 'mainnet'
-            assert provider.arc_url == 'https://arc.gorillapool.io'
+        with pytest.raises(ValueError) as excinfo:
+            WalletProvider(wallet, signer, basket='app', network='regtest')
+        assert 'regtest' in str(excinfo.value)
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class TestWalletProviderBroadcast:
+    def _provider(self, **kwargs):
+        wallet = MockWalletClient()
+        signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+        return WalletProvider(wallet, signer, basket='app', **kwargs)
+
+    def test_posts_to_bsv_broadcaster_by_default(self, monkeypatch):
+        import hashlib
+        local_txid = hashlib.sha256(hashlib.sha256(bytes.fromhex('0100')).digest()).digest()[::-1].hex()
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req)
+            # F-042 applies to BSV Broadcaster too: the body must echo THIS tx's txid.
+            return _FakeResponse(
+                ('{"txid": "%s", "status": 202, "txStatus": "RECEIVED"}' % local_txid).encode()
+            )
+
+        monkeypatch.setattr('runar.sdk.wallet.urlopen', fake_urlopen)
+        provider = self._provider(network='testnet')
+
+        assert provider.broadcast('0100') == local_txid
+        assert calls[0].full_url == 'https://arcade-v2-testnet-us-1.bsvblockchain.tech/tx'
+        assert calls[0].get_method() == 'POST'
+        assert calls[0].get_header('Content-type') == 'application/octet-stream'
+        assert calls[0].data == bytes.fromhex('0100')
+
+    def test_error_names_the_service(self, monkeypatch):
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        def refuse(req, timeout=None):
+            raise HTTPError(req.full_url, 400, 'Bad Request', {}, BytesIO(b'bad tx'))
+
+        monkeypatch.setattr('runar.sdk.wallet.urlopen', refuse)
+
+        with pytest.raises(RuntimeError, match=r'BSV Broadcaster broadcast failed \(400\): bad tx'):
+            self._provider(network='testnet').broadcast('0100')
+        with pytest.raises(RuntimeError, match=r'ARC broadcast failed \(400\): bad tx'):
+            self._provider(arc_url='https://arc.example').broadcast('0100')
 
 
 # ---------------------------------------------------------------------------

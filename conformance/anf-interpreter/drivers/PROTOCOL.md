@@ -52,6 +52,13 @@ output on error — print full output on stdout only after a successful run.
   (an exact `args["<name>@local"]` entry, if present, wins). Positional
   binding is not used because the ANF and ABI param lists do not align
   1:1 — a FixedArray param is one ABI entry but several ANF params.
+  Two compiler-implicit params may be supplied (F-024): `_newAmount` (the
+  continuation's satoshis, what `continuationAmount()` reads) and an
+  INTEGER `txPreimage`, meaning the satoshis of the UTXO being spent — what
+  `extractAmount(txPreimage)` answers, including inside a private helper
+  that reads `this.txPreimage`. Rust / Python / Zig / Ruby / Java read the
+  integer natively; the Go driver wraps it in `MockPreimageAmount` and the
+  TS reference passes it as `ContinuationContext.inputAmount`.
 - `constructorArgs` — list of constructor arg values (positional)
 
 ## Bigint encoding

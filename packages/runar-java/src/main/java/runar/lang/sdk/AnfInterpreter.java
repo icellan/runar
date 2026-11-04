@@ -1176,6 +1176,11 @@ public final class AnfInterpreter {
                     String pname = (String) p.get("name");
                     if (callerEnv.containsKey(pname)) callEnv.put(pname, callerEnv.get(pname));
                 }
+                // A helper reads `this.txPreimage` as `load_prop txPreimage`,
+                // but it is not a property, so carry the caller's binding (the
+                // F-024 integer input amount) or `extractAmount` in the helper
+                // answers the placeholder (ports #172).
+                if (callerEnv.containsKey("txPreimage")) callEnv.put("txPreimage", callerEnv.get("txPreimage"));
                 // Map params to args
                 List<Map<String, Object>> params = listOfObjects(m.get("params"));
                 for (int i = 0; i < params.size() && i < argVals.size(); i++) {

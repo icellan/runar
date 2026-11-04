@@ -1381,7 +1381,7 @@ Abstract BRC-100 wallet client. Subclasses must implement: `get_public_key(proto
 
 See [Section 7c](#7c-brc-100-wallet-signing) and [Section 12.5](#125-walletprovider).
 
-- `new(wallet:, signer:, basket:, funding_tag: 'funding', arc_url: 'https://arc.gorillapool.io', overlay_url: nil, network: 'mainnet', fee_rate: 100)`
+- `new(wallet:, signer:, basket:, funding_tag: 'funding', arc_url: nil, overlay_url: nil, network: 'mainnet', fee_rate: 100)`. With no `arc_url`, broadcasts to BSV Broadcaster for `network`
 - `cache_tx(txid, raw_hex)` — pre-populate the in-memory tx cache.
 - Standard `Provider` interface.
 

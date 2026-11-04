@@ -64,7 +64,8 @@ function makeProvider(): WalletProvider {
 
 function stubArc(respond: () => Promise<Response>): void {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    if (url.endsWith('/v1/tx')) return respond();
+    // The default path now posts to BSV Broadcaster's /tx; ARC's is /v1/tx.
+    if (url.endsWith('/tx')) return respond();
     throw new Error(`unexpected fetch: ${url}`);
   }));
 }

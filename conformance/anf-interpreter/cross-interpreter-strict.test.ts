@@ -97,6 +97,15 @@ function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: 
   };
 }
 
+/** An integer `args.txPreimage` is the spent UTXO's satoshis (PROTOCOL.md). */
+function splitInputAmount(args: Record<string, unknown>): {
+  args: Record<string, unknown>;
+  continuation?: { inputAmount: bigint };
+} {
+  const { txPreimage, ...rest } = args;
+  return typeof txPreimage === 'bigint' ? { args: rest, continuation: { inputAmount: txPreimage } } : { args };
+}
+
 function loadAnf(input: Pick<CaseInput, 'case' | 'anfPath'>): ANFProgram {
   const path = input.anfPath
     ? join(REPO_ROOT, input.anfPath)
@@ -141,12 +150,14 @@ describe('ANF strict parity (TS SDK)', () => {
 
       let actual: CaseOutput;
       try {
+        const { args, continuation } = splitInputAmount(input.args);
         const result = executeStrict(
           anf,
           input.methodName,
           input.currentState,
-          input.args,
+          args,
           input.constructorArgs,
+          continuation,
         );
         actual = normalizeResult(result);
       } catch (e) {

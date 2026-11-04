@@ -3344,6 +3344,15 @@
       "reviewer": "siggi",
       "date": "2026-10-30",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/anf-interpreter/expected-strict/helper-extract-amount.json",
+      "sha256": "25f51746ab785ebad820f004d7fdb61314e2bfaea59a01160c03f0981e94eb5e",
+      "verified-against": "differential-oracle",
+      "reason": "Ports #172: NEW strict-mode ANF-interpreter golden, no previous bytes. Pins conformance/anf-interpreter/programs/helper-extract-amount.anf.json method tick with currentState total=5 and an integer txPreimage=7777 (the spent UTXO's satoshis, PROTOCOL.md): the value-returning private helper spent() reads this.txPreimage (load_prop txPreimage) and returns extractAmount of it, and tick sets total = total + spent(). Expected total=7782n, hand-derived from the source. Pre-fix measured: TS/Go/Rust/Zig answer 5n, Java 10005n, Python/Ruby a non-numeric value, because the helper env copied only properties and dropped the caller's txPreimage binding. Verified-against: differential-oracle -- the input carries a scriptOracle with deploySatoshis=7777, so cross-interpreter.test.ts deploys and spends the compiled script on @bsv/sdk Spend and decodes total=7782 from the continuation output (pre-fix the TS SDK's own pre-broadcast dry-run refused the call); all 7 tier interpreters reproduce these bytes under RUNAR_ANF_DRIVERS_STRICT=1. No compiler golden moved.",
+      "reviewer": "fix-session: PR sync (ports #172), golden hand-checked 5 + 7777 = 7782 against the @bsv/sdk Spend oracle",
+      "date": "2026-11-03",
+      "review-status": "reviewed"
     }
   ]
 }

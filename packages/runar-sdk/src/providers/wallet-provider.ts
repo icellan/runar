@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 //
 // Provider implementation that uses a BRC-100 wallet for UTXO management,
-// GorillaPool ARC for broadcast (EF format), and an optional overlay
+// BSV Broadcaster for broadcast (EF format), and an optional overlay
 // service for tx indexing.
 // ---------------------------------------------------------------------------
 
@@ -23,10 +23,15 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * The default ARC broadcaster. This is a MAINNET endpoint — see R-179 for why
- * that matters at construction time.
+ * The default broadcasters: the BSV Association's public BSV Broadcaster
+ * endpoints (the service was called Arcade before 0.19.0, hence the
+ * hostnames). One per network, so the default always matches `network` — see
+ * R-179. BSV Broadcaster submits at `POST /tx`, not ARC's `POST /v1/tx`.
  */
-const MAINNET_ARC_URL = 'https://arc.gorillapool.io';
+const BSV_BROADCASTER_URLS = {
+  mainnet: 'https://arcade-us-1.bsvblockchain.tech',
+  testnet: 'https://arcade-v2-testnet-us-1.bsvblockchain.tech',
+} as const;
 
 /**
  * ARC txStatus values returned with HTTP 200 for a transaction ARC did not
@@ -79,9 +84,10 @@ export interface WalletProviderOptions {
   /** Tag for funding UTXOs within the basket (default: 'funding'). */
   fundingTag?: string;
   /**
-   * ARC broadcast endpoint. Defaults to the MAINNET endpoint
-   * ('https://arc.gorillapool.io') and is therefore REQUIRED when `network` is
-   * anything other than 'mainnet' — see R-179.
+   * ARC broadcast endpoint (submits to `${arcUrl}/v1/tx`). Optional: when
+   * omitted, the provider broadcasts to the BSV Broadcaster endpoint for
+   * `network` ('https://arcade-us-1.bsvblockchain.tech' on mainnet,
+   * 'https://arcade-v2-testnet-us-1.bsvblockchain.tech' on testnet).
    */
   arcUrl?: string;
   /** Overlay service URL for tx submission and raw tx lookups (optional). */
@@ -98,7 +104,7 @@ export interface WalletProviderOptions {
    * and a downstream layer (e.g. wallet-toolbox) share ONE broadcaster/config
    * — keeping parent and child txs at the same ARC deployment (avoids
    * `SEEN_IN_ORPHAN_MEMPOOL`). Additive and non-breaking; omit for the default
-   * ARC path.
+   * fetch path (`arcUrl`, else BSV Broadcaster).
    */
   broadcaster?: Broadcaster;
   /**
@@ -118,7 +124,10 @@ export class WalletProvider implements Provider {
   protected readonly signer: Signer;
   protected readonly basket: string;
   protected readonly fundingTag: string;
-  protected readonly arcUrl: string;
+  /** The ARC endpoint the caller passed, if any. */
+  protected readonly arcUrl: string | undefined;
+  /** The URL `broadcastTx` posts EF to: ARC's `/v1/tx` or BSV Broadcaster's `/tx`. */
+  protected readonly broadcastUrl: string;
   protected readonly overlayUrl: string | undefined;
   protected readonly overlayTopics: string[] | undefined;
   protected readonly _network: 'mainnet' | 'testnet';
@@ -136,20 +145,13 @@ export class WalletProvider implements Provider {
     // R-179: arcUrl and network used to be defaulted independently, so a
     // provider configured for testnet reported getNetwork() === 'testnet' and
     // broadcast every transaction to the MAINNET ARC, with nothing to say so.
-    // There is no canonical testnet ARC endpoint in this repo to default to,
-    // so a testnet provider has to name its own rather than inherit one that
-    // points at real money. The sibling GorillaPoolProvider derives its base
-    // URL from the network for the same reason.
-    if (options.arcUrl) {
-      this.arcUrl = options.arcUrl;
-    } else if (this._network === 'mainnet') {
-      this.arcUrl = MAINNET_ARC_URL;
-    } else {
-      throw new Error(
-        `WalletProvider: no default ARC endpoint for network '${this._network}' — ` +
-          `${MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arcUrl explicitly.`,
-      );
-    }
+    // The default is now derived from the network, as the sibling
+    // GorillaPoolProvider derives its base URL; an explicit arcUrl is the
+    // caller's choice and is used as given.
+    this.arcUrl = options.arcUrl || undefined;
+    this.broadcastUrl = this.arcUrl
+      ? `${this.arcUrl}/v1/tx`
+      : `${BSV_BROADCASTER_URLS[this._network]}/tx`;
     this.overlayUrl = options.overlayUrl;
     this.overlayTopics = options.overlayTopics;
     this._feeRate = options.feeRate ?? 100;
@@ -211,7 +213,8 @@ export class WalletProvider implements Provider {
   // -------------------------------------------------------------------------
 
   /**
-   * Broadcast a transaction via ARC in EF format.
+   * Broadcast a transaction in EF format via BSV Broadcaster, or via ARC when
+   * `arcUrl` is set.
    *
    * Protected so subclasses can reroute broadcast (e.g. through an overlay
    * that gates admission) while `broadcast()` and `ensureFunding()` keep
@@ -260,24 +263,26 @@ export class WalletProvider implements Provider {
 
     let resp: Response;
     try {
-      resp = await fetch(`${this.arcUrl}/v1/tx`, {
+      resp = await fetch(this.broadcastUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: efBytes.buffer as ArrayBuffer,
-        // N-040: bound the request so a hung ARC deployment (accepts the
+        // N-040: bound the request so a hung broadcaster (accepts the
         // connection, never responds) fails closed instead of blocking
         // broadcast() forever.
         signal: AbortSignal.timeout(this.arcTimeoutMs),
       });
     } catch (e) {
+      const service = this.arcUrl ? 'ARC' : 'BSV Broadcaster';
       throw new Error(
-        `WalletProvider: ARC broadcast to ${this.arcUrl}/v1/tx failed, the transaction was NOT broadcast: ` +
+        `WalletProvider: ${service} broadcast to ${this.broadcastUrl} failed, the transaction was NOT broadcast: ` +
           `${e instanceof Error ? e.message : String(e)}`,
       );
     }
     if (!resp.ok) {
       const body = await resp.text();
-      throw new Error(`WalletProvider: ARC broadcast failed (${resp.status}): ${body}`);
+      const service = this.arcUrl ? 'ARC' : 'BSV Broadcaster';
+      throw new Error(`WalletProvider: ${service} broadcast failed (${resp.status}): ${body}`);
     }
     const txid = checkArcAccepted(await resp.json().catch(() => undefined), tx.id('hex'));
 

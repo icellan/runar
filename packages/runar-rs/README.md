@@ -652,7 +652,7 @@ fn build_wallet_pair() -> (WalletProvider<MyWallet>, WalletSigner<MyWallet>) {
         "1".to_string(),
         "runar-funding".to_string(),
         Some("funding".to_string()),
-        None,           // arc_url — defaults to https://arc.gorillapool.io
+        None,           // arc_url — defaults to BSV Broadcaster for the network
         None,           // overlay_url
         Some("mainnet".to_string()),
         Some(100),      // fee rate, sat/KB
