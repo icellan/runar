@@ -1,13 +1,4 @@
 {
   "documentation": "Escape hatch for the must-move-a-golden gate (conformance/scripts/wire-format-pr-audit.ts). An entry suppresses ONE exact wire-format path for the PR that adds it, when that change genuinely cannot move any pinned bytes (e.g. a comment-only touch, or a private-helper rename proven byte-identical over the state value-class matrix). Every field is required: \"path\" (exact, no globs), \"reason\" (>= 20 chars), \"date\" (ISO, when it was granted), \"expires\" (ISO, at most 180 days after \"date\" \u2014 hard failure once passed), \"sha256\" (64 hex chars: the sha256 of that file's REVIEWED content, so the entry authorises one version of the file and self-invalidates on the next edit, exactly like conformance/golden-provenance-allowlist.json), and \"reviewer\" (sign-off marker, e.g. \"gh:handle\"). Entries are printed on EVERY run of the gate and are reviewed in the diff like any other code. The entry COUNT is asserted to be zero by scripts/__tests__/wire-format-pr-audit.test.ts, so adding one is a deliberate, reviewed edit to that assertion \u2014 never a quiet JSON append. Prefer moving a golden. See conformance/README.md -> 'Encoding-change checklist'.",
-  "entries": [
-    {
-      "path": "compilers/go/codegen/stack.go",
-      "reason": "Ports #173 (Groth16 WA pinnedPublicInputs). The only stack.go change is a compile-time refusal: a method calling assertGroth16WitnessAssisted (non-MSM) under a vk.json that pins public inputs now returns an error instead of emitting a verifier that would silently not enforce the pins. Every script that still compiles is byte-identical to main: the 15 go-only-parity contracts and conformance/tests/bn254-pairing compile to the same hex before and after. No state framing, OP_RETURN or addOutput ordering code is touched.",
-      "date": "2026-11-04",
-      "expires": "2027-05-02",
-      "sha256": "c5927a40ba2dd1f196fc79b48b73cb53afdcb33c21d6628d86b5956c9514961d",
-      "reviewer": "gh:icellan"
-    }
-  ]
+  "entries": []
 }

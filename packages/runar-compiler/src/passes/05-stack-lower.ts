@@ -1516,6 +1516,117 @@ class LoweringContext {
   }
 
   /**
+   * The slots this arm inherited from the parent, as arm stack indices (bottom
+   * = 0) in the arm's current order. A slot is matched to the parent by name
+   * and multiplicity: for each name, the deepest `min(parent count, arm count)`
+   * occurrences. Everything else the arm holds (its results, a rebound
+   * local's new value) is not inherited.
+   */
+  private inheritedSlots(parent: StackMap): number[] {
+    const parentCounts = new Map<string, number>();
+    for (let d = 0; d < parent.depth; d++) {
+      const n = parent.peekAtDepth(d);
+      if (n !== null) parentCounts.set(n, (parentCounts.get(n) ?? 0) + 1);
+    }
+    const seen = new Map<string, number>();
+    const inherited: number[] = [];
+    for (let i = 0; i < this.stackMap.depth; i++) {
+      const n = this.stackMap.peekAtDepth(this.stackMap.depth - 1 - i);
+      if (n === null) continue;
+      const k = seen.get(n) ?? 0;
+      seen.set(n, k + 1);
+      if (k < (parentCounts.get(n) ?? 0)) inherited.push(i);
+    }
+    return inherited;
+  }
+
+  /**
+   * The parent's order for the slots this arm inherited: the parent's named
+   * slots, bottom first, keeping for each name only its deepest occurrences,
+   * as many as the arm inherited. Phase 2 drops the SHALLOWEST occurrence of a
+   * name a sibling consumed, and the post-ENDIF reconcile removes the parent's
+   * shallowest occurrence, so this is exactly the order the parent goes on
+   * modelling after OP_ENDIF.
+   */
+  parentOrder(parent: StackMap): string[] {
+    const want = new Map<string, number>();
+    for (const i of this.inheritedSlots(parent)) {
+      const n = this.stackMap.peekAtDepth(this.stackMap.depth - 1 - i)!;
+      want.set(n, (want.get(n) ?? 0) + 1);
+    }
+    const order: string[] = [];
+    for (let d = parent.depth - 1; d >= 0; d--) {
+      const n = parent.peekAtDepth(d);
+      if (n === null) continue;
+      const left = want.get(n) ?? 0;
+      if (left > 0) {
+        order.push(n);
+        want.set(n, left - 1);
+      }
+    }
+    return order;
+  }
+
+  /**
+   * The arm slots to roll to the top, in turn, so that the inherited slots
+   * stand in `order` (names, bottom first) with everything else above them in
+   * its current order. The longest run at the bottom already in place stays.
+   * Same-named slots keep their relative order, so a name held twice keeps
+   * its dead-below-live layout.
+   */
+  private alignmentRolls(parent: StackMap, order: string[]): number[] {
+    const inherited = this.inheritedSlots(parent);
+    const byName = new Map<string, number[]>();
+    for (const i of inherited) {
+      const n = this.stackMap.peekAtDepth(this.stackMap.depth - 1 - i)!;
+      byName.set(n, [...(byName.get(n) ?? []), i]);
+    }
+    const target: number[] = [];
+    const taken = new Map<string, number>();
+    for (const n of order) {
+      const k = taken.get(n) ?? 0;
+      taken.set(n, k + 1);
+      target.push(byName.get(n)![k]!);
+    }
+    const inSet = new Set(inherited);
+    for (let i = 0; i < this.stackMap.depth; i++) if (!inSet.has(i)) target.push(i);
+    // Slots never rolled keep their relative order and sink to the bottom, so
+    // the longest increasing prefix of `target` stays and the rest is rolled.
+    let keep = 0;
+    while (keep < target.length && (keep === 0 || target[keep]! > target[keep - 1]!)) keep++;
+    return target.slice(keep);
+  }
+
+  /**
+   * Put this arm's inherited slots in `order` (issue #178): see
+   * `alignmentRolls`. Emits nothing when they already are.
+   */
+  alignInheritedLayout(parent: StackMap, order: string[]): void {
+    const rolls = this.alignmentRolls(parent, order);
+    const current = Array.from({ length: this.stackMap.depth }, (_u, i) => i);
+    for (const index of rolls) {
+      const pos = current.indexOf(index);
+      const depth = current.length - 1 - pos;
+      current.splice(pos, 1);
+      current.push(index);
+      if (depth === 0) continue;
+      if (depth === 1) {
+        this.emitOp({ op: 'swap' });
+        this.stackMap.swap();
+      } else if (depth === 2) {
+        this.emitOp({ op: 'rot' });
+        this.stackMap.push(this.stackMap.removeAtDepth(2));
+      } else {
+        this.emitOp({ op: 'push', value: BigInt(depth) });
+        this.stackMap.push(null);
+        this.emitOp({ op: 'roll', depth });
+        this.stackMap.pop();
+        this.stackMap.push(this.stackMap.removeAtDepth(depth));
+      }
+    }
+  }
+
+  /**
    * Lower a sequence of ANF bindings.
    *
    * When `terminalAssert` is true, the final assert in the sequence omits
@@ -2947,6 +3058,35 @@ class LoweringContext {
       }
     }
 
+    // Issue #178: both arms now hold the same inherited slots, but not
+    // necessarily in the parent's ORDER. Rebinding a local that is dead after
+    // the `if` consumes its slot and pushes the new value on top (`w = w - 1n`
+    // turns `[w k]` into `[k w]`); a nested `if` without `else` that rebinds a
+    // live local leaves the new value on top of its neighbours. Everything
+    // below reads the arms by position and the parent goes on modelling its
+    // own order, so a read of a moved slot on that path took its neighbour's
+    // value.
+    //
+    // Roll each arm's inherited slots back into the parent's pre-`if` order:
+    // the same contract the #149 `sinkBelow` repair keeps for declared
+    // results, one layer earlier, so the parent's model of every slot it does
+    // not adopt stays "the depth it recorded before the branch" on every path.
+    // Emits nothing for an arm already in that order. Before the result trim,
+    // which removes the slots just beneath the results and so needs every
+    // inherited slot below them.
+    const inheritedOrder = thenCtx.parentOrder(this.stackMap);
+    const elseInheritedOrder = elseCtx.parentOrder(this.stackMap);
+    if (inheritedOrder.join('\u0000') !== elseInheritedOrder.join('\u0000')) {
+      throw new Error(
+        `Internal codegen error: the conditional's arms inherit different parent ` +
+        `slots ([${inheritedOrder.join(', ')}] after the then-arm, ` +
+        `[${elseInheritedOrder.join(', ')}] after the else-arm). ` +
+        `binding='${bindingName}'.`,
+      );
+    }
+    thenCtx.alignInheritedLayout(this.stackMap, inheritedOrder);
+    elseCtx.alignInheritedLayout(this.stackMap, inheritedOrder);
+
     // Branch-merged locals: trim each arm down to exactly its K result slots.
     //
     // 04-anf-lower ends both arms with an identical K-binding block that
@@ -3084,6 +3224,24 @@ class LoweringContext {
       );
     }
 
+    // Layer D: equal depth is not enough, the arms must agree slot by slot on
+    // every name the parent can read after OP_ENDIF. A slot only one arm names
+    // is skipped: a phase-3 placeholder, or the `if`'s own value, which each
+    // arm binds under its own temporary. Two different parent names at the same
+    // depth mean one path reads its neighbour's value (#178). Emits no opcodes.
+    for (let d = 0; d < thenCtx.stackMap.depth; d++) {
+      const tn = thenCtx.stackMap.peekAtDepth(d);
+      const en = elseCtx.stackMap.peekAtDepth(d);
+      if (tn !== null && en !== null && tn !== en && preIfNames.has(tn) && preIfNames.has(en)) {
+        throw new Error(
+          `Internal codegen error: conditional arms leave different stack layouts ` +
+          `(depth ${d} holds '${tn}' after the then-arm and '${en}' after the ` +
+          `else-arm), so every later read of either slot would take the wrong ` +
+          `value on one path (see GitHub issue #178). binding='${bindingName}'.`,
+        );
+      }
+    }
+
     const thenOps = thenCtx.result.ops;
     const elseOps = elseCtx.result.ops;
 
@@ -3116,6 +3274,24 @@ class LoweringContext {
       while (excess > 0 && this.stackMap.has(name)) {
         this.stackMap.removeAtDepth(this.stackMap.findDepth(name));
         excess--;
+      }
+    }
+
+    // #178: what the parent still models is exactly the slots both arms
+    // inherited, and the arms were rolled into the parent's order above. Checked
+    // rather than assumed. Emits no opcodes.
+    {
+      const modelled: string[] = [];
+      for (let d = this.stackMap.depth - 1; d >= 0; d--) {
+        const n = this.stackMap.peekAtDepth(d);
+        if (n !== null) modelled.push(n);
+      }
+      if (modelled.join('\u0000') !== inheritedOrder.join('\u0000')) {
+        throw new Error(
+          `Internal codegen error: after OP_ENDIF the parent models ` +
+          `[${modelled.join(', ')}] but both arms leave their inherited slots as ` +
+          `[${inheritedOrder.join(', ')}]. binding='${bindingName}'.`,
+        );
       }
     }
 
