@@ -5,8 +5,8 @@ import RunarVerification.Pipeline
 # N-178 — `check_preimage.sighashFlag` reaches the OP_PUSH_TX binding blob
 
 The TS reference (`oppushtx-codegen.ts` `anySBindingBytes`) appends
-`sighashFlag & 0xff` to the on-chain-derived signature: byte 391 of the
-428-byte binding blob, pushed as `01 <flag>` then `OP_CAT` (`7e`). Absent
+`sighashFlag & 0xff` to the on-chain-derived signature: byte 385 of the
+422-byte binding blob, pushed as `01 <flag>` then `OP_CAT` (`7e`). Absent
 means the default `ALL|FORKID` (`0x41`).
 
 What these guards prove: an ANF program whose `check_preimage` carries
@@ -76,8 +76,8 @@ def toHex (b : ByteArray) : String :=
     let h := (Nat.toDigits 16 x.toNat)
     String.ofList (if h.length < 2 then '0' :: h else h))
 
--- The flag site: bytes 390/391/392 are `01 41 7e` in the pinned default blob.
-#guard Lower.checkPreimageBindingBytes.size == 428
+-- The flag site: bytes 384/385/386 are `01 41 7e` in the pinned default blob.
+#guard Lower.checkPreimageBindingBytes.size == 422
 #guard Lower.checkPreimageBindingBytes.get! (Lower.checkPreimageBindingFlagIndex - 1) == 0x01
 #guard Lower.checkPreimageBindingBytes.get! Lower.checkPreimageBindingFlagIndex == 0x41
 #guard Lower.checkPreimageBindingBytes.get! (Lower.checkPreimageBindingFlagIndex + 1) == 0x7e
@@ -89,7 +89,7 @@ def toHex (b : ByteArray) : String :=
 (`packages/runar-compiler/src/passes/oppushtx-codegen.ts`), captured with
 `npx tsx -e` for N-178. -/
 def tsBindingHexSingleForkId : String :=
-  "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01437e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad"
+  "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01437e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
 
 #guard toHex (Lower.checkPreimageBindingBytesFor (some 0x43)) == tsBindingHexSingleForkId
 
