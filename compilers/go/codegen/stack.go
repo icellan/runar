@@ -6442,7 +6442,17 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 				method.Name,
 			)
 		}
-		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, methodUsesGroth16WAPreambleWithMSM(method.Body))
+		useMSM := methodUsesGroth16WAPreambleWithMSM(method.Body)
+		if !useMSM && opts.Groth16WAConfig.HasPinnedPublicInputs() {
+			// The raw variant never sees the public-input scalars, so a
+			// pin would be silently unenforced. Refuse rather than emit a
+			// verifier that does not do what the vk.json says.
+			return nil, fmt.Errorf(
+				"method %q calls assertGroth16WitnessAssisted but the Groth16 vk.json pins public inputs (pinnedPublicInputs); only assertGroth16WitnessAssistedWithMSM enforces pins — call that instead, or remove the field",
+				method.Name,
+			)
+		}
+		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, useMSM)
 		ctx.skipGroth16WAMarker = true
 	}
 
