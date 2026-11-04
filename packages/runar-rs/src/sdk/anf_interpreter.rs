@@ -1352,6 +1352,13 @@ fn eval_value(
                         child_env.insert(prop.name.clone(), v.clone());
                     }
                 }
+                // A helper reads `this.txPreimage` as `load_prop txPreimage`,
+                // but it is not a property, so carry the caller's binding (the
+                // F-024 integer input amount) or `extractAmount` in the helper
+                // answers the placeholder (ports #172).
+                if let Some(v) = env.get("txPreimage") {
+                    child_env.insert("txPreimage".to_string(), v.clone());
+                }
                 // Map params to args
                 for (i, param) in method.params.iter().enumerate() {
                     if let Some(arg_val) = call_args.get(i) {

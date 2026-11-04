@@ -1596,6 +1596,13 @@ def _eval_method_call(
                         name = prop['name']
                         if name in caller_env:
                             new_env[name] = caller_env[name]
+                    # A helper reads ``this.txPreimage`` as ``load_prop
+                    # txPreimage``, but it is not a property, so carry the
+                    # caller's binding (the F-024 integer input amount) or
+                    # ``extractAmount`` in the helper answers the placeholder
+                    # (ports #172).
+                    if 'txPreimage' in caller_env:
+                        new_env['txPreimage'] = caller_env['txPreimage']
                 # Map method params to passed args
                 params = m.get('params', [])
                 for i, param in enumerate(params):

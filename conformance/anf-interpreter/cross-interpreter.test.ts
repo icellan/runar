@@ -46,6 +46,11 @@ interface ScriptOracleSpec {
   constructorArgs: string[];
   /** POSITIONAL method args, in declaration order. */
   methodArgs: unknown[];
+  /**
+   * Satoshis the deploy output (= the UTXO the call spends) carries, for a case
+   * whose post-state reads `extractAmount(txPreimage)`. Omitted: the SDK default.
+   */
+  deploySatoshis?: number;
 }
 
 interface CaseOutput {
@@ -94,6 +99,20 @@ function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: 
   };
 }
 
+/**
+ * PROTOCOL.md: an INTEGER `args.txPreimage` is the spent UTXO's satoshis (the
+ * F-024 convention the Rust / Python / Zig / Ruby / Java interpreters read
+ * natively). The TS SDK takes it as `ContinuationContext.inputAmount` instead,
+ * so the reference translates it here, as the Go driver does.
+ */
+function splitInputAmount(args: Record<string, unknown>): {
+  args: Record<string, unknown>;
+  continuation?: { inputAmount: bigint };
+} {
+  const { txPreimage, ...rest } = args;
+  return typeof txPreimage === 'bigint' ? { args: rest, continuation: { inputAmount: txPreimage } } : { args };
+}
+
 function loadAnf(input: Pick<CaseInput, 'case' | 'anfPath'>): ANFProgram {
   const path = input.anfPath
     ? join(REPO_ROOT, input.anfPath)
@@ -136,12 +155,14 @@ describe('ANF interpreter parity (TS SDK)', () => {
       const inputRaw = JSON.parse(readFileSync(join(INPUTS_DIR, inputFile), 'utf8')) as CaseInput;
       const input = decodeBigints(inputRaw) as CaseInput;
       const anf = loadAnf(input);
+      const { args, continuation } = splitInputAmount(input.args);
       const result = computeNewStateAndDataOutputs(
         anf,
         input.methodName,
         input.currentState,
-        input.args,
+        args,
         input.constructorArgs,
+        continuation,
       );
       const actual = normalizeResult(result);
 
@@ -363,6 +384,7 @@ describe('ANF interpreter vs SCRIPT semantics (independent oracle)', () => {
         args: decodeBigints(spec.methodArgs) as unknown[],
         constructorArgs: decodeBigints(spec.constructorArgs) as (bigint | boolean | string)[],
         signerKey: 'alice',
+        ...(spec.deploySatoshis !== undefined ? { deploySatoshis: spec.deploySatoshis } : {}),
       });
 
       // A rejected spend or a failed state decode must never read as "the

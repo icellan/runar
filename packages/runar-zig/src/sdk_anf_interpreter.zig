@@ -2064,6 +2064,13 @@ fn evalMethodCall(
                     try method_env.put(prop.name, val);
                 }
             }
+            // A helper reads `this.txPreimage` as `load_prop txPreimage`, but
+            // it is not a property, so carry the caller's binding (the F-024
+            // integer input amount) or `extractAmount` in the helper answers
+            // the placeholder (ports #172).
+            if (env.get("txPreimage")) |val| {
+                try method_env.put("txPreimage", val);
+            }
 
             // Map method params to passed args
             for (m.params, 0..) |param, i| {
