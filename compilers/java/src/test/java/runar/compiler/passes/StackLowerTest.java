@@ -229,11 +229,11 @@ class StackLowerTest {
         boolean sawPreimageBinding = false;
         for (StackOp op : inc.ops()) {
             // BUG-100: checkPreimage now derives AND verifies the OP_PUSH_TX
-            // signature on-chain as one fixed 428-byte opaque raw_bytes blob.
+            // signature on-chain as one fixed 422-byte opaque raw_bytes blob.
             // OP_CHECKSIG is INSIDE the blob (a peephole barrier), so it is no
             // longer a discrete OP_CHECKSIGVERIFY StackOp. The binding blob is
             // byte-identical across all seven tiers.
-            if (op instanceof RawBytesOp rb && rb.bytes().length == 428) sawPreimageBinding = true;
+            if (op instanceof RawBytesOp rb && rb.bytes().length == 422) sawPreimageBinding = true;
         }
         // R-010: the separator is no longer emitted per method — it is hoisted
         // to offset 1 of the locking script by the emitter. What the method
@@ -243,12 +243,12 @@ class StackLowerTest {
         assertTrue(inc.needsCodeSeparator(),
             "stateful method must be marked needsCodeSeparator for the hoisted separator");
         assertTrue(sawPreimageBinding,
-            "checkPreimage must emit the 428-byte OP_PUSH_TX sig-derivation raw_bytes blob");
+            "checkPreimage must emit the 422-byte OP_PUSH_TX sig-derivation raw_bytes blob");
     }
 
     // F-284: statefulCounterIncludesCodeSeparator above recognises the BUG-100
-    // binding blob by its LENGTH only (rb.bytes().length == 428). Length is not
-    // a security property: a 428-byte blob with one opcode changed (OP_HASH256
+    // binding blob by its LENGTH only (rb.bytes().length == 422). Length is not
+    // a security property: a 422-byte blob with one opcode changed (OP_HASH256
     // -> OP_NOP at byte 1) has the same length, and the @bsv/sdk Spend
     // interpreter ACCEPTS that forged blob with a 32-byte non-preimage while
     // rejecting the genuine preimage.
@@ -267,23 +267,23 @@ class StackLowerTest {
         "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
         + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
         + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
-        + "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
-        + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
-        + "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
-        + "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        + "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
-        + "bf66a71ae74a1e83b0ad";
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffff"
+        + "ffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f"
+        + "82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f8292"
+        + "7f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82"
+        + "927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e230220"
+        + "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e"
+        + "01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c190560"
+        + "8b9218ad";
     private static final String TS_REFERENCE_PREIMAGE_BINDING_SHA256 =
-        "5784cfa33516fe07e8c0466c2608a9f812e5ecc8a35283a23700832fbe2144d5";
+        "e7210348b5f3a2af7c302a5285d127d00e800e852bf8572a751acc4800bfd406";
 
     @Test
     void statefulPreimageBindingBlobIsByteIdenticalToTsReference() throws Exception {
         byte[] reference = java.util.HexFormat.of().parseHex(TS_REFERENCE_PREIMAGE_BINDING_HEX);
         // Guard the literal itself against a silent edit.
-        assertEquals(428, reference.length);
+        assertEquals(422, reference.length);
         assertEquals(TS_REFERENCE_PREIMAGE_BINDING_SHA256, java.util.HexFormat.of().formatHex(
             java.security.MessageDigest.getInstance("SHA-256").digest(reference)));
 

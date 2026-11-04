@@ -63,6 +63,7 @@ export type {
   UpdateProp,
   GetStateScript,
   CheckPreimage,
+  BindingVariant,
   AddOutput,
   // R-251: members of the ANFValue union that the barrel did not re-export, so
   // a consumer could import ANFValue and not name the member to narrow it to.

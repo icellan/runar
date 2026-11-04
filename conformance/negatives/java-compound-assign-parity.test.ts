@@ -40,7 +40,7 @@ import { isCiEnv } from '../env.js';
  * parser refuses `<<= >>= &= |= ^=` independently of this item.
  */
 
-const COMPOUND_SHA256 = 'a66871ae82eb652992f39ef9f8ef7f6474cf92bc424776d344127ec843643fce';
+const COMPOUND_SHA256 = '32339da8b1c1e9fd2f390b48f64f5952caf398b64262452bdbf1f3ca2277acdf';
 
 const ALL_OPS = ['+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|=', '^='] as const;
 

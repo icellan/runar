@@ -114,6 +114,13 @@ type MethodNode struct {
 	// Drives the auto-injected preimage-type assert, the OP_PUSH_TX binding
 	// flag, the ABI sigHashType, and the SDK-side preimage construction.
 	SighashType *int
+
+	// BindingVariant is the Any-S OP_PUSH_TX binding construction from a
+	// `/** @bindingVariant <lowS|all> */` directive on a public .runar.ts
+	// method (ports #170). "" = no directive = the default lowS. "all"
+	// selects the compact non-low-S blob, spendable only when the spending tx
+	// has nVersion != 1.
+	BindingVariant string
 }
 
 // ParamNode represents a method parameter.

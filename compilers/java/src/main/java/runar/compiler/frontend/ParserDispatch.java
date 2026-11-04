@@ -94,6 +94,11 @@ public final class ParserDispatch {
                     "@embedAlways directive (issue #109) is not supported as a comment by the " + surface[1]
                     + " surface parser; write it as " + surface[4] + " (see docs/formats/" + surface[2] + ".md)");
             }
+            // `@bindingVariant` (ports #170) has no native spelling on any
+            // non-TS surface: every occurrence of the marker is refused.
+            if (surface != null && source.contains(runar.compiler.passes.BindingVariantDirective.MARKER)) {
+                throw new ParseException(runar.compiler.passes.BindingVariantDirective.unsupportedMessage(surface[1]));
+            }
         }
 
         try {

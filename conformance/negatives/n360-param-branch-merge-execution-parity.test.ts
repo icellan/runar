@@ -223,14 +223,14 @@ const STATEFUL: { name: string; src: string; headSha?: { off: string; on: string
   }`),
     // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now
     // folds to OP_ROT (745 -> 744 B, opcode diff is that fold only).
-    headSha: { off: 'c4547ac45f720db6', on: 'c4547ac45f720db6' },
+    headSha: { off: '7abce4a2cad9ab12', on: '7abce4a2cad9ab12' },
   },
   {
     name: 'Out',
     src: stateful('Out', `  public m(x: bigint, c: boolean) {
     if (c) { x = x + 1n; this.addOutput(1000n, x); } else { this.addOutput(1000n, x); }
   }`),
-    headSha: { off: '58c5d9cbbeb07df2', on: '58c5d9cbbeb07df2' },
+    headSha: { off: '789c888c0d5e1b86', on: '789c888c0d5e1b86' },
   },
   {
     name: 'property-named public param reassigned in both arms, read after (stateful)',

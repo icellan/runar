@@ -81,6 +81,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "8b23a83fd70b5002f80ada07f0d38807d0ca9870ddc0c675eb83ee0c3c454c77"
+    "expected-script.hex": "627b93eeda39bc8becfe676247f71e7866bc9e49b4c4423b5ddbcc8ceee2aef6"
   }
 }

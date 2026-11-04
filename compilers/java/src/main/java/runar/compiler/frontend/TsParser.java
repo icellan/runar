@@ -96,6 +96,7 @@ public final class TsParser {
     // @sighashSINGLE|FORKID / @sighashType are refused as malformed, not prose.
     private static final Pattern EMBED_ALWAYS_RE = Pattern.compile("@embedAlways\\b");
     private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash");
+    private static final Pattern BINDING_VARIANT_TOKEN_RE = Pattern.compile("@bindingVariant");
 
     /**
      * A source comment captured by the tokenizer, keyed by its start line and
@@ -631,6 +632,7 @@ public final class TsParser {
             String body = source.substring(bodyStart, bodyEnd);
             java.util.TreeMap<Integer, String> lost = new java.util.TreeMap<>();
             scanLost(body, bodyStart, SIGHASH_TOKEN_RE, "@sighash", methodComments, lost);
+            scanLost(body, bodyStart, BINDING_VARIANT_TOKEN_RE, "@bindingVariant", methodComments, lost);
             scanLost(body, bodyStart, EMBED_ALWAYS_RE, "@embedAlways", propertyComments, lost);
             for (Map.Entry<Integer, String> e : lost.entrySet()) {
                 int pos = e.getKey();
@@ -1110,7 +1112,34 @@ public final class TsParser {
 
             Visibility vis = visibility.equals("public") ? Visibility.PUBLIC : Visibility.PRIVATE;
             Integer sighashType = parseSighashDirective(name, vis, leadingComments, location);
-            return new MethodNode(name, params, body, vis, location, sighashType);
+            // `/** @bindingVariant <lowS|all> */` -> per-method binding construction (ports #170).
+            String bindingVariant = parseBindingVariantDirective(name, vis, leadingComments, location);
+            return new MethodNode(name, params, body, vis, location, sighashType, bindingVariant);
+        }
+
+        /**
+         * Ports #170: detect + parse a {@code @bindingVariant} directive in a
+         * method's leading trivia, with the same fail-closed rules as
+         * {@link #parseSighashDirective}. {@code null} when no directive is
+         * present. Mirrors the TS parseBindingVariantOnMethod.
+         */
+        String parseBindingVariantDirective(String name, Visibility vis, String leadingComments,
+                                            SourceLocation location) {
+            runar.compiler.passes.BindingVariantDirective.Result result =
+                runar.compiler.passes.BindingVariantDirective.extract(leadingComments);
+            if (result == null) return null;
+            if (vis != Visibility.PUBLIC) {
+                addError(LexDiag.at(fileName, location.line(), location.column(), String.format(
+                    "@bindingVariant directive on non-public method '%s' has no effect "
+                    + "— only public methods are spending entry points", name)));
+                return null;
+            }
+            if (result.isError()) {
+                addError(LexDiag.at(fileName, location.line(), location.column(),
+                    String.format("Method '%s': %s", name, result.error())));
+                return null;
+            }
+            return result.value();
         }
 
         /**

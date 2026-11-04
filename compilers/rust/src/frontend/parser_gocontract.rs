@@ -900,6 +900,7 @@ impl<'a> GoParser<'a> {
             body: Vec::new(),
             visibility: Visibility::Private,
             sighash_type: None,
+            binding_variant: None,
             source_location: SourceLocation {
                 file: self.file.clone(),
                 line: self.current().line,
@@ -1205,6 +1206,7 @@ impl<'a> GoParser<'a> {
             visibility: Visibility::Public,
             source_location: super_loc,
             sighash_type: None,
+            binding_variant: None,
         };
 
         Some(ContractNode {
@@ -1504,6 +1506,7 @@ impl<'a> GoParser<'a> {
                 visibility,
                 source_location: loc,
                 sighash_type: None,
+                binding_variant: None,
             },
             method_name_raw,
             Some(recv_type),
@@ -1542,6 +1545,7 @@ impl<'a> GoParser<'a> {
                 visibility: Visibility::Private,
                 source_location: loc,
                 sighash_type: None,
+                binding_variant: None,
             },
             func_name_raw,
         ))

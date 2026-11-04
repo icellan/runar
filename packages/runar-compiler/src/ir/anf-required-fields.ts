@@ -249,6 +249,15 @@ function checkSighashFlags(
     } else if (v.kind === 'loop') {
       checkSighashFlags(v, 'body', vp, method, isPublic, declared);
     } else if (v.kind === 'check_preimage') {
+      // Ports #170: only the two constructions exist. Anything else must not
+      // reach codegen, where it would silently emit the default blob.
+      if (v.bindingVariant !== undefined && v.bindingVariant !== null
+        && v.bindingVariant !== 'lowS' && v.bindingVariant !== 'all') {
+        throw new Error(
+          `IR validation: method ${method} binding ${binding.name as string} check_preimage has an invalid ` +
+            'bindingVariant; bindingVariant must be "lowS" or "all"',
+        );
+      }
       let flag = SIGHASH_DEFAULT;
       if (v.sighashFlag !== undefined && v.sighashFlag !== null) {
         if (typeof v.sighashFlag !== 'number') {

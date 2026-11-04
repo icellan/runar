@@ -1538,6 +1538,7 @@ impl<'a> RbParser<'a> {
                 visibility: Visibility::Public,
                 source_location: def_loc,
                 sighash_type: None,
+                binding_variant: None,
             };
         }
 
@@ -1555,6 +1556,7 @@ impl<'a> RbParser<'a> {
             },
             source_location: def_loc,
             sighash_type: None,
+            binding_variant: None,
         }
     }
 
@@ -2742,6 +2744,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             column: 0,
         },
         sighash_type: None,
+        binding_variant: None,
     }
 }
 

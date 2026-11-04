@@ -182,7 +182,7 @@ def lost_directive_message(directive: str) -> str:
     is not in the leading comments of the member kind that reads it
     (``@sighash`` -> a method, ``@embedAlways`` -> a property). Mirrors the TS
     reference's ``lostDirectiveMessage`` (sighash-directive.ts)."""
-    target = "method" if directive == "@sighash" else "property"
+    target = "property" if directive == "@embedAlways" else "method"
     return (
         f"{directive} directive is not attached to any {target} and would be silently ignored; "
         f"put the comment on its own line directly above the {target} it annotates "

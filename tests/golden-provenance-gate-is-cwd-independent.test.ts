@@ -43,10 +43,14 @@ const GATE = join(ROOT, 'conformance', 'scripts', 'check-golden-provenance.mjs')
 function justifiedGolden(): string | undefined {
   const allowlist = JSON.parse(
     readFileSync(join(ROOT, 'conformance', 'golden-provenance-allowlist.json'), 'utf8'),
-  ) as { entries?: { path: string; sha256: string }[] };
+  ) as { entries?: { path: string; sha256: string; 'review-status'?: string }[] };
   return (allowlist.entries ?? []).find((e) => {
     const abs = join(ROOT, e.path);
+    // An entry marked unreviewed pins current bytes but justifies nothing (the
+    // gate rejects it), so it cannot drive the "justified" checks below.
+    const reviewed = e['review-status'] === undefined || e['review-status'] === 'reviewed';
     return (
+      reviewed &&
       existsSync(abs) && createHash('sha256').update(readFileSync(abs)).digest('hex') === e.sha256
     );
   })?.path;

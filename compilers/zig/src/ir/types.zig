@@ -241,6 +241,11 @@ pub const MethodNode = struct {
     /// preimage construction. The other 8 surfaces set it from their native
     /// spelling (N-093; e.g. `runar.Sighash("SINGLE|FORKID")` on `.runar.zig`).
     sighash_type: ?i32 = null,
+    /// Ports #170: true when a `/** @bindingVariant all */` directive on a
+    /// public `.runar.ts` method selects the compact non-low-S binding blob
+    /// (spendable only when the spending tx has nVersion != 1). False = the
+    /// default lowS.
+    binding_variant_all: bool = false,
 };
 /// `spelled_type` is the annotation as the author spelled it, set ONLY when it did not
 /// resolve to a known type (`type_info == .unknown`); empty otherwise, and when there is
@@ -642,6 +647,10 @@ pub const CheckPreimage = struct {
     /// non-default @sighash mode, keeping golden ANF unchanged for every
     /// existing contract.
     sighash_flag: i32 = 0,
+    /// Ports #170: true for `bindingVariant: "all"` (the compact non-low-S
+    /// blob, nVersion != 1 only). False = default lowS; emitted only when true,
+    /// keeping golden ANF unchanged.
+    binding_variant_all: bool = false,
 };
 pub const DeserializeState = struct { preimage: []const u8 };
 pub const ANFAddOutput = struct { satoshis: []const u8, state_values: []const []const u8 = &.{}, preimage: []const u8 = "", state_refs: []const []const u8 = &.{} };

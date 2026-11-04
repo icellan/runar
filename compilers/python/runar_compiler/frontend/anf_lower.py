@@ -380,6 +380,10 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
         # this method.
         if method.sighash_type is not None and method.sighash_type != SIGHASH_DEFAULT:
             method_ctx.sighash_flag = method.sighash_type
+        # Ports #170: `@bindingVariant all` selects the compact binding for
+        # every checkPreimage in this method (auto-injected or manual).
+        if method.binding_variant == "all":
+            method_ctx.binding_variant = "all"
         for p in method.params:
             method_ctx.register_param_type(p.name, _type_node_to_string(p.type))
 
@@ -441,6 +445,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # Omit for the default so the ANF (and pinned binding blob) is unchanged.
             if not is_default_sighash:
                 check_pre_value.sighash_flag = sighash_mode
+            check_pre_value.binding_variant = method_ctx.binding_variant
             check_result = method_ctx.emit(check_pre_value)
             method_ctx.emit(_make_assert(check_result))
 
@@ -775,6 +780,8 @@ class _LowerCtx:
         # binds under the same mode as the method's declared sighash. ``None`` =
         # default ALL|FORKID, keeping the pinned binding blob unchanged.
         self.sighash_flag: int | None = None
+        # Ports #170: the method's non-default @bindingVariant ("all"), or None.
+        self.binding_variant: str | None = None
         # True in every context produced by ``sub_context()`` -- inside an if
         # arm, a loop body, or an inlined helper's block -- and False only in
         # the context a method's own body is lowered into.
@@ -1105,6 +1112,7 @@ class _LowerCtx:
         # Issue #123: a manual checkPreimage() inside a nested block must bind
         # under the same declared @sighash mode as the enclosing method.
         sub.sighash_flag = self.sighash_flag
+        sub.binding_variant = self.binding_variant
         # Inherit (copy, not share) the output-hash commitment state: a
         # commitment already emitted on the dominating path covers this block
         # too, but a commitment emitted INSIDE this block must not be visible
@@ -1782,6 +1790,7 @@ class _LowerCtx:
                 # Issue #123: honour the method's declared @sighash on manual calls.
                 if self.sighash_flag is not None:
                     cp.sighash_flag = self.sighash_flag
+                cp.binding_variant = self.binding_variant
                 return self.emit(cp)
 
         # extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString.

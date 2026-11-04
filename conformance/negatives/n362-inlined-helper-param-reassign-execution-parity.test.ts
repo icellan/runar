@@ -176,7 +176,7 @@ const SHAPES: Shape[] = [
 /** An inlined helper that does NOT reassign: its pre-fix TS bytes must not move. */
 const NO_REASSIGN = stateful('InlNoReassign', `  private emit(a: ByteString, b: ByteString): void { assert(a === b); this.addOutput(1000n, a); }
   public m(x: ByteString, y: ByteString) { this.emit(x, y); }`, 'data: ByteString');
-const NO_REASSIGN_HEAD_SHA16 = 'a0c55ba22b27dfda';
+const NO_REASSIGN_HEAD_SHA16 = '552a5749370684f0';
 
 const sha16 = (hex: string) => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex').slice(0, 16);
 const foldOff = (t: Tier): Tier => ({ ...t, argsFor: (s) => [...t.argsFor(s), '--disable-constant-folding'] });

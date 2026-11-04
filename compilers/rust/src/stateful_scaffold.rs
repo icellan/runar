@@ -71,7 +71,7 @@ fn assert(value: &str, auto: bool) -> ANFValue {
 fn prologue(e: &mut Emitter, sighash_mode: i64, has_mutable_state: bool) {
     let pre = e.emit(load_param("txPreimage"));
     let flag = if sighash_mode == SIGHASH_DEFAULT { None } else { Some(sighash_mode) };
-    let check = e.emit(ANFValue::CheckPreimage { preimage: pre, sighash_flag: flag });
+    let check = e.emit(ANFValue::CheckPreimage { preimage: pre, sighash_flag: flag, binding_variant: None });
     e.emit(assert(&check, false));
     let p2 = e.emit(load_param("txPreimage"));
     let typ = e.emit(call("extractSigHashType", &[&p2]));
@@ -248,8 +248,10 @@ impl Matcher {
             (ANFValue::LoadParam { name: e }, ANFValue::LoadParam { name: a }) => e == a,
             (ANFValue::LoadConst { value: e }, ANFValue::LoadConst { value: a }) => same_const(e, a),
             (
-                ANFValue::CheckPreimage { preimage: ep, sighash_flag: ef },
-                ANFValue::CheckPreimage { preimage: ap, sighash_flag: af },
+                // bindingVariant is not compared (ports #170): a per-method author
+                // choice the loader validates, not scaffolding.
+                ANFValue::CheckPreimage { preimage: ep, sighash_flag: ef, .. },
+                ANFValue::CheckPreimage { preimage: ap, sighash_flag: af, .. },
             ) => self.r(ep, ap) && ef.unwrap_or(SIGHASH_DEFAULT) == af.unwrap_or(SIGHASH_DEFAULT),
             (ANFValue::Assert { value: e, .. }, ANFValue::Assert { value: a, .. }) => self.r(e, a),
             (ANFValue::Call { func: ef, args: ea }, ANFValue::Call { func: af, args: aa }) => {

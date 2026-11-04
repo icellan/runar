@@ -201,18 +201,18 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
   // -------------------------------------------------------------------------
   describe('controls: every other state type is byte-unchanged', () => {
     const TERMINAL_PINS: Record<string, string> = {
-      bigint: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
+      bigint: 'f176cc040e818cd980bb6d84335b956070e46419cab9fd49ec66c0fe76674881',
       // W3 / BoolBamboozle re-stamp: `check(expected: boolean)` is a public
       // method with a `boolean` parameter, so its entry now carries the
       // 9-byte ABI-domain gate. The other six rows are unmoved, which is the
       // point of the control — the gate is scoped to boolean PARAMS and does
       // not touch state encoding for any type, boolean included.
-      boolean: '92a509b1441238ebe8903c8c04004c8c4dfd150e02c88f256212266f54ddcece',
-      RabinSig: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
-      RabinPubKey: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
-      PubKey: '584bda4d3de4e73ace367fdfc3d5500a37967a7327af5c7c1421b474702598af',
-      Sha256: '18ba16775519004de420c6d32178843d9ace1242f906c9aef4f4f7d7d75fbe6f',
-      Addr: 'cb372d34a9db0c8a9c56989796bc204f51e171397573c7f87656e86b0faab04c',
+      boolean: 'a7b7f3697b02e1021204ec6741e5ffb64c2caf54d68ce163bdb95037cac0885b',
+      RabinSig: 'f176cc040e818cd980bb6d84335b956070e46419cab9fd49ec66c0fe76674881',
+      RabinPubKey: 'f176cc040e818cd980bb6d84335b956070e46419cab9fd49ec66c0fe76674881',
+      PubKey: '16e9668876a97cdc86e86c243732cee98be673d7acb13085a048fdb9ea695016',
+      Sha256: '349aaa70a6a675748629b9d3595d906819c11683b15745c0df7d54a4688128df',
+      Addr: '15f00ac46f526821caa217e9c7234655a7b219a2aace1bf9bf6ec559273f120d',
     };
 
     const WRITE_PINS: Record<string, string> = {
@@ -227,15 +227,15 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // re-measured byte-identical in all seven tiers (the same script as
       // curve-point-state-width's PubKey write pin). The numeric and framed
       // rows are unmoved.
-      ByteString: 'ffe905dc3e740a5ed3c3ee819b7d5269cc6a78feb7857b0aceef29c5420d332d',
-      PubKey: '758f1fc87b596cfa2eac87f77ee2b3639fef1e3ea5c1bdd6d1b461a07fa98741',
-      bigint: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
+      ByteString: '58b91009cbc8e6e14f970225de10430d5440291da06c3659c0c2c5470a2f4b92',
+      PubKey: 'acf3b1b1632fe4afc9ab6f7cee50c0ed93286194884fb68041d0fe21af9677c9',
+      bigint: '78bfd5caf2af4353342ac3c498abb3d8c98d06a05806243af9fc8356d0f76736',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: 'f38514e87b397d0351f23fc7d9f5a055af45a660982b11f32d41bf229ceab8c4',
-      RabinSig: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
+      boolean: 'de3ef459c5d33d114be642a3dbcb04f77e1e8a7d4abedd3c6102f0eade9795c5',
+      RabinSig: '78bfd5caf2af4353342ac3c498abb3d8c98d06a05806243af9fc8356d0f76736',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {
@@ -254,7 +254,7 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // N-044 re-stamp: the push-data reader reads lengths unsigned,
       // whitelists the header byte and asserts exact consumption.
       expect(sha256(hexOf(terminalSource('ByteString'), READ_FILE))).toBe(
-        '0cff82c1a9079c665da13495c3fe0f8d8613507a60bb1fcb1e646255b1970e10',
+        'b35628c56861b59f86c18c1d2469c86d9318b178aada54a863a27dab8e090386',
       );
     });
   });

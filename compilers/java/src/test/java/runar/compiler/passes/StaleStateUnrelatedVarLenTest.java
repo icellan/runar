@@ -133,9 +133,9 @@ class StaleStateUnrelatedVarLenTest {
      * the var-length reader reads PUSHDATA lengths unsigned, whitelists the
      * header and asserts exact consumption (1280 -> 1308 hex chars).
      */
-    private static final int PROBE_FIXED_LEN = 1308;
+    private static final int PROBE_FIXED_LEN = 1296; // ports #170: -12 hex (C=1 binding blob)
     private static final String PROBE_FIXED_SHA256 =
-        "0eff5de2f7274f45f37850f4aa186ca85ead5f1e7623c0798c059fcddfb07a04";
+        "d801076fbefe3f5c4b52953994a7b77b3a3d593de50d280b5f3e41cd0c4017c4";
 
     /**
      * The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
@@ -145,9 +145,9 @@ class StaleStateUnrelatedVarLenTest {
         "150cb2a01cca2eb26bbbe02e2c090aa5d0c33957b07a7e385d951ec6452e0fb8";
 
     /** Outside the fix's blast radius — must not move. */
-    private static final int CONTROL_FIXED_LEN = 952;
+    private static final int CONTROL_FIXED_LEN = 940; // ports #170: -12 hex
     private static final String CONTROL_SHA256 =
-        "4b1bff88a334cbc0604fada46ea297efada0825ed26769bbeef8c888c08b6722";
+        "b4722d412b2b7fbedd116ff8d1859c21d3596025de79abdf6967570aa4f9fc77";
 
     /**
      * The BIP-143 scriptCode varint-strip cascade ({@code <fd00> OP_LESSTHAN

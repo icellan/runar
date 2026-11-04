@@ -80,9 +80,9 @@ const FIXED_SRC =
 ;
 
 /// Pins taken from the TypeScript reference artifact (fold OFF).
-const TS_SCRIPT_LEN_BYTES: usize = 1317;
-const TS_SCRIPT_SHA256 = "45bdadad4ee5fac233b3f09d8bfea71d8048d2a164b737d126c65ab28f7c9faf";
-const TS_SLOT_BYTE_OFFSET: usize = 959;
+const TS_SCRIPT_LEN_BYTES: usize = 1305;
+const TS_SCRIPT_SHA256 = "738869ba6eed4d229d0d30f0b91b6fe98addff349a4f0fe0dee3ca3ffb656e45";
+const TS_SLOT_BYTE_OFFSET: usize = 947;
 
 fn compileJson(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const result = try compiler_api.compileSourceWithOptions(allocator, src, FILE_NAME, true);
@@ -112,7 +112,7 @@ test "N-051: a variable-width readonly arg yields an equality pin and a codePart
     // The pin is an equality; the old lower-bound tail is gone.
     try std.testing.expect(std.mem.indexOf(u8, script, "81a269") == null);
 
-    // codePartLenSlots = [{"byteOffset": 959}] — exactly one key per entry.
+    // codePartLenSlots = [{"byteOffset": 947}] — exactly one key per entry.
     const slots_val = root.get("codePartLenSlots") orelse return error.MissingCodePartLenSlots;
     const slots = slots_val.array.items;
     try std.testing.expectEqual(@as(usize, 1), slots.len);
@@ -131,7 +131,7 @@ test "N-051: a variable-width readonly arg yields an equality pin and a codePart
     // Key order: codePartLenSlots immediately after codeSepIndexSlots.
     const csis = std.mem.indexOf(u8, json, "\"codeSepIndexSlots\":[") orelse return error.MissingCodeSepIndexSlots;
     const close = std.mem.indexOfPos(u8, json, csis, "],") orelse return error.Malformed;
-    try std.testing.expect(std.mem.startsWith(u8, json[close + 2 ..], "\"codePartLenSlots\":[{\"byteOffset\":959}]"));
+    try std.testing.expect(std.mem.startsWith(u8, json[close + 2 ..], "\"codePartLenSlots\":[{\"byteOffset\":947}]"));
 }
 
 test "N-051: a fully fixed-width contract keeps an equality pin and records no slot" {

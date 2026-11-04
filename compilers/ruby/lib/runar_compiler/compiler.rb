@@ -11,6 +11,7 @@ require "set"
 
 require_relative "ir/types"
 require_relative "frontend/sighash_directive"
+require_relative "frontend/binding_variant_directive"
 require_relative "frontend/embed_always_dce"
 
 module RunarCompiler
@@ -268,6 +269,12 @@ module RunarCompiler
     if source =~ /@embedAlways\b/
       return "@embedAlways directive (issue #109) is not supported as a comment by the #{surface} " \
              "surface parser; write it as #{embed_spelling} (see docs/formats/#{doc}.md)"
+    end
+
+    # `@bindingVariant` (ports #170) has no native spelling on any non-TS
+    # surface: every occurrence of the marker is refused.
+    if source.include?(Frontend::BindingVariantDirective::MARKER)
+      return Frontend::BindingVariantDirective.unsupported_message(surface)
     end
 
     nil
@@ -1344,6 +1351,7 @@ module RunarCompiler
       # Issue #123: a non-default @sighash mode threads the BIP-143 flag onto the
       # check_preimage node. Omitted for the default so existing ANF is unchanged.
       d["sighashFlag"] = v.sighash_flag if v.respond_to?(:sighash_flag) && !v.sighash_flag.nil?
+      d["bindingVariant"] = v.binding_variant if v.respond_to?(:binding_variant) && !v.binding_variant.nil?
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?
       d["scriptBytes"] = v.script_bytes unless v.script_bytes.nil?

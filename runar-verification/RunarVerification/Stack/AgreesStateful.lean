@@ -60,7 +60,7 @@ def stG : ByteArray := StatefulBridge.stG
 /-- The canonical stateful method's CONSTANT lowered op list (BUG-100).
 
 The auto-injected `check_preimage` lowers to `OP_CODESEPARATOR` followed by
-the fixed 428-byte on-chain OP_PUSH_TX binding blob (a single opaque
+the fixed 422-byte on-chain OP_PUSH_TX binding blob (a single opaque
 `.rawBytes` op — `Lower.checkPreimageBindingBytes`); the terminal `assert`'s
 `OP_VERIFY` is elided (public method, body ends in assert). No
 spender-supplied `_opPushTxSig` witness is loaded — the ECDSA signature is
@@ -115,7 +115,7 @@ theorem parseScript_emitOpsFast_statefulPrologue :
 
 /-- **The OP_PUSH_TX binding crypto-boundary axiom (BUG-100).**
 
-Running the parsed deployed prologue (`OP_CODESEPARATOR` + the decoded 428-byte
+Running the parsed deployed prologue (`OP_CODESEPARATOR` + the decoded 422-byte
 binding blob) on a stack topped by the preimage bytes is a NET-ZERO
 preimage-binding check: it leaves the stack unchanged when
 `Crypto.checkPreimage pre` holds (the pushed preimage IS the spending tx's
@@ -449,7 +449,7 @@ theorem computeLastUses_statefulFull (pre sats stateVal : String)
     Ne.symm hVC, Ne.symm hSP, Ne.symm hVP, Ne.symm hSV]
 
 /-- The `check_preimage` binding on the FULL initial map (BUG-100 + R-010):
-preimage consumed in place (d0 last-use), the 428-byte binding blob, then
+preimage consumed in place (d0 last-use), the 422-byte binding blob, then
 the `_codePart` pin. `scriptLevelCodeSeparator = true` skips the
 per-method CODESEPARATOR. -/
 theorem lowerValueP_checkPreimage_statefulFull

@@ -55,7 +55,7 @@ test "N-051: the artifact's codePartLenSlots are parsed" {
     var artifact = try types.RunarArtifact.fromJson(allocator, ARTIFACT_JSON);
     defer artifact.deinit();
     try std.testing.expectEqual(@as(usize, 1), artifact.code_part_len_slots.len);
-    try std.testing.expectEqual(@as(i32, 959), artifact.code_part_len_slots[0].byte_offset);
+    try std.testing.expectEqual(@as(i32, 947), artifact.code_part_len_slots[0].byte_offset);
 }
 
 test "N-051: the built code part and locking script carry the deployed code-part length" {
@@ -107,7 +107,7 @@ test "N-051: a codePartLenSlots entry that does not point at a pin field is refu
     try std.testing.expectEqual(@as(usize, 1), artifact.code_part_len_slots.len);
 
     const args = ctorArgs(&e);
-    for ([_]i32{ 958, 960, 0 }) |bad| {
+    for ([_]i32{ 946, 948, 0 }) |bad| {
         artifact.code_part_len_slots[0].byte_offset = bad;
         var contract = try RunarContract.init(allocator, &artifact, &args);
         defer contract.deinit();
@@ -128,8 +128,8 @@ test "N-051: matchesArtifact compares the pin field against the candidate's own 
 
     // Tamper with the deployed length field: no longer the code part's length.
     const code_len = e.int("codePartLen");
-    try std.testing.expectEqual(@as(usize, 1608), code_len);
-    const needle = "0448060000819c69"; // LE32(1608) = 48 06 00 00
+    try std.testing.expectEqual(@as(usize, 1596), code_len);
+    const needle = "043c060000819c69"; // LE32(1596) = 3c 06 00 00
     const at = std.mem.indexOf(u8, locking, needle) orelse return error.PinNotFound;
     const tampered = try allocator.dupe(u8, locking);
     defer allocator.free(tampered);

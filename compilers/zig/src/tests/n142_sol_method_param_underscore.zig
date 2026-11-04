@@ -127,10 +127,10 @@ test "N-142: .sol silent shape keeps the state write" {
     try std.testing.expect(inc.operand == .property_access);
 
     const got = try hexSha(SILENT, "F200Silent.runar.sol");
-    try std.testing.expectEqualStrings("3676c0b9030628828837696cad74c710bb225d151f5ba822be8b2ed302e3a342", &got);
+    try std.testing.expectEqualStrings("484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5", &got);
 }
 
 test "N-142: .sol inter shape compiles to the TS reference bytes" {
     const got = try hexSha(INTER, "F200Inter.runar.sol");
-    try std.testing.expectEqualStrings("3cb777cf55b26a89a9f9a9664dd259f63f343bd347e4057c859ab0454526e521", &got);
+    try std.testing.expectEqualStrings("29956ebf68e8510b65a74f18a47e5851f322bf6dc2d0981b45ee301f2aaae575", &got);
 }

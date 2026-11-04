@@ -236,6 +236,14 @@ def _check_sighash_flags(
         elif kind == "loop":
             _check_sighash_flags(v, "body", vp, method, is_public, declared)
         elif kind == "check_preimage":
+            # Ports #170: only the two constructions exist; anything else must
+            # not reach codegen, where it would emit the default blob.
+            variant = v.get("bindingVariant")
+            if variant is not None and variant not in ("lowS", "all"):
+                raise ValueError(
+                    f"IR validation: method {method} binding {binding['name']} check_preimage "
+                    'has an invalid bindingVariant; bindingVariant must be "lowS" or "all"'
+                )
             flag = v.get("sighashFlag")
             if flag is None:
                 flag = _SIGHASH_DEFAULT

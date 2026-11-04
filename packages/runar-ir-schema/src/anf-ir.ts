@@ -58,6 +58,12 @@ export interface ANFProperty {
   syntheticArrayChain?: ANFSyntheticArrayLevel[];
 }
 
+/**
+ * Which Any-S OP_PUSH_TX preimage-binding construction a `check_preimage` node
+ * emits (`@bindingVariant <lowS|all>`). See `oppushtx-codegen.ts`.
+ */
+export type BindingVariant = 'lowS' | 'all';
+
 export interface ANFMethod {
   name: string;
   params: ANFParam[];
@@ -201,6 +207,14 @@ export interface CheckPreimage {
    * `@sighash` mode, keeping golden ANF unchanged for every existing contract.
    */
   sighashFlag?: number;
+  /**
+   * The Any-S binding construction, from the method's `@bindingVariant`
+   * directive. Absent = default `'lowS'` (the 422-byte low-S blob). `'all'`
+   * selects the 376-byte non-low-S blob, spendable only when the spending tx
+   * has nVersion != 1. Only set for a method that opts in, keeping golden ANF
+   * unchanged for every other contract.
+   */
+  bindingVariant?: BindingVariant;
 }
 
 export interface DeserializeState {

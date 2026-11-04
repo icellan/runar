@@ -58,6 +58,12 @@ import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
 import { extractSighashDirective, lostDirectiveMessage } from './sighash-directive.js';
+import {
+  BINDING_VARIANT_MARKER,
+  bindingVariantUnsupportedMessage,
+  extractBindingVariantDirective,
+} from './bindingvariant-directive.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { normalizeLoopConditions } from './loop-condition.js';
 import { checkConstReassignment } from './const-reassign.js';
 import { OPCODES } from './06-emit.js';
@@ -131,6 +137,11 @@ function unsupportedDirectiveError(
   }
   if (EMBED_ALWAYS_DIRECTIVE_RE.test(source)) {
     return `@embedAlways directive (issue #109) is not supported as a comment by the ${surfaceName} surface parser; write it as ${embedSpelling} (see docs/formats/${doc}.md)`;
+  }
+  // `@bindingVariant` (ports #170) has no native spelling on any non-TS
+  // surface: every occurrence of the marker is refused.
+  if (source.includes(BINDING_VARIANT_MARKER)) {
+    return bindingVariantUnsupportedMessage(surfaceName);
   }
   return null;
 }
@@ -501,6 +512,8 @@ function parseMethod(
 
   // Issue #123: `/** @sighash <FLAGS> */` directive → per-method sighash type.
   const sighashType = parseSighashOnMethod(method, name, visibility, file, errors);
+  // `/** @bindingVariant <lowS|all> */` → per-method binding construction (ports #170).
+  const bindingVariant = parseBindingVariantOnMethod(method, name, visibility, file, errors);
 
   return {
     kind: 'method',
@@ -509,6 +522,7 @@ function parseMethod(
     body,
     visibility,
     ...(sighashType !== undefined ? { sighashType } : {}),
+    ...(bindingVariant !== undefined ? { bindingVariant } : {}),
     sourceLocation: locFromNode(method, file),
   };
 }
@@ -563,6 +577,43 @@ function parseSighashOnMethod(
   return result.value;
 }
 
+/**
+ * Detect + parse a `/** @bindingVariant <lowS|all> *\/` directive on a method,
+ * with the same comment collection and fail-closed rules as `@sighash`: a
+ * marker on a non-public method, a second marker, or a malformed / unknown
+ * value is a compile error. Returns `undefined` when no marker is present.
+ */
+function parseBindingVariantOnMethod(
+  method: MethodDeclaration,
+  name: string,
+  visibility: 'public' | 'private',
+  file: string,
+  errors: CompilerDiagnostic[],
+): BindingVariant | undefined {
+  const comments = new Map<number, string>();
+  for (const jsdoc of method.getJsDocs()) comments.set(jsdoc.getStart(), jsdoc.getText());
+  for (const range of method.getLeadingCommentRanges()) {
+    if (!comments.has(range.getPos())) comments.set(range.getPos(), range.getText());
+  }
+  const text = [...comments.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).join('\n');
+  const result = extractBindingVariantDirective(text);
+  if (result === null) return undefined;
+
+  if (visibility !== 'public') {
+    errors.push(makeDiagnostic(
+      `@bindingVariant directive on non-public method '${name}' has no effect — only public methods are spending entry points`,
+      'error',
+      locFromNode(method, file),
+    ));
+    return undefined;
+  }
+  if ('error' in result) {
+    errors.push(makeDiagnostic(`Method '${name}': ${result.error}`, 'error', locFromNode(method, file)));
+    return undefined;
+  }
+  return result.value;
+}
+
 // N-039 (R85): no word boundary. `@sighashSINGLE|FORKID` / `@sighashType` reach
 // extractSighashDirective and are refused as malformed, not ignored as prose.
 const SIGHASH_TOKEN_RE = /@sighash/;
@@ -593,9 +644,10 @@ function reportLostDirectives(cls: ClassDeclaration, file: string, errors: Compi
       ...m.getJsDocs().map((j): [number, number] => [j.getStart(), j.getEnd()]),
       ...m.getLeadingCommentRanges().map((r): [number, number] => [r.getPos(), r.getEnd()]),
     ]);
-  const lost: Array<{ pos: number; directive: '@sighash' | '@embedAlways' }> = [];
+  const lost: Array<{ pos: number; directive: '@sighash' | '@embedAlways' | '@bindingVariant' }> = [];
   for (const [re, directive, spans] of [
     [/@sighash/g, '@sighash', spansOf(cls.getMethods())],
+    [/@bindingVariant/g, '@bindingVariant', spansOf(cls.getMethods())],
     [/@embedAlways\b/g, '@embedAlways', spansOf(cls.getProperties())],
   ] as const) {
     for (const m of body.matchAll(re)) {

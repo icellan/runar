@@ -159,6 +159,11 @@ func unsupportedDirectiveError(source []byte, s nonTSSurface) string {
 	if embedAlwaysDirectiveRE.Match(source) {
 		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported as a comment by the %s surface parser; write it as %s (see docs/formats/%s.md)", s.name, s.embedSpelling, s.doc)
 	}
+	// `@bindingVariant` (ports #170) has no native spelling on any non-TS
+	// surface: every occurrence of the marker is refused.
+	if bindingVariantMarkerRE.Match(source) {
+		return BindingVariantUnsupportedMsg(s.name)
+	}
 	return ""
 }
 
@@ -837,9 +842,9 @@ func memberCommentSpans(node *sitter.Node) [][2]uint32 {
 // LostDirectiveMsg is the N-199 (R75) diagnostic shared verbatim by all seven
 // tiers (TS: lostDirectiveMessage in sighash-directive.ts).
 func LostDirectiveMsg(directive string) string {
-	target := "property"
-	if directive == "@sighash" {
-		target = "method"
+	target := "method"
+	if directive == "@embedAlways" {
+		target = "property"
 	}
 	return fmt.Sprintf("%s directive is not attached to any %s and would be silently ignored; put the comment on its own line directly above the %s it annotates (a comment that shares a line with the preceding code belongs to that code)", directive, target, target)
 }
@@ -879,6 +884,7 @@ func (p *parseContext) reportLostDirectives(body *sitter.Node, methodSpans, prop
 		}
 	}
 	scan(sighashMarkerRE, "@sighash", methodSpans)
+	scan(bindingVariantMarkerRE, "@bindingVariant", methodSpans)
 	scan(embedAlwaysDirectiveRE, "@embedAlways", propSpans)
 	sort.Slice(found, func(i, j int) bool { return found[i].pos < found[j].pos })
 	for _, f := range found {
@@ -946,6 +952,8 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 
 	// Issue #123: `/** @sighash <FLAGS> */` directive → per-method sighash type.
 	sighashType := p.parseSighashOnMethod(node, name, visibility)
+	// `/** @bindingVariant <lowS|all> */` → per-method binding construction (ports #170).
+	bindingVariant := p.parseBindingVariantOnMethod(node, name, visibility)
 
 	return MethodNode{
 		Name:           name,
@@ -953,8 +961,32 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 		Body:           body,
 		Visibility:     visibility,
 		SighashType:    sighashType,
+		BindingVariant: bindingVariant,
 		SourceLocation: p.loc(node),
 	}
+}
+
+// parseBindingVariantOnMethod detects + parses a `@bindingVariant` directive
+// from a method's leading comments, with the same fail-closed rules as
+// parseSighashOnMethod. Returns "" when no directive is present. Mirrors the
+// TS parseBindingVariantOnMethod.
+func (p *parseContext) parseBindingVariantOnMethod(node *sitter.Node, name, visibility string) string {
+	result, present := extractBindingVariantDirective(p.leadingCommentText(node))
+	if !present {
+		return ""
+	}
+	loc := p.loc(node)
+	if visibility != "public" {
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf(
+			"@bindingVariant directive on non-public method '%s' has no effect — only public methods are spending entry points",
+			name), Severity: SeverityError, Loc: &loc})
+		return ""
+	}
+	if result.err != "" {
+		p.errors = append(p.errors, Diagnostic{Message: fmt.Sprintf("Method '%s': %s", name, result.err), Severity: SeverityError, Loc: &loc})
+		return ""
+	}
+	return result.value
 }
 
 // parseSighashOnMethod detects + parses a `/** @sighash <FLAGS> */` (or

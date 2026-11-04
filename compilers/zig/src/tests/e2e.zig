@@ -709,7 +709,8 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // N-216 took it 7857 -> 7855: two branch-reconcile `OP_2 OP_ROLL` pairs now fold to OP_ROT.
     // N-376 took it 7855 -> 7801: the ROT ROT ROT -> [] peephole rule deletes 18 identity ROT^3 runs (54 bytes).
     // N-397 took it 7801 -> 7798: the folder sees through `count = @ref:t`, so countOccupied's first `count + 1n` folds to 1 (OP_OVER OP_SWAP OP_ADD gone).
-    const expected_bytes: usize = 7798;
+    // Ports #170: 7798 -> 7762, six C=1 binding blobs at -6 B each.
+    const expected_bytes: usize = 7762;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

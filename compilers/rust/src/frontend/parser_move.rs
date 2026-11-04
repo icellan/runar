@@ -1177,6 +1177,7 @@ impl<'a> MoveParser<'a> {
             visibility,
             source_location: location,
             sighash_type,
+            binding_variant: None,
         }
     }
 
@@ -2222,6 +2223,7 @@ fn build_constructor(properties: &[PropertyNode], loc: SourceLocation) -> Method
         visibility: Visibility::Public,
         source_location: loc,
         sighash_type: None,
+        binding_variant: None,
     }
 }
 

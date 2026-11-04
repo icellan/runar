@@ -149,14 +149,14 @@ func TestN142_SolSilentShapeWritesState(t *testing.T) {
 	if _, ok := ie.Operand.(frontend.PropertyAccessExpr); !ok {
 		t.Fatalf("operand = %T, want PropertyAccessExpr", ie.Operand)
 	}
-	const want = "3676c0b9030628828837696cad74c710bb225d151f5ba822be8b2ed302e3a342"
+	const want = "484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5"
 	if got := n142HexSha(t, n142Silent, "F200Silent.runar.sol"); got != want {
 		t.Fatalf("sha256(hex) = %s, want %s", got, want)
 	}
 }
 
 func TestN142_SolInterShapeCompilesToTSBytes(t *testing.T) {
-	const want = "3cb777cf55b26a89a9f9a9664dd259f63f343bd347e4057c859ab0454526e521"
+	const want = "29956ebf68e8510b65a74f18a47e5851f322bf6dc2d0981b45ee301f2aaae575"
 	if got := n142HexSha(t, n142Inter, "F200Inter.runar.sol"); got != want {
 		t.Fatalf("sha256(hex) = %s, want %s", got, want)
 	}

@@ -114,7 +114,7 @@ fn n051_variable_width_pin_is_an_equality_with_a_deploy_time_slot() {
         "codePartLenSlots must record the pin's length field"
     );
     // Same layout as the TS reference artifact (fold OFF).
-    assert_eq!(push_at + 1, 959);
+    assert_eq!(push_at + 1, 947);
 }
 
 #[test]

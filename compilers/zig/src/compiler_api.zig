@@ -19,6 +19,7 @@ const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
 const emit = @import("codegen/emit.zig");
 const input_limits = @import("frontend/input_limits.zig");
+const bindingvariant_directive = @import("frontend/bindingvariant_directive.zig");
 const embed_always_warn = @import("passes/embed_always_warn.zig");
 
 pub const SourceSizeExceededError = input_limits.SourceSizeError;
@@ -123,6 +124,22 @@ fn sighashGuardErrors(format: FileFormat) []const []const u8 {
     };
 }
 
+/// The `@bindingVariant` refusal (ports #170) for a non-TS surface, as a
+/// static one-element error list.
+fn bindingVariantGuardErrors(format: FileFormat) []const []const u8 {
+    return switch (format) {
+        .runar_sol => &.{comptime bindingvariant_directive.unsupportedError("Solidity")},
+        .runar_move => &.{comptime bindingvariant_directive.unsupportedError("Move")},
+        .runar_py => &.{comptime bindingvariant_directive.unsupportedError("Python")},
+        .runar_go => &.{comptime bindingvariant_directive.unsupportedError("Go DSL")},
+        .runar_rs => &.{comptime bindingvariant_directive.unsupportedError("Rust")},
+        .runar_rb => &.{comptime bindingvariant_directive.unsupportedError("Ruby")},
+        .runar_zig => &.{comptime bindingvariant_directive.unsupportedError("Zig")},
+        .runar_java => &.{comptime bindingvariant_directive.unsupportedError("Java")},
+        .runar_ts, .unknown => unreachable,
+    };
+}
+
 /// The shared `@embedAlways` refusal (N-268, mirroring N-244) for a non-TS
 /// surface, as a static one-element error list.
 fn embedAlwaysGuardErrors(format: FileFormat) []const []const u8 {
@@ -189,6 +206,11 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
         }
         if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
             return .{ .contract = null, .errors = embedAlwaysGuardErrors(format) };
+        }
+        // Ports #170: `@bindingVariant` has no native spelling on any non-TS
+        // surface; every occurrence of the marker is refused.
+        if (std.mem.indexOf(u8, source, bindingvariant_directive.MARKER) != null) {
+            return .{ .contract = null, .errors = bindingVariantGuardErrors(format) };
         }
     }
 

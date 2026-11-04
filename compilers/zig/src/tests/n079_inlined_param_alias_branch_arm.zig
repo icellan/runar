@@ -256,16 +256,16 @@ const Case = struct {
 
 const CASES = [_]Case{
     // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
-    .{ .label = "if-arm", .source = IF_ARM, .want_len = 707, .want_sha = "55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f" },
-    .{ .label = "if-arm-manual", .source = IF_ARM_MANUAL, .want_len = 707, .want_sha = "55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f" },
-    .{ .label = "if-arm-200", .source = IF_ARM_200, .want_len = 708, .want_sha = "327265f54207c1ec4af32c04f1b24c97c920d970c70051d8181f1edc56593418" },
-    .{ .label = "ternary-arm", .source = TERNARY_ARM, .want_len = 694, .want_sha = "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde" },
-    .{ .label = "ternary-arm-manual", .source = TERNARY_ARM_MANUAL, .want_len = 694, .want_sha = "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde" },
-    .{ .label = "loop-body", .source = LOOP_BODY, .want_len = 701, .want_sha = "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a" },
-    .{ .label = "loop-body-manual", .source = LOOP_BODY_MANUAL, .want_len = 701, .want_sha = "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a" },
-    .{ .label = "no-if", .source = NO_IF, .want_len = 686, .want_sha = "7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300" },
-    .{ .label = "stmt-level", .source = STMT_LEVEL, .want_len = 703, .want_sha = "9b3a9ebbe5701fdb3eca8c77a822130a37e787e94a5aaa2a3f7d6921bc89864d" },
-    .{ .label = "passthrough", .source = PASSTHROUGH, .want_len = 705, .want_sha = "5ed88937d0c4e98c9adf381e5b32570adce11b68622b35e866b1223e04bc3048" },
+    .{ .label = "if-arm", .source = IF_ARM, .want_len = 701, .want_sha = "01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9" },
+    .{ .label = "if-arm-manual", .source = IF_ARM_MANUAL, .want_len = 701, .want_sha = "01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9" },
+    .{ .label = "if-arm-200", .source = IF_ARM_200, .want_len = 702, .want_sha = "f22c8cd3e1fa94ee938819d40b4c92770b220db9edac5c513d3c7a49d572be69" },
+    .{ .label = "ternary-arm", .source = TERNARY_ARM, .want_len = 688, .want_sha = "ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6" },
+    .{ .label = "ternary-arm-manual", .source = TERNARY_ARM_MANUAL, .want_len = 688, .want_sha = "ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6" },
+    .{ .label = "loop-body", .source = LOOP_BODY, .want_len = 695, .want_sha = "1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f" },
+    .{ .label = "loop-body-manual", .source = LOOP_BODY_MANUAL, .want_len = 695, .want_sha = "1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f" },
+    .{ .label = "no-if", .source = NO_IF, .want_len = 680, .want_sha = "a31e207c875e996ea8fbe20ad348ba8bd062e4e14b7473d02dac40065f869734" },
+    .{ .label = "stmt-level", .source = STMT_LEVEL, .want_len = 697, .want_sha = "b7a9174c58353d308961e3761988671af95bd3ae54a8ff6ff6edc4a6944a134b" },
+    .{ .label = "passthrough", .source = PASSTHROUGH, .want_len = 699, .want_sha = "17767a3afcf95c0403e1cd8425ae7b9b0ea1b2511f0d8e68664dd60d55d430db" },
 };
 
 fn compileScriptHex(

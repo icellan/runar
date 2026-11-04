@@ -18,7 +18,7 @@ require 'json'
 # writes the deployed code-part length (inscription envelope included) into it.
 #
 # Fixtures: the TS-compiled TaffyTailVault artifact (fold OFF;
-# codePartLenSlots = [{byteOffset: 959}]) and the TS SDK's output for the same
+# codePartLenSlots = [{byteOffset: 947}]) and the TS SDK's output for the same
 # constructor args. The Ruby SDK must reproduce those bytes exactly.
 # rubocop:disable RSpec/DescribeClass
 RSpec.describe 'N-051 codePartLenSlots deploy-time patch' do
@@ -48,7 +48,7 @@ RSpec.describe 'N-051 codePartLenSlots deploy-time patch' do
 
   it 'parses codePartLenSlots from the artifact JSON' do
     artifact = Runar::SDK::RunarArtifact.from_hash(n051_artifact_hash)
-    expect(artifact.code_part_len_slots.map(&:byte_offset)).to eq([959])
+    expect(artifact.code_part_len_slots.map(&:byte_offset)).to eq([947])
   end
 
   it 'patches the deployed code-part length into the pin field' do
@@ -73,7 +73,7 @@ RSpec.describe 'N-051 codePartLenSlots deploy-time patch' do
 
   it 'refuses a codePartLenSlots entry that does not point at a pin length field' do
     hash = n051_artifact_hash
-    hash['codePartLenSlots'] = [{ 'byteOffset' => 958 }]
+    hash['codePartLenSlots'] = [{ 'byteOffset' => 946 }]
     contract = n051_contract(hash)
 
     expect { contract.get_locking_script }
@@ -107,7 +107,7 @@ RSpec.describe 'N-051 codePartLenSlots deploy-time patch' do
       script = n051_expected['lockingScriptHex'].dup
       # The owner slot (template byte 465) is the only substitution before the
       # pin; its 34-byte push replaces a 1-byte placeholder (+33 bytes).
-      off = (959 + 33) * 2
+      off = (947 + 33) * 2
       expect(script[off - 2, 2]).to eq('04')
       script[off, 8] = '00000000'
       expect(Runar::SDK::ScriptUtils.matches_artifact(artifact, script)).to be(false)

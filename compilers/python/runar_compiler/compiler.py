@@ -1285,6 +1285,8 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         # for the default (None) so existing ANF is byte-identical.
         if v.kind == "check_preimage" and v.sighash_flag is not None:
             d["sighashFlag"] = v.sighash_flag
+        if v.kind == "check_preimage" and v.binding_variant is not None:
+            d["bindingVariant"] = v.binding_variant
         if v.satoshis is not None:
             d["satoshis"] = v.satoshis
         if v.state_values is not None:

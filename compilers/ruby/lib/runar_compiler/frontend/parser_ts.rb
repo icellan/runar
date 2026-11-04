@@ -11,6 +11,7 @@ require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "input_limits"
 require_relative "sighash_directive"
+require_relative "binding_variant_directive"
 require_relative "../codegen/emit"
 
 module RunarCompiler
@@ -186,7 +187,7 @@ module RunarCompiler
       # +/@embedAlways\b/+ / +/@sighash/+ scans. N-039 (R85): +@sighash+ has no
       # word boundary, so +@sighashSINGLE|FORKID+ / +@sighashType+ are recorded
       # and refused as malformed rather than ignored as prose.
-      DIRECTIVE_RE = /@embedAlways\b|@sighash/
+      DIRECTIVE_RE = /@embedAlways\b|@sighash|@bindingVariant/
 
       # Tokenize a source string into an array of Token structs.
       #
@@ -729,6 +730,9 @@ module RunarCompiler
         # `@sighash` on the same member is seen and refused (F-039).
         sighash_texts = member_directives.map { |d| d[:text] }.select { |t| t.match?(/@sighash/) }
         sighash_text = sighash_texts.empty? ? nil : sighash_texts.join("\n")
+        # Ports #170: same collection for `@bindingVariant`.
+        bv_texts = member_directives.map { |d| d[:text] }.select { |t| t.include?(BindingVariantDirective::MARKER) }
+        binding_variant_text = bv_texts.empty? ? nil : bv_texts.join("\n")
 
         # Collect modifiers: public, private, readonly
         visibility = "private"
@@ -783,7 +787,7 @@ module RunarCompiler
                                       severity: Severity::ERROR, loc: location)
           end
           @method_directives.concat(member_directives)
-          return parse_method(member_name, visibility, location, sighash_text)
+          return parse_method(member_name, visibility, location, sighash_text, binding_variant_text)
         end
 
         if is_static
@@ -852,6 +856,7 @@ module RunarCompiler
         body = @source[body_start...rbrace.offset]
         lost = []
         [[/@sighash/, "@sighash", @method_directives],
+         [/@bindingVariant/, "@bindingVariant", @method_directives],
          [/@embedAlways\b/, "@embedAlways", @property_directives]].each do |re, directive, claimed|
           body.scan(re) do
             pos = body_start + Regexp.last_match.begin(0)
@@ -935,7 +940,7 @@ module RunarCompiler
 
       # -- Methods ----------------------------------------------------------
 
-      def parse_method(name, visibility, location, sighash_text = nil)
+      def parse_method(name, visibility, location, sighash_text = nil, binding_variant_text = nil)
         params = parse_params
 
         # Optional return type annotation. The AST keeps none; N-331 refuses an
@@ -951,6 +956,8 @@ module RunarCompiler
         # type. Only public methods are spending entry points, so a directive on
         # a private helper is meaningless (error). Malformed flag lists error too.
         sighash_type = parse_sighash_on_method(name, visibility, sighash_text, location)
+        # `/** @bindingVariant <lowS|all> */` -> per-method binding construction (ports #170).
+        binding_variant = parse_binding_variant_on_method(name, visibility, binding_variant_text, location)
 
         MethodNode.new(
           name: name,
@@ -958,8 +965,32 @@ module RunarCompiler
           body: body,
           visibility: visibility,
           source_location: location,
-          sighash_type: sighash_type
+          sighash_type: sighash_type,
+          binding_variant: binding_variant
         )
+      end
+
+      # Resolve a method's `@bindingVariant` directive text, with the same
+      # fail-closed rules as +parse_sighash_on_method+. nil when there is no
+      # directive. Mirrors the TS parseBindingVariantOnMethod.
+      def parse_binding_variant_on_method(name, visibility, text, location)
+        return nil if text.nil?
+
+        result = BindingVariantDirective.extract_binding_variant_directive(text)
+        return nil if result.nil?
+
+        if visibility != "public"
+          @errors << Diagnostic.new(message: "@bindingVariant directive on non-public method '#{name}' has no effect — " \
+                                             "only public methods are spending entry points",
+                                    severity: Severity::ERROR, loc: location)
+          return nil
+        end
+        if result.key?(:error)
+          @errors << Diagnostic.new(message: "Method '#{name}': #{result[:error]}",
+                                    severity: Severity::ERROR, loc: location)
+          return nil
+        end
+        result[:value]
       end
 
       # Resolve a method's `@sighash` directive text to a numeric sighash type,

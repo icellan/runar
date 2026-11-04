@@ -390,7 +390,7 @@ test "R-073 control: correct element writes and an element read still compile" {
     defer a.free(hex);
     // Byte-for-byte pin, captured from the pre-fix binary.
     // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 2560).
-    try std.testing.expectEqual(@as(usize, 2594), hex.len); // W1: +12, four zero-pad sites
+    try std.testing.expectEqual(@as(usize, 2570), hex.len); // W1: +12, four zero-pad sites; ports #170: -24, two C=1 binding blobs
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab76009c63757676aa517f"));
 }
 
@@ -402,7 +402,7 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 1784).
     // N-044: +134 hex for the two ByteString slots' PUSHDATA4 writer arm and the unsigned-length reader.
     // N-216: -2 hex, one branch-reconcile `OP_2 OP_ROLL` now folds to OP_ROT (code-part length literal follows).
-    try std.testing.expectEqual(@as(usize, 1950), hex.len); // W1: +6, two zero-pad sites
+    try std.testing.expectEqual(@as(usize, 1938), hex.len); // W1: +6, two zero-pad sites; ports #170: -12, one C=1 binding blob
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

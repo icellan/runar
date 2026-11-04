@@ -25,6 +25,7 @@ const loop_condition = @import("loop_condition.zig");
 const const_reassign = @import("const_reassign.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const bindingvariant_directive = @import("../frontend/bindingvariant_directive.zig");
 const input_limits = @import("../frontend/input_limits.zig");
 const containsDirectiveToken = input_limits.containsDirectiveToken;
 
@@ -902,6 +903,8 @@ const Parser = struct {
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
             m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public, member_first_tok);
+            // `/** @bindingVariant <lowS|all> */` -> per-method binding construction (ports #170).
+            m.binding_variant_all = self.parseBindingVariantDirective(member_trivia, member_name, is_public, member_first_tok);
             self.recordTriviaSpan(&self.method_spans, member_trivia);
             return .{ .method = m };
         }
@@ -1137,6 +1140,8 @@ const Parser = struct {
             var msg: ?[]const u8 = null;
             if (std.mem.startsWith(u8, rest, "@sighash")) {
                 if (!inSpans(self.method_spans.items, i)) msg = sighash_directive.LOST_SIGHASH_ERROR;
+            } else if (std.mem.startsWith(u8, rest, bindingvariant_directive.MARKER)) {
+                if (!inSpans(self.method_spans.items, i)) msg = bindingvariant_directive.LOST_ERROR;
             } else if (std.mem.startsWith(u8, rest, "@embedAlways") and containsDirectiveToken(rest[0..@min(rest.len, "@embedAlways".len + 1)], "@embedAlways")) {
                 if (!inSpans(self.prop_spans.items, i)) msg = sighash_directive.LOST_EMBED_ALWAYS_ERROR;
             }
@@ -1154,6 +1159,26 @@ const Parser = struct {
             if (s[0] <= pos and pos < s[1]) return true;
         }
         return false;
+    }
+
+    /// Detect + parse a `@bindingVariant` directive on a method, with the same
+    /// fail-closed rules as `parseSighashDirective`. False when no directive is
+    /// present (default lowS). Mirrors the TS parseBindingVariantOnMethod.
+    fn parseBindingVariantDirective(self: *Parser, trivia: []const u8, name: []const u8, is_public: bool, at: Token) bool {
+        const result = bindingvariant_directive.extractDirective(self.allocator, trivia) orelse return false;
+        if (!is_public) {
+            const msg = std.fmt.allocPrint(self.allocator, "@bindingVariant directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{name}) catch return false;
+            self.addErrorAt(at, msg);
+            return false;
+        }
+        switch (result) {
+            .all => |all| return all,
+            .err => |err_msg| {
+                const msg = std.fmt.allocPrint(self.allocator, "Method '{s}': {s}", .{ name, err_msg }) catch return false;
+                self.addErrorAt(at, msg);
+                return false;
+            },
+        }
     }
 
     /// Detect + parse a `/** @sighash <FLAGS> */` (or `// @sighash ...`)

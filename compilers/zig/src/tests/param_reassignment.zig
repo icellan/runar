@@ -29,7 +29,8 @@
 //! @bsv/sdk Spend engine `increment(5, 1)` from state 0 rejected the honest
 //! continuation (count = 6) and accepted the stale one (count = 5). A
 //! property-named public parameter that the method reassigns is now bound
-//! under its `count@local` slot, and the TS reference is PR 1414 hex,
+//! under its `count@local` slot, and the TS reference is PR 1402 hex (1414 before
+//! the C=1 binding blob of ports #170),
 //! ShadowParam 1398 hex (`conformance/negatives/param-reassign-parity.test.ts`
 //! executes the PR spend on-chain).
 //!
@@ -49,9 +50,10 @@
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
 
-/// sha256 of the TS reference hex for PR, fold OFF (1414 hex chars, N-360).
-const PR_TS_SHA256 = "a8300f31ee8ab63c3f0a7b617e9dd91f9e37c4f753ab84496911b80fef5728ee";
-const PR_TS_LEN: usize = 1414;
+/// sha256 of the TS reference hex for PR, fold OFF (1402 hex chars; 1414 at
+/// N-360, before the C=1 binding blob of ports #170).
+const PR_TS_SHA256 = "2d439f924960c54527370c0c700e18807fb3acd634eed4dabd9876da29d7ec05";
+const PR_TS_LEN: usize = 1402;
 
 /// TS reference hex for SL, fold OFF.
 const SL_TS_HEX = "788b7852937c9d0000a07777";

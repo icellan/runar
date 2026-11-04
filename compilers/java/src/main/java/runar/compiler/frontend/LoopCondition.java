@@ -76,7 +76,7 @@ public final class LoopCondition {
     private static MethodNode normalizeMethod(MethodNode m) {
         if (m == null) return null;
         return new MethodNode(m.name(), m.params(), normalizeStatements(m.body()), m.visibility(),
-            m.sourceLocation(), m.sighashType());
+            m.sourceLocation(), m.sighashType(), m.bindingVariant());
     }
 
     /** {@code contract} with every loop condition rewritten to its canonical spelling. */

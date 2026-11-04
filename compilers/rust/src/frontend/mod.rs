@@ -30,6 +30,7 @@ pub mod parser_sol;
 pub mod parser_zig;
 pub mod side_effect_summary;
 pub mod sighash_directive;
+pub mod binding_variant_directive;
 pub mod sighash_validate;
 pub mod ts_nesting;
 pub mod typecheck;
