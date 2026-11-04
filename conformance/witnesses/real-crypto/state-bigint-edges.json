@@ -123,6 +123,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "1bb1970bb75e92c0d17259e82a8616bd30a3a088ba13f10be7a48e47ba61feea"
+    "expected-script.hex": "d56ad95c2547fc0cea1b2aa3b2d14f41cef15d9dc21460905f2566508dbe90a7"
   }
 }

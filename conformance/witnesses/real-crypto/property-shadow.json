@@ -42,7 +42,7 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "4ff6800c609a09e976addc707524778bc842a92066c4fd04dec4dd8cde56e4e7",
+    "expected-script.hex": "36315bff21670a3f6763d8785ae4aa4bdafe34170f53da37104dc09ecdd05020",
     "expected-ir.json": "e341b053c3d67c7fa7b1315a44a2cd51930d3d3c6a54629a3dfe9ed9c565e18b"
   }
 }
