@@ -1254,8 +1254,12 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // inputs on the non-MSM Groth16 WA path; every script that still compiles
     // is byte-identical (go-only-parity + bn254-pairing hex unchanged). It is
     // spent, and must be deleted, on the next edit to stack.go.
+    //
+    // 2026-11-04 — DELETED, spent: the #179 port (#178 branch-arm order fix)
+    // edits stack.go and moves its own pins (conformance/anf-interpreter
+    // branch-permuted-* cases), so it needs no cover.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual(['compilers/go/codegen/stack.go']);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
