@@ -93,8 +93,8 @@ describe('WalletProvider extensibility', () => {
     const childTxid = child.id('hex');
 
     const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith('/v1/tx')) {
-        return new Response(JSON.stringify({ txid: childTxid }), { status: 200 });
+      if (url.endsWith('/tx')) {
+        return new Response(JSON.stringify({ txid: childTxid }), { status: 202 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });

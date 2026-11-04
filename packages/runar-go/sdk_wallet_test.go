@@ -3,6 +3,8 @@ package runar
 import (
 	"encoding/hex"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -689,8 +691,8 @@ func TestWalletProvider_Defaults(t *testing.T) {
 	if wp.fundingTag != "funding" {
 		t.Errorf("expected default fundingTag 'funding', got %q", wp.fundingTag)
 	}
-	if wp.arcUrl != "https://arc.gorillapool.io" {
-		t.Errorf("expected default arcUrl, got %q", wp.arcUrl)
+	if wp.broadcastURL != "https://arcade-us-1.bsvblockchain.tech/tx" {
+		t.Errorf("expected the mainnet BSV Broadcaster default, got %q", wp.broadcastURL)
 	}
 	if wp.feeRate != 100 {
 		t.Errorf("expected default feeRate 100, got %f", wp.feeRate)
@@ -701,53 +703,100 @@ func TestWalletProvider_Defaults(t *testing.T) {
 // provider configured for testnet reported GetNetwork() == "testnet" and
 // broadcast every transaction to the MAINNET ARC, with nothing to say so.
 //
-// NewWalletProvider cannot return an error without breaking its signature, so
-// a non-mainnet provider that named no endpoint is left with an empty arcUrl
-// and Broadcast refuses — the tier refuses as early as its constructor allows.
-func TestR179_TestnetWithoutArcURLRefusesToBroadcast(t *testing.T) {
-	wp := NewWalletProvider(WalletProviderOptions{
-		Wallet:  newMockWalletClient(""),
-		Network: "testnet",
-	})
-	if wp.arcUrl != "" {
-		t.Fatalf("a testnet provider must not inherit the mainnet ARC endpoint, got %q", wp.arcUrl)
+// The default broadcaster is now BSV Broadcaster, which publishes one endpoint
+// per network, so the default is derived from Network. The invariant is
+// unchanged: a provider the caller did not point anywhere broadcasts to the
+// network it reports.
+func TestR179_DefaultEndpointFollowsNetwork(t *testing.T) {
+	cases := map[string]string{
+		"":        "https://arcade-us-1.bsvblockchain.tech/tx",
+		"mainnet": "https://arcade-us-1.bsvblockchain.tech/tx",
+		"testnet": "https://arcade-v2-testnet-us-1.bsvblockchain.tech/tx",
 	}
-
-	_, err := wp.Broadcast(transaction.NewTransaction())
-	if err == nil {
-		t.Fatal("Broadcast must refuse when no ARC endpoint matches the network")
-	}
-	if !strings.Contains(err.Error(), "testnet") ||
-		!strings.Contains(err.Error(), "arc.gorillapool.io") {
-		t.Errorf("the refusal must name the network and the mainnet endpoint it declined to use; got: %v", err)
+	for network, want := range cases {
+		wp := NewWalletProvider(WalletProviderOptions{
+			Wallet:  newMockWalletClient(""),
+			Network: network,
+		})
+		if wp.broadcastURL != want {
+			t.Errorf("network %q: expected %q, got %q", network, want, wp.broadcastURL)
+		}
+		if wp.arcUrl != "" {
+			t.Errorf("network %q: no ArcUrl was given, got %q", network, wp.arcUrl)
+		}
 	}
 }
 
-func TestR179_TestnetWithAnExplicitArcURLIsAccepted(t *testing.T) {
+func TestR179_ExplicitArcURLKeepsTheARCPath(t *testing.T) {
 	wp := NewWalletProvider(WalletProviderOptions{
 		Wallet:  newMockWalletClient(""),
 		Network: "testnet",
-		ArcUrl:  "https://arc.testnet.example",
+		ArcUrl:  "https://arc.testnet.example/",
 	})
-	if wp.arcUrl != "https://arc.testnet.example" {
-		t.Errorf("explicit ArcUrl was not honoured, got %q", wp.arcUrl)
+	if wp.broadcastURL != "https://arc.testnet.example/v1/tx" {
+		t.Errorf("explicit ArcUrl was not honoured, got %q", wp.broadcastURL)
 	}
 	if wp.GetNetwork() != "testnet" {
 		t.Errorf("expected testnet, got %q", wp.GetNetwork())
 	}
 }
 
-func TestR179_MainnetDefaultIsUnchanged(t *testing.T) {
-	for _, network := range []string{"", "mainnet"} {
-		wp := NewWalletProvider(WalletProviderOptions{
-			Wallet:  newMockWalletClient(""),
-			Network: network,
-		})
-		if wp.GetNetwork() != "mainnet" {
-			t.Errorf("network %q: expected mainnet, got %q", network, wp.GetNetwork())
-		}
-		if wp.arcUrl != "https://arc.gorillapool.io" {
-			t.Errorf("network %q: expected the mainnet ARC default, got %q", network, wp.arcUrl)
-		}
+// broadcastTestTx is a minimal transaction for exercising the HTTP path; its
+// validity does not matter to a stub server.
+func broadcastTestTx(t *testing.T) *transaction.Transaction {
+	t.Helper()
+	tx, err := transaction.NewTransactionFromHex(
+		"0100000001" + strings.Repeat("00", 32) + "00000000" + "00" + "ffffffff" +
+			"01" + "50c3000000000000" + "0151" + "00000000")
+	if err != nil {
+		t.Fatalf("building test tx: %v", err)
+	}
+	return tx
+}
+
+func TestWalletProvider_BroadcastPostsToTheConfiguredURL(t *testing.T) {
+	var gotPath, gotType string
+	tx := broadcastTestTx(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotType = r.URL.Path, r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusAccepted)
+		// F-042 applies to BSV Broadcaster too: the body must echo THIS tx's txid.
+		_, _ = w.Write([]byte(`{"txid":"` + tx.TxID().String() + `","status":202,"txStatus":"RECEIVED"}`))
+	}))
+	defer server.Close()
+
+	wp := NewWalletProvider(WalletProviderOptions{Wallet: newMockWalletClient(""), Network: "testnet"})
+	wp.broadcastURL = server.URL + "/tx"
+
+	txid, err := wp.Broadcast(tx)
+	if err != nil {
+		t.Fatalf("Broadcast: %v", err)
+	}
+	if txid != tx.TxID().String() {
+		t.Errorf("expected txid %s, got %s", tx.TxID().String(), txid)
+	}
+	if gotPath != "/tx" || gotType != "application/octet-stream" {
+		t.Errorf("expected POST /tx as application/octet-stream, got %q %q", gotPath, gotType)
+	}
+}
+
+func TestWalletProvider_BroadcastErrorNamesTheService(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"failed to parse transaction"}`))
+	}))
+	defer server.Close()
+
+	def := NewWalletProvider(WalletProviderOptions{Wallet: newMockWalletClient(""), Network: "testnet"})
+	def.broadcastURL = server.URL + "/tx"
+	_, err := def.Broadcast(broadcastTestTx(t))
+	if err == nil || !strings.Contains(err.Error(), "BSV Broadcaster returned 400") {
+		t.Errorf("default path: expected a BSV Broadcaster error, got %v", err)
+	}
+
+	arc := NewWalletProvider(WalletProviderOptions{Wallet: newMockWalletClient(""), ArcUrl: server.URL})
+	_, err = arc.Broadcast(broadcastTestTx(t))
+	if err == nil || !strings.Contains(err.Error(), "ARC returned 400") {
+		t.Errorf("ArcUrl path: expected an ARC error, got %v", err)
 	}
 }

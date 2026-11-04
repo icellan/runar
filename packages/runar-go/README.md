@@ -288,7 +288,7 @@ provider := runar.NewWalletProvider(runar.WalletProviderOptions{
 	Signer:     signer,
 	Basket:     "my-app-utxos",
 	FundingTag: "funding",        // defaults to "funding"
-	ArcUrl:     "https://arc.gorillapool.io", // defaults to this
+	ArcUrl:     "https://arc.gorillapool.io", // optional; default is BSV Broadcaster for Network
 	Network:    "mainnet",
 })
 
@@ -1635,7 +1635,7 @@ type WalletProviderOptions struct {
 	Signer        Signer
 	Basket        string
 	FundingTag    string  // default "funding"
-	ArcUrl        string  // default "https://arc.gorillapool.io"
+	ArcUrl        string  // optional ARC endpoint; default: BSV Broadcaster for Network
 	OverlayUrl    string
 	OverlayTopics []string
 	Network       string  // default "mainnet"
@@ -1647,7 +1647,7 @@ func NewWalletProvider(opts WalletProviderOptions) *WalletProvider
 func (p *WalletProvider) EnsureFunding(minSatoshis int64) error
 ```
 
-Plus the standard `Provider` interface methods. Broadcasts via ARC; reads UTXOs from the wallet's basket; resolves transactions via the optional overlay service or local cache. `EnsureFunding` creates a funding UTXO via `CreateAction` if the wallet doesn't already hold enough. [sdk_wallet.go](sdk_wallet.go).
+Plus the standard `Provider` interface methods. Broadcasts via BSV Broadcaster (`POST /tx`, endpoint chosen by `Network`), or via ARC when `ArcUrl` is set; reads UTXOs from the wallet's basket; resolves transactions via the optional overlay service or local cache. `EnsureFunding` creates a funding UTXO via `CreateAction` if the wallet doesn't already hold enough. [sdk_wallet.go](sdk_wallet.go).
 
 #### `WalletSigner` / `WalletSignerOptions`
 

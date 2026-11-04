@@ -239,6 +239,11 @@ func run() error {
 
 	currentState := toMap(decodeBigints(toMap(raw["currentState"])))
 	args := toMap(decodeBigints(toMap(raw["args"])))
+	// PROTOCOL.md: an integer `args.txPreimage` is the spent UTXO's satoshis.
+	// The Go SDK reads that from a MockPreimageAmount, not a bare integer.
+	if amt, ok := args["txPreimage"].(*big.Int); ok {
+		args["txPreimage"] = runar.MockPreimageAmount{Amount: amt}
+	}
 	constructorArgs := toSlice(decodeBigints(toSlice(raw["constructorArgs"])))
 
 	anfPath, err := resolveAnfPath(raw, inputFile)

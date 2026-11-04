@@ -1,0 +1,22 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/helper-extract-amount.anf.json",
+  "methodName": "tick",
+  "currentState": {
+    "total": "5n"
+  },
+  "args": {
+    "txPreimage": "7777n",
+    "_newAmount": "7777n"
+  },
+  "constructorArgs": [
+    "5n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/HelperExtractAmount.runar.ts",
+    "constructorArgs": [
+      "5n"
+    ],
+    "methodArgs": [],
+    "deploySatoshis": 7777
+  }
+}
