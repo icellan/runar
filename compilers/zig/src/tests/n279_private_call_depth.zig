@@ -84,5 +84,6 @@ test "N-279: a mutation 71 private-helper hops deep compiles byte-identically to
     // tip for N-279), independently reproduced by Rust, Python, Ruby, Java
     // and the TS reference compiler against the same source.
     // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff vs the old pin is folds only (Go agrees).
-    try std.testing.expectEqualStrings("9acf031ac53e363f0727682ba052d45e411123dc526fa89074e8e5b7bf395389", &got);
+    // Ports #170: re-pinned; the C=1 binding blob is 6 B shorter (Go and TS agree).
+    try std.testing.expectEqualStrings("27af114291005cad95d905511793a9fa98cc0560faebcf6a312e6097ec44b85d", &got);
 }

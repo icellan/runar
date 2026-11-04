@@ -94,13 +94,13 @@ class N130CompoundAssignTest {
 
     /** sha256 of the TS reference script hex for Arith.runar.java. */
     private static final String ARITH_TS_SHA256 =
-        "211acb3712ea3a082c1657e21485f4d1176a2c480847d1622eaac31fc12b37fc";
-    private static final int ARITH_TS_HEX_LEN = 1804;
+        "81dde0f19bf5e3f794e881314033cadaa754938b27d575e801c699bf05e5c3b5";
+    private static final int ARITH_TS_HEX_LEN = 1792;
 
     /** sha256 of the TS reference script hex for Compound.runar.java. */
     private static final String COMPOUND_TS_SHA256 =
-        "a66871ae82eb652992f39ef9f8ef7f6474cf92bc424776d344127ec843643fce";
-    private static final int COMPOUND_TS_HEX_LEN = 1880;
+        "32339da8b1c1e9fd2f390b48f64f5952caf398b64262452bdbf1f3ca2277acdf";
+    private static final int COMPOUND_TS_HEX_LEN = 1868;
 
     @Test
     void arithmeticCompoundAssignmentsMatchTheTsReference(@TempDir Path tmp) throws Exception {
@@ -153,8 +153,9 @@ class N130CompoundAssignTest {
 
     /** sha256 of the TS reference script hex for the unit-step loop (all 7 tiers agree). */
     // N-216 (2026-10-21): re-pinned; one lowerUpdateProp `OP_2 OP_ROLL` now folds to OP_ROT (886 -> 885 B).
+    // Ports #170: re-pinned; C=1 binding blob, 885 -> 879 B.
     private static final String UNIT_LOOP_TS_SHA256 =
-        "6993bf337af1e5f184d954514ffb1b254e45e6001400fda896ff92022ba664e9";
+        "3dafdb07cb6d97d37acaa1f88300751c45a5342be801f0ee9b6c801055f62cc7";
 
     /** A unit-step {@code i += Bigint.ONE} loop update compiles exactly like {@code i++}. */
     @Test

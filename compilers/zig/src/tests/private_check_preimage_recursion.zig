@@ -200,9 +200,9 @@ test "C27: checkPreimage reachable only through a private helper still emits _co
     // while the private-method map was null. All seven tiers were re-measured
     // at 625 on the same ANF input before this number was moved. N-044: +14
     // for the unsigned PUSHDATA-length reader, header whitelist and exact
-    // state consumption -> 639.
+    // state consumption -> 639. Ports #170: -6 for the C=1 binding blob -> 633.
     const hex = try scriptHex(artifact);
-    try std.testing.expectEqual(@as(usize, 639 * 2), hex.len);
+    try std.testing.expectEqual(@as(usize, 633 * 2), hex.len);
 }
 
 test "C27: the _codePart gate stays gated when no checkPreimage is reachable" {

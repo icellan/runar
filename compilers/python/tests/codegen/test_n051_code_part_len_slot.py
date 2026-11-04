@@ -10,7 +10,7 @@ is always ``9c`` and the length field is recorded as an artifact
 ``codePartLenSlots`` entry that the SDK patches at deploy time.
 
 The expected bytes are the TypeScript reference compile (fold OFF): template
-script sha256 ``45bdadad...``, the pin's length field at byte 959.
+script sha256 ``738869ba...``, the pin's length field at byte 947.
 """
 
 from __future__ import annotations
@@ -76,8 +76,8 @@ class FixedWidthVault extends StatefulSmartContract {
 }
 """
 
-TS_SCRIPT_SHA256 = "45bdadad4ee5fac233b3f09d8bfea71d8048d2a164b737d126c65ab28f7c9faf"
-TS_PIN_VALUE_OFFSET = 959
+TS_SCRIPT_SHA256 = "738869ba6eed4d229d0d30f0b91b6fe98addff349a4f0fe0dee3ca3ffb656e45"
+TS_PIN_VALUE_OFFSET = 947
 
 
 def _compile(src: str, name: str):

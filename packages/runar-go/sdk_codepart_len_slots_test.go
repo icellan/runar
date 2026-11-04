@@ -64,8 +64,8 @@ func newTaffyTail(art *RunarArtifact, exp *taffyTailExpected) *RunarContract {
 
 func TestN051_ArtifactParsesCodePartLenSlots(t *testing.T) {
 	art, _ := loadTaffyTail(t)
-	if len(art.CodePartLenSlots) != 1 || art.CodePartLenSlots[0].ByteOffset != 959 {
-		t.Fatalf("codePartLenSlots = %+v, want [{ByteOffset:959}]", art.CodePartLenSlots)
+	if len(art.CodePartLenSlots) != 1 || art.CodePartLenSlots[0].ByteOffset != 947 {
+		t.Fatalf("codePartLenSlots = %+v, want [{ByteOffset:947}]", art.CodePartLenSlots)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestN051_InscriptionPatchedIntoDeployTimePin(t *testing.T) {
 
 func TestN051_CorruptedSlotOffsetRefused(t *testing.T) {
 	art, exp := loadTaffyTail(t)
-	art.CodePartLenSlots[0].ByteOffset = 958 // one byte off the length field
+	art.CodePartLenSlots[0].ByteOffset = 946 // one byte off the length field
 	c := newTaffyTail(art, exp)
 
 	defer func() {
@@ -138,9 +138,9 @@ func TestN051_MatchesArtifactChecksDeployedLengthField(t *testing.T) {
 		t.Fatalf("MatchesArtifact must accept the honestly deployed TaffyTail locking script")
 	}
 
-	// The length field sits at template 959 + the growth of the slots before
+	// The length field sits at template 947 + the growth of the slots before
 	// it (only the `owner` pubkey at 465: 34 bytes for a 1-byte placeholder).
-	at := (959 + 33) * 2
+	at := (947 + 33) * 2
 	if exp.LockingScriptHex[at-2:at] != "04" || exp.LockingScriptHex[at+8:at+14] != "819c69" {
 		t.Fatalf("test offset does not address the pin field")
 	}

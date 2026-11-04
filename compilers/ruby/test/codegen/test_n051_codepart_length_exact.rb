@@ -97,7 +97,7 @@ class TestN051CodePartLengthExact < Minitest::Test
 
     json = JSON.parse(RunarCompiler.artifact_to_json(artifact))
     # Byte-identical with the TS reference compiler (fold OFF).
-    assert_equal [{ "byteOffset" => 959 }], json["codePartLenSlots"]
+    assert_equal [{ "byteOffset" => 947 }], json["codePartLenSlots"]
     assert_equal found.map(&:first), json["codePartLenSlots"].map { |s| s["byteOffset"] }
 
     off = json["codePartLenSlots"][0]["byteOffset"]

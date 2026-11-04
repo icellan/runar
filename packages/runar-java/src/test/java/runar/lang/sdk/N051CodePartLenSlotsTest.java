@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * part it actually deploys — inscription envelope included.
  *
  * <p>Fixture: the TypeScript reference compiler's TaffyTailVault artifact
- * (fold OFF, slot at template byte 959) and the hex the TypeScript SDK builds
+ * (fold OFF, slot at template byte 947) and the hex the TypeScript SDK builds
  * from it ({@code taffytail-vault-expected.json}). The owner slot at template
  * byte 465 precedes the length field and the tag slot at 1113 follows it, so
  * the resolved offset exercises the "earlier substitutions only" shift.
@@ -66,7 +66,7 @@ class N051CodePartLenSlotsTest {
     @Test
     void artifactParsesCodePartLenSlots() throws Exception {
         RunarArtifact artifact = RunarArtifact.fromJson(artifactJson());
-        assertEquals(List.of(new RunarArtifact.CodePartLenSlot(959)), artifact.codePartLenSlots());
+        assertEquals(List.of(new RunarArtifact.CodePartLenSlot(947)), artifact.codePartLenSlots());
         assertEquals(List.of(), RunarArtifact.fromJson(
             withSlots(artifactJson(), "[]")).codePartLenSlots());
     }
@@ -120,7 +120,7 @@ class N051CodePartLenSlotsTest {
     @Test
     void corruptedSlotOffsetIsRefused() throws Exception {
         Map<String, Object> exp = expected();
-        for (int bad : List.of(958, 960, 0)) {
+        for (int bad : List.of(946, 948, 0)) {
             RunarArtifact artifact = RunarArtifact.fromJson(
                 withSlots(artifactJson(), "[{\"byteOffset\": " + bad + "}]"));
             RuntimeException e = assertThrows(RuntimeException.class,

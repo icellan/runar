@@ -53,7 +53,7 @@ import { isCiEnv } from '../env.js';
  */
 
 /** N-360: PR 1414 hex chars (was 1420), ShadowParam 1398 (was 1404). */
-const PR_SHA256 = 'a8300f31ee8ab63c3f0a7b617e9dd91f9e37c4f753ab84496911b80fef5728ee';
+const PR_SHA256 = '2d439f924960c54527370c0c700e18807fb3acd634eed4dabd9876da29d7ec05';
 const PR_HEX_LEN = 1414;
 const SHADOW_PARAM_SHA256 = 'b9ede9c014e89373bedf983b487da17286e915bccaeb50e1fd3546da4d6f57e1';
 const SHADOW_PARAM_HEX_LEN = 1398;

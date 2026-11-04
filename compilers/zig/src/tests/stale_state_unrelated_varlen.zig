@@ -114,9 +114,9 @@ const NO_STATE_READ_SRC =
 /// string, exactly as the sibling Python test does. N-044 re-stamp: the
 /// var-length reader reads PUSHDATA lengths unsigned, whitelists the header
 /// and asserts exact consumption (1280 -> 1308 hex chars, all seven tiers).
-const PROBE_FIXED_LEN: usize = 1308;
+const PROBE_FIXED_LEN: usize = 1296; // ports #170: -12 hex (C=1 binding blob)
 const PROBE_FIXED_SHA256 =
-    "0eff5de2f7274f45f37850f4aa186ca85ead5f1e7623c0798c059fcddfb07a04";
+    "d801076fbefe3f5c4b52953994a7b77b3a3d593de50d280b5f3e41cd0c4017c4";
 
 /// The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
 /// future regression cannot quietly restore it. NOTE: this digest is of the
@@ -127,9 +127,9 @@ const PROBE_BROKEN_SHA256 =
     "150cb2a01cca2eb26bbbe02e2c090aa5d0c33957b07a7e385d951ec6452e0fb8";
 
 /// Outside the fix's blast radius — must not move.
-const CONTROL_FIXED_LEN: usize = 952;
+const CONTROL_FIXED_LEN: usize = 940; // ports #170: -12 hex
 const CONTROL_SHA256 =
-    "4b1bff88a334cbc0604fada46ea297efada0825ed26769bbeef8c888c08b6722";
+    "b4722d412b2b7fbedd116ff8d1859c21d3596025de79abdf6967570aa4f9fc77";
 
 /// The BIP-143 scriptCode varint-strip cascade (`<fd00> OP_LESSTHAN OP_IF`)
 /// emitted ONLY on the `_codePart`-relative live-state path — never on the

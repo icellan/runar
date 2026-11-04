@@ -113,9 +113,10 @@ class N051CodePartLenSlotTest {
                 label + ": each entry carries exactly one key, byteOffset");
             if (!fold) {
                 // Cross-tier: the TypeScript reference compiler, fold OFF, emits a
-                // 1317-byte template with the slot at byte 959.
-                assertEquals(1317, script.length() / 2, "template length must match the TS reference");
-                assertEquals(List.of(959), slots, "slot offset must match the TS reference");
+                // 1305-byte template with the slot at byte 947 (1317 / 959
+                // before the C=1 binding blob, ports #170).
+                assertEquals(1305, script.length() / 2, "template length must match the TS reference");
+                assertEquals(List.of(947), slots, "slot offset must match the TS reference");
             }
         }
     }

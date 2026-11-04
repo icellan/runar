@@ -241,8 +241,8 @@ export class SinkDistance extends StatefulSmartContract {
   // fold to OP_ROT (-4 hex chars, both modes; opcode diff is the folds only).
   // Re-measured against the same mutant: fold-OFF 1494 / fold-ON 1510 hex
   // chars, different digests — still killed.
-  foldOff: 'e09d8fba20bc9d24cd2cbe88250816061be18623a135e56bc7e5ac559801310a',
-  foldOn: '968674def6e9d75ba10e9fbabf2d9622d1b65ae2fb0720aafbe289964705563f',
+  foldOff: 'fd22f72064e392254b81401a5592cbd04229223f9d44bfc241c2b3d47d92e1a2',
+  foldOn: 'aa52340126f8e43375dfd9ba193fe5a51600258d750a1ac6f19727e7283593ed',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -265,10 +265,11 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
         // added 6 hex chars to both modes.
         // F-024 (R14): +64 hex chars in both modes for the value check.
         // N-216: -4 hex chars in both modes (two reconcile rolls fold to OP_ROT).
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1474);
+        // Ports #170: -12 hex chars in both modes (the C=1 binding blob, 428 -> 422 B).
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1462);
         // N-138 (2026-10-30): fold-ON no longer carries the dead operand pushes
         // the folder orphaned (-22 hex chars); fold-OFF is unchanged.
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1472);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1460);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

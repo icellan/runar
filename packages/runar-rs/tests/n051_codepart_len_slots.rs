@@ -114,7 +114,7 @@ fn n051_artifact_parses_code_part_len_slots() {
     let a = artifact();
     let slots = a.code_part_len_slots.as_ref().expect("codePartLenSlots parsed");
     assert_eq!(slots.len(), 1);
-    assert_eq!(slots[0].byte_offset, 959);
+    assert_eq!(slots[0].byte_offset, 947);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn n051_exact_compile_time_pin_still_refuses_an_inscription() {
 #[test]
 fn n051_corrupted_slot_offset_is_refused() {
     let mut a = artifact();
-    a.code_part_len_slots = Some(vec![CodePartLenSlot { byte_offset: 960 }]);
+    a.code_part_len_slots = Some(vec![CodePartLenSlot { byte_offset: 948 }]);
 
     let msg = panic_message(|| RunarContract::new(a.clone(), args()).get_locking_script());
     assert!(
@@ -199,7 +199,7 @@ fn n051_matches_artifact_checks_the_deployed_length_field() {
 
     let at = built_len_field_hex(&a);
     let code_len = expected()["codePartLen"].as_u64().unwrap() as usize;
-    for wrong in [code_len - 1, code_len + 1, 1350 /* the template's compile-time value */] {
+    for wrong in [code_len - 1, code_len + 1, 1338 /* the template's compile-time value */] {
         let tampered = format!("{}{}{}", &ls[..at], le32(wrong), &ls[at + 8..]);
         assert!(!matches_artifact(&a, &tampered).unwrap(), "length field {wrong} must not match");
     }

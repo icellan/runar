@@ -82,8 +82,8 @@ class SighashCodegenTest {
     /**
      * Java parity with the TypeScript reference: the SINGLE-safe counter under
      * SINGLE|FORKID differs from the default (ALL|FORKID) at EXACTLY two byte
-     * offsets — the OP_PUSH_TX binding flag byte (byte 394) and the
-     * auto-injected preimage-type assert const (byte 521 since W1's zero-pad) —
+     * offsets — the OP_PUSH_TX binding flag byte (byte 388) and the
+     * auto-injected preimage-type assert const (byte 515 since W1's zero-pad) —
      * each 0x41 -> 0x43.
      * (R-010 moved both: +1 for the hoisted OP_NOP OP_CODESEPARATOR prologue,
      * and the assert const additionally past the `_codePart` authentication
@@ -100,22 +100,22 @@ class SighashCodegenTest {
         // N-038 (R64): the SINGLE continuation also drops the change segment and
         // the _changePKH / _changeAmount params (BIP-143 SINGLE commits
         // hash256(output[0]) only), which shrinks the script and shifts stack
-        // depths from byte 486 on. The pure flag swap is therefore checked over
-        // the prologue before that (one byte: the binding flag at 394), and the
-        // preimage-type assert const (`01<mode>9d`, flag at 521) in place.
+        // depths from byte 480 on. The pure flag swap is therefore checked over
+        // the prologue before that (one byte: the binding flag at 388), and the
+        // preimage-type assert const (`01<mode>9d`, flag at 515) in place.
         assertTrue(single.length() < dflt.length(), "SINGLE drops the change segment");
         java.util.List<Integer> diffBytes = new java.util.ArrayList<>();
-        for (int i = 0; i < 2 * 486; i += 2) {
+        for (int i = 0; i < 2 * 480; i += 2) {
             if (!dflt.regionMatches(i, single, i, 2)) {
                 diffBytes.add(i / 2);
                 assertEquals("41", dflt.substring(i, i + 2));
                 assertEquals("43", single.substring(i, i + 2));
             }
         }
-        assertEquals(java.util.List.of(394), diffBytes,
+        assertEquals(java.util.List.of(388), diffBytes,
             "SINGLE must change exactly the binding flag byte in the prologue");
-        assertEquals("01419d", dflt.substring(2 * 520, 2 * 523));
-        assertEquals("01439d", single.substring(2 * 520, 2 * 523),
+        assertEquals("01419d", dflt.substring(2 * 514, 2 * 517));
+        assertEquals("01439d", single.substring(2 * 514, 2 * 517),
             "the preimage-type assert const carries the declared mode");
     }
 }

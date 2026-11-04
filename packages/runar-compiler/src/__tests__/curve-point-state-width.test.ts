@@ -143,20 +143,20 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // OP_NUMEQUALVERIFY before committing the field (+8 hex chars). Re-measured
       // byte-identical in all seven tiers; Point == P256Point still holds, and
       // the read shape and the framed rows are byte-unchanged.
-      { shape: 0, type: 'Point', digest: 'd6148b45', hexLen: 1400 },
-      { shape: 0, type: 'P256Point', digest: 'd6148b45', hexLen: 1400 },
-      { shape: 0, type: 'P384Point', digest: 'e9ee2d74', hexLen: 1400 },
-      { shape: 0, type: 'PubKey', digest: '758f1fc8', hexLen: 1400 },
-      { shape: 0, type: 'Sha256', digest: '64697f2b', hexLen: 1400 },
-      { shape: 0, type: 'ByteString', digest: 'ffe905dc', hexLen: 1716 },
-      { shape: 0, type: 'Sig', digest: 'ffe905dc', hexLen: 1716 },
-      { shape: 1, type: 'Point', digest: 'a1e544fa', hexLen: 942 },
-      { shape: 1, type: 'P256Point', digest: 'a1e544fa', hexLen: 942 },
-      { shape: 1, type: 'P384Point', digest: '69b87cde', hexLen: 942 },
-      { shape: 1, type: 'PubKey', digest: '75d147d3', hexLen: 942 },
-      { shape: 1, type: 'Sha256', digest: 'e2b1b50e', hexLen: 942 },
-      { shape: 1, type: 'ByteString', digest: '0cff82c1', hexLen: 1298 },
-      { shape: 1, type: 'Sig', digest: '0cff82c1', hexLen: 1298 },
+      { shape: 0, type: 'Point', digest: '859c25fc', hexLen: 1388 },
+      { shape: 0, type: 'P256Point', digest: '859c25fc', hexLen: 1388 },
+      { shape: 0, type: 'P384Point', digest: '87f3fba0', hexLen: 1388 },
+      { shape: 0, type: 'PubKey', digest: 'acf3b1b1', hexLen: 1388 },
+      { shape: 0, type: 'Sha256', digest: '4854d31a', hexLen: 1388 },
+      { shape: 0, type: 'ByteString', digest: '58b91009', hexLen: 1704 },
+      { shape: 0, type: 'Sig', digest: '58b91009', hexLen: 1704 },
+      { shape: 1, type: 'Point', digest: 'e1202b56', hexLen: 930 },
+      { shape: 1, type: 'P256Point', digest: 'e1202b56', hexLen: 930 },
+      { shape: 1, type: 'P384Point', digest: '40ced076', hexLen: 930 },
+      { shape: 1, type: 'PubKey', digest: '05103b1d', hexLen: 930 },
+      { shape: 1, type: 'Sha256', digest: 'fca8d767', hexLen: 930 },
+      { shape: 1, type: 'ByteString', digest: 'b35628c5', hexLen: 1286 },
+      { shape: 1, type: 'Sig', digest: 'b35628c5', hexLen: 1286 },
     ];
 
     for (const pin of PINS) {

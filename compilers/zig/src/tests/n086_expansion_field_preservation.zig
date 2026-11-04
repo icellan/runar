@@ -346,20 +346,20 @@ test "N-086 FixedArray SINGLE differs from default at exactly the binding-flag b
 
     // Under the drop the two scripts are byte-IDENTICAL, so zero difference is
     // the failure mode. N-038 (R64): the SINGLE continuation also drops the
-    // change segment and its params, which shifts stack depths from byte 486
+    // change segment and its params, which shifts stack depths from byte 480
     // on, so the pure flag-swap comparison now covers the prologue before
     // that: exactly one flag byte moves there, the OP_PUSH_TX binding blob's
-    // appended DER sighash byte (394). The other flag byte, the auto-injected
-    // `extractSigHashType(pre) === <mode>` push (`01<mode>9d`, flag at 522), is
+    // appended DER sighash byte (388). The other flag byte, the auto-injected
+    // `extractSigHashType(pre) === <mode>` push (`01<mode>9d`, flag at 516), is
     // checked in place. The scripts must also differ in length (the dropped
     // change segment), which the drop would also erase.
     try std.testing.expect(single.len < dflt.len);
-    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 486], single[0 .. 2 * 486], "41", "43");
+    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
     defer a.free(moved);
-    try std.testing.expectEqualSlices(usize, &[_]usize{394}, moved);
-    try std.testing.expectEqualStrings("01437e2102b405d7f032", single[2 * 393 .. 2 * 403]);
-    try std.testing.expectEqualStrings("01439d", single[2 * 521 .. 2 * 524]);
-    try std.testing.expectEqualStrings("01419d", dflt[2 * 521 .. 2 * 524]);
+    try std.testing.expectEqualSlices(usize, &[_]usize{388}, moved);
+    try std.testing.expectEqualStrings("01437e21038ff83d8cf1", single[2 * 387 .. 2 * 397]);
+    try std.testing.expectEqualStrings("01439d", single[2 * 515 .. 2 * 518]);
+    try std.testing.expectEqualStrings("01419d", dflt[2 * 515 .. 2 * 518]);
 }
 
 test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
@@ -370,13 +370,13 @@ test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {
     defer a.free(dflt);
 
     // N-038 (R64): compared over the prologue only (see the test above); the
-    // sighash-type assert push's flag byte sits at 521 in this contract.
+    // sighash-type assert push's flag byte sits at 515 in this contract.
     try std.testing.expect(single.len < dflt.len);
-    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 486], single[0 .. 2 * 486], "41", "43");
+    const moved = try flagSwapPositions(a, dflt[0 .. 2 * 480], single[0 .. 2 * 480], "41", "43");
     defer a.free(moved);
     try std.testing.expectEqual(@as(usize, 1), moved.len);
-    try std.testing.expectEqualStrings("01439d", single[2 * 520 .. 2 * 523]);
-    try std.testing.expectEqualStrings("01419d", dflt[2 * 520 .. 2 * 523]);
+    try std.testing.expectEqualStrings("01439d", single[2 * 514 .. 2 * 517]);
+    try std.testing.expectEqualStrings("01419d", dflt[2 * 514 .. 2 * 517]);
 }
 
 // ---------------------------------------------------------------------------

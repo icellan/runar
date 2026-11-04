@@ -149,7 +149,16 @@ describe('F-039 — malformed @sighash: the pre-fix artifact is an ALL|FORKID co
   });
 
   it('the stand-in is the measured pre-fix Rust artifact (script sha1 ca7fb3bd4d…)', () => {
-    const sha1 = createHash('sha1').update(preFix.script).digest('hex');
+    // The measurement predates the C=1 binding (ports #170), which moved only
+    // the OP_PUSH_TX blob: undo exactly that change (addend, key, s fan-out)
+    // and the stand-in hashes to the measured artifact again.
+    const preC1 = preFix.script
+      .replace('01007e818b', '01007e8100011f80517e93')
+      .replace('038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218',
+        '02b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0')
+      .split('82927f'.repeat(31)).join('76927f'.repeat(31));
+    expect(preC1).not.toBe(preFix.script);
+    const sha1 = createHash('sha1').update(preC1).digest('hex');
     expect(sha1.startsWith('ca7fb3bd4d')).toBe(true);
     expect(preFix.abi.methods.find((m) => m.name === 'bump')!.sigHashType).toBeUndefined();
   });

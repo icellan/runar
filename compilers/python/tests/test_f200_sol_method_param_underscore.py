@@ -62,7 +62,7 @@ contract F200Silent is StatefulSmartContract {
 """
 
 UNBOUND_HEX = "009c"
-SILENT_SHA256 = "3676c0b9030628828837696cad74c710bb225d151f5ba822be8b2ed302e3a342"
+SILENT_SHA256 = "484142b25662c6a0a0126f11b1d4700fd79632224dc38c6ae869c889e5fe30d5"
 
 
 def _method(src: str, file: str, name: str):

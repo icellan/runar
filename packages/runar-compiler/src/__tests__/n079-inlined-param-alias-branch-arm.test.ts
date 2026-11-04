@@ -247,16 +247,17 @@ const SEVEN_TIER: Record<string, [number, string]> = {
   // sighash-type pin's OP_BIN2NUM. One pad site per script; the alias-survival
   // equalities between the `-manual` pairs are unchanged.
   // N-216 (2026-10-21): re-pinned; the branch-reconcile rolls now fold (`<k> OP_ROLL` -> OP_SWAP / OP_ROT), opcode diff is folds only, -1 B per fold.
-  'if-arm': [707, '55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f'],
-  'if-arm-manual': [707, '55b165be06f53bc2e65c3458fb0ad00f6e42501307cf7717ec8fb910e994dc8f'],
-  'if-arm-200': [708, '327265f54207c1ec4af32c04f1b24c97c920d970c70051d8181f1edc56593418'],
-  'ternary-arm': [694, '697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde'],
-  'ternary-arm-manual': [694, '697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde'],
-  'loop-body': [701, '7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a'],
-  'loop-body-manual': [701, '7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a'],
-  'no-if': [686, '7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300'],
-  'stmt-level': [703, '9b3a9ebbe5701fdb3eca8c77a822130a37e787e94a5aaa2a3f7d6921bc89864d'],
-  'passthrough': [705, '5ed88937d0c4e98c9adf381e5b32570adce11b68622b35e866b1223e04bc3048'],
+  // Ports #170: re-pinned, -6 B (the one OP_PUSH_TX binding blob moved to the C=1 key, 428 -> 422 B).
+  'if-arm': [701, '01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9'],
+  'if-arm-manual': [701, '01fc4e2a33d7eab587a7eff268d5bafbe40836a40c8f58b4665ef860306471a9'],
+  'if-arm-200': [702, 'f22c8cd3e1fa94ee938819d40b4c92770b220db9edac5c513d3c7a49d572be69'],
+  'ternary-arm': [688, 'ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6'],
+  'ternary-arm-manual': [688, 'ffdf44269ab63b6ae616448384d16a17f2f1987bc519e53a6c53b184ee1779a6'],
+  'loop-body': [695, '1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f'],
+  'loop-body-manual': [695, '1b79e6c258aec5f041236ca3a1a9b9f3537405531439a8337db2a8001ab1624f'],
+  'no-if': [680, 'a31e207c875e996ea8fbe20ad348ba8bd062e4e14b7473d02dac40065f869734'],
+  'stmt-level': [697, 'b7a9174c58353d308961e3761988671af95bd3ae54a8ff6ff6edc4a6944a134b'],
+  'passthrough': [699, '17767a3afcf95c0403e1cd8425ae7b9b0ea1b2511f0d8e68664dd60d55d430db'],
 };
 
 const CASES: [string, string][] = [

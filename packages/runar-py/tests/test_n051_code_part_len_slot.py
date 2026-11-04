@@ -48,16 +48,16 @@ def _inscription() -> Inscription:
 
 def test_artifact_parses_code_part_len_slots():
     artifact = RunarArtifact.from_dict(ARTIFACT_JSON)
-    assert [s.byte_offset for s in artifact.code_part_len_slots] == [959]
+    assert [s.byte_offset for s in artifact.code_part_len_slots] == [947]
     # The template carries the equality pin, never the lower bound.
-    assert artifact.script[958 * 2:959 * 2] == '04'
-    assert artifact.script[963 * 2:966 * 2] == '819c69'
+    assert artifact.script[946 * 2:947 * 2] == '04'
+    assert artifact.script[951 * 2:954 * 2] == '819c69'
 
 
 def test_built_code_part_and_locking_script_match_ts_reference():
     contract = _contract()
     code_part = contract._get_code_part_hex()
-    assert len(code_part) // 2 == EXPECTED['codePartLen'] == 1608
+    assert len(code_part) // 2 == EXPECTED['codePartLen'] == 1596
     assert code_part == EXPECTED['codePartHex']
     assert contract.get_locking_script() == EXPECTED['lockingScriptHex']
 
@@ -68,14 +68,14 @@ def test_inscribed_code_part_matches_ts_reference():
     result = contract.with_inscription(_inscription())
     assert result is contract
     code_part = contract._get_code_part_hex()
-    assert len(code_part) // 2 == EXPECTED['inscribedCodePartLen'] == 1631
+    assert len(code_part) // 2 == EXPECTED['inscribedCodePartLen'] == 1619
     assert code_part == EXPECTED['inscribedCodePartHex']
 
 
 def test_exact_compile_time_pin_still_refuses_inscription():
     """Control: the guard must still decode exact pins from the built code.
 
-    Dropping the slot turns the field back into a compile-time value (1350 in
+    Dropping the slot turns the field back into a compile-time value (1338 in
     the template, which is wrong for this deployment either way): the guard
     must refuse an inscription rather than silently patch.
     """
@@ -90,7 +90,7 @@ def test_exact_compile_time_pin_still_refuses_inscription():
 
 def test_corrupted_slot_offset_is_refused():
     d = copy.deepcopy(ARTIFACT_JSON)
-    d['codePartLenSlots'] = [{'byteOffset': 958}]
+    d['codePartLenSlots'] = [{'byteOffset': 946}]
     contract = _contract(d)
     with pytest.raises(ValueError) as excinfo:
         contract.get_locking_script()
@@ -102,15 +102,15 @@ def test_matches_artifact_checks_deployed_length_field():
     locking = EXPECTED['lockingScriptHex']
     assert matches_artifact(artifact, locking)
 
-    # The pin's field sits at template offset 959; in the deployed code it is
+    # The pin's field sits at template offset 947; in the deployed code it is
     # shifted by the 33-byte growth of the PubKey slot at template offset 465
     # (the ByteString slot at 1113 lies after it).
-    at = (959 + 33) * 2
-    assert locking[at:at + 8] == (1608).to_bytes(4, 'little').hex()
-    altered = locking[:at] + (1607).to_bytes(4, 'little').hex() + locking[at + 8:]
+    at = (947 + 33) * 2
+    assert locking[at:at + 8] == (1596).to_bytes(4, 'little').hex()
+    altered = locking[:at] + (1595).to_bytes(4, 'little').hex() + locking[at + 8:]
     assert not matches_artifact(artifact, altered)
     # The unpatched template value is not accepted either.
-    altered = locking[:at] + ARTIFACT_JSON['script'][959 * 2:963 * 2] + locking[at + 8:]
+    altered = locking[:at] + ARTIFACT_JSON['script'][947 * 2:951 * 2] + locking[at + 8:]
     assert not matches_artifact(artifact, altered)
 
 
