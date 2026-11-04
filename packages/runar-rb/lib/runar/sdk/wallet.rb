@@ -99,7 +99,7 @@ module Runar
     # Adapts a WalletClient into the Runar SDK Provider interface. UTXOs are
     # fetched from the wallet's basket via +list_outputs+. Broadcast is
     # handled by the wallet's +create_action+ or by submitting raw hex to
-    # an ARC endpoint.
+    # BSV Broadcaster (or to an ARC endpoint, when +arc_url+ is given).
     #
     # @example
     #   wallet  = MyAppWallet.new
@@ -109,8 +109,18 @@ module Runar
     #   )
     #   contract.connect(provider, signer)
     class WalletProvider < Provider
-      # The default ARC broadcaster. A MAINNET endpoint — see R-179.
+      # GorillaPool's MAINNET ARC endpoint. No longer the default; pass it as
+      # +arc_url+ to keep broadcasting there.
       MAINNET_ARC_URL = 'https://arc.gorillapool.io'
+
+      # The default broadcasters: the BSV Association's public BSV Broadcaster
+      # endpoints (called Arcade before 0.19.0, hence the hostnames). One per
+      # network, so the default always matches +network+ — see R-179. BSV
+      # Broadcaster submits at POST /tx, not ARC's POST /v1/tx.
+      BSV_BROADCASTER_URLS = {
+        'mainnet' => 'https://arcade-us-1.bsvblockchain.tech',
+        'testnet' => 'https://arcade-v2-testnet-us-1.bsvblockchain.tech'
+      }.freeze
 
       DEFAULT_FEE_RATE = 100
 
@@ -120,7 +130,7 @@ module Runar
       # @param signer       [Signer]         signer derived from the same wallet
       # @param basket       [String]         wallet basket name for UTXO management
       # @param funding_tag  [String]         tag for funding UTXOs (default: 'funding')
-      # @param arc_url      [String, nil]    ARC endpoint; REQUIRED unless network is 'mainnet' (R-179)
+      # @param arc_url      [String, nil]    ARC endpoint (default: BSV Broadcaster for network)
       # @param network      [String]         'mainnet' or 'testnet' (default: 'mainnet')
       # @param fee_rate     [Integer]        satoshis per kilobyte (default: 100)
       def initialize(wallet:, signer:, basket:, funding_tag: 'funding',
@@ -132,18 +142,19 @@ module Runar
         @funding_tag = funding_tag
         # R-179: arc_url and network used to be defaulted independently, so a
         # provider configured for testnet reported get_network == 'testnet' and
-        # broadcast every transaction to the MAINNET ARC. There is no canonical
-        # testnet ARC endpoint to default to, so a non-mainnet provider has to
-        # name its own instead of inheriting one that points at real money.
-        @arc_url =
+        # broadcast every transaction to the MAINNET ARC. The default is now
+        # derived from the network; an explicit arc_url is the caller's choice
+        # and is used as given. A network with no default is refused.
+        @arc_url = arc_url
+        @broadcast_url =
           if arc_url
-            arc_url
-          elsif network == 'mainnet'
-            MAINNET_ARC_URL
+            "#{arc_url}/v1/tx"
+          elsif BSV_BROADCASTER_URLS.key?(network)
+            "#{BSV_BROADCASTER_URLS[network]}/tx"
           else
             raise ArgumentError,
-                  "WalletProvider: no default ARC endpoint for network #{network.inspect} — " \
-                  "#{MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arc_url explicitly."
+                  "WalletProvider: no default broadcaster for network #{network.inspect}. " \
+                  'Pass arc_url explicitly.'
           end
         @overlay_url = overlay_url
         @network     = network
@@ -197,15 +208,17 @@ module Runar
         DOUBLE_SPEND_ATTEMPTED REJECTED INVALID MALFORMED MINED_IN_STALE_BLOCK
       ].freeze
 
-      # POST the raw tx to ARC. Returns ARC's txid only when ARC accepted the
-      # transaction and that txid is this transaction's; raises otherwise
-      # (F-042 — never report a transaction the network did not accept).
+      # POST the raw tx to BSV Broadcaster (or ARC, when arc_url is given).
+      # Returns the broadcaster's txid only when it accepted the transaction
+      # and that txid is this transaction's; raises otherwise (F-042 —
+      # never report a transaction the network did not accept).
       def broadcast(raw_tx)
         raw_bytes = [raw_tx].pack('H*')
         local_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw_bytes)).reverse.unpack1('H*')
 
+        service = @arc_url ? 'ARC' : 'BSV Broadcaster'
         require 'net/http'
-        uri = URI("#{@arc_url}/v1/tx")
+        uri = URI(@broadcast_url)
         begin
           http = Net::HTTP.new(uri.host, uri.port)
           http.use_ssl = uri.scheme == 'https'
@@ -216,12 +229,12 @@ module Runar
           req.body = raw_bytes
           resp = http.request(req)
         rescue StandardError => e
-          raise "WalletProvider: ARC broadcast to #{uri} failed, the transaction was NOT broadcast: " \
+          raise "WalletProvider: #{service} broadcast to #{uri} failed, the transaction was NOT broadcast: " \
                 "#{e.class}: #{e.message}"
         end
 
         unless resp.is_a?(Net::HTTPSuccess)
-          raise "WalletProvider: ARC broadcast failed (HTTP #{resp.code}): #{resp.body}"
+          raise "WalletProvider: #{service} broadcast failed (HTTP #{resp.code}): #{resp.body}"
         end
 
         json = begin
