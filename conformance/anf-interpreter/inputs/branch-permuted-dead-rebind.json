@@ -1,0 +1,30 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/branch-permuted-parent-slots.anf.json",
+  "methodName": "deadRebind",
+  "currentState": {
+    "a": "5n",
+    "b": "7n",
+    "c": "9n"
+  },
+  "args": {
+    "x": "10n",
+    "flag": "1n"
+  },
+  "constructorArgs": [
+    "5n",
+    "7n",
+    "9n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/BranchPermutedParentSlots.runar.ts",
+    "constructorArgs": [
+      "5n",
+      "7n",
+      "9n"
+    ],
+    "methodArgs": [
+      "10n",
+      "1n"
+    ]
+  }
+}

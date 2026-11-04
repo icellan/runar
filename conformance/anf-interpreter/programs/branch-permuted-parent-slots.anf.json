@@ -1,0 +1,1492 @@
+{
+  "contractName": "BranchPermutedParentSlots",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "c"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "a",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "b",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "c"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "c",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        },
+        {
+          "name": "c",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t3"
+            ],
+            "func": "extractSigHashType",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_const",
+            "value": 65
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t4",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "t10",
+            "op": "+",
+            "right": "t11"
+          }
+        },
+        {
+          "name": "w",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t12"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_const",
+            "value": 2
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "bin_op",
+            "left": "t13",
+            "op": "+",
+            "right": "t14"
+          }
+        },
+        {
+          "name": "k",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t15"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "flag"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "bin_op",
+            "left": "t16",
+            "op": ">",
+            "right": "t17"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "cond": "t18",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t19",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t20",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "w",
+                  "op": "-",
+                  "right": "t19"
+                }
+              },
+              {
+                "name": "w",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t20"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "update_prop",
+            "name": "a",
+            "value": "k"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "args": [
+              "t23"
+            ],
+            "func": "extractAmount",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "bin_op",
+            "left": "t25",
+            "op": ">=",
+            "right": "t24"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "assert",
+            "value": "t26"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "bin_op",
+            "left": "t29",
+            "op": "!==",
+            "right": "t30"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "cond": "t31",
+            "else": [
+              {
+                "name": "t33",
+                "value": {
+                  "kind": "load_const",
+                  "value": ""
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t32",
+                "value": {
+                  "args": [
+                    "t28",
+                    "t29"
+                  ],
+                  "func": "buildChangeOutput",
+                  "kind": "call"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t36",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t37",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t38",
+          "value": {
+            "args": [
+              "t36",
+              "t35",
+              "t37"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t39",
+          "value": {
+            "args": [
+              "t38",
+              "t34"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t40",
+          "value": {
+            "args": [
+              "t39"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t41",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t42",
+          "value": {
+            "args": [
+              "t41"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t43",
+          "value": {
+            "kind": "bin_op",
+            "left": "t40",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t42"
+          }
+        },
+        {
+          "name": "t44",
+          "value": {
+            "isAutoInjectedStateCheck": true,
+            "kind": "assert",
+            "value": "t43"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "deadRebind",
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        },
+        {
+          "name": "flag",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t3"
+            ],
+            "func": "extractSigHashType",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_const",
+            "value": 65
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t4",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_prop",
+            "name": "a"
+          }
+        },
+        {
+          "name": "na",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t10"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "b"
+          }
+        },
+        {
+          "name": "nb",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t11"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_param",
+            "name": "outer"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "bin_op",
+            "left": "t12",
+            "op": ">",
+            "right": "t13"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "cond": "t14",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t15",
+                "value": {
+                  "kind": "load_param",
+                  "name": "inner"
+                }
+              },
+              {
+                "name": "t16",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t17",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t15",
+                  "op": ">",
+                  "right": "t16"
+                }
+              },
+              {
+                "name": "t21",
+                "value": {
+                  "cond": "t17",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t18",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "x"
+                      }
+                    },
+                    {
+                      "name": "t19",
+                      "value": {
+                        "kind": "load_const",
+                        "value": 1
+                      }
+                    },
+                    {
+                      "name": "t20",
+                      "value": {
+                        "kind": "bin_op",
+                        "left": "t18",
+                        "op": "+",
+                        "right": "t19"
+                      }
+                    },
+                    {
+                      "name": "na",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t20"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "update_prop",
+            "name": "a",
+            "value": "na"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "update_prop",
+            "name": "b",
+            "value": "nb"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "args": [
+              "t25"
+            ],
+            "func": "extractAmount",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "bin_op",
+            "left": "t27",
+            "op": ">=",
+            "right": "t26"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "kind": "assert",
+            "value": "t28"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "bin_op",
+            "left": "t31",
+            "op": "!==",
+            "right": "t32"
+          }
+        },
+        {
+          "name": "t36",
+          "value": {
+            "cond": "t33",
+            "else": [
+              {
+                "name": "t35",
+                "value": {
+                  "kind": "load_const",
+                  "value": ""
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t34",
+                "value": {
+                  "args": [
+                    "t30",
+                    "t31"
+                  ],
+                  "func": "buildChangeOutput",
+                  "kind": "call"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t37",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t38",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t39",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t40",
+          "value": {
+            "args": [
+              "t38",
+              "t37",
+              "t39"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t41",
+          "value": {
+            "args": [
+              "t40",
+              "t36"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t42",
+          "value": {
+            "args": [
+              "t41"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t43",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t44",
+          "value": {
+            "args": [
+              "t43"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t45",
+          "value": {
+            "kind": "bin_op",
+            "left": "t42",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t44"
+          }
+        },
+        {
+          "name": "t46",
+          "value": {
+            "isAutoInjectedStateCheck": true,
+            "kind": "assert",
+            "value": "t45"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "nestedRebind",
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        },
+        {
+          "name": "outer",
+          "type": "bigint"
+        },
+        {
+          "name": "inner",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t3"
+            ],
+            "func": "extractSigHashType",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_const",
+            "value": 65
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t4",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_prop",
+            "name": "a"
+          }
+        },
+        {
+          "name": "na",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t10"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "bin_op",
+            "left": "t11",
+            "op": "+",
+            "right": "t12"
+          }
+        },
+        {
+          "name": "s1",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t13"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "load_const",
+            "value": 2
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14",
+            "op": "+",
+            "right": "t15"
+          }
+        },
+        {
+          "name": "s2",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t16"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "load_const",
+            "value": 3
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "bin_op",
+            "left": "t17",
+            "op": "+",
+            "right": "t18"
+          }
+        },
+        {
+          "name": "s3",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t19"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "load_param",
+            "name": "outer"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "bin_op",
+            "left": "t20",
+            "op": ">",
+            "right": "t21"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "cond": "t22",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t23",
+                "value": {
+                  "kind": "load_param",
+                  "name": "inner"
+                }
+              },
+              {
+                "name": "t24",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t25",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t23",
+                  "op": ">",
+                  "right": "t24"
+                }
+              },
+              {
+                "name": "t27",
+                "value": {
+                  "cond": "t25",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t26",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "x"
+                      }
+                    },
+                    {
+                      "name": "na",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t26"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "kind": "update_prop",
+            "name": "a",
+            "value": "na"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "kind": "bin_op",
+            "left": "s1",
+            "op": "+",
+            "right": "s2"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "update_prop",
+            "name": "b",
+            "value": "t30"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "kind": "update_prop",
+            "name": "c",
+            "value": "s3"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "args": [
+              "t33"
+            ],
+            "func": "extractAmount",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t36",
+          "value": {
+            "kind": "bin_op",
+            "left": "t35",
+            "op": ">=",
+            "right": "t34"
+          }
+        },
+        {
+          "name": "t37",
+          "value": {
+            "kind": "assert",
+            "value": "t36"
+          }
+        },
+        {
+          "name": "t38",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t39",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t40",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t41",
+          "value": {
+            "kind": "bin_op",
+            "left": "t39",
+            "op": "!==",
+            "right": "t40"
+          }
+        },
+        {
+          "name": "t44",
+          "value": {
+            "cond": "t41",
+            "else": [
+              {
+                "name": "t43",
+                "value": {
+                  "kind": "load_const",
+                  "value": ""
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t42",
+                "value": {
+                  "args": [
+                    "t38",
+                    "t39"
+                  ],
+                  "func": "buildChangeOutput",
+                  "kind": "call"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t45",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t46",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t47",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t48",
+          "value": {
+            "args": [
+              "t46",
+              "t45",
+              "t47"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t49",
+          "value": {
+            "args": [
+              "t48",
+              "t44"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t50",
+          "value": {
+            "args": [
+              "t49"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t51",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t52",
+          "value": {
+            "args": [
+              "t51"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t53",
+          "value": {
+            "kind": "bin_op",
+            "left": "t50",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t52"
+          }
+        },
+        {
+          "name": "t54",
+          "value": {
+            "isAutoInjectedStateCheck": true,
+            "kind": "assert",
+            "value": "t53"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "siblingsAbove",
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        },
+        {
+          "name": "outer",
+          "type": "bigint"
+        },
+        {
+          "name": "inner",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "parentClass": "StatefulSmartContract",
+  "properties": [
+    {
+      "name": "a",
+      "readonly": false,
+      "type": "bigint"
+    },
+    {
+      "name": "b",
+      "readonly": false,
+      "type": "bigint"
+    },
+    {
+      "name": "c",
+      "readonly": false,
+      "type": "bigint"
+    }
+  ]
+}
