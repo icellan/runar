@@ -282,8 +282,13 @@ function arbMethodBody(
 
   return fc
     .tuple(
-      // 0-2 variable declarations
-      fc.array(arbVarDeclStatement(bigintVars), { minLength: 0, maxLength: 2 }),
+      // 0-2 variable declarations, distinct names (same-scope redeclaration is
+      // invalid per spec/grammar.md)
+      fc.uniqueArray(arbVarDeclStatement(bigintVars), {
+        minLength: 0,
+        maxLength: 2,
+        selector: (d) => d.name,
+      }),
       // 0-1 if statements
       fc.array(arbIfStatement(bigintVars, boolVars), { minLength: 0, maxLength: 1 }),
       // 1-2 assert statements (method must end with assert)
@@ -1496,7 +1501,15 @@ function arbMethodIR(
       .chain((shape) => arbIrLoopBlock(shape, bigintVars, wideLoops));
 
     return fc.tuple(
-      fc.array(arbVarDeclStmtIR(bigintVars), { minLength: 0, maxLength: 2 }),
+      // Distinct names: a same-scope redeclaration is invalid per
+      // spec/grammar.md, and only some surfaces can even express it (Python
+      // and Ruby lower it as a rebind), so it reads as a cross-tier ANF
+      // mismatch rather than a compiler bug.
+      fc.uniqueArray(arbVarDeclStmtIR(bigintVars), {
+        minLength: 0,
+        maxLength: 2,
+        selector: (d) => d.name,
+      }),
       fc.array(branchBlock, {
         minLength: forceBranchShape ? 1 : 0,
         maxLength: 1,
