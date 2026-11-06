@@ -28,11 +28,24 @@ func AssertOnChainState(
 	outputIndex int,
 	expected map[string]interface{},
 ) (map[string]interface{}, error) {
-	raw, err := GetRawTransaction(callTxid)
-	if err != nil {
-		return nil, err
+	var raw map[string]interface{}
+	var hexStr string
+	if IsTeranode() {
+		// Teranode's verbose getrawtransaction fails on scripts whose state
+		// bytes do not parse as pushes; the raw-hex fallback below handles it.
+		h, err := GetRawTransactionHex(callTxid)
+		if err != nil {
+			return nil, err
+		}
+		hexStr = h
+	} else {
+		r, err := GetRawTransaction(callTxid)
+		if err != nil {
+			return nil, err
+		}
+		raw = r
+		hexStr, _ = raw["hex"].(string)
 	}
-	hexStr, _ := raw["hex"].(string)
 	if hexStr == "" {
 		return nil, fmt.Errorf("getrawtransaction(%s): empty hex", callTxid)
 	}

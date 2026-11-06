@@ -30,7 +30,7 @@ pnpm integration:svnode:clean    # remove all data
 pnpm integration:teranode:run
 
 # Or step by step:
-pnpm integration:teranode:start   # starts Docker services + mines 10101 blocks
+pnpm integration:teranode:start   # starts Docker services + mines 15101 blocks
 pnpm integration:teranode
 pnpm integration:teranode:stop
 pnpm integration:teranode:clean   # remove all data + volumes
@@ -187,13 +187,14 @@ Key differences from SV Node:
 | Feature | SV Node | Teranode |
 |---------|---------|----------|
 | Genesis activation | Height 1 (configurable) | Height 10000 (hardcoded in go-chaincfg) |
-| Wallet | Built-in (`sendtoaddress`) | None — uses raw coinbase UTXOs |
+| Chronicle activation | Height 1 (`chronicleactivationheight=1`) | Height 15000 (hardcoded in go-chaincfg v1.5.3) |
+| Wallet | Built-in (`sendtoaddress`, `listunspent`) | None — funds from raw coinbase UTXOs; the Go SDK provider's UTXO lookup reads a ledger of the txs the harness broadcast (`helpers/utxo_ledger.go`) |
 | `getrawtransaction` verbose | `true` (bool) | `1` (int) |
 | `getrawtransaction` value | BTC (e.g. 50.0) | Satoshis (e.g. 5000000000) |
 | `getblock` tx list | Populated | Empty (code commented out) |
 | Block format | Standard | Extended (extra varint fields + subtree hashes) |
 
-Because Teranode's Genesis activation is hardcoded at height 10000 for regtest, the `teranode.sh start` script pre-mines 10101 blocks (10000 for Genesis + 101 for coinbase maturity). This takes ~5 minutes on first start. Subsequent `start` commands (without `clean`) skip mining if blocks already exist.
+Because Teranode's Genesis and Chronicle activations are hardcoded at heights 10000 and 15000 for regtest, and the compilers emit Chronicle opcodes, the `teranode.sh start` script pre-mines 15101 blocks in batches. This takes ~10-15 minutes on first start. Subsequent `start` commands (without `clean`) skip mining if blocks already exist.
 
 ## Environment Variables
 
@@ -203,6 +204,7 @@ Because Teranode's Genesis activation is hardcoded at height 10000 for regtest, 
 | `RPC_URL` | auto | Override RPC endpoint URL |
 | `RPC_USER` | `bitcoin` | RPC username |
 | `RPC_PASS` | `bitcoin` | RPC password |
+| `ASSET_URL` | `http://localhost:18090` | Teranode asset service (used for `gettxout`, which Teranode's RPC lacks) |
 
 ## Troubleshooting
 
@@ -210,4 +212,4 @@ Because Teranode's Genesis activation is hardcoded at height 10000 for regtest, 
 
 **RPC timeout during mining**: The Teranode RPC timeout is set to 600s in `settings_local.conf`. The Go HTTP client also uses a 10-minute timeout.
 
-**Tests pass on SV Node but fail on Teranode**: Check that the 10101 blocks were mined (Genesis activation). Run `./teranode.sh getblockchaininfo` to verify the block height.
+**Tests pass on SV Node but fail on Teranode**: Check that the 15101 blocks were mined (Genesis + Chronicle activation). Run `./teranode.sh getblockchaininfo` to verify the block height.

@@ -300,7 +300,7 @@ func deployGroth16WA(t *testing.T, fix *groth16WAFixture, provider *helpers.Batc
 	t.Helper()
 
 	funder := helpers.NewWallet()
-	if _, err := helpers.RPCCall("importaddress", funder.Address, "", false); err != nil {
+	if err := helpers.ImportAddress(funder.Address); err != nil {
 		t.Fatalf("importaddress: %v", err)
 	}
 

@@ -67,7 +67,7 @@ func deployGroth16WASDK(t *testing.T, artifact *runar.RunarArtifact, provider ru
 	t.Helper()
 
 	funder := helpers.NewWallet()
-	if _, err := helpers.RPCCall("importaddress", funder.Address, "", false); err != nil {
+	if err := helpers.ImportAddress(funder.Address); err != nil {
 		t.Fatalf("importaddress: %v", err)
 	}
 	if _, err := helpers.FundWallet(funder, 1.0); err != nil {
