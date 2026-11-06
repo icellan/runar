@@ -167,7 +167,25 @@ func SendRawTransaction(txHex string) (string, error) {
 	}
 	var txid string
 	json.Unmarshal(result, &txid)
+	if IsTeranode() {
+		// Teranode has no wallet to answer listunspent; RPCProvider.GetUtxos
+		// reads this ledger instead. Recorded only after the node accepted it.
+		if err := broadcastLedger.recordHex(txHex); err != nil {
+			return txid, err
+		}
+	}
 	return txid, nil
+}
+
+// ImportAddress asks the node wallet to watch addr so listunspent sees its
+// coins. Teranode has no wallet (importaddress is "Method not found") and
+// does not need one: its UTXOs come from the broadcast ledger.
+func ImportAddress(addr string) error {
+	if IsTeranode() {
+		return nil
+	}
+	_, err := RPCCall("importaddress", addr, "", false)
+	return err
 }
 
 // GetRawTransaction fetches a transaction by txid (verbose mode).
@@ -182,6 +200,19 @@ func GetRawTransaction(txid string) (map[string]interface{}, error) {
 	return tx, nil
 }
 
+// GetRawTransactionHex fetches a transaction's serialized hex (non-verbose).
+func GetRawTransactionHex(txid string) (string, error) {
+	result, err := RPCCall("getrawtransaction", txid, 0)
+	if err != nil {
+		return "", err
+	}
+	var rawHex string
+	if err := json.Unmarshal(result, &rawHex); err != nil {
+		return "", fmt.Errorf("getrawtransaction %s: parse hex: %w", txid, err)
+	}
+	return rawHex, nil
+}
+
 // GetTxOut returns UTXO info for a given (txid, vout) via the node's UTXO
 // set, or nil if the output is spent (or its transaction was never mined).
 // Unlike GetRawTransaction, this only reflects confirmed chain state, so it's
@@ -190,6 +221,9 @@ func GetRawTransaction(txid string) (map[string]interface{}, error) {
 // into the mempool for relay but excludes them from block templates, so
 // sendrawtransaction succeeding is NOT evidence a spend is consensus-final.
 func GetTxOut(txid string, vout int) (map[string]interface{}, error) {
+	if IsTeranode() {
+		return getTxOutTeranode(txid, vout)
+	}
 	result, err := RPCCall("gettxout", txid, vout)
 	if err != nil {
 		return nil, err

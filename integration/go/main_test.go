@@ -27,8 +27,9 @@ func TestMain(m *testing.M) {
 	helpers.EnsureRegtest()
 
 	// Mine initial blocks so coinbase UTXOs mature (100 block maturity).
-	// On Teranode regtest, GenesisActivationHeight=10000 (hardcoded in go-chaincfg),
-	// so we need height > 10000 for post-Genesis rules. The teranode.sh start script
+	// On Teranode regtest, GenesisActivationHeight=10000 and
+	// ChronicleActivationHeight=15000 (hardcoded in go-chaincfg), so we need
+	// height > 15000 for the Chronicle opcodes. The teranode.sh start script
 	// pre-mines these blocks, but we check and top up if needed.
 	currentHeight, err := helpers.GetBlockCount()
 	if err != nil {
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 
 	targetHeight := 501 // SV Node: genesis at height 1, extra headroom for parallel tests
 	if helpers.IsTeranode() {
-		targetHeight = 10_101 // regtest genesis at 10000 + 101 for coinbase maturity
+		targetHeight = 15_101 // regtest Chronicle at 15000 + 101 (see teranode.sh)
 	}
 
 	blocksNeeded := targetHeight - currentHeight

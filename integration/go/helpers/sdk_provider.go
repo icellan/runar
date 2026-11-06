@@ -31,6 +31,9 @@ func NewRPCProvider() *RPCProvider {
 }
 
 func (p *RPCProvider) GetTransaction(txid string) (*runar.TransactionData, error) {
+	if IsTeranode() {
+		return teranodeTransactionData(txid)
+	}
 	raw, err := GetRawTransaction(txid)
 	if err != nil {
 		return nil, err
@@ -75,6 +78,36 @@ func (p *RPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 	return txid, nil
 }
 
+// teranodeTransactionData builds TransactionData from the raw (non-verbose)
+// transaction. Teranode's verbose getrawtransaction is unusable here on two
+// counts: it reports `value` in satoshis rather than BTC, and it fails
+// outright ("Error extracting script addresses") on locking scripts whose
+// post-OP_RETURN state bytes do not parse as pushes — i.e. most stateful
+// Rúnar contracts. The serialized transaction has neither problem.
+func teranodeTransactionData(txid string) (*runar.TransactionData, error) {
+	rawHex, err := GetRawTransactionHex(txid)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := transaction.NewTransactionFromHex(rawHex)
+	if err != nil {
+		return nil, fmt.Errorf("parse raw tx %s: %w", txid, err)
+	}
+	var outputs []runar.TxOutput
+	for _, o := range tx.Outputs {
+		outputs = append(outputs, runar.TxOutput{
+			Satoshis: int64(o.Satoshis),
+			Script:   hex.EncodeToString(*o.LockingScript),
+		})
+	}
+	return &runar.TransactionData{
+		Txid:    txid,
+		Version: 1,
+		Outputs: outputs,
+		Raw:     rawHex,
+	}, nil
+}
+
 // BatchRPCProvider is like RPCProvider but skips mining after each broadcast.
 // Call MineAll() when ready to confirm all pending transactions at once.
 type BatchRPCProvider struct {
@@ -110,6 +143,11 @@ func (p *BatchRPCProvider) MineAll() error {
 }
 
 func (p *RPCProvider) GetUtxos(address string) ([]runar.UTXO, error) {
+	if IsTeranode() {
+		// No wallet on Teranode: answer from the outputs of the transactions
+		// this harness broadcast (see utxo_ledger.go).
+		return broadcastLedger.utxosForAddress(address)
+	}
 	result, err := RPCCall("listunspent", 0, 9999999, []string{address})
 	if err != nil {
 		return nil, fmt.Errorf("listunspent: %w", err)
@@ -144,6 +182,9 @@ func (p *RPCProvider) GetNetwork() string {
 }
 
 func (p *RPCProvider) GetRawTransaction(txid string) (string, error) {
+	if IsTeranode() {
+		return GetRawTransactionHex(txid)
+	}
 	raw, err := GetRawTransaction(txid)
 	if err != nil {
 		return "", err

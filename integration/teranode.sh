@@ -88,33 +88,58 @@ if [ "$1" == "start" ]; then
     sleep 1
   done
 
-  # Pre-mine blocks for Genesis activation (regtest GenesisActivationHeight=10000).
+  # Pre-mine past Genesis AND Chronicle activation. Both heights are hardcoded
+  # in the regtest params of the go-chaincfg Teranode v0.13.2 is built with
+  # (v1.5.3): GenesisActivationHeight=10000, ChronicleActivationHeight=15000.
+  # SV Node regtest runs with chronicleactivationheight=1 (regtest.sh), and the
+  # compilers emit Chronicle opcodes (OP_2MUL, OP_2DIV, OP_RSHIFTNUM, ...), so
+  # below 15000 Teranode rejects those spends with "Attempted to use a
+  # disabled opcode". +101 keeps the old coinbase-maturity headroom.
   # Coinbase wallet address for privkey=1 (deterministic, regtest format).
   COINBASE_ADDR="mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r"
-  TARGET_HEIGHT=10101  # 10000 (genesis) + 101 (coinbase maturity)
+  TARGET_HEIGHT=15101  # 15000 (Chronicle) + 101
+  BATCH=1000
 
-  CURRENT_HEIGHT=$(curl -s -u bitcoin:bitcoin \
-    -X POST http://localhost:19292 \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['blocks'])" 2>/dev/null)
+  get_height() {
+    curl -s -u bitcoin:bitcoin \
+      -X POST http://localhost:19292 \
+      -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['blocks'])" 2>/dev/null
+  }
 
+  CURRENT_HEIGHT=$(get_height)
   if [ -z "$CURRENT_HEIGHT" ]; then
     CURRENT_HEIGHT=0
   fi
 
-  BLOCKS_NEEDED=$((TARGET_HEIGHT - CURRENT_HEIGHT))
-  if [ "$BLOCKS_NEEDED" -gt 0 ]; then
-    echo "Mining $BLOCKS_NEEDED blocks for Genesis activation (current: $CURRENT_HEIGHT, target: $TARGET_HEIGHT)..."
+  # Mine in batches: a single 10k+ block generatetoaddress outlives any sane
+  # HTTP timeout, and a timed-out curl used to be reported as "Mining
+  # complete" whether or not the height was reached.
+  echo "Mining to height $TARGET_HEIGHT (current: $CURRENT_HEIGHT)..."
+  while [ "$CURRENT_HEIGHT" -lt "$TARGET_HEIGHT" ]; do
+    N=$((TARGET_HEIGHT - CURRENT_HEIGHT))
+    if [ "$N" -gt "$BATCH" ]; then N=$BATCH; fi
     curl -s -u bitcoin:bitcoin \
       -X POST http://localhost:19292 \
       -H 'Content-Type: application/json' \
       --max-time 600 \
-      -d "{\"jsonrpc\":\"1.0\",\"id\":\"1\",\"method\":\"generatetoaddress\",\"params\":[$BLOCKS_NEEDED, \"$COINBASE_ADDR\"]}" > /dev/null 2>&1
-    echo "Mining complete."
-  else
-    echo "Already at height $CURRENT_HEIGHT (>= $TARGET_HEIGHT), no mining needed."
-  fi
+      -d "{\"jsonrpc\":\"1.0\",\"id\":\"1\",\"method\":\"generatetoaddress\",\"params\":[$N, \"$COINBASE_ADDR\"]}" > /dev/null 2>&1
+    # generatetoaddress can return before getblockchaininfo reflects the new
+    # tip (seen on the last, short batch), so poll briefly before giving up.
+    for _ in $(seq 1 60); do
+      NEW_HEIGHT=$(get_height)
+      if [ -n "$NEW_HEIGHT" ] && [ "$NEW_HEIGHT" -gt "$CURRENT_HEIGHT" ]; then break; fi
+      sleep 1
+    done
+    if [ -z "$NEW_HEIGHT" ] || [ "$NEW_HEIGHT" -le "$CURRENT_HEIGHT" ]; then
+      echo "Mining made no progress (height: ${NEW_HEIGHT:-unknown}, target: $TARGET_HEIGHT)."
+      exit 1
+    fi
+    CURRENT_HEIGHT=$NEW_HEIGHT
+    echo "  height $CURRENT_HEIGHT / $TARGET_HEIGHT"
+  done
+  echo "Mining complete (height: $CURRENT_HEIGHT)."
 
   echo ""
   echo "Teranode regtest is running."
