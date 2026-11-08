@@ -166,9 +166,12 @@ describe('F-017 .runar.rs', () => {
         '    fn do_it(&self, v: Int) -> Int {\n        v + 1\n    }\n\n    fn doIt(&self, v: Int) -> Int {\n        v + 2\n    }\n\n'),
       F, msg('doIt', 'do_it', 'doIt'));
   });
-  it('accepts distinct names and Rust shadowing under one spelling', () => {
+  it('accepts distinct names; one spelling re-declared is not a collision', () => {
     expectAccepted(RS('        let x = n + 1;\n        let y = n + 2;\n        assert!(x != y);'), F);
-    expectAccepted(RS('        let x = n + 1;\n        let x = x + 1;\n        assert!(x == n + 2);'), F);
+    // Same-scope `let x` shadowing is refused by N-509 (re-declaration in the
+    // same scope), not by this rule: no collision diagnostic is reported.
+    const errs = errorsOf(RS('        let x = n + 1;\n        let x = x + 1;\n        assert!(x == n + 2);'), F);
+    expect(errs).toEqual(["'x' is already declared in this scope and cannot be re-declared"]);
   });
 });
 

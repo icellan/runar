@@ -105,6 +105,7 @@ public final class Validate {
         ctx.validateMethods();
         boolean callDepthExceeded = ctx.checkNoRecursion();
         ctx.checkReservedNames();
+        ctx.checkRedeclarations();
         ctx.warnStrippedReadonlyFields();
         // N-180: the Rabin-provenance and sighash passes walk the private-method
         // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
@@ -1872,6 +1873,44 @@ public final class Validate {
         // --------------------------------------------------------------
         // Recursion detection
         // --------------------------------------------------------------
+
+        /**
+         * N-509: a local cannot be re-declared in the same scope
+         * (spec/grammar.md, Statement Restrictions). A scope is one statement
+         * list -- a method or constructor body, an if branch, an else branch,
+         * a loop body -- and a method's parameters belong to its body's
+         * top-level list. A declaration in a NESTED list that reuses an outer
+         * name (shadowing) is not a re-declaration; the spec is silent on it
+         * and every tier lowers it as the renamed program. The loop iterator
+         * lives in the loop header, not in the body list.
+         */
+        void checkRedeclarations() {
+            List<MethodNode> all = new ArrayList<>();
+            if (contract.constructor() != null) all.add(contract.constructor());
+            all.addAll(contract.methods());
+            for (MethodNode m : all) {
+                Set<String> declared = new HashSet<>();
+                for (ParamNode p : m.params()) declared.add(p.name());
+                checkRedeclarationsInBody(m.body(), declared);
+            }
+        }
+
+        private void checkRedeclarationsInBody(List<Statement> body, Set<String> declared) {
+            if (body == null) return;
+            for (Statement s : body) {
+                if (s instanceof VariableDeclStatement v) {
+                    if (!declared.add(v.name())) {
+                        error("'" + v.name() + "' is already declared in this scope and cannot be re-declared",
+                            v.sourceLocation());
+                    }
+                } else if (s instanceof IfStatement i) {
+                    checkRedeclarationsInBody(i.thenBody(), new HashSet<>());
+                    checkRedeclarationsInBody(i.elseBody(), new HashSet<>());
+                } else if (s instanceof ForStatement f) {
+                    checkRedeclarationsInBody(f.body(), new HashSet<>());
+                }
+            }
+        }
 
         /**
          * N-065 / N-060: refuse a declared identifier spelled like a name a

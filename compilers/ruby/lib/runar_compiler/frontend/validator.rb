@@ -81,6 +81,7 @@ module RunarCompiler
       ctx.validate_methods
       call_depth_exceeded = ctx.check_no_recursion
       ctx.check_reserved_names
+      ctx.check_redeclarations
       # N-180: the Rabin-provenance and sighash passes walk the private-method
       # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
       # refuses, so stop here.
@@ -663,6 +664,41 @@ module RunarCompiler
           next if !w[:value].nil? && rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
 
           add_error(self.class.rabin_key_write_message(w[:prop]), loc: w[:loc])
+        end
+      end
+
+      # N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
+      # Statement Restrictions). A scope is one statement list -- a method or
+      # constructor body, an if branch, an else branch, a loop body -- and a
+      # method's parameters belong to its body's top-level list. A declaration
+      # in a NESTED list that reuses an outer name (shadowing) is not a
+      # re-declaration; the spec is silent on it and every tier lowers it as
+      # the renamed program. The loop iterator lives in the loop header, not in
+      # the body list.
+      def check_redeclarations
+        walk = lambda do |stmts, declared|
+          (stmts || []).each do |st|
+            case st
+            when VariableDeclStmt
+              if declared.include?(st.name)
+                add_error("'#{st.name}' is already declared in this scope and cannot be re-declared",
+                          loc: st.source_location)
+              end
+              declared[st.name] = true
+            when IfStmt
+              walk.call(st.then, {})
+              walk.call(st.else_, {})
+            when ForStmt
+              walk.call(st.body, {})
+            end
+          end
+        end
+
+        methods = [@contract.constructor, *@contract.methods].compact
+        methods.each do |m|
+          declared = {}
+          (m.params || []).each { |pr| declared[pr.name] = true }
+          walk.call(m.body, declared)
         end
       end
 

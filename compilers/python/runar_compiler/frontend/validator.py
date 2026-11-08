@@ -86,6 +86,7 @@ def validate(contract: ContractNode) -> ValidationResult:
     ctx.validate_methods()
     call_depth_exceeded = ctx.check_no_recursion()
     ctx.check_reserved_names()
+    ctx.check_redeclarations()
     # N-180: the Rabin-provenance and sighash passes walk the private-method
     # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     # refuses, so stop here.
@@ -233,6 +234,39 @@ class _ValidationContext:
             for p in method.params:
                 check(p.name, method.source_location)
             walk(method.body)
+
+    # -------------------------------------------------------------------
+    # N-509: same-scope re-declaration
+    # -------------------------------------------------------------------
+
+    def check_redeclarations(self) -> None:
+        """A local cannot be re-declared in the same scope (spec/grammar.md,
+        Statement Restrictions). A scope is one statement list -- a method or
+        constructor body, an if branch, an else branch, a loop body -- and a
+        method's parameters belong to its body's top-level list. A declaration
+        in a NESTED list that reuses an outer name (shadowing) is not a
+        re-declaration; the spec is silent on it and every tier lowers it as
+        the renamed program. The loop iterator lives in the loop header, not
+        in the body list.
+        """
+
+        def walk(stmts: list[Statement], declared: set[str]) -> None:
+            for s in stmts:
+                if isinstance(s, VariableDeclStmt):
+                    if s.name in declared:
+                        self._add_error(
+                            f"'{s.name}' is already declared in this scope and cannot be re-declared",
+                            loc=s.source_location,
+                        )
+                    declared.add(s.name)
+                elif isinstance(s, IfStmt):
+                    walk(s.then, set())
+                    walk(s.else_ or [], set())
+                elif isinstance(s, ForStmt):
+                    walk(s.body, set())
+
+        for method in [self.contract.constructor, *self.contract.methods]:
+            walk(method.body, {p.name for p in method.params})
 
     # -------------------------------------------------------------------
     # Property validation
