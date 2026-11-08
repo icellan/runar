@@ -4,8 +4,8 @@
  * Removes bindings whose results are never referenced by other bindings,
  * preserving bindings with observable side effects (assert, update_prop,
  * check_preimage, add_output, add_raw_output, add_data_output, call,
- * method_call, raw_script) and any `if` / `loop` whose nested bindings carry
- * one. Iterates to a fixed point so transitively dead bindings are also
+ * method_call, raw_script), any `bin_op` that can abort (`/ % & | ^ << >>`),
+ * and any `if` / `loop` whose nested bindings carry one. Iterates to a fixed point so transitively dead bindings are also
  * removed.
  *
  * "Results" is plural on purpose (N-140). A binding does not only define its
@@ -288,6 +288,9 @@ export function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   }
 }
 
+/** `bin_op` operators whose opcode can fail at runtime (see `hasSideEffect`). */
+const PARTIAL_BIN_OPS: ReadonlySet<string> = new Set(['/', '%', '&', '|', '^', '<<', '>>']);
+
 export function hasSideEffect(value: ANFValue): boolean {
   switch (value.kind) {
     case 'assert':
@@ -321,11 +324,18 @@ export function hasSideEffect(value: ANFValue): boolean {
     // `compilers/zig/src/passes/dce.zig`.
     case 'load_prop':
       return value[PRESERVE] === true;
-    // Pure ANF kinds — no side effect, safe to DCE if unreferenced.
+    // A `bin_op` that can ABORT the script is not removable: purity is not
+    // totality (spec/semantics.md §3.7). `& | ^` fail on operands of unequal
+    // byte length, `<< >>` on a negative count, `/ %` on a zero divisor. The
+    // source evaluates the binding, so deleting it turns an abort into an
+    // accept — the fold-ON prune did exactly that to `let m = 41n & p; m = …`
+    // (execution-fuzzer seed 1351961626). Kept regardless of operands.
+    case 'bin_op':
+      return PARTIAL_BIN_OPS.has(value.op);
+    // Pure, total ANF kinds — safe to DCE if unreferenced.
     case 'load_param':
     case 'load_const':
     case 'get_state_script':
-    case 'bin_op':
     case 'unary_op':
     case 'array_literal':
       return false;

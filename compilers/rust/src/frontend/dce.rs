@@ -416,9 +416,18 @@ pub fn has_side_effect(value: &ANFValue) -> bool {
         // eliminable. Mirrors `compilers/zig/src/passes/dce.zig`.
         ANFValue::LoadProp { preserve, .. } => *preserve,
 
+        // A bin_op that can ABORT the script is not removable: purity is not
+        // totality (spec/semantics.md §3.7). `& | ^` fail on operands of
+        // unequal byte length, `<< >>` on a negative count, `/ %` on a zero
+        // divisor; deleting the binding turns an abort into an accept
+        // (execution-fuzzer seed 1351961626). Mirrors
+        // packages/runar-compiler/src/optimizer/dce.ts.
+        ANFValue::BinOp { op, .. } => {
+            matches!(op.as_str(), "/" | "%" | "&" | "|" | "^" | "<<" | ">>")
+        }
+
         ANFValue::LoadParam { .. }
         | ANFValue::LoadConst { .. }
-        | ANFValue::BinOp { .. }
         | ANFValue::UnaryOp { .. }
         | ANFValue::GetStateScript {}
         | ANFValue::ArrayLiteral { .. } => false,

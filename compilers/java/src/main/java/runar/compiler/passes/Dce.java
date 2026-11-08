@@ -399,6 +399,10 @@ public final class Dce {
      * assert, update_prop, check_preimage, deserialize_state, add_output,
      * add_raw_output, add_data_output, if, loop, call, method_call.
      */
+    /** bin_op operators whose opcode can fail at runtime (see {@link #hasSideEffect}). */
+    private static final java.util.Set<String> PARTIAL_BIN_OPS =
+        java.util.Set.of("/", "%", "&", "|", "^", "<<", ">>");
+
     public static boolean hasSideEffect(AnfValue v) {
         if (v instanceof Assert
             || v instanceof UpdateProp
@@ -435,11 +439,19 @@ public final class Dce {
         if (v instanceof LoadProp lp) {
             return lp.preserve();
         }
+        // A bin_op that can ABORT the script is not removable: purity is not
+        // totality (spec/semantics.md §3.7). `& | ^` fail on operands of
+        // unequal byte length, `<< >>` on a negative count, `/ %` on a zero
+        // divisor; deleting the binding turns an abort into an accept
+        // (execution-fuzzer seed 1351961626). Mirrors
+        // packages/runar-compiler/src/optimizer/dce.ts.
+        if (v instanceof BinOp bo) {
+            return PARTIAL_BIN_OPS.contains(bo.op());
+        }
         // Pure values — safe for DCE to drop when unreferenced.
         if (v instanceof LoadParam
             || v instanceof LoadConst
             || v instanceof GetStateScript
-            || v instanceof BinOp
             || v instanceof UnaryOp
             || v instanceof ArrayLiteral) {
             return false;
