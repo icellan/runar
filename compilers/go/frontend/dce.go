@@ -352,6 +352,11 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 // explicitly so an unknown kind cannot silently default to "no side effect"
 // — that would let DCE eliminate a newly-added side-effecting ANF kind and
 // produce scripts that omit observable behavior.
+// partialBinOps are the bin_op operators whose opcode can fail at runtime.
+var partialBinOps = map[string]bool{
+	"/": true, "%": true, "&": true, "|": true, "^": true, "<<": true, ">>": true,
+}
+
 func HasSideEffect(v *ir.ANFValue) bool {
 	switch v.Kind {
 	case "assert", "update_prop", "check_preimage", "add_output", "deserialize_state",
@@ -366,7 +371,15 @@ func HasSideEffect(v *ir.ANFValue) bool {
 		// (Preserve = false) remain freely eliminable. Mirrors
 		// compilers/zig/src/passes/dce.zig.
 		return v.Preserve
-	case "load_param", "load_const", "bin_op", "unary_op",
+	case "bin_op":
+		// A bin_op that can ABORT the script is not removable: purity is not
+		// totality (spec/semantics.md §3.7). `& | ^` fail on operands of
+		// unequal byte length, `<< >>` on a negative count, `/ %` on a zero
+		// divisor; deleting the binding turns an abort into an accept
+		// (execution-fuzzer seed 1351961626). Mirrors
+		// packages/runar-compiler/src/optimizer/dce.ts.
+		return partialBinOps[v.Op]
+	case "load_param", "load_const", "unary_op",
 		"get_state_script", "array_literal":
 		// Pure ANF kinds — no observable effect, safe to DCE if unreferenced.
 		return false

@@ -394,6 +394,15 @@ pub fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
 /// F-003: every ANFValue variant is enumerated explicitly (no `else`) so
 /// adding a new variant fails at Zig compile time here instead of silently
 /// defaulting to "pure" — which would let DCE delete an effectful binding.
+/// bin_op operators whose opcode can fail at runtime (see `hasSideEffect`).
+fn isPartialBinOp(op: []const u8) bool {
+    const partial = [_][]const u8{ "/", "%", "&", "|", "^", "<<", ">>" };
+    for (partial) |p| {
+        if (std.mem.eql(u8, op, p)) return true;
+    }
+    return false;
+}
+
 pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
@@ -440,9 +449,15 @@ pub fn hasSideEffect(v: types.ANFValue) bool {
         // DCE must keep it even though nothing references it. Ordinary
         // load_props (preserve = false) remain freely eliminable.
         .load_prop => |lp| lp.preserve,
+        // A bin_op that can ABORT the script is not removable: purity is not
+        // totality (spec/semantics.md §3.7). `& | ^` fail on operands of
+        // unequal byte length, `<< >>` on a negative count, `/ %` on a zero
+        // divisor; deleting the binding turns an abort into an accept
+        // (execution-fuzzer seed 1351961626). Mirrors
+        // packages/runar-compiler/src/optimizer/dce.ts.
+        .bin_op => |bo| isPartialBinOp(bo.op),
         .load_param,
         .load_const,
-        .bin_op,
         .unary_op,
         .get_state_script,
         .array_literal,

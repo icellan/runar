@@ -77,6 +77,9 @@ module RunarCompiler
       # so an unknown kind raises UnknownANFKindError instead of silently
       # being treated as side-effect-free (which would cause DCE to drop
       # a new side-effecting variant).
+      # bin_op operators whose opcode can fail at runtime (see +has_side_effect?+).
+      PARTIAL_BIN_OPS = %w[/ % & | ^ << >>].freeze
+
       SIDE_EFFECT_FREE_KINDS = %w[
         load_param load_prop load_const get_state_script
         bin_op unary_op array_literal
@@ -340,6 +343,14 @@ module RunarCompiler
         # load_props (preserve = false) remain freely eliminable. Mirrors
         # compilers/zig/src/passes/dce.zig.
         return v.preserve == true if kind == "load_prop"
+
+        # A bin_op that can ABORT the script is not removable: purity is not
+        # totality (spec/semantics.md §3.7). +& | ^+ fail on operands of
+        # unequal byte length, +<< >>+ on a negative count, +/ %+ on a zero
+        # divisor; deleting the binding turns an abort into an accept
+        # (execution-fuzzer seed 1351961626). Mirrors
+        # packages/runar-compiler/src/optimizer/dce.ts.
+        return PARTIAL_BIN_OPS.include?(v.op) if kind == "bin_op"
 
         # R-140: recursion is what makes retention both safe and precise.
         # Nested bindings live inside the parent node rather than flattened into

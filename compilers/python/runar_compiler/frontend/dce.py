@@ -363,6 +363,10 @@ def collect_refs(v: ANFValue, used: set[str]) -> None:
             collect_refs(b.value, used)
 
 
+# bin_op operators whose opcode can fail at runtime (see ``has_side_effect``).
+_PARTIAL_BIN_OPS = frozenset({"/", "%", "&", "|", "^", "<<", ">>"})
+
+
 def has_side_effect(v: ANFValue) -> bool:
     """Return True if this value kind has observable side effects.
 
@@ -404,6 +408,14 @@ def has_side_effect(v: ANFValue) -> bool:
         )
     if v.kind == "loop":
         return any(has_side_effect(b.value) for b in (v.body or []))
+
+    # A bin_op that can ABORT the script is not removable: purity is not
+    # totality (spec/semantics.md §3.7). ``& | ^`` fail on operands of unequal
+    # byte length, ``<< >>`` on a negative count, ``/ %`` on a zero divisor;
+    # deleting the binding turns an abort into an accept (execution-fuzzer
+    # seed 1351961626). Mirrors packages/runar-compiler/src/optimizer/dce.ts.
+    if v.kind == "bin_op":
+        return v.op in _PARTIAL_BIN_OPS
 
     return v.kind in (
         "assert",

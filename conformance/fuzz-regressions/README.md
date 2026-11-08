@@ -224,6 +224,7 @@ still not replayable through this corpus.
 | `2026-07-14-chained-shift-or-nonminimal` | chained `(x << 8) \| 5` succeeds on-chain; the interpreter aborted (opposite direction of the same bug) |
 | `2026-08-06-branch-k1-empty-pad-guard-bypass` | **funds risk** — a K=1 branch merge padded the shorter arm with an EMPTY push and registered it as the merged value, so the script accepted a spend the source rejects |
 | `2026-08-17-shift-nonminimal-zero-numeric-consume` | **funds locking** — `1 >> 1` leaves a non-minimal `[0x00]`; a numeric consumer aborts on chain while the interpreter accepted. Pinned against the `tri-modal` (consensus) oracle, not `execute` |
+| `2026-11-06-fold-prune-partial-and` | **funds risk** — DCE treated a partial `bin_op` (`&` on unequal-length operands) as side-effect-free, so the fold-ON prune deleted an orphaned `41n & p` and the script accepted any `p` the source rejects (PR #192). `OP_AND` is a required opcode, so the entry fails if the AND is dropped again |
 
 The first four come from the shift/bitwise semantics bug fixed in PR #141
 (commits `61796893`, `88bb6903`, `694c891b`). The original

@@ -705,9 +705,16 @@ All Rúnar operations are deterministic. Given the same unlocking script and loc
 |---|---|
 | `assert(false)` | Script fails, transaction invalid |
 | Division by zero | Script fails (`OP_DIV` / `OP_MOD` with 0) |
+| `&` / `\|` / `^` on operands of unequal byte length | Script fails (`OP_AND` / `OP_OR` / `OP_XOR`) |
+| `<<` / `>>` with a negative shift count | Script fails (`OP_LSHIFT` / `OP_RSHIFT`) |
 | Array index out of bounds | Compile-time error (if index is constant) or undefined behavior |
 | Stack overflow (>800 items) | Compile-time rejection |
 | `OP_RETURN` reached | Script terminates immediately; transaction marked invalid |
+
+A binding the source evaluates is evaluated by the script even when nothing
+reads its value: an optimiser may delete an unused binding only if its
+expression cannot fail. Deleting `let m = 41n & p;` because `m` is later
+overwritten turns the abort for a multi-byte `p` into an accept.
 
 ---
 
@@ -730,7 +737,7 @@ For any given `(unlocking_script, locking_script)` pair, the execution result is
 If a Rúnar program type-checks, then at runtime:
 - No type errors will occur (all operations receive operands of the correct type).
 - No stack underflow will occur (static stack analysis guarantees sufficient items).
-- The only runtime failures are explicit `assert` failures and division by zero.
+- The only runtime failures are explicit `assert` failures and the partial operations listed in §10.
 
 ### 11.4 UTXO Safety (Affine Guarantee)
 

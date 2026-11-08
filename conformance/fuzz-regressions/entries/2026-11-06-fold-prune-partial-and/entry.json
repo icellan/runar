@@ -1,0 +1,29 @@
+{
+  "id": "2026-11-06-fold-prune-partial-and",
+  "title": "fold-ON DCE deleted an orphaned `41n & p`; the script accepted multi-byte p that OP_AND must abort on",
+  "discovered": "2026-11-06",
+  "oracle": "execute",
+  "sourceFile": "contract.runar.ts",
+  "fileName": "FoldOrphanPartialAnd.runar.ts",
+  "method": "unlock",
+  "constructorArgs": {},
+  "args": [
+    "-49253n"
+  ],
+  "expect": {
+    "interpreterAccepted": false,
+    "vmAccepted": false
+  },
+  "requiredOpcodes": [
+    "OP_AND"
+  ],
+  "provenance": {
+    "finding": "2026-11-06T03-07-20-052Z-FuzzContract94-method2",
+    "fixedBy": [
+      "29c7e5d14"
+    ],
+    "issue": "fix/exec-divergence",
+    "note": "Nightly 'Fuzzer nightly' run 42154150919 (job 127684172795), execute oracle, seed 1351961626, FuzzContract94.method2 with args (false, -49253n, true). Minimised by hand to the three statements that matter: `41n & param84` bound to a let that is then overwritten by a constant, and an assert the folder decides. Pre-fix fold-ON bytes were 5177 (OP_1 OP_NIP) in all 7 tiers."
+  },
+  "rationale": "OP_AND requires equal-length operands. 41 encodes to one byte and -49253 to three, so the source (the ANF interpreter) and the fold-OFF script both abort on `41n & p`: the spend is invalid. Pre-fix, the fold-ON N-138 prune deleted the AND once folding `m === 5n` to true orphaned it, because DCE treated every bin_op as pure, and the deployed script accepted every p. reject/reject is the correct verdict; requiredOpcodes [OP_AND] fails the entry if the AND is ever deleted again."
+}
