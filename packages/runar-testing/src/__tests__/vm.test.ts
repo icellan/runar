@@ -307,7 +307,10 @@ describe('ScriptVM: post-Genesis BSV behaviours', () => {
   it('accepts the BSV NOP range above OP_CHECKMULTISIGVERIFY', () => {
     // Legacy VM's opcode table stopped at 0xaf, so 0xb0..0xfc were all
     // "Unknown or disabled opcode" — it rejected valid BSV scripts.
-    expect(new ScriptVM().executeHex('51b0ba').success).toBe(true); // OP_1 OP_NOP1 OP_NOP11
+    expect(new ScriptVM().executeHex('51b0b9').success).toBe(true); // OP_1 OP_NOP1 OP_NOP10
+    // From 0xba up the bytes are undefined, not NOPs: node v1.2.0 returns
+    // SCRIPT_ERR_BAD_OPCODE, and @bsv/sdk Spend matches it since 2.0.10.
+    expect(new ScriptVM().executeHex('51ba').success).toBe(false); // OP_1 0xba
   });
 
   it('executes BSV string opcodes (OP_SPLIT peer OP_LEFT, 0xb4)', () => {
