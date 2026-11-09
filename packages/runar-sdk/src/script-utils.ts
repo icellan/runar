@@ -262,8 +262,13 @@ export function extractConstructorArgs(
   // occurrence's encoded width contributes to the cumulative offset shift —
   // deduplicating before the walk drops those widths and mis-aligns every
   // later slot on artifacts with repeated references. The VALUE is taken
-  // from the first occurrence per param.
-  const slots = [...artifact.constructorSlots].sort((a, b) => a.byteOffset - b.byteOffset);
+  // from the first occurrence per param. A codeSepIndex slot is a placeholder
+  // too: its baked value can be wider than one byte, so it is walked for its
+  // width only (paramIndex -1).
+  const slots: Array<{ byteOffset: number; paramIndex: number }> = [
+    ...artifact.constructorSlots,
+    ...(artifact.codeSepIndexSlots ?? []).map((s) => ({ byteOffset: s.byteOffset, paramIndex: -1 })),
+  ].sort((a, b) => a.byteOffset - b.byteOffset);
 
   const result: Record<string, unknown> = {};
   const assigned = new Set<number>();
@@ -275,6 +280,7 @@ export function extractConstructorArgs(
     // Template placeholders are exactly 1 byte, so the shift contributed by
     // each occurrence is its encoded width minus that byte.
     cumulativeShift += elem.totalHexChars / 2 - 1;
+    if (slot.paramIndex < 0) continue;
     // Deploy only ever writes a push or a small-integer opcode at a
     // constructor slot; any other opcode would otherwise be reported as a
     // value the script does not hold ('', 0n or true by type). Checked at

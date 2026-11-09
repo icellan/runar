@@ -25,7 +25,9 @@
  * wrong width at a fixed-width slot do not; a stateful artifact's script with
  * no OP_RETURN after its code part does not; hex case inside a slot value does
  * not matter; extractConstructorArgs refuses a non-push opcode at any
- * reference of a param.
+ * reference of a param; extractConstructorArgs reads a constructor arg from
+ * its deployed position after a codeSepIndex slot whose baked value is wider
+ * than one byte.
  * Does NOT prove: anything about the Go, Rust, Python, Zig, Ruby or Java
  * SDKs, which have not replayed the vector yet; nor that a slot push is
  * minimally encoded; nor that extractConstructorArgs validates anything
@@ -37,6 +39,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractConstructorArgs, matchesArtifact } from '../script-utils.js';
+import { RunarContract } from '../contract.js';
 import { MalformedScriptError } from '../errors.js';
 import type { RunarArtifact } from '../types.js';
 
@@ -88,5 +91,31 @@ describe('extractConstructorArgs refuses a non-push opcode at a constructor slot
     }
     expect(extractConstructorArgs(owner2, fixture.cases.find((x) => x.name === 'owner2-honest')!.script_hex))
       .toEqual({ owner: G });
+  });
+});
+
+describe('extractConstructorArgs after a codeSepIndex slot', () => {
+  // Hand-built: a codeSepIndex slot at byte 1 with codeSepIndex 140, baked as
+  // 143 (`02 8f00`: 140 plus the 3-byte growth of the constructor slot before
+  // index 140), then a constructor slot at byte 3. The TS compiler emits
+  // codeSep slots before constructor slots, but with codeSepIndex 1 (a 1-byte
+  // OP_1), so its output never shifts the constructor slot this way.
+  const cs = {
+    version: 'runar-v1.0.0-rc.1',
+    compilerVersion: '1.0.0-rc.1',
+    contractName: 'CodeSepBeforeSlot',
+    asm: '',
+    buildTimestamp: '',
+    abi: { constructor: { params: [{ name: 'x', type: 'ByteString' }] }, methods: [] },
+    script: '5100520053',
+    constructorSlots: [{ paramIndex: 0, byteOffset: 3 }],
+    codeSepIndexSlots: [{ byteOffset: 1, codeSepIndex: 140 }],
+  } as unknown as RunarArtifact;
+
+  it('reads the constructor arg from its deployed position', () => {
+    const script = new RunarContract(cs, ['aabbcc']).getLockingScript();
+    expect(script).toBe('51028f005203aabbcc53');
+    expect(matchesArtifact(cs, script)).toBe(true);
+    expect(extractConstructorArgs(cs, script)).toEqual({ x: 'aabbcc' });
   });
 });
