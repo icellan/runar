@@ -678,7 +678,9 @@ function decodePushData(
     const b1 = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(hex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(hex.slice(offset + 8, offset + 10), 16);
-    const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    // Unsigned: a signed `b3 << 24` made lengths >= 0x80000000 negative,
+    // which slipped past `need` and moved the cursor backwards.
+    const len = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
     const dataLen = len * 2;
     need(10 + dataLen, 'OP_PUSHDATA4 payload');
     return {
