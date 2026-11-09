@@ -305,7 +305,7 @@ describe('ScriptVM: post-Genesis BSV behaviours', () => {
   });
 
   it('accepts the BSV NOP range above OP_CHECKMULTISIGVERIFY', () => {
-    // Legacy VM's opcode table stopped at 0xaf, so 0xb0..0xfc were all
+    // Legacy VM's opcode table stopped at 0xaf, so 0xb0..0xb9 were all
     // "Unknown or disabled opcode" — it rejected valid BSV scripts.
     expect(new ScriptVM().executeHex('51b0b9').success).toBe(true); // OP_1 OP_NOP1 OP_NOP10
     // From 0xba up the bytes are undefined, not NOPs: node v1.2.0 returns
@@ -320,58 +320,51 @@ describe('ScriptVM: post-Genesis BSV behaviours', () => {
     expect(bytesToHex(r.stack[0]!)).toBe('aabb');
   });
 
-  // N-210: @bsv/sdk 2.0.7 `Spend` computes OP_RIGHT as `buf.slice(size - len, len)`
-  // instead of `buf.slice(size - len)`, so for 0 < len < size it returns the
-  // WRONG bytes (`slice(3, 2)` on a 5-byte buffer is empty, not the last 2
-  // bytes). `ScriptVM` wraps this `Spend` directly with no opcode semantics of
-  // its own (see this module's header comment), so it cannot silently correct
-  // the result — it must refuse the miscomputed case instead of returning a
-  // wrong answer. n = 0 and n = size are unaffected (upstream computes those
-  // correctly) and must keep working.
+  // OP_RIGHT for 0 < n < size. @bsv/sdk 2.0.0-2.0.9 `Spend` computed it as
+  // `buf.slice(size - len, len)` (the wrong bytes, usually empty), and ScriptVM
+  // used to refuse that case rather than report a wrong answer. Every
+  // @bsv/sdk the package accepts (from 2.0.10) returns the last n bytes, so
+  // ScriptVM now evaluates it through `Spend` like any other opcode.
   //
-  // What this proves: ScriptVM refuses (rather than silently mis-evaluates)
-  // the specific 0 < n < size case, in both one-shot and step() execution,
-  // while leaving n = 0, n = size, and OP_RIGHT inside a dead OP_IF branch
-  // unaffected. What it does not prove: correct OP_RIGHT evaluation for
-  // 0 < n < size (the guard refuses rather than computes it); it also says
-  // nothing about `ScriptExecutionContract` / `consensus-spend.ts`, the
-  // separate acceptance-oracle path that builds `Spend` directly and is not
-  // routed through this guard (see the f290 canary in
-  // f290-opcode-golden-coverage.test.ts).
-  describe('OP_RIGHT (0xb5): upstream @bsv/sdk 2.0.7 miscomputes 0 < n < size', () => {
-    it('refuses rather than silently return the wrong bytes for 0 < n < size', () => {
-      // push 'aabbccddee' (5 bytes), OP_2, OP_RIGHT -> should be 'ddee', but
-      // upstream Spend computes buf.slice(5-2, 2) = slice(3, 2) = empty.
+  // What this proves: ScriptVM returns the last n bytes for 0 < n < size in
+  // both one-shot and step() execution, and n = 0, n = size and OP_RIGHT in a
+  // dead OP_IF branch behave as before. What it does not prove: OP_RIGHT on an
+  // SDK below the 2.0.10 floor (it would compute the wrong bytes). The same
+  // n = 2 vector also runs through `ScriptExecutionContract` in the OP_RIGHT
+  // case of f290-opcode-golden-coverage.test.ts.
+  describe('OP_RIGHT (0xb5)', () => {
+    it('returns the last n bytes for 0 < n < size', () => {
+      // push 'aabbccddee' (5 bytes), OP_2, OP_RIGHT -> 'ddee'
       const r = new ScriptVM().executeHex('05aabbccddee52b5');
-      expect(r.error).toBeDefined();
-      expect(r.error).toMatch(/OP_RIGHT/);
-      expect(r.success).toBe(false);
+      expect(r.error).toBeUndefined();
+      expect(r.success).toBe(true);
+      expect(r.stack.length).toBe(1);
+      expect(bytesToHex(r.stack[0]!)).toBe('ddee'); // last 2 bytes of aabbccddee
     });
 
-    it('still executes n = 0 (upstream is correct at this edge)', () => {
+    it('executes n = 0', () => {
       const r = new ScriptVM().executeHex('05aabbccddee00b5');
       expect(r.error).toBeUndefined();
       expect(r.stack.length).toBe(1);
       expect(bytesToHex(r.stack[0]!)).toBe('');
     });
 
-    it('still executes n = size (upstream is correct at this edge)', () => {
+    it('executes n = size', () => {
       const r = new ScriptVM().executeHex('05aabbccddee55b5');
       expect(r.error).toBeUndefined();
       expect(bytesToHex(r.stack[0]!)).toBe('aabbccddee');
     });
 
-    it('does not refuse OP_RIGHT inside a dead (not-taken) OP_IF branch', () => {
+    it('skips OP_RIGHT inside a dead (not-taken) OP_IF branch', () => {
       // push 'aabbccddee', OP_2, OP_0, OP_IF, OP_RIGHT, OP_ENDIF, OP_2DROP, OP_1.
       // OP_0 OP_IF enters the false branch, so Spend.step() never evaluates
-      // OP_RIGHT (its own isScriptExecuting = !ifStack.includes(false) gate);
-      // the guard must not refuse an opcode the real engine never runs.
+      // OP_RIGHT (its own isScriptExecuting = !ifStack.includes(false) gate).
       const r = new ScriptVM().executeHex('05aabbccddee520063b5686d51');
       expect(r.error).toBeUndefined();
       expect(r.success).toBe(true);
     });
 
-    it('step() also refuses the miscomputed case (runar debug uses step mode)', () => {
+    it('step() also returns the last n bytes (runar debug uses step mode)', () => {
       const vm = new ScriptVM();
       vm.load(new Uint8Array(0), hexToBytes('05aabbccddee52b5'));
       let lastStep: ReturnType<typeof vm.step> = null;
@@ -380,8 +373,10 @@ describe('ScriptVM: post-Genesis BSV behaviours', () => {
         if (s === null) break;
         lastStep = s;
       }
-      expect(lastStep?.error).toBeDefined();
-      expect(lastStep?.error).toMatch(/OP_RIGHT/);
+      expect(lastStep?.error).toBeUndefined();
+      expect(lastStep?.opcode).toBe('OP_RIGHT');
+      expect(lastStep?.mainStack.map(bytesToHex)).toEqual(['ddee']); // last 2 bytes of aabbccddee
+      expect(vm.isSuccess).toBe(true);
     });
   });
 });
