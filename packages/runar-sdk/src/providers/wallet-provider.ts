@@ -15,6 +15,7 @@ import { buildP2PKHScript } from '../script-utils.js';
 import {
   Transaction,
   type WalletClient,
+  type WalletInterface,
   type Broadcaster,
 } from '@bsv/sdk';
 
@@ -74,9 +75,18 @@ function checkArcAccepted(json: unknown, localTxid: string): string {
   return localTxid;
 }
 
-export interface WalletProviderOptions {
-  /** BRC-100 WalletClient instance. */
-  wallet: WalletClient;
+/**
+ * `W` is the type of the wallet passed in. It is inferred from `wallet` at
+ * construction, so `walletClient` returns the same type the caller passed;
+ * the `WalletClient` default keeps existing type annotations and subclasses
+ * (`extends WalletProvider`, `WalletProviderOptions`) meaning what they did.
+ */
+export interface WalletProviderOptions<W extends WalletInterface = WalletClient> {
+  /**
+   * BRC-100 wallet: any `WalletInterface`, such as a `WalletClient` or an
+   * in-process wallet. The provider calls `listOutputs` and `createAction`.
+   */
+  wallet: W;
   /** Signer derived from the same wallet (e.g. WalletSigner). */
   signer: Signer;
   /** Wallet basket name for UTXO management (e.g. 'my-app'). */
@@ -119,8 +129,8 @@ export interface WalletProviderOptions {
 // WalletProvider
 // ---------------------------------------------------------------------------
 
-export class WalletProvider implements Provider {
-  protected readonly wallet: WalletClient;
+export class WalletProvider<W extends WalletInterface = WalletClient> implements Provider {
+  protected readonly wallet: W;
   protected readonly signer: Signer;
   protected readonly basket: string;
   protected readonly fundingTag: string;
@@ -136,7 +146,7 @@ export class WalletProvider implements Provider {
   protected readonly arcTimeoutMs: number;
   protected readonly txCache = new Map<string, string>();
 
-  constructor(options: WalletProviderOptions) {
+  constructor(options: WalletProviderOptions<W>) {
     this.wallet = options.wallet;
     this.signer = options.signer;
     this.basket = options.basket;
@@ -164,8 +174,8 @@ export class WalletProvider implements Provider {
   // consumers reach the wallet without reaching into internals)
   // -------------------------------------------------------------------------
 
-  /** The BRC-100 wallet client this provider wraps. */
-  get walletClient(): WalletClient {
+  /** The BRC-100 wallet this provider wraps, typed as it was passed in. */
+  get walletClient(): W {
     return this.wallet;
   }
 
