@@ -1,6 +1,6 @@
 {
   "fixture_version": 1,
-  "notes": "matchesArtifact must accept only what RunarContract writes at a constructor slot: encodeArg(value), i.e. a push or a small-integer opcode, the same bytes at every reference of a param, and exactly fixedValueByteLength bytes where the slot declares one. Case fields as codesep.json; artifact names a key of artifacts. \"owner2\" is synthetic (one PubKey param referenced twice); \"fixed1\" is synthetic (a 1-byte fixed-width ByteString slot, so an OP_N value counts as one byte). \"slotMatrix\" is conformance/sdk-vertical/artifacts/SlotMatrix.json (TS-compiler output; templateDigest dropped, asm and buildTimestamp blanked). Honest = RunarContract.getLockingScript(). TypeScript SDK replays it (matches-artifact-slot-values.test.ts); the other tiers have not been ported yet.",
+  "notes": "matchesArtifact must accept only what RunarContract writes at a constructor slot: encodeArg(value), i.e. a push or a small-integer opcode, the same bytes at every reference of a param, and exactly fixedValueByteLength bytes where the slot declares one; and a stateful artifact (stateFields non-empty) must have an OP_RETURN after its code part. Case fields as codesep.json; artifact names a key of artifacts. \"owner2\" is synthetic (one PubKey param referenced twice); \"fixed1\" is synthetic (a 1-byte fixed-width ByteString slot, so an OP_N value counts as one byte). \"slotMatrix\" is conformance/sdk-vertical/artifacts/SlotMatrix.json (TS-compiler output; templateDigest dropped, asm and buildTimestamp blanked). Honest = RunarContract.getLockingScript(). TypeScript SDK replays it (matches-artifact-slot-values.test.ts); the other tiers have not been ported yet. \"stateful\" and \"statefulLiteral\" are synthetic stateful artifacts (with and without slots).",
   "artifacts": {
     "owner2": {
       "version": "runar-v1.0.0-rc.1",
@@ -146,6 +146,83 @@
       ],
       "asm": "",
       "buildTimestamp": ""
+    },
+    "stateful": {
+      "version": "runar-v1.0.0-rc.1",
+      "compilerVersion": "1.0.0-rc.1",
+      "asm": "",
+      "buildTimestamp": "",
+      "contractName": "Stateful",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "supply",
+              "type": "bigint"
+            }
+          ]
+        },
+        "methods": [
+          {
+            "name": "transfer",
+            "params": [],
+            "isPublic": true
+          }
+        ]
+      },
+      "script": "76a90088750400000000819c69ac",
+      "constructorSlots": [
+        {
+          "paramIndex": 0,
+          "byteOffset": 2
+        }
+      ],
+      "codePartLenSlots": [
+        {
+          "byteOffset": 6
+        }
+      ],
+      "stateFields": [
+        {
+          "name": "balance",
+          "type": "bigint",
+          "index": 0
+        }
+      ]
+    },
+    "statefulLiteral": {
+      "version": "runar-v1.0.0-rc.1",
+      "compilerVersion": "1.0.0-rc.1",
+      "asm": "",
+      "buildTimestamp": "",
+      "contractName": "StatefulLiteral",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "supply",
+              "type": "bigint"
+            }
+          ]
+        },
+        "methods": [
+          {
+            "name": "transfer",
+            "params": [],
+            "isPublic": true
+          }
+        ]
+      },
+      "script": "76a988ac",
+      "constructorSlots": [],
+      "codePartLenSlots": [],
+      "stateFields": [
+        {
+          "name": "balance",
+          "type": "bigint",
+          "index": 0
+        }
+      ]
     }
   },
   "cases": [
@@ -309,6 +386,34 @@
       "script_hex": "01117b8801117c9d01110087916900ac",
       "expected": false,
       "why": "OP_0 (empty push) at both owner slots (fixedValueByteLength 33)."
+    },
+    {
+      "name": "stateful-honest",
+      "artifact": "stateful",
+      "script_hex": "76a902112288750410000000819c69ac6a1122000000000000",
+      "expected": true,
+      "why": "Code part (supply = 0x2211, code-part length 16) followed by OP_RETURN and the state section."
+    },
+    {
+      "name": "stateful-code-part-alone",
+      "artifact": "stateful",
+      "script_hex": "76a902112288750410000000819c69ac",
+      "expected": false,
+      "why": "The same code part with no OP_RETURN after it."
+    },
+    {
+      "name": "stateful-literal-honest",
+      "artifact": "statefulLiteral",
+      "script_hex": "76a988ac6a0000000000000000",
+      "expected": true,
+      "why": "A slot-free stateful template followed by OP_RETURN and the state section."
+    },
+    {
+      "name": "stateful-literal-alone",
+      "artifact": "statefulLiteral",
+      "script_hex": "76a988ac",
+      "expected": false,
+      "why": "The slot-free stateful template with no OP_RETURN after it."
     }
   ]
 }

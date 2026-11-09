@@ -1185,7 +1185,7 @@ Reads the constructor arg values back out of an on-chain script using `artifact.
 matchesArtifact(artifact: RunarArtifact, scriptHex: string): boolean
 ```
 
-Checks whether `scriptHex` was produced from `artifact` (regardless of the constructor args used). Beyond the template bytes, every constructor slot must hold a push or small-integer opcode, a param referenced more than once must hold the same bytes at each reference, and a slot with `fixedValueByteLength` must push exactly that many bytes.
+Checks whether `scriptHex` was produced from `artifact` (regardless of the constructor args used). Beyond the template bytes, every constructor slot must hold a push or small-integer opcode, a param referenced more than once must hold the same bytes at each reference, and a slot with `fixedValueByteLength` must push exactly that many bytes. For a stateful artifact (one with `stateFields`) pass the full locking script: it must have an OP_RETURN after its code part, so the code part alone does not match.
 
 ### Tokens
 

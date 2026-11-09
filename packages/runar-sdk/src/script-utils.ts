@@ -319,9 +319,14 @@ export function matchesArtifact(
     throw new MalformedScriptError('matchesArtifact: script is not an even-length hex string');
   }
   let codeHex = scriptHex;
+  // A stateful contract is deployed with an OP_RETURN and its state after the
+  // code part, so a script with no OP_RETURN after it is not a deployment.
+  // Only the OP_RETURN's presence is checked here, not the state's length.
+  let missingState = false;
   if (artifact.stateFields && artifact.stateFields.length > 0) {
     const opReturnPos = findLastOpReturn(scriptHex);
     if (opReturnPos !== -1) codeHex = scriptHex.slice(0, opReturnPos);
+    else missingState = true;
   }
 
   const template = artifact.script;
@@ -333,7 +338,7 @@ export function matchesArtifact(
     !(artifact.constructorSlots?.length) &&
     !(artifact.codeSepIndexSlots?.length) &&
     !(artifact.codePartLenSlots?.length)
-  ) return codeHex === template;
+  ) return codeHex === template && !missingState;
 
   // Every OP_0 placeholder the SDK replaces at deploy time is one variable
   // script element: constructor slots AND codeSepIndex slots (the latter bake
@@ -424,6 +429,10 @@ export function matchesArtifact(
     if (first !== undefined && first !== el) return false;
     firstElem.set(cs.paramIndex, el);
   }
+
+  // Checked after the slot walk so a malformed script still raises
+  // MalformedScriptError (N-317) rather than reporting a plain mismatch.
+  if (missingState) return false;
   return true;
 }
 
