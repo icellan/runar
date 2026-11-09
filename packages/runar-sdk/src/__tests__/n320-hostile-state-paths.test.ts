@@ -16,9 +16,9 @@
  * with no state section is refused (C10) with the typed error; the replay
  * stays inside a process-CPU budget.
  * Does NOT prove: on-chain spendability of a reconnected contract; artifact
- * shapes other than the two in the fixture; the plain Error deserializeState
- * raises on a hex-valid truncated or overlong state section (no case here
- * reaches it).
+ * shapes other than the two in the fixture; the MalformedScriptError
+ * deserializeState raises on a hex-valid truncated or overlong state section
+ * (no case here reaches it; pushdata4-unsigned-length.test.ts covers it).
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';

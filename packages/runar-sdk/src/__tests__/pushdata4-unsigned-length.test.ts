@@ -10,6 +10,9 @@
  *    `deserializeState` could return field values for a state section that the
  *    contract's own on-chain reader rejects.
  *
+ * Also pins that `deserializeState` rejects malformed input with the exported
+ * `MalformedScriptError`, so callers can catch it by type.
+ *
  * The envelope cases run one per child process
  * (pushdata4-unsigned-length-replay.mts): before the fix the walk never
  * returned, and a synchronous loop cannot be timed out in-process.
@@ -18,7 +21,9 @@
  * script at all three sites — the envelope walk terminates with no envelope
  * (also through `stripInscriptionEnvelope` and `RunarContract.fromUtxo`), and
  * `deserializeState` rejects the state section; a well-formed OP_PUSHDATA4
- * still decodes.
+ * still decodes; every `deserializeState` rejection path, including non-hex
+ * input in a bigint or fixed-width field, throws `MalformedScriptError`, and
+ * the class is exported from the package entry point.
  * Does NOT prove: anything about OP_PUSHDATA1/2 (they cannot overflow); the
  * other SDK tiers; scripts of 2 GiB or more (a genuine push that large is
  * never built here).
@@ -28,6 +33,8 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { StateField } from 'runar-ir-schema';
+import * as sdk from '../index.js';
+import { MalformedScriptError } from '../errors.js';
 import { deserializeState, serializeState } from '../state.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,9 +103,35 @@ describe('deserializeState: OP_PUSHDATA4 length is unsigned', () => {
   it('rejects a high-bit length instead of moving the cursor backwards', () => {
     // length 0xfffffff8; the signed read decoded this as { a: '', b: 'aabb' }
     expect(() => deserializeState(fields, '4ef8ffffff0aaabb')).toThrow(/truncated.*OP_PUSHDATA4 payload/);
+    expect(() => deserializeState(fields, '4ef8ffffff0aaabb')).toThrow(MalformedScriptError);
   });
 
   it('rejects a lone 0x80000000 length as truncated', () => {
     expect(() => deserializeState(fields.slice(0, 1), '4e00000080')).toThrow(/truncated.*OP_PUSHDATA4 payload/);
+  });
+});
+
+describe('deserializeState: malformed input throws MalformedScriptError', () => {
+  const num: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
+  const bytes: StateField[] = [{ name: 'b', type: 'ByteString', index: 0 }];
+  const key: StateField[] = [{ name: 'pk', type: 'PubKey', index: 0 }];
+
+  it('is exported from the package entry point', () => {
+    expect(sdk.MalformedScriptError).toBe(MalformedScriptError);
+  });
+
+  it.each([
+    ['odd-length blob', num, '0'],
+    ['truncated fixed-width field', num, '00000000000000'],
+    ['trailing bytes', num, '000000000000000000'],
+    ['truncated push', bytes, '05aa'],
+    ['non-push opcode', bytes, '51'],
+    // previously a RangeError from BigInt()
+    ['non-hex bigint field', num, '00000000000000zz'],
+    // previously accepted as the key's hex
+    ['non-hex fixed-width bytes field', key, '02' + 'zz'.repeat(32)],
+    ['non-hex push opcode', bytes, 'zz'],
+  ])('%s', (_, fields, hex) => {
+    expect(() => deserializeState(fields, hex)).toThrow(MalformedScriptError);
   });
 });

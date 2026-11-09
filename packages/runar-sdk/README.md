@@ -1341,7 +1341,7 @@ type Transaction        // @bsv/sdk Transaction class
 
 ## Error handling
 
-The TypeScript SDK throws native `Error` objects with descriptive messages. There are no exported error classes; check `error.message` if you need to discriminate.
+The TypeScript SDK throws native `Error` objects with descriptive messages. Three exported subclasses can be caught by type: `ScriptSizeExceededError`, `InvalidConstructorArgError`, and `MalformedScriptError`, which `deserializeState`, `extractStateFromScript`, `RunarContract.fromUtxo` and `fromTxId` throw for a malformed script or state section. Otherwise, check `error.message` if you need to discriminate.
 
 Common patterns:
 
