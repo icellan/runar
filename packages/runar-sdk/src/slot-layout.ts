@@ -22,9 +22,10 @@
 //   - 'data-push'      raw data push: 1/2/3/5-byte header + value bytes
 //   - 'scriptnum-push' Script number >= 17 or <= -2: 1-byte header + LE
 //                      sign-magnitude payload
-//   - 'op-n'           bigint 1..16 → single opcode 0x51..0x60 (value = byte - 0x50)
+//   - 'op-n'           bigint 1..16, or a 1-byte ByteString 0x01..0x10 →
+//                      single opcode 0x51..0x60 (value = byte - 0x50)
 //   - 'op-0'           bigint 0 / empty data → single 0x00 opcode
-//   - 'op-1negate'     bigint -1 → single 0x4f opcode
+//   - 'op-1negate'     bigint -1, or a 1-byte ByteString 0x81 → single 0x4f opcode
 //   - 'bool'           boolean → single 0x51 / 0x00 opcode
 //
 // NOTE: offsets are relative to the CODE PART (the locking script before any
@@ -161,7 +162,11 @@ function classifyEncoded(
     return { encoding: 'scriptnum-push', pushHeaderBytes: 5 }; // 0x4e
   }
   // Data (hex string): OP_0 for empty, else direct push / PUSHDATA1/2/4.
+  // encodeArg writes a 1-byte value 0x01..0x10 as OP_1..OP_16 and 0x81 as
+  // OP_1NEGATE (minimal push), so those carry no header and one value byte.
   if (b0 === 0x00) return { encoding: 'op-0', pushHeaderBytes: 0 };
+  if (b0 === 0x4f) return { encoding: 'op-1negate', pushHeaderBytes: 0 };
+  if (b0 >= 0x51 && b0 <= 0x60) return { encoding: 'op-n', pushHeaderBytes: 0 };
   if (b0 <= 0x4b) return { encoding: 'data-push', pushHeaderBytes: 1 };
   if (b0 === 0x4c) return { encoding: 'data-push', pushHeaderBytes: 2 };
   if (b0 === 0x4d) return { encoding: 'data-push', pushHeaderBytes: 3 };
