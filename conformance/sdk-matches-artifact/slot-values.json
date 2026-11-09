@@ -1,0 +1,314 @@
+{
+  "fixture_version": 1,
+  "notes": "matchesArtifact must accept only what RunarContract writes at a constructor slot: encodeArg(value), i.e. a push or a small-integer opcode, the same bytes at every reference of a param, and exactly fixedValueByteLength bytes where the slot declares one. Case fields as codesep.json; artifact names a key of artifacts. \"owner2\" is synthetic (one PubKey param referenced twice); \"fixed1\" is synthetic (a 1-byte fixed-width ByteString slot, so an OP_N value counts as one byte). \"slotMatrix\" is conformance/sdk-vertical/artifacts/SlotMatrix.json (TS-compiler output; templateDigest dropped, asm and buildTimestamp blanked). Honest = RunarContract.getLockingScript(). TypeScript SDK replays it (matches-artifact-slot-values.test.ts); the other tiers have not been ported yet.",
+  "artifacts": {
+    "owner2": {
+      "version": "runar-v1.0.0-rc.1",
+      "compilerVersion": "1.0.0-rc.1",
+      "asm": "",
+      "buildTimestamp": "",
+      "contractName": "Owner2",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "owner",
+              "type": "PubKey"
+            }
+          ]
+        },
+        "methods": []
+      },
+      "script": "00ad00ac",
+      "constructorSlots": [
+        {
+          "paramIndex": 0,
+          "byteOffset": 0,
+          "fixedValueByteLength": 33
+        },
+        {
+          "paramIndex": 0,
+          "byteOffset": 2,
+          "fixedValueByteLength": 33
+        }
+      ]
+    },
+    "fixed1": {
+      "version": "runar-v1.0.0-rc.1",
+      "compilerVersion": "1.0.0-rc.1",
+      "asm": "",
+      "buildTimestamp": "",
+      "contractName": "Fixed1",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "tag",
+              "type": "ByteString"
+            }
+          ]
+        },
+        "methods": []
+      },
+      "script": "0087",
+      "constructorSlots": [
+        {
+          "paramIndex": 0,
+          "byteOffset": 0,
+          "fixedValueByteLength": 1
+        }
+      ]
+    },
+    "slotMatrix": {
+      "version": "runar-v1.0.0-rc.1",
+      "compilerVersion": "1.0.0-rc.1",
+      "contractName": "SlotMatrix",
+      "parentClass": "SmartContract",
+      "abi": {
+        "constructor": {
+          "params": [
+            {
+              "name": "count",
+              "type": "bigint"
+            },
+            {
+              "name": "tag",
+              "type": "ByteString"
+            },
+            {
+              "name": "owner",
+              "type": "PubKey"
+            }
+          ]
+        },
+        "methods": [
+          {
+            "name": "unlock",
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              },
+              {
+                "name": "witness",
+                "type": "ByteString"
+              },
+              {
+                "name": "n",
+                "type": "bigint"
+              }
+            ],
+            "isPublic": true
+          }
+        ]
+      },
+      "script": "007b88007c9d000087916900ac",
+      "constructorSlots": [
+        {
+          "paramIndex": 1,
+          "byteOffset": 0,
+          "name": "tag",
+          "type": "ByteString",
+          "valueEncoding": "data"
+        },
+        {
+          "paramIndex": 0,
+          "byteOffset": 3,
+          "name": "count",
+          "type": "bigint",
+          "valueEncoding": "scriptnum"
+        },
+        {
+          "paramIndex": 1,
+          "byteOffset": 6,
+          "name": "tag",
+          "type": "ByteString",
+          "valueEncoding": "data"
+        },
+        {
+          "paramIndex": 2,
+          "byteOffset": 7,
+          "name": "owner",
+          "type": "PubKey",
+          "valueEncoding": "data",
+          "fixedValueByteLength": 33,
+          "fixedPushHeaderBytes": 1
+        },
+        {
+          "paramIndex": 2,
+          "byteOffset": 11,
+          "name": "owner",
+          "type": "PubKey",
+          "valueEncoding": "data",
+          "fixedValueByteLength": 33,
+          "fixedPushHeaderBytes": 1
+        }
+      ],
+      "asm": "",
+      "buildTimestamp": ""
+    }
+  },
+  "cases": [
+    {
+      "name": "owner2-honest",
+      "artifact": "owner2",
+      "script_hex": "210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with owner = G: the same 33-byte push at both references."
+    },
+    {
+      "name": "owner2-different-values",
+      "artifact": "owner2",
+      "script_hex": "210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad2102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac",
+      "expected": false,
+      "why": "One param, two references, different keys at the two references."
+    },
+    {
+      "name": "owner2-non-push-first",
+      "artifact": "owner2",
+      "script_hex": "acad210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": false,
+      "why": "OP_CHECKSIG (not a push) at the first constructor slot."
+    },
+    {
+      "name": "owner2-non-push-second",
+      "artifact": "owner2",
+      "script_hex": "210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798adacac",
+      "expected": false,
+      "why": "OP_CHECKSIG (not a push) at the second reference only."
+    },
+    {
+      "name": "owner2-wrong-width-20",
+      "artifact": "owner2",
+      "script_hex": "14ababababababababababababababababababababad14ababababababababababababababababababababac",
+      "expected": false,
+      "why": "A 20-byte push at both references of a fixedValueByteLength 33 slot."
+    },
+    {
+      "name": "owner2-wrong-width-65",
+      "artifact": "owner2",
+      "script_hex": "410479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8ad410479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8ac",
+      "expected": false,
+      "why": "A 65-byte push (uncompressed key) at both references of a fixedValueByteLength 33 slot."
+    },
+    {
+      "name": "slotmatrix-honest-tag-11",
+      "artifact": "slotMatrix",
+      "script_hex": "01117b8801117c9d0111210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '11', owner = G (tag bakes as a 1-byte push)."
+    },
+    {
+      "name": "slotmatrix-honest-tag-01",
+      "artifact": "slotMatrix",
+      "script_hex": "517b8801117c9d51210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '01', owner = G (tag bakes as OP_1)."
+    },
+    {
+      "name": "slotmatrix-honest-tag-05",
+      "artifact": "slotMatrix",
+      "script_hex": "557b8801117c9d55210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '05', owner = G (tag bakes as OP_5)."
+    },
+    {
+      "name": "slotmatrix-honest-tag-10",
+      "artifact": "slotMatrix",
+      "script_hex": "607b8801117c9d60210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '10', owner = G (tag bakes as OP_16)."
+    },
+    {
+      "name": "slotmatrix-honest-tag-81",
+      "artifact": "slotMatrix",
+      "script_hex": "4f7b8801117c9d4f210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '81', owner = G (tag bakes as OP_1NEGATE)."
+    },
+    {
+      "name": "slotmatrix-honest-tag-empty",
+      "artifact": "slotMatrix",
+      "script_hex": "007b8801117c9d00210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with count = 17, tag = '', owner = G (tag bakes as OP_0)."
+    },
+    {
+      "name": "fixed1-honest-05",
+      "artifact": "fixed1",
+      "script_hex": "5587",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with tag = '05' (OP_5): one byte in a fixedValueByteLength 1 slot."
+    },
+    {
+      "name": "fixed1-honest-10",
+      "artifact": "fixed1",
+      "script_hex": "6087",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with tag = '10' (OP_16): one byte in a fixedValueByteLength 1 slot."
+    },
+    {
+      "name": "fixed1-honest-81",
+      "artifact": "fixed1",
+      "script_hex": "4f87",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with tag = '81' (OP_1NEGATE): one byte in a fixedValueByteLength 1 slot."
+    },
+    {
+      "name": "fixed1-honest-aa",
+      "artifact": "fixed1",
+      "script_hex": "01aa87",
+      "expected": true,
+      "why": "RunarContract.getLockingScript() with tag = 'aa' (a 1-byte push): one byte in a fixedValueByteLength 1 slot."
+    },
+    {
+      "name": "fixed1-two-bytes",
+      "artifact": "fixed1",
+      "script_hex": "02aabb87",
+      "expected": false,
+      "why": "A 2-byte push in a fixedValueByteLength 1 slot."
+    },
+    {
+      "name": "slotmatrix-last-owner-differs",
+      "artifact": "slotMatrix",
+      "script_hex": "01117b8801117c9d0111210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988791692102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac",
+      "expected": false,
+      "why": "Honest except the second owner reference holds a different key."
+    },
+    {
+      "name": "slotmatrix-second-tag-differs",
+      "artifact": "slotMatrix",
+      "script_hex": "01117b8801117c9d0122210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": false,
+      "why": "Honest except the second tag reference pushes 0x22 instead of 0x11."
+    },
+    {
+      "name": "slotmatrix-non-push-tag",
+      "artifact": "slotMatrix",
+      "script_hex": "ac7b8801117c9dac210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": false,
+      "why": "OP_CHECKSIG at both tag slots."
+    },
+    {
+      "name": "slotmatrix-op-reserved-tag",
+      "artifact": "slotMatrix",
+      "script_hex": "507b8801117c9d50210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "expected": false,
+      "why": "OP_RESERVED (0x50) at both tag slots; it is not a push."
+    },
+    {
+      "name": "slotmatrix-owner-20-bytes",
+      "artifact": "slotMatrix",
+      "script_hex": "01117b8801117c9d011114abababababababababababababababababababab87916914ababababababababababababababababababababac",
+      "expected": false,
+      "why": "A 20-byte push at both owner slots (fixedValueByteLength 33)."
+    },
+    {
+      "name": "slotmatrix-owner-empty",
+      "artifact": "slotMatrix",
+      "script_hex": "01117b8801117c9d01110087916900ac",
+      "expected": false,
+      "why": "OP_0 (empty push) at both owner slots (fixedValueByteLength 33)."
+    }
+  ]
+}
