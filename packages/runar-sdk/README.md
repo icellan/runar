@@ -720,6 +720,8 @@ class MyProvider implements Provider {
 }
 ```
 
+A provider that holds `@bsv/sdk` `Transaction` objects (from BEEF, raw hex or its own cache) can answer `getTransaction` with `txToTransactionData(txid, tx)`, the same conversion the built-in providers and `deploy()` / `finalizeCall()` use. It reads each input's txid from `sourceTXID` or, failing that, from the attached source transaction.
+
 ---
 
 ## Full API reference

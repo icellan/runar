@@ -79,6 +79,10 @@ the worked examples and which gate now catches which bug, and
 [`conformance/README.md`](conformance/README.md) for the provenance-discipline
 and weak-coverage-kind policies.
 
+### Added
+
+- **`txToTransactionData` is exported from `runar-sdk`** (TypeScript SDK). It turns a `@bsv/sdk` `Transaction` into the `TransactionData` that `Provider.getTransaction()` returns, the conversion the built-in providers and `deploy()` / `finalizeCall()` already use internally. A custom provider that holds `Transaction` objects can now return the same shape instead of re-deriving it (an input's txid comes from `sourceTXID` or the attached source transaction). No behaviour change.
+
 ### Changed
 
 - **`WalletProvider` broadcasts to BSV Broadcaster by default, on mainnet and testnet** (TypeScript, Go, Python, Rust, Ruby). With no ARC URL (and, in TypeScript and Rust, no injected broadcaster), the provider posts to the BSV Association's BSV Broadcaster (`POST /tx`): `https://arcade-us-1.bsvblockchain.tech` on mainnet, `https://arcade-v2-testnet-us-1.bsvblockchain.tech` on testnet. A testnet provider no longer needs an ARC URL (R-179's invariant — the default endpoint matches the network — still holds; a network with no default is still refused). Passing an ARC URL keeps the previous behaviour (`POST <arc url>/v1/tx`); mainnet callers who relied on the GorillaPool ARC default can pass `https://arc.gorillapool.io` (`MAINNET_ARC_URL` in Python, Ruby and Rust). The stored ARC URL field is now empty/`None`/`nil`/`undefined` unless the caller passed one, and a new `broadcastUrl` / `broadcast_url` / `broadcastURL` field holds the submit URL. The F-042 acceptance checks (2xx body must not carry a rejected/orphan `txStatus` and must echo this transaction's txid) and the N-040 request timeout apply to the BSV Broadcaster path exactly as to ARC. The Zig and Java wallet providers have no default broadcaster (Zig's `WalletProvider.broadcast` fails closed — N-260 — and Java delegates to an injected `Provider`) and are unchanged.
