@@ -40,6 +40,7 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     validate_methods(contract, &mut errors, &mut warnings);
     let call_depth_exceeded = check_no_recursion(contract, &mut errors);
     check_reserved_names(contract, &mut errors);
+    check_redeclarations(contract, &mut errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -61,6 +62,46 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     }
 
     ValidationResult { errors, warnings }
+}
+
+/// N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
+/// Statement Restrictions). A scope is one statement list -- a method or
+/// constructor body, an if branch, an else branch, a loop body -- and a
+/// method's parameters belong to its body's top-level list. A declaration in a
+/// NESTED list that reuses an outer name (shadowing) is not a re-declaration;
+/// the spec is silent on it and every tier lowers it as the renamed program.
+/// The loop iterator lives in the loop header, not in the body list.
+fn check_redeclarations(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    use std::collections::HashSet;
+    fn walk(stmts: &[Statement], declared: &mut HashSet<String>, errors: &mut Vec<Diagnostic>) {
+        for s in stmts {
+            match s {
+                Statement::VariableDecl { name, source_location, .. } => {
+                    if !declared.insert(name.clone()) {
+                        errors.push(Diagnostic::error(
+                            format!("'{}' is already declared in this scope and cannot be re-declared", name),
+                            Some(source_location.clone()),
+                        ));
+                    }
+                }
+                Statement::IfStatement { then_branch, else_branch, .. } => {
+                    walk(then_branch, &mut HashSet::new(), errors);
+                    if let Some(e) = else_branch {
+                        walk(e, &mut HashSet::new(), errors);
+                    }
+                }
+                Statement::ForStatement { body, .. } => {
+                    walk(body, &mut HashSet::new(), errors);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for method in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        let mut declared: HashSet<String> = method.params.iter().map(|p| p.name.clone()).collect();
+        walk(&method.body, &mut declared, errors);
+    }
 }
 
 /// N-065 / N-060: refuse a declared identifier spelled like a name a compiler

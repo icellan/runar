@@ -37,6 +37,7 @@ test {
     _ = @import("passes/parse_ruby.zig");
     _ = @import("passes/identifier_collision.zig");
     _ = @import("tests/f017_identifier_collision.zig");
+    _ = @import("tests/n509_redeclare.zig");
     _ = @import("tests/n050_static_methods.zig");
     _ = @import("tests/n303_decorated_init.zig");
     _ = @import("tests/f011_unterminated_literal.zig");

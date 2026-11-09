@@ -75,6 +75,7 @@ fn validateWithMode(
     try validateMethods(allocator, contract, &errors, &warnings);
     const call_depth_exceeded = try checkNoRecursion(allocator, contract, &errors);
     try checkReservedNames(allocator, contract, &errors);
+    try checkRedeclarations(allocator, contract, &errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -159,6 +160,61 @@ fn checkReservedNames(
         for (m.params) |p| try c.check(p.name, m.source_loc);
         try c.walk(m.body, m.source_loc);
     }
+}
+
+/// N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
+/// Statement Restrictions). A scope is one statement list -- a method or
+/// constructor body, an if branch, an else branch, a loop body -- and a
+/// method's parameters belong to its body's top-level list. A declaration in a
+/// NESTED list that reuses an outer name (shadowing) is not a re-declaration;
+/// the spec is silent on it and every tier lowers it as the renamed program.
+/// The loop iterator lives in the loop header, not in the body list.
+fn checkRedeclarations(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const Set = std.StringHashMapUnmanaged(void);
+    const Checker = struct {
+        a: Allocator,
+        errs: *std.ArrayListUnmanaged(CompilerDiagnostic),
+
+        fn decl(self: @This(), declared: *Set, name: []const u8, loc: ?SourceLocation) !void {
+            const gop = try declared.getOrPut(self.a, name);
+            if (!gop.found_existing) return;
+            const msg = try std.fmt.allocPrint(self.a, "'{s}' is already declared in this scope and cannot be re-declared", .{name});
+            try self.errs.append(self.a, .{ .message = msg, .location = loc, .severity = .@"error", .owned_message = true });
+        }
+
+        fn walk(self: @This(), stmts: []const Statement, declared: *Set, loc: ?SourceLocation) Allocator.Error!void {
+            for (stmts) |stmt| switch (stmt) {
+                .const_decl => |d| try self.decl(declared, d.name, d.source_loc orelse loc),
+                .let_decl => |d| try self.decl(declared, d.name, d.source_loc orelse loc),
+                .if_stmt => |i| {
+                    try self.fresh(i.then_body, loc);
+                    if (i.else_body) |e| try self.fresh(e, loc);
+                },
+                .for_stmt => |f| try self.fresh(f.body, loc),
+                else => {},
+            };
+        }
+
+        fn fresh(self: @This(), stmts: []const Statement, loc: ?SourceLocation) Allocator.Error!void {
+            var inner: Set = .empty;
+            defer inner.deinit(self.a);
+            try self.walk(stmts, &inner, loc);
+        }
+
+        fn method(self: @This(), params: anytype, body: []const Statement, loc: ?SourceLocation) !void {
+            var declared: Set = .empty;
+            defer declared.deinit(self.a);
+            for (params) |p| try declared.put(self.a, p.name, {});
+            try self.walk(body, &declared, loc);
+        }
+    };
+    const c = Checker{ .a = allocator, .errs = errors };
+    try c.method(contract.constructor.params, contract.constructor.body, null);
+    for (contract.methods) |m| try c.method(m.params, m.body, m.source_loc);
 }
 
 /// Free a ValidationResult previously returned by validate().

@@ -47,6 +47,7 @@ export function validate(contract: ContractNode): ValidationResult {
   validateMethods(ctx);
   const callDepthExceeded = checkNoRecursion(ctx);
   checkReservedNames(ctx);
+  checkRedeclarations(ctx);
   // N-180: the Rabin-provenance and sighash passes walk the private-method
   // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
   // refuses, so stop here.
@@ -105,6 +106,40 @@ function checkReservedNames(ctx: ValidationContext): void {
     if (method.name !== 'constructor') check(method.name, method.sourceLocation);
     for (const p of method.params) check(p.name, method.sourceLocation);
     walk(method.body);
+  }
+}
+
+/**
+ * N-509: a local cannot be re-declared in the same scope (spec/grammar.md,
+ * Statement Restrictions). A scope is one statement list -- a method or
+ * constructor body, an if branch, an else branch, a loop body -- and a
+ * method's parameters belong to its body's top-level list. A declaration in
+ * a NESTED list that reuses an outer name (shadowing) is not a re-declaration;
+ * the spec is silent on it and every tier lowers it as the renamed program.
+ * The loop iterator lives in the loop header, not in the body list.
+ */
+function checkRedeclarations(ctx: ValidationContext): void {
+  const walk = (stmts: readonly Statement[], declared: Set<string>): void => {
+    for (const s of stmts) {
+      if (s.kind === 'variable_decl') {
+        if (declared.has(s.name)) {
+          ctx.errors.push(makeDiagnostic(
+            `'${s.name}' is already declared in this scope and cannot be re-declared`,
+            'error',
+            s.sourceLocation,
+          ));
+        }
+        declared.add(s.name);
+      } else if (s.kind === 'if_statement') {
+        walk(s.then, new Set());
+        if (s.else) walk(s.else, new Set());
+      } else if (s.kind === 'for_statement') {
+        walk(s.body, new Set());
+      }
+    }
+  };
+  for (const method of [ctx.contract.constructor, ...ctx.contract.methods]) {
+    walk(method.body, new Set(method.params.map((p) => p.name)));
   }
 }
 

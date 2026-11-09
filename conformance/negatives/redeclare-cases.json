@@ -1,0 +1,153 @@
+{
+  "cases": [
+    {
+      "name": "ts-const-const",
+      "file": "RdConstConst.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdConstConst extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    const a = p + 1n;\n    const a = p + 2n;\n    assert(a == this.k);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdConstConst extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    const a = p + 1n;\n    const b = p + 2n;\n    assert(b == this.k);\n  }\n}\n",
+      "error": "'a' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-let-let",
+      "file": "RdLetLet.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdLetLet extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x = p + 1n;\n    let x = p + 2n;\n    assert(x == this.k);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdLetLet extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x = p + 1n;\n    let y = p + 2n;\n    assert(y == this.k);\n  }\n}\n",
+      "error": "'x' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-let-var",
+      "file": "RdLetVar.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdLetVar extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x = p + 1n;\n    var x = p + 2n;\n    assert(x == this.k);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdLetVar extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x = p + 1n;\n    var y = p + 2n;\n    assert(y == this.k);\n  }\n}\n",
+      "error": "'x' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-const-let-reassign",
+      "file": "RdConstLet.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdConstLet extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    const a = p + 1n;\n    let a = p + 2n;\n    a = 3n;\n    assert(a == this.k);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdConstLet extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    const a = p + 1n;\n    let b = p + 2n;\n    b = 3n;\n    assert(b == this.k);\n  }\n}\n",
+      "error": "'a' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-type-change",
+      "file": "RdTypeChange.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, toByteString, len } from 'runar-lang';\n\nclass RdTypeChange extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x: bigint = p;\n    let x: ByteString = toByteString('00');\n    assert(len(x) == this.k);\n  }\n}\n",
+      "twin": "import { SmartContract, assert, ByteString, toByteString, len } from 'runar-lang';\n\nclass RdTypeChange extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x: bigint = p;\n    let y: ByteString = toByteString('00');\n    assert(len(y) == this.k);\n  }\n}\n",
+      "error": "'x' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-same-scope-in-if",
+      "file": "RdInIf.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInIf extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      let y = p + 1n;\n      let y = p + 2n;\n      assert(y == this.k);\n    }\n    assert(p > 0n);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInIf extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      let y = p + 1n;\n      let z = p + 2n;\n      assert(z == this.k);\n    }\n    assert(p > 0n);\n  }\n}\n",
+      "error": "'y' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-same-scope-in-else",
+      "file": "RdInElse.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInElse extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      assert(p > 0n);\n    } else {\n      let y = p + 1n;\n      let y = p + 2n;\n      assert(y == this.k);\n    }\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInElse extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      assert(p > 0n);\n    } else {\n      let y = p + 1n;\n      let z = p + 2n;\n      assert(z == this.k);\n    }\n  }\n}\n",
+      "error": "'y' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-same-scope-in-for",
+      "file": "RdInFor.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInFor extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let s = 0n;\n    for (let i = 0n; i < 2n; i++) {\n      let t = i;\n      let t = i + 1n;\n      s = s + t;\n    }\n    assert(s == p);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdInFor extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let s = 0n;\n    for (let i = 0n; i < 2n; i++) {\n      let t = i;\n      let u = i + 1n;\n      s = s + u;\n    }\n    assert(s == p);\n  }\n}\n",
+      "error": "'t' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-method-param",
+      "file": "RdParam.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdParam extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let p = 5n;\n    assert(p == this.k && c);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdParam extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let q = 5n;\n    assert(q == this.k && c);\n  }\n}\n",
+      "error": "'p' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "ts-constructor-param",
+      "file": "RdCtorParam.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdCtorParam extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n    const k = 2n;\n    assert(k > 0n);\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    assert(p == this.k && c);\n  }\n}\n",
+      "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdCtorParam extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n    const k2 = 2n;\n    assert(k2 > 0n);\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    assert(p == this.k && c);\n  }\n}\n",
+      "error": "'k' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "go-same-scope",
+      "file": "Anchor.runar.go",
+      "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype Anchor struct {\n\trunar.SmartContract\n\tT runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *Anchor) Go(x runar.Int, flag runar.Bool) {\n\tb := flag\n\tb := x > 0\n\trunar.Assert(b)\n}\n",
+      "twin": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype Anchor struct {\n\trunar.SmartContract\n\tT runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *Anchor) Go(x runar.Int, flag runar.Bool) {\n\tb := flag\n\td := x > 0\n\trunar.Assert(d)\n}\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "rs-same-scope",
+      "file": "Anchor.runar.rs",
+      "src": "use runar::prelude::*;\n\n#[runar::contract]\nstruct Anchor {\n    #[readonly]\n    t: Int,\n}\n\nimpl Anchor {\n    pub fn go(&self, x: Int, flag: bool) {\n        let b = flag;\n        let b = x > 0;\n        assert!(b);\n    }\n}\n",
+      "twin": "use runar::prelude::*;\n\n#[runar::contract]\nstruct Anchor {\n    #[readonly]\n    t: Int,\n}\n\nimpl Anchor {\n    pub fn go(&self, x: Int, flag: bool) {\n        let b = flag;\n        let c = x > 0;\n        assert!(c);\n    }\n}\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "sol-same-scope",
+      "file": "Anchor.runar.sol",
+      "src": "pragma runar ^0.1.0;\n\ncontract Anchor is SmartContract {\n    int immutable t;\n\n    constructor(int _t) {\n        t = _t;\n    }\n\n    function go(int x, bool flag) public {\n        bool b = flag;\n        bool b = x > 0;\n        require(b);\n    }\n}\n",
+      "twin": "pragma runar ^0.1.0;\n\ncontract Anchor is SmartContract {\n    int immutable t;\n\n    constructor(int _t) {\n        t = _t;\n    }\n\n    function go(int x, bool flag) public {\n        bool b = flag;\n        bool c = x > 0;\n        require(c);\n    }\n}\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "move-same-scope",
+      "file": "Anchor.runar.move",
+      "src": "module Anchor {\n    use runar::types::{Int};\n\n    struct Anchor {\n        t: Int,\n    }\n\n    public fun go(contract: &Anchor, x: Int, flag: bool) {\n        let b = flag;\n        let b = x > 0;\n        assert!(b, 0);\n    }\n}\n",
+      "twin": "module Anchor {\n    use runar::types::{Int};\n\n    struct Anchor {\n        t: Int,\n    }\n\n    public fun go(contract: &Anchor, x: Int, flag: bool) {\n        let b = flag;\n        let c = x > 0;\n        assert!(c, 0);\n    }\n}\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "zig-same-scope",
+      "file": "Anchor.runar.zig",
+      "src": "const runar = @import(\"runar\");\n\npub const Anchor = struct {\n    pub const Contract = runar.SmartContract;\n\n    t: i64,\n\n    pub fn init(t: i64) Anchor {\n        return .{ .t = t };\n    }\n\n    pub fn go(self: *const Anchor, x: i64, flag: bool) void {\n        const b = flag;\n        const b = x > 0;\n        runar.assert(b);\n    }\n};\n",
+      "twin": "const runar = @import(\"runar\");\n\npub const Anchor = struct {\n    pub const Contract = runar.SmartContract;\n\n    t: i64,\n\n    pub fn init(t: i64) Anchor {\n        return .{ .t = t };\n    }\n\n    pub fn go(self: *const Anchor, x: i64, flag: bool) void {\n        const b = flag;\n        const c = x > 0;\n        runar.assert(c);\n    }\n};\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    },
+    {
+      "name": "java-same-scope",
+      "file": "Anchor.runar.java",
+      "src": "package runar.examples;\n\nimport runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.annotations.Readonly;\nimport runar.lang.types.Bigint;\n\nimport static runar.lang.Builtins.assertThat;\nimport static runar.lang.Builtins.abs;\n\nclass Anchor extends SmartContract {\n    @Readonly Bigint t;\n\n    Anchor(Bigint t) {\n        super(t);\n        this.t = t;\n    }\n\n    @Public\n    void go(Bigint x, boolean flag) {\n        boolean b = flag;\n        boolean b = x > 0;\n        assertThat(b);\n    }\n}\n",
+      "twin": "package runar.examples;\n\nimport runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.annotations.Readonly;\nimport runar.lang.types.Bigint;\n\nimport static runar.lang.Builtins.assertThat;\nimport static runar.lang.Builtins.abs;\n\nclass Anchor extends SmartContract {\n    @Readonly Bigint t;\n\n    Anchor(Bigint t) {\n        super(t);\n        this.t = t;\n    }\n\n    @Public\n    void go(Bigint x, boolean flag) {\n        boolean b = flag;\n        boolean c = x > 0;\n        assertThat(c);\n    }\n}\n",
+      "error": "'b' is already declared in this scope and cannot be re-declared"
+    }
+  ],
+  "accept": [
+    {
+      "name": "ts-nested-if-shadows-local",
+      "file": "RdOkNestedIf.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkNestedIf extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let x = p + 1n;\n    if (c) {\n      let x = p + 2n;\n      assert(x == this.k);\n    }\n    assert(x == p + 1n);\n  }\n}\n"
+    },
+    {
+      "name": "ts-nested-if-shadows-param",
+      "file": "RdOkNestedParam.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkNestedParam extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      let p = 5n;\n      assert(p == 5n);\n    }\n    assert(p == this.k);\n  }\n}\n"
+    },
+    {
+      "name": "ts-local-named-like-property",
+      "file": "RdOkProperty.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkProperty extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    const k = 5n;\n    assert(k == p + this.k && c);\n  }\n}\n"
+    },
+    {
+      "name": "ts-for-body-shadows-iterator",
+      "file": "RdOkForIter.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkForIter extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let s = 0n;\n    for (let i = 0n; i < 2n; i++) {\n      let i = 7n;\n      s = s + i;\n    }\n    assert(s == p && c);\n  }\n}\n"
+    },
+    {
+      "name": "ts-sibling-branches",
+      "file": "RdOkSiblings.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkSiblings extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      let y = p + 1n;\n      assert(y == this.k);\n    } else {\n      let y = p + 2n;\n      assert(y == this.k);\n    }\n  }\n}\n"
+    },
+    {
+      "name": "ts-redeclare-after-block",
+      "file": "RdOkAfterBlock.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkAfterBlock extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    if (c) {\n      let y = p + 1n;\n      assert(y == this.k);\n    }\n    let y = p + 2n;\n    assert(y == this.k);\n  }\n}\n"
+    },
+    {
+      "name": "ts-two-loops-same-iterator",
+      "file": "RdOkTwoLoops.runar.ts",
+      "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RdOkTwoLoops extends SmartContract {\n  readonly k: bigint;\n\n  constructor(k: bigint) {\n    super(k);\n    this.k = k;\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let s = 0n;\n    for (let i = 0n; i < 2n; i++) {\n      s = s + i;\n    }\n    for (let i = 0n; i < 3n; i++) {\n      s = s + i;\n    }\n    assert(s == p && c);\n  }\n}\n"
+    }
+  ]
+}

@@ -54,6 +54,7 @@ func Validate(contract *ContractNode) *ValidationResult {
 	ctx.validateMethods()
 	callDepthExceeded := ctx.checkNoRecursion()
 	ctx.checkReservedNames()
+	ctx.checkRedeclarations()
 	// N-180: the Rabin-provenance and sighash passes walk the private-method
 	// call graph; past MaxCallDepth that walk is the very depth the limit
 	// refuses, so stop here.
@@ -93,6 +94,52 @@ func (ctx *validationContext) addWarning(msg string) {
 
 func (ctx *validationContext) addWarningWithLoc(msg string, loc *SourceLocation) {
 	ctx.warnings = append(ctx.warnings, Diagnostic{Message: msg, Severity: SeverityWarning, Loc: loc})
+}
+
+// checkRedeclarations is N-509: a local cannot be re-declared in the same
+// scope (spec/grammar.md, Statement Restrictions). A scope is one statement
+// list -- a method or constructor body, an if branch, an else branch, a loop
+// body -- and a method's parameters belong to its body's top-level list. A
+// declaration in a NESTED list that reuses an outer name (shadowing) is not a
+// re-declaration; the spec is silent on it and every tier lowers it as the
+// renamed program. The loop iterator lives in the loop header, not the body.
+func (ctx *validationContext) checkRedeclarations() {
+	var walk func(stmts []Statement, declared map[string]bool)
+	decl := func(name string, loc SourceLocation, declared map[string]bool) {
+		if declared[name] {
+			l := loc
+			ctx.addErrorWithLoc(fmt.Sprintf("'%s' is already declared in this scope and cannot be re-declared", name), &l)
+		}
+		declared[name] = true
+	}
+	walk = func(stmts []Statement, declared map[string]bool) {
+		for _, s := range stmts {
+			switch st := s.(type) {
+			case VariableDeclStmt:
+				decl(st.Name, st.SourceLocation, declared)
+			case *VariableDeclStmt:
+				decl(st.Name, st.SourceLocation, declared)
+			case IfStmt:
+				walk(st.Then, map[string]bool{})
+				walk(st.Else, map[string]bool{})
+			case *IfStmt:
+				walk(st.Then, map[string]bool{})
+				walk(st.Else, map[string]bool{})
+			case ForStmt:
+				walk(st.Body, map[string]bool{})
+			case *ForStmt:
+				walk(st.Body, map[string]bool{})
+			}
+		}
+	}
+	methods := append([]MethodNode{ctx.contract.Constructor}, ctx.contract.Methods...)
+	for _, m := range methods {
+		declared := map[string]bool{}
+		for _, p := range m.Params {
+			declared[p.Name] = true
+		}
+		walk(m.Body, declared)
+	}
 }
 
 // checkReservedNames is N-065 / N-060: refuse a declared identifier spelled

@@ -75,9 +75,10 @@ export function snakeToCamelCore(name: string): string {
  * Scope is the whole contract, not one method: a spelling in one method
  * collides with a different spelling of the same name in another. Using ONE
  * spelling many times (a property and the constructor parameter that sets
- * it, Rust `let x` shadowing, the same local in two methods) is not a
- * collision, and a single identifier that maps to a different name (`sum_`
- * -> `sum`) is still accepted. References are not recorded: an undeclared
+ * it, Rust `let x` shadowing -- which N-509 refuses separately when both
+ * are in one scope -- the same local in two methods) is not a collision,
+ * and a single identifier that maps to a different name (`sum_` -> `sum`)
+ * is still accepted. References are not recorded: an undeclared
  * spelling is already an error in the source language itself.
  */
 export function identifierCollisionMessage(

@@ -1083,3 +1083,64 @@ describe('N-401: statement walkers visit for-loop header slots', () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// N-509: a local cannot be re-declared in the same scope (spec/grammar.md).
+// One scope = one statement list; the method's parameters belong to its body's
+// top-level list. Shadowing in a NESTED list is not a re-declaration.
+// ---------------------------------------------------------------------------
+
+describe('N-509: same-scope re-declaration', () => {
+  const REDECL = (body: string, ctor = 'super(k);\n    this.k = k;') => `
+class R extends SmartContract {
+  readonly k: bigint;
+  constructor(k: bigint) {
+    ${ctor}
+  }
+  public unlock(p: bigint, c: boolean) {
+    ${body}
+  }
+}
+`;
+  const msg = (n: string) => `'${n}' is already declared in this scope and cannot be re-declared`;
+  const errs = (src: string) => validateSource(src).errors.map((e) => e.message);
+
+  const refused: Array<[string, string, string] | [string, string, string, string]> = [
+    ['const / const', 'const a = 1n; const a = 2n; assert(a == p);', 'a'],
+    ['let / let', 'let x = 1n; let x = 2n; assert(x == p);', 'x'],
+    ['const / let', 'const a = 1n; let a = 2n; a = 3n; assert(a == p);', 'a'],
+    ['twice inside one if branch', 'if (c) { let y = 1n; let y = 2n; assert(y == p); } assert(c);', 'y'],
+    ['twice inside one else branch', 'if (c) { assert(c); } else { let y = 1n; let y = 2n; assert(y == p); }', 'y'],
+    ['twice inside one loop body', 'let s = 0n; for (let i = 0n; i < 2n; i++) { let t = i; let t = i; s = s + t; } assert(s == p);', 't'],
+    ['a method parameter at the top of its body', 'let p = 5n; assert(p == this.k && c);', 'p'],
+    ['a constructor parameter at the top of its body', 'assert(p == this.k && c);', 'k',
+      'super(k);\n    this.k = k;\n    const k = 2n;\n    assert(k > 0n);'],
+  ];
+  for (const [name, body, id, ctor] of refused) {
+    it(`refuses ${name}`, () => {
+      expect(errs(REDECL(body, ctor))).toContain(msg(id));
+    });
+  }
+
+  it('reports the second declaration, once', () => {
+    const r = validateSource(REDECL('const a = 1n;\n    const a = 2n;\n    assert(a == p);'));
+    const hits = r.errors.filter((e) => e.message === msg('a'));
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.loc?.line).toBe(10);
+  });
+
+  const accepted: Array<[string, string]> = [
+    ['a nested if shadowing an outer local', 'let x = 1n; if (c) { let x = 2n; assert(x == 2n); } assert(x == p);'],
+    ['a nested if shadowing a parameter', 'if (c) { let p = 5n; assert(p == 5n); } assert(p == this.k);'],
+    ['a local named like a property', 'const k = 5n; assert(k == p + this.k && c);'],
+    ['a loop body shadowing its iterator', 'let s = 0n; for (let i = 0n; i < 2n; i++) { let i = 7n; s = s + i; } assert(s == p && c);'],
+    ['sibling branches declaring the same name', 'if (c) { let y = 1n; assert(y == p); } else { let y = 2n; assert(y == p); }'],
+    ['a declaration after the block that declared it ended', 'if (c) { let y = 1n; assert(y == p); } let y = 2n; assert(y == p);'],
+    ['two loops with the same iterator', 'let s = 0n; for (let i = 0n; i < 2n; i++) { s = s + i; } for (let i = 0n; i < 3n; i++) { s = s + i; } assert(s == p && c);'],
+  ];
+  for (const [name, body] of accepted) {
+    it(`accepts ${name}`, () => {
+      expect(errs(REDECL(body)).filter((m) => m.includes('already declared'))).toEqual([]);
+    });
+  }
+});
