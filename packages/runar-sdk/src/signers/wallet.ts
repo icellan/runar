@@ -48,6 +48,9 @@ export class WalletSigner implements Signer {
     const { publicKey } = await this.wallet.getPublicKey({
       protocolID: this.protocolID,
       keyID: this.keyID,
+      // Same counterparty as sign/signHash, so the key reported here is the
+      // key that signs, without relying on the wallet's default.
+      counterparty: 'self',
     });
     this.cachedPubKey = publicKey;
     return publicKey;
