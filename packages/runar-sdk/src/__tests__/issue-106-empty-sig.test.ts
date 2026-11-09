@@ -24,8 +24,8 @@
  *     evaluated failing branch holds it, e.g. the signer is pkB and branch A
  *     carries the non-empty invalid signature. The test pins the wire bytes.
  *
- * Note on the interpreter: the installed @bsv/sdk (2.0.7) `Spend` does NOT
- * implement SCRIPT_VERIFY_NULLFAIL — a non-empty invalid signature makes
+ * Note on the interpreter: @bsv/sdk's default `Spend` context does NOT
+ * enforce SCRIPT_VERIFY_NULLFAIL — a non-empty invalid signature makes
  * CHECKSIG push `false` rather than abort — so it cannot itself REJECT the
  * `[null, null]` tx. The reporter cited a NULLFAIL-enforcing fork
  * (`packages/sdk/src/script/Spend.ts:1326`); a real node/ARC enforces it too.
