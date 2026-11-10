@@ -174,6 +174,8 @@ function regroupNested(flat: unknown[], dims: number[], offset = 0): { value: un
  *  - overlong tails — bytes left over after the last declared field throw
  *    instead of being silently dropped.
  *
+ * Every rejection throws {@link MalformedScriptError}.
+ *
  * Restoring wrong-but-plausible state from a corrupted continuation is worse
  * than not restoring it at all: the caller then signs a continuation output
  * committing to that state.
@@ -183,9 +185,14 @@ export function deserializeState(
   scriptHex: string,
 ): Record<string, unknown> {
   if (scriptHex.length % 2 !== 0) {
-    throw new Error(
+    throw new MalformedScriptError(
       `deserializeState: state blob is ${scriptHex.length} hex chars — not a whole number of bytes`,
     );
+  }
+  // Checked once here: a non-hex byte would otherwise reach BigInt() as a
+  // RangeError, or decode silently inside a fixed-width field.
+  if (!isHexBytes(scriptHex)) {
+    throw new MalformedScriptError('deserializeState: state blob is not a hex string');
   }
 
   const sorted = [...fields].sort((a, b) => a.index - b.index);
@@ -217,7 +224,7 @@ export function deserializeState(
   }
 
   if (offset !== scriptHex.length) {
-    throw new Error(
+    throw new MalformedScriptError(
       `deserializeState: ${(scriptHex.length - offset) / 2} unexpected trailing byte(s) after the ` +
         `last state field (consumed ${offset / 2} of ${scriptHex.length / 2} bytes) — the state ` +
         `section does not match the artifact's stateFields`,
@@ -559,7 +566,7 @@ function decodeStateValue(
   if (width) {
     const hexWidth = width.size * 2;
     if (offset + hexWidth > hex.length) {
-      throw new Error(
+      throw new MalformedScriptError(
         `deserializeState: truncated state — field "${label}" (${type}) needs ${width.size} byte(s) ` +
           `at offset ${offset / 2} but only ${(hex.length - offset) / 2} byte(s) remain`,
       );
@@ -625,7 +632,7 @@ function decodePushData(
   /** Assert `chars` hex chars are available from `offset`, else fail closed. */
   const need = (chars: number, what: string): void => {
     if (offset + chars > hex.length) {
-      throw new Error(
+      throw new MalformedScriptError(
         `deserializeState: truncated state — field "${label}" ${what} runs past the end of the ` +
           `state section (needs ${chars / 2} byte(s) at offset ${offset / 2}, ` +
           `only ${(hex.length - offset) / 2} remain)`,
@@ -636,7 +643,7 @@ function decodePushData(
   need(2, 'push opcode');
   const opcode = parseInt(hex.slice(offset, offset + 2), 16);
   if (Number.isNaN(opcode)) {
-    throw new Error(
+    throw new MalformedScriptError(
       `deserializeState: field "${label}" — non-hex byte at offset ${offset / 2} in the state section`,
     );
   }
@@ -678,7 +685,9 @@ function decodePushData(
     const b1 = parseInt(hex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(hex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(hex.slice(offset + 8, offset + 10), 16);
-    const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    // Unsigned: a signed `b3 << 24` made lengths >= 0x80000000 negative,
+    // which slipped past `need` and moved the cursor backwards.
+    const len = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
     const dataLen = len * 2;
     need(10 + dataLen, 'OP_PUSHDATA4 payload');
     return {
@@ -690,7 +699,7 @@ function decodePushData(
   // Not a push opcode at all — `encodePushDataState` can never emit one, so the
   // state section is malformed. Previously this silently consumed one byte and
   // returned an empty value, which desynchronised every subsequent field.
-  throw new Error(
+  throw new MalformedScriptError(
     `deserializeState: field "${label}" — byte 0x${opcode.toString(16).padStart(2, '0')} at offset ` +
       `${offset / 2} is not a push opcode; the state section is malformed`,
   );

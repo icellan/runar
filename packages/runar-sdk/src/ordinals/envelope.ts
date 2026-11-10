@@ -132,7 +132,9 @@ function readPushData(
     const b1 = parseInt(scriptHex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(scriptHex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(scriptHex.slice(offset + 8, offset + 10), 16);
-    const len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    // Unsigned: a signed `b3 << 24` made lengths >= 0x80000000 negative,
+    // which slipped past the bounds check below.
+    const len = (b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000;
     const dataLen = len * 2;
     if (offset + 10 + dataLen > scriptHex.length) return null;
     return { data: scriptHex.slice(offset + 10, offset + 10 + dataLen), bytesRead: 10 + dataLen };
@@ -166,7 +168,9 @@ function opcodeSize(scriptHex: string, offset: number): number {
     const b1 = parseInt(scriptHex.slice(offset + 4, offset + 6), 16);
     const b2 = parseInt(scriptHex.slice(offset + 6, offset + 8), 16);
     const b3 = parseInt(scriptHex.slice(offset + 8, offset + 10), 16);
-    return 10 + (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) * 2;
+    // Unsigned: a signed `b3 << 24` made lengths >= 0x80000000 negative, so
+    // findInscriptionEnvelope stepped by zero or backwards and never returned.
+    return 10 + ((b0 | (b1 << 8) | (b2 << 16)) + b3 * 0x1000000) * 2;
   }
 
   return 2; // all other opcodes are 1 byte
