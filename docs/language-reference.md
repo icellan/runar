@@ -807,7 +807,10 @@ The BSV node default is `DEFAULT_MAX_SCRIPT_SIZE_POLICY_AFTER_GENESIS = 500 * ON
 
 ## Compiler Directives
 
-Two directives change what the compiler emits. On the `.runar.ts` surface they
+Three directives change what the compiler emits. A third, `@bindingVariant`,
+exists only on `.runar.ts` and is covered in its own section
+([below](#bindingvariant)); this paragraph and the table describe the other two.
+On the `.runar.ts` surface they
 are comments, shown below. The other eight surfaces spell each one as a native
 modifier that mirrors how that surface spells `readonly` (N-093); every tier
 reads all nine spellings into the same AST, so the bytes are identical:
@@ -928,6 +931,56 @@ Worked example, with both directives and their falsifications:
 port in every other surface under `examples/<format>/compiler-directives/`. The
 conformance fixtures `compiler-directives` and `embed-always-fixed-array` pin
 the bytes across all seven compilers.
+
+### `@bindingVariant`
+
+Every `checkPreimage` — the one auto-injected into a `StatefulSmartContract`
+method, or one a stateless covenant calls itself — compiles to a fixed block of
+Script that ties the pushed preimage to the real spending transaction (the
+OP_PUSH_TX binding). `@bindingVariant` picks which of two such blocks a public
+method gets:
+
+| Directive | Size | Spendable when the spending tx has |
+|---|---|---|
+| none, or `@bindingVariant lowS` | 422 bytes | any nVersion, including 1 |
+| `@bindingVariant all` | 376 bytes | nVersion greater than 1 only |
+
+```typescript
+/** @bindingVariant all */
+public bump() { ... }
+```
+
+Leave it out unless you have a reason. `lowS` is the default and is what every
+method without the directive gets. Its only failure case for an honest spend
+has probability 2⁻²⁵⁶.
+
+`all` saves 46 bytes by skipping the reduction that keeps the derived
+signature canonical. Roughly half of all honest spends then carry a high-S or
+non-minimal signature, which the node refuses when the spending transaction has
+nVersion 1. **Every Rúnar SDK builds nVersion 1 transactions**, so spending an
+`all` output through the SDKs fails unpredictably. Use it only when you build
+the spending transaction yourself with nVersion greater than 1. The compiler cannot see the spending transaction and does not check
+this for you.
+
+Rules:
+
+- **`.runar.ts` only.** The other eight surface parsers have no spelling for
+  it and refuse the marker with an error naming the surface, rather than
+  silently compiling the default.
+- **Public methods only.** On a private method it is a compile error: only
+  public methods are spending entry points.
+- **Exact values.** The value is case-sensitive: `lowS` or `all`. Anything
+  else, or a second `@bindingVariant` on the same method, is a compile error,
+  never a fall-back to the default. The marker follows the same placement rules
+  as `@sighash` above.
+- **Independent of `@sighash`.** A method may carry both; the sighash flag
+  is part of the binding in either variant.
+
+The ABI does not record the choice; the difference is visible only in the
+script bytes. The conformance fixture
+[`conformance/preimage-binding/StatefulBindingAll.runar.ts`](../conformance/preimage-binding/StatefulBindingAll.runar.ts)
+pins the `all` block across all seven compilers, next to `StatefulBinding.runar.ts`
+for the default.
 
 ---
 

@@ -82,3 +82,27 @@ describe('R-209: both compiler directives have a worked example and are document
     );
   });
 });
+
+describe('@bindingVariant is documented (ports #170 follow-up)', () => {
+  // The third directive shipped in #187 with no mention in the reference. Its
+  // `all` form is unspendable under the nVersion every Rúnar SDK builds, so a
+  // user who finds it only in the compiler source can lock funds they cannot
+  // spend. The reference has to name both variants, the nVersion condition,
+  // and the fact that only `.runar.ts` accepts it.
+  const ref = readFileSync(join(ROOT, 'docs/language-reference.md'), 'utf-8');
+  const start = ref.indexOf('### `@bindingVariant`');
+  const section = start === -1 ? '' : ref.slice(start, ref.indexOf('\n## ', start));
+
+  it('has its own section under Compiler Directives', () => {
+    expect(start, 'docs/language-reference.md has no `@bindingVariant` section').toBeGreaterThan(
+      ref.indexOf('## Compiler Directives'),
+    );
+  });
+
+  it('names both variants, the nVersion condition and the TS-only surface', () => {
+    expect(section).toContain('@bindingVariant lowS');
+    expect(section).toContain('@bindingVariant all');
+    expect(section).toMatch(/nVersion/);
+    expect(section).toMatch(/\.runar\.ts/);
+  });
+});
