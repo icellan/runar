@@ -821,6 +821,23 @@ export class RunarInterpreter {
   // Function call evaluation
   // -------------------------------------------------------------------------
 
+  /**
+   * The diagnostic text for a failed `assert(cond, message)`. A string
+   * literal is reported verbatim; a non-literal ByteString expression (the
+   * pre-existing path) is evaluated and UTF-8 decoded; no message is
+   * 'assert failed'.
+   */
+  private assertMessage(
+    expr: Expression | undefined,
+    env: Environment,
+    methods: MethodNode[],
+  ): string {
+    if (!expr) return 'assert failed';
+    if (expr.kind === 'bytestring_literal') return expr.value;
+    const value = this.evalExpr(expr, env, methods);
+    return value.kind === 'bytes' ? new TextDecoder().decode(value.value) : 'assert failed';
+  }
+
   private evalCallExpr(
     callee: Expression,
     argExprs: Expression[],
@@ -896,22 +913,26 @@ export class RunarInterpreter {
       throw new Error(`Cannot call expression of kind: ${callee.kind}`);
     }
 
+    // `assert(cond, "message")`: the message is a plain string on the
+    // documented surface (language-reference "Assert", spec/grammar
+    // `message?: string`), stripped by the compiler and never a ByteString.
+    // The parser lowers EVERY string literal to `bytestring_literal`, so
+    // evaluating it with the other arguments read it as hex and threw
+    // `Invalid hex character` for any human-readable message — on every call
+    // of the method, passing or failing. Evaluate the condition alone and
+    // read the message as the text it is.
+    if (funcName === 'assert') {
+      if (argExprs.length < 1) throw new Error('assert requires at least one argument');
+      if (!this.toBool(this.evalExpr(argExprs[0]!, env, methods))) {
+        throw new AssertionError(this.assertMessage(argExprs[1], env, methods));
+      }
+      return { kind: 'void' };
+    }
+
     const args = argExprs.map((a) => this.evalExpr(a, env, methods));
 
     // Built-in functions.
     switch (funcName) {
-      case 'assert': {
-        if (args.length < 1) throw new Error('assert requires at least one argument');
-        if (!this.toBool(args[0]!)) {
-          const msg =
-            args.length > 1 && args[1]!.kind === 'bytes'
-              ? new TextDecoder().decode(args[1]!.value)
-              : 'assert failed';
-          throw new AssertionError(msg);
-        }
-        return { kind: 'void' };
-      }
-
       case 'exit': {
         if (args.length < 1) throw new Error('exit requires at least one argument');
         if (!this.toBool(args[0]!)) {
