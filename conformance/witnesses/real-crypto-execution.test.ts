@@ -43,6 +43,8 @@ import {
   testKey,
   type StatelessArg,
 } from '../../packages/runar-testing/src/index.js';
+import { computeTemplateHash, resolveSlotLayout } from '../../packages/runar-sdk/src/slot-layout.js';
+import type { RunarArtifact } from '../../packages/runar-ir-schema/src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TESTS_DIR = join(__dirname, '..', 'tests');
@@ -109,6 +111,9 @@ interface SpendSpec {
   /** precompiled-hex reject: the engine error must match this (case-insensitive)
    *  regex, pinning the FAILURE CLASS and not just the verdict. */
   vmErrorPattern?: string;
+  /** Stateful accept only: the slot layout and slot-excised template hash of
+   *  the EXECUTED deployment (see `checkTemplateHash`). */
+  templateHash?: TemplateHashPin;
 }
 
 /** Resolve the `.runar.ts` source for a fixture. */
@@ -239,6 +244,75 @@ function assertNearMissReachedEngine(
   ).toBe(true);
 }
 
+interface TemplateHashPin {
+  /** hash256 of the code part with every constructor slot's value bytes cut
+   *  out, push headers kept. Derived offline from the compiler's template
+   *  (`artifact.script` with the excised placeholder bytes removed), not
+   *  from slot-layout.ts. */
+  hash256: string;
+  /** Byte where the code part ends; the OP_RETURN (0x6a) must sit there. */
+  codePartByteLength: number;
+  /** Every constructor slot, at its DEPLOYED offset: `was` is the hand-derived
+   *  bytes deploy writes there, `pushHeaderBytes` how many of them are a
+   *  push header (kept in the hash) rather than value (cut). */
+  slots: { param: string; at: number; was: string; encoding: string; pushHeaderBytes: number }[];
+}
+
+const hash256 = (hex: string): string => {
+  const sha = (b: Buffer) => createHash('sha256').update(b).digest();
+  return sha(sha(Buffer.from(hex, 'hex'))).toString('hex');
+};
+
+/**
+ * The executed deployment, read back through resolveSlotLayout and
+ * computeTemplateHash. The layout must agree with hand-derived bytes at
+ * hand-derived offsets of the script the real Spend engine just accepted a
+ * spend of, and the template hash must equal both the offline pin and the
+ * hash of that executed code part with the declared value bytes cut out.
+ */
+function checkTemplateHash(
+  label: string,
+  pin: TemplateHashPin,
+  artifact: RunarArtifact,
+  lockingHex: string,
+  constructorArgs: unknown[],
+): void {
+  const code = lockingHex.slice(0, pin.codePartByteLength * 2);
+  expect(lockingHex.slice(pin.codePartByteLength * 2, pin.codePartByteLength * 2 + 2), `${label}: OP_RETURN`).toBe('6a');
+  let excised = code;
+  for (const sl of [...pin.slots].sort((a, b) => b.at - a.at)) {
+    expect(code.slice(sl.at * 2, sl.at * 2 + sl.was.length), `${label}: executed bytes at ${sl.at}`).toBe(sl.was);
+    excised = excised.slice(0, (sl.at + sl.pushHeaderBytes) * 2) + excised.slice(sl.at * 2 + sl.was.length);
+  }
+  expect(hash256(excised), `${label}: offline template-hash pin vs the executed code part`).toBe(pin.hash256);
+
+  const layout = resolveSlotLayout(artifact, constructorArgs);
+  expect(layout.codeByteLength, `${label}: resolved code length`).toBe(pin.codePartByteLength);
+  expect(
+    layout.slots.map((x) => ({
+      param: x.name,
+      at: x.byteOffset,
+      encoding: x.encoding,
+      byteLength: x.byteLength,
+      pushHeaderBytes: x.pushHeaderBytes,
+      valueByteOffset: x.valueByteOffset,
+      valueByteLength: x.valueByteLength,
+    })),
+    `${label}: resolved slot layout`,
+  ).toEqual(
+    pin.slots.map((sl) => ({
+      param: sl.param,
+      at: sl.at,
+      encoding: sl.encoding,
+      byteLength: sl.was.length / 2,
+      pushHeaderBytes: sl.pushHeaderBytes,
+      valueByteOffset: sl.at + sl.pushHeaderBytes,
+      valueByteLength: sl.was.length / 2 - sl.pushHeaderBytes,
+    })),
+  );
+  expect(computeTemplateHash(artifact, constructorArgs), `${label}: computeTemplateHash`).toBe(pin.hash256);
+}
+
 describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () => {
   for (const specFile of specFiles) {
     const spec: Spec = JSON.parse(readFileSync(join(SPEC_DIR, specFile), 'utf-8'));
@@ -324,6 +398,16 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
             const r = await runStatefulSpend({ ...spendOpts, attackerNewState });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
             assertNearMissReachedEngine(spec.fixture, s, r);
+            if (s.templateHash !== undefined) {
+              expect(s.expect === 'accept' && !s.tamperOutput, 'templateHash is for an accepted spend').toBe(true);
+              checkTemplateHash(
+                `${spec.fixture}.${s.method}`,
+                s.templateHash,
+                r.artifact!,
+                r.lockingHex!,
+                spendOpts.constructorArgs,
+              );
+            }
             // Independent state-VALUE check (audit #4): accept/reject is blind to
             // an ANF state-transition miscompile that produces the same wrong
             // state in both the SDK-built output and the covenant. Decode the

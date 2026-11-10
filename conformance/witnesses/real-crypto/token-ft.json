@@ -30,6 +30,61 @@
         },
         "balance": "10n",
         "mergeBalance": "0n"
+      },
+      "templateHash": {
+        "hash256": "2ff69aa12a0a1cfd9a15d878c9f950d68edd216d7d33367fd3dc6094ed97890f",
+        "codePartByteLength": 3035,
+        "slots": [
+          {
+            "param": "tokenId",
+            "at": 2119,
+            "was": "51",
+            "encoding": "op-n",
+            "pushHeaderBytes": 0
+          }
+        ]
+      }
+    },
+    {
+      "method": "send",
+      "args": [
+        null,
+        {
+          "$pubkey": "bob"
+        },
+        "1n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        "10n",
+        "0n",
+        "81"
+      ],
+      "signerKey": "alice",
+      "satoshis": 1,
+      "expect": "accept",
+      "note": "tokenId 0x81 deploys as OP_1NEGATE; same template hash as tokenId 0x01 (OP_1)",
+      "expectedState": {
+        "owner": {
+          "$pubkey": "bob"
+        },
+        "balance": "10n",
+        "mergeBalance": "0n"
+      },
+      "templateHash": {
+        "hash256": "2ff69aa12a0a1cfd9a15d878c9f950d68edd216d7d33367fd3dc6094ed97890f",
+        "codePartByteLength": 3035,
+        "slots": [
+          {
+            "param": "tokenId",
+            "at": 2119,
+            "was": "4f",
+            "encoding": "op-1negate",
+            "pushHeaderBytes": 0
+          }
+        ]
       }
     },
     {
