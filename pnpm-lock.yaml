@@ -14,8 +14,8 @@ importers:
   .:
     dependencies:
       '@bsv/sdk':
-        specifier: ^2.0.7
-        version: 2.0.7
+        specifier: ^2.0.10 || ^3.0.0 || ^4.0.1
+        version: 4.0.1
     devDependencies:
       '@changesets/cli':
         specifier: ^2.30.0
@@ -42,8 +42,8 @@ importers:
   integration/ts:
     dependencies:
       '@bsv/sdk':
-        specifier: ^2.0.7
-        version: 2.0.7
+        specifier: ^2.0.10 || ^3.0.0 || ^4.0.1
+        version: 4.0.1
       runar-compiler:
         specifier: workspace:*
         version: link:../../packages/runar-compiler
@@ -149,8 +149,8 @@ importers:
   packages/runar-lang:
     dependencies:
       '@bsv/sdk':
-        specifier: ^2.0.7
-        version: 2.0.7
+        specifier: ^2.0.10 || ^3.0.0 || ^4.0.1
+        version: 4.0.1
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -162,8 +162,8 @@ importers:
   packages/runar-sdk:
     dependencies:
       '@bsv/sdk':
-        specifier: ^2.0.7
-        version: 2.0.7
+        specifier: ^2.0.10 || ^3.0.0 || ^4.0.1
+        version: 4.0.1
       runar-ir-schema:
         specifier: workspace:*
         version: link:../runar-ir-schema
@@ -181,8 +181,8 @@ importers:
   packages/runar-testing:
     dependencies:
       '@bsv/sdk':
-        specifier: ^2.0.7
-        version: 2.0.7
+        specifier: ^2.0.10 || ^3.0.0 || ^4.0.1
+        version: 4.0.1
       runar-compiler:
         specifier: workspace:*
         version: link:../runar-compiler
@@ -212,8 +212,9 @@ packages:
     resolution: {integrity: sha512-05WQkdpL9COIMz4LjTxGpPNCdlpyimKppYNoJ5Di5EUObifl8t4tuLuUBBZEpoLYOmfvIWrsp9fCl0HoPRVTdA==}
     engines: {node: '>=6.9.0'}
 
-  '@bsv/sdk@2.0.7':
-    resolution: {integrity: sha512-zh3DtbGIAeojf/TYlhVTIOIFeUWboq7jyWSEmiPmKxp8MnprZM+jino1Lm0KbjEnwn56pAPCZt8eb+5tTWtHaA==}
+  '@bsv/sdk@4.0.1':
+    resolution: {integrity: sha512-aLaRa38h+ck5OhqRlNiQ9oUIOuB+vSZwWzkgWlXzr/9qwK5F0pbtog5PM+1Wo2GNIzxVAEnvxYCLL5SU55cW0w==}
+    engines: {node: '>=22'}
 
   '@changesets/apply-release-plan@7.1.0':
     resolution: {integrity: sha512-yq8ML3YS7koKQ/9bk1PqO0HMzApIFNwjlwCnwFEXMzNe8NpzeeYYKCmnhWJGkN8g7E51MnWaSbqRcTcdIxUgnQ==}
@@ -1231,7 +1232,7 @@ snapshots:
 
   '@babel/runtime@7.28.6': {}
 
-  '@bsv/sdk@2.0.7': {}
+  '@bsv/sdk@4.0.1': {}
 
   '@changesets/apply-release-plan@7.1.0':
     dependencies:

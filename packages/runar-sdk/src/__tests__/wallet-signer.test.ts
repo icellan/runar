@@ -75,6 +75,7 @@ describe('WalletSigner.getPublicKey', () => {
     expect(wallet.getPublicKey).toHaveBeenCalledWith({
       protocolID: [2, 'test app'],
       keyID: '1',
+      counterparty: 'self',
     });
   });
 

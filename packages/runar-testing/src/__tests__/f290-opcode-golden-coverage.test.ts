@@ -31,8 +31,7 @@
  * consensus-shaped Spend, for at least one accepting and one rejecting input.
  * What it does not prove: that the other six compiler tiers emit these
  * opcodes identically (no golden pins them); that the semantics hold at every
- * edge (only the listed vectors run); or OP_RIGHT for 0 < n < len — see the
- * OP_RIGHT canary below, @bsv/sdk 2.0.7 computes that case wrongly.
+ * edge (only the listed vectors run).
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -294,9 +293,8 @@ const CASES: OpcodeCase[] = [
   asmCase('OP_LEFT', 'x n -> first n bytes', ['OP_LEFT'],
     [['aabbccddee', num(2n)], ['aabbccddee', num(0n)], ['aabbccddee', num(5n)]],
     ([x, n]) => [x!.slice(0, Number(dec(n!)) * 2)]),
-  // n = 0 and n = len only: @bsv/sdk 2.0.7 is wrong for 0 < n < len (canary below).
   asmCase('OP_RIGHT', 'x n -> last n bytes', ['OP_RIGHT'],
-    [['aabbccddee', num(0n)], ['aabbccddee', num(5n)]],
+    [['aabbccddee', num(2n)], ['aabbccddee', num(0n)], ['aabbccddee', num(5n)]],
     ([x, n]) => [x!.slice(x!.length - Number(dec(n!)) * 2)]),
   asmCase('OP_LSHIFTNUM', 'a n -> a << n (numeric)', ['OP_LSHIFTNUM'],
     [[num(5n), num(3n)], [num(1n), num(40n)], [num(-3n), num(2n)], [num(0x7fn), num(1n)]],
@@ -396,20 +394,4 @@ describe('F-290: emittable opcodes absent from every golden are executed on Spen
       }
     });
   }
-
-  // Upstream divergence, not a Rúnar defect: @bsv/sdk 2.0.7 Spend computes
-  // OP_RIGHT as `buf.slice(size - len, len)` instead of `buf.slice(size - len)`,
-  // so for 0 < n < len it returns the wrong bytes (usually empty). go-sdk
-  // (`opcodeSliceBytes`, `data[size-len:]`) and the Chronicle spec return the
-  // last n bytes. Nothing the compiler emits for `right()` uses OP_RIGHT (it
-  // lowers to OP_SPLIT), but the TS ScriptVM / `runar debug` wrap this Spend.
-  // When @bsv/sdk fixes it this test fails: move n = 2 into the OP_RIGHT case
-  // above and delete this one.
-  it('canary: @bsv/sdk Spend still computes OP_RIGHT wrongly for 0 < n < len', () => {
-    const c = CASES.find((x) => x.opcode === 'OP_RIGHT')!;
-    const exec = ScriptExecutionContract.fromSource(c.source, {}, 'F290.runar.ts');
-    // m(i0 = x, i1 = n, p0 = expected): right(aabbccddee, 2) is ddee.
-    expect(exec.execute('m', ['aabbccddee', num(2n), 'ddee']).success).toBe(false);
-    expect(exec.execute('m', ['aabbccddee', num(2n), '']).success).toBe(true);
-  });
 });

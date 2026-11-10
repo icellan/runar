@@ -24,6 +24,9 @@ export type {
 // Tests import it directly from `../providers/mock.js`.
 export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider, GorillaPoolProvider } from './providers/index.js';
 export type { Provider, RPCProviderOptions, WalletProviderOptions, InscriptionInfo, InscriptionDetail } from './providers/index.js';
+// For custom providers: the TransactionData the built-in providers and
+// deploy()/finalizeCall() derive from a locally held Transaction.
+export { txToTransactionData } from './providers/provider.js';
 
 // Signers
 export { LocalSigner, MockSigner, ExternalSigner, WalletSigner } from './signers/index.js';

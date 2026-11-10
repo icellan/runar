@@ -2,7 +2,8 @@
 // runar-sdk/signers/wallet.ts — BRC-100 wallet signer
 // ---------------------------------------------------------------------------
 //
-// Delegates signing to a BRC-100 compatible wallet via @bsv/sdk's WalletClient.
+// Delegates signing to a BRC-100 compatible wallet: any @bsv/sdk
+// WalletInterface (a WalletClient is created when none is passed).
 // Computes BIP-143 sighash locally, then sends the pre-hashed digest to the
 // wallet for ECDSA signing via `hashToDirectlySign`.
 // ---------------------------------------------------------------------------
@@ -18,6 +19,7 @@ import {
   Utils,
   PublicKey,
   type SecurityLevel,
+  type WalletInterface,
 } from '@bsv/sdk';
 
 const SIGHASH_ALL_FORKID = 0x41;
@@ -27,12 +29,16 @@ export interface WalletSignerOptions {
   protocolID: [SecurityLevel, string];
   /** Key derivation ID, e.g. '1' */
   keyID: string;
-  /** Optional pre-existing WalletClient instance. If not provided, a new one is created. */
-  wallet?: WalletClient;
+  /**
+   * Optional BRC-100 wallet: any `WalletInterface`, such as a `WalletClient`
+   * or an in-process wallet. If not provided, a new `WalletClient` is created.
+   * The signer calls only `getPublicKey` and `createSignature`.
+   */
+  wallet?: WalletInterface;
 }
 
 export class WalletSigner implements Signer {
-  private readonly wallet: WalletClient;
+  private readonly wallet: WalletInterface;
   private readonly protocolID: [SecurityLevel, string];
   private readonly keyID: string;
   private cachedPubKey: string | null = null;
@@ -48,6 +54,9 @@ export class WalletSigner implements Signer {
     const { publicKey } = await this.wallet.getPublicKey({
       protocolID: this.protocolID,
       keyID: this.keyID,
+      // Same counterparty as sign/signHash, so the key reported here is the
+      // key that signs, without relying on the wallet's default.
+      counterparty: 'self',
     });
     this.cachedPubKey = publicKey;
     return publicKey;

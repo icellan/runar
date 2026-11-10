@@ -68,10 +68,16 @@ export function warnNonFatal(context: string, err: unknown): void {
 }
 
 /**
- * Audit finding C4: project a locally-held @bsv/sdk `Transaction` into the
- * plain `TransactionData` shape `getTransaction()` returns.
+ * Project a locally-held @bsv/sdk `Transaction` into the plain
+ * `TransactionData` shape `getTransaction()` returns. Exported for custom
+ * providers that need the same shape the built-in ones produce.
  *
- * Two call sites need exactly this, and they must not drift apart:
+ * Precondition: every input must carry its source txid and unlocking script,
+ * because `tx.toHex()` throws otherwise (pass a signed transaction).
+ *
+ * (Audit finding C4.) Several call sites need exactly this, and they must not
+ * drift apart:
+ *   - `WalletProvider.getTransaction()` returns it for a transaction it has cached.
  *   - `MockProvider.broadcast()` registers the tx it just accepted, so
  *     `getTransaction()` can resolve it instead of throwing "not found".
  *   - `RunarContract.deploy()` / `finalizeCall()` fall back to it when

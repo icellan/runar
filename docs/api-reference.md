@@ -548,7 +548,7 @@ The constructor takes three parameters: the public key hex, the BSV address, and
 
 ### WalletSigner
 
-Delegates signing to a BRC-100 compatible wallet via `@bsv/sdk`'s `WalletClient`. Computes BIP-143 sighash locally, then sends the pre-hashed digest to the wallet for ECDSA signing via `hashToDirectlySign`.
+Delegates signing to a BRC-100 compatible wallet: any `@bsv/sdk` `WalletInterface`, such as a `WalletClient` or an in-process wallet. Computes BIP-143 sighash locally, then sends the pre-hashed digest to the wallet for ECDSA signing via `hashToDirectlySign`.
 
 ```typescript
 import { WalletSigner } from 'runar-sdk';
@@ -556,7 +556,7 @@ import { WalletSigner } from 'runar-sdk';
 const signer = new WalletSigner({
   protocolID: [2, 'my app'],  // BRC-100 protocol ID tuple
   keyID: '1',                 // Key derivation ID
-  wallet: existingClient,     // Optional pre-existing WalletClient
+  wallet: existingWallet,     // Optional: any WalletInterface
 });
 ```
 
@@ -564,7 +564,7 @@ const signer = new WalletSigner({
 |--------|------|-------------|
 | `protocolID` | `[SecurityLevel, string]` | BRC-100 protocol ID (required) |
 | `keyID` | `string` | Key derivation ID (required) |
-| `wallet` | `WalletClient?` | Pre-existing `WalletClient`. If not provided, a new one is created. |
+| `wallet` | `WalletInterface?` | Any BRC-100 wallet (`WalletClient` or another `WalletInterface`). If not provided, a new `WalletClient` is created. |
 
 ---
 

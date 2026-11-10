@@ -693,7 +693,7 @@ The pattern: **stubbed = `checkPreimage` only**, because real preimage verificat
 
 If you genuinely need to assert that *the on-chain signature check would reject this input*, `TestContract` is not the right tool. Pick one of:
 
-1. **`ScriptVM` (TypeScript, Go, Rust, Python).** Each of these tiers wraps an upstream BSV SDK's Bitcoin Script interpreter (see CLAUDE.md ⇒ "Off-chain Script VM (`ScriptVM`)" for the exact wrapper and per-tier capabilities). `ScriptVM` executes the *compiled* locking + unlocking scripts and runs real `OP_CHECKSIG` / `OP_CHECKSIGVERIFY` against the supplied signature, pubkey, and sighash. This is the only off-chain path that exercises real ECDSA verification. **Zig, Ruby, and Java have no `ScriptVM`** — by documented project policy, no canonical upstream BSV SDK script interpreter is usable for those tiers (Ruby/Java have no `bsv-blockchain` SDK; the Zig `bsvz` engine does not compile on the repo's Zig 0.16 toolchain).
+1. **`ScriptVM` (TypeScript, Go, Rust, Python).** Each of these tiers wraps an upstream BSV SDK's Bitcoin Script interpreter (see CLAUDE.md ⇒ "Off-chain Script VM (`ScriptVM`)" for the exact wrapper and per-tier capabilities). `ScriptVM` executes the *compiled* locking + unlocking scripts and runs real `OP_CHECKSIG` / `OP_CHECKSIGVERIFY` against the supplied signature, pubkey, and sighash. This is the only off-chain path that exercises real `OP_CHECKSIG` against a transaction sighash. **Zig, Ruby, and Java have no `ScriptVM`** — by documented project policy, no canonical upstream BSV SDK script interpreter is usable for those tiers (Ruby/Java have no `bsv-blockchain` SDK; the Zig `bsvz` engine does not compile on the repo's Zig 0.16 toolchain).
 2. **Regtest integration tests (all 7 tiers).** `integration/{ts,go,rust,python,ruby,zig,java}` ship end-to-end harnesses that deploy the compiled contract to a local BSV regtest node and spend it for real. Real keys, real ECDSA, real preimage. This is the canonical real-crypto rejection path for Zig, Ruby, and Java.
 3. **Conformance byte-parity (all 7 tiers).** The conformance suite verifies all 7 compilers produce byte-identical canonical ANF IR + script hex for every fixture (subject to the per-fixture `compilers` allowlist). Stack IR is not compared (R-096). If the TS compiler's compiled hex passes a real-crypto ScriptVM test, and the Zig/Ruby/Java compilers produce the same bytes, the on-chain behavior is the same — but byte-parity is *semantic* assurance, not a VM-level rejection test in those tiers.
 
@@ -705,14 +705,15 @@ import { TestContract } from 'runar-testing';
 const contract = TestContract.fromSource(p2pkhSource, { pubKeyHash });
 
 it('rejects a bad signature', () => {
-  // This test fails for the WRONG reason. `checkSig` is mocked to return true,
-  // so the rejection (if any) comes from the assert(hash160(pubKey) === this.pubKeyHash)
-  // line, not from the signature being malformed.
+  // This passes, but it proves less than its name says. `checkSig` verifies
+  // against the fixed test message, not this transaction: a garbage `sig` fails
+  // here, but so would a perfectly valid signature over the real BIP-143
+  // sighash, and a `signTestMessage(privKey)` signature passes for ANY transaction.
   const result = contract.call('unlock', {
     sig: '00'.repeat(70),       // intentionally garbage
     pubKey: validCompressedPk,  // hash160 still matches pubKeyHash
   });
-  expect(result.success).toBe(false); // FAILS — the interpreter accepts this.
+  expect(result.success).toBe(false); // passes — and says nothing about the on-chain OP_CHECKSIG.
 });
 ```
 
@@ -743,7 +744,7 @@ For Zig, Ruby, and Java contracts, drop the `ScriptVM` step and write the equiva
 
 ## Script VM Testing (Compiled Script Execution)
 
-The `ScriptVM` class can be used directly for lower-level testing without the `TestSmartContract` wrapper. Unlike `TestContract` (which interprets the parsed Rúnar AST with mocked crypto), `ScriptVM` executes actual compiled Bitcoin Script opcodes.
+The `ScriptVM` class can be used directly for lower-level testing without the `TestSmartContract` wrapper. Unlike `TestContract` (which interprets the parsed Rúnar AST, with `checkSig` bound to a fixed test message and `checkPreimage` stubbed), `ScriptVM` executes actual compiled Bitcoin Script opcodes.
 
 ```typescript
 import { ScriptVM, hexToBytes, bytesToHex, disassemble } from 'runar-testing';

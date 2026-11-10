@@ -122,7 +122,7 @@ These terms are used throughout the rest of the README and across all seven Rún
 - **Contract** (`RunarContract`, [src/contract.ts](src/contract.ts)): the runtime wrapper that binds an artifact to constructor args, tracks current state and UTXO, and produces transactions for deploy, call, prepare, and finalize.
 - **Provider** (`Provider` interface, [src/providers/provider.ts](src/providers/provider.ts)): blockchain access. Reads transactions and UTXOs, broadcasts new ones, exposes a fee rate.
 - **Signer** (`Signer` interface, [src/signers/signer.ts](src/signers/signer.ts)): key management. Derives a compressed public key, derives a Base58Check address, and produces BIP-143 ECDSA signatures over given subscripts.
-- **Wallet** (BRC-100 `WalletClient` from `@bsv/sdk`): a browser- or extension-resident wallet that owns its keys and creates its own actions. Backs `WalletProvider` and `WalletSigner`.
+- **Wallet** (any BRC-100 `WalletInterface` from `@bsv/sdk`, such as a `WalletClient`): a browser-, extension- or in-process wallet that owns its keys and creates its own actions. Backs `WalletProvider` and `WalletSigner`.
 - **Call**: a method invocation. Spends the contract UTXO; for stateful contracts, creates a continuation UTXO with updated state; can produce additional data outputs and terminal outputs; broadcasts.
 - **PreparedCall** (`PreparedCall` type, [src/types.ts](src/types.ts)): the output of `prepareCall`. A built-but-not-fully-signed transaction plus the BIP-143 sighash for external signers, packaged with opaque internals that `finalizeCall` consumes.
 - **State**: the mutable Bitcoin Script payload that follows the last `OP_RETURN` in a stateful contract's locking script. Ordered by `StateField.index`. Encoded as raw `OP_NUM2BIN` bytes for ints, single bytes for bools, fixed-size raw bytes for `PubKey`/`Addr`/`Ripemd160`/`Sha256`/`Point`, and length-prefixed push data for variable types.
@@ -543,7 +543,7 @@ Two layers, depending on what you're verifying.
 
 ### 13a. Off-chain runtime simulation
 
-`runar-testing` ships a `TestContract` API that runs the contract through Rúnar's reference interpreter (not the script VM). Crypto is mocked: `checkSig` always returns true, `checkPreimage` always returns true, mock signatures and pubkeys are deterministic placeholders. This is the right tool for unit-testing business logic without dealing with transactions.
+`runar-testing` ships a `TestContract` API that runs the contract through Rúnar's reference interpreter (not the script VM). Its crypto is a mixture, not a blanket mock: `checkSig` and `verifyRabinSig` verify for real — ECDSA over a fixed test message (sign it with `signTestMessage(privKey)` from `runar-testing`), real Rabin — `checkPreimage` is stubbed to `true`, and `checkMultiSig` refuses rather than answer (use `ScriptVM` for the real `OP_CHECKMULTISIG`). This is the right tool for unit-testing business logic without dealing with transactions; it proves nothing about spendability.
 
 ```typescript
 import { describe, it, expect } from 'vitest';
@@ -719,6 +719,8 @@ class MyProvider implements Provider {
   async getRawTransaction(txid: string): Promise<string> { /* ... */ }
 }
 ```
+
+A provider that holds `@bsv/sdk` `Transaction` objects (from BEEF, raw hex or its own cache) can answer `getTransaction` with `txToTransactionData(txid, tx)`, the same conversion the built-in providers and `deploy()` / `finalizeCall()` use. It reads each input's txid from `sourceTXID` or, failing that, from the attached source transaction.
 
 ---
 
@@ -954,10 +956,10 @@ getBSV21Utxos(address: string, id: string): Promise<UTXO[]>
 #### `WalletProvider` ([src/providers/wallet-provider.ts](src/providers/wallet-provider.ts))
 
 ```typescript
-new WalletProvider(options: WalletProviderOptions)
+new WalletProvider<W extends WalletInterface = WalletClient>(options: WalletProviderOptions<W>)
 
-interface WalletProviderOptions {
-  wallet: WalletClient;            // BRC-100 client (from @bsv/sdk)
+interface WalletProviderOptions<W extends WalletInterface = WalletClient> {
+  wallet: W;                       // any BRC-100 WalletInterface (from @bsv/sdk), e.g. a WalletClient; walletClient returns it
   signer: Signer;                   // typically a WalletSigner backed by the same wallet
   basket: string;                   // wallet basket holding funding outputs
   fundingTag?: string;              // default 'funding'
@@ -1030,7 +1032,7 @@ new WalletSigner(options: WalletSignerOptions)
 interface WalletSignerOptions {
   protocolID: [SecurityLevel, string]; // BRC-100 protocol identifier
   keyID: string;                        // BRC-100 key derivation identifier
-  wallet?: WalletClient;                // optional pre-existing client
+  wallet?: WalletInterface;             // optional; default: a new WalletClient
 }
 
 signHash(sighash: string | number[]): Promise<string>  // DER signature hex (no sighash byte)

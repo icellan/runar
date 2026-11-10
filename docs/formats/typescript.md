@@ -436,7 +436,7 @@ describe('Counter', () => {
 });
 ```
 
-`TestContract` runs the contract through the ANF interpreter (not the BSV Script VM) with mocked crypto: `checkSig` and `checkPreimage` always return true. It tests business logic, not signature flows. For real-crypto coverage use the cross-tier ANF parity suite or `RunarContract` end-to-end.
+`TestContract` runs the contract through the reference AST interpreter (not the BSV Script VM). `checkPreimage` is stubbed to `true`; `checkSig` is real ECDSA over a fixed test message (`signTestMessage`), not a transaction sighash; `checkMultiSig` refuses rather than answer. It tests business logic, not signature flows. For real-crypto coverage use `ScriptVM`, the cross-tier ANF parity suite (`--mode=on-chain`, `conformance/anf-interpreter/cross-interpreter-real-crypto.test.ts`) or `RunarContract` end-to-end.
 
 ---
 
