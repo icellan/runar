@@ -543,7 +543,7 @@ Two layers, depending on what you're verifying.
 
 ### 13a. Off-chain runtime simulation
 
-`runar-testing` ships a `TestContract` API that runs the contract through Rúnar's reference interpreter (not the script VM). Crypto is mocked: `checkSig` always returns true, `checkPreimage` always returns true, mock signatures and pubkeys are deterministic placeholders. This is the right tool for unit-testing business logic without dealing with transactions.
+`runar-testing` ships a `TestContract` API that runs the contract through Rúnar's reference interpreter (not the script VM). Its crypto is a mixture, not a blanket mock: `checkSig` and `verifyRabinSig` verify for real — ECDSA over a fixed test message (sign it with `signTestMessage(privKey)` from `runar-testing`), real Rabin — `checkPreimage` is stubbed to `true`, and `checkMultiSig` refuses rather than answer (use `ScriptVM` for the real `OP_CHECKMULTISIG`). This is the right tool for unit-testing business logic without dealing with transactions; it proves nothing about spendability.
 
 ```typescript
 import { describe, it, expect } from 'vitest';
