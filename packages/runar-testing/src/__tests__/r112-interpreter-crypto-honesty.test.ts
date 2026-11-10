@@ -159,12 +159,30 @@ describe('R-112 interpreter crypto honesty', () => {
     // straight through it. Match the CLAIM on whitespace-normalised text, and
     // allow only a clearly-marked historical quotation of it.
     const CLAIM = /`?check(?:Sig|MultiSig)`?[^.]{0,160}?always\s+(?:returns?\s+)?`?true`?/gi;
+    // The same claim spelled without "always" (the integration guide's first
+    // example and the testing guide's "does NOT prove" example used it).
+    const MOCKED = /`?check(?:Sig|MultiSig)`?\s+is\s+mocked/gi;
+    // ... and as a blanket description of TestContract itself.
+    const MOCKED_CRYPTO = /TestContract[^.]{0,80}mocked crypto/gi;
     const HISTORICAL =
       /used to (?:say|claim|read)|previously (?:said|claimed|read)|no longer (?:says|claims)|formerly|old wording|used to be/i;
 
-    for (const rel of ['CLAUDE.md', 'packages/runar-testing/README.md']) {
+    // The user-facing documents that describe TestContract, not only the two
+    // R-112 corrected: the SDK README's "Off-chain runtime simulation"
+    // section, the testing guide, the TypeScript format guide, the
+    // integration guide and the getting-started guide each kept the claim in
+    // their own words.
+    for (const rel of [
+      'CLAUDE.md',
+      'packages/runar-testing/README.md',
+      'packages/runar-sdk/README.md',
+      'docs/testing-guide.md',
+      'docs/formats/typescript.md',
+      'docs/integration-guide.md',
+      'docs/getting-started.md',
+    ]) {
       const flat = readFileSync(resolve(REPO, rel), 'utf8').replace(/\s+/g, ' ');
-      for (const m of flat.matchAll(CLAIM)) {
+      for (const m of [...flat.matchAll(CLAIM), ...flat.matchAll(MOCKED), ...flat.matchAll(MOCKED_CRYPTO)]) {
         const at = m.index ?? 0;
         const before = flat.slice(Math.max(0, at - 120), at);
         expect(

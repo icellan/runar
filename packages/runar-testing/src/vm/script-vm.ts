@@ -48,7 +48,7 @@
  * encoding rules back on for this VM.
  */
 
-import { LockingScript, UnlockingScript, Spend, BigNumber } from '@bsv/sdk';
+import { LockingScript, UnlockingScript, Spend } from '@bsv/sdk';
 import { opcodeName } from './opcodes.js';
 import { isTruthy, hexToBytes } from './utils.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
@@ -148,7 +148,6 @@ const OP_VERIF = 0x65;
 const OP_VERNOTIF = 0x66;
 const OP_ENDIF = 0x68;
 const OP_RETURN = 0x6a;
-const OP_RIGHT = 0xb5;
 
 // ---------------------------------------------------------------------------
 // Script execution error (harness-level: limits, not opcode semantics)
@@ -398,7 +397,6 @@ export class ScriptVM {
 
     try {
       this.countOp(chunks[pos.chunkIndex]?.op ?? 0);
-      this.guardOpRight(chunks[pos.chunkIndex]?.op ?? 0);
       spend.step();
       this.afterStep();
       return {
@@ -537,49 +535,6 @@ export class ScriptVM {
     return { context: inUnlocking ? 'unlocking' : 'locking', chunkIndex: pc };
   }
 
-  /**
-   * N-210: `@bsv/sdk` 2.0.7 `Spend` computes OP_RIGHT as
-   * `buf.slice(size - len, len)` instead of `buf.slice(size - len)`, which is
-   * wrong whenever `0 < len < size` (e.g. `slice(3, 2)` on a 5-byte buffer is
-   * empty, not the last 2 bytes). `len === 0` and `len === size` are
-   * unaffected — upstream computes those correctly. `ScriptVM` wraps `Spend`
-   * verbatim and reimplements no opcode semantics of its own (see the module
-   * header), so it cannot silently correct the miscomputed result; it refuses
-   * this one case before handing control to `spend.step()`, rather than
-   * report a wrong answer as success. Peeks the stack without mutating it —
-   * any decoding failure (non-numeric length, too few items) is left for
-   * `Spend` to report with its own error.
-   */
-  private guardOpRight(op: number): void {
-    if (op !== OP_RIGHT) return;
-    const spend = this.spend!;
-    // `Spend.step()` only evaluates an opcode when `!ifStack.includes(false)`
-    // (its `isScriptExecuting`); inside a dead OP_IF/OP_NOTIF branch OP_RIGHT
-    // never runs and the real network never sees it, so refusing here would
-    // reject a script `Spend` itself accepts.
-    if (spend.ifStack.includes(false)) return;
-    const stack = spend.stack;
-    if (stack.length < 2) return;
-    // Mirrors `Spend.isRelaxed()` for this VM's fixed-version-1 synthetic
-    // context (`loadInternal` constructs `Spend` with exactly this value);
-    // `isRelaxed()` itself is declared `private` in @bsv/sdk's type decls.
-    const requireMinimal = this.flags.strictEncoding === true;
-    let len: number;
-    try {
-      len = BigNumber.fromScriptNum(stack[stack.length - 1]!, requireMinimal).toNumber();
-    } catch {
-      return;
-    }
-    const size = stack[stack.length - 2]!.length;
-    if (len > 0 && len < size) {
-      throw new ScriptError(
-        `OP_RIGHT(n=${len}, size=${size}) refused: @bsv/sdk 2.0.7 Spend miscomputes 0 < n < size ` +
-          `(returns buf.slice(size-n, n) instead of buf.slice(size-n)); ScriptVM does not reimplement ` +
-          `opcode semantics (see vm/script-vm.ts)`,
-      );
-    }
-  }
-
   /** Consensus op counting: everything above OP_16 counts. */
   private countOp(op: number): void {
     if (op <= OP_16) return;
@@ -618,7 +573,6 @@ export class ScriptVM {
         if (pos === null) break;
         const chunks = this.chunksFor(pos.context);
         this.countOp(chunks[pos.chunkIndex]?.op ?? 0);
-        this.guardOpRight(chunks[pos.chunkIndex]?.op ?? 0);
         if (!spend.step()) break;
         this.afterStep();
       }

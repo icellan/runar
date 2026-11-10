@@ -509,7 +509,7 @@ for (let i: bigint = 0n; i < 10n; i++) {
 
 ```typescript
 assert(condition);            // fails the script if condition is false
-assert(condition, "message"); // message is stripped at compile time
+assert(condition, "message"); // message is stripped at compile time; TestContract reports it when the assert fails
 ```
 
 `assert` compiles to `OP_VERIFY` (or the condition is left on the stack if it is the final statement).

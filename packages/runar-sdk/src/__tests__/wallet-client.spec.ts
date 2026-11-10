@@ -38,7 +38,9 @@ function buildClient(endpoint: string): WalletClient {
         return fetch(input, { ...init, headers });
       }
     : undefined;
-  const substrate = new HTTPWalletJSON(undefined, endpoint, customFetch);
+  // From @bsv/sdk 2.1.1 on, HTTPWalletJSON refuses to send a request from
+  // Node without an originator (it becomes the Origin/Originator header).
+  const substrate = new HTTPWalletJSON('runar-integration.test', endpoint, customFetch);
   return new WalletClient(substrate);
 }
 

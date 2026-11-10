@@ -214,7 +214,7 @@ runar test
 pnpm test
 ```
 
-The `TestContract` class compiles your contract source, then uses the interpreter (with mocked crypto) to execute methods and verify business logic.
+The `TestContract` class compiles your contract source, then uses the reference interpreter to execute methods and verify business logic. Its `checkSig` is real ECDSA over a fixed test message (sign with `signTestMessage` from `runar-testing`), not a transaction sighash, and `checkPreimage` is stubbed to `true`.
 
 ---
 

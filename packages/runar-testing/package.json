@@ -26,7 +26,7 @@
     "runar-ir-schema": "workspace:*",
     "runar-compiler": "workspace:*",
     "runar-sdk": "workspace:*",
-    "@bsv/sdk": "^2.0.7"
+    "@bsv/sdk": "^2.0.10 || ^3.0.0 || ^4.0.1"
   },
   "devDependencies": {
     "runar-sdk": "workspace:*",

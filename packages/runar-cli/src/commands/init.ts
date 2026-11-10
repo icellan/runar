@@ -218,7 +218,7 @@ describe('P2PKH', () => {
       test: 'npm run contract:test',
     },
     dependencies: {
-      '@bsv/sdk': '^2.0.7',
+      '@bsv/sdk': '^2.0.10 || ^3.0.0 || ^4.0.1',
       'runar-lang': '^0.5.0',
       'runar-sdk': '^0.5.0',
     },
