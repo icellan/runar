@@ -20,6 +20,151 @@
       "note": "owner==signer, deposit 50 -> balance 150",
       "expectedState": {
         "balance": "150n"
+      },
+      "artifactReadback": {
+        "constructorArgs": {
+          "owner": {
+            "$pubkey": "alice"
+          }
+        },
+        "codePartByteLength": 2999,
+        "holds": [
+          {
+            "at": 546,
+            "was": [
+              "21",
+              {
+                "$pubkey": "alice"
+              }
+            ]
+          },
+          {
+            "at": 1285,
+            "was": [
+              "21",
+              {
+                "$pubkey": "alice"
+              }
+            ]
+          },
+          {
+            "at": 2051,
+            "was": [
+              "21",
+              {
+                "$pubkey": "alice"
+              }
+            ]
+          },
+          {
+            "at": 2788,
+            "was": [
+              "21",
+              {
+                "$pubkey": "alice"
+              }
+            ]
+          }
+        ],
+        "notDeployments": [
+          {
+            "name": "non-push opcode (OP_CHECKSIG) at the last owner reference",
+            "edits": [
+              {
+                "at": 2788,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": "ac"
+              }
+            ],
+            "extractThrows": true
+          },
+          {
+            "name": "second owner reference holds a different key",
+            "edits": [
+              {
+                "at": 1285,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": [
+                  "21",
+                  {
+                    "$pubkey": "bob"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "32-byte push at every 33-byte owner slot",
+            "edits": [
+              {
+                "at": 546,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": [
+                  "20",
+                  "1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "at": 1285,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": [
+                  "20",
+                  "1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "at": 2051,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": [
+                  "20",
+                  "1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              },
+              {
+                "at": 2788,
+                "was": [
+                  "21",
+                  {
+                    "$pubkey": "alice"
+                  }
+                ],
+                "with": [
+                  "20",
+                  "1111111111111111111111111111111111111111111111111111111111111111"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "code part with no OP_RETURN and no state",
+            "dropStateTail": true
+          }
+        ]
       }
     },
     {

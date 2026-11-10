@@ -104,8 +104,12 @@ export interface RealExecResult {
    *  `undefined` when not evaluated. */
   interpreterAccepted?: boolean;
   interpreterError?: string;
+  /** The locking script the spend was validated against. For a stateful
+   *  spend: the deploy tx's output 0, read from the raw transaction. */
   lockingHex?: string;
   unlockingHex?: string;
+  /** Stateful only: the artifact the contract was deployed from. */
+  artifact?: RunarArtifact;
   /** For an ACCEPTED stateful spend: the continuation output's state decoded
    *  from the on-chain call tx (via `extractStateFromScript`), so the caller can
    *  check it against an INDEPENDENT hand-authored expectation. This is the only
@@ -848,5 +852,13 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
     }
   }
 
-  return { vmAccepted, vmError, continuationState, reachedEngine, stateDecodeError };
+  return {
+    vmAccepted,
+    vmError,
+    continuationState,
+    reachedEngine,
+    stateDecodeError,
+    lockingHex: deployTx.outputs[0]!.lockingScript.toHex(),
+    artifact,
+  };
 }
