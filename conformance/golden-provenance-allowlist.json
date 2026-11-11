@@ -3383,6 +3383,357 @@
       "reviewer": "fix-session: PR sync (ports #179), golden hand-checked against the source and the @bsv/sdk Spend oracle",
       "date": "2026-11-04",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-0/expected-readback.json",
+      "sha256": "90843350261223acd8280a91ae58c5186832ff460f5e5420d98b4b2b2d6af29b",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-1/expected-readback.json",
+      "sha256": "2dbe235158c5ab6b5007628930945e379d156023d0f10d9eab1691e0bfa2ddfc",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-127/expected-readback.json",
+      "sha256": "019933ab4dc2da23f00528d0e2c628173285a927ffeac242c1a8c944cff10eba",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-128/expected-readback.json",
+      "sha256": "0a43c2250d566e4921dab2644a474b4d7cce8af7ffd516db6ba8351fa294a7e2",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-16/expected-readback.json",
+      "sha256": "c0d9481d89567b9897c1382b08dcccbce1035849dceba62dbec24ec2326bb1be",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-17/expected-readback.json",
+      "sha256": "8589072bac5bc2e81dfd0952b2da5ea9efc8d5fe166c3561a63dc8d595d281d5",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-large/expected-readback.json",
+      "sha256": "1b8169fb85675a0886c04336e7aed039b6059ee7cd81a6958d54041f61fcbcae",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg-large/expected-readback.json",
+      "sha256": "80943eaac63f0198c3b78a346d540921b37fb22be640847be86a32cd944d5f42",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg1/expected-readback.json",
+      "sha256": "9a0015427871891830c8be03f3976c3569b6b63beb755dd907206015151521af",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg128/expected-readback.json",
+      "sha256": "38d37b44f01821d7a8c1a51d1be4f6282cc40c5a9a08b2eca9c9406e05a8d375",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg129/expected-readback.json",
+      "sha256": "5aa4e3bf4a3e483c09831f74b5c259780ba0ddf2d5e2236a5ae2c69831bc669d",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg16/expected-readback.json",
+      "sha256": "2f8d2854ed7b72fe41cf27a99dae94b6822e6f54dd3118fbbbdabc8c4b8cae9b",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bigint-neg17/expected-readback.json",
+      "sha256": "a2d868c16f400d3b6a48af2d3b168bba4380c8225ebdefd9ed846b3c8a98b8c0",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bool-false/expected-readback.json",
+      "sha256": "b6088343ade182bfaf640e49470570aff08b2880f530e12692224cb90043b05f",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bool-true/expected-readback.json",
+      "sha256": "6e0591d401e0df4ec801a25f94c5e4e9c6a8dbbdbf2dd5d6fe825c725dc9527f",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-255/expected-readback.json",
+      "sha256": "46467a9710d1d5721d08ec0e220f9cfc097ed6ee196faec99ae76008678225ba",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-256/expected-readback.json",
+      "sha256": "5c3b36d541e615af43d6d4b7a9d2dc1ca555258bae0870fbee274a76bf59afe2",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-75/expected-readback.json",
+      "sha256": "bf64ecb6efb5df782e7cc27ba05e4daf77f702fbcc9ba80b2189011764528e35",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-ab-trap/expected-readback.json",
+      "sha256": "41aab3ad7ad035af0627c27c9abd1b7d6e540dd1cae465dc1c4260f09d078d47",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-empty/expected-readback.json",
+      "sha256": "bbfc8f6c9980c767d7808e8e885fc98ebac329589bf459aa84f0d252a9cfaf07",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-multi-2/expected-readback.json",
+      "sha256": "1fbab0c932589b8d51a1fdc8d1509f185585ccf3f34a2a963c03581df9576023",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-multi-4/expected-readback.json",
+      "sha256": "fbaf060bdca5ce07ca7980db7e3136ff5ecd8fed038bdbde029f9f1858568c2d",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-op-n-high/expected-readback.json",
+      "sha256": "c0fd949be3652316e377a0edd2fbdee96db743c00bd3269ef2bb4e9dd0e17b9f",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-op-n-low/expected-readback.json",
+      "sha256": "f396530a4305b04eb2d8a964eee3917d43184cc902d58fe95a00497d055d2b9d",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-op-n-mid/expected-readback.json",
+      "sha256": "8e2d9636c6dc1796305b173968c3c7325ed1db8bc8da868f5cd521c3ec9632b2",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-op1negate/expected-readback.json",
+      "sha256": "8ea6d9d964c137af76e42089283a0693441cbdd601b98acd38e081c829c75eef",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-outside-high/expected-readback.json",
+      "sha256": "8732064040ec2887fb0a54b002c8cf0b197a38a34b20324e7bbaaae0d2d953b9",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-outside-low/expected-readback.json",
+      "sha256": "70050688dd1dd9c2dc6920d26df6959e67f031c3757d493462b2a8f6fa763698",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-pushdata1/expected-readback.json",
+      "sha256": "7d034282f0efeb04b96d099acac2d8f9ed9d6d384a9c113487f0126f9e923b36",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-pushdata2/expected-readback.json",
+      "sha256": "4ad11ff80fddee51568deba2a75797425637d82f206e03b2edace03b42930851",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/bytes-zero/expected-readback.json",
+      "sha256": "c688ce486e578deaa915a07772942011a0d7a002815bb6d0d1ddc863d9cdb623",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-ab-trap/expected-readback.json",
+      "sha256": "3a1a4fe0917a8584015f994c2d344e1a5b0fe101ce7b582030e01e24330c3f52",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-empty/expected-readback.json",
+      "sha256": "d2c54ac6955cd4a0bc83ce91e0e8c320e7775c91f0dddeab97c3e92c8142e878",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-multi/expected-readback.json",
+      "sha256": "8e4669c7d7d11384f93a290b1ee43c41a15b661590bb7668e5f448788cd2eb35",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-op-n/expected-readback.json",
+      "sha256": "893f1f5cf18b9beb825902ba932eb8a83f25af37c47e93ed83172d5ed7faef62",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-pushdata1/expected-readback.json",
+      "sha256": "f5be4860b17316d12e1e61d42a71d9e9513360c391f1b28d0fc2a5cefcbb5613",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/codesep-tag-zero/expected-readback.json",
+      "sha256": "2472b8dce292ea8af00d0e33aacaa29205aa4907208872c245a2198ce35a72fd",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/multi-slot-mixed-a/expected-readback.json",
+      "sha256": "1cacf3b5f33533ff88961a4d8800eb8c73c17ff9fb40f7d8e4025b8f20854c78",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/sdk-vertical/cases/multi-slot-mixed-b/expected-readback.json",
+      "sha256": "62c7fbb3d037a051293476072e88664ecf4145b53e6141f2176eddff79b8ecfe",
+      "verified-against": "second-implementation",
+      "reason": "New readback golden written by sdk-vertical/generate.ts from reference/readback.ts (imports nothing from packages/**), not from any SDK. Honest script equals expected-locking.hex; all 7 SDK drivers give the pinned verdict on every honest+tamper script (247/247 per tier); with the 153b5885b SDK fixes reverted every tamper row fails in all six non-TS tiers (208/208 per tier).",
+      "reviewer": "fix-session: PR sync (ports #200)",
+      "date": "2026-11-11",
+      "review-status": "reviewed"
     }
   ]
 }

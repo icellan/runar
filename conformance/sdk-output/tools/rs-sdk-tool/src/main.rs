@@ -6,7 +6,7 @@ use runar_lang::sdk::types::{RunarArtifact, SdkValue};
 use runar_lang::sdk::contract::RunarContract;
 use runar_lang::sdk::ordinals::Inscription;
 use runar_lang::sdk::{
-    deploy_with_wallet, DeployWithWalletOptions, WalletActionOutput, WalletActionResult,
+    deploy_with_wallet, extract_constructor_args, matches_artifact, DeployWithWalletOptions, WalletActionOutput, WalletActionResult,
     WalletClient, WalletOutput,
 };
 
@@ -59,11 +59,59 @@ struct WalletDeployInput {
 #[derive(Deserialize)]
 struct Input {
     artifact: serde_json::Value,
-    #[serde(rename = "constructorArgs")]
+    // Absent in readback mode, which reads `scriptHex` instead.
+    #[serde(rename = "constructorArgs", default)]
     constructor_args: Vec<TypedArg>,
     inscription: Option<InscriptionInput>,
     #[serde(rename = "walletDeploy")]
     wallet_deploy: Option<WalletDeployInput>,
+    /// Selects readback mode (conformance/sdk-vertical).
+    #[serde(rename = "scriptHex")]
+    script_hex: Option<String>,
+}
+
+/// Readback mode (conformance/sdk-vertical): what `matches_artifact` and
+/// `extract_constructor_args` say about `script_hex`. `args` is positional by
+/// paramIndex as `{type, value}` (decimal / "true"|"false" / lowercase hex),
+/// null for a param the extraction does not report; `error` is the message
+/// `extract_constructor_args` (or `matches_artifact`) returned, else null.
+fn readback(artifact: &RunarArtifact, script_hex: &str) -> serde_json::Value {
+    let mut matches = serde_json::Value::Null;
+    let mut error = serde_json::Value::Null;
+    match matches_artifact(artifact, script_hex) {
+        Ok(m) => matches = serde_json::Value::Bool(m),
+        Err(e) => error = serde_json::Value::String(e),
+    }
+    let args = match extract_constructor_args(artifact, script_hex) {
+        Err(e) => {
+            if error.is_null() {
+                error = serde_json::Value::String(e);
+            }
+            serde_json::Value::Null
+        }
+        Ok(got) => serde_json::Value::Array(
+            artifact
+                .abi
+                .constructor
+                .params
+                .iter()
+                .map(|p| match got.get(&p.name) {
+                    None => serde_json::Value::Null,
+                    Some(v) => {
+                        let value = match v {
+                            SdkValue::Int(n) => n.to_string(),
+                            SdkValue::BigInt(n) => n.to_string(),
+                            SdkValue::Bool(b) => b.to_string(),
+                            SdkValue::Bytes(h) => h.to_lowercase(),
+                            other => format!("{other:?}"),
+                        };
+                        serde_json::json!({ "type": p.param_type, "value": value })
+                    }
+                })
+                .collect(),
+        ),
+    };
+    serde_json::json!({ "matches": matches, "args": args, "error": error })
 }
 
 fn convert_arg(arg: &TypedArg) -> SdkValue {
@@ -99,6 +147,10 @@ fn main() {
 
     let artifact: RunarArtifact =
         serde_json::from_value(input.artifact).expect("failed to parse artifact");
+    if let Some(script_hex) = input.script_hex {
+        print!("{}", readback(&artifact, &script_hex));
+        return;
+    }
     // `deploy_with_wallet` takes the artifact by reference (R-062) while the
     // contract takes it by value; keep a copy for the wallet path.
     let artifact_for_wallet = artifact.clone();

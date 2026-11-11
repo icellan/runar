@@ -5,10 +5,14 @@ import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import runar.lang.sdk.DeployOptions;
+import runar.lang.sdk.DriverReadbackAccess;
 import runar.lang.sdk.Inscription;
 import runar.lang.sdk.LocalSigner;
 import runar.lang.sdk.MockBRC100Wallet;
@@ -55,6 +59,12 @@ public final class Driver {
 
         Map<String, Object> artifactMap = MiniJson.asObject(input.get("artifact"));
         RunarArtifact artifact = RunarArtifact.fromJson(MiniJson.toJson(artifactMap));
+
+        Object rawScriptHex = input.get("scriptHex");
+        if (rawScriptHex != null) {
+            System.out.print(MiniJson.toJson(readback(artifact, MiniJson.asString(rawScriptHex))));
+            return;
+        }
 
         List<Object> ctorArgs = new ArrayList<>();
         Object rawArgs = input.get("constructorArgs");
@@ -136,6 +146,56 @@ public final class Driver {
             System.err.println(e.getMessage());
             System.exit(1);
         }
+    }
+
+    /**
+     * Readback mode (conformance/sdk-vertical): what {@code matchesArtifact}
+     * and {@code extractConstructorArgs} say about {@code scriptHex}.
+     * {@code args} is positional by paramIndex as {type, value} (decimal /
+     * "true"|"false" / lowercase hex), null for a param the extraction does
+     * not report; {@code error} is the message extractConstructorArgs (or
+     * matchesArtifact) threw, else null.
+     *
+     * <p>Java's extraction returns a full positional list with {@code 0} for
+     * a param that has no constructor slot (a mutable state field); that
+     * placeholder is normalized to null here, as the other tiers simply omit
+     * the param.
+     */
+    private static Map<String, Object> readback(RunarArtifact artifact, String scriptHex) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Boolean matches = null;
+        String error = null;
+        try {
+            matches = ScriptUtils.matchesArtifact(artifact, scriptHex);
+        } catch (RuntimeException e) {
+            error = String.valueOf(e.getMessage());
+        }
+        List<Object> args = null;
+        try {
+            List<Object> got = DriverReadbackAccess.extractConstructorArgs(artifact, scriptHex);
+            Set<Integer> slotted = new HashSet<>();
+            for (RunarArtifact.ConstructorSlot s : artifact.constructorSlots()) slotted.add(s.paramIndex());
+            var params = artifact.abi().constructor().params();
+            args = new ArrayList<>();
+            for (int i = 0; i < params.size(); i++) {
+                if (!slotted.contains(i)) {
+                    args.add(null);
+                    continue;
+                }
+                Object v = got.get(i);
+                String value = (v instanceof String str) ? str.toLowerCase() : String.valueOf(v);
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("type", params.get(i).type());
+                a.put("value", value);
+                args.add(a);
+            }
+        } catch (RuntimeException e) {
+            if (error == null) error = String.valueOf(e.getMessage());
+        }
+        out.put("matches", matches);
+        out.put("args", args);
+        out.put("error", error);
+        return out;
     }
 
     private static final String WALLET_DRIVER_PRIV =

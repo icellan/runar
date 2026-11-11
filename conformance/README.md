@@ -535,7 +535,7 @@ Goldens are **self-produced** by the very implementation under test — `pnpm ru
 - `conformance/tests/**/expected-ir.json`
 - `conformance/runtime-vectors/*.json` (official-KAT hash vectors)
 - `conformance/sdk-output/tests/**/expected-*.hex`
-- `conformance/sdk-vertical/cases/*/expected-*.{hex,json}` (the compiler↔SDK vertical pins — `expected-code-part.hex`, `expected-vertical.json`, `expected-locking.hex`)
+- `conformance/sdk-vertical/cases/*/expected-*.{hex,json}` (the compiler↔SDK vertical pins — `expected-code-part.hex`, `expected-vertical.json`, `expected-locking.hex`, `expected-readback.json`)
 - `conformance/sdk-vertical/artifacts/*.json` (the compiled artifacts those cases splice; `constructorSlots[].byteOffset` and `codeSeparatorIndices` live here)
 - `conformance/analyzer/**/expected-analyzer-report.json`
 - `conformance/source-map/**/expected-source-map.json`

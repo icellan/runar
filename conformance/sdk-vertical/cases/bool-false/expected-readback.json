@@ -1,0 +1,37 @@
+{
+  "case": "bool-false",
+  "contract": "SlotBool",
+  "honest": {
+    "scriptHex": "767600877c51879b69007c9d210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+    "matches": true,
+    "args": [
+      {
+        "type": "boolean",
+        "value": "false"
+      },
+      {
+        "type": "PubKey",
+        "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      }
+    ],
+    "extractRaises": false
+  },
+  "tampers": [
+    {
+      "id": "non-push:flag@9",
+      "class": "non-push-at-slot",
+      "description": "OP_NOP (0x61) at the constructor slot flag@9 (template byte offset), all other slots honest",
+      "scriptHex": "767600877c51879b69617c9d210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "matches": false,
+      "extractRaises": true
+    },
+    {
+      "id": "wrong-width:owner",
+      "class": "wrong-fixed-width",
+      "description": "'owner' pushes 32 bytes (its value minus the last byte) at every reference; the slots declare fixedValueByteLength 33",
+      "scriptHex": "767600877c51879b69007c9d200279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817ac",
+      "matches": false,
+      "extractRaises": false
+    }
+  ]
+}

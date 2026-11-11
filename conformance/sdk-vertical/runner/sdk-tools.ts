@@ -190,7 +190,12 @@ export function buildSdkTools(toolsDirOverride?: string): SdkTool[] {
   return tools;
 }
 
-export function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
+/**
+ * `raw: true` returns stdout untouched (only trimmed). The default lowercases
+ * it, which is right for a locking-script hex and wrong for the readback
+ * mode's JSON (it would lowercase ABI type names and error messages).
+ */
+export function runSdkTool(tool: SdkTool, inputPath: string, opts: { raw?: boolean } = {}): SdkResult {
   const start = Date.now();
   try {
     if (tool.preBuild) {
@@ -204,7 +209,8 @@ export function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
       env: { ...process.env, ...tool.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    return { sdk: tool.name, hex: output.toString().trim().toLowerCase(), success: true, durationMs: Date.now() - start };
+    const out = output.toString().trim();
+    return { sdk: tool.name, hex: opts.raw ? out : out.toLowerCase(), success: true, durationMs: Date.now() - start };
   } catch (err: unknown) {
     const e = err as { stderr?: Buffer; message?: string };
     return {

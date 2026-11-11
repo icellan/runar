@@ -82,11 +82,13 @@ sides, three of which need no SDK at all:
    layer would still fire if the project deliberately changed encodings.
 
 3. **Checked-in absolute goldens**, per case:
-   `expected-code-part.hex`, `expected-vertical.json`, `expected-locking.hex`.
+   `expected-code-part.hex`, `expected-vertical.json`, `expected-locking.hex`,
+   `expected-readback.json`.
    Because they are committed, a change to the harness alone cannot silently
    move the target — it shows up as a reviewable golden diff (and feeds the
    must-move-golden gate, plan Phase F). `expected-code-part.hex` and
-   `expected-vertical.json` are written from the **independent derivation**,
+   `expected-vertical.json` and `expected-readback.json` are written from the
+   **independent derivation**,
    never from an SDK; `generate.ts` refuses to write a golden for a case whose
    artifact fails its own template claims.
 
@@ -108,12 +110,15 @@ sdk-vertical/
     script.ts       opcode walker / disassembler / codesep finder
     encode.ts       deploy-time constructor-arg encoding spec
     derive.ts       splice + template-claim checks + deployed-script checks
+    readback.ts     honest locking script + tampered scripts, and what
+                    matchesArtifact / extractConstructorArgs must say about each
   runner/           the seven-tier CLI gate
   cases/<row>/
     input.json               {artifact, constructorArgs}
     expected-code-part.hex   INDEPENDENTLY DERIVED
     expected-vertical.json   INDEPENDENTLY DERIVED (slot layout + codesep offsets)
     expected-locking.hex     the full deployed script all tiers agree on
+    expected-readback.json   INDEPENDENTLY DERIVED (honest script + tampers, readback verdicts)
   vertical-pins.test.ts      compiler-side pins + the red-proofs (vitest)
 ```
 
@@ -164,6 +169,8 @@ CI runs the gate in the `sdk-output` job, reusing the drivers built there.
 | D4 | deployed separator offsets equal the artifact's indices shifted by the actual constructor-arg expansion | no |
 | D5 | the codesep index each SDK **bakes into the script** equals the byte offset where `OP_CODESEPARATOR` actually lands | no (pinned), yes (per tier) |
 | — | every tier's deployed locking script carries the derived code part as its prefix, tiers agree, and all match `expected-locking.hex` | yes |
+| R1 | every tier's `matchesArtifact` accepts the honest locking script (which must equal `expected-locking.hex`) and `extractConstructorArgs` reads back exactly the case's constructor args | yes (all seven) |
+| R2 | every tier's `matchesArtifact` rejects every tampered script in `expected-readback.json`, and `extractConstructorArgs` raises exactly where pinned (see "Readback" below) | yes (all seven) |
 | X1 (TS only) | `RunarContract.getSubscriptForSigning()` trims the deployed script at the SAME offset the independent derivation computes, for every method of every codesep case | yes (typescript) |
 | X2 (TS only) | a real deploy → call continuation spend of `CodeSepMatrix.reseal` (the shifted, multi-byte codesep bake) validates on `@bsv/sdk`'s `Spend` | yes (typescript) |
 
@@ -192,6 +199,42 @@ length. Six rows shift it by 0/0/+1/+4/+3/+77.
 
 The `0xab` rows exist so that a naive `script.indexOf('ab')` separator scan
 false-positives and the opcode walk does not.
+
+## Readback (`expected-readback.json`)
+
+The checks above pin what an SDK *writes*. R1/R2 pin what it *reads back*:
+`matchesArtifact(artifact, script)` and `extractConstructorArgs(artifact,
+script)`, run by each tier's driver in readback mode (input `{artifact,
+scriptHex}`, output `{matches, args, error}`; the mode is selected by the
+presence of `scriptHex`, so the drivers' locking-script output is unchanged).
+
+`reference/readback.ts` derives, per case:
+
+- **honest**: the spliced code part plus, for a stateful artifact, the
+  `OP_RETURN` state tail. `matches: true`, and `args` positional by
+  `paramIndex` as `{type, value}` in `input.json`'s conventions (decimal,
+  `'true'`/`'false'`, lowercase hex; `type` is the artifact's ABI type), `null`
+  for a param with no constructor slot (a mutable state field).
+- **tampers**, from the contract's own slot layout. Each is built by
+  re-splicing the template with one slot overridden, so the codeSepIndex
+  slots and codePartLen fields stay consistent with the tampered widths and
+  the defect under test is the only one:
+
+  | class | applies when | `extractRaises` |
+  |---|---|---|
+  | `non-push-at-slot` | always: `OP_NOP` at the first constructor slot; also at the second reference of any param referenced twice | yes |
+  | `repeat-ref-differs` | a param has two references (SlotMatrix `tag`, `owner`): a different valid push of the same width class at the second | no |
+  | `wrong-fixed-width` | a slot declares `fixedValueByteLength` (every `owner`): a push one byte short, at every reference | no |
+  | `missing-state` | the artifact is stateful (CodeSepMatrix): the honest code part with no `OP_RETURN` after it | no |
+
+  Every tamper must give `matches: false`. When extraction is not pinned to
+  raise, the args it reports are not compared: the script is not a deployment
+  of the artifact, so there is no honest answer.
+
+Java's `ContractScript.extractConstructorArgs` is package-private; the Java
+driver reaches it through `runar.lang.sdk.DriverReadbackAccess`, a class in the
+driver's own source tree under the SDK's package name, and maps the `0`
+placeholder Java returns for a slotless param to `null`.
 
 ## Adding a matrix row
 

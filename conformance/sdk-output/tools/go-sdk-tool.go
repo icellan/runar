@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	runar "github.com/icellan/runar/packages/runar-go"
 )
@@ -34,6 +35,64 @@ type Input struct {
 	ConstructorArgs []TypedArg       `json:"constructorArgs"`
 	Inscription     *InscriptionInput `json:"inscription,omitempty"`
 	WalletDeploy    *WalletDeployInput `json:"walletDeploy,omitempty"`
+	// ScriptHex selects readback mode (conformance/sdk-vertical).
+	ScriptHex *string `json:"scriptHex,omitempty"`
+}
+
+type readbackArg struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type readbackOutput struct {
+	Matches *bool          `json:"matches"`
+	Args    []*readbackArg `json:"args"`
+	Error   *string        `json:"error"`
+}
+
+// readback (conformance/sdk-vertical): report what MatchesArtifact and
+// ExtractConstructorArgs say about scriptHex. Args are positional by
+// paramIndex as {type, value} (decimal / "true"|"false" / lowercase hex),
+// nil for a param the extraction does not report; Error is the message
+// ExtractConstructorArgs (or MatchesArtifact) returned, else nil.
+func readback(artifact *runar.RunarArtifact, scriptHex string) readbackOutput {
+	var out readbackOutput
+	if m, err := runar.MatchesArtifact(artifact, scriptHex); err != nil {
+		msg := err.Error()
+		out.Error = &msg
+	} else {
+		out.Matches = &m
+	}
+	got, err := runar.ExtractConstructorArgs(artifact, scriptHex)
+	if err != nil {
+		if out.Error == nil {
+			msg := err.Error()
+			out.Error = &msg
+		}
+		return out
+	}
+	out.Args = make([]*readbackArg, len(artifact.ABI.Constructor.Params))
+	for i, p := range artifact.ABI.Constructor.Params {
+		v, ok := got[p.Name]
+		if !ok {
+			continue
+		}
+		var s string
+		switch x := v.(type) {
+		case int64:
+			s = fmt.Sprintf("%d", x)
+		case *big.Int:
+			s = x.String()
+		case bool:
+			s = fmt.Sprintf("%t", x)
+		case string:
+			s = strings.ToLower(x)
+		default:
+			s = fmt.Sprintf("%v", x)
+		}
+		out.Args[i] = &readbackArg{Type: p.Type, Value: s}
+	}
+	return out
 }
 
 // stubWallet is the smallest BRC-100 wallet that can fund a deploy.
@@ -92,6 +151,16 @@ func main() {
 	if err := json.Unmarshal(input.Artifact, &artifact); err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading artifact: %v\n", err)
 		os.Exit(1)
+	}
+
+	if input.ScriptHex != nil {
+		enc, err := json.Marshal(readback(&artifact, *input.ScriptHex))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding readback: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(string(enc))
+		return
 	}
 
 	args := make([]interface{}, len(input.ConstructorArgs))
