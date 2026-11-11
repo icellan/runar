@@ -262,8 +262,13 @@ export function extractConstructorArgs(
   // occurrence's encoded width contributes to the cumulative offset shift —
   // deduplicating before the walk drops those widths and mis-aligns every
   // later slot on artifacts with repeated references. The VALUE is taken
-  // from the first occurrence per param.
-  const slots = [...artifact.constructorSlots].sort((a, b) => a.byteOffset - b.byteOffset);
+  // from the first occurrence per param. A codeSepIndex slot is a placeholder
+  // too: its baked value can be wider than one byte, so it is walked for its
+  // width only (paramIndex -1).
+  const slots: Array<{ byteOffset: number; paramIndex: number }> = [
+    ...artifact.constructorSlots,
+    ...(artifact.codeSepIndexSlots ?? []).map((s) => ({ byteOffset: s.byteOffset, paramIndex: -1 })),
+  ].sort((a, b) => a.byteOffset - b.byteOffset);
 
   const result: Record<string, unknown> = {};
   const assigned = new Set<number>();
@@ -275,6 +280,17 @@ export function extractConstructorArgs(
     // Template placeholders are exactly 1 byte, so the shift contributed by
     // each occurrence is its encoded width minus that byte.
     cumulativeShift += elem.totalHexChars / 2 - 1;
+    if (slot.paramIndex < 0) continue;
+    // Deploy only ever writes a push or a small-integer opcode at a
+    // constructor slot; any other opcode would otherwise be reported as a
+    // value the script does not hold ('', 0n or true by type). Checked at
+    // every occurrence, not just the first.
+    if (!isPushOpcode(elem.opcode)) {
+      throw new MalformedScriptError(
+        `extractConstructorArgs: opcode 0x${elem.opcode.toString(16).padStart(2, '0')} at the constructor slot ` +
+          `at template byte ${slot.byteOffset} is not a push`,
+      );
+    }
     if (assigned.has(slot.paramIndex)) continue;
     assigned.add(slot.paramIndex);
     const param = artifact.abi.constructor.params[slot.paramIndex];
@@ -309,9 +325,14 @@ export function matchesArtifact(
     throw new MalformedScriptError('matchesArtifact: script is not an even-length hex string');
   }
   let codeHex = scriptHex;
+  // A stateful contract is deployed with an OP_RETURN and its state after the
+  // code part, so a script with no OP_RETURN after it is not a deployment.
+  // Only the OP_RETURN's presence is checked here, not the state's length.
+  let missingState = false;
   if (artifact.stateFields && artifact.stateFields.length > 0) {
     const opReturnPos = findLastOpReturn(scriptHex);
     if (opReturnPos !== -1) codeHex = scriptHex.slice(0, opReturnPos);
+    else missingState = true;
   }
 
   const template = artifact.script;
@@ -323,7 +344,7 @@ export function matchesArtifact(
     !(artifact.constructorSlots?.length) &&
     !(artifact.codeSepIndexSlots?.length) &&
     !(artifact.codePartLenSlots?.length)
-  ) return codeHex === template;
+  ) return codeHex === template && !missingState;
 
   // Every OP_0 placeholder the SDK replaces at deploy time is one variable
   // script element: constructor slots AND codeSepIndex slots (the latter bake
@@ -401,5 +422,34 @@ export function matchesArtifact(
     if (elems.get(slot.byteOffset) !== expected) return false;
     resolved.push({ byteOffset: slot.byteOffset, width: expected.length / 2 });
   }
+
+  // Deploy writes encodeArg(value) at every slot of a param: a push or a
+  // small-integer opcode, the same bytes at every occurrence of the param, and
+  // exactly fixedValueByteLength bytes where the artifact declares one.
+  const firstElem = new Map<number, string>();
+  for (const cs of artifact.constructorSlots ?? []) {
+    const el = elems.get(cs.byteOffset)!.toLowerCase();
+    if (!isPushOpcode(parseInt(el.slice(0, 2), 16))) return false;
+    if (cs.fixedValueByteLength !== undefined && pushedByteLength(el) !== cs.fixedValueByteLength) return false;
+    const first = firstElem.get(cs.paramIndex);
+    if (first !== undefined && first !== el) return false;
+    firstElem.set(cs.paramIndex, el);
+  }
+
+  // Checked after the slot walk so a malformed script still raises
+  // MalformedScriptError (N-317) rather than reporting a plain mismatch.
+  if (missingState) return false;
   return true;
+}
+
+/** OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encodeArg can write. */
+function isPushOpcode(opcode: number): boolean {
+  return opcode <= 0x4f || (opcode >= 0x51 && opcode <= 0x60);
+}
+
+/** Number of bytes a push element (as returned by readScriptElement) leaves on the stack. */
+function pushedByteLength(elementHex: string): number {
+  const { opcode, dataHex } = readScriptElement(elementHex, 0);
+  if (opcode === 0x4f || (opcode >= 0x51 && opcode <= 0x60)) return 1;
+  return dataHex.length / 2;
 }

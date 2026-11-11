@@ -43,6 +43,8 @@ import {
   testKey,
   type StatelessArg,
 } from '../../packages/runar-testing/src/index.js';
+import { extractConstructorArgs, matchesArtifact } from '../../packages/runar-sdk/src/script-utils.js';
+import { MalformedScriptError } from '../../packages/runar-sdk/src/errors.js';
 import { computeTemplateHash, resolveSlotLayout } from '../../packages/runar-sdk/src/slot-layout.js';
 import type { RunarArtifact } from '../../packages/runar-ir-schema/src/index.js';
 
@@ -106,6 +108,10 @@ interface SpendSpec {
   noStateCheck?: boolean;
   /** Mandatory when `noStateCheck` is set — see above. */
   issue?: string;
+  /** Stateful accept only: read the EXECUTED deploy locking script back
+   *  through the SDK's `matchesArtifact` / `extractConstructorArgs` (see
+   *  `checkArtifactReadback`). */
+  artifactReadback?: ArtifactReadback;
   // both
   cryptoNearMiss?: boolean;
   /** precompiled-hex reject: the engine error must match this (case-insensitive)
@@ -217,6 +223,86 @@ function resolveStatefulArgs(raw: unknown[]): unknown[] {
     if (ph?.tag === 'pkh') return testKey(ph.key).pubKeyHash;
     return scalar(v);
   });
+}
+
+/** Hex bytes written as one literal, a placeholder, or a list of either. */
+type HexParts = string | Record<string, string> | (string | Record<string, string>)[];
+function hexOf(v: HexParts): string {
+  if (Array.isArray(v)) return v.map(hexOf).join('');
+  const ph = placeholder(v);
+  if (ph?.tag === 'pubkey') return testKey(ph.key).pubKey;
+  if (ph?.tag === 'pkh') return testKey(ph.key).pubKeyHash;
+  if (typeof v === 'string' && /^([0-9a-f]{2})*$/.test(v)) return v;
+  throw new Error(`not a hex literal or placeholder: ${JSON.stringify(v)}`);
+}
+
+/** One change to the executed script, at a DEPLOYED byte offset. `was` is
+ *  what must already be there (hand-derived from the artifact's template
+ *  offsets and the deploy args); `with` replaces exactly those bytes. */
+interface ScriptEdit {
+  at: number;
+  was: HexParts;
+  with: HexParts;
+}
+interface ArtifactReadback {
+  /** What extractConstructorArgs must return for the executed script. */
+  constructorArgs: Record<string, unknown>;
+  /** Byte where the code part ends; the OP_RETURN (0x6a) must sit there. */
+  codePartByteLength: number;
+  /** Hand-derived bytes at hand-derived deployed offsets, checked as-is. */
+  holds: { at: number; was: HexParts }[];
+  /** Scripts no deployment of this artifact produces: matchesArtifact must
+   *  return false for every one. `extractThrows`: extractConstructorArgs must
+   *  refuse it with MalformedScriptError. `dropStateTail`: cut the script at
+   *  codePartByteLength (the code part with no OP_RETURN and no state). */
+  notDeployments: { name: string; edits?: ScriptEdit[]; dropStateTail?: boolean; extractThrows?: boolean }[];
+}
+
+function bytesAt(hex: string, at: number, len: number): string {
+  return hex.slice(at * 2, (at + len) * 2);
+}
+
+/**
+ * The executed deploy script, read back through the SDK. The expectations are
+ * the spec's own deploy args and hand-derived offsets — not anything the SDK
+ * computed — and the script is the one the real Spend engine just accepted a
+ * spend of, so a matchesArtifact / extractConstructorArgs that disagrees with
+ * a real deployment, or that takes a script no deployment produces, fails.
+ */
+function checkArtifactReadback(
+  label: string,
+  rb: ArtifactReadback,
+  artifact: RunarArtifact,
+  lockingHex: string,
+): void {
+  for (const h of rb.holds) {
+    const want = hexOf(h.was);
+    expect(bytesAt(lockingHex, h.at, want.length / 2), `${label}: executed bytes at ${h.at}`).toBe(want);
+  }
+  expect(bytesAt(lockingHex, rb.codePartByteLength, 1), `${label}: OP_RETURN after the code part`).toBe('6a');
+
+  expect(matchesArtifact(artifact, lockingHex), `${label}: the executed deployment must match`).toBe(true);
+  const want: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rb.constructorArgs)) {
+    const ph = placeholder(v);
+    want[k] = ph ? hexOf(v as Record<string, string>) : scalar(v);
+  }
+  expect(extractConstructorArgs(artifact, lockingHex), `${label}: constructor args read back`).toEqual(want);
+
+  for (const t of rb.notDeployments) {
+    let script = lockingHex;
+    if (t.dropStateTail) script = script.slice(0, rb.codePartByteLength * 2);
+    // Apply from the highest offset down so each `at` stays a deployed offset.
+    for (const e of [...(t.edits ?? [])].sort((a, b) => b.at - a.at)) {
+      const was = hexOf(e.was);
+      expect(bytesAt(script, e.at, was.length / 2), `${label} ${t.name}: bytes at ${e.at}`).toBe(was);
+      script = script.slice(0, e.at * 2) + hexOf(e.with) + script.slice(e.at * 2 + was.length);
+    }
+    expect(matchesArtifact(artifact, script), `${label} ${t.name}: not a deployment`).toBe(false);
+    if (t.extractThrows) {
+      expect(() => extractConstructorArgs(artifact, script), `${label} ${t.name}`).toThrow(MalformedScriptError);
+    }
+  }
 }
 
 const specFiles = readdirSync(SPEC_DIR).filter((f) => f.endsWith('.json'));
@@ -398,6 +484,11 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
             const r = await runStatefulSpend({ ...spendOpts, attackerNewState });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
             assertNearMissReachedEngine(spec.fixture, s, r);
+            if (s.artifactReadback !== undefined) {
+              expect(s.expect === 'accept' && !s.tamperOutput, 'artifactReadback is for an accepted spend').toBe(true);
+              expect(r.vmAccepted).toBe(true);
+              checkArtifactReadback(`${spec.fixture}.${s.method}`, s.artifactReadback, r.artifact!, r.lockingHex!);
+            }
             if (s.templateHash !== undefined) {
               expect(s.expect === 'accept' && !s.tamperOutput, 'templateHash is for an accepted spend').toBe(true);
               checkTemplateHash(

@@ -1179,7 +1179,7 @@ Produces a P2PKH locking script. Accepts:
 extractConstructorArgs(artifact: RunarArtifact, scriptHex: string): Record<string, unknown>
 ```
 
-Reads the constructor arg values back out of an on-chain script using `artifact.constructorSlots`. Useful when you discover a UTXO and want to know what its constructor args were.
+Reads the constructor arg values back out of an on-chain script using `artifact.constructorSlots`. Useful when you discover a UTXO and want to know what its constructor args were. It throws `MalformedScriptError` when a constructor slot holds a non-push opcode, but does not otherwise check that the script is an instance of the artifact; call `matchesArtifact` first.
 
 #### `matchesArtifact` ([src/script-utils.ts](src/script-utils.ts))
 
@@ -1187,7 +1187,7 @@ Reads the constructor arg values back out of an on-chain script using `artifact.
 matchesArtifact(artifact: RunarArtifact, scriptHex: string): boolean
 ```
 
-Checks whether `scriptHex` was produced from `artifact` (regardless of the constructor args used).
+Checks whether `scriptHex` was produced from `artifact` (regardless of the constructor args used). Beyond the template bytes, every constructor slot must hold a push or small-integer opcode, a param referenced more than once must hold the same bytes at each reference, and a slot with `fixedValueByteLength` must push exactly that many bytes. For a stateful artifact (one with `stateFields`) pass the full locking script: it must have an OP_RETURN after its code part, so the code part alone does not match.
 
 ### Tokens
 
