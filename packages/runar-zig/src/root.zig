@@ -306,6 +306,7 @@ test {
     _ = @import("sdk_n316_matches_artifact_slot_only_test.zig");
     _ = @import("sdk_n317_hostile_utxo_scripts_test.zig");
     _ = @import("sdk_n318_matches_artifact_codesep_value_test.zig");
+    _ = @import("sdk_matches_artifact_slot_values_test.zig");
     _ = @import("sdk_n320_hostile_state_paths_test.zig");
     _ = @import("sdk_n329_nonhex_ctor_arg_test.zig");
     _ = @import("sdk_n330_nonstring_ctor_arg_test.zig");

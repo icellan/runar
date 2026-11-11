@@ -197,26 +197,42 @@ def extract_constructor_args(
     # occurrence's encoded width contributes to the cumulative offset shift --
     # deduplicating before the walk drops those widths and mis-aligns every
     # later slot on artifacts with repeated references. The VALUE is taken
-    # from the first occurrence per param.
-    slots = sorted(artifact.constructor_slots, key=lambda s: s.byte_offset)
+    # from the first occurrence per param. A codeSepIndex slot is a placeholder
+    # too: its baked value can be wider than one byte, so it is walked for its
+    # width only (param index -1).
+    slots = sorted(
+        [(s.byte_offset, s.param_index) for s in artifact.constructor_slots]
+        + [(s.byte_offset, -1) for s in artifact.code_sep_index_slots],
+        key=lambda s: s[0],
+    )
 
     result: dict = {}
     assigned: set[int] = set()
     cumulative_shift = 0
 
-    for slot in slots:
-        adjusted_hex_offset = (slot.byte_offset + cumulative_shift) * 2
+    for byte_offset, param_index in slots:
+        adjusted_hex_offset = (byte_offset + cumulative_shift) * 2
         data_hex, total_hex_chars, opcode = _read_script_element(code_hex, adjusted_hex_offset)
         # Template placeholders are exactly 1 byte, so the shift contributed by
         # each occurrence is its encoded width minus that byte.
         cumulative_shift += total_hex_chars // 2 - 1
+        if param_index < 0:
+            continue
+        # Deploy only ever writes a push or a small-integer opcode at a
+        # constructor slot; any other opcode would otherwise be reported as a
+        # value the script does not hold. Checked at every occurrence.
+        if not _is_push_opcode(opcode):
+            raise MalformedScriptError(
+                f"extract_constructor_args: opcode 0x{opcode:02x} at the constructor "
+                f"slot at template byte {byte_offset} is not a push"
+            )
 
-        if slot.param_index in assigned:
+        if param_index in assigned:
             continue
-        assigned.add(slot.param_index)
-        if slot.param_index >= len(artifact.abi.constructor_params):
+        assigned.add(param_index)
+        if param_index >= len(artifact.abi.constructor_params):
             continue
-        param = artifact.abi.constructor_params[slot.param_index]
+        param = artifact.abi.constructor_params[param_index]
         result[param.name] = _interpret_script_element(opcode, data_hex, param.type)
 
     return result
@@ -273,10 +289,16 @@ def matches_artifact(
             "matches_artifact: script is not an even-length hex string"
         )
     code_hex = script_hex
+    # A stateful contract is deployed with an OP_RETURN and its state after the
+    # code part, so a script with no OP_RETURN after it is not a deployment.
+    # Only the OP_RETURN's presence is checked here, not the state's length.
+    missing_state = False
     if artifact.state_fields:
         op_return_pos = find_last_op_return(script_hex)
         if op_return_pos != -1:
             code_hex = script_hex[:op_return_pos]
+        else:
+            missing_state = True
 
     template = artifact.script
 
@@ -286,7 +308,7 @@ def matches_artifact(
         and not artifact.code_sep_index_slots
         and not artifact.code_part_len_slots
     ):
-        return code_hex == template
+        return code_hex == template and not missing_state
 
     # Every OP_0 placeholder the SDK substitutes at deploy time -- constructor
     # args AND codeSepIndex slots -- is a variable element in the deployed
@@ -366,4 +388,41 @@ def matches_artifact(
         if elems.get(slot.byte_offset) != expected:
             return False
         resolved.append((slot.byte_offset, len(expected) // 2))
+
+    # Deploy writes encodeArg(value) at every slot of a param: a push or a
+    # small-integer opcode, the same bytes at every occurrence of the param,
+    # and exactly fixedValueByteLength bytes where the artifact declares one.
+    first_elem: dict[int, str] = {}
+    for cs in artifact.constructor_slots:
+        el = elems[cs.byte_offset].lower()
+        if not _is_push_opcode(int(el[:2], 16)):
+            return False
+        if (
+            cs.fixed_value_byte_length is not None
+            and _pushed_byte_length(el) != cs.fixed_value_byte_length
+        ):
+            return False
+        first = first_elem.get(cs.param_index)
+        if first is not None and first != el:
+            return False
+        first_elem[cs.param_index] = el
+
+    # Checked after the slot walk so a malformed script still raises
+    # MalformedScriptError (N-317) rather than reporting a plain mismatch.
+    if missing_state:
+        return False
     return True
+
+
+def _is_push_opcode(opcode: int) -> bool:
+    """OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encode_arg can write."""
+    return opcode <= 0x4F or 0x51 <= opcode <= 0x60
+
+
+def _pushed_byte_length(element_hex: str) -> int:
+    """Number of bytes a push element (as sliced by ``_read_script_element``)
+    leaves on the stack."""
+    data_hex, _, opcode = _read_script_element(element_hex, 0)
+    if opcode == 0x4F or 0x51 <= opcode <= 0x60:
+        return 1
+    return len(data_hex) // 2

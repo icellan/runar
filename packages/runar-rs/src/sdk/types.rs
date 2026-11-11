@@ -333,6 +333,10 @@ pub struct StateField {
 pub struct ConstructorSlot {
     pub param_index: usize,
     pub byte_offset: usize,
+    /// When set, the exact number of bytes every deployment pushes at this
+    /// slot (`matches_artifact` checks it).
+    #[serde(default)]
+    pub fixed_value_byte_length: Option<usize>,
 }
 
 /// A codeSepIndex slot describing where a codeSeparatorIndex placeholder

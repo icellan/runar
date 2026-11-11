@@ -79,7 +79,9 @@ module Runar
     end
 
     # Where a constructor placeholder resides in the compiled script.
-    ConstructorSlot = Struct.new(:param_index, :byte_offset, keyword_init: true)
+    # +fixed_value_byte_length+, when set, is the exact number of bytes every
+    # deployment pushes at the slot (matches_artifact checks it).
+    ConstructorSlot = Struct.new(:param_index, :byte_offset, :fixed_value_byte_length, keyword_init: true)
 
     # Slot recording a push_codesep_index placeholder in the template script.
     CodeSepIndexSlot = Struct.new(:byte_offset, :code_sep_index, keyword_init: true)
@@ -198,7 +200,8 @@ module Runar
         end
 
         constructor_slots = Array(hash['constructorSlots']).map do |cs|
-          ConstructorSlot.new(param_index: cs['paramIndex'], byte_offset: cs['byteOffset'])
+          ConstructorSlot.new(param_index: cs['paramIndex'], byte_offset: cs['byteOffset'],
+                              fixed_value_byte_length: cs['fixedValueByteLength'])
         end
 
         code_sep_index_slots = Array(hash['codeSepIndexSlots']).map do |cs|

@@ -493,13 +493,20 @@ pub fn extractConstructorArgs(
     // occurrence's encoded width contributes to the cumulative offset shift —
     // deduplicating before the walk drops those widths and mis-aligns every
     // later slot on artifacts with repeated references. The VALUE is taken
-    // from the first occurrence per param.
-    var indices = try allocator.alloc(usize, artifact.constructor_slots.len);
+    // from the first occurrence per param. A codeSepIndex slot is a placeholder
+    // too: its baked value can be wider than one byte, so it is walked for its
+    // width only (param_index -1).
+    const cs = try allocator.alloc(types.ConstructorSlot, artifact.constructor_slots.len + artifact.code_sep_index_slots.len);
+    defer allocator.free(cs);
+    @memcpy(cs[0..artifact.constructor_slots.len], artifact.constructor_slots);
+    for (artifact.code_sep_index_slots, artifact.constructor_slots.len..) |sep, i| {
+        cs[i] = .{ .param_index = -1, .byte_offset = sep.byte_offset };
+    }
+    var indices = try allocator.alloc(usize, cs.len);
     defer allocator.free(indices);
-    for (0..artifact.constructor_slots.len) |i| indices[i] = i;
+    for (0..cs.len) |i| indices[i] = i;
 
-    const cs = artifact.constructor_slots;
-    std.mem.sort(usize, indices, cs, struct {
+    std.mem.sort(usize, indices, @as([]const types.ConstructorSlot, cs), struct {
         fn lessThan(ctx: []const types.ConstructorSlot, a: usize, b: usize) bool {
             return ctx[a].byte_offset < ctx[b].byte_offset;
         }
@@ -524,6 +531,11 @@ pub fn extractConstructorArgs(
         // accumulate for EVERY occurrence, including the ones whose value we
         // already captured.
         cumulative_shift += @divTrunc(@as(i64, @intCast(elem.total_hex_chars)), 2) - 1;
+        if (slot.param_index < 0) continue;
+        // Deploy only ever writes a push or a small-integer opcode at a
+        // constructor slot; any other opcode would otherwise be reported as a
+        // value the script does not hold. Checked at every occurrence.
+        if (!isPushOpcode(elem.opcode)) return error.MalformedScript;
 
         if (assigned.contains(slot.param_index)) continue;
 
@@ -561,12 +573,18 @@ pub fn matchesArtifact(
     // N-317: refuse anything that is not whole bytes of hex up front, so no
     // reader below sees a partial byte and every tier makes the same call.
     if (!isHexBytes(script_hex)) return error.MalformedScript;
-    // Strip state suffix for stateful contracts
+    // Strip state suffix for stateful contracts. A stateful contract is
+    // deployed with an OP_RETURN and its state after the code part, so a
+    // script with no OP_RETURN after it is not a deployment. Only the
+    // OP_RETURN's presence is checked here, not the state's length.
     var code_hex = script_hex;
+    var missing_state = false;
     if (artifact.state_fields.len > 0) {
         const op_return_pos = state_mod.findLastOpReturn(script_hex);
         if (op_return_pos) |pos| {
             code_hex = script_hex[0..pos];
+        } else {
+            missing_state = true;
         }
     }
 
@@ -576,7 +594,7 @@ pub fn matchesArtifact(
     if (artifact.constructor_slots.len == 0 and artifact.code_sep_index_slots.len == 0 and
         artifact.code_part_len_slots.len == 0)
     {
-        return std.mem.eql(u8, code_hex, template);
+        return std.mem.eql(u8, code_hex, template) and !missing_state;
     }
 
     // Build sorted, deduplicated slots by byte offset
@@ -705,7 +723,37 @@ pub fn matchesArtifact(
             break; // a duplicate entry at the same offset would re-check the same element
         }
     }
+
+    // Deploy writes encodeArg(value) at every slot of a param: a push or a
+    // small-integer opcode, the same bytes at every occurrence of the param,
+    // and exactly fixedValueByteLength bytes where the artifact declares one.
+    for (artifact.constructor_slots, 0..) |slot, i| {
+        const e = Elem.at(sorted_offsets[0..sorted_count], elem_at[0..sorted_count], slot.byte_offset);
+        const el = code_hex[e.start .. e.start + e.len];
+        const elem = try readScriptElement(el, 0);
+        if (!isPushOpcode(elem.opcode)) return false;
+        if (slot.fixed_value_byte_length) |n| {
+            const pushed: usize = if (elem.opcode == 0x4f or (elem.opcode >= 0x51 and elem.opcode <= 0x60)) 1 else elem.data_hex.len / 2;
+            if (n < 0 or pushed != @as(usize, @intCast(n))) return false;
+        }
+        // Compare with the first occurrence of the same param.
+        for (artifact.constructor_slots[0..i]) |prev| {
+            if (prev.param_index != slot.param_index) continue;
+            const p = Elem.at(sorted_offsets[0..sorted_count], elem_at[0..sorted_count], prev.byte_offset);
+            if (!std.ascii.eqlIgnoreCase(code_hex[p.start .. p.start + p.len], el)) return false;
+            break;
+        }
+    }
+
+    // Checked after the slot walk so a malformed script still returns
+    // error.MalformedScript (N-317) rather than reporting a plain mismatch.
+    if (missing_state) return false;
     return true;
+}
+
+/// OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encodeArg can write.
+fn isPushOpcode(opcode: u8) bool {
+    return opcode <= 0x4f or (opcode >= 0x51 and opcode <= 0x60);
 }
 
 /// Compare template[t_start..t_end] against code_hex starting at c_start

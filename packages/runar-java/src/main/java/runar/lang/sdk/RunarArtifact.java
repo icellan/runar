@@ -400,9 +400,19 @@ public record RunarArtifact(
         }
     }
 
-    public record ConstructorSlot(int paramIndex, int byteOffset) {
+    /**
+     * {@code fixedValueByteLength}, when non-null, is the exact number of bytes
+     * every deployment pushes at this slot ({@code matchesArtifact} checks it).
+     */
+    public record ConstructorSlot(int paramIndex, int byteOffset, Integer fixedValueByteLength) {
+        public ConstructorSlot(int paramIndex, int byteOffset) {
+            this(paramIndex, byteOffset, null);
+        }
+
         static ConstructorSlot fromMap(Map<String, Object> m) {
-            return new ConstructorSlot(Json.asInt(m.get("paramIndex")), Json.asInt(m.get("byteOffset")));
+            Object fixed = m.get("fixedValueByteLength");
+            return new ConstructorSlot(Json.asInt(m.get("paramIndex")), Json.asInt(m.get("byteOffset")),
+                fixed == null ? null : Json.asInt(fixed));
         }
     }
 

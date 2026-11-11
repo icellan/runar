@@ -126,6 +126,7 @@ fn ctor_bytestring_artifact() -> RunarArtifact {
         constructor_slots: Some(vec![ConstructorSlot {
             param_index: 0,
             byte_offset: 1,
+            fixed_value_byte_length: None,
         }]),
         code_sep_index_slots: None,
         code_part_len_slots: None,

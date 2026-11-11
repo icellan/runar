@@ -187,25 +187,39 @@ module Runar
         # occurrence's encoded width contributes to the cumulative offset shift
         # — deduplicating before the walk drops those widths and mis-aligns
         # every later slot on artifacts with repeated references. The VALUE is
-        # taken from the first occurrence per param.
-        slots = artifact.constructor_slots.sort_by(&:byte_offset)
+        # taken from the first occurrence per param. A codeSepIndex slot is a
+        # placeholder too: its baked value can be wider than one byte, so it is
+        # walked for its width only (param_index -1).
+        slots = (artifact.constructor_slots.map { |s| [s.byte_offset, s.param_index] } +
+                 Array(artifact.code_sep_index_slots).map { |s| [s.byte_offset, -1] })
+                .sort_by(&:first)
 
         result = {}
         assigned = {}
         cumulative_shift = 0
 
-        slots.each do |slot|
-          adjusted_hex_offset = (slot.byte_offset + cumulative_shift) * 2
+        slots.each do |byte_offset, param_index|
+          adjusted_hex_offset = (byte_offset + cumulative_shift) * 2
           elem = read_script_element(code_hex, adjusted_hex_offset)
           # Template placeholders are exactly 1 byte, so the shift contributed
           # by each occurrence is its encoded width minus that byte.
           cumulative_shift += elem[:total_hex_chars] / 2 - 1
-          next if assigned[slot.param_index]
+          next if param_index.negative?
 
-          assigned[slot.param_index] = true
+          # Deploy only ever writes a push or a small-integer opcode at a
+          # constructor slot; any other opcode would otherwise be reported as a
+          # value the script does not hold. Checked at every occurrence.
+          unless push_opcode?(elem[:opcode])
+            raise Runar::SDK::MalformedScriptError,
+                  format('extract_constructor_args: opcode 0x%<op>02x at the constructor slot ' \
+                         'at template byte %<off>d is not a push', op: elem[:opcode], off: byte_offset)
+          end
+          next if assigned[param_index]
+
+          assigned[param_index] = true
 
           params = artifact.abi.constructor_params
-          param = slot.param_index < params.length ? params[slot.param_index] : nil
+          param = param_index < params.length ? params[param_index] : nil
           next unless param
 
           result[param.name] = interpret_script_element(elem[:opcode], elem[:data_hex], param.type)
@@ -235,9 +249,18 @@ module Runar
         end
 
         code_hex = script_hex
+        # A stateful contract is deployed with an OP_RETURN and its state after
+        # the code part, so a script with no OP_RETURN after it is not a
+        # deployment. Only the OP_RETURN's presence is checked, not the state's
+        # length.
+        missing_state = false
         if artifact.state_fields && !artifact.state_fields.empty?
           op_return_pos = State.find_last_op_return(script_hex)
-          code_hex = script_hex[0, op_return_pos] if op_return_pos != -1
+          if op_return_pos != -1
+            code_hex = script_hex[0, op_return_pos]
+          else
+            missing_state = true
+          end
         end
 
         template = artifact.script
@@ -246,7 +269,7 @@ module Runar
         if Array(artifact.constructor_slots).empty? &&
            Array(artifact.code_sep_index_slots).empty? &&
            Array(artifact.code_part_len_slots).empty?
-          return code_hex == template
+          return code_hex == template && !missing_state
         end
 
         # Every OP_0 placeholder the SDK replaces at deploy time is one
@@ -325,7 +348,43 @@ module Runar
 
           resolved << [slot.byte_offset, expected.length / 2]
         end
+
+        # Deploy writes encodeArg(value) at every slot of a param: a push or a
+        # small-integer opcode, the same bytes at every occurrence of the
+        # param, and exactly fixedValueByteLength bytes where the artifact
+        # declares one.
+        first_elem = {}
+        Array(artifact.constructor_slots).each do |cs|
+          el = elems[cs.byte_offset].downcase
+          return false unless push_opcode?(el[0, 2].to_i(16))
+          return false if !cs.fixed_value_byte_length.nil? && pushed_byte_length(el) != cs.fixed_value_byte_length
+
+          first = first_elem[cs.param_index]
+          return false if !first.nil? && first != el
+
+          first_elem[cs.param_index] = el
+        end
+
+        # Checked after the slot walk so a malformed script still raises
+        # MalformedScriptError (N-317) rather than reporting a plain mismatch.
+        return false if missing_state
+
         true
+      end
+
+      # OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encode_arg can write.
+      def push_opcode?(opcode)
+        opcode <= 0x4f || (opcode >= 0x51 && opcode <= 0x60)
+      end
+
+      # Number of bytes a push element (as sliced by read_script_element)
+      # leaves on the stack.
+      def pushed_byte_length(element_hex)
+        elem = read_script_element(element_hex, 0)
+        op = elem[:opcode]
+        return 1 if op == 0x4f || (op >= 0x51 && op <= 0x60)
+
+        elem[:data_hex].length / 2
       end
     end
 

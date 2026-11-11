@@ -375,16 +375,22 @@ public final class ScriptUtils {
             throw new IllegalArgumentException("matchesArtifact: script is not an even-length hex string");
         }
         String codeHex = scriptHex;
+        // A stateful contract is deployed with an OP_RETURN and its state after
+        // the code part, so a script with no OP_RETURN after it is not a
+        // deployment. Only the OP_RETURN's presence is checked, not the state's
+        // length.
+        boolean missingState = false;
         if (artifact.stateFields() != null && !artifact.stateFields().isEmpty()) {
             int opReturnPos = findLastOpReturn(scriptHex);
             if (opReturnPos != -1) codeHex = scriptHex.substring(0, opReturnPos);
+            else missingState = true;
         }
 
         String template = artifact.scriptHex();
         // N-316: compare literally only when the template has no slot of ANY kind.
         if (artifact.constructorSlots().isEmpty() && artifact.codeSepIndexSlots().isEmpty()
             && artifact.codePartLenSlots().isEmpty()) {
-            return codeHex.equals(template);
+            return codeHex.equals(template) && !missingState;
         }
 
         java.util.TreeSet<Integer> offsets = new java.util.TreeSet<>();
@@ -438,7 +444,33 @@ public final class ScriptUtils {
             if (!expected.equals(elems.get(slot.byteOffset()))) return false;
             resolved.add(new int[] {slot.byteOffset(), expected.length() / 2});
         }
+
+        // Deploy writes encodeArg(value) at every slot of a param: a push or a
+        // small-integer opcode, the same bytes at every occurrence of the param,
+        // and exactly fixedValueByteLength bytes where the artifact declares one.
+        java.util.Map<Integer, String> firstElem = new java.util.HashMap<>();
+        for (RunarArtifact.ConstructorSlot cs : artifact.constructorSlots()) {
+            String el = elems.get(cs.byteOffset()).toLowerCase(java.util.Locale.ROOT);
+            int opcode = Integer.parseInt(el.substring(0, 2), 16);
+            if (!isPushOpcode(opcode)) return false;
+            if (cs.fixedValueByteLength() != null) {
+                int pushed = (opcode == 0x4f || (opcode >= 0x51 && opcode <= 0x60))
+                    ? 1 : decodePushData(el, 0).dataHex().length() / 2;
+                if (pushed != cs.fixedValueByteLength()) return false;
+            }
+            String first = firstElem.putIfAbsent(cs.paramIndex(), el);
+            if (first != null && !first.equals(el)) return false;
+        }
+
+        // Checked after the slot walk so a malformed script still throws
+        // (N-317) rather than reporting a plain mismatch.
+        if (missingState) return false;
         return true;
+    }
+
+    /** OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encodeArg can write. */
+    static boolean isPushOpcode(int opcode) {
+        return opcode <= 0x4f || (opcode >= 0x51 && opcode <= 0x60);
     }
 
     /** True when {@code hex} is an even-length string of hex digits (N-317). */
