@@ -29,7 +29,7 @@
  * its deployed position after a codeSepIndex slot whose baked value is wider
  * than one byte.
  * Does NOT prove: anything about the Go, Rust, Python, Zig, Ruby or Java
- * SDKs, which have not replayed the vector yet; nor that a slot push is
+ * SDKs, which replay the vector in their own tests; nor that a slot push is
  * minimally encoded; nor that extractConstructorArgs validates anything
  * beyond the non-push refusal (call matchesArtifact first); nor anything
  * about the length of the state after the OP_RETURN.

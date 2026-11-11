@@ -23,8 +23,45 @@ if ARGV.length < 1
   exit 1
 end
 
+# Readback mode (conformance/sdk-vertical): what matches_artifact and
+# extract_constructor_args say about scriptHex. args is positional by
+# paramIndex as {type, value} (decimal / 'true'|'false' / lowercase hex), nil
+# for a param the extraction does not report; error is the message
+# extract_constructor_args (or matches_artifact) raised, else nil.
+def readback(artifact, script_hex)
+  out = { 'matches' => nil, 'args' => nil, 'error' => nil }
+  begin
+    out['matches'] = Runar::SDK::ScriptUtils.matches_artifact(artifact, script_hex) ? true : false
+  rescue StandardError => e
+    out['error'] = e.message
+  end
+  begin
+    got = Runar::SDK::ScriptUtils.extract_constructor_args(artifact, script_hex)
+  rescue StandardError => e
+    out['error'] ||= e.message
+    return out
+  end
+  out['args'] = artifact.abi.constructor_params.map do |p|
+    next nil unless got.key?(p.name)
+
+    v = got[p.name]
+    value = case v
+            when true then 'true'
+            when false then 'false'
+            when Integer then v.to_s
+            else v.to_s.downcase
+            end
+    { 'type' => p.type, 'value' => value }
+  end
+  out
+end
+
 data = JSON.parse(File.read(ARGV[0]))
 artifact = Runar::SDK::RunarArtifact.from_hash(data['artifact'])
+if data.key?('scriptHex')
+  $stdout.write(JSON.generate(readback(artifact, data['scriptHex'])))
+  exit 0
+end
 args = data['constructorArgs'].map { |a| convert_arg(a) }
 
 contract = Runar::SDK::RunarContract.new(artifact, args)

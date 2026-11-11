@@ -313,26 +313,42 @@ pub fn extract_constructor_args(
     // occurrence's encoded width contributes to the cumulative offset shift —
     // deduplicating before the walk drops those widths and mis-aligns every
     // later slot on artifacts with repeated references. The VALUE is taken
-    // from the first occurrence per param.
-    let mut sorted_slots: Vec<_> = slots.iter().collect();
-    sorted_slots.sort_by_key(|s| s.byte_offset);
+    // from the first occurrence per param. A codeSepIndex slot is a placeholder
+    // too: its baked value can be wider than one byte, so it is walked for its
+    // width only (param index None).
+    let mut sorted_slots: Vec<(usize, Option<usize>)> =
+        slots.iter().map(|s| (s.byte_offset, Some(s.param_index))).collect();
+    if let Some(ref cs) = artifact.code_sep_index_slots {
+        sorted_slots.extend(cs.iter().map(|s| (s.byte_offset, None)));
+    }
+    sorted_slots.sort_by_key(|s| s.0);
 
     let mut result = HashMap::new();
     let mut assigned = std::collections::HashSet::new();
     let mut cumulative_shift: isize = 0;
 
-    for slot in &sorted_slots {
-        let adjusted_hex_offset = ((slot.byte_offset as isize) + cumulative_shift) as usize * 2;
+    for &(byte_offset, param_index) in &sorted_slots {
+        let adjusted_hex_offset = ((byte_offset as isize) + cumulative_shift) as usize * 2;
         let (data_hex, total_hex_chars, opcode) = read_script_element(&code_hex, adjusted_hex_offset)?;
         // Template placeholders are exactly 1 byte, so the shift contributed by
         // each occurrence is its encoded width minus that byte.
         cumulative_shift += (total_hex_chars as isize) / 2 - 1;
+        let Some(param_index) = param_index else { continue };
+        // Deploy only ever writes a push or a small-integer opcode at a
+        // constructor slot; any other opcode would otherwise be reported as a
+        // value the script does not hold. Checked at every occurrence.
+        if !is_push_opcode(opcode) {
+            return Err(format!(
+                "extract_constructor_args: opcode 0x{:02x} at the constructor slot at template byte {} is not a push",
+                opcode, byte_offset
+            ));
+        }
 
-        if !assigned.insert(slot.param_index) {
+        if !assigned.insert(param_index) {
             continue;
         }
-        if slot.param_index < artifact.abi.constructor.params.len() {
-            let param = &artifact.abi.constructor.params[slot.param_index];
+        if param_index < artifact.abi.constructor.params.len() {
+            let param = &artifact.abi.constructor.params[param_index];
             let value = interpret_script_element(opcode, &data_hex, &param.param_type);
             result.insert(param.name.clone(), value);
         }
@@ -362,10 +378,17 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
         return Err("matches_artifact: script is not an even-length hex string".to_string());
     }
     let mut code_hex = script_hex.to_string();
+    // A stateful contract is deployed with an OP_RETURN and its state after
+    // the code part, so a script with no OP_RETURN after it is not a
+    // deployment. Only the OP_RETURN's presence is checked, not the state's
+    // length.
+    let mut missing_state = false;
     if let Some(ref state_fields) = artifact.state_fields {
         if !state_fields.is_empty() {
             if let Some(op_return_pos) = find_last_op_return(script_hex) {
                 code_hex = script_hex[..op_return_pos].to_string();
+            } else {
+                missing_state = true;
             }
         }
     }
@@ -378,7 +401,7 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
         && none_of(artifact.code_sep_index_slots.as_ref().map(|v| v.len()))
         && none_of(artifact.code_part_len_slots.as_ref().map(|v| v.len()))
     {
-        return Ok(code_hex == *template);
+        return Ok(code_hex == *template && !missing_state);
     }
     let slots = artifact.constructor_slots.as_deref().unwrap_or(&[]);
 
@@ -484,7 +507,51 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> Result<bo
         }
         resolved.push((slot.byte_offset, expected.len() / 2));
     }
+
+    // Deploy writes encodeArg(value) at every slot of a param: a push or a
+    // small-integer opcode, the same bytes at every occurrence of the param,
+    // and exactly fixedValueByteLength bytes where the artifact declares one.
+    let mut first_elem: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    for cs in slots {
+        let el = elems[&cs.byte_offset].to_ascii_lowercase();
+        let opcode = u8::from_str_radix(&el[..2], 16).map_err(|e| e.to_string())?;
+        if !is_push_opcode(opcode) {
+            return Ok(false);
+        }
+        if let Some(n) = cs.fixed_value_byte_length {
+            if pushed_byte_length(&el)? != n {
+                return Ok(false);
+            }
+        }
+        if let Some(first) = first_elem.get(&cs.param_index) {
+            if *first != el {
+                return Ok(false);
+            }
+        }
+        first_elem.insert(cs.param_index, el);
+    }
+
+    // Checked after the slot walk so a malformed script still errs (N-317)
+    // rather than reporting a plain mismatch.
+    if missing_state {
+        return Ok(false);
+    }
     Ok(true)
+}
+
+/// OP_0, a data push, OP_1NEGATE or OP_1..OP_16: what encodeArg can write.
+fn is_push_opcode(opcode: u8) -> bool {
+    opcode <= 0x4f || (0x51..=0x60).contains(&opcode)
+}
+
+/// Number of bytes a push element (as sliced by `read_script_element`) leaves
+/// on the stack.
+fn pushed_byte_length(element_hex: &str) -> Result<usize, String> {
+    let (data_hex, _, opcode) = read_script_element(element_hex, 0)?;
+    if opcode == 0x4f || (0x51..=0x60).contains(&opcode) {
+        return Ok(1);
+    }
+    Ok(data_hex.len() / 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +726,7 @@ mod tests {
         let artifact = make_artifact(
             "0093", // placeholder + OP_ADD
             vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         // Actual script has push(1 byte: 42)
         let script = "012a93";
@@ -672,7 +739,7 @@ mod tests {
         let artifact = make_artifact(
             "0093",
             vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         // OP_1 (0x51) then OP_ADD
         let script = "5193";
@@ -685,7 +752,7 @@ mod tests {
         let artifact = make_artifact(
             "0093",
             vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         // OP_0 (0x00) then OP_ADD
         let script = "0093";
@@ -700,7 +767,7 @@ mod tests {
             let artifact = make_artifact(
                 "0093",
                 vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
-                vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+                vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
             );
             let script = format!("{:02x}93", opcode);
             let result = extract_constructor_args(&artifact, &script).unwrap();
@@ -740,7 +807,7 @@ mod tests {
         make_artifact(
             "00ac",
             vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         )
     }
 
@@ -773,7 +840,7 @@ mod tests {
         let artifact = make_artifact(
             "00ac",
             vec![AbiParam { name: "x".to_string(), param_type: "ByteString".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         let cases: &[(&str, &str)] = &[
             ("012a", "2a"),             // direct push
@@ -793,7 +860,7 @@ mod tests {
         let artifact = make_artifact(
             "0093",
             vec![AbiParam { name: "pk".to_string(), param_type: "PubKey".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         let pubkey_hex = "ab".repeat(33);
         let script = format!("21{}93", pubkey_hex); // PUSH(33 bytes)
@@ -825,9 +892,9 @@ mod tests {
                 AbiParam { name: "beta".to_string(), param_type: "bigint".to_string(), fixed_array: None },
             ],
             vec![
-                ConstructorSlot { param_index: 0, byte_offset: 1 },
-                ConstructorSlot { param_index: 0, byte_offset: 3 },
-                ConstructorSlot { param_index: 1, byte_offset: 5 },
+                ConstructorSlot { param_index: 0, byte_offset: 1, fixed_value_byte_length: None },
+                ConstructorSlot { param_index: 0, byte_offset: 3, fixed_value_byte_length: None },
+                ConstructorSlot { param_index: 1, byte_offset: 5, fixed_value_byte_length: None },
             ],
         )
     }
@@ -890,7 +957,7 @@ mod tests {
         let artifact = make_artifact(
             "0093",
             vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
-            vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
+            vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }],
         );
         // Script with different arg (push 1 byte: 42) then OP_ADD
         assert!(matches_artifact(&artifact, "012a93").unwrap());
@@ -928,8 +995,9 @@ mod tests {
         };
         // Script with code + OP_RETURN + state data
         assert!(matches_artifact(&artifact, "51516a0000000000000000").unwrap());
-        // Without state should still match
-        assert!(matches_artifact(&artifact, "5151").unwrap());
+        // The code part alone is not a deployment of a stateful artifact
+        // (slot-values.json `stateful-literal-alone`).
+        assert!(!matches_artifact(&artifact, "5151").unwrap());
     }
 
 // -----------------------------------------------------------------------
@@ -970,9 +1038,9 @@ fn n070_artifact(rabin_type: &str, bool_type: &str) -> RunarArtifact {
             AbiParam { name: "blob".into(), param_type: "ByteString".into(), fixed_array: None },
         ],
         vec![
-            ConstructorSlot { param_index: 0, byte_offset: 0 },
-            ConstructorSlot { param_index: 1, byte_offset: 2 },
-            ConstructorSlot { param_index: 2, byte_offset: 4 },
+            ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None },
+            ConstructorSlot { param_index: 1, byte_offset: 2, fixed_value_byte_length: None },
+            ConstructorSlot { param_index: 2, byte_offset: 4, fixed_value_byte_length: None },
         ],
     )
 }
@@ -1101,7 +1169,7 @@ mod n074_script_number_width {
             script: "00ac".to_string(),
             asm: None,
             state_fields: None,
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
             code_separator_index: None,

@@ -7,6 +7,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'packages', 'runar-py'))
 
 from runar.sdk import RunarContract, RunarArtifact, Inscription
+from runar.sdk import extract_constructor_args, matches_artifact
 from runar.sdk.wallet import WalletClient, WalletProvider, WalletSigner
 
 
@@ -39,6 +40,40 @@ def convert_arg(arg: dict):
     return v
 
 
+def readback(artifact, script_hex: str) -> dict:
+    """Readback mode (conformance/sdk-vertical): what matches_artifact and
+    extract_constructor_args say about script_hex. ``args`` is positional by
+    paramIndex as {type, value} (decimal / 'true'|'false' / lowercase hex),
+    None for a param the extraction does not report; ``error`` is the message
+    extract_constructor_args (or matches_artifact) raised, else None."""
+    out = {'matches': None, 'args': None, 'error': None}
+    try:
+        out['matches'] = bool(matches_artifact(artifact, script_hex))
+    except Exception as e:  # noqa: BLE001 — any raise is the result
+        out['error'] = str(e) or type(e).__name__
+    try:
+        got = extract_constructor_args(artifact, script_hex)
+    except Exception as e:  # noqa: BLE001
+        if out['error'] is None:
+            out['error'] = str(e) or type(e).__name__
+        return out
+    args = []
+    for p in artifact.abi.constructor_params:
+        if p.name not in got:
+            args.append(None)
+            continue
+        v = got[p.name]
+        if isinstance(v, bool):
+            s = 'true' if v else 'false'
+        elif isinstance(v, int):
+            s = str(v)
+        else:
+            s = str(v).lower()
+        args.append({'type': p.type, 'value': s})
+    out['args'] = args
+    return out
+
+
 def main():
     if len(sys.argv) < 2:
         print('Usage: py-sdk-tool.py <input.json>', file=sys.stderr)
@@ -48,6 +83,9 @@ def main():
         data = json.load(f)
 
     artifact = RunarArtifact.from_dict(data['artifact'])
+    if 'scriptHex' in data:
+        sys.stdout.write(json.dumps(readback(artifact, data['scriptHex'])))
+        return
     args = [convert_arg(a) for a in data['constructorArgs']]
 
     contract = RunarContract(artifact, args)

@@ -24,13 +24,15 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { describe, expect, it } from 'vitest';
 
-import { RunarContract } from '../../packages/runar-sdk/src/index.js';
+import { extractConstructorArgs, matchesArtifact, RunarContract } from '../../packages/runar-sdk/src/index.js';
 import { hexToBytes, runStatefulSpend, runStatelessSigned, testKey } from '../../packages/runar-testing/src/index.js';
 
 import { MATRIX } from './matrix.js';
 import { checkDeployedAgainstDerivation, deriveVertical, type RefArtifact } from './reference/derive.js';
 import { argValue, encodePushData, encodeScriptNumber, type TypedArg } from './reference/encode.js';
+import { deriveReadback, type ReadbackDerivation } from './reference/readback.js';
 import { findCodeSeparators, walkScript } from './reference/script.js';
+import { checkReadback } from './runner/vertical-runner.js';
 import { checkArtifacts, diffArtifact } from './generate.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -824,6 +826,126 @@ describe('P1-5 executed rows: SlotBool.unlock — real signature, both flag valu
     });
     expect(r.vmAccepted).toBe(false);
     expect(r.reachedEngine).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [5] READBACK — expected-readback.json, and its TypeScript analogue
+// ---------------------------------------------------------------------------
+//
+// The seven-tier readback runs in vertical-runner.ts (it needs every tier's
+// driver). Here: the golden equals the independent derivation, and the
+// TypeScript SDK's matchesArtifact / extractConstructorArgs, called in
+// process, give the pinned verdict for the honest script and every tamper.
+
+/** Run the TS SDK the way the readback drivers do, normalized the same way. */
+function tsReadback(artifact: RefArtifact, scriptHex: string) {
+  let matches: boolean | null = null;
+  let args: Array<{ type: string; value: string } | null> | null = null;
+  let error: string | null = null;
+  try {
+    matches = matchesArtifact(artifact as never, scriptHex);
+  } catch (e) {
+    error = (e as Error).message;
+  }
+  try {
+    const got = extractConstructorArgs(artifact as never, scriptHex);
+    args = artifact.abi.constructor.params.map((p) =>
+      p.name in got ? { type: p.type, value: String(got[p.name]).toLowerCase() } : null,
+    );
+  } catch (e) {
+    error ??= (e as Error).message;
+  }
+  return { matches, args, error };
+}
+
+describe.each(CASES)('readback: %s', (name) => {
+  const input = loadCase(name);
+  const golden = JSON.parse(
+    readFileSync(join(CASES_DIR, name, 'expected-readback.json'), 'utf-8'),
+  ) as ReadbackDerivation;
+  const derived = deriveReadback(input.artifact, input.constructorArgs);
+
+  it('expected-readback.json equals the independent derivation', () => {
+    expect(golden.honest).toEqual(derived.honest);
+    expect(golden.tampers).toEqual(derived.tampers);
+  });
+
+  it('the derived honest script is exactly expected-locking.hex', () => {
+    const locking = readFileSync(join(CASES_DIR, name, 'expected-locking.hex'), 'utf-8').trim();
+    expect(derived.honest.scriptHex).toBe(locking);
+  });
+
+  it('has at least one tamper', () => {
+    expect(golden.tampers.length).toBeGreaterThan(0);
+  });
+
+  it('TypeScript SDK: honest script matches and reads back the case args', () => {
+    expect(checkReadback(golden.honest, tsReadback(input.artifact, golden.honest.scriptHex))).toEqual([]);
+  });
+
+  for (const t of golden.tampers) {
+    it(`TypeScript SDK: tamper ${t.id} is rejected${t.extractRaises ? ', and extract raises' : ''}`, () => {
+      expect(checkReadback(t, tsReadback(input.artifact, t.scriptHex))).toEqual([]);
+    });
+  }
+});
+
+describe('readback: tamper coverage per contract', () => {
+  const classesFor = (contract: string) => {
+    const row = MATRIX.find((r) => r.contract === contract)!;
+    const g = JSON.parse(
+      readFileSync(join(CASES_DIR, row.name, 'expected-readback.json'), 'utf-8'),
+    ) as ReadbackDerivation;
+    return [...new Set(g.tampers.map((t) => t.class))].sort();
+  };
+
+  it('SlotMatrix (tag and owner each referenced twice, owner fixed 33 B) carries all three slot tamper classes', () => {
+    expect(classesFor('SlotMatrix')).toEqual(['non-push-at-slot', 'repeat-ref-differs', 'wrong-fixed-width']);
+  });
+
+  it('SlotBool (no repeated param) carries no repeat-ref tamper', () => {
+    expect(classesFor('SlotBool')).toEqual(['non-push-at-slot', 'wrong-fixed-width']);
+  });
+
+  it('CodeSepMatrix (stateful) additionally carries the missing-state tamper', () => {
+    expect(classesFor('CodeSepMatrix')).toEqual(['missing-state', 'non-push-at-slot', 'wrong-fixed-width']);
+  });
+});
+
+describe('RED-PROOF 5: checkReadback rejects the pre-fix answers', () => {
+  const input = loadCase('multi-slot-mixed-a');
+  const g = deriveReadback(input.artifact, input.constructorArgs);
+  const honestOut = { matches: true, args: g.honest.args, error: null };
+
+  it('passes the honest answer', () => {
+    expect(checkReadback(g.honest, honestOut)).toEqual([]);
+  });
+
+  it('fails a tier that accepts a tamper (matchesArtifact true)', () => {
+    for (const t of g.tampers) {
+      expect(checkReadback(t, { ...honestOut, matches: true }).length, t.id).toBeGreaterThan(0);
+    }
+  });
+
+  it('fails a tier that reports args for a non-push opcode at a slot instead of raising', () => {
+    const t = g.tampers.find((x) => x.class === 'non-push-at-slot')!;
+    expect(checkReadback(t, { matches: false, args: g.honest.args, error: null })).toEqual([
+      'extractConstructorArgs returned args, pinned: must raise',
+    ]);
+  });
+
+  it('fails a tier that reads back a different value from the honest script', () => {
+    const wrong = clone(g.honest.args);
+    wrong[0] = { type: 'bigint', value: '0' };
+    expect(checkReadback(g.honest, { matches: true, args: wrong, error: null }).length).toBeGreaterThan(0);
+  });
+
+  it('fails a tier whose driver prints neither args nor an error', () => {
+    const t = g.tampers.find((x) => !x.extractRaises)!;
+    expect(checkReadback(t, { matches: false, args: null, error: null })).toEqual([
+      'driver reported neither args nor an error',
+    ]);
   });
 });
 

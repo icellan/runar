@@ -377,6 +377,7 @@ pub const RunarArtifact = struct {
                     slots[i] = .{
                         .param_index = if (obj.get("paramIndex")) |pi| @intCast(pi.integer) else 0,
                         .byte_offset = if (obj.get("byteOffset")) |bo| @intCast(bo.integer) else 0,
+                        .fixed_value_byte_length = if (obj.get("fixedValueByteLength")) |fv| @intCast(fv.integer) else null,
                     };
                 }
                 artifact.constructor_slots = slots;
@@ -751,6 +752,9 @@ pub const StateField = struct {
 pub const ConstructorSlot = struct {
     param_index: i32,
     byte_offset: i32,
+    /// When set, the exact number of bytes every deployment pushes at this
+    /// slot (`matchesArtifact` checks it).
+    fixed_value_byte_length: ?i32 = null,
 };
 
 /// CodeSepIndexSlot describes where a codeSeparatorIndex placeholder (OP_0)

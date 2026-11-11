@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -264,10 +265,15 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) (map[stri
 	// occurrence's encoded width contributes to the cumulative offset shift —
 	// deduplicating before the walk drops those widths and mis-aligns every
 	// later slot on artifacts with repeated references. The VALUE is taken from
-	// the first occurrence per param.
-	slots := make([]ConstructorSlot, len(artifact.ConstructorSlots))
-	copy(slots, artifact.ConstructorSlots)
-	sort.Slice(slots, func(i, j int) bool {
+	// the first occurrence per param. A codeSepIndex slot is a placeholder too:
+	// its baked value can be wider than one byte, so it is walked for its width
+	// only (ParamIndex -1).
+	slots := make([]ConstructorSlot, 0, len(artifact.ConstructorSlots)+len(artifact.CodeSepIndexSlots))
+	slots = append(slots, artifact.ConstructorSlots...)
+	for _, s := range artifact.CodeSepIndexSlots {
+		slots = append(slots, ConstructorSlot{ParamIndex: -1, ByteOffset: s.ByteOffset})
+	}
+	sort.SliceStable(slots, func(i, j int) bool {
 		return slots[i].ByteOffset < slots[j].ByteOffset
 	})
 
@@ -284,6 +290,17 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) (map[stri
 		// Template placeholders are exactly 1 byte, so the shift contributed by
 		// each occurrence is its encoded width minus that byte.
 		cumulativeShift += totalHexChars/2 - 1
+		if slot.ParamIndex < 0 {
+			continue
+		}
+		// Deploy only ever writes a push or a small-integer opcode at a
+		// constructor slot; any other opcode would otherwise be reported as a
+		// value the script does not hold. Checked at every occurrence.
+		if !isPushOpcode(opcode) {
+			return nil, &MalformedScriptError{Message: fmt.Sprintf(
+				"ExtractConstructorArgs: opcode 0x%02x at the constructor slot at template byte %d is not a push",
+				opcode, slot.ByteOffset)}
+		}
 
 		if assigned[slot.ParamIndex] {
 			continue
@@ -322,10 +339,16 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 		return false, &MalformedScriptError{Message: "MatchesArtifact: script is not an even-length hex string"}
 	}
 	codeHex := scriptHex
+	// A stateful contract is deployed with an OP_RETURN and its state after the
+	// code part, so a script with no OP_RETURN after it is not a deployment.
+	// Only the OP_RETURN's presence is checked here, not the state's length.
+	missingState := false
 	if artifact.StateFields != nil && len(artifact.StateFields) > 0 {
 		opReturnPos := FindLastOpReturn(scriptHex)
 		if opReturnPos != -1 {
 			codeHex = scriptHex[:opReturnPos]
+		} else {
+			missingState = true
 		}
 	}
 
@@ -334,7 +357,7 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 	// N-316: compare literally only when the template has no slot of ANY kind.
 	if len(artifact.ConstructorSlots) == 0 && len(artifact.CodeSepIndexSlots) == 0 &&
 		len(artifact.CodePartLenSlots) == 0 {
-		return codeHex == template, nil
+		return codeHex == template && !missingState, nil
 	}
 
 	// Deduplicate placeholder offsets (constructor + codeSepIndex), ascending.
@@ -438,5 +461,49 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) (bool, error) {
 		}
 		resolved = append(resolved, resolvedSep{slot.ByteOffset, len(expected) / 2})
 	}
+
+	// Deploy writes encodeArg(value) at every slot of a param: a push or a
+	// small-integer opcode, the same bytes at every occurrence of the param, and
+	// exactly FixedValueByteLength bytes where the artifact declares one.
+	firstElem := make(map[int]string)
+	for _, cs := range artifact.ConstructorSlots {
+		el := strings.ToLower(elems[cs.ByteOffset])
+		opcode, err := strconv.ParseUint(el[:2], 16, 8)
+		if err != nil || !isPushOpcode(int(opcode)) {
+			return false, nil
+		}
+		if cs.FixedValueByteLength != nil && pushedByteLength(el) != *cs.FixedValueByteLength {
+			return false, nil
+		}
+		if first, ok := firstElem[cs.ParamIndex]; ok && first != el {
+			return false, nil
+		}
+		firstElem[cs.ParamIndex] = el
+	}
+
+	// Checked after the slot walk so a malformed script still returns a
+	// *MalformedScriptError (N-317) rather than reporting a plain mismatch.
+	if missingState {
+		return false, nil
+	}
 	return true, nil
+}
+
+// isPushOpcode reports whether opcode is OP_0, a data push, OP_1NEGATE or
+// OP_1..OP_16: what encodeArg can write.
+func isPushOpcode(opcode int) bool {
+	return opcode <= 0x4f || (opcode >= 0x51 && opcode <= 0x60)
+}
+
+// pushedByteLength returns the number of bytes a push element (as sliced by
+// readScriptElement) leaves on the stack.
+func pushedByteLength(elementHex string) int {
+	dataHex, _, opcode, err := readScriptElement(elementHex, 0)
+	if err != nil {
+		return -1
+	}
+	if opcode == 0x4f || (opcode >= 0x51 && opcode <= 0x60) {
+		return 1
+	}
+	return len(dataHex) / 2
 }

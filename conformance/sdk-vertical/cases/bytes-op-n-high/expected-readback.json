@@ -1,0 +1,73 @@
+{
+  "case": "bytes-op-n-high",
+  "contract": "SlotMatrix",
+  "honest": {
+    "scriptHex": "607b88577c9d60210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+    "matches": true,
+    "args": [
+      {
+        "type": "bigint",
+        "value": "7"
+      },
+      {
+        "type": "ByteString",
+        "value": "10"
+      },
+      {
+        "type": "PubKey",
+        "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      }
+    ],
+    "extractRaises": false
+  },
+  "tampers": [
+    {
+      "id": "non-push:tag@0",
+      "class": "non-push-at-slot",
+      "description": "OP_NOP (0x61) at the constructor slot tag@0 (template byte offset), all other slots honest",
+      "scriptHex": "617b88577c9d60210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "matches": false,
+      "extractRaises": true
+    },
+    {
+      "id": "non-push:tag@6",
+      "class": "non-push-at-slot",
+      "description": "OP_NOP (0x61) at tag@6, the second reference of 'tag'; the first reference is honest",
+      "scriptHex": "607b88577c9d61210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "matches": false,
+      "extractRaises": true
+    },
+    {
+      "id": "repeat-differs:tag@6",
+      "class": "repeat-ref-differs",
+      "description": "'tag' pushes 01ee at its second reference tag@6 but 60 at the first",
+      "scriptHex": "607b88577c9d01ee210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac",
+      "matches": false,
+      "extractRaises": false
+    },
+    {
+      "id": "non-push:owner@11",
+      "class": "non-push-at-slot",
+      "description": "OP_NOP (0x61) at owner@11, the second reference of 'owner'; the first reference is honest",
+      "scriptHex": "607b88577c9d60210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179887916961ac",
+      "matches": false,
+      "extractRaises": true
+    },
+    {
+      "id": "repeat-differs:owner@11",
+      "class": "repeat-ref-differs",
+      "description": "'owner' pushes 210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81799 at its second reference owner@11 but 210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798 at the first",
+      "scriptHex": "607b88577c9d60210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798879169210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81799ac",
+      "matches": false,
+      "extractRaises": false
+    },
+    {
+      "id": "wrong-width:owner",
+      "class": "wrong-fixed-width",
+      "description": "'owner' pushes 32 bytes (its value minus the last byte) at every reference; the slots declare fixedValueByteLength 33",
+      "scriptHex": "607b88577c9d60200279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817879169200279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817ac",
+      "matches": false,
+      "extractRaises": false
+    }
+  ]
+}

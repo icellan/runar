@@ -3557,6 +3557,7 @@ mod tests {
             constructor_slots: Some(vec![ConstructorSlot {
                 param_index: 0,
                 byte_offset: 2,
+                fixed_value_byte_length: None,
             }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
@@ -3597,8 +3598,8 @@ mod tests {
             asm: None,
             state_fields: None,
             constructor_slots: Some(vec![
-                ConstructorSlot { param_index: 0, byte_offset: 0 },
-                ConstructorSlot { param_index: 1, byte_offset: 2 },
+                ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None },
+                ConstructorSlot { param_index: 1, byte_offset: 2, fixed_value_byte_length: None },
             ]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
@@ -3689,7 +3690,7 @@ mod tests {
             script: "009c69".to_string(),
             asm: None,
             state_fields: None,
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
             code_separator_index: None,
@@ -3720,7 +3721,7 @@ mod tests {
             script: "00930088".to_string(),
             asm: None,
             state_fields: None,
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2, fixed_value_byte_length: None }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
             code_separator_index: None,
@@ -4925,7 +4926,7 @@ mod tests {
             script: "0093".to_string(), // template: OP_0 placeholder + OP_ADD
             asm: None,
             state_fields: None,
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
             code_separator_index: None,
@@ -5154,7 +5155,7 @@ mod tests {
             script: "51ab52ab".to_string(),
             asm: None,
             state_fields: None,
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0, fixed_value_byte_length: None }]),
             code_sep_index_slots: None,
             code_part_len_slots: None,
             code_separator_index: Some(1),
@@ -5302,7 +5303,7 @@ mod tests {
         // Exactly 1 constructor arg below (matching the 1 ABI param), but the
         // slot references param_index 1 -- out of range.
         let artifact = RunarArtifact {
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0, fixed_value_byte_length: None }]),
             ..make_artifact(
                 "009c69", // OP_0(slot) OP_NUMEQUAL OP_VERIFY
                 Abi {
@@ -5328,7 +5329,7 @@ mod tests {
         // code_script is None -- this never calls try_build_code_script at
         // all, proving the gap the primary-site fix alone does not cover.
         let artifact = RunarArtifact {
-            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0 }]),
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 1, byte_offset: 0, fixed_value_byte_length: None }]),
             code_separator_index: Some(2),
             code_separator_indices: Some(vec![2]),
             ..make_artifact(

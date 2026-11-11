@@ -9,6 +9,10 @@
 //                                 per-tier SDK drivers run against it unchanged
 //   cases/<row>/expected-code-part.hex   INDEPENDENTLY DERIVED (reference/)
 //   cases/<row>/expected-vertical.json   INDEPENDENTLY DERIVED (reference/)
+//   cases/<row>/expected-readback.json   INDEPENDENTLY DERIVED (reference/readback.ts):
+//                                 the honest locking script + tampered scripts,
+//                                 and what matchesArtifact /
+//                                 extractConstructorArgs must say about each
 //
 // The goldens are written from `reference/derive.ts`, never from an SDK.
 // Generation REFUSES to write a case whose artifact fails its own template
@@ -40,6 +44,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 
 import { MATRIX } from './matrix.js';
 import { deriveVertical, type RefArtifact } from './reference/derive.js';
+import { deriveReadback } from './reference/readback.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HERE = __dirname;
@@ -144,7 +149,14 @@ function main(): void {
         2,
       ) + '\n',
     );
-    console.log(`  wrote ${row.name} (${derivation.codePartByteLength} B code part)`);
+    const readback = deriveReadback(artifact, row.constructorArgs);
+    writeFileSync(
+      join(dir, 'expected-readback.json'),
+      JSON.stringify({ case: row.name, contract: row.contract, ...readback }, null, 2) + '\n',
+    );
+    console.log(
+      `  wrote ${row.name} (${derivation.codePartByteLength} B code part, ${readback.tampers.length} readback tampers)`,
+    );
   }
 
   rmSync(TMP_DIR, { recursive: true, force: true });

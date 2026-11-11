@@ -335,6 +335,9 @@ type StateField struct {
 type ConstructorSlot struct {
 	ParamIndex int `json:"paramIndex"`
 	ByteOffset int `json:"byteOffset"`
+	// FixedValueByteLength, when set, is the exact number of bytes every
+	// deployment pushes at this slot (MatchesArtifact checks it).
+	FixedValueByteLength *int `json:"fixedValueByteLength,omitempty"`
 }
 
 // CodeSepIndexSlot describes where a codeSeparatorIndex placeholder (OP_0)

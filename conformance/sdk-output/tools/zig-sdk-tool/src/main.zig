@@ -41,6 +41,15 @@ pub fn main(init: std.process.Init) !void {
     var artifact = try runar.RunarArtifact.fromJson(allocator, artifact_json);
     defer artifact.deinit();
 
+    // Readback mode (conformance/sdk-vertical): input {artifact, scriptHex}.
+    if (root.get("scriptHex")) |sh| {
+        const out = try readback(allocator, &artifact, sh.string);
+        defer allocator.free(out);
+        const stdout = std.Io.File.stdout();
+        try stdout.writeStreamingAll(io, out);
+        return;
+    }
+
     // Parse constructorArgs
     const ctor_args_val = root.get("constructorArgs") orelse {
         std.debug.print("Missing 'constructorArgs' field\n", .{});
@@ -209,4 +218,86 @@ fn convertArg(allocator: std.mem.Allocator, type_str: []const u8, value: std.jso
         };
         return .{ .bytes = try allocator.dupe(u8, str) };
     }
+}
+
+/// JSON-encode a string (quoted, escaped).
+fn jsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, s, .{});
+}
+
+/// Readback mode (conformance/sdk-vertical): what matchesArtifact and
+/// extractConstructorArgs say about `script_hex`, as
+/// `{"matches":...,"args":...,"error":...}`. `args` is positional by
+/// paramIndex as {type, value} (decimal / "true"|"false" / lowercase hex),
+/// null for a param the extraction does not report; `error` is the Zig error
+/// name extractConstructorArgs (or matchesArtifact) returned, else null.
+fn readback(allocator: std.mem.Allocator, artifact: *const runar.RunarArtifact, script_hex: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var err_name: ?[]const u8 = null;
+
+    try buf.appendSlice(allocator, "{\"matches\":");
+    if (runar.sdk_script_utils.matchesArtifact(artifact, script_hex)) |m| {
+        try buf.appendSlice(allocator, if (m) "true" else "false");
+    } else |e| {
+        err_name = @errorName(e);
+        try buf.appendSlice(allocator, "null");
+    }
+
+    try buf.appendSlice(allocator, ",\"args\":");
+    if (runar.sdk_script_utils.extractConstructorArgs(artifact, script_hex, allocator)) |got_const| {
+        var got = got_const;
+        defer {
+            var it = got.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                entry.value_ptr.deinit(allocator);
+            }
+            got.deinit();
+        }
+        try buf.append(allocator, '[');
+        for (artifact.abi.constructor.params, 0..) |p, i| {
+            if (i > 0) try buf.append(allocator, ',');
+            const v = got.get(p.name) orelse {
+                try buf.appendSlice(allocator, "null");
+                continue;
+            };
+            const value: []u8 = switch (v) {
+                .int => |n| try std.fmt.allocPrint(allocator, "{d}", .{n}),
+                .big_int => |b| try allocator.dupe(u8, b),
+                .boolean => |b| try allocator.dupe(u8, if (b) "true" else "false"),
+                .bytes => |h| blk: {
+                    const lower = try allocator.alloc(u8, h.len);
+                    _ = std.ascii.lowerString(lower, h);
+                    break :blk lower;
+                },
+                else => try allocator.dupe(u8, @tagName(v)),
+            };
+            defer allocator.free(value);
+            const t = try jsonString(allocator, p.type_name);
+            defer allocator.free(t);
+            const vs = try jsonString(allocator, value);
+            defer allocator.free(vs);
+            try buf.appendSlice(allocator, "{\"type\":");
+            try buf.appendSlice(allocator, t);
+            try buf.appendSlice(allocator, ",\"value\":");
+            try buf.appendSlice(allocator, vs);
+            try buf.append(allocator, '}');
+        }
+        try buf.append(allocator, ']');
+    } else |e| {
+        if (err_name == null) err_name = @errorName(e);
+        try buf.appendSlice(allocator, "null");
+    }
+
+    try buf.appendSlice(allocator, ",\"error\":");
+    if (err_name) |n| {
+        const es = try jsonString(allocator, n);
+        defer allocator.free(es);
+        try buf.appendSlice(allocator, es);
+    } else {
+        try buf.appendSlice(allocator, "null");
+    }
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
 }

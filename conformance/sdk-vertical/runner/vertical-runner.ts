@@ -24,6 +24,14 @@
 //                              the derived code part as its prefix (stateless:
 //                              exactly equal), and must agree with the pinned
 //                              expected-locking.hex.
+//   [5] READBACK               every tier's matchesArtifact /
+//                              extractConstructorArgs, run on the honest
+//                              locking script and on every tampered script in
+//                              expected-readback.json (itself re-derived from
+//                              reference/readback.ts and compared first), must
+//                              give the pinned verdict: honest -> matches and
+//                              the case's own args; tamper -> no match, and
+//                              extract raises exactly where pinned.
 //
 // Usage:
 //   tsx sdk-vertical/runner/vertical-runner.ts [--filter <substr>]
@@ -32,12 +40,14 @@
 //                                              [--cases-dir <dir>]
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 import { deriveVertical, type RefArtifact } from '../reference/derive.js';
 import type { TypedArg } from '../reference/encode.js';
+import { deriveReadback, type ReadbackArg, type ReadbackDerivation } from '../reference/readback.js';
 import { buildSdkTools, runSdkTool, type SdkResult } from './sdk-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +64,49 @@ export interface CaseReport {
   /** Divergences that reproduced a known-divergences.json entry. */
   known: string[];
   sdkResults: SdkResult[];
+  /** One row per (tier, readback script): did the tier give the pinned verdict? */
+  readback: Array<{ tier: string; id: string; ok: boolean }>;
+}
+
+/** What a driver prints in readback mode. */
+interface ReadbackOutput {
+  matches: boolean | null;
+  args: Array<ReadbackArg | null> | null;
+  error: string | null;
+}
+
+/**
+ * Compare one tier's readback output against the pinned expectation. Returns
+ * the failure messages (empty = the tier gave the pinned verdict).
+ * Exported for the vitest red-proofs.
+ */
+export function checkReadback(
+  expected: { matches: boolean; extractRaises: boolean; args?: Array<ReadbackArg | null> },
+  out: ReadbackOutput,
+): string[] {
+  const f: string[] = [];
+  if (out.matches !== expected.matches) {
+    f.push(`matchesArtifact gave ${String(out.matches)}, pinned ${String(expected.matches)}`);
+  }
+  // extract raised <=> no args and an error. An error WITH args means only
+  // matchesArtifact raised (already reported through matches === null).
+  const raised = out.args === null && out.error !== null;
+  if (raised !== expected.extractRaises) {
+    f.push(
+      expected.extractRaises
+        ? 'extractConstructorArgs returned args, pinned: must raise'
+        : `extractConstructorArgs raised (${out.error}), pinned: must not raise`,
+    );
+  } else if (!raised && out.args === null) {
+    f.push('driver reported neither args nor an error');
+  }
+  if (expected.args !== undefined && !raised) {
+    const want = JSON.stringify(expected.args);
+    const got = JSON.stringify(out.args);
+    if (want !== got) f.push(`extractConstructorArgs args mismatch:\n        pinned: ${want}\n        actual: ${got}`);
+  }
+  if (expected.args !== undefined && out.error !== null) f.push(`unexpected error on the honest script: ${out.error}`);
+  return f;
 }
 
 /** The exact byte a listed divergence must reproduce: `golden` is the byte
@@ -194,8 +247,37 @@ export function runCase(
     }
   }
 
+  // --- [5a] readback golden (no SDK) --------------------------------------
+  let readback: ReadbackDerivation | undefined;
+  const readbackGoldenPath = join(caseDir, 'expected-readback.json');
+  try {
+    readback = deriveReadback(input.artifact, input.constructorArgs);
+  } catch (err) {
+    failures.push(`[readback] reference derivation failed: ${(err as Error).message}`);
+  }
+  if (readback) {
+    if (!readback.honest.scriptHex.startsWith(derived.codePartHex)) {
+      failures.push('[readback] derived honest script does not begin with the derived code part');
+    }
+    if (!existsSync(readbackGoldenPath)) {
+      failures.push('[golden] expected-readback.json is missing — run the generator');
+    } else {
+      const g = readJson<ReadbackDerivation>(readbackGoldenPath);
+      for (const key of ['honest', 'tampers'] as const) {
+        if (JSON.stringify(g[key]) !== JSON.stringify(readback[key])) {
+          failures.push(`[golden] expected-readback.json '${key}' does not match the independent readback derivation — run the generator and review the diff`);
+        }
+      }
+    }
+    const lockingGolden = join(caseDir, 'expected-locking.hex');
+    if (existsSync(lockingGolden) && readFileSync(lockingGolden, 'utf-8').trim().toLowerCase() !== readback.honest.scriptHex) {
+      failures.push('[readback] the derived honest locking script differs from expected-locking.hex');
+    }
+  }
+
   // --- [4] seven SDKs ------------------------------------------------------
   const sdkResults: SdkResult[] = [];
+  const readbackRows: CaseReport['readback'] = [];
   const known: string[] = [];
   if (opts.runSdks) {
     const inputPath = join(caseDir, 'input.json');
@@ -264,9 +346,43 @@ export function runCase(
         if (r.hex !== golden) failures.push(`[tier:${r.sdk}] does not match expected-locking.hex (${firstDiff(golden, r.hex)})`);
       }
     }
+
+    // --- [5b] seven-tier readback -----------------------------------------
+    if (readback) {
+      const scripts = [
+        { id: 'honest', scriptHex: readback.honest.scriptHex, expect: readback.honest },
+        ...readback.tampers.map((t) => ({ id: t.id, scriptHex: t.scriptHex, expect: t as { matches: boolean; extractRaises: boolean } })),
+      ];
+      const tmp = mkdtempSync(join(tmpdir(), `sdk-vertical-readback-${name}-`));
+      try {
+        scripts.forEach((sc, i) => {
+          writeFileSync(join(tmp, `${i}.json`), JSON.stringify({ artifact: input.artifact, scriptHex: sc.scriptHex }));
+        });
+        for (const tool of ALL_TOOLS) {
+          if (opts.tiers && !opts.tiers.has(tool.name)) continue;
+          scripts.forEach((sc, i) => {
+            const r = runSdkTool(tool, join(tmp, `${i}.json`), { raw: true });
+            let rowFailures: string[];
+            if (!r.success) {
+              rowFailures = [`driver failed: ${r.error}`];
+            } else {
+              try {
+                rowFailures = checkReadback(sc.expect, JSON.parse(r.hex) as ReadbackOutput);
+              } catch (err) {
+                rowFailures = [`driver printed no readback JSON (${(err as Error).message}): ${r.hex.slice(0, 120)}`];
+              }
+            }
+            readbackRows.push({ tier: tool.name, id: sc.id, ok: rowFailures.length === 0 });
+            for (const m of rowFailures) failures.push(`[readback:${tool.name}] ${sc.id}: ${m}`);
+          });
+        }
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    }
   }
 
-  return { name, failures, known, sdkResults };
+  return { name, failures, known, sdkResults, readback: readbackRows };
 }
 
 const ALL_TOOLS = buildSdkTools();
@@ -317,6 +433,7 @@ function main(): void {
 
   let failed = 0;
   const tierStatus = new Map<string, { ok: number; fail: number; lastError?: string }>();
+  const readbackStatus = new Map<string, { ok: number; fail: number; failByClass: Map<string, number> }>();
 
   for (const dir of dirs) {
     const rep = runCase(dir, { runSdks, updateGolden, tiers });
@@ -328,6 +445,16 @@ function main(): void {
         s.lastError = r.error;
       }
       tierStatus.set(r.sdk, s);
+    }
+    for (const r of rep.readback) {
+      const s = readbackStatus.get(r.tier) ?? { ok: 0, fail: 0, failByClass: new Map<string, number>() };
+      if (r.ok) s.ok++;
+      else {
+        s.fail++;
+        const cls = r.id.split(':')[0]!;
+        s.failByClass.set(cls, (s.failByClass.get(cls) ?? 0) + 1);
+      }
+      readbackStatus.set(r.tier, s);
     }
     if (rep.failures.length === 0) {
       console.log(`[+] ${rep.name}${rep.known.length > 0 ? ` (${rep.known.length} known divergence)` : ''}`);
@@ -357,6 +484,14 @@ function main(): void {
     for (const [tier, s] of [...tierStatus].sort()) {
       const line = `  ${tier.padEnd(11)} ok=${s.ok} fail=${s.fail}`;
       console.log(s.fail > 0 ? `${line}\n      last error: ${(s.lastError ?? '').split('\n')[0]}` : line);
+    }
+  }
+
+  if (readbackStatus.size > 0) {
+    console.log('\nPer-tier readback (honest + tampered scripts):');
+    for (const [tier, s] of [...readbackStatus].sort()) {
+      const classes = [...s.failByClass].sort().map(([c, n]) => `${c}=${n}`).join(' ');
+      console.log(`  ${tier.padEnd(11)} ok=${s.ok} fail=${s.fail}${classes ? `  (failed: ${classes})` : ''}`);
     }
   }
 

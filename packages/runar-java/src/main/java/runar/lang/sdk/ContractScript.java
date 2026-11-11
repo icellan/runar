@@ -338,6 +338,14 @@ public final class ContractScript {
             if (ctorSlotByOffset.containsKey(templateByteOffset)) {
                 int paramIndex = ctorSlotByOffset.get(templateByteOffset);
                 int opcode = Integer.parseInt(deployed.substring(deployedPos, deployedPos + 2), 16);
+                // Deploy only ever writes a push or a small-integer opcode at a
+                // constructor slot; any other opcode would otherwise be reported
+                // as a value the script does not hold. Checked at every occurrence.
+                if (!ScriptUtils.isPushOpcode(opcode)) {
+                    throw new IllegalArgumentException(String.format(
+                        "extractConstructorArgs: opcode 0x%02x at the constructor slot at template byte %d is not a push",
+                        opcode, templateByteOffset));
+                }
                 args.set(paramIndex, decodeSlotValue(deployed, deployedPos, opcode,
                     paramType(artifact, paramIndex)));
                 templatePos += 2;  // OP_0 placeholder is 1 byte

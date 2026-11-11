@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { RunarContract } from '../../../packages/runar-sdk/src/contract.js';
 import { WalletProvider } from '../../../packages/runar-sdk/src/providers/wallet-provider.js';
+import { extractConstructorArgs, matchesArtifact } from '../../../packages/runar-sdk/src/script-utils.js';
 
 interface TypedArg {
   type: string;
@@ -52,6 +53,40 @@ if (!inputPath) {
 }
 
 const input: Input = JSON.parse(readFileSync(inputPath, 'utf-8'));
+
+/**
+ * Readback mode (conformance/sdk-vertical): input `{artifact, scriptHex}`.
+ * Prints `{matches, args, error}` — `args` positional by paramIndex as
+ * `{type, value}` (decimal / 'true'|'false' / lowercase hex), null for a
+ * param extractConstructorArgs does not report; `error` is the message
+ * extractConstructorArgs (or matchesArtifact) raised, else null.
+ */
+const readbackScript = (input as unknown as { scriptHex?: unknown }).scriptHex;
+if (typeof readbackScript === 'string') {
+  const artifact = input.artifact as any;
+  let matches: boolean | null = null;
+  let args: Array<{ type: string; value: string } | null> | null = null;
+  let error: string | null = null;
+  try {
+    matches = matchesArtifact(artifact, readbackScript);
+  } catch (e) {
+    error = (e as Error).message;
+  }
+  try {
+    const got = extractConstructorArgs(artifact, readbackScript);
+    const params = artifact.abi.constructor.params as Array<{ name: string; type: string }>;
+    args = params.map((p) => {
+      if (!(p.name in got)) return null;
+      const v = got[p.name];
+      const value = typeof v === 'bigint' || typeof v === 'boolean' ? String(v) : String(v).toLowerCase();
+      return { type: p.type, value };
+    });
+  } catch (e) {
+    error ??= (e as Error).message;
+  }
+  process.stdout.write(JSON.stringify({ matches, args, error }));
+  process.exit(0);
+}
 const args = input.constructorArgs.map(convertArg);
 const contract = new RunarContract(input.artifact as any, args);
 if (input.inscription) {

@@ -96,6 +96,9 @@ class ConstructorSlot:
     """Where a constructor placeholder resides in the compiled script."""
     param_index: int
     byte_offset: int
+    # When set, the exact number of bytes every deployment pushes at this slot
+    # (``matches_artifact`` checks it).
+    fixed_value_byte_length: int | None = None
 
 
 @dataclass
@@ -186,7 +189,10 @@ class RunarArtifact:
             for sf in d.get('stateFields', [])
         ]
         ctor_slots = [
-            ConstructorSlot(param_index=cs['paramIndex'], byte_offset=cs['byteOffset'])
+            ConstructorSlot(
+                param_index=cs['paramIndex'], byte_offset=cs['byteOffset'],
+                fixed_value_byte_length=cs.get('fixedValueByteLength'),
+            )
             for cs in d.get('constructorSlots', [])
         ]
         code_sep_idx_slots = [
