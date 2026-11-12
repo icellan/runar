@@ -712,7 +712,7 @@ the constants had been honest all along.
 -- state-covenant (it carries the blob); all three live hex values are
 -- byte-equal to their expected-script.hex.
 -- 2026-11-12 (#187, `@bindingVariant all`): the model fingerprint moved to
--- v1:65f:7257052b:63f203a80b6d9496 (ANF/Syntax.lean + ANF/Json.lean +
+-- v1:65f:7257050b:203784dbf8f91f50 (ANF/Syntax.lean + ANF/Json.lean +
 -- Stack/Lower.lean: `check_preimage` carries a `BindingVariant`, and `.all`
 -- lowers to the 376-byte blob; Stack/AgreesStateful.lean gains the `all`
 -- lowering / parse facts; new guard module Stack/BindingVariantGuard.lean; the
@@ -720,16 +720,19 @@ the constants had been honest all along.
 -- regens (shards 1, 8, 22 of 22) returned all three `.regenLive` anchors
 -- `[fresh]` and byte-equal to their expected-script.hex (no fixture sets
 -- `bindingVariant`; state-covenant keeps the lowS blob), so only their
--- fingerprints move.
+-- fingerprints move. The fingerprint above was re-taken after the
+-- two `nVersion != 1` -> `nVersion > 1` doc-comment edits (-2 bytes); the
+-- same three shards were re-run on that model and again returned `[fresh]`,
+-- byte-exact.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:65f:7257052b:63f203a80b6d9496"⟩,
+  ⟨"babybear", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-chained-rewrite",       .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:65f:7257052b:63f203a80b6d9496"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -752,7 +755,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:65f:7257052b:63f203a80b6d9496"⟩,
+  ⟨"state-covenant", .regenLive, "v1:65f:7257050b:203784dbf8f91f50"⟩,
 ]
 
 /--
