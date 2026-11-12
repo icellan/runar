@@ -26,11 +26,12 @@ RSpec.describe 'N-296 — merge per-input Sig override' do
     Runar::SDK::Utxo.new(txid: h['txid'], output_index: h['outputIndex'], satoshis: h['satoshis'], script: h['script'])
   end
 
-  define_method(:merge_tx) do |per_input_args|
+  define_method(:merge_tx) do |per_input_args, fee_rate = nil|
     v = JSON.parse(File.read(vector_path))
     art = Runar::SDK::RunarArtifact.from_hash(v['artifact'])
     signer = Runar::SDK::LocalSigner.new(v['privKeyHex'])
     provider = Runar::SDK::MockProvider.new
+    provider.set_fee_rate(fee_rate) if fee_rate
     provider.add_utxo(signer.get_address, n296_utxo(v['fundingUtxo']))
     cu = n296_utxo(v['contractUtxo'])
     eu = n296_utxo(v['extraContractUtxo'])
@@ -52,5 +53,35 @@ RSpec.describe 'N-296 — merge per-input Sig override' do
 
   it 'an explicit non-zero Sig in the per-input args is overwritten by the signer' do
     expect(merge_tx([['ab' * 71]])).to eq(reference_tx_hex)
+  end
+
+  # Fee sizing for a merge: at 1000 sat/kB every byte the fee layout misses is a
+  # satoshi under-paid. Each additional contract input's unlock carries
+  # _changeAmount, so it must be sized with the real change, not 0 (the defect
+  # the Java tier had; ported here as a cross-tier pin).
+  it 'the merge fee covers every byte of the signed tx at 1 sat/byte' do
+    raw = [merge_tx(nil, 1000)].pack('H*').bytes
+    varint = lambda do |i|
+      n = raw[i]
+      next [n, i + 1] if n < 0xfd
+
+      w = { 0xfd => 2, 0xfe => 4, 0xff => 8 }[n]
+      [raw[i + 1, w].each_with_index.sum { |b, k| b << (8 * k) }, i + 1 + w]
+    end
+    n_in, i = varint.call(4)
+    n_in.times do
+      sl, i = varint.call(i + 36)
+      i += sl + 4
+    end
+    n_out, i = varint.call(i)
+    out = 0
+    n_out.times do
+      out += raw[i, 8].each_with_index.sum { |b, k| b << (8 * k) }
+      sl, i = varint.call(i + 8)
+      i += sl
+    end
+    v = JSON.parse(File.read(vector_path))
+    paid = v['contractUtxo']['satoshis'] + v['extraContractUtxo']['satoshis'] + v['fundingUtxo']['satoshis'] - out
+    expect(paid).to be >= raw.length
   end
 end

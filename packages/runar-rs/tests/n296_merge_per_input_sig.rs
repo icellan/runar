@@ -30,6 +30,10 @@ fn utxo(v: &Value) -> Utxo {
 }
 
 fn merge(per_input_args: Option<Vec<Vec<SdkValue>>>) -> String {
+    merge_at(per_input_args, None)
+}
+
+fn merge_at(per_input_args: Option<Vec<Vec<SdkValue>>>, fee_rate: Option<i64>) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../conformance/sdk-call/stateful-merge-prepared.json");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -38,6 +42,9 @@ fn merge(per_input_args: Option<Vec<Vec<SdkValue>>>) -> String {
     let signer = LocalSigner::new(v["privKeyHex"].as_str().unwrap()).unwrap();
     let address = signer.get_address().unwrap();
     let mut provider = MockProvider::testnet();
+    if let Some(rate) = fee_rate {
+        provider.set_fee_rate(rate);
+    }
     provider.add_utxo(&address, utxo(&v["fundingUtxo"]));
     let cu = utxo(&v["contractUtxo"]);
     let eu = utxo(&v["extraContractUtxo"]);
@@ -70,4 +77,51 @@ fn n296_merge_default_path_matches_reference() {
 fn n296_merge_explicit_sig_is_overwritten_by_signer() {
     let explicit = vec![vec![SdkValue::Bytes("ab".repeat(71))]];
     assert_eq!(merge(Some(explicit)), REFERENCE_TX_HEX);
+}
+
+fn varint(b: &[u8], i: usize) -> (u64, usize) {
+    match b[i] {
+        n @ 0..=0xfc => (n as u64, i + 1),
+        m => {
+            let w = match m { 0xfd => 2, 0xfe => 4, _ => 8 };
+            let mut v = 0u64;
+            for k in 0..w {
+                v |= (b[i + 1 + k] as u64) << (8 * k);
+            }
+            (v, i + 1 + w)
+        }
+    }
+}
+
+/// Fee sizing for a merge: at 1000 sat/kB every byte the fee layout misses is a
+/// satoshi under-paid. Each additional contract input's unlock carries
+/// _changeAmount, so it must be sized with the real change, not 0 (the defect
+/// the Java tier had; ported here as a cross-tier pin).
+#[test]
+fn n296_merge_fee_covers_every_byte_at_one_sat_per_byte() {
+    let hex_tx = merge_at(None, Some(1000));
+    let raw: Vec<u8> = (0..hex_tx.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&hex_tx[i..i + 2], 16).unwrap()).collect();
+    let (n_in, mut i) = varint(&raw, 4);
+    for _ in 0..n_in {
+        let (sl, j) = varint(&raw, i + 36);
+        i = j + sl as usize + 4;
+    }
+    let (n_out, mut i2) = varint(&raw, i);
+    let mut out: i64 = 0;
+    for _ in 0..n_out {
+        let mut val = 0u64;
+        for k in 0..8 {
+            val |= (raw[i2 + k] as u64) << (8 * k);
+        }
+        out += val as i64;
+        let (sl, j) = varint(&raw, i2 + 8);
+        i2 = j + sl as usize;
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/sdk-call/stateful-merge-prepared.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let paid = utxo(&v["contractUtxo"]).satoshis + utxo(&v["extraContractUtxo"]).satoshis
+        + utxo(&v["fundingUtxo"]).satoshis - out;
+    assert!(paid >= raw.len() as i64, "paid {paid} sat for a {}-byte tx at 1 sat/byte", raw.len());
 }

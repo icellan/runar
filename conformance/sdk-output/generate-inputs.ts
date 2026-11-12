@@ -632,6 +632,102 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'Addr', value: ADDR },
     ],
   },
+  // The merged-local / branch-node regression fixtures (4b0f688f3, 62ff2dad7,
+  // 32b9cb2ae). They were hand-added without a spec here, so `--check` never
+  // saw them, and they kept a frozen pre-C=1 artifact after the compiler moved
+  // on. Listing them here makes that drift a CI failure.
+  {
+    // `if (c) { this.count = ... } else { assert(false) }`: the guard shape
+    // that compiled to an unspendable UTXO before 62ff2dad7 (P0-1).
+    name: 'assert-false-guard',
+    constructorArgs: [
+      { type: 'bigint', value: '7' },
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '0' },
+    ],
+  },
+  {
+    name: 'loop-if-merged-locals',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '9' },
+    ],
+  },
+  {
+    name: 'merge-locals-prop-updates',
+    constructorArgs: [
+      { type: 'bigint', value: '3' },
+      { type: 'bigint', value: '5' },
+      { type: 'bigint', value: '8' },
+    ],
+  },
+  {
+    name: 'merge-locals-shapes',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '9' },
+    ],
+  },
+  // StateBigintEdges with two signed bigint state fields at the script-number
+  // width boundaries: the sign bit, 0x7f/0x80, 0xff/0x0100, and a 5-byte value.
+  // Every case compiles the same contract; only the deploy-time state differs.
+  {
+    name: 'state-bigint-edges',
+    constructorArgs: [
+      { type: 'bigint', value: '-1' },
+      { type: 'bigint', value: '1' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-zero',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+      { type: 'bigint', value: '1' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-127',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '-127' },
+      { type: 'bigint', value: '127' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-128',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '-128' },
+      { type: 'bigint', value: '128' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-255',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '-255' },
+      { type: 'bigint', value: '255' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-256',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '-256' },
+      { type: 'bigint', value: '256' },
+    ],
+  },
+  {
+    name: 'state-bigint-edges-large',
+    source: 'conformance/tests/state-bigint-edges/StateBigintEdges.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '-9999999999' },
+      { type: 'bigint', value: '9999999999' },
+    ],
+  },
 ];
 
 const TMP_DIR = join(__dirname, '.tmp');

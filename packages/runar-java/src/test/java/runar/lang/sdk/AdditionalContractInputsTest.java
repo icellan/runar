@@ -25,6 +25,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code allPrevouts}, so the SDK must also auto-resolve that parameter from
  * the transaction's own inputs — the second half of the gap, since Java's
  * null-arg guard rejected every null {@code ByteString} including this one.
+ *
+ * <p>{@code merge} has the W8 signature
+ * {@code merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)}:
+ * each input names the raw parent transaction of its COMPANION (the other
+ * contract input), whose output 0 holds the companion's token script. The
+ * parent of a deployed contract is its deploy transaction; a contract placed
+ * with {@code setCurrentUtxo} gets a synthetic one-output parent whose hash256
+ * is its txid ({@link #parentHolding}), so the binding the contract checks
+ * holds for the arguments these tests pass.
  */
 class AdditionalContractInputsTest {
 
@@ -44,7 +53,33 @@ class AdditionalContractInputsTest {
 
     private record Setup(
         RunarContract first, RunarContract second, MockProvider provider, LocalSigner signer
-    ) {}
+    ) {
+        /** Raw deploy tx of {@code first}: the companion parent the SECOND input names. */
+        String firstDeployTx() { return provider.getBroadcastedTxs().get(0); }
+        /** Raw deploy tx of {@code second}: the companion parent the FIRST input names. */
+        String secondDeployTx() { return provider.getBroadcastedTxs().get(1); }
+    }
+
+    /**
+     * A one-input, one-output parent transaction whose output 0 is
+     * {@code lockingScriptHex} — the shape {@code merge} walks to find the
+     * companion's token script. {@code seed} picks the parent's own prevout so
+     * two parents holding equal scripts still have distinct txids.
+     */
+    private static String parentHolding(String lockingScriptHex, int seed) {
+        return "01000000"                                   // nVersion
+            + "01" + String.format("%02x", seed).repeat(32) + "00000000" + "00" + "ffffffff" // 1 input, empty scriptSig
+            + "01" + ScriptUtils.toLittleEndian64(1L)        // 1 output, 1 sat
+            + ScriptUtils.encodeVarInt(lockingScriptHex.length() / 2) + lockingScriptHex
+            + "00000000";                                    // nLockTime
+    }
+
+    /** Display-order txid of a raw tx: reverse(hash256(tx)). */
+    private static String txidOf(String rawTxHex) throws Exception {
+        java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] h = sha.digest(sha.digest(ScriptUtils.hexToBytes(rawTxHex)));
+        return ScriptUtils.reverseHex(ScriptUtils.bytesToHex(h));
+    }
 
     /** Deploy two token contracts under one owner: balances 400 and 600. */
     private static Setup deployPair() throws Exception {
@@ -75,14 +110,15 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                // merge(sig, otherBalance, allPrevouts, outputSatoshis) as seen
-                // from the SECOND input: its counterpart holds 400.
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)
+                // merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)
+                // as seen from the SECOND input: its counterpart holds 400 and
+                // was created by the first deploy tx.
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, s.firstDeployTx(), BigInteger.ONE)
             ));
 
         s.first().callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, s.secondDeployTx(), BigInteger.ONE),
             opts, s.provider(), s.signer());
 
         List<String> txs = s.provider().getBroadcastedTxs();
@@ -139,7 +175,7 @@ class AdditionalContractInputsTest {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () ->
             s.first().callWithOptions(
                 "merge",
-                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, s.secondDeployTx(), BigInteger.ONE),
                 opts, s.provider(), s.signer()));
         assertTrue(e.getMessage().contains("additionalContractInputs"),
             "the error must name the option that was rejected, got: " + e.getMessage());
@@ -201,11 +237,11 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, s.firstDeployTx(), BigInteger.ONE)));
 
         s.first().callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, s.secondDeployTx(), BigInteger.ONE),
             opts, s.provider(), s.signer());
 
         List<String> txs = s.provider().getBroadcastedTxs();
@@ -243,6 +279,56 @@ class AdditionalContractInputsTest {
                 + paid + " sat, needs " + needed + " sat for " + bytes + " bytes");
     }
 
+    /**
+     * Byte-exact version of the fee check above. At the default 100 sat/kB a
+     * size estimate a few bytes short only fails when it crosses a 10-byte
+     * rounding boundary; at 1000 sat/kB (1 sat per byte) every byte the fee
+     * layout misses is a satoshi under-paid.
+     *
+     * <p>The defect it pins: each additional contract input's unlock carries
+     * {@code _changeAmount}, but the fee layout sized it with a change of 0
+     * (OP_0, 1 byte) and never re-sized it, while the broadcast unlock carries
+     * the real change (a 3-byte script number here, pushed in 4 bytes), so the
+     * fee was computed for a transaction 3 bytes smaller than the one shipped.
+     */
+    @Test
+    void mergeFeeCoversEveryByteOfTheSignedTransaction() throws Exception {
+        Setup s = deployPair();
+        s.provider().setFeeRate(1000L);
+        UTXO other = s.second().currentUtxo();
+        String deployTxid1 = s.first().currentUtxo().txid();
+
+        CallOptions opts = new CallOptions(null, null, null)
+            .withAdditionalContractInputs(List.of(other))
+            .withAdditionalContractInputArgs(List.of(
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, s.firstDeployTx(), BigInteger.ONE)));
+        s.first().callWithOptions(
+            "merge",
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, s.secondDeployTx(), BigInteger.ONE),
+            opts, s.provider(), s.signer());
+
+        List<String> txs = s.provider().getBroadcastedTxs();
+        String callTxHex = txs.get(txs.size() - 1);
+        RawTx callTx = RawTxParser.parse(callTxHex);
+        RawTx deploy1 = RawTxParser.parse(txs.get(0));
+        RawTx deploy2 = RawTxParser.parse(txs.get(1));
+        long inSats = 0;
+        for (RawTx.Input in : callTx.inputs) {
+            if (in.prevTxid.equals(deployTxid1)) inSats += deploy1.outputs.get(in.prevVout).satoshis;
+            else if (in.prevTxid.equals(other.txid())) inSats += deploy2.outputs.get(in.prevVout).satoshis;
+            else if (in.prevTxid.equals(FUND_TXID)) inSats += FUND_SATS;
+            else throw new AssertionError("unresolved input source " + in.prevTxid);
+        }
+        long outSats = 0;
+        for (RawTx.Output o : callTx.outputs) outSats += o.satoshis;
+        long paid = inSats - outSats;
+        long bytes = callTxHex.length() / 2;
+
+        assertTrue(paid >= bytes,
+            "at 1 sat/byte the merge tx must pay at least its own signed size: paid "
+                + paid + " sat for " + bytes + " bytes");
+    }
+
     @Test
     void feeStillCoversTheTxWhenMoreThanOneFundingInputIsNeeded() throws Exception {
         // The `allPrevouts` stand-in is sized for an ASSUMED input count
@@ -270,10 +356,12 @@ class AdditionalContractInputsTest {
         List<Object> args2 = List.of(ownerHex, BigInteger.valueOf(600), BigInteger.ZERO, TOKEN_ID);
         RunarContract first = new RunarContract(artifact, args1);
         RunarContract second = new RunarContract(artifact, args2);
-        UTXO primary = new UTXO("cc".repeat(32), 0, 1L,
-            ContractScript.renderLockingScript(artifact, args1, null));
-        UTXO other = new UTXO("dd".repeat(32), 0, 1L,
-            ContractScript.renderLockingScript(artifact, args2, null));
+        String script1 = ContractScript.renderLockingScript(artifact, args1, null);
+        String script2 = ContractScript.renderLockingScript(artifact, args2, null);
+        String parent1 = parentHolding(script1, 0xc1);
+        String parent2 = parentHolding(script2, 0xd2);
+        UTXO primary = new UTXO(txidOf(parent1), 0, 1L, script1);
+        UTXO other = new UTXO(txidOf(parent2), 0, 1L, script2);
         first.setCurrentUtxo(primary);
         // Phase A5 non-vacuity: the fail-closed MockProvider must also know the
         // outpoint this call spends — injecting it straight into the contract
@@ -287,10 +375,10 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, parent1, BigInteger.ONE)));
         first.callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, parent2, BigInteger.ONE),
             opts, provider, signer);
 
         List<String> txs = provider.getBroadcastedTxs();
@@ -332,16 +420,20 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(s.second().currentUtxo()))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE),
-                java.util.Arrays.asList(null, BigInteger.valueOf(999), null, BigInteger.ONE)));
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, s.firstDeployTx(), BigInteger.ONE),
+                java.util.Arrays.asList(null, BigInteger.valueOf(999), null, s.firstDeployTx(), BigInteger.ONE)));
 
         // Two arg lists for one extra input is a caller mistake that would
-        // otherwise silently drop the second: fail loudly instead.
-        assertThrows(IllegalArgumentException.class, () ->
+        // otherwise silently drop the second: fail loudly instead. The message
+        // check keeps an unrelated IllegalArgumentException (e.g. a wrong arg
+        // count for merge) from satisfying this test.
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () ->
             s.first().callWithOptions(
                 "merge",
-                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, s.secondDeployTx(), BigInteger.ONE),
                 opts, s.provider(), s.signer()));
+        assertTrue(e.getMessage().contains("additionalContractInputArgs has 2 entries"),
+            "must fail on the per-input arg count, got: " + e.getMessage());
     }
 
     /**
@@ -378,10 +470,12 @@ class AdditionalContractInputsTest {
         // `other` carries a LARGE satoshi value so largest-first selection
         // prefers it over the genuine small funding coin, if it is (wrongly)
         // treated as a funding candidate.
-        UTXO primary = new UTXO("cc".repeat(32), 0, 1L,
-            ContractScript.renderLockingScript(artifact, args1, null));
-        UTXO other = new UTXO("dd".repeat(32), 0, 300_000L,
-            ContractScript.renderLockingScript(artifact, args2, null));
+        String script1 = ContractScript.renderLockingScript(artifact, args1, null);
+        String script2 = ContractScript.renderLockingScript(artifact, args2, null);
+        String parent1 = parentHolding(script1, 0xc1);
+        String parent2 = parentHolding(script2, 0xd2);
+        UTXO primary = new UTXO(txidOf(parent1), 0, 1L, script1);
+        UTXO other = new UTXO(txidOf(parent2), 0, 300_000L, script2);
         first.setCurrentUtxo(primary);
         provider.addKnownOutpoint(primary);
         second.setCurrentUtxo(other);
@@ -399,10 +493,10 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, parent1, BigInteger.ONE)));
         first.callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, parent2, BigInteger.ONE),
             opts, provider, signer);
 
         List<String> txs = provider.getBroadcastedTxs();

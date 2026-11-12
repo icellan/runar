@@ -37,7 +37,7 @@
       }
     ]
   },
-  "script": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f8201219d517f75016a880261ab7c7e8869768254947f778101419d7601687f7782012c947f758258947f75820120947f77587f7c817c587f7c817c587f7c817c81587991635379675879519c635279675879529c637867766868688b5979915a79519c5b79529c5c7a539c5379917654799a5479915279789a55799a557991547a537a9a7c9a53799a5679567a9b557a9b547a9b695879547a635479677668597a755879557a635579677668597a755879567a635679677668597a755879577a635779677668597a7551695c7a5c7a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b757768577a5880567a58807e547a58807e7b58807e5779597a7c7558806b5879016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa567a820128947f7701207f7587777777777777",
+  "script": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937782927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686857798252947b7c7f8201219d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f75820120947f77587f7c817c587f7c817c587f7c817c81587991635379675879519c635279675879529c637867766868688b5979915a79519c5b79529c5c7a539c5379917654799a5479915279789a55799a557991547a537a9a7c9a53799a5679567a9b557a9b547a9b695879547a635479677668597a755879557a635579677668597a755879567a635679677668597a755879577a635779677668597a7551695979820134947f77587f75815b797ca2695c7a5c7a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b757768577a5880567a58807e547a58807e7b58807e5779597a7c7558806b5879016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa567a820128947f7701207f7587777777777777",
   "stateFields": [
     {
       "name": "table",
@@ -414,115 +414,72 @@
             }
           },
           {
-            "name": "t75",
+            "name": "t80",
             "value": {
               "kind": "load_param",
               "name": "i"
             }
           },
           {
-            "name": "t76",
+            "name": "t81",
             "value": {
               "kind": "load_const",
               "value": "1n"
             }
           },
           {
-            "name": "t77",
+            "name": "t82",
             "value": {
               "kind": "bin_op",
               "op": "===",
-              "left": "t75",
-              "right": "t76"
+              "left": "t80",
+              "right": "t81"
             }
           },
           {
-            "name": "t78",
+            "name": "t83",
             "value": {
               "kind": "load_param",
               "name": "i"
             }
           },
           {
-            "name": "t79",
+            "name": "t84",
             "value": {
               "kind": "load_const",
               "value": "2n"
             }
           },
           {
-            "name": "t80",
+            "name": "t85",
             "value": {
               "kind": "bin_op",
               "op": "===",
-              "left": "t78",
-              "right": "t79"
+              "left": "t83",
+              "right": "t84"
             }
           },
           {
-            "name": "t81",
+            "name": "t86",
             "value": {
               "kind": "load_param",
               "name": "i"
             }
           },
           {
-            "name": "t82",
+            "name": "t87",
             "value": {
               "kind": "load_const",
               "value": "3n"
             }
           },
           {
-            "name": "t83",
-            "value": {
-              "kind": "bin_op",
-              "op": "===",
-              "left": "t81",
-              "right": "t82"
-            }
-          },
-          {
-            "name": "t84",
-            "value": {
-              "kind": "unary_op",
-              "op": "!",
-              "operand": "t30"
-            }
-          },
-          {
-            "name": "t85",
-            "value": {
-              "kind": "bin_op",
-              "op": "&&",
-              "left": "t84",
-              "right": "t77"
-            }
-          },
-          {
-            "name": "t86",
-            "value": {
-              "kind": "unary_op",
-              "op": "!",
-              "operand": "t77"
-            }
-          },
-          {
-            "name": "t87",
-            "value": {
-              "kind": "bin_op",
-              "op": "&&",
-              "left": "t84",
-              "right": "t86"
-            }
-          },
-          {
             "name": "t88",
             "value": {
               "kind": "bin_op",
-              "op": "&&",
-              "left": "t87",
-              "right": "t80"
+              "op": "===",
+              "left": "t86",
+              "right": "t87"
             }
           },
           {
@@ -530,7 +487,7 @@
             "value": {
               "kind": "unary_op",
               "op": "!",
-              "operand": "t80"
+              "operand": "t30"
             }
           },
           {
@@ -538,17 +495,16 @@
             "value": {
               "kind": "bin_op",
               "op": "&&",
-              "left": "t84",
-              "right": "t86"
+              "left": "t89",
+              "right": "t82"
             }
           },
           {
             "name": "t91",
             "value": {
-              "kind": "bin_op",
-              "op": "&&",
-              "left": "t90",
-              "right": "t89"
+              "kind": "unary_op",
+              "op": "!",
+              "operand": "t82"
             }
           },
           {
@@ -556,81 +512,85 @@
             "value": {
               "kind": "bin_op",
               "op": "&&",
-              "left": "t91",
-              "right": "t83"
+              "left": "t89",
+              "right": "t91"
             }
           },
           {
             "name": "t93",
             "value": {
               "kind": "bin_op",
-              "op": "||",
-              "left": "t30",
-              "right": "t77"
+              "op": "&&",
+              "left": "t92",
+              "right": "t85"
             }
           },
           {
             "name": "t94",
             "value": {
-              "kind": "bin_op",
-              "op": "||",
-              "left": "t93",
-              "right": "t80"
+              "kind": "unary_op",
+              "op": "!",
+              "operand": "t85"
             }
           },
           {
             "name": "t95",
             "value": {
               "kind": "bin_op",
-              "op": "||",
-              "left": "t94",
-              "right": "t83"
+              "op": "&&",
+              "left": "t89",
+              "right": "t91"
             }
           },
           {
             "name": "t96",
             "value": {
-              "kind": "assert",
-              "value": "t95"
+              "kind": "bin_op",
+              "op": "&&",
+              "left": "t95",
+              "right": "t94"
             }
           },
           {
             "name": "t97",
             "value": {
-              "kind": "load_prop",
-              "name": "table__0"
+              "kind": "bin_op",
+              "op": "&&",
+              "left": "t96",
+              "right": "t88"
+            }
+          },
+          {
+            "name": "t98",
+            "value": {
+              "kind": "bin_op",
+              "op": "||",
+              "left": "t30",
+              "right": "t82"
+            }
+          },
+          {
+            "name": "t99",
+            "value": {
+              "kind": "bin_op",
+              "op": "||",
+              "left": "t98",
+              "right": "t85"
             }
           },
           {
             "name": "t100",
             "value": {
-              "kind": "if",
-              "cond": "t30",
-              "then": [
-                {
-                  "name": "t98",
-                  "value": {
-                    "kind": "load_const",
-                    "value": "@ref:__val_0"
-                  }
-                }
-              ],
-              "else": [
-                {
-                  "name": "t99",
-                  "value": {
-                    "kind": "load_const",
-                    "value": "@ref:t97"
-                  }
-                }
-              ]
+              "kind": "bin_op",
+              "op": "||",
+              "left": "t99",
+              "right": "t88"
             }
           },
           {
             "name": "t101",
             "value": {
-              "kind": "update_prop",
-              "name": "table__0",
+              "kind": "assert",
               "value": "t100"
             }
           },
@@ -638,14 +598,14 @@
             "name": "t102",
             "value": {
               "kind": "load_prop",
-              "name": "table__1"
+              "name": "table__0"
             }
           },
           {
             "name": "t105",
             "value": {
               "kind": "if",
-              "cond": "t85",
+              "cond": "t30",
               "then": [
                 {
                   "name": "t103",
@@ -670,7 +630,7 @@
             "name": "t106",
             "value": {
               "kind": "update_prop",
-              "name": "table__1",
+              "name": "table__0",
               "value": "t105"
             }
           },
@@ -678,14 +638,14 @@
             "name": "t107",
             "value": {
               "kind": "load_prop",
-              "name": "table__2"
+              "name": "table__1"
             }
           },
           {
             "name": "t110",
             "value": {
               "kind": "if",
-              "cond": "t88",
+              "cond": "t90",
               "then": [
                 {
                   "name": "t108",
@@ -710,7 +670,7 @@
             "name": "t111",
             "value": {
               "kind": "update_prop",
-              "name": "table__2",
+              "name": "table__1",
               "value": "t110"
             }
           },
@@ -718,14 +678,14 @@
             "name": "t112",
             "value": {
               "kind": "load_prop",
-              "name": "table__3"
+              "name": "table__2"
             }
           },
           {
             "name": "t115",
             "value": {
               "kind": "if",
-              "cond": "t92",
+              "cond": "t93",
               "then": [
                 {
                   "name": "t113",
@@ -750,8 +710,48 @@
             "name": "t116",
             "value": {
               "kind": "update_prop",
-              "name": "table__3",
+              "name": "table__2",
               "value": "t115"
+            }
+          },
+          {
+            "name": "t117",
+            "value": {
+              "kind": "load_prop",
+              "name": "table__3"
+            }
+          },
+          {
+            "name": "t120",
+            "value": {
+              "kind": "if",
+              "cond": "t97",
+              "then": [
+                {
+                  "name": "t118",
+                  "value": {
+                    "kind": "load_const",
+                    "value": "@ref:__val_0"
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "name": "t119",
+                  "value": {
+                    "kind": "load_const",
+                    "value": "@ref:t117"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "t121",
+            "value": {
+              "kind": "update_prop",
+              "name": "table__3",
+              "value": "t120"
             }
           },
           {
@@ -772,53 +772,93 @@
             "name": "t58",
             "value": {
               "kind": "load_param",
-              "name": "_changePKH"
+              "name": "txPreimage"
             }
           },
           {
             "name": "t59",
             "value": {
-              "kind": "load_param",
-              "name": "_changeAmount"
+              "kind": "call",
+              "func": "extractAmount",
+              "args": [
+                "t58"
+              ]
             }
           },
           {
             "name": "t60",
             "value": {
-              "kind": "load_const",
-              "value": "0n"
+              "kind": "load_param",
+              "name": "_newAmount"
             }
           },
           {
             "name": "t61",
             "value": {
               "kind": "bin_op",
-              "op": "!==",
-              "left": "t59",
-              "right": "t60"
+              "op": ">=",
+              "left": "t60",
+              "right": "t59"
+            }
+          },
+          {
+            "name": "t62",
+            "value": {
+              "kind": "assert",
+              "value": "t61"
+            }
+          },
+          {
+            "name": "t63",
+            "value": {
+              "kind": "load_param",
+              "name": "_changePKH"
             }
           },
           {
             "name": "t64",
             "value": {
+              "kind": "load_param",
+              "name": "_changeAmount"
+            }
+          },
+          {
+            "name": "t65",
+            "value": {
+              "kind": "load_const",
+              "value": "0n"
+            }
+          },
+          {
+            "name": "t66",
+            "value": {
+              "kind": "bin_op",
+              "op": "!==",
+              "left": "t64",
+              "right": "t65"
+            }
+          },
+          {
+            "name": "t69",
+            "value": {
               "kind": "if",
-              "cond": "t61",
+              "cond": "t66",
               "then": [
                 {
-                  "name": "t62",
+                  "name": "t67",
                   "value": {
                     "kind": "call",
                     "func": "buildChangeOutput",
                     "args": [
-                      "t58",
-                      "t59"
+                      "t63",
+                      "t64"
                     ]
                   }
                 }
               ],
               "else": [
                 {
-                  "name": "t63",
+                  "name": "t68",
                   "value": {
                     "kind": "load_const",
                     "value": ""
@@ -828,56 +868,9 @@
             }
           },
           {
-            "name": "t65",
-            "value": {
-              "kind": "get_state_script"
-            }
-          },
-          {
-            "name": "t66",
-            "value": {
-              "kind": "load_param",
-              "name": "txPreimage"
-            }
-          },
-          {
-            "name": "t67",
-            "value": {
-              "kind": "load_param",
-              "name": "_newAmount"
-            }
-          },
-          {
-            "name": "t68",
-            "value": {
-              "kind": "call",
-              "func": "computeStateOutput",
-              "args": [
-                "t66",
-                "t65",
-                "t67"
-              ]
-            }
-          },
-          {
-            "name": "t69",
-            "value": {
-              "kind": "call",
-              "func": "cat",
-              "args": [
-                "t68",
-                "t64"
-              ]
-            }
-          },
-          {
             "name": "t70",
             "value": {
-              "kind": "call",
-              "func": "hash256",
-              "args": [
-                "t69"
-              ]
+              "kind": "get_state_script"
             }
           },
           {
@@ -890,35 +883,83 @@
           {
             "name": "t72",
             "value": {
-              "kind": "call",
-              "func": "extractOutputHash",
-              "args": [
-                "t71"
-              ]
+              "kind": "load_param",
+              "name": "_newAmount"
             }
           },
           {
             "name": "t73",
             "value": {
-              "kind": "bin_op",
-              "op": "===",
-              "left": "t70",
-              "right": "t72",
-              "result_type": "bytes"
+              "kind": "call",
+              "func": "computeStateOutput",
+              "args": [
+                "t71",
+                "t70",
+                "t72"
+              ]
             }
           },
           {
             "name": "t74",
             "value": {
+              "kind": "call",
+              "func": "cat",
+              "args": [
+                "t73",
+                "t69"
+              ]
+            }
+          },
+          {
+            "name": "t75",
+            "value": {
+              "kind": "call",
+              "func": "hash256",
+              "args": [
+                "t74"
+              ]
+            }
+          },
+          {
+            "name": "t76",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            }
+          },
+          {
+            "name": "t77",
+            "value": {
+              "kind": "call",
+              "func": "extractOutputHash",
+              "args": [
+                "t76"
+              ]
+            }
+          },
+          {
+            "name": "t78",
+            "value": {
+              "kind": "bin_op",
+              "op": "===",
+              "left": "t75",
+              "right": "t77",
+              "result_type": "bytes"
+            }
+          },
+          {
+            "name": "t79",
+            "value": {
               "kind": "assert",
-              "value": "t73",
+              "value": "t78",
               "isAutoInjectedStateCheck": true
             }
           }
         ],
         "isPublic": true
       }
-    ]
+    ],
+    "parentClass": "StatefulSmartContract"
   },
   "codeSeparatorIndex": 1,
   "codeSeparatorIndices": [
@@ -927,7 +968,7 @@
   "rawScriptSpans": [
     {
       "offset": 3,
-      "length": 428,
+      "length": 422,
       "inArity": 1,
       "outArity": 1
     }

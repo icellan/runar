@@ -83,6 +83,10 @@ class N296MergePerInputSigTest {
     }
 
     private static String merge(List<List<Object>> perInputArgs) throws Exception {
+        return merge(perInputArgs, null);
+    }
+
+    private static String merge(List<List<Object>> perInputArgs, Long feeRate) throws Exception {
         Path p = Paths.get(System.getProperty("user.dir"), "..", "..", "conformance", "sdk-call",
             "stateful-merge-prepared.json");
         Map<String, Object> v = obj(Json.parse(Files.readString(p)));
@@ -96,6 +100,7 @@ class N296MergePerInputSigTest {
 
         LocalSigner signer = new LocalSigner((String) v.get("privKeyHex"));
         MockProvider provider = new MockProvider();
+        if (feeRate != null) provider.setFeeRate(feeRate);
         provider.addUtxo(signer.address(), fundingUtxo);
         provider.addKnownOutpoint(contractUtxo);
         provider.addKnownOutpoint(extraUtxo);
@@ -108,6 +113,28 @@ class N296MergePerInputSigTest {
         RunarContract.CallOutcome out = contract.callWithOptions(
             (String) v.get("method"), args, options, provider, signer);
         return out.rawTxHex();
+    }
+
+    /**
+     * Fee sizing for a merge: at 1000 sat/kB every byte the fee layout misses
+     * is a satoshi under-paid. Each additional contract input's unlock carries
+     * {@code _changeAmount}; sizing it with a change of 0 (OP_0) and shipping
+     * the real change (a 3-byte script number here) under-paid by 3 sat.
+     */
+    @Test
+    void mergeFeeCoversEveryByteAtOneSatPerByte() throws Exception {
+        String hex = merge(null, 1000L);
+        RawTx tx = RawTxParser.parse(hex);
+        long out = 0;
+        for (RawTx.Output o : tx.outputs) out += o.satoshis;
+        Path p = Paths.get(System.getProperty("user.dir"), "..", "..", "conformance", "sdk-call",
+            "stateful-merge-prepared.json");
+        Map<String, Object> v = obj(Json.parse(Files.readString(p)));
+        long in = utxo(v.get("contractUtxo")).satoshis() + utxo(v.get("extraContractUtxo")).satoshis()
+            + utxo(v.get("fundingUtxo")).satoshis();
+        long size = hex.length() / 2;
+        org.junit.jupiter.api.Assertions.assertTrue(in - out >= size,
+            "paid " + (in - out) + " sat for a " + size + "-byte tx at 1 sat/byte");
     }
 
     @Test
