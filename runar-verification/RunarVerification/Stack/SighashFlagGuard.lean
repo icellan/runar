@@ -96,7 +96,7 @@ def tsBindingHexSingleForkId : String :=
 /-! ### The plain `lowerValue` arm (not reached by `Pipeline.compile`) -/
 
 -- `lowerValue` on `check_preimage` with flag 0x43 emits the 0x43 blob.
-#guard (Lower.lowerValue [some "pre"] "cp" (.checkPreimage "pre" (some 0x43))).1.any
+#guard (Lower.lowerValue [some "pre"] "cp" (.checkPreimage "pre" (some 0x43) .lowS)).1.any
   (fun op => match op with
     | .rawBytes b => b.toList == (Lower.checkPreimageBindingBytesFor (some 0x43)).toList
     | _           => false)

@@ -177,7 +177,7 @@ def valueIsWFAux (fuel : Nat) (env : ScopeEnv) : ANFValue → Bool
   | .assert v => env.resolves v
   | .updateProp _ v => env.resolves v
   | .getStateScript => true
-  | .checkPreimage p _ => env.resolves p
+  | .checkPreimage p _ _ => env.resolves p
   | .deserializeState p => env.resolves p
   | .addOutput sats sv pre =>
       env.resolves sats && sv.all env.resolves

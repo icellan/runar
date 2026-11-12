@@ -162,7 +162,7 @@ def collectRefs : ANFValue → List String
   | .loop _ body _ _ _ => collectRefsBindings body
   | .assert ref               => [ref]
   | .updateProp _ ref         => [ref]
-  | .checkPreimage pre _      => [pre]
+  | .checkPreimage pre _ _      => [pre]
   | .deserializeState pre     => [pre]
   | .arrayLiteral elems       => elems
   | .addRawOutput sat scr     => [sat, scr]
@@ -1889,18 +1889,103 @@ blob pushes `01 <flag>` then `OP_CAT` (`7e`) at bytes 384–386, mirroring
 (`oppushtx-codegen.ts`). -/
 def checkPreimageBindingFlagIndex : Nat := 385
 
+/--
+The fixed 376-byte `@bindingVariant all` OP_PUSH_TX binding blob (#187,
+ports #170).
+
+Byte-identical to the TS reference `CHECK_PREIMAGE_BINDING_ALL_HEX`
+(`oppushtx-codegen.ts`, `anySBindingBytes(0x41, 'all')`). Same Any-S
+construction as `checkPreimageBindingBytes` (k=1, d = Gx⁻¹ mod n, verify key
+`038ff83d…`), except that `s = z + 1` is used as-is: no `OP_BIN2NUM`, no
+mod-n, no low-S fixup (`01 00 7e 8b` replaces the 46-byte
+`01 00 7e 81 8b <n> …` span), and the DER fan-out runs 32 times instead of
+31 because an un-reduced `s` can carry a 0x00 sign byte and reach 33 bytes.
+
+At nVersion = 1 a node rejects EVERY spend of this blob: when the digest's
+top byte has its high bit set, `s = z + 1 > n/2` fails LOW_S; when it is
+clear, the `00` pad is a non-minimal number that `OP_1ADD` refuses. It is
+spendable only when the spending tx has nVersion > 1. The Lean model has no nVersion, so no
+acceptance fact is stated for this blob: see `BindingVariantGuard.lean`. -/
+def checkPreimageBindingAllBytes : ByteArray := ByteArray.mk #[
+    0x76, 0xaa, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f,
+    0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f,
+    0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f,
+    0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f,
+    0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f, 0x51, 0x7f,
+    0x51, 0x7f, 0x51, 0x7f, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x01, 0x00, 0x7e, 0x8b, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92,
+    0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x82, 0x92, 0x7f, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e, 0x7c, 0x7e,
+    0x7c, 0x7e, 0x82, 0x7c, 0x7e, 0x23, 0x02, 0x20, 0x79, 0xbe, 0x66, 0x7e,
+    0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+    0x16, 0xf8, 0x17, 0x98, 0x02, 0x7c, 0x7e, 0x82, 0x7c, 0x7e, 0x01, 0x30,
+    0x7c, 0x7e, 0x01, 0x41, 0x7e, 0x21, 0x03, 0x8f, 0xf8, 0x3d, 0x8c, 0xf1,
+    0x21, 0x21, 0x49, 0x16, 0x09, 0xc4, 0x93, 0x9d, 0xc1, 0x1c, 0x4a, 0xa3,
+    0x55, 0x03, 0x50, 0x8f, 0xe4, 0x32, 0xdc, 0x5a, 0x5c, 0x19, 0x05, 0x60,
+    0x8b, 0x92, 0x18, 0xad]
+
+/-- Byte offset of the sighash flag inside `checkPreimageBindingAllBytes`:
+`01 <flag> 7e` at bytes 338–340. Located by diffing TS
+`checkPreimageBindingBytes(0x41, 'all')` against `(0x43, 'all')`. -/
+def checkPreimageBindingAllFlagIndex : Nat := 339
+
 /-- The OP_PUSH_TX binding blob for a `check_preimage` carrying `sighashFlag`
-(issue #123 / N-178). `none` (absent = default `ALL|FORKID`) is exactly the
-pinned `checkPreimageBindingBytes` — definitionally, so every proof stated
-at the default keeps reducing to the constant the binding axiom names.
-`some f` replaces the single flag byte with `f & 0xff` (`UInt8.ofNat`), as
-TS does; the blob length is unchanged. -/
-def checkPreimageBindingBytesFor : Option Nat → ByteArray
-  | none   => checkPreimageBindingBytes
-  | some f => checkPreimageBindingBytes.set! checkPreimageBindingFlagIndex (UInt8.ofNat f)
+(issue #123 / N-178) and `bindingVariant` (#187). With the default variant
+`.lowS`, `none` (absent = default `ALL|FORKID`) is exactly the pinned
+`checkPreimageBindingBytes` — definitionally, so every proof stated at the
+default keeps reducing to the constant the binding axiom names. `some f`
+replaces the single flag byte with `f & 0xff` (`UInt8.ofNat`), as TS does;
+the blob length is unchanged. `.all` selects `checkPreimageBindingAllBytes`
+and patches its flag byte the same way. Mirrors TS `anySBindingBytes`, where
+only the exact variant `'all'` selects the compact blob. -/
+def checkPreimageBindingBytesFor (sighashFlag : Option Nat)
+    (bindingVariant : BindingVariant := .lowS) : ByteArray :=
+  match bindingVariant, sighashFlag with
+  | .lowS, none   => checkPreimageBindingBytes
+  | .lowS, some f => checkPreimageBindingBytes.set! checkPreimageBindingFlagIndex (UInt8.ofNat f)
+  | .all,  none   => checkPreimageBindingAllBytes
+  | .all,  some f => checkPreimageBindingAllBytes.set! checkPreimageBindingAllFlagIndex (UInt8.ofNat f)
 
 @[simp] theorem checkPreimageBindingBytesFor_none :
     checkPreimageBindingBytesFor none = checkPreimageBindingBytes := rfl
+
+/-- `.all` with the default flag is exactly the pinned 376-byte blob. -/
+@[simp] theorem checkPreimageBindingBytesFor_all_none :
+    checkPreimageBindingBytesFor none .all = checkPreimageBindingAllBytes := rfl
+
+set_option maxRecDepth 8192 in
+/-- The pinned blob sizes: 422 bytes (`lowS`) and 376 bytes (`all`). -/
+theorem checkPreimageBindingBytes_size : checkPreimageBindingBytes.size = 422 := by decide
+set_option maxRecDepth 8192 in
+theorem checkPreimageBindingAllBytes_size : checkPreimageBindingAllBytes.size = 376 := by decide
+
+/-- The variant reaches the bytes: for every sighash flag, `.all` and
+`.lowS` emit different blobs (they differ in length; `set!` preserves it). -/
+theorem checkPreimageBindingBytesFor_all_ne_lowS (f : Option Nat) :
+    checkPreimageBindingBytesFor f .all ≠ checkPreimageBindingBytesFor f .lowS := by
+  have key : ∀ (b : ByteArray) (i : Nat) (v : UInt8), (b.set! i v).size = b.size := by
+    intro b i v; cases b; simp [ByteArray.set!, ByteArray.size]
+  intro h
+  have hs := congrArg ByteArray.size h
+  cases f <;>
+    simp only [checkPreimageBindingBytesFor, key, checkPreimageBindingBytes_size,
+      checkPreimageBindingAllBytes_size] at hs <;> omega
 
 /--
 Lowering for `check_preimage(preimage)` (BUG-100 on-chain binding). Mirrors
@@ -1910,7 +1995,7 @@ Op sequence:
 
   OP_CODESEPARATOR
   <bring preimage to top>
-  <the fixed 422-byte OP_PUSH_TX binding blob (raw_bytes)>
+  <the fixed OP_PUSH_TX binding blob (raw_bytes): 422 bytes, or 376 for `.all`>
 
 The blob derives the ECDSA signature on-chain from `hash256(preimage)` and
 runs `OP_CHECKSIGVERIFY` against `G`, aborting unless the pushed preimage
@@ -1919,12 +2004,13 @@ preimage remains on top, renamed to `bindingName` so downstream extractors
 can reference it. The old spender-supplied `_opPushTxSig` witness is gone.
 -/
 def lowerCheckPreimageOps (sm : StackMap) (bindingName : String)
-    (preimage : String) (sighashFlag : Option Nat := none) : (List StackOp × StackMap) :=
+    (preimage : String) (sighashFlag : Option Nat := none)
+    (bindingVariant : BindingVariant := .lowS) : (List StackOp × StackMap) :=
   let s0 : List StackOp := [.opcode "OP_CODESEPARATOR"]
   -- Bring preimage to top.
   let s1 := loadRef sm preimage
   -- Derive + verify the signature on-chain (single opaque raw_bytes blob).
-  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag)]
+  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag bindingVariant)]
   (s0 ++ s1 ++ s2, sm.push bindingName)
 
 /-- Mutable properties only — R-010 clause 8 keys off this list. -/
@@ -2047,14 +2133,15 @@ def lowerCheckPreimageOpsLive (sm : StackMap) (bindingName : String)
     (outerProtected : List String)
     (scriptLevelCodeSeparator : Bool := false)
     (props : List ANFProperty := [])
-    (sighashFlag : Option Nat := none) : (List StackOp × StackMap) :=
+    (sighashFlag : Option Nat := none)
+    (bindingVariant : BindingVariant := .lowS) : (List StackOp × StackMap) :=
   let s0 : List StackOp :=
     if scriptLevelCodeSeparator then [] else [.opcode "OP_CODESEPARATOR"]
   -- Step 1: bring preimage to top, consuming on last use.
   let (s1, sm1) := loadRefLive sm preimage currentIndex lastUses outerProtected
   -- Step 2: derive + verify the signature on-chain (single opaque raw_bytes
   -- blob; net stack effect 0 — preimage in → preimage out).
-  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag)]
+  let s2 : List StackOp := [.rawBytes (checkPreimageBindingBytesFor sighashFlag bindingVariant)]
   -- Step 3: R-010 pin, only when this method's stack carries `_codePart`.
   let (sAuth, smAuth) :=
     match sm1.depth? "_codePart" with
@@ -3891,7 +3978,7 @@ def lowerValue (sm : StackMap) (bindingName : String) :
   -- in ANF lowering distinguishes them.
   | .addRawOutput sat scr    => lowerAddRawOutputOps sm bindingName sat scr
   | .addDataOutput sat scr   => lowerAddRawOutputOps sm bindingName sat scr
-  | .checkPreimage pre flag  => lowerCheckPreimageOps sm bindingName pre flag
+  | .checkPreimage pre flag bv => lowerCheckPreimageOps sm bindingName pre flag bv
   -- Out-of-scope: depend on the program's property table (which
   -- `lowerValue` doesn't have access to). Tracked as Phase 3y deferred.
   | .getStateScript          => ([.opcode "OP_RUNAR_GETSTATESCRIPT_UNSUPPORTED"], sm.push bindingName)
@@ -5511,7 +5598,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
   | .addDataOutput sat scr   =>
       let (ops, sm') := lowerAddRawOutputOpsLive sm bindingName sat scr currentIndex lastUses outerProtected
       (ops, sm', localBindings)
-  | .checkPreimage pre flag  =>
+  | .checkPreimage pre flag bv =>
       -- R-010: skip the per-method CODESEPARATOR when this method's stack
       -- carries `_codePart` (the implicit is only prepended for methods
       -- that authenticate). Mixed contracts whose checkPreimage-only
@@ -5522,7 +5609,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- flag through the lowering context.
       let scriptLevel : Bool := (sm.depth? "_codePart").isSome
       let (ops, sm') := lowerCheckPreimageOpsLive sm bindingName pre currentIndex lastUses outerProtected
-          scriptLevel props flag
+          scriptLevel props flag bv
       (ops, sm', localBindings)
   -- Phase 3z-A: property-table-aware framework intrinsics.
   | .getStateScript          =>
@@ -5738,7 +5825,7 @@ def bindingsUseCheckPreimage : List ANFBinding → Bool
   | (.mk _ v _) :: rest =>
       let here : Bool :=
         match v with
-        | .checkPreimage _ _    => true
+        | .checkPreimage _ _ _    => true
         | .ifVal _ thn els _    =>
             bindingsUseCheckPreimage thn || bindingsUseCheckPreimage els
         | .loop _ body _ _ _ => bindingsUseCheckPreimage body
@@ -6105,7 +6192,7 @@ def simpleValue : ANFValue → Bool
   | .loop _ body _ _ _ =>
       simpleBindings body
   -- Phase 3w-b — concretely lowered framework intrinsics:
-  | .checkPreimage _ _          => true
+  | .checkPreimage _ _ _          => true
   | .addRawOutput _ _         => true
   | .addDataOutput _ _        => true
   -- Phase 3z-A — property-table-aware framework intrinsics:

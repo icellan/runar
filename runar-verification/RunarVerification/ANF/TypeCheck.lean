@@ -426,7 +426,7 @@ def typeOfValue (retEnv : List (String × ANFType)) (Γ : TypeEnv) : ANFValue �
       | some τprop, some τsrc => if τprop == τsrc then some τprop else none
       | _, _ => none
   | .getStateScript => some .byteString
-  | .checkPreimage preimage _ =>
+  | .checkPreimage preimage _ _ =>
       if Γ.lookup preimage == some .sigHashPreimage then some .bool else none
   | .deserializeState preimage =>
       if Γ.lookup preimage == some .sigHashPreimage then some .bool else none

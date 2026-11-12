@@ -50,6 +50,7 @@ import RunarVerification.Script.EmitCorrect
 import RunarVerification.Script.Parse
 import RunarVerification.Pipeline
 import RunarVerification.Stack.SighashFlagGuard
+import RunarVerification.Stack.BindingVariantGuard
 import RunarVerification.Script.LoopParse
 import RunarVerification.Stack.AgreesLoopBridge
 import RunarVerification.Stack.AgreesLoopParsed

@@ -157,6 +157,17 @@ by project decision:
   ⟺ checkPreimage(preimage)` is the foundation of every stateful BSV
   contract; treating it as a named crypto axiom (rather than formalizing
   ECDSA + the BIP-143 sighash) is the principled trust-footprint choice.
+  The two binding axioms are stated over the default 422-byte low-S blob
+  only. The opt-in `@bindingVariant all` blob (376 bytes, #187) is modelled
+  byte-exact (`Stack.Lower.checkPreimageBindingAllBytes`; whole-fixture parity
+  with the TS compiler in `Stack/BindingVariantGuard.lean`), and its lowering
+  and parse round-trip are proved (`AgreesStateful.lowerMethod_ops_statefulPrologueAll`,
+  `parseScript_emitOpsFast_statefulPrologueAll`). Its runtime acceptance is
+  NOT proved and has no axiom: on chain it is spendable only when the
+  spending tx has nVersion > 1, and the model has no nVersion, so the lowS
+  statement would be false for it. Both stateful classifiers reject an `all`
+  body, so such programs land on the `crypto_call` fallback axiom, whose
+  acceptance claim for them presumes nVersion > 1.
 * **SLH-DSA** (6 FIPS-205 parameter sets) — post-quantum signature codegen
   spans hundreds of kilobytes of Script; out of project scope.
 * **BabyBear / KoalaBear / Poseidon2 / BN254 / FRI** — proof-system

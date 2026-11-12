@@ -157,7 +157,7 @@ theorem lowerValueP_checkPreimage_statefulPrologue
     (budget : Nat) (localBindings : List String) (pre : String)
     (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     Lower.lowerValueP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
-        [] localBindings [] [pre] "_cp0" (.checkPreimage pre none)
+        [] localBindings [] [pre] "_cp0" (.checkPreimage pre none .lowS)
       = (statefulPrologueOps, (["_cp0"] : Stack.Lower.StackMap), localBindings) := by
   unfold Lower.lowerValueP
   simp [Lower.lowerCheckPreimageOpsLive, Lower.loadRefLive, Lower.bringToTop,
@@ -194,7 +194,7 @@ theorem lowerBindingsP_statefulPrologue
       = (statefulPrologueOps ++ [.opcode "OP_VERIFY"], ([] : Stack.Lower.StackMap)) := by
   show (Lower.lowerBindingsP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre]
-        [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩])
+        [⟨"_cp0", .checkPreimage pre none .lowS, none⟩, ⟨"_v", .assert "_cp0", none⟩])
       = (statefulPrologueOps ++ [.opcode "OP_VERIFY"], [])
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_checkPreimage_statefulPrologue progMethods props budget
@@ -314,7 +314,7 @@ EXACTLY the gated stateful prologue on `pre`, with the two name-collision
 exclusions. -/
 def statefulConsumeShapeBool (m : ANFMethod) : Bool :=
   match m.params, m.body with
-  | [p], [⟨bn1, .checkPreimage pre none, none⟩, ⟨bn2, .assert ref, none⟩] =>
+  | [p], [⟨bn1, .checkPreimage pre none .lowS, none⟩, ⟨bn2, .assert ref, none⟩] =>
       (bn1 == "_cp0") && (bn2 == "_v") && (ref == "_cp0") &&
       (p.name == pre) && !(pre == "_cp0") && !(pre == "_opPushTxSig") &&
       !(pre == "_codePart")
@@ -463,7 +463,7 @@ theorem lowerValueP_checkPreimage_statefulFull
     Lower.lowerValueP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre, stateVal, sats, "_codePart"]
-        "_cp0" (.checkPreimage pre none)
+        "_cp0" (.checkPreimage pre none .lowS)
       = ((Lower.lowerCheckPreimageOpsLive
             ([pre, stateVal, sats, "_codePart"] : Stack.Lower.StackMap)
             "_cp0" pre 0
@@ -546,7 +546,7 @@ theorem lowerBindingsP_statefulFull
   show Lower.lowerBindingsP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre, stateVal, sats, "_codePart"]
-        [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩,
+        [⟨"_cp0", .checkPreimage pre none .lowS, none⟩, ⟨"_v", .assert "_cp0", none⟩,
          ⟨"_so0", .addOutput sats [stateVal] "", none⟩]
       = (statefulFullOps, (["_so0", "_codePart"] : Stack.Lower.StackMap))
   rw [Lower.lowerBindingsP.eq_def]
@@ -692,7 +692,7 @@ theorem evalBindingsP_statefulFull_isSome_eq
   unfold statefulFullBody StatefulBridge.gatedStatefulPrologueBody
     AgreesD2.statefulPrologueBody AgreesD2.statefulEpilogueBody
   show (evalBindingsP methods s
-      [⟨"_cp0", .checkPreimage pre none, none⟩, ⟨"_v", .assert "_cp0", none⟩,
+      [⟨"_cp0", .checkPreimage pre none .lowS, none⟩, ⟨"_v", .assert "_cp0", none⟩,
        ⟨"_so0", .addOutput sats [stateVal] "", none⟩]).toOption.isSome
     = Crypto.checkPreimage b
   have hLookup :
@@ -804,7 +804,7 @@ one mutable bigint property, all name-collision exclusions. -/
 def statefulFullConsumeShapeBool (props : List ANFProperty) (m : ANFMethod) : Bool :=
   match m.params, m.body with
   | [pS, pV, pP],
-    [⟨bn1, .checkPreimage pre none, none⟩, ⟨bn2, .assert ref, none⟩,
+    [⟨bn1, .checkPreimage pre none .lowS, none⟩, ⟨bn2, .assert ref, none⟩,
      ⟨bn3, .addOutput sats [stateVal] epre, none⟩] =>
       (bn1 == "_cp0") && (bn2 == "_v") && (ref == "_cp0") && (bn3 == "_so0") &&
       (epre == "") &&
@@ -940,5 +940,226 @@ theorem smoke_full_lowerMethod_ops :
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
     (by decide) (by decide)
+
+/-! # Part 7 — `@bindingVariant all` (#187, ports #170)
+
+A `check_preimage` carrying `bindingVariant = .all` lowers to the 376-byte
+`Lower.checkPreimageBindingAllBytes` instead of the 422-byte low-S blob. This
+part carries, for the canonical gated prologue, every fact the lowS prologue
+has EXCEPT the runtime one:
+
+* the lowering reduction (`lowerMethod_ops_statefulPrologueV`, stated for
+  both variants; `lowerMethod_ops_statefulPrologueAll` is the `.all`
+  instance), and
+* the deployed-byte facts: the emitted bytes are `OP_CODESEPARATOR` followed
+  by the 376-byte blob verbatim, and they parse back
+  (`parseScript_emitOpsFast_statefulPrologueAll`).
+
+NOT stated: a runtime characterisation of `statefulPrologueAllParsedOps`,
+the peer of `runOps_checkPreimageBindingRaw_eq`. That would be a new axiom,
+and it could not be stated faithfully either: on chain the `all` blob aborts
+on EVERY genuine spend when the spending tx has nVersion = 1 (`s = z + 1` is
+high-S or the padded `z` is non-minimal, depending on one digest bit), and
+the Lean model has no nVersion (nor the LOW_S / minimal-number rules it
+gates). So the two binding axioms stay
+stated over the lowS blob only, and both stateful classifiers REJECT an
+`.all` body (`smoke_classifier_rejects_all`,
+`smoke_full_classifier_rejects_all`): an `all` program never reaches the
+discharged stateful consume theorems and is routed to the omnibus's
+`crypto_call` fallback. -/
+
+/-- The gated stateful prologue with an explicit binding variant. -/
+def statefulPrologueBodyV (pre : String) (bv : BindingVariant) : List ANFBinding :=
+  [⟨"_cp0", .checkPreimage pre none bv, none⟩, ⟨"_v", .assert "_cp0", none⟩]
+
+/-- At `.lowS` this is exactly the existing gated prologue. -/
+theorem statefulPrologueBodyV_lowS (pre : String) :
+    statefulPrologueBodyV pre .lowS = StatefulBridge.gatedStatefulPrologueBody pre := rfl
+
+/-- The prologue's constant lowered op list for a given variant. -/
+def statefulPrologueOpsV (bv : BindingVariant) : List StackOp :=
+  [.opcode "OP_CODESEPARATOR", .rawBytes (Lower.checkPreimageBindingBytesFor none bv)]
+
+/-- At `.lowS` this is exactly `statefulPrologueOps`. -/
+theorem statefulPrologueOpsV_lowS : statefulPrologueOpsV .lowS = statefulPrologueOps := rfl
+
+/-- The `@bindingVariant all` prologue: `OP_CODESEPARATOR` + the 376-byte blob. -/
+def statefulPrologueAllOps : List StackOp := statefulPrologueOpsV .all
+
+theorem statefulPrologueAllOps_eq :
+    statefulPrologueAllOps
+      = [.opcode "OP_CODESEPARATOR", .rawBytes Lower.checkPreimageBindingAllBytes] := rfl
+
+theorem computeLastUses_statefulPrologueV (pre : String) (bv : BindingVariant)
+    (hne1 : pre ≠ "_cp0") :
+    Lower.computeLastUses (statefulPrologueBodyV pre bv) = [("_cp0", 1), (pre, 0)] := by
+  simp [statefulPrologueBodyV, Lower.computeLastUses, Lower.computeLastUses.go,
+    Lower.collectRefs, Lower.lastUsesUpdate, hne1]
+
+/-- The `check_preimage` binding lowers to `OP_CODESEPARATOR` + the variant's
+blob, preimage consumed in place. -/
+theorem lowerValueP_checkPreimage_statefulPrologueV
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat) (localBindings : List String) (pre : String) (bv : BindingVariant)
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
+    Lower.lowerValueP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
+        [] localBindings [] [pre] "_cp0" (.checkPreimage pre none bv)
+      = (statefulPrologueOpsV bv, (["_cp0"] : Stack.Lower.StackMap), localBindings) := by
+  unfold Lower.lowerValueP
+  simp [Lower.lowerCheckPreimageOpsLive, Lower.loadRefLive, Lower.bringToTop,
+    Lower.StackMap.depth?, Lower.isLastUse,
+    Lower.lastUsesLookup, Lower.listContains, List.findIdx?, List.findIdx?.go,
+    Ne.symm hne1, hneCode, statefulPrologueOpsV]
+
+theorem lowerBindingsP_statefulPrologueV
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat) (localBindings : List String) (pre : String) (bv : BindingVariant)
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
+    (Lower.lowerBindingsP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
+        [] localBindings [] [pre] (statefulPrologueBodyV pre bv))
+      = (statefulPrologueOpsV bv ++ [.opcode "OP_VERIFY"], ([] : Stack.Lower.StackMap)) := by
+  show (Lower.lowerBindingsP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
+        [] localBindings [] [pre]
+        [⟨"_cp0", .checkPreimage pre none bv, none⟩, ⟨"_v", .assert "_cp0", none⟩])
+      = (statefulPrologueOpsV bv ++ [.opcode "OP_VERIFY"], [])
+  rw [Lower.lowerBindingsP.eq_def]
+  simp only [lowerValueP_checkPreimage_statefulPrologueV progMethods props budget
+    localBindings pre bv hne1 hneCode]
+  rw [Lower.lowerBindingsP.eq_def]
+  simp only [lowerValueP_assert_statefulPrologue progMethods props budget
+    localBindings pre hne1]
+  rw [Lower.lowerBindingsP.eq_def]
+  simp
+
+/-- **The method-level lowering reduction, for either binding variant.**
+A public single-param method whose body is the gated stateful prologue with
+variant `bv` lowers to the CONSTANT `statefulPrologueOpsV bv`. At `.lowS`
+this is `lowerMethod_ops_statefulPrologue`. -/
+theorem lowerMethod_ops_statefulPrologueV
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (anfM : ANFMethod) (pre : String) (ty : ANFType) (bv : BindingVariant)
+    (hParams : anfM.params = [ANFParam.mk pre ty])
+    (hBody : anfM.body = statefulPrologueBodyV pre bv)
+    (hPub : anfM.isPublic = true)
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
+    (Lower.lowerMethod progMethods props anfM).ops = statefulPrologueOpsV bv := by
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [statefulPrologueBodyV, Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
+  rw [hParams, hBody, hPub]
+  simp only [List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil,
+    List.nil_append]
+  have hUsesPre : Lower.bindingsUseCheckPreimage (statefulPrologueBodyV pre bv) = true := by
+    simp [statefulPrologueBodyV, Lower.bindingsUseCheckPreimage]
+  have hUsesCode : Lower.bindingsUseCodePart (statefulPrologueBodyV pre bv) = false := by
+    simp [statefulPrologueBodyV, Lower.bindingsUseCodePart]
+  have hReadsVarLen : Lower.bindingsReadVarLenState progMethods
+      (Lower.varLenPropNames props) progMethods.length
+      (statefulPrologueBodyV pre bv) = false := by
+    simp [statefulPrologueBodyV, Lower.bindingsReadVarLenState]
+  have hConstInts : Lower.collectConstInts (statefulPrologueBodyV pre bv) = [] := by
+    simp [statefulPrologueBodyV, Lower.collectConstInts]
+  have hEndsAssert : Lower.bodyEndsInAssert (statefulPrologueBodyV pre bv) = true := by
+    simp [statefulPrologueBodyV, Lower.bodyEndsInAssert]
+  have hEndsIf : Lower.bodyEndsInIf (statefulPrologueBodyV pre bv) = false := by
+    simp [statefulPrologueBodyV, Lower.bodyEndsInIf]
+  simp only [hEndsIf, Bool.and_false, Bool.false_eq_true, if_false]
+  rw [hUsesPre, hUsesCode, hReadsVarLen,
+    computeLastUses_statefulPrologueV pre bv hne1, hConstInts]
+  simp only [Bool.or_self, if_true, List.cons_append, List.nil_append]
+  rw [show ((statefulPrologueBodyV pre bv).map (·.name)) = ["_cp0", "_v"] by
+      simp [statefulPrologueBodyV, ANFBinding.name]]
+  simp only [Bool.false_eq_true, if_false]
+  rw [show Lower.collectRawSlots (statefulPrologueBodyV pre bv) = [] from by
+        simp [statefulPrologueBodyV, Lower.collectRawSlots, Lower.collectRawSlotsGo,
+          Lower.rawResultValue]]
+  rw [show Lower.arrayElemsOf (statefulPrologueBodyV pre bv) = [] from by
+        simp [statefulPrologueBodyV, Lower.arrayElemsOf]]
+  simp only [lowerBindingsP_statefulPrologueV progMethods props
+    Lower.defaultInlineBudget ["_cp0", "_v"] pre bv hne1 hneCode]
+  simp [hEndsAssert, statefulPrologueOpsV]
+
+/-- **`@bindingVariant all` lowering reduction.** The canonical stateful
+method whose `check_preimage` carries `.all` lowers to `OP_CODESEPARATOR`
+followed by the 376-byte `Lower.checkPreimageBindingAllBytes`. -/
+theorem lowerMethod_ops_statefulPrologueAll
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (anfM : ANFMethod) (pre : String) (ty : ANFType)
+    (hParams : anfM.params = [ANFParam.mk pre ty])
+    (hBody : anfM.body = statefulPrologueBodyV pre .all)
+    (hPub : anfM.isPublic = true)
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
+    (Lower.lowerMethod progMethods props anfM).ops = statefulPrologueAllOps :=
+  lowerMethod_ops_statefulPrologueV progMethods props anfM pre ty .all
+    hParams hBody hPub hne1 hneCode
+
+open RunarVerification.Script in
+/-- **Deployed bytes (byte-exact).** The `all` prologue emits `OP_CODESEPARATOR`
+(`0xab`) followed by the 376-byte blob verbatim. -/
+theorem emitOpsFast_statefulPrologueAll :
+    (Emit.emitOpsFast statefulPrologueAllOps).toList
+      = 0xab :: Lower.checkPreimageBindingAllBytes.toList := by
+  native_decide
+
+open RunarVerification.Script in
+/-- The `all` and `lowS` prologues deploy different bytes, so the lowS binding
+axioms (stated over the parsed lowS bytes) say nothing about `all`. -/
+theorem emitOpsFast_statefulPrologueAll_ne_lowS :
+    (Emit.emitOpsFast statefulPrologueAllOps).toList
+      ≠ (Emit.emitOpsFast statefulPrologueOps).toList := by
+  native_decide
+
+open RunarVerification.Script RunarVerification.Script.Parse in
+/-- The parsed image of the deployed `all` prologue bytes. -/
+noncomputable def statefulPrologueAllParsedOps : List StackOp :=
+  (parseScript (Emit.emitOpsFast statefulPrologueAllOps)).toOption.getD []
+
+open RunarVerification.Script RunarVerification.Script.Parse in
+theorem statefulPrologueAll_parse_isSome :
+    (parseScript (Emit.emitOpsFast statefulPrologueAllOps)).toOption.isSome = true := by
+  native_decide
+
+open RunarVerification.Script RunarVerification.Script.Parse in
+/-- **M4 round-trip (`all` form).** The deployed `all` prologue bytes parse to
+`statefulPrologueAllParsedOps`. -/
+theorem parseScript_emitOpsFast_statefulPrologueAll :
+    parseScript (Emit.emitOpsFast statefulPrologueAllOps) = .ok statefulPrologueAllParsedOps := by
+  unfold statefulPrologueAllParsedOps
+  exact except_ok_of_toOption_isSome _ statefulPrologueAll_parse_isSome
+
+/-! ### Smokes: the variant reaches the lowering, and the lowS-only
+classifiers do not fire on `all` (soundness of the axiom scoping). -/
+
+/-- The canonical stateful method with `@bindingVariant all`. -/
+def smokeAllMethod : ANFMethod :=
+  { name := "verify"
+    params := [ANFParam.mk "pre" .byteString]
+    body := statefulPrologueBodyV "pre" .all
+    isPublic := true }
+
+theorem smoke_all_lowerMethod_ops :
+    (Lower.lowerMethod [] [] smokeAllMethod).ops = statefulPrologueAllOps :=
+  lowerMethod_ops_statefulPrologueAll [] [] smokeAllMethod "pre" .byteString
+    rfl rfl rfl (by decide) (by decide)
+
+/-- SOUNDNESS — the prologue classifier (which gates the theorem resting on
+`runOps_checkPreimageBindingRaw_eq`) rejects the `all` method. -/
+theorem smoke_classifier_rejects_all : statefulConsumeShapeBool smokeAllMethod = false := by
+  decide +kernel
+
+/-- The widened method with `@bindingVariant all`. -/
+def smokeFullAllMethod : ANFMethod :=
+  { smokeFullMethod with
+    body := (statefulFullBody "pre" "sats" "stateVal").map fun b =>
+      match b with
+      | ⟨n, .checkPreimage p f _, l⟩ => ⟨n, .checkPreimage p f .all, l⟩
+      | b => b }
+
+/-- SOUNDNESS — the widened classifier (which gates the theorem resting on
+`runOps_statefulFullParsedOps_scriptAccepts`) rejects the `all` method, while
+firing on its lowS twin (`smoke_full_classifier_fires`). -/
+theorem smoke_full_classifier_rejects_all :
+    statefulFullConsumeShapeBool smokeFullProps smokeFullAllMethod = false := by
+  native_decide
 
 end RunarVerification.Stack.AgreesStateful
