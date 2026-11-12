@@ -22,7 +22,13 @@ const conformanceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 describe('N-381: conformance Go module excludes negatives/', () => {
   it('go list ./... succeeds and lists no negatives package', () => {
     const r = spawnSync('go', ['list', './...'], { cwd: conformanceDir, encoding: 'utf8' });
-    expect(r.stderr).toBe('');
+    // A cold module cache makes go print `go: downloading <module>` progress
+    // to stderr even on success; that is not a package error, so drop it.
+    const stderr = r.stderr
+      .split('\n')
+      .filter((l) => l && !l.startsWith('go: downloading '))
+      .join('\n');
+    expect(stderr).toBe('');
     expect(r.status).toBe(0);
     const pkgs = r.stdout.split('\n').filter(Boolean);
     expect(pkgs.length).toBeGreaterThan(0);
