@@ -73,7 +73,7 @@ def valueKindName : ANFValue → String
   | .assert _             => "assert"
   | .updateProp _ _       => "update_prop"
   | .getStateScript       => "get_state_script"
-  | .checkPreimage _ _      => "check_preimage"
+  | .checkPreimage _ _ _      => "check_preimage"
   | .deserializeState _   => "deserialize_state"
   | .addOutput _ _ _      => "add_output"
   | .addRawOutput _ _     => "add_raw_output"

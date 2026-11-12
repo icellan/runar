@@ -66,7 +66,7 @@ with a single `check_preimage(preimage)` binding (named `_cp0` here over a
 preimage param `pre`).  Decidable, witness-parameterised — the exact
 counterpart of `AgreesA5.updatePropConsumeBody`. -/
 def statefulPrologueBody (pre : String) : List ANFBinding :=
-  [ ⟨"_cp0", .checkPreimage pre none, none⟩ ]
+  [ ⟨"_cp0", .checkPreimage pre none .lowS, none⟩ ]
 
 /-- **Decidable BODY-shape classifier for the stateful prologue.**
 
@@ -75,7 +75,7 @@ VACUOUS (`_ => false`) on every other body, so a keyed omnibus premise
 built on it would stay jointly satisfiable — same discipline as
 `AgreesA5.updatePropConsumeShapeBool`. -/
 def statefulPrologueShapeBool : List ANFBinding → Bool
-  | [ .mk "_cp0" (.checkPreimage _ none) none ] => true
+  | [ .mk "_cp0" (.checkPreimage _ none .lowS) none ] => true
   | _ => false
 
 /-- **Extraction.**  A `statefulPrologueShapeBool`-true body is EXACTLY
@@ -128,7 +128,7 @@ theorem evalBindingsP_statefulPrologue_reduces
       = .ok (s.addBinding "_cp0" (.vBool (Crypto.checkPreimage b))) := by
   unfold statefulPrologueBody
   show evalBindingsP methods s
-        [⟨"_cp0", .checkPreimage pre none, none⟩] = _
+        [⟨"_cp0", .checkPreimage pre none .lowS, none⟩] = _
   unfold evalBindingsP
   simp only [evalValueP, lookupRef, hPre, Value.asBytes?, bind, Except.bind,
     evalBindingsP]

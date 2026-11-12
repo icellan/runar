@@ -1920,7 +1920,7 @@ def evalValue (s : State) : ANFValue → EvalResult (Value × State)
       -- carry the compiled artifact's `codePart`, so it returns an
       -- opaque payload.
       .ok (.vOpaque ByteArray.empty, s)
-  | .checkPreimage preimage _ => do
+  | .checkPreimage preimage _ _ => do
       let pv ← lookupRef s preimage
       match pv.asBytes? with
       | some bytes => .ok (.vBool (Crypto.checkPreimage bytes), s)
@@ -2183,7 +2183,7 @@ def evalValueP (methods : List ANFMethod) (s : State) : ANFValue → EvalResult 
       return (v, s.setProp name v)
   | .getStateScript =>
       .ok (.vOpaque ByteArray.empty, s)
-  | .checkPreimage preimage _ => do
+  | .checkPreimage preimage _ _ => do
       let pv ← lookupRef s preimage
       match pv.asBytes? with
       | some bytes => .ok (.vBool (Crypto.checkPreimage bytes), s)
@@ -2318,7 +2318,7 @@ theorem evalValueP_eq_evalValue_of_noMethodCall
     | assert ref => intro _; rw [evalValueP, evalValue]
     | updateProp name ref => intro _; rw [evalValueP, evalValue]
     | getStateScript => intro _; rw [evalValueP, evalValue]
-    | checkPreimage preimage _ => intro _; rw [evalValueP, evalValue]
+    | checkPreimage preimage _ _ => intro _; rw [evalValueP, evalValue]
     | deserializeState preimage => intro _; rw [evalValueP, evalValue]
     | addOutput sats sv pre => intro _; rw [evalValueP, evalValue]
     | addRawOutput sats sb => intro _; rw [evalValueP, evalValue]

@@ -175,7 +175,7 @@ theorem structuralArithValueNarrow_iff_structuralConstValue
       constructor
       · intro h; simp [structuralArithValueNarrow] at h
       · intro h; simp [structuralConstValue] at h
-  | checkPreimage _ _ =>
+  | checkPreimage _ _ _ =>
       constructor
       · intro h; simp [structuralArithValueNarrow] at h
       · intro h; simp [structuralConstValue] at h
@@ -283,7 +283,7 @@ theorem structuralArithValueNarrowB_iff (v : ANFValue) :
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
   | getStateScript =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
-  | checkPreimage _ _ =>
+  | checkPreimage _ _ _ =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
   | deserializeState _ =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
@@ -13903,7 +13903,7 @@ theorem emittableArithChainReadyBool_iff
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
   | (.mk _ .getStateScript _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
-  | (.mk _ (.checkPreimage _ _) _) :: _, _sm, _currentIndex => by
+  | (.mk _ (.checkPreimage _ _ _) _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
   | (.mk _ (.deserializeState _) _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
@@ -14098,7 +14098,7 @@ theorem emittableArithChainReadyNoDblNegBool_iff
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
   | (.mk _ .getStateScript _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
-  | (.mk _ (.checkPreimage _ _) _) :: _, _sm, _currentIndex, _ => by
+  | (.mk _ (.checkPreimage _ _ _) _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
   | (.mk _ (.deserializeState _) _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
@@ -14155,7 +14155,7 @@ theorem emittableArithChainReadyNoDblNeg_imp_ready
       | assert _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | updateProp _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | getStateScript => simp only [emittableArithChainReadyNoDblNeg] at hRef
-      | checkPreimage _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
+      | checkPreimage _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | deserializeState _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | addOutput _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | addRawOutput _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
@@ -14381,7 +14381,7 @@ theorem loweredEmittableArith_areEmittable
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
-      | checkPreimage _ _ => simp only [emittableArithChainReady] at hReady
+      | checkPreimage _ _ _ => simp only [emittableArithChainReady] at hReady
       | deserializeState _ => simp only [emittableArithChainReady] at hReady
       | addOutput _ _ _ => simp only [emittableArithChainReady] at hReady
       | addRawOutput _ _ => simp only [emittableArithChainReady] at hReady
@@ -14539,7 +14539,7 @@ theorem loweredEmittableArith_m3ShapeFacts
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
-      | checkPreimage _ _ => simp only [emittableArithChainReady] at hReady
+      | checkPreimage _ _ _ => simp only [emittableArithChainReady] at hReady
       | deserializeState _ => simp only [emittableArithChainReady] at hReady
       | addOutput _ _ _ => simp only [emittableArithChainReady] at hReady
       | addRawOutput _ _ => simp only [emittableArithChainReady] at hReady
@@ -14770,7 +14770,7 @@ private theorem refinedTrue_firstBindingNotNeg
       | assert _ => rfl
       | updateProp _ _ => rfl
       | getStateScript => rfl
-      | checkPreimage _ _ => rfl
+      | checkPreimage _ _ _ => rfl
       | deserializeState _ => rfl
       | addOutput _ _ _ => rfl
       | addRawOutput _ _ => rfl
@@ -14862,7 +14862,7 @@ theorem loweredEmittableArithNoDblNeg_arithEmitNoFuse
       | assert _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | updateProp _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | getStateScript => simp only [emittableArithChainReadyNoDblNeg] at hRef
-      | checkPreimage _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
+      | checkPreimage _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | deserializeState _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | addOutput _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | addRawOutput _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
@@ -15201,7 +15201,7 @@ theorem structuralArithConsumeBody_of_entry_agreesTagged
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
-      | checkPreimage _ _ => simp only [emittableArithChainReady] at hReady
+      | checkPreimage _ _ _ => simp only [emittableArithChainReady] at hReady
       | deserializeState _ => simp only [emittableArithChainReady] at hReady
       | addOutput _ _ _ => simp only [emittableArithChainReady] at hReady
       | addRawOutput _ _ => simp only [emittableArithChainReady] at hReady
@@ -16794,7 +16794,7 @@ theorem agreesTagged_arith_walk_iff
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
-      | checkPreimage _ _ => simp only [emittableArithChainReady] at hReady
+      | checkPreimage _ _ _ => simp only [emittableArithChainReady] at hReady
       | deserializeState _ => simp only [emittableArithChainReady] at hReady
       | addOutput _ _ _ => simp only [emittableArithChainReady] at hReady
       | addRawOutput _ _ => simp only [emittableArithChainReady] at hReady

@@ -297,7 +297,16 @@ private def fromJsonANFValueAux? (fuel : Nat) (j : Json) : Except String ANFValu
         | .ok .null => .ok none
         | .ok f     => (f.getNat?).map some
         | .error _  => .ok none
-      return .checkPreimage preimage sighashFlag
+      -- #187: optional; absent / `null` / `"lowS"` = `.lowS`, `"all"` = `.all`,
+      -- anything else is rejected (TS `anf-required-fields.ts`), so a
+      -- malformed variant can never fail open to either blob.
+      let bindingVariant ← match j.getObjVal? "bindingVariant" with
+        | .ok .null           => .ok BindingVariant.lowS
+        | .ok (.str "lowS")   => .ok BindingVariant.lowS
+        | .ok (.str "all")    => .ok BindingVariant.all
+        | .ok v               => .error s!"check_preimage: bindingVariant must be \"lowS\" or \"all\", got {v.compress}"
+        | .error _            => .ok BindingVariant.lowS
+      return .checkPreimage preimage sighashFlag bindingVariant
   | "deserialize_state" =>
       let preimage ← j.getObjValAs? String "preimage"
       return .deserializeState preimage
@@ -402,11 +411,15 @@ private def toJsonANFValue : ANFValue → Json
   | .updateProp name value =>
       mkObj [("kind", .str "update_prop"), ("name", .str name), ("value", .str value)]
   | .getStateScript => mkObj [("kind", .str "get_state_script")]
-  | .checkPreimage preimage sighashFlag =>
+  | .checkPreimage preimage sighashFlag bindingVariant =>
       mkObj ([("kind", .str "check_preimage"), ("preimage", .str preimage)]
              ++ (match sighashFlag with
                  | some f => [("sighashFlag", .num ⟨f, 0⟩)]
-                 | none   => []))
+                 | none   => [])
+             -- TS sets the field only for `'all'` (stateful-scaffold.ts).
+             ++ (match bindingVariant with
+                 | .all  => [("bindingVariant", .str "all")]
+                 | .lowS => []))
   | .deserializeState preimage =>
       mkObj [("kind", .str "deserialize_state"), ("preimage", .str preimage)]
   | .addOutput sats sv preimage =>

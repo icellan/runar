@@ -127,7 +127,7 @@ theorem structuralConstBodyB_iff (body : List ANFBinding) :
         | assert _ => simp at hHead
         | updateProp _ _ => simp at hHead
         | getStateScript => simp at hHead
-        | checkPreimage _ _ => simp at hHead
+        | checkPreimage _ _ _ => simp at hHead
         | deserializeState _ => simp at hHead
         | addOutput _ _ _ => simp at hHead
         | addRawOutput _ _ => simp at hHead
@@ -157,7 +157,7 @@ theorem structuralConstBodyB_iff (body : List ANFBinding) :
         | assert _ => simp [structuralConstValue] at hHead
         | updateProp _ _ => simp [structuralConstValue] at hHead
         | getStateScript => simp [structuralConstValue] at hHead
-        | checkPreimage _ _ => simp [structuralConstValue] at hHead
+        | checkPreimage _ _ _ => simp [structuralConstValue] at hHead
         | deserializeState _ => simp [structuralConstValue] at hHead
         | addOutput _ _ _ => simp [structuralConstValue] at hHead
         | addRawOutput _ _ => simp [structuralConstValue] at hHead
@@ -197,7 +197,7 @@ theorem structuralIfValBodyNarrowB_iff (body : List ANFBinding) :
       | assert _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | updateProp _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | getStateScript => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
-      | checkPreimage _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
+      | checkPreimage _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | deserializeState _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | addOutput _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | addRawOutput _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
@@ -1385,7 +1385,7 @@ private theorem runOps_lowerValue_loadConst_preserves_metadata
   | assert _ => simp [structuralConstValue] at hHead
   | updateProp _ _ => simp [structuralConstValue] at hHead
   | getStateScript => simp [structuralConstValue] at hHead
-  | checkPreimage _ _ => simp [structuralConstValue] at hHead
+  | checkPreimage _ _ _ => simp [structuralConstValue] at hHead
   | deserializeState _ => simp [structuralConstValue] at hHead
   | addOutput _ _ _ => simp [structuralConstValue] at hHead
   | addRawOutput _ _ => simp [structuralConstValue] at hHead
@@ -4872,7 +4872,7 @@ theorem ifValArithBodyBool_iff
   | [.mk _ (.assert _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.updateProp _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ .getStateScript _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
-  | [.mk _ (.checkPreimage _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
+  | [.mk _ (.checkPreimage _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.deserializeState _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.addOutput _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.addRawOutput _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]

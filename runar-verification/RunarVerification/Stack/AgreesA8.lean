@@ -307,7 +307,7 @@ theorem lowerBindingsP_singleton_leafEmpty_methodCall_ops
           | .assert _         => simp [leafEmptyMethodCallValueB] at hVal
           | .updateProp _ _   => simp [leafEmptyMethodCallValueB] at hVal
           | .getStateScript   => simp [leafEmptyMethodCallValueB] at hVal
-          | .checkPreimage _ _  => simp [leafEmptyMethodCallValueB] at hVal
+          | .checkPreimage _ _ _  => simp [leafEmptyMethodCallValueB] at hVal
           | .deserializeState _ => simp [leafEmptyMethodCallValueB] at hVal
           | .addOutput _ _ _    => simp [leafEmptyMethodCallValueB] at hVal
           | .addRawOutput _ _   => simp [leafEmptyMethodCallValueB] at hVal
@@ -642,7 +642,7 @@ theorem runOps_lowerBindingsP_singleton_methodCallLeaf_isSome
           | .assert _         => simp [singletonMethodCallLeafValue] at hVal
           | .updateProp _ _   => simp [singletonMethodCallLeafValue] at hVal
           | .getStateScript   => simp [singletonMethodCallLeafValue] at hVal
-          | .checkPreimage _ _  => simp [singletonMethodCallLeafValue] at hVal
+          | .checkPreimage _ _ _  => simp [singletonMethodCallLeafValue] at hVal
           | .deserializeState _ => simp [singletonMethodCallLeafValue] at hVal
           | .addOutput _ _ _    => simp [singletonMethodCallLeafValue] at hVal
           | .addRawOutput _ _   => simp [singletonMethodCallLeafValue] at hVal
@@ -978,7 +978,7 @@ theorem runOps_lowerBindingsP_leafEmptyMethodCall_then_const_isSome
               leafEmptyMethodCallValue] at hVal
           | .getStateScript   => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
-          | .checkPreimage _ _  => simp [leafEmptyMethodCallValueB,
+          | .checkPreimage _ _ _  => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
           | .deserializeState _ => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
@@ -2397,7 +2397,7 @@ theorem methodCallConsumeShapeBool_extract
                   | assert _      => rw [hPa, hBd] at h; simp at h
                   | updateProp _ _ => rw [hPa, hBd] at h; simp at h
                   | getStateScript => rw [hPa, hBd] at h; simp at h
-                  | checkPreimage _ _ => rw [hPa, hBd] at h; simp at h
+                  | checkPreimage _ _ _ => rw [hPa, hBd] at h; simp at h
                   | deserializeState _ => rw [hPa, hBd] at h; simp at h
                   | addOutput _ _ _ => rw [hPa, hBd] at h; simp at h
                   | addRawOutput _ _ => rw [hPa, hBd] at h; simp at h

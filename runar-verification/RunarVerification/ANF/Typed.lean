@@ -110,7 +110,7 @@ def freeNames : ANFValue → List String
   | .assert v => [v]
   | .updateProp _ v => [v]
   | .getStateScript => []
-  | .checkPreimage p _ => [p]
+  | .checkPreimage p _ _ => [p]
   | .deserializeState p => [p]
   | .addOutput sats sv pre => sats :: pre :: sv
   | .addRawOutput sats sb => [sats, sb]
