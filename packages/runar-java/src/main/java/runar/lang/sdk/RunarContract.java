@@ -1431,7 +1431,7 @@ public final class RunarContract {
                     0L, methodNeedsNewAmount, newSats, preimagePlaceholder, intentWitnessHex);
                 List<TransactionBuilder.ContractInput> probeExtras = buildExtraInputPlaceholders(
                     m, methodName, extraContractUtxos, extraResolved, extraSubscripts,
-                    methodNeedsChange ? changePkhHex : null, methodNeedsNewAmount, newSats,
+                    methodNeedsChange ? changePkhHex : null, 0L, methodNeedsNewAmount, newSats,
                     intentWitnessHex);
                 TransactionBuilder.CallTxResult probe = orderedContractOutputs != null
                     ? TransactionBuilder.buildCallTransactionFullOrdered(
@@ -1470,7 +1470,7 @@ public final class RunarContract {
         // covers their bytes too.
         List<TransactionBuilder.ContractInput> extraInputs = buildExtraInputPlaceholders(
             m, methodName, extraContractUtxos, extraResolved, extraSubscripts,
-            methodNeedsChange ? changePkhHex : null, methodNeedsNewAmount, newSats,
+            methodNeedsChange ? changePkhHex : null, 0L, methodNeedsNewAmount, newSats,
             intentWitnessHex);
 
         // Thread CallOptions.locktime so contracts asserting
@@ -1500,14 +1500,21 @@ public final class RunarContract {
             /*preimageHex*/ preimagePlaceholder,
             intentWitnessHex
         );
+        // Every extra contract input's unlock carries _changeAmount too, so it
+        // grows exactly like the primary's. Re-size them with the same change
+        // amount, or the fee is computed for a tx smaller than the one shipped.
+        List<TransactionBuilder.ContractInput> secondPassExtras = buildExtraInputPlaceholders(
+            m, methodName, extraContractUtxos, extraResolved, extraSubscripts,
+            methodNeedsChange ? changePkhHex : null, changeAmount, methodNeedsNewAmount, newSats,
+            intentWitnessHex);
         TransactionBuilder.CallTxResult secondPass = orderedContractOutputs != null
             ? TransactionBuilder.buildCallTransactionFullOrdered(
                 currentUtxo, secondPassUnlock, orderedContractOutputs,
-                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, secondPassExtras
             )
             : TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, secondPassUnlock, newLockingScript, newSats,
-                dataOutputs, additional, changeAddress, feeRate, locktime, extraInputs
+                dataOutputs, additional, changeAddress, feeRate, locktime, secondPassExtras
             );
         long finalChangeAmount = secondPass.changeAmount();
         RawTx tx = secondPass.tx();
@@ -2294,7 +2301,7 @@ public final class RunarContract {
     private List<TransactionBuilder.ContractInput> buildExtraInputPlaceholders(
         RunarArtifact.ABIMethod m, String methodName, List<UTXO> extraContractUtxos,
         List<List<Object>> extraResolved, List<String> extraSubscripts,
-        String changePkhHex, boolean methodNeedsNewAmount, long newSats,
+        String changePkhHex, long changeAmount, boolean methodNeedsNewAmount, long newSats,
         String intentWitnessHex
     ) {
         List<TransactionBuilder.ContractInput> out = new ArrayList<>();
@@ -2303,7 +2310,7 @@ public final class RunarContract {
                 extraContractUtxos.get(i),
                 buildPushTxUnlock(
                     m, methodName, extraResolved.get(i), "00".repeat(72),
-                    changePkhHex, 0L, methodNeedsNewAmount, newSats,
+                    changePkhHex, changeAmount, methodNeedsNewAmount, newSats,
                     "00".repeat(bip143PreimageLen(extraSubscripts.get(i))),
                     intentWitnessHex)));
         }

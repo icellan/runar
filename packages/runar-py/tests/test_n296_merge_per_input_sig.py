@@ -34,11 +34,13 @@ def _utxo(d: dict) -> Utxo:
     return Utxo(txid=d["txid"], output_index=d["outputIndex"], satoshis=d["satoshis"], script=d["script"])
 
 
-def _merge(per_input_args):
+def _merge(per_input_args, fee_rate=None):
     v = json.loads(VECTOR_PATH.read_text())
     art = RunarArtifact.from_dict(v["artifact"])
     signer = LocalSigner(v["privKeyHex"])
     provider = MockProvider("testnet")
+    if fee_rate is not None:
+        provider.set_fee_rate(fee_rate)
     provider.add_utxo(signer.get_address(), _utxo(v["fundingUtxo"]))
     cu = _utxo(v["contractUtxo"])
     eu = _utxo(v["extraContractUtxo"])
@@ -65,3 +67,40 @@ def test_n296_merge_default_path_matches_reference():
 
 def test_n296_merge_explicit_sig_is_overwritten_by_signer():
     assert _merge([["ab" * 71]]) == REFERENCE_TX_HEX
+
+
+def _varint(b: bytes, i: int) -> tuple[int, int]:
+    n = b[i]
+    if n < 0xFD:
+        return n, i + 1
+    w = {0xFD: 2, 0xFE: 4, 0xFF: 8}[n]
+    return int.from_bytes(b[i + 1:i + 1 + w], "little"), i + 1 + w
+
+
+def _output_sats(raw_hex: str) -> int:
+    b = bytes.fromhex(raw_hex)
+    n_in, i = _varint(b, 4)
+    for _ in range(n_in):
+        sl, i = _varint(b, i + 36)
+        i += sl + 4
+    n_out, i = _varint(b, i)
+    total = 0
+    for _ in range(n_out):
+        total += int.from_bytes(b[i:i + 8], "little")
+        sl, i = _varint(b, i + 8)
+        i += sl
+    return total
+
+
+def test_n296_merge_fee_covers_every_byte_at_one_sat_per_byte():
+    """Fee sizing for a merge: at 1000 sat/kB every byte the fee layout misses
+    is a satoshi under-paid. Each additional contract input's unlock carries
+    _changeAmount, so it must be sized with the real change, not 0 (the
+    defect the Java tier had; ported here as a cross-tier pin)."""
+    raw = _merge(None, fee_rate=1000)
+    v = json.loads(VECTOR_PATH.read_text())
+    paid = (
+        v["contractUtxo"]["satoshis"] + v["extraContractUtxo"]["satoshis"]
+        + v["fundingUtxo"]["satoshis"] - _output_sats(raw)
+    )
+    assert paid >= len(raw) // 2, f"paid {paid} sat for a {len(raw) // 2}-byte tx at 1 sat/byte"

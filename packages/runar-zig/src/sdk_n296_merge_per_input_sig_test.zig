@@ -37,6 +37,14 @@ fn utxoOf(obj: std.json.ObjectMap) types.UTXO {
 
 fn mergeAndCompare(per_input_args: ?[]const []const types.StateValue) !void {
     const allocator = std.testing.allocator;
+    const tx = try mergeTx(allocator, per_input_args, null);
+    defer allocator.free(tx);
+    try std.testing.expectEqualStrings(REFERENCE_TX_HEX, tx);
+}
+
+/// Runs the merge and returns the broadcast tx hex (caller frees). `fee_rate`
+/// overrides the MockProvider's sat/kB rate when non-null.
+fn mergeTx(allocator: std.mem.Allocator, per_input_args: ?[]const []const types.StateValue, fee_rate: ?i64) ![]u8 {
     const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, VECTOR_PATH, allocator, .limited(8 * 1024 * 1024));
     defer allocator.free(raw);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
@@ -54,6 +62,7 @@ fn mergeAndCompare(per_input_args: ?[]const []const types.StateValue) !void {
 
     var prov = provider_mod.MockProvider.init(allocator, "testnet");
     defer prov.deinit();
+    if (fee_rate) |rate| prov.fee_rate = rate;
     var signer = try signer_mod.LocalSigner.fromHex(str(v, "privKeyHex"));
     {
         const addr = try signer.signer().getAddress(allocator);
@@ -76,7 +85,61 @@ fn mergeAndCompare(per_input_args: ?[]const []const types.StateValue) !void {
 
     const txs = prov.getBroadcastedTxs();
     try std.testing.expectEqual(@as(usize, 1), txs.len);
-    try std.testing.expectEqualStrings(REFERENCE_TX_HEX, txs[0]);
+    return allocator.dupe(u8, txs[0]);
+}
+
+fn readVarint(b: []const u8, i: usize) struct { v: u64, next: usize } {
+    const n = b[i];
+    if (n < 0xfd) return .{ .v = n, .next = i + 1 };
+    const w: usize = switch (n) {
+        0xfd => 2,
+        0xfe => 4,
+        else => 8,
+    };
+    var v: u64 = 0;
+    for (0..w) |k| v |= @as(u64, b[i + 1 + k]) << @intCast(8 * k);
+    return .{ .v = v, .next = i + 1 + w };
+}
+
+// Fee sizing for a merge: at 1000 sat/kB every byte the fee layout misses is a
+// satoshi under-paid. Each additional contract input's unlock carries
+// _changeAmount, so it must be sized with the real change, not 0 (the defect
+// the Java tier had; ported here as a cross-tier pin).
+test "N-296: the merge fee covers every byte of the signed tx at 1 sat/byte" {
+    const allocator = std.testing.allocator;
+    const tx_hex = try mergeTx(allocator, null, 1000);
+    defer allocator.free(tx_hex);
+    const raw = try allocator.alloc(u8, tx_hex.len / 2);
+    defer allocator.free(raw);
+    _ = try std.fmt.hexToBytes(raw, tx_hex);
+
+    var r = readVarint(raw, 4);
+    var i = r.next;
+    for (0..r.v) |_| {
+        const sl = readVarint(raw, i + 36);
+        i = sl.next + @as(usize, @intCast(sl.v)) + 4;
+    }
+    r = readVarint(raw, i);
+    i = r.next;
+    var out: i64 = 0;
+    for (0..r.v) |_| {
+        out += @intCast(std.mem.readInt(u64, raw[i..][0..8], .little));
+        const sl = readVarint(raw, i + 8);
+        i = sl.next + @as(usize, @intCast(sl.v));
+    }
+
+    const vec = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, VECTOR_PATH, allocator, .limited(8 * 1024 * 1024));
+    defer allocator.free(vec);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, vec, .{});
+    defer parsed.deinit();
+    const v = parsed.value.object;
+    const in = utxoOf(v.get("contractUtxo").?.object).satoshis + utxoOf(v.get("extraContractUtxo").?.object).satoshis +
+        utxoOf(v.get("fundingUtxo").?.object).satoshis;
+    const paid = in - out;
+    if (paid < @as(i64, @intCast(raw.len))) {
+        std.debug.print("paid {d} sat for a {d}-byte tx at 1 sat/byte\n", .{ paid, raw.len });
+        return error.FeeUnderpaid;
+    }
 }
 
 test "N-296: default (no per-input args) merge matches the reference tx" {
