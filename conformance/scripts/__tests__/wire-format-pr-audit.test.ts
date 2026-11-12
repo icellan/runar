@@ -1258,13 +1258,24 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     // 2026-11-04 — DELETED, spent: the #179 port (#178 branch-arm order fix)
     // edits stack.go and moves its own pins (conformance/anf-interpreter
     // branch-permuted-* cases), so it needs no cover.
+    //
+    // 2026-11-12 — four entries, one per codegen file whose ONLY change is
+    // the `@bindingVariant all` comment (the 376-byte blob needs nVersion
+    // greater than 1, not merely other than 1; @bsv/sdk Spend.isRelaxed).
+    // A comment cannot move a byte. Each is spent, and must be deleted, on
+    // the next edit to its file.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual([]);
+    expect(entries.map((e) => e.path).sort()).toEqual([
+      'compilers/java/src/main/java/runar/compiler/passes/StackLower.java',
+      'compilers/python/runar_compiler/codegen/stack.py',
+      'compilers/ruby/lib/runar_compiler/codegen/stack.rb',
+      'compilers/zig/src/passes/stack_lower.zig',
+    ]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {
-      expect(e.expires).toBe('2027-05-02');
-      expect(e.reviewer).toBe('gh:icellan');
+      expect(e.expires).toBe('2027-05-11');
+      expect(e.reviewer).toBe('fix-session: nVersion wording');
       expect(e.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
   });

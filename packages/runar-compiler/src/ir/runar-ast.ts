@@ -137,7 +137,7 @@ export interface MethodNode {
    * The Any-S OP_PUSH_TX binding construction from a `@bindingVariant <lowS|all>`
    * directive on a public `.runar.ts` method. Absent = the default `'lowS'`.
    * `'all'` selects the compact non-low-S blob, spendable only when the
-   * spending tx has nVersion != 1.
+   * spending tx has nVersion > 1.
    */
   bindingVariant?: BindingVariant;
   sourceLocation: SourceLocation;

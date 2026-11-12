@@ -306,7 +306,7 @@
         },
         "bindingVariant": {
           "enum": ["lowS", "all"],
-          "description": "The Any-S OP_PUSH_TX binding construction, from a `@bindingVariant` directive on the method (ports #170). ABSENT means the default lowS (422-byte low-S blob, valid at every nVersion). `all` selects the 376-byte non-low-S blob, which is only spendable when the spending tx has nVersion != 1. Emitted only for a method that opts in, so every pre-existing golden is unchanged."
+          "description": "The Any-S OP_PUSH_TX binding construction, from a `@bindingVariant` directive on the method (ports #170). ABSENT means the default lowS (422-byte low-S blob, valid at every nVersion). `all` selects the 376-byte non-low-S blob, which is only spendable when the spending tx has nVersion > 1. Emitted only for a method that opts in, so every pre-existing golden is unchanged."
         }
       }
     },

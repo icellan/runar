@@ -349,7 +349,7 @@ class MethodNode:
     # Ports #170: the Any-S OP_PUSH_TX binding construction from a
     # ``/** @bindingVariant <lowS|all> */`` directive on a public ``.runar.ts``
     # method. ``None`` = the default lowS; ``"all"`` selects the compact
-    # non-low-S blob, spendable only when the spending tx has nVersion != 1.
+    # non-low-S blob, spendable only when the spending tx has nVersion > 1.
     binding_variant: str | None = None
     source_location: SourceLocation = field(default_factory=SourceLocation)
 

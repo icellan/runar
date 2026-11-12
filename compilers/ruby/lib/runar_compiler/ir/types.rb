@@ -178,7 +178,7 @@ module RunarCompiler
         # -- check_preimage (ports #170): the Any-S binding
         #    construction from the method's @bindingVariant
         #    directive. nil = default lowS; "all" = the compact
-        #    non-low-S blob (nVersion != 1 only).
+        #    non-low-S blob (nVersion > 1 only).
         :binding_variant,
         # -- add_output ----------------------------------------
         :satoshis,

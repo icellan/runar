@@ -10,7 +10,7 @@
  *     every tx nVersion, including 1. Absent directive ⇒ this construction.
  *   - `all`: s = z + 1 as-is (no mod-n, no low-S), 46 bytes smaller. REJECTED
  *     at nVersion = 1 (LOW_S and minimal-number rules); ONLY spendable when the
- *     spending tx has nVersion != 1. The compiler cannot check that; the
+ *     spending tx has nVersion > 1. The compiler cannot check that; the
  *     author owns it, and no Rúnar SDK builds such a transaction.
  *
  * Same marker rules as `@sighash` (F-039 / N-039): every occurrence of the

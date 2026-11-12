@@ -222,7 +222,7 @@ class ANFValue:
     sighash_flag: int | None = None
     # -- check_preimage (ports #170): the Any-S binding construction from the
     #    method's ``@bindingVariant`` directive. ``None`` = default lowS;
-    #    ``"all"`` selects the compact non-low-S blob (nVersion != 1 only).
+    #    ``"all"`` selects the compact non-low-S blob (nVersion > 1 only).
     binding_variant: str | None = None
 
     # -- add_output --------------------------------------------------------

@@ -258,7 +258,7 @@ module RunarCompiler
     # construction from a +/** @bindingVariant <lowS|all> */+ directive on a
     # public +.runar.ts+ method. +nil+ = the default lowS; +"all"+ selects the
     # compact non-low-S blob, spendable only when the spending tx has
-    # nVersion != 1.
+    # nVersion > 1.
     MethodNode = Struct.new(:name, :params, :body, :visibility, :source_location, :sighash_type, :binding_variant,
                             keyword_init: true) do
       def initialize(name: "", params: [], body: [], visibility: "public", source_location: SourceLocation.new,

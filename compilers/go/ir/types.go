@@ -217,7 +217,7 @@ type ANFValue struct {
 
 	// check_preimage — the Any-S binding construction from the method's
 	// `@bindingVariant` directive (ports #170). "" = default lowS. "all"
-	// selects the compact non-low-S blob (nVersion != 1 only). Only set for a
+	// selects the compact non-low-S blob (nVersion > 1 only). Only set for a
 	// method that opts in, keeping golden ANF unchanged.
 	BindingVariant string `json:"bindingVariant,omitempty"`
 

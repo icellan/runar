@@ -211,7 +211,7 @@ _CHECK_PREIMAGE_BINDING_HEX = (
 
 # The ``@bindingVariant all`` blob (376 bytes; ports #170): s = z + 1 with no
 # mod-n and no low-S fixup, so it is only spendable when the spending tx has
-# nVersion != 1. Same C=1 key and tail as the default.
+# nVersion > 1. Same C=1 key and tail as the default.
 _CHECK_PREIMAGE_BINDING_ALL_HEX = (
     "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
     "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
