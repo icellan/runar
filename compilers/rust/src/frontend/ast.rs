@@ -161,7 +161,7 @@ pub struct MethodNode {
     /// `/** @bindingVariant <lowS|all> */` directive on a public `.runar.ts`
     /// method (ports #170). `None` = the default lowS. `Some("all")` selects
     /// the compact non-low-S blob, spendable only when the spending tx has
-    /// nVersion != 1.
+    /// nVersion > 1.
     pub binding_variant: Option<String>,
     pub source_location: SourceLocation,
 }

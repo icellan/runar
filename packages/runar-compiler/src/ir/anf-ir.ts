@@ -248,7 +248,7 @@ export interface CheckPreimage {
    * The Any-S binding construction, from the method's `@bindingVariant`
    * directive. Absent = default `'lowS'` (the 422-byte low-S blob). `'all'`
    * selects the 376-byte non-low-S blob, spendable only when the spending tx
-   * has nVersion != 1. Only set for a method that opts in, keeping golden ANF
+   * has nVersion > 1. Only set for a method that opts in, keeping golden ANF
    * unchanged for every other contract.
    */
   bindingVariant?: BindingVariant;

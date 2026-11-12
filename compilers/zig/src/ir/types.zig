@@ -243,7 +243,7 @@ pub const MethodNode = struct {
     sighash_type: ?i32 = null,
     /// Ports #170: true when a `/** @bindingVariant all */` directive on a
     /// public `.runar.ts` method selects the compact non-low-S binding blob
-    /// (spendable only when the spending tx has nVersion != 1). False = the
+    /// (spendable only when the spending tx has nVersion > 1). False = the
     /// default lowS.
     binding_variant_all: bool = false,
 };
@@ -648,7 +648,7 @@ pub const CheckPreimage = struct {
     /// existing contract.
     sighash_flag: i32 = 0,
     /// Ports #170: true for `bindingVariant: "all"` (the compact non-low-S
-    /// blob, nVersion != 1 only). False = default lowS; emitted only when true,
+    /// blob, nVersion > 1 only). False = default lowS; emitted only when true,
     /// keeping golden ANF unchanged.
     binding_variant_all: bool = false,
 };

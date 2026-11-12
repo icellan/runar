@@ -22,7 +22,7 @@ public record MethodNode(
      * {@code /** @bindingVariant <lowS|all> *&#47;} directive on a public
      * {@code .runar.ts} method. {@code null} = the default lowS; {@code "all"}
      * selects the compact non-low-S blob, spendable only when the spending tx
-     * has nVersion != 1.
+     * has nVersion > 1.
      */
     String bindingVariant
 ) {

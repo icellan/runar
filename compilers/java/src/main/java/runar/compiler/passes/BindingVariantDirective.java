@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
  * {@code /** @bindingVariant <lowS|all> *&#47;}, selecting the Any-S OP_PUSH_TX
  * binding construction its checkPreimage emits. {@code lowS} (default) is valid
  * at every tx nVersion; {@code all} is the compact non-low-S blob, spendable
- * only when the spending tx has nVersion != 1. Same marker rules as
+ * only when the spending tx has nVersion > 1. Same marker rules as
  * {@code @sighash} (F-039 / N-039): one marker per method, and anything other
  * than {@code " lowS"} / {@code " all"} after it is an error.
  */

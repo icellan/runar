@@ -15,7 +15,7 @@
  * low-S by (r,n−s) malleation), 422 bytes; see the block comment above
  * `anySBindingBytes` for the derivation and each optimization. A method may opt
  * into the 376-byte `@bindingVariant all` form (no mod-n, no low-S), which is
- * only spendable when the spending tx has nVersion != 1.
+ * only spendable when the spending tx has nVersion > 1.
  *
  * LEGACY — fixed nonce k=2, privkey d=1 ⇒ pubkey = G, ~760 bytes:
  *   z    = hash256(preimage)                     (the ECDSA message)
@@ -348,7 +348,7 @@ function anySBindingBytes(sighashFlag: number, variant: BindingVariant = 'lowS')
     op(OP.OP_MUL, OP.OP_ADD);                         // [n, s']
     op(OP.OP_NIP);                                    // [s']
   } else {
-    // 'all': s = z + 1, no BIN2NUM, no mod n, no low-S (nVersion != 1 only).
+    // 'all': s = z + 1, no BIN2NUM, no mod n, no low-S (nVersion > 1 only).
     pushHex('00'); op(OP.OP_CAT, OP.OP_1ADD);
   }
   // s (minimal LE script number) → big-endian DER magnitude: fan out one byte
@@ -417,7 +417,7 @@ const bytesToHex = (u: Uint8Array): string => Array.from(u, (b) => b.toString(16
 /** Hex of the default (lowS) construction — the value the other 6 tiers must pin. */
 export const CHECK_PREIMAGE_BINDING_HEX: string = bytesToHex(checkPreimageBindingBytes());
 
-/** Hex of the `@bindingVariant all` construction (nVersion != 1 only), pinned cross-tier. */
+/** Hex of the `@bindingVariant all` construction (nVersion > 1 only), pinned cross-tier. */
 export const CHECK_PREIMAGE_BINDING_ALL_HEX: string = bytesToHex(checkPreimageBindingBytes(SIGHASH_FLAG_DEFAULT, 'all'));
 
 /**

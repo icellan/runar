@@ -7211,7 +7211,7 @@ const check_preimage_binding_hex = "76aa517f517f517f517f517f517f517f517f517f517f
 
 // The `@bindingVariant all` blob (376 bytes; ports #170): s = z + 1 with no
 // mod-n and no low-S fixup, so it is only spendable when the spending tx has
-// nVersion != 1. Same C=1 key and tail as the default.
+// nVersion > 1. Same C=1 key and tail as the default.
 const check_preimage_binding_all_hex = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8b82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f82927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
 
 // The frozen binding hex above ends with `0141` (OP_DATA_1 SIGHASH_ALL|FORKID)

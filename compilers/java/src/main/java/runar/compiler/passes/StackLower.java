@@ -138,7 +138,7 @@ public final class StackLower {
     /**
      * The {@code @bindingVariant all} blob (376 bytes; ports #170): s = z + 1
      * with no mod-n and no low-S fixup, so it is only spendable when the
-     * spending tx has nVersion != 1. Same C=1 key and tail as the default.
+     * spending tx has nVersion > 1. Same C=1 key and tail as the default.
      */
     private static final String CHECK_PREIMAGE_BINDING_ALL_HEX =
         "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"

@@ -6,7 +6,7 @@
 //! A public `.runar.ts` method may carry `/** @bindingVariant <lowS|all> */`,
 //! selecting the Any-S OP_PUSH_TX binding construction its checkPreimage
 //! emits. `lowS` (default) is valid at every tx nVersion; `all` is the compact
-//! non-low-S blob, spendable only when the spending tx has nVersion != 1.
+//! non-low-S blob, spendable only when the spending tx has nVersion > 1.
 //! Same marker rules as `@sighash` (F-039 / N-039): one marker per method, and
 //! anything other than ` lowS` / ` all` after it is an error.
 
