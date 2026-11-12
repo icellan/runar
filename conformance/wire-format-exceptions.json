@@ -3,7 +3,7 @@
   "entries": [
     {
       "path": "compilers/java/src/main/java/runar/compiler/passes/StackLower.java",
-      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs nVersion != 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
+      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs any nVersion other than 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
       "date": "2026-11-12",
       "expires": "2027-05-11",
       "sha256": "c33403b5111f56439b7f5d834a409158f2bf08be6e0f7145321381813b7eb87b",
@@ -11,7 +11,7 @@
     },
     {
       "path": "compilers/python/runar_compiler/codegen/stack.py",
-      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs nVersion != 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
+      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs any nVersion other than 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
       "date": "2026-11-12",
       "expires": "2027-05-11",
       "sha256": "bae25e691171d96650364f40844d9022f7c3c77ab3c9e7f1556bd7067d35c92e",
@@ -19,7 +19,7 @@
     },
     {
       "path": "compilers/ruby/lib/runar_compiler/codegen/stack.rb",
-      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs nVersion != 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
+      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs any nVersion other than 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
       "date": "2026-11-12",
       "expires": "2027-05-11",
       "sha256": "0e807e2dc924d82d11d5f54b6aec060f40dad136e4f612665a039073c2bbde15",
@@ -27,7 +27,7 @@
     },
     {
       "path": "compilers/zig/src/passes/stack_lower.zig",
-      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs nVersion != 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
+      "reason": "Comment-only: the @bindingVariant all comment said the 376-byte blob needs any nVersion other than 1; corrected to nVersion > 1 (@bsv/sdk Spend.isRelaxed is transactionVersion > 1). No emitted byte changes.",
       "date": "2026-11-12",
       "expires": "2027-05-11",
       "sha256": "2a47ecf8fe21824d021007ce3bc77db75180c014384d4e29103fef08707e6371",
