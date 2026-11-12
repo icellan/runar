@@ -60,6 +60,12 @@
   // excluded — those probes are ordinary Rúnar that also typechecks, so they
   // keep the free coverage.
   //
+  // `frozen-fixture-sources/**/*.runar.ts` are the reconstructed sources of
+  // checked-in SDK test artifacts, read as TEXT by regenerate.mjs and fed to
+  // the compiler that produced each fixture. Several are byte-for-byte the
+  // historical source (no imports, string literals for ByteString), and
+  // editing them for tsc would change source positions the artifacts embed.
+  //
   // `negatives/rejection-parity.test.ts` is NOT excluded — the harness is real
   // TypeScript and stays typechecked.
   "exclude": [
@@ -68,6 +74,7 @@
     "fuzz-regressions/entries/*/contract.runar.ts",
     "negatives/*.runar.ts",
     "closed-findings/*.runar.ts",
-    "subtype-parity/*.runar.ts"
+    "subtype-parity/*.runar.ts",
+    "frozen-fixture-sources/**/*.runar.ts"
   ]
 }
