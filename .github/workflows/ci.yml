@@ -1646,6 +1646,18 @@ jobs:
         # artifacts) and nothing failed. This recompiles every spec and fails
         # on any difference. Mirrors the sdk-vertical:check gate.
         run: cd conformance && npx tsx sdk-output/generate-inputs.ts --check
+      - name: Build Zig compiler (frozen SDK fixtures)
+        run: cd compilers/zig && zig build
+      - name: Assert frozen SDK test artifacts match the current compiler
+        # Same failure mode as the step above, for the compiled artifacts SDK
+        # tests load from disk (arraywrite-artifact.json x6, Java/Zig
+        # artifacts, sdk-matches-artifact). #187's 422-B binding blob left
+        # them on the old 428-B blob and nothing failed. Each fixture is
+        # rebuilt by the tier that produced it: TS dist (built above), the Zig
+        # binary (step above), the Java compiler jar (composite-built by the
+        # java-driver fatJar above) and Go. See
+        # conformance/frozen-fixture-sources/README.md.
+        run: node conformance/frozen-fixture-sources/regenerate.mjs --check
       - name: Run SDK output conformance (all contracts x 7 SDKs)
         run: cd conformance/sdk-output && npx tsx runner/sdk-runner.ts
       - name: Run vertical compiler<->SDK pins (constructorSlots + codeSeparator offsets)
