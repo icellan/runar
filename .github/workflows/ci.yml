@@ -1647,7 +1647,7 @@ jobs:
         # on any difference. Mirrors the sdk-vertical:check gate.
         run: cd conformance && npx tsx sdk-output/generate-inputs.ts --check
       - name: Build Zig compiler (frozen SDK fixtures)
-        run: cd compilers/zig && zig build
+        run: cd compilers/zig && zig build -Doptimize=ReleaseSafe
       - name: Assert frozen SDK test artifacts match the current compiler
         # Same failure mode as the step above, for the compiled artifacts SDK
         # tests load from disk (arraywrite-artifact.json x6, Java/Zig

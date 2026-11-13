@@ -14,7 +14,7 @@ node conformance/frozen-fixture-sources/regenerate.mjs --check   # rebuild + dif
 node conformance/frozen-fixture-sources/regenerate.mjs --check --only arraywrite
 ```
 
-CI runs `--check` in the SDK Output Conformance job (`.github/workflows/ci.yml`).
+CI runs `--check` in the SDK Output Conformance job (`.github/workflows/ci.yml`), and `pnpm test:ci` runs it as `ci-local:frozen-fixtures-check`.
 
 `--check` exits 1 and names the first differing character of each drifted
 file. `buildTimestamp` is the only field it ignores. A rewrite keeps the old
