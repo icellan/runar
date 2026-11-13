@@ -1,5 +1,6 @@
 import RunarVerification.ANF.Json
 import RunarVerification.ANF.TypeCheck
+import Lean.Data.Json
 
 /-!
 # Task 9 — Type-system fidelity sweep
@@ -18,6 +19,10 @@ For every fixture it prints one line:
 and, for a `FAIL`, the FIRST offending construct — the first binding whose
 `typeOfValue` (or `if`/`loop` branch rule) returns `none`, reported as
 `method <m> / binding <name> = <kind>[:<func>]`.
+
+A rejected fixture whose `source.json` allowlist omits `ts` prints `GO-ONLY`
+instead of `FAIL`: it uses a Go-only builtin the TS checker refuses (N-398),
+and `builtinTable` mirrors that checker, so the rejection is expected.
 
 The offending-construct walker `firstFailure` re-threads the typing environment
 exactly like `TypeCheck.checkBody` (contract properties + method params seed the
@@ -147,6 +152,20 @@ def firstProgramFailure (p : ANFProgram) : Option (String × String × String) :
       | none => go ms
   go p.methods
 
+/-- True when the fixture's `source.json` carries a `compilers` allowlist that
+omits `ts`. Such fixtures exercise Go-only builtins (CLAUDE.md, N-398) that the
+TS checker deliberately refuses; `builtinTable` mirrors that checker, so a
+rejection here is the mirror working, not a type-system gap. -/
+def tsExcluded (fixtureDir : System.FilePath) : IO Bool := do
+  let path := fixtureDir / "source.json"
+  if !(← path.pathExists) then return false
+  match Lean.Json.parse (← IO.FS.readFile path) with
+  | .error _ => return false
+  | .ok j =>
+    match j.getObjValAs? (Array String) "compilers" with
+    | .ok cs => return !cs.contains "ts"
+    | .error _ => return false
+
 end RunarVerification.TypeCheckSweep
 
 open RunarVerification.TypeCheckSweep
@@ -159,6 +178,7 @@ def main : IO UInt32 := do
   let mut pass := 0
   let mut fail := 0
   let mut parseFail := 0
+  let mut goOnly := 0
   for f in sorted do
     -- Fixture name = the directory containing expected-ir.json.
     let fixture := (f.parent.map (·.fileName)).getD (some f.toString) |>.getD f.toString
@@ -171,6 +191,12 @@ def main : IO UInt32 := do
         if programWellTypedBool p then
           pass := pass + 1
           IO.println s!"{fixture}: PASS"
+        else if ← tsExcluded (f.parent.getD ".") then
+          goOnly := goOnly + 1
+          let site := match firstProgramFailure p with
+            | some (m, bname, kind) => s!"method {m} / binding {bname} = {kind}"
+            | none => "no single offending binding"
+          IO.println s!"{fixture}: GO-ONLY  [refused like the TS checker (N-398); {site}]"
         else
           fail := fail + 1
           match firstProgramFailure p with
@@ -180,5 +206,5 @@ def main : IO UInt32 := do
               -- programWellTypedBool=false but no single binding pinned: the
               -- failure is in a method-result / retEnv interaction.
               IO.println s!"{fixture}: FAIL  [no single offending binding — retEnv/method-result interaction]"
-  IO.println s!"\nsummary: {pass} PASS, {fail} FAIL, {parseFail} PARSE-FAIL  (total {sorted.size})"
+  IO.println s!"\nsummary: {pass} PASS, {fail} FAIL, {goOnly} GO-ONLY, {parseFail} PARSE-FAIL  (total {sorted.size})"
   return 0
