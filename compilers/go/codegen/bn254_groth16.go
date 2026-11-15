@@ -366,8 +366,10 @@ func emitWitnessInverseVerifyFp12(t *BN254Tracker, fPrefix, fInvPrefix, resultPr
 // Script checks: y*y mod p == (x*x*x + 3) mod p, aborts if false.
 func emitWAG1OnCurveCheck(t *BN254Tracker, xName, yName string) {
 	// Shared body lives in bn254_point_validation.go so the general-purpose
-	// pairing builtins emit the identical assertion (CL-BUG-103).
-	bn254AssertG1OnCurve(t, xName, yName, uniqueSuffixForOCC(xName, yName))
+	// pairing builtins emit the identical assertion (CL-BUG-103). The
+	// witness supplies raw script numbers, so the range check must also
+	// bound them from below (GK-GAP-009).
+	bn254AssertG1OnCurve(t, xName, yName, uniqueSuffixForOCC(xName, yName), true)
 }
 
 // uniqueSuffixForOCC returns a short suffix so emitWAG1OnCurveCheck can be
