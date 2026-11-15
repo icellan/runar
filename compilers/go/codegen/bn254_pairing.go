@@ -800,9 +800,11 @@ func bn254RenameG2(t *BN254Tracker, srcPrefix, dstPrefix string) {
 // Consumes 12 Fp slots (Miller loop result); produces 12 Fp slots.
 //
 // Uses the Fuentes-Castañeda / Duquesne-Ghammam decomposition of the hard
-// part of the final exponent — the same formula that emitWAFinalExp uses
-// (with witness-supplied a, b, c) but computes a = f2^x, b = f2^(x^2),
-// c = f2^(x^3) on-chain via three ExpByX calls.
+// part of the final exponent, computing a = f2^x, b = f2^(x^2),
+// c = f2^(x^3) on-chain via three ExpByX calls. (The witness-assisted
+// Groth16 verifiers once took a, b, c from the unlocking script unchecked —
+// GK-BUG-005; they now skip the final exponentiation altogether with a
+// residue witness, see bn254_groth16.go.)
 //
 // An earlier version of this function used an incorrect Devegili-style
 // decomposition whose exponent differed from the correct BN254 hard part;
@@ -817,7 +819,7 @@ func bn254RenameG2(t *BN254Tracker, srcPrefix, dstPrefix string) {
 //   f1 = f_conj * f_inv         (= f^(p^6 - 1))
 //   f2 = f1 * frob_p2(f1)       (= f1^(p^2 + 1))
 //
-// Hard part (FC exponent, reusing emitWAFinalExp formula):
+// Hard part (FC exponent):
 //   a = f2^x, b = f2^x², c = f2^x³
 //   P0 = f2 · a^6 · b^12 · c^12
 //   P1 = a^4 · b^6 · c^12

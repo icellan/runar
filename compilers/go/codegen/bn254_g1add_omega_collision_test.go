@@ -24,7 +24,7 @@ import (
 // legitimate case -- general addition, doubling, P + (-P) -> all-zero O, and
 // all-zero operands -- still runs to completion with its previous answer.
 // What it does not prove: anything about the Groth16 MSM accumulator, which
-// shares bn254G1AffineAdd and is deliberately left unchanged.
+// shares bn254G1AffineAdd behind its own guard (gk_bug_007_msm_add_collision_test.go).
 
 func bn254Hex(t *testing.T, s string) *big.Int {
 	t.Helper()

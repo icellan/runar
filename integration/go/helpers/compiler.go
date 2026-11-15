@@ -153,7 +153,7 @@ func CompileToSDKArtifactAbs(absPath string) (*runar.RunarArtifact, error) {
 }
 
 // CompileToSDKArtifactWithGroth16WAVKey compiles a Mode 3 stateful contract
-// (one whose method body calls runar.AssertGroth16WitnessAssisted) by
+// (one whose method body calls runar.AssertGroth16WitnessAssistedWithMSM) by
 // supplying the SP1-format Groth16 verifying key path that the codegen will
 // load and bake into the witness-assisted verifier preamble. The resulting
 // artifact is otherwise a standard SDK artifact and can be deployed and

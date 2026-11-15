@@ -78,8 +78,8 @@ func ExampleGenerateWitness_sp1() {
 	fmt.Printf("public inputs: %d\n", len(publicInputs))
 	fmt.Printf("vk ic entries: %d\n", len(vk.IC))
 	fmt.Printf("witness q nonzero: %v\n", w.Q.Sign() == 1)
-	fmt.Printf("witness final-exp slots: %d\n",
-		len(w.FinalExpFInv)+len(w.FinalExpA)+len(w.FinalExpB)+len(w.FinalExpC))
+	fmt.Printf("witness residue slots (c, c^-1, s): %d\n",
+		len(w.ResidueC)+len(w.ResidueCInv)+1)
 	fmt.Printf("witness prepared-inputs coords: %d\n", len(w.PreparedInputs))
 	fmt.Printf("witness proof A/B/C slots: %d/%d/%d\n",
 		len(w.ProofA), len(w.ProofB), len(w.ProofC))
@@ -90,7 +90,7 @@ func ExampleGenerateWitness_sp1() {
 	// public inputs: 5
 	// vk ic entries: 6
 	// witness q nonzero: true
-	// witness final-exp slots: 48
+	// witness residue slots (c, c^-1, s): 25
 	// witness prepared-inputs coords: 2
 	// witness proof A/B/C slots: 2/4/2
 	// witness stack-op count > 0: true

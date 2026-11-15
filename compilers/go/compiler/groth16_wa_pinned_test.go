@@ -397,9 +397,9 @@ func TestPinnedPublicInputs_StandaloneRejectsConflictingPub(t *testing.T) {
 
 // TestPinnedPublicInputs_RejectedOnNonMSMPath: the plain witness-assisted
 // verifier (AssertGroth16WitnessAssisted, no MSM binding) never sees the
-// public-input scalars and cannot enforce a pin. A vk.json that pins inputs
-// is refused for such a method rather than silently ignored; the same vk.json
-// is accepted by the MSM variant and the unpinned vk.json by both.
+// public-input scalars, so it can neither enforce a pin nor bind a statement
+// at all. Since GK-BUG-006 the marker is refused with ANY vk.json, pinned or
+// not; the pinned vk.json is accepted by the MSM variant.
 func TestPinnedPublicInputs_RejectedOnNonMSMPath(t *testing.T) {
 	vkPath := sp1VKPath(t)
 	pubs := sp1PublicInputs(t)
@@ -429,15 +429,14 @@ func (c *` + name + `) Verify() {
 	raw := write("RawPinned", "AssertGroth16WitnessAssisted")
 	msm := write("MSMPinned", "AssertGroth16WitnessAssistedWithMSM")
 
-	_, err := CompileFromSource(raw, CompileOptions{Groth16WAVKey: pinnedPath})
-	if err == nil {
-		t.Fatal("a pinned vk.json was accepted for AssertGroth16WitnessAssisted, where the pin cannot be enforced")
-	}
-	if !strings.Contains(err.Error(), "pinnedPublicInputs") || !strings.Contains(err.Error(), "WithMSM") {
-		t.Fatalf("error should name the field and point at the MSM variant; got: %v", err)
-	}
-	if _, err := CompileFromSource(raw, CompileOptions{Groth16WAVKey: vkPath}); err != nil {
-		t.Fatalf("unpinned vk.json on the raw variant should compile: %v", err)
+	for label, vk := range map[string]string{"pinned": pinnedPath, "unpinned": vkPath} {
+		_, err := CompileFromSource(raw, CompileOptions{Groth16WAVKey: vk})
+		if err == nil {
+			t.Fatalf("a %s vk.json was accepted for AssertGroth16WitnessAssisted, which binds no public input", label)
+		}
+		if !strings.Contains(err.Error(), "assertGroth16WitnessAssisted()") || !strings.Contains(err.Error(), "WithMSM") {
+			t.Fatalf("%s vk.json: error should name the raw marker and point at the MSM variant; got: %v", label, err)
+		}
 	}
 	if _, err := CompileFromSource(msm, CompileOptions{Groth16WAVKey: pinnedPath}); err != nil {
 		t.Fatalf("pinned vk.json on the MSM variant should compile: %v", err)

@@ -94,16 +94,16 @@ type CallOptions struct {
 
 	// Groth16WAWitness is the prover-supplied witness bundle for a Mode 3
 	// stateful contract whose method begins with a call to
-	// runar.AssertGroth16WitnessAssisted. When set, the SDK splices the
+	// runar.AssertGroth16WitnessAssistedWithMSM. When set, the SDK splices the
 	// witness's stack pushes into the unlocking script ON TOP of the
 	// regular ABI argument pushes (i.e., immediately before the method
 	// selector), so the verifier preamble in the locking script consumes
 	// them before the method body sees its declared parameters.
 	//
 	// nil for normal Rúnar contract calls. The witness is generated
-	// off-chain via bn254witness.GenerateWitness from a real Groth16
-	// proof + the same VK that was baked into the contract at compile
-	// time via CompileOptions.Groth16WAVKey.
+	// off-chain via bn254witness.BuildFromProofWithInputs from a real
+	// Groth16 proof + the same VK that was baked into the contract at
+	// compile time via CompileOptions.Groth16WAVKey.
 	Groth16WAWitness *bn254witness.Witness `json:"-"`
 
 	// DataOutputs is an optional explicit override for data outputs

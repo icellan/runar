@@ -199,9 +199,10 @@ func TestGroth16WASDK_RejectsTamperedWitness(t *testing.T) {
 	// Swap the proof's A point with the G1 generator (on-curve but not
 	// the real prover's A). This keeps the on-curve check passing but
 	// blows up the pairing product at the end. We regenerate the
-	// witness from the tampered proof so the gradient / final-exp
-	// consistency checks still pass locally — the failure should land
-	// in the final pairing check inside the script.
+	// witness from the tampered proof so the gradient checks and the
+	// residue witness's c·c⁻¹ check still pass locally — no residue c
+	// exists for a false statement, so the failure should land in the
+	// final f·ω^s == c^λ check inside the script.
 	tamperedProof := bn254witness.Proof{
 		A: [2]*big.Int{new(big.Int).Set(fix.proof.A[0]), new(big.Int).Set(fix.proof.A[1])},
 		B: [4]*big.Int{

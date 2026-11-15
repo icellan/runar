@@ -12,6 +12,11 @@
 //   6. Precomputed e(alpha,beta): hardcoded Fp12 constant in locking script
 //   7. Triple Miller loop: 3 pairs processed simultaneously (4th precomputed)
 //
+// The final exponentiation is not computed at all: the prover supplies a
+// residue witness c with f·ω^s == c^λ (Novakovic & Eagen, eprint 2024/640),
+// folded into the Miller loop — see "Final-exponentiation elimination by
+// residue witness" below (GK-BUG-005).
+//
 // This is a separate module from the general-purpose bn254.go/bn254_ext.go/bn254_pairing.go.
 // It generates a monolithic Groth16 verifier, not composable builtins.
 package codegen
@@ -21,6 +26,7 @@ import (
 	"math/big"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fp"
 )
 
 // =========================================================================
@@ -74,8 +80,9 @@ type Groth16Config struct {
 
 	// Precomputed MillerLoop(α, -β) as 12 Fp values in gnark flat order.
 	// This is a PRE-final-exponentiation value. The verifier multiplies
-	// the triple Miller loop accumulator by this, then applies a single
-	// final exponentiation at the end.
+	// the triple Miller loop accumulator by this (times ω^s) and then runs
+	// the residue check that stands in for the single final
+	// exponentiation (GK-BUG-005).
 	//
 	// Coefficient order matches Gnark's flat Fp12 layout:
 	//   [C0.B0.A0, C0.B0.A1, C0.B1.A0, C0.B1.A1, C0.B2.A0, C0.B2.A1,
@@ -360,8 +367,10 @@ func emitWitnessInverseVerifyFp12(t *BN254Tracker, fPrefix, fInvPrefix, resultPr
 // Script checks: y*y mod p == (x*x*x + 3) mod p, aborts if false.
 func emitWAG1OnCurveCheck(t *BN254Tracker, xName, yName string) {
 	// Shared body lives in bn254_point_validation.go so the general-purpose
-	// pairing builtins emit the identical assertion (CL-BUG-103).
-	bn254AssertG1OnCurve(t, xName, yName, uniqueSuffixForOCC(xName, yName))
+	// pairing builtins emit the identical assertion (CL-BUG-103). The
+	// witness supplies raw script numbers, so the range check must also
+	// bound them from below (GK-GAP-009).
+	bn254AssertG1OnCurve(t, xName, yName, uniqueSuffixForOCC(xName, yName), true)
 }
 
 // uniqueSuffixForOCC returns a short suffix so emitWAG1OnCurveCheck can be
@@ -1088,11 +1097,20 @@ func emitWALineEvalAddSparse(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, pxNam
 //
 // This function is called from EmitGroth16VerifierWitnessAssisted to generate
 // the Miller loop portion of the locking script.
+//
+// The residue witness rides along (GK-BUG-005, see emitWAResidueFold): the
+// accumulator starts at c⁻¹ instead of 1, and every non-zero NAF digit
+// multiplies it by c⁻¹ (+1) or c (−1), so the loop leaves
+// MillerLoop3 · c^(−(6x+2)).
 func emitWAMillerLoop3(t *BN254Tracker) {
 	naf := bn254SixXPlus2NAF
 	msbIdx := len(naf) - 1
 	for msbIdx > 0 && naf[msbIdx] == 0 {
 		msbIdx--
+	}
+	if naf[msbIdx] != 1 {
+		// Starting the accumulator at c⁻¹ encodes a leading +1 digit.
+		panic("emitWAMillerLoop3: NAF of 6x+2 must lead with +1")
 	}
 
 	// Initialize T_i = Q_i for each pair
@@ -1106,8 +1124,9 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 		t.copyToTop(qpfx+"y1", tpfx+"_y_1")
 	}
 
-	// Initialize f = 1
-	bn254Fp12SetOne(t, "_f")
+	// Initialize f = c⁻¹ (the residue witness's leading NAF digit) rather
+	// than 1; see emitWAResidueFold.
+	bn254Fp12CopyPrefix(t, waResidueCInv, "_f")
 
 	// Prepare -Q_i for NAF digit = -1
 	for k := 1; k <= 3; k++ {
@@ -1163,6 +1182,7 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 				bn254Fp12MulSparse(t, "_f", "_la"+ks, "_f_add"+ks)
 				bn254Fp12RenamePrefix(t, "_f_add"+ks, "_f")
 			}
+			emitWAResidueFold(t, 1)
 		case -1:
 			for k := 1; k <= 3; k++ {
 				ks := string(rune('0' + k))
@@ -1181,6 +1201,7 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 				bn254Fp12MulSparse(t, "_f", "_ls"+ks, "_f_sub"+ks)
 				bn254Fp12RenamePrefix(t, "_f_sub"+ks, "_f")
 			}
+			emitWAResidueFold(t, -1)
 		}
 
 		iterNum++
@@ -1240,166 +1261,259 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 }
 
 // =========================================================================
-// Witness-assisted final exponentiation
+// Final-exponentiation elimination by residue witness (GK-BUG-005)
 // =========================================================================
-
-// emitWAFinalExp performs witness-assisted final exponentiation.
-// The prover supplies f_inv, a=f2^x, b=f2^(x^2), c=f2^(x^3) as witness values,
-// eliminating the 3 expensive ExpByX computations (~63 Fp12 squarings + ~30 Fp12
-// multiplications each) and the Fp12 inverse in the easy part.
 //
-// Easy part:
+// The verifier used to finish with a "witness-assisted final exponentiation"
+// that took a = f2^x, b = f2^(x²), c = f2^(x³) from the unlocking script and
+// never checked them, so scaling any one of them by a chosen element of the
+// order-r subgroup forced the result to 1 for a FALSE statement. It is
+// replaced by the residue-witness check of Novakovic & Eagen, "On Proving
+// Pairings" (eprint 2024/640, §4), which needs no final exponentiation.
 //
-//	f_conj = conj(f)              (cheap: negate the b-part)
-//	verify f * f_inv == 1         (1 Fp12 mul + comparison)
-//	f1 = f_conj * f_inv           (= f^(p^6 - 1))
-//	f2 = f1 * frob_p2(f1)         (= f1^(p^2 + 1))
+// Notation: p, r the BN254 base-field prime and group order, x =
+// 4965661367192848881 the curve seed, n = p¹² − 1, h = n/r. f is the exact
+// Fp12 value the script computes — the triple Miller loop with its Py-scaled
+// affine lines times the precomputed MillerLoop(α, −β) — and the pairing
+// check is f^h == 1 (the Fp* line scalings vanish under h, as p − 1 | h).
 //
-// Hard part (direct per-p-power assembly of the Fuentes-Castañeda /
-// Duquesne-Ghammam exponent — gnark-crypto's BN254 FinalExponentiation):
+//	λ = 6x + 2 + p − p² + p³
 //
-//	e(x, p) = (1 + 6x + 12x² + 12x³)
-//	        + (    4x + 6x² + 12x³) * p
-//	        + (    6x + 6x² + 12x³) * p²
-//	        + (-1 + 4x + 6x² + 12x³) * p³
+// Facts (each re-derived from p, r, x by bn254witness.buildResidueParams,
+// which refuses to build witnesses if one fails, and by the GK-BUG-005
+// tests):
 //
-// With witnesses a = f2^x, b = f2^x², c = f2^x³:
+//	(1) λ ≡ 0 (mod r), and λ = 3·m'·r with gcd(m', n) = 1.
+//	(2) gcd(λ, n) = 3r; 27 ∥ n, hence 27 | h; r² ∤ n.
+//	(3) ω = w^(n/27), w the generator of Fp12 over Fp6 (w² = v), is a
+//	    primitive 27th root of unity (bn254Omega27).
 //
-//	P0 = f2     · a^6 · b^12 · c^12
-//	P1 =          a^4 · b^6  · c^12
-//	P2 =          a^6 · b^6  · c^12
-//	P3 = conj(f2)· a^4 · b^6  · c^12
-//	result = P0 · Frob(P1) · FrobSq(P2) · FrobCube(P3)
+// The prover supplies c, c⁻¹ ∈ Fp12 and an index s ∈ {0, 1, 2}, and the
+// script accepts iff
 //
-// The a, b, c values are NOT individually verified. Any incorrect witness
-// produces a wrong final result that fails the subsequent comparison
-// against the precomputed e(alpha, beta) · pairing product == 1 check.
+//	c · c⁻¹ == 1    and    f · ω^s == c^λ.
 //
-// This formula is pure-Go validated against gnark.FinalExponentiation by
-// TestFinalExpWitnessesProduceCorrectResult in
-// packages/runar-go/bn254witness/witness_test.go.
+// Soundness. If both hold, raise the second to h:
+// f^h · ω^(s·h) = c^(λh) = (c^n)^(3m') = 1, and ω^h = 1 because ω^27 = 1 and
+// 27 | h. So f^h = 1: the pairing product is 1. Nothing about c or s is
+// trusted. Two restrictions are load-bearing:
 //
-// Expected witness values on tracker (from unlocking script):
+//   - s indexes the FIXED set {1, ω, ω²}; a free scaling factor w would
+//     accept every f (w = f⁻¹, c = 1).
+//   - c⁻¹ is checked against c. The script folds c and c⁻¹ into different
+//     exponents (E_c = E₋ + p², E_ci = E₊ + p + p³ below), and gcd(E_c, E_ci)
+//     = 3: with c⁻¹ free, a prover could solve c^E_c · c⁻¹^E_ci =
+//     (f·ω^s)⁻¹ for any f whose f·ω^s is a cube.
 //
-//	"_wa_finv" (12 Fp) — f^(-1)
-//	"_wa_a"    (12 Fp) — f2^x
-//	"_wa_b"    (12 Fp) — f2^(x^2)
-//	"_wa_c"    (12 Fp) — f2^(x^3)
-func emitWAFinalExp(t *BN254Tracker, fPrefix, resultPrefix string) {
-	// === Easy part (witness-assisted) ===
+// Completeness. If f^h = 1, f is an r-th power, and so is ω (ω^h = 1). An
+// element y is a λ-th power iff y^(n/3r) = 1 (fact 2), i.e. iff it is an
+// r-th power AND a cube. f^(n/3) is a cube root of unity and ω^(n/3) a
+// primitive one (n/27 is prime to 3), so exactly one s ∈ {0, 1, 2} makes
+// y = f·ω^s a cube. The prover then takes y' = y^((m'·r)⁻¹ mod n/3r), so
+// y'^(m'r) = y, and c = ∛y' (a cube root by the 27-Sylow split), giving
+// c^λ = (c³)^(m'r) = y. See bn254witness.computeResidueWitness.
+//
+// Which witness the prover can choose. s is unique. c is not: every c·κ
+// with κ^λ = 1 (κ in the order-3r subgroup of Fp12*) passes too, and so do
+// encodings of c, c⁻¹ outside [0, p). That does not weaken soundness, but
+// the unlocking script stays third-party malleable in c (txid malleability
+// is not closed by this check).
+//
+// Folding c^λ into the script. λ = s₀ + p − p² + p³ with s₀ = 6x + 2, whose
+// NAF the Miller loop already walks. The accumulator starts at c⁻¹ (the
+// NAF's leading +1) instead of 1, and after the shared squaring of every
+// iteration whose digit is +1 (−1) it is also multiplied by c⁻¹ (c), so the
+// loop leaves f·c^(−s₀) = f·(c⁻¹)^E₊·c^E₋ with s₀ = E₊ − E₋. The verifier
+// then multiplies by Frob(c⁻¹)·Frob²(c)·Frob³(c⁻¹) = c^(−p + p² − p³) and by
+// MillerLoop(α, −β)·ω^s (one of three precomputed constants, selected by s,
+// so the scaling costs no Fp12 multiplication) and requires the product to
+// be 1: f · ω^s · c^(−λ) == 1. The Frobenius maps are the field
+// automorphisms x ↦ x^(p^k), valid on all of Fp12 (c is not in the
+// cyclotomic subgroup), and bn254Fp12Sqr/Mul are the generic formulas.
+//
+// Cost against the old witness-assisted final exponentiation: 21 extra
+// Fp12 multiplications in the loop (one per non-zero NAF digit), one for
+// the inverse check and three Frobenius terms, against the old easy part,
+// f⁻¹ check and hard-part products; the unlocking script carries 25 values
+// (c, c⁻¹, s) instead of 48 (f⁻¹, a, b, c).
 
-	// Copy f before the inverse verify consumes it — we need conj(f) later.
-	bn254Fp12CopyPrefix(t, fPrefix, "_wafe_fcopy")
+// Tracker names of the residue witness the unlocking script pushes.
+const (
+	waResidueC    = "_wa_rc"   // c (12 Fp, gnark flat order)
+	waResidueCInv = "_wa_rci"  // c⁻¹ (12 Fp)
+	waResidueSel  = "_wa_wsel" // s ∈ {0, 1, 2}: the scaling factor is ω^s
+)
 
-	// Verify: f * f_inv == 1 in Fp12.
-	// This drops fPrefix and renames "_wa_finv" to "_wafe_finv_v".
-	emitWitnessInverseVerifyFp12(t, fPrefix, "_wa_finv", "_wafe_finv_v")
+// bn254Omega27 is ω = w^((p¹²−1)/27) in gnark flat Fp12 order: a primitive
+// 27th root of unity whose only non-zero coefficient is C0.B1 (an Fp2
+// element times v). gk_bug_005_forged_power_witness_test.go and the
+// bn254witness residue tests recompute it from that definition, and
+// bn254witness.buildResidueParams checks ω^27 = 1, ω^9 ≠ 1.
+var bn254Omega27 [12]*big.Int
 
-	// f_conj = conj(f) — conjugation negates the b-part of the Fp12 element.
-	bn254Fp12Conjugate(t, "_wafe_fcopy", "_wafe_fconj")
+func init() {
+	for i := range bn254Omega27 {
+		bn254Omega27[i] = big.NewInt(0)
+	}
+	bn254Omega27[2] = mustParseBig("9483667112135124394372960210728142145589475128897916459350428495526310884707")
+	bn254Omega27[3] = mustParseBig("4534159768373982659291990808346042891252278737770656686799127720849666919525")
+}
 
-	// f1 = f_conj * f_inv = f^(p^6 - 1)
-	bn254Fp12Mul(t, "_wafe_fconj", "_wafe_finv_v", "_wafe_f1")
+// Bn254ResidueOmega27 returns a copy of ω, the 27th root of unity whose
+// powers ω^0, ω^1, ω^2 are the only scaling factors the verifier accepts.
+// The witness generator must use exactly this constant.
+func Bn254ResidueOmega27() [12]*big.Int {
+	var out [12]*big.Int
+	for i, v := range bn254Omega27 {
+		out[i] = new(big.Int).Set(v)
+	}
+	return out
+}
 
-	// f2 = f1 * frob_p2(f1) = f1^(p^2 + 1)
-	bn254Fp12CopyPrefix(t, "_wafe_f1", "_wafe_f1_frob")
-	bn254Fp12FrobeniusP2(t, "_wafe_f1_frob", "_wafe_f1p2")
-	bn254Fp12Mul(t, "_wafe_f1", "_wafe_f1p2", "_wafe_f2")
+// appendFp12SlotNames appends the 12 tracker names of an Fp12 value in gnark
+// flat order (prefix_a_0_0 … prefix_b_2_1), the order the unlocking script
+// pushes them.
+func appendFp12SlotNames(names []string, prefix string) []string {
+	for _, part := range []string{"_a", "_b"} {
+		for i := 0; i < 3; i++ {
+			sfx := string(rune('0' + i))
+			names = append(names, prefix+part+"_"+sfx+"_0", prefix+part+"_"+sfx+"_1")
+		}
+	}
+	return names
+}
 
-	// === Hard part (witness-assisted) ===
-	// Plan: compute a^4, a^6, b^6, b^12, c^12 with exactly the copies that
-	// the four P_i products need, then build P0..P3 and frobenius them,
-	// then multiply them together into the final result.
+func bn254FlatToE12(flat [12]*big.Int) bn254.E12 {
+	var z bn254.E12
+	coords := []*fp.Element{
+		&z.C0.B0.A0, &z.C0.B0.A1, &z.C0.B1.A0, &z.C0.B1.A1, &z.C0.B2.A0, &z.C0.B2.A1,
+		&z.C1.B0.A0, &z.C1.B0.A1, &z.C1.B1.A0, &z.C1.B1.A1, &z.C1.B2.A0, &z.C1.B2.A1,
+	}
+	for i, c := range coords {
+		c.SetBigInt(flat[i])
+	}
+	return z
+}
 
-	// ---- Prepare a^4 and a^6 (need 2 copies of each) ----
-	// _wa_a remains intact; we work on a copy.
-	bn254Fp12CopyPrefix(t, "_wa_a", "_wafe_a_w1")
-	bn254Fp12Sqr(t, "_wafe_a_w1", "_wafe_a2") // a² (consumes _wafe_a_w1)
-	// Need a² twice: once for (a²)²=a⁴, once for a⁴·a²=a⁶. So copy once and
-	// consume the original in the first square below.
-	bn254Fp12CopyPrefix(t, "_wafe_a2", "_wafe_a2_for_a6")
-	bn254Fp12Sqr(t, "_wafe_a2", "_wafe_a4_core") // a⁴ (consumes _wafe_a2)
-	// Need a⁴ three times total: once to feed into a⁶, once for P1, once for P3.
-	// Make two copies; the remaining "_wafe_a4_core" is consumed by the a⁶ mul.
-	bn254Fp12CopyPrefix(t, "_wafe_a4_core", "_wafe_a4_p1")
-	bn254Fp12CopyPrefix(t, "_wafe_a4_core", "_wafe_a4_p3")
-	bn254Fp12Mul(t, "_wafe_a4_core", "_wafe_a2_for_a6", "_wafe_a6_core")
-	// Need a⁶ twice (P0 and P2). One copy + keep the core.
-	bn254Fp12CopyPrefix(t, "_wafe_a6_core", "_wafe_a6_p2")
-	bn254Fp12RenamePrefix(t, "_wafe_a6_core", "_wafe_a6_p0")
+func bn254E12ToFlat(z *bn254.E12) [12]*big.Int {
+	coords := []*fp.Element{
+		&z.C0.B0.A0, &z.C0.B0.A1, &z.C0.B1.A0, &z.C0.B1.A1, &z.C0.B2.A0, &z.C0.B2.A1,
+		&z.C1.B0.A0, &z.C1.B0.A1, &z.C1.B1.A0, &z.C1.B1.A1, &z.C1.B2.A0, &z.C1.B2.A1,
+	}
+	var out [12]*big.Int
+	for i, c := range coords {
+		out[i] = c.BigInt(new(big.Int))
+	}
+	return out
+}
 
-	// ---- Prepare b^6 and b^12 ----
-	bn254Fp12CopyPrefix(t, "_wa_b", "_wafe_b_w1")
-	bn254Fp12Sqr(t, "_wafe_b_w1", "_wafe_b2")
-	bn254Fp12CopyPrefix(t, "_wafe_b2", "_wafe_b2_for_b6")
-	bn254Fp12Sqr(t, "_wafe_b2", "_wafe_b4")
-	bn254Fp12Mul(t, "_wafe_b4", "_wafe_b2_for_b6", "_wafe_b6_core")
-	// Need b⁶ three times (P1, P2, P3) AND once to square into b¹². So 4 total.
-	// Make 3 copies (p1, p2, p3); keep the core to feed the sqr for b¹².
-	bn254Fp12CopyPrefix(t, "_wafe_b6_core", "_wafe_b6_p1")
-	bn254Fp12CopyPrefix(t, "_wafe_b6_core", "_wafe_b6_p2")
-	bn254Fp12CopyPrefix(t, "_wafe_b6_core", "_wafe_b6_p3")
-	bn254Fp12Sqr(t, "_wafe_b6_core", "_wafe_b12_p0") // consumes _wafe_b6_core
+// groth16ScaledAlphaNegBeta returns MillerLoop(α, −β)·ω^s for s = 0, 1, 2:
+// the three constants the residue scaling index selects between.
+func groth16ScaledAlphaNegBeta(alphaNegBeta [12]*big.Int) [3][12]*big.Int {
+	ab := bn254FlatToE12(alphaNegBeta)
+	omega := bn254FlatToE12(bn254Omega27)
+	var out [3][12]*big.Int
+	cur := ab
+	for s := 0; s < 3; s++ {
+		out[s] = bn254E12ToFlat(&cur)
+		cur.Mul(&cur, &omega)
+	}
+	return out
+}
 
-	// ---- Prepare c^12 (need 4 copies) ----
-	bn254Fp12CopyPrefix(t, "_wa_c", "_wafe_c_w1")
-	bn254Fp12Sqr(t, "_wafe_c_w1", "_wafe_c2")
-	bn254Fp12CopyPrefix(t, "_wafe_c2", "_wafe_c2_for_c6")
-	bn254Fp12Sqr(t, "_wafe_c2", "_wafe_c4")
-	bn254Fp12Mul(t, "_wafe_c4", "_wafe_c2_for_c6", "_wafe_c6")
-	bn254Fp12Sqr(t, "_wafe_c6", "_wafe_c12_core") // c¹²
-	bn254Fp12CopyPrefix(t, "_wafe_c12_core", "_wafe_c12_p0")
-	bn254Fp12CopyPrefix(t, "_wafe_c12_core", "_wafe_c12_p1")
-	bn254Fp12CopyPrefix(t, "_wafe_c12_core", "_wafe_c12_p2")
-	bn254Fp12RenamePrefix(t, "_wafe_c12_core", "_wafe_c12_p3")
+// emitWAResidueInverseCheck aborts unless c · c⁻¹ == 1 in Fp12. Both
+// witnesses stay on the tracker.
+func emitWAResidueInverseCheck(t *BN254Tracker) {
+	bn254Fp12CopyPrefix(t, waResidueC, "_ric_c")
+	bn254Fp12CopyPrefix(t, waResidueCInv, "_ric_ci")
+	bn254Fp12Mul(t, "_ric_c", "_ric_ci", "_ric_prod")
+	bn254Fp12IsOne(t, "_ric_prod", "_ric_ok")
+	t.toTop("_ric_ok")
+	t.rawBlock([]string{"_ric_ok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
 
-	// ---- Prepare f2 and conj(f2) ----
-	// f2 is used in P0 (directly) and P3 (as conj(f2)). Copy once, rename once.
-	bn254Fp12CopyPrefix(t, "_wafe_f2", "_wafe_f2_for_P3_src")
-	bn254Fp12RenamePrefix(t, "_wafe_f2", "_wafe_f2_for_P0")
+// emitWAResidueFold multiplies the Miller accumulator _f by c⁻¹ (NAF digit
+// +1) or c (digit −1). Called once per non-zero digit, after that
+// iteration's squaring, so the loop accumulates c^(−(6x+2)).
+func emitWAResidueFold(t *BN254Tracker, digit int) {
+	src := waResidueCInv
+	if digit < 0 {
+		src = waResidueC
+	}
+	bn254Fp12CopyPrefix(t, src, "_rfold")
+	bn254Fp12Mul(t, "_f", "_rfold", "_f_rfold")
+	bn254Fp12RenamePrefix(t, "_f_rfold", "_f")
+}
 
-	// ---- Assemble P0 = f2 · a^6 · b^12 · c^12 ----
-	bn254Fp12Mul(t, "_wafe_f2_for_P0", "_wafe_a6_p0", "_wafe_P0_s1")
-	bn254Fp12Mul(t, "_wafe_P0_s1", "_wafe_b12_p0", "_wafe_P0_s2")
-	bn254Fp12Mul(t, "_wafe_P0_s2", "_wafe_c12_p0", "_wafe_P0")
+// emitWAResidueFrobeniusTerms multiplies _f by c^(−p + p² − p³) =
+// Frob(c⁻¹) · Frob²(c) · Frob³(c⁻¹), completing c^(−λ).
+func emitWAResidueFrobeniusTerms(t *BN254Tracker) {
+	bn254Fp12CopyPrefix(t, waResidueCInv, "_rfp1_in")
+	bn254Fp12FrobeniusP(t, "_rfp1_in", "_rfp1")
+	bn254Fp12Mul(t, "_f", "_rfp1", "_f_rfp1")
+	bn254Fp12RenamePrefix(t, "_f_rfp1", "_f")
 
-	// ---- Assemble P1 = a^4 · b^6 · c^12 ----
-	bn254Fp12Mul(t, "_wafe_a4_p1", "_wafe_b6_p1", "_wafe_P1_s1")
-	bn254Fp12Mul(t, "_wafe_P1_s1", "_wafe_c12_p1", "_wafe_P1")
+	bn254Fp12CopyPrefix(t, waResidueC, "_rfp2_in")
+	bn254Fp12FrobeniusP2(t, "_rfp2_in", "_rfp2")
+	bn254Fp12Mul(t, "_f", "_rfp2", "_f_rfp2")
+	bn254Fp12RenamePrefix(t, "_f_rfp2", "_f")
 
-	// ---- Assemble P2 = a^6 · b^6 · c^12 ----
-	bn254Fp12Mul(t, "_wafe_a6_p2", "_wafe_b6_p2", "_wafe_P2_s1")
-	bn254Fp12Mul(t, "_wafe_P2_s1", "_wafe_c12_p2", "_wafe_P2")
+	bn254Fp12CopyPrefix(t, waResidueCInv, "_rfp3_in")
+	bn254Fp12FrobeniusP2(t, "_rfp3_in", "_rfp3_t")
+	bn254Fp12FrobeniusP(t, "_rfp3_t", "_rfp3")
+	bn254Fp12Mul(t, "_f", "_rfp3", "_f_rfp3")
+	bn254Fp12RenamePrefix(t, "_f_rfp3", "_f")
+}
 
-	// ---- Assemble P3 = conj(f2) · a^4 · b^6 · c^12 ----
-	bn254Fp12Conjugate(t, "_wafe_f2_for_P3_src", "_wafe_f2conj")
-	bn254Fp12Mul(t, "_wafe_f2conj", "_wafe_a4_p3", "_wafe_P3_s1")
-	bn254Fp12Mul(t, "_wafe_P3_s1", "_wafe_b6_p3", "_wafe_P3_s2")
-	bn254Fp12Mul(t, "_wafe_P3_s2", "_wafe_c12_p3", "_wafe_P3")
+// emitWASelectScaledAlphaNegBeta consumes the witness index s and pushes
+// MillerLoop(α, −β)·ω^s as the 12 Fp slots of outPrefix. Any s outside
+// {0, 1, 2} aborts.
+func emitWASelectScaledAlphaNegBeta(t *BN254Tracker, config Groth16Config, outPrefix string) {
+	scaled := groth16ScaledAlphaNegBeta(config.AlphaNegBetaFp12)
+	pushAll := func(vals [12]*big.Int) []StackOp {
+		ops := make([]StackOp, 0, 12)
+		for _, v := range vals {
+			ops = append(ops, StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
+		}
+		return ops
+	}
+	t.toTop(waResidueSel)
+	t.rawBlock([]string{waResidueSel}, "", func(e func(StackOp)) {
+		// 0 <= s < 3
+		e(StackOp{Op: "opcode", Code: "OP_DUP"})
+		e(StackOp{Op: "push", Value: bigIntPush(0)})
+		e(StackOp{Op: "push", Value: bigIntPush(3)})
+		e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		// s != 0 ? (s - 1 != 0 ? AB·ω² : AB·ω) : AB
+		e(StackOp{Op: "opcode", Code: "OP_DUP"})
+		e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		nonzero := append([]StackOp{{Op: "opcode", Code: "OP_1SUB"}},
+			StackOp{Op: "if", Then: pushAll(scaled[2]), Else: pushAll(scaled[1])})
+		zero := append([]StackOp{{Op: "opcode", Code: "OP_DROP"}}, pushAll(scaled[0])...)
+		e(StackOp{Op: "if", Then: nonzero, Else: zero})
+	})
+	t.nm = appendFp12SlotNames(t.nm, outPrefix)
+}
 
-	// ---- Apply Frobenius powers ----
-	// P1f = Frobenius(P1)
-	bn254Fp12FrobeniusP(t, "_wafe_P1", "_wafe_P1f")
-	// P2f = FrobeniusSquare(P2)
-	bn254Fp12FrobeniusP2(t, "_wafe_P2", "_wafe_P2f")
-	// P3f = FrobeniusCube(P3) = FrobeniusP(FrobeniusSquare(P3))
-	bn254Fp12FrobeniusP2(t, "_wafe_P3", "_wafe_P3f_tmp")
-	bn254Fp12FrobeniusP(t, "_wafe_P3f_tmp", "_wafe_P3f")
+// emitWAResidueFinish completes the pairing check once the triple Miller
+// loop (with the residue folded in) has left its product in _f: multiply by
+// MillerLoop(α, −β)·ω^s and by c^(−p + p² − p³), then require 1. The
+// witnesses c, c⁻¹ stay on the tracker for the caller's final sweep.
+func emitWAResidueFinish(t *BN254Tracker, config Groth16Config) {
+	emitWASelectScaledAlphaNegBeta(t, config, "_ab")
+	bn254Fp12Mul(t, "_f", "_ab", "_f_with_ab")
+	bn254Fp12RenamePrefix(t, "_f_with_ab", "_f")
 
-	// ---- Final product: result = P0 · P1f · P2f · P3f ----
-	bn254Fp12Mul(t, "_wafe_P0", "_wafe_P1f", "_wafe_r1")
-	bn254Fp12Mul(t, "_wafe_r1", "_wafe_P2f", "_wafe_r2")
-	bn254Fp12Mul(t, "_wafe_r2", "_wafe_P3f", "_wafe_result")
+	emitWAResidueFrobeniusTerms(t)
 
-	// Witnesses (_wa_a, _wa_b, _wa_c) are still on the stack — we only copied
-	// them. Drop them now. _wafe_f2 was renamed away and is fully consumed,
-	// so no separate drop is needed.
-	bn254Fp12DropInputs(t, "_wa_a")
-	bn254Fp12DropInputs(t, "_wa_b")
-	bn254Fp12DropInputs(t, "_wa_c")
-
-	// Rename result
-	bn254Fp12RenamePrefix(t, "_wafe_result", resultPrefix)
+	bn254Fp12IsOne(t, "_f", "_final_check")
+	t.toTop("_final_check")
+	t.rawBlock([]string{"_final_check"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
 }
 
 // =========================================================================
@@ -1418,7 +1532,8 @@ func emitWAFinalExp(t *BN254Tracker, fPrefix, resultPrefix string) {
 //
 // The generated script expects the following in the unlocking script (pushed by prover):
 //   - All line gradients for Miller loop iterations (2 Fp values each, in Fp2)
-//   - Final exponentiation witnesses: f_inv (12 Fp), a (12 Fp), b (12 Fp), c (12 Fp)
+//   - The residue witness: c (12 Fp), c⁻¹ (12 Fp) and the scaling index
+//     s ∈ {0, 1, 2} (see "Final-exponentiation elimination by residue witness")
 //   - prepared_inputs (G1, 2 Fp) — computed off-chain as
 //     IC[0] + sum(pub_j * IC[j+1])
 //   - The proof: A (2 Fp), B (4 Fp), C (2 Fp)
@@ -1427,11 +1542,14 @@ func emitWAFinalExp(t *BN254Tracker, fPrefix, resultPrefix string) {
 //  1. Places q at stack bottom for efficient access
 //  2. Verifies q matches the hardcoded BN254 field prime
 //  3. On-curve checks the prover-supplied prepared_inputs G1 point
-//  4. Runs triple Miller loop with witness-supplied gradients over
-//     (A, B), (L, -γ), (C, -δ)
-//  5. Multiplies by precomputed MillerLoop(α, -β)
-//  6. Witness-assisted final exponentiation (prover supplies f_inv, a, b, c)
-//  7. Checks result == 1 in Fp12
+//  4. Checks c · c⁻¹ == 1
+//  5. Runs triple Miller loop with witness-supplied gradients over
+//     (A, B), (L, -γ), (C, -δ), starting from c⁻¹ and folding c^(−(6x+2))
+//     into the shared squarings
+//  6. Multiplies by MillerLoop(α, -β)·ω^s (precomputed, selected by s) and
+//     by c^(−p + p² − p³)
+//  7. Checks result == 1 in Fp12, i.e. f·ω^s == c^λ — which holds for some
+//     c, s iff the pairing product is 1
 //
 // SOUNDNESS WARNING — this variant does NOT bind public inputs. Public
 // inputs are not on the stack: the prover runs the MSM off-chain (where
@@ -1499,18 +1617,11 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 		iterNum++
 	}
 
-	// Final exponentiation witness values: f_inv (12 Fp), a (12 Fp), b (12 Fp), c (12 Fp)
-	// These are the intermediate values the prover computes off-chain and supplies
-	// so the script can skip the 3 expensive ExpByX calls and 1 Fp12 inverse.
-	for _, waPrefix := range []string{"_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, waPrefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, waPrefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
+	// Residue witness (GK-BUG-005): c, c⁻¹ (12 Fp each) and the scaling
+	// index s. They replace the final exponentiation entirely.
+	initNames = appendFp12SlotNames(initNames, waResidueC)
+	initNames = appendFp12SlotNames(initNames, waResidueCInv)
+	initNames = append(initNames, waResidueSel)
 
 	// prepared_inputs (G1, prover-supplied): 2 Fp.
 	// The prover computes IC[0] + sum(pub_j * IC[j+1]) off-chain using any
@@ -1524,7 +1635,7 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	// AFTER prepared_inputs and BEFORE the proof points so the tracker's
 	// initial stack layout reads bottom-to-top as:
 	//
-	//   q, Miller gradients, final-exp witnesses, prepared_inputs,
+	//   q, Miller gradients, residue witness (c, c⁻¹, s), prepared_inputs,
 	//   proof.B subgroup gradients (doublings then additions),
 	//   proof_ax, proof_ay, proof_bx0 .. proof_by1, proof_cx, proof_cy
 	initNames = appendSubgroupGradientNames(initNames)
@@ -1600,8 +1711,10 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	// where β, γ, δ are stored pre-negated in the config, and α, A, B,
 	// L, C are used positive. The triple Miller loop handles the first
 	// three pairs on-chain; e(α, -β) is baked into config.AlphaNegBetaFp12
-	// as a precomputed MillerLoop constant that the verifier multiplies
-	// into the accumulator before the single final exponentiation.
+	// as a precomputed MillerLoop constant (scaled by ω^s, see
+	// emitWASelectScaledAlphaNegBeta) that the verifier multiplies into the
+	// accumulator before the residue check that replaces the final
+	// exponentiation.
 
 	// P1 = proof_A (positive)
 	t.toTop("proof_ax")
@@ -1643,36 +1756,17 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	t.pushBigInt("q3y0", config.DeltaNegG2[2])
 	t.pushBigInt("q3y1", config.DeltaNegG2[3])
 
-	// Step 4: Triple Miller loop with witness-assisted gradients
+	// Step 4: the residue witness's inverse check, c · c⁻¹ == 1.
+	emitWAResidueInverseCheck(t)
+
+	// Step 5: Triple Miller loop with witness-assisted gradients, starting
+	// from c⁻¹ and folding c^(−(6x+2)) into the shared squarings.
 	emitWAMillerLoop3(t)
 
-	// Step 5: Multiply by precomputed MillerLoop(α, -β)
-	// Push the 12 hardcoded Fp values
-	for i := 0; i < 12; i++ {
-		part := "_a"
-		if i >= 6 {
-			part = "_b"
-		}
-		idx := i % 6
-		comp := idx / 2
-		sub := idx % 2
-		name := "_ab" + part + "_" + string(rune('0'+comp)) + "_" + string(rune('0'+sub))
-		t.pushBigInt(name, config.AlphaNegBetaFp12[i])
-	}
-
-	bn254Fp12Mul(t, "_f", "_ab", "_f_with_ab")
-	bn254Fp12RenamePrefix(t, "_f_with_ab", "_f")
-
-	// Step 6: Witness-assisted final exponentiation
-	// f_inv, a, b, c are already on the tracker from the unlocking script init.
-	emitWAFinalExp(t, "_f", "_result")
-
-	// Step 7: Check result == 1 in Fp12
-	bn254Fp12IsOne(t, "_result", "_final_check")
-	t.toTop("_final_check")
-	t.rawBlock([]string{"_final_check"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
+	// Steps 6–7: multiply by MillerLoop(α, -β)·ω^s and c^(−p + p² − p³),
+	// then require 1 — i.e. f·ω^s == c^λ, which some c, s satisfy iff the
+	// pairing product is 1.
+	emitWAResidueFinish(t, config)
 
 	// Clean up P and Q inputs
 	bn254DropNames(t, []string{"p1x", "p1y", "q1x0", "q1x1", "q1y0", "q1y1"})
@@ -1719,7 +1813,7 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 //
 // Witness stack layout (bottom → top, the prover's unlocking script order):
 //
-//	[q, Miller_gradients..., FinalExp_witnesses...,
+//	[q, Miller_gradients..., residue c (12), c⁻¹ (12), s,
 //	 pub_0, pub_1, pub_2, pub_3, pub_4,
 //	 prepared_inputs_x, prepared_inputs_y,
 //	 proof_ax, proof_ay, proof_bx0, proof_bx1, proof_by0, proof_by1,
@@ -1736,7 +1830,7 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 // at the end of the preamble so the method body can reference them via the
 // Groth16PublicInput(i) DSL intrinsic (see the _pub_* altstack dance at
 // the end of this function). Callers that rely on this arity:
-//   - compilers/go/codegen/stack.go: emitGroth16WAPreamble (useMSM=true)
+//   - compilers/go/codegen/stack.go: emitGroth16WAPreamble
 //   - packages/runar-go/bn254witness/witness.go (witness-stack layout)
 //   - packages/runar-go/bn254.go (Groth16Config.IC documentation)
 // Generalising to an arbitrary number of public inputs would require
@@ -1776,17 +1870,12 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 		iterNum++
 	}
 
-	for _, waPrefix := range []string{"_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, waPrefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, waPrefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
+	// Residue witness (GK-BUG-005): c, c⁻¹ and the scaling index s.
+	initNames = appendFp12SlotNames(initNames, waResidueC)
+	initNames = appendFp12SlotNames(initNames, waResidueCInv)
+	initNames = append(initNames, waResidueSel)
 
-	// 5 SP1 public-input scalars — between the final-exp witnesses and
+	// 5 SP1 public-input scalars — between the residue witness and
 	// prepared_inputs.
 	for i := 0; i < 5; i++ {
 		initNames = append(initNames, "_pub_"+string(rune('0'+i)))
@@ -1885,34 +1974,15 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 	t.pushBigInt("q3y0", config.DeltaNegG2[2])
 	t.pushBigInt("q3y1", config.DeltaNegG2[3])
 
-	// Step 4: Triple Miller loop.
+	// Step 4: the residue witness's inverse check, c · c⁻¹ == 1.
+	emitWAResidueInverseCheck(t)
+
+	// Step 5: Triple Miller loop, with c^(−(6x+2)) folded in.
 	emitWAMillerLoop3(t)
 
-	// Step 5: Multiply by precomputed MillerLoop(α, -β).
-	for i := 0; i < 12; i++ {
-		part := "_a"
-		if i >= 6 {
-			part = "_b"
-		}
-		idx := i % 6
-		comp := idx / 2
-		sub := idx % 2
-		name := "_ab" + part + "_" + string(rune('0'+comp)) + "_" + string(rune('0'+sub))
-		t.pushBigInt(name, config.AlphaNegBetaFp12[i])
-	}
-
-	bn254Fp12Mul(t, "_f", "_ab", "_f_with_ab")
-	bn254Fp12RenamePrefix(t, "_f_with_ab", "_f")
-
-	// Step 6: Witness-assisted final exponentiation.
-	emitWAFinalExp(t, "_f", "_result")
-
-	// Step 7: Check result == 1 in Fp12.
-	bn254Fp12IsOne(t, "_result", "_final_check")
-	t.toTop("_final_check")
-	t.rawBlock([]string{"_final_check"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
+	// Steps 6–7: multiply by MillerLoop(α, -β)·ω^s and c^(−p + p² − p³),
+	// then require 1 (f·ω^s == c^λ).
+	emitWAResidueFinish(t, config)
 
 	// Clean up P and Q inputs.
 	bn254DropNames(t, []string{"p1x", "p1y", "q1x0", "q1x1", "q1y0", "q1y1"})
@@ -2313,7 +2383,24 @@ func emitG1ScalarMulNamed(t *BN254Tracker, bxName, byName, scalarName, resultXNa
 // Wraps bn254G1AffineAdd (which expects the names "px, py, qx, qy" and
 // writes to "rx, ry") with rename plumbing so the caller can use arbitrary
 // names for inputs and outputs.
+//
+// GK-BUG-007: the unified slope (px² + px·qx + qx²) / (py + qy) has a zero
+// denominator for P == -Q and for the omega partners (w·px, -py),
+// (w²·px, -py); Fermat inverts 0 to 0 and the adder returns
+// (-(px+qx), -py), which is not P + Q (and, for an omega partner, is still
+// on the curve). Abort unless py + qy != 0 mod p. Doubling (P == Q) keeps
+// working: BN254 G1 has no point with y = 0, so 2·py != 0.
 func emitG1AffineAddNamed(t *BN254Tracker, p1x, p1y, p2x, p2y, resultX, resultY string) {
+	t.copyToTop(p1y, "_g1an_py")
+	t.copyToTop(p2y, "_g1an_qy")
+	t.rawBlock([]string{"_g1an_py", "_g1an_qy"}, "_g1an_ysum", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	bn254FieldMod(t, "_g1an_ysum", "_g1an_ysum_r")
+	t.rawBlock([]string{"_g1an_ysum_r"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+
 	t.toTop(p1x)
 	t.rename("px")
 	t.toTop(p1y)
@@ -2352,54 +2439,6 @@ func EmitWitnessGradientVerifyFp(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"lambda", "denom", "numer"}, emit)
 	t.PushPrimeCache()
 	emitWitnessGradientVerifyFp(t, "lambda", "denom", "numer", "result")
-	t.PopPrimeCache()
-}
-
-// EmitWAFinalExpA6Debug is a debugging wrapper that runs EXACTLY the
-// a^6 preparation sequence of emitWAFinalExp (including the "fanout"
-// copies for P1 and P3) and leaves _wafe_a6_p0 on top of stack in prefix
-// order (a_0_0 deepest, b_2_1 on top). Used by the witness-package script
-// tests to compare the codegen's a^6 computation against gnark's.
-//
-// Stack layout expected: just _wa_a (12 slots) in prefix order.
-func EmitWAFinalExpA6Debug(emit func(StackOp)) {
-	initNames := []string{}
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			initNames = append(initNames, "_wa_a"+part+"_"+sfx+"_0")
-			initNames = append(initNames, "_wa_a"+part+"_"+sfx+"_1")
-		}
-	}
-	t := NewBN254Tracker(initNames, emit)
-	t.PushPrimeCache()
-
-	// Replicate the a^4/a^6 preparation of emitWAFinalExp verbatim.
-	bn254Fp12CopyPrefix(t, "_wa_a", "_wafe_a_w1")
-	bn254Fp12Sqr(t, "_wafe_a_w1", "_wafe_a2")
-	bn254Fp12CopyPrefix(t, "_wafe_a2", "_wafe_a2_for_a6")
-	bn254Fp12Sqr(t, "_wafe_a2", "_wafe_a4_core")
-	bn254Fp12CopyPrefix(t, "_wafe_a4_core", "_wafe_a4_p1")
-	bn254Fp12CopyPrefix(t, "_wafe_a4_core", "_wafe_a4_p3")
-	bn254Fp12Mul(t, "_wafe_a4_core", "_wafe_a2_for_a6", "_wafe_a6_core")
-	bn254Fp12CopyPrefix(t, "_wafe_a6_core", "_wafe_a6_p2")
-	bn254Fp12RenamePrefix(t, "_wafe_a6_core", "_wafe_a6_p0")
-
-	// Drop _wa_a (we only copied it), _wafe_a4_p1, _wafe_a4_p3, _wafe_a6_p2.
-	bn254Fp12DropInputs(t, "_wa_a")
-	bn254Fp12DropInputs(t, "_wafe_a4_p1")
-	bn254Fp12DropInputs(t, "_wafe_a4_p3")
-	bn254Fp12DropInputs(t, "_wafe_a6_p2")
-
-	// Move _wafe_a6_p0 to the top in prefix order (a_0_0 deepest, b_2_1 top).
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			t.toTop("_wafe_a6_p0" + part + "_" + sfx + "_0")
-			t.toTop("_wafe_a6_p0" + part + "_" + sfx + "_1")
-		}
-	}
-
 	t.PopPrimeCache()
 }
 
@@ -2607,212 +2646,54 @@ func EmitFp12MulStandalone(emit func(StackOp)) {
 	t.PopPrimeCache()
 }
 
-// EmitWAFinalExpF2Debug runs only the easy part of emitWAFinalExp and
-// leaves _wafe_f2 on top of stack. Used to verify that the easy-part
-// computation matches gnark's (conj(f)·f^-1)·frob_p2(·).
-func EmitWAFinalExpF2Debug(emit func(StackOp)) {
-	initNames := []string{}
-	for _, prefix := range []string{"_f", "_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, prefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, prefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
+// EmitWAResidueCheckStandalone emits the residue-witness pairing check of
+// the witness-assisted verifiers on its own, for an Fp12 product supplied on
+// the stack instead of one computed by the triple Miller loop.
+//
+// Stack in (deepest → top): f (12 Fp), c (12 Fp), c⁻¹ (12 Fp), s — every
+// Fp12 in gnark flat order. The script checks c · c⁻¹ == 1, accumulates
+// c^(−(6x+2)) with EXACTLY the squaring/fold schedule emitWAMillerLoop3
+// uses (start at c⁻¹, square per NAF iteration, fold c⁻¹ / c at ±1 digits),
+// multiplies by f, then runs emitWAResidueFinish with alphaNegBetaFp12 in
+// place of MillerLoop(α, −β) — so it accepts iff
+//
+//	f · alphaNegBetaFp12 · ω^s == c^λ,   s ∈ {0, 1, 2}.
+//
+// It aborts otherwise and leaves OP_1 on success. Pass the Fp12 identity
+// as alphaNegBetaFp12 to check a bare product f.
+func EmitWAResidueCheckStandalone(emit func(StackOp), alphaNegBetaFp12 [12]*big.Int) {
+	var initNames []string
+	initNames = appendFp12SlotNames(initNames, "_fin")
+	initNames = appendFp12SlotNames(initNames, waResidueC)
+	initNames = appendFp12SlotNames(initNames, waResidueCInv)
+	initNames = append(initNames, waResidueSel)
 	t := NewBN254Tracker(initNames, emit)
 	t.PushPrimeCache()
 
-	// Easy part only.
-	bn254Fp12CopyPrefix(t, "_f", "_wafe_fcopy")
-	emitWitnessInverseVerifyFp12(t, "_f", "_wa_finv", "_wafe_finv_v")
-	bn254Fp12Conjugate(t, "_wafe_fcopy", "_wafe_fconj")
-	bn254Fp12Mul(t, "_wafe_fconj", "_wafe_finv_v", "_wafe_f1")
-	bn254Fp12CopyPrefix(t, "_wafe_f1", "_wafe_f1_frob")
-	bn254Fp12FrobeniusP2(t, "_wafe_f1_frob", "_wafe_f1p2")
-	bn254Fp12Mul(t, "_wafe_f1", "_wafe_f1p2", "_wafe_f2")
+	emitWAResidueInverseCheck(t)
 
-	// Drop the unused witnesses.
-	bn254Fp12DropInputs(t, "_wa_a")
-	bn254Fp12DropInputs(t, "_wa_b")
-	bn254Fp12DropInputs(t, "_wa_c")
-
-	// Reduce f2 and bring to top.
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			bn254FieldMod(t, "_wafe_f2"+part+"_"+sfx+"_0", "_wafe_f2"+part+"_"+sfx+"_0_r")
-			bn254FieldMod(t, "_wafe_f2"+part+"_"+sfx+"_1", "_wafe_f2"+part+"_"+sfx+"_1_r")
+	naf := bn254SixXPlus2NAF
+	msbIdx := len(naf) - 1
+	for msbIdx > 0 && naf[msbIdx] == 0 {
+		msbIdx--
+	}
+	bn254Fp12CopyPrefix(t, waResidueCInv, "_f")
+	for i := msbIdx - 1; i >= 0; i-- {
+		bn254Fp12Sqr(t, "_f", "_f_sq")
+		bn254Fp12RenamePrefix(t, "_f_sq", "_f")
+		if naf[i] != 0 {
+			emitWAResidueFold(t, naf[i])
 		}
 	}
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			t.toTop("_wafe_f2" + part + "_" + sfx + "_0_r")
-			t.toTop("_wafe_f2" + part + "_" + sfx + "_1_r")
-		}
-	}
+	bn254Fp12Mul(t, "_f", "_fin", "_f_in")
+	bn254Fp12RenamePrefix(t, "_f_in", "_f")
+
+	emitWAResidueFinish(t, Groth16Config{AlphaNegBetaFp12: alphaNegBetaFp12})
+
+	bn254Fp12DropInputs(t, waResidueC)
+	bn254Fp12DropInputs(t, waResidueCInv)
 	t.PopPrimeCache()
-}
-
-// EmitWAFinalExpP0Debug runs only the easy part + P0 assembly of
-// emitWAFinalExp and leaves the 12-slot _wafe_P0 on top. Used to check
-// whether P0 = f2 · a^6 · b^12 · c^12 is computed correctly.
-func EmitWAFinalExpP0Debug(emit func(StackOp)) {
-	initNames := []string{}
-	for _, prefix := range []string{"_f", "_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, prefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, prefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
-	t := NewBN254Tracker(initNames, emit)
-	t.PushPrimeCache()
-
-	// === Easy part (same as emitWAFinalExp) ===
-	bn254Fp12CopyPrefix(t, "_f", "_wafe_fcopy")
-	emitWitnessInverseVerifyFp12(t, "_f", "_wa_finv", "_wafe_finv_v")
-	bn254Fp12Conjugate(t, "_wafe_fcopy", "_wafe_fconj")
-	bn254Fp12Mul(t, "_wafe_fconj", "_wafe_finv_v", "_wafe_f1")
-	bn254Fp12CopyPrefix(t, "_wafe_f1", "_wafe_f1_frob")
-	bn254Fp12FrobeniusP2(t, "_wafe_f1_frob", "_wafe_f1p2")
-	bn254Fp12Mul(t, "_wafe_f1", "_wafe_f1p2", "_wafe_f2")
-
-	// === a^6, b^12, c^12, f2 preparation (single-copy variants: we only need P0) ===
-	bn254Fp12CopyPrefix(t, "_wa_a", "_wafe_a_w1")
-	bn254Fp12Sqr(t, "_wafe_a_w1", "_wafe_a2")
-	bn254Fp12CopyPrefix(t, "_wafe_a2", "_wafe_a2_for_a6")
-	bn254Fp12Sqr(t, "_wafe_a2", "_wafe_a4_core")
-	bn254Fp12Mul(t, "_wafe_a4_core", "_wafe_a2_for_a6", "_wafe_a6_p0")
-
-	bn254Fp12CopyPrefix(t, "_wa_b", "_wafe_b_w1")
-	bn254Fp12Sqr(t, "_wafe_b_w1", "_wafe_b2")
-	bn254Fp12CopyPrefix(t, "_wafe_b2", "_wafe_b2_for_b6")
-	bn254Fp12Sqr(t, "_wafe_b2", "_wafe_b4")
-	bn254Fp12Mul(t, "_wafe_b4", "_wafe_b2_for_b6", "_wafe_b6_core")
-	bn254Fp12Sqr(t, "_wafe_b6_core", "_wafe_b12_p0")
-
-	bn254Fp12CopyPrefix(t, "_wa_c", "_wafe_c_w1")
-	bn254Fp12Sqr(t, "_wafe_c_w1", "_wafe_c2")
-	bn254Fp12CopyPrefix(t, "_wafe_c2", "_wafe_c2_for_c6")
-	bn254Fp12Sqr(t, "_wafe_c2", "_wafe_c4")
-	bn254Fp12Mul(t, "_wafe_c4", "_wafe_c2_for_c6", "_wafe_c6")
-	bn254Fp12Sqr(t, "_wafe_c6", "_wafe_c12_p0")
-
-	bn254Fp12RenamePrefix(t, "_wafe_f2", "_wafe_f2_for_P0")
-
-	// P0 = f2 · a^6 · b^12 · c^12
-	bn254Fp12Mul(t, "_wafe_f2_for_P0", "_wafe_a6_p0", "_wafe_P0_s1")
-	bn254Fp12Mul(t, "_wafe_P0_s1", "_wafe_b12_p0", "_wafe_P0_s2")
-	bn254Fp12Mul(t, "_wafe_P0_s2", "_wafe_c12_p0", "_wafe_P0")
-
-	// Drop the witnesses still on the stack (_wa_a, _wa_b, _wa_c copies).
-	bn254Fp12DropInputs(t, "_wa_a")
-	bn254Fp12DropInputs(t, "_wa_b")
-	bn254Fp12DropInputs(t, "_wa_c")
-
-	// Reduce P0 components and bring to top.
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			bn254FieldMod(t, "_wafe_P0"+part+"_"+sfx+"_0", "_wafe_P0"+part+"_"+sfx+"_0_r")
-			bn254FieldMod(t, "_wafe_P0"+part+"_"+sfx+"_1", "_wafe_P0"+part+"_"+sfx+"_1_r")
-		}
-	}
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			t.toTop("_wafe_P0" + part + "_" + sfx + "_0_r")
-			t.toTop("_wafe_P0" + part + "_" + sfx + "_1_r")
-		}
-	}
-
-	t.PopPrimeCache()
-}
-
-// EmitWAFinalExpResultDebug is a debugging variant of EmitWAFinalExpStandalone
-// that leaves the 12-Fp-slot result on top of stack (in prefix order
-// _result_a_0_0 ... _result_b_2_1) instead of running IsOne. This lets
-// callers compare the raw result against gnark.FinalExponentiation's output
-// component-wise, which gives a much more informative failure than a boolean.
-//
-// Stack layout expected: same 60 Fp slots as EmitWAFinalExpStandalone.
-// Stack out: 12 Fp slots for the final exponentiation result.
-func EmitWAFinalExpResultDebug(emit func(StackOp)) {
-	initNames := []string{}
-	for _, prefix := range []string{"_f", "_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, prefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, prefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
-	t := NewBN254Tracker(initNames, emit)
-	t.PushPrimeCache()
-	emitWAFinalExp(t, "_f", "_result")
-	// Reduce each _result component mod p for canonical comparison.
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			bn254FieldMod(t, "_result"+part+"_"+sfx+"_0", "_result"+part+"_"+sfx+"_0_r")
-			bn254FieldMod(t, "_result"+part+"_"+sfx+"_1", "_result"+part+"_"+sfx+"_1_r")
-		}
-	}
-	// Bring the reduced result to the top in prefix order (a_0_0 deepest).
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			t.toTop("_result" + part + "_" + sfx + "_0_r")
-			t.toTop("_result" + part + "_" + sfx + "_1_r")
-		}
-	}
-	t.PopPrimeCache()
-}
-
-// EmitWAFinalExpStandalone emits a script that runs just the witness-assisted
-// final exponentiation on inputs already present on the stack.
-//
-// Stack layout expected (deepest → top):
-//
-//	_f_a_0_0, _f_a_0_1, _f_a_1_0, _f_a_1_1, _f_a_2_0, _f_a_2_1,
-//	_f_b_0_0, _f_b_0_1, _f_b_1_0, _f_b_1_1, _f_b_2_0, _f_b_2_1,    (12 slots for f)
-//	_wa_finv_*                                                      (12 slots for f⁻¹)
-//	_wa_a_*                                                         (12 slots for a)
-//	_wa_b_*                                                         (12 slots for b)
-//	_wa_c_*                                                         (12 slots for c)
-//
-// 60 Fp values total. After the script runs, a single boolean is left on
-// top indicating whether the final exponentiation result equals the Fp12
-// identity (1). Callers can OP_VERIFY that boolean to assert the result.
-//
-// Used by package-level tests in compilers/go/codegen and by executable
-// tests in packages/runar-go/bn254witness that feed real gnark-computed
-// inputs through the full witness-assisted final exp and compare the
-// boolean output to gnark.FinalExponentiation's result (encoded as "is it
-// the identity?" via pre-multiplying by the inverse of gnark's result).
-func EmitWAFinalExpStandalone(emit func(StackOp)) {
-	initNames := []string{}
-	for _, prefix := range []string{"_f", "_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				initNames = append(initNames, prefix+part+"_"+sfx+"_0")
-				initNames = append(initNames, prefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
-	t := NewBN254Tracker(initNames, emit)
-	t.PushPrimeCache()
-	emitWAFinalExp(t, "_f", "_result")
-	// Leave bn254Fp12IsOne boolean on top so the caller can OP_VERIFY.
-	bn254Fp12IsOne(t, "_result", "_check")
-	t.PopPrimeCache()
+	emit(StackOp{Op: "push", Value: bigIntPush(1)})
 }
 
 // =========================================================================

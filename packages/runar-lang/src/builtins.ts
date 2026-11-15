@@ -1081,12 +1081,20 @@ export function merkleRootPoseidon2KB(..._args: bigint[]): bigint {
   return compilerStub('merkleRootPoseidon2KB');
 }
 
-/** Mode-3 witness-assisted Groth16 verification entry; takes no arguments. */
+/**
+ * Raw witness-assisted Groth16 entry. Refused by the (Go-only) compiler —
+ * it never sees the public inputs, so it accepts a proof of any statement
+ * (GK-BUG-006). Use assertGroth16WitnessAssistedWithMSM.
+ */
 export function assertGroth16WitnessAssisted(): void {
   compilerStub('assertGroth16WitnessAssisted');
 }
 
-/** Soundness-strict sibling of assertGroth16WitnessAssisted (with MSM). */
+/**
+ * Mode-3 witness-assisted Groth16 verification entry (MSM-binding); takes
+ * no arguments. Bind the statement with vk.json pinnedPublicInputs or
+ * groth16PublicInput(i) assertions.
+ */
 export function assertGroth16WitnessAssistedWithMSM(): void {
   compilerStub('assertGroth16WitnessAssistedWithMSM');
 }

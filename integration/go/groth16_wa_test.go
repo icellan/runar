@@ -463,10 +463,10 @@ func TestGroth16WA_Regtest_TamperedProofA_Rejected(t *testing.T) {
 	defer provider.MineAll()
 
 	// Flip the low bit of proof.A.x. This corrupts the off-chain pairing
-	// identity, so the final exponentiation witnesses will not satisfy the
-	// verifier. We regenerate the witness so the gradient / final-exp
-	// consistency checks still pass — the failure should land in the
-	// pairing check at the end.
+	// identity, so no residue witness exists and the one the generator
+	// returns will not satisfy the verifier. We regenerate the witness so
+	// the gradient checks and the c·c⁻¹ check still pass — the failure
+	// should land in the final f·ω^s == c^λ check at the end.
 	tamperedProof := bn254witness.Proof{
 		A: [2]*big.Int{new(big.Int).Set(fix.proof.A[0]), new(big.Int).Set(fix.proof.A[1])},
 		B: [4]*big.Int{

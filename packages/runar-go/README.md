@@ -666,7 +666,7 @@ type Addr = ByteString
 func AssertGroth16WitnessAssisted()
 ```
 
-Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted Groth16 verifier preamble in a stateful contract. Has no Go runtime effect. [bn254.go](bn254.go).
+**Refused by the compiler** (GK-BUG-006): this raw witness-assisted Groth16 verifier never sees the public inputs, so it accepts an honest proof of any statement the spender picks. Use `AssertGroth16WitnessAssistedWithMSM`. Has no Go runtime effect. [bn254.go](bn254.go).
 
 #### `AssertGroth16WitnessAssistedWithMSM`
 
@@ -674,7 +674,7 @@ Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted G
 func AssertGroth16WitnessAssistedWithMSM()
 ```
 
-Variant of `AssertGroth16WitnessAssisted` that emits the multi-scalar-multiplication backend. [bn254.go](bn254.go).
+Marker intrinsic recognised by the compiler to start a Mode-3 witness-assisted Groth16 verifier preamble that recomputes the public-input multi-scalar multiplication on-chain, binding the proof to the five witness scalars. The method must still fix the statement — with `pinnedPublicInputs` in the vk.json or `Groth16PublicInput(i)` assertions in its body. Has no Go runtime effect. [bn254.go](bn254.go).
 
 #### `Assert`
 

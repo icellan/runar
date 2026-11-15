@@ -12,11 +12,20 @@ Groth16 verification on BN254 is dominated by two costly operations —
 field inversions inside the Miller loop gradients and the final
 exponentiation — neither of which fits comfortably inside a Bitcoin Script
 budget. Witness-assisted verification moves both operations off-chain: the
-prover supplies the per-iteration Miller loop gradients and four Fp12
-witnesses (`f^-1`, `f2^x`, `f2^(x^2)`, `f2^(x^3)`) alongside the proof.
-The on-chain script only has to check that the supplied witnesses are
-locally consistent (multiplications, squarings, and Frobenius maps, all
-cheap) and that the resulting pairing product equals one. The prepared
+prover supplies the per-iteration Miller loop gradients and a **residue
+witness** — `c`, `c⁻¹` in Fp12 and an index `s ∈ {0, 1, 2}` with
+`f · ω^s == c^λ`, `λ = 6x + 2 + p − p² + p³`, `ω` a fixed primitive 27th
+root of unity (Novakovic & Eagen, "On Proving Pairings", eprint 2024/640) —
+alongside the proof. Such a `c` exists exactly when the pairing product is
+one, so the script never computes a final exponentiation: it checks the
+gradients locally, folds `c` into the Miller loop's squarings, and requires
+the folded product to be one. (GK-BUG-005: this replaced a witness-assisted
+final exponentiation whose witnesses `f2^x, f2^(x²), f2^(x³)` were never
+checked, so a forged one made a false statement verify.)
+
+The residue witness is not unique: `c·κ` for any `κ` with `κ^λ = 1` verifies
+too, so the unlocking script is malleable in `c` (this does not affect
+soundness). `s` is unique. The prepared
 public-input accumulator (`IC[0] + Σ pubⱼ · IC[j+1]`) is also computed
 off-chain, so the script never has to run variable-base G1 scalar
 multiplication either.
@@ -180,9 +189,13 @@ first, top of stack last):
 2. Miller loop gradients — interleaved per iteration as `(d1, d2, d3, a1?, a2?, a3?)`
    where `dₖ` are the doubling gradients for pair `k` and `aₖ` are the
    addition gradients (present only for non-zero NAF digits).
-3. Final exponentiation witnesses — 4 × 12 = 48 Fp values for `f^-1`, `a`, `b`, `c`.
-4. Prepared inputs — 2 Fp values for the accumulator G1 point `(x, y)`.
-5. Proof points — A `(x, y)`, B `(x0, x1, y0, y1)`, C `(x, y)`.
+3. Residue witness — `c` (12 Fp values), `c⁻¹` (12 Fp values) and the
+   scaling index `s ∈ {0, 1, 2}`.
+4. Public-input scalars — 5 values, only for the MSM-binding verifier
+   (`BuildFromProofWithInputs`).
+5. Prepared inputs — 2 Fp values for the accumulator G1 point `(x, y)`.
+6. proof.B subgroup-check gradients — 390 Fp values.
+7. Proof points — A `(x, y)`, B `(x0, x1, y0, y1)`, C `(x, y)`.
 
 The emitted verifier expects this layout exactly. Do not rearrange.
 
@@ -210,9 +223,9 @@ All tests in this package and in `integration/go/` use
 ### Witness generation cost
 
 The off-chain witness generator itself is cheap — tens of milliseconds
-per proof, dominated by gnark-crypto's Fp12 exponentiations inside the
-final exponentiation step. Regenerating witnesses on every spend is
-entirely practical.
+per proof, dominated by gnark-crypto's Fp12 exponentiations in the
+residue-witness computation (a few ~3000-bit exponents). Regenerating
+witnesses on every spend is entirely practical.
 
 ## Known limitations
 
@@ -271,8 +284,20 @@ Types:
 
 Core:
 
-- `GenerateWitness(vk, proof, publicInputs) (*Witness, error)`
+- `GenerateWitness(vk, proof, publicInputs) (*Witness, error)` — raw-variant
+  layout (internal/test verifier; contracts use the MSM variant).
+- `BuildFromProofWithInputs(vk, proof, publicInputs) (*Witness, error)` —
+  MSM-binding layout (what `runarc groth16-wa` and
+  `AssertGroth16WitnessAssistedWithMSM` verify).
 - `(*Witness).ToStackOps() []codegen.StackOp`
+- `MillerLoopProduct(vk, proof, publicInputs) ([12]*big.Int, error)` — the
+  exact Fp12 value the verifier's residue check is applied to (for
+  adversarial tests).
+- `ResidueLambda() *big.Int` — `λ = 6x + 2 + p − p² + p³`.
+
+A witness for a FALSE statement is still returned (so callers can show the
+verifier rejects it): no residue `c` exists for it, and the one returned
+fails the on-chain check.
 
 Precompute:
 

@@ -182,204 +182,171 @@ func TestPairingProductIsOne_Bilinearity(t *testing.T) {
 	// TestMillerLoopGradientLocalConsistency above.
 }
 
-// TestFinalExpWitnessesProduceCorrectResult pure-Go-reproduces the EXACT
-// hard-part combine formula that emitWAFinalExp (compilers/go/codegen/
-// bn254_groth16.go) applies to the witnesses (f2, a, b, c) and asserts
-// the result equals gnark's standard FinalExponentiation.
-//
-// The formula is derived from the Fuentes-Castañeda/Duquesne-Ghammam
-// hard-part decomposition (https://eprint.iacr.org/2015/192.pdf, alg. 6),
-// which gnark-crypto's BN254 FinalExponentiation implements. Working out
-// the exponent polynomial of Fuentes's output yields:
-//
-//	e(x, p) = (1 + 6x + 12x² + 12x³)
-//	        + (    4x + 6x² + 12x³) · p
-//	        + (    6x + 6x² + 12x³) · p²
-//	        + (-1 + 4x + 6x² + 12x³) · p³
-//
-// Using witnesses a = f2^x, b = f2^x², c = f2^x³, the four "per-p-power"
-// pieces become:
-//
-//	P0 = f2      · a^6 · b^12 · c^12
-//	P1 =           a^4 · b^6  · c^12
-//	P2 =           a^6 · b^6  · c^12
-//	P3 = conj(f2)· a^4 · b^6  · c^12
-//	result = P0 · Frobenius(P1) · FrobeniusSquare(P2) · FrobeniusCube(P3)
-//
-// This form is what emitWAFinalExp implements, so the test also serves as
-// the executable spec for the codegen. If this test passes, any mismatch
-// in D0 must be in the CODEGEN (not the math or the witness generator).
-func TestFinalExpWitnessesProduceCorrectResult(t *testing.T) {
-	// Pick a non-trivial f: take MillerLoop(G1, G2) before final exp.
-	_, _, g1Aff, g2Aff := bn254.Generators()
-
-	fGnark, err := bn254.MillerLoop([]bn254.G1Affine{g1Aff}, []bn254.G2Affine{g2Aff})
-	if err != nil {
-		t.Fatalf("bn254.MillerLoop: %v", err)
+// residueTestLambda recomputes λ = 6x + 2 + p − p² + p³ from p and x here,
+// independently of the package's own constant, and checks λ ≡ 0 (mod r).
+func residueTestLambda(t *testing.T) *big.Int {
+	t.Helper()
+	p := fp.Modulus()
+	x, _ := new(big.Int).SetString("4965661367192848881", 10)
+	p2 := new(big.Int).Mul(p, p)
+	lam := new(big.Int).Mul(big.NewInt(6), x)
+	lam.Add(lam, big.NewInt(2))
+	lam.Add(lam, p)
+	lam.Sub(lam, p2)
+	lam.Add(lam, new(big.Int).Mul(p2, p))
+	if new(big.Int).Mod(lam, fr.Modulus()).Sign() != 0 {
+		t.Fatal("lambda is not a multiple of r")
 	}
-	fFlat := e12ToFlatFp12(&fGnark)
-
-	// Compute witnesses.
-	fInvFlat, aFlat, bFlat, cFlat, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
+	if lam.Cmp(ResidueLambda()) != 0 {
+		t.Fatal("ResidueLambda differs from 6x+2+p-p^2+p^3")
 	}
-
-	// Sanity: f * fInv should equal 1.
-	var fE, fInvE bn254.E12
-	if err := flatFp12ToE12(fFlat, &fE); err != nil {
-		t.Fatal(err)
-	}
-	if err := flatFp12ToE12(fInvFlat, &fInvE); err != nil {
-		t.Fatal(err)
-	}
-	var prod bn254.E12
-	prod.Mul(&fE, &fInvE)
-	var one bn254.E12
-	one.SetOne()
-	if !prod.Equal(&one) {
-		t.Error("f * fInv != 1")
-	}
-
-	// === Easy part: f2 = f^((p^6 - 1)(p^2 + 1)) ===
-	var fConj bn254.E12
-	fConj.Conjugate(&fE)
-	var f1 bn254.E12
-	f1.Mul(&fConj, &fInvE) // f1 = conj(f) * f^(-1) = f^(p^6 - 1)
-	var f1Frob bn254.E12
-	f1Frob.FrobeniusSquare(&f1)
-	var f2 bn254.E12
-	f2.Mul(&f1, &f1Frob) // f2 = f1^(p^2 + 1) = f^((p^6-1)(p^2+1))
-
-	// Decode witnesses.
-	var aE, bE, cE bn254.E12
-	if err := flatFp12ToE12(aFlat, &aE); err != nil {
-		t.Fatal(err)
-	}
-	if err := flatFp12ToE12(bFlat, &bE); err != nil {
-		t.Fatal(err)
-	}
-	if err := flatFp12ToE12(cFlat, &cE); err != nil {
-		t.Fatal(err)
-	}
-
-	// === Hard part: direct per-p-power assembly of the Fuentes exponent ===
-	// Compute the powers of a, b, c needed for the assembly.
-	//   a^2, a^4, a^6
-	//   b^2, b^4, b^6, b^12
-	//   c^2, c^4, c^6, c^12
-	var aSq, a4, a6 bn254.E12
-	aSq.Square(&aE)
-	a4.Square(&aSq)
-	a6.Mul(&a4, &aSq)
-
-	var bSq, b4, b6, b12 bn254.E12
-	bSq.Square(&bE)
-	b4.Square(&bSq)
-	b6.Mul(&b4, &bSq)
-	b12.Square(&b6)
-
-	var cSq, c4, c6, c12 bn254.E12
-	cSq.Square(&cE)
-	c4.Square(&cSq)
-	c6.Mul(&c4, &cSq)
-	c12.Square(&c6)
-
-	// P0 = f2 · a^6 · b^12 · c^12 = f2^(1 + 6x + 12x² + 12x³)
-	var P0 bn254.E12
-	P0.Mul(&f2, &a6)
-	P0.Mul(&P0, &b12)
-	P0.Mul(&P0, &c12)
-
-	// P1 = a^4 · b^6 · c^12 = f2^(4x + 6x² + 12x³)
-	var P1 bn254.E12
-	P1.Mul(&a4, &b6)
-	P1.Mul(&P1, &c12)
-
-	// P2 = a^6 · b^6 · c^12 = f2^(6x + 6x² + 12x³)
-	var P2 bn254.E12
-	P2.Mul(&a6, &b6)
-	P2.Mul(&P2, &c12)
-
-	// P3 = conj(f2) · a^4 · b^6 · c^12 = f2^(-1 + 4x + 6x² + 12x³)
-	var P3 bn254.E12
-	P3.Conjugate(&f2)
-	P3.Mul(&P3, &a4)
-	P3.Mul(&P3, &b6)
-	P3.Mul(&P3, &c12)
-
-	// result = P0 · Frob(P1) · FrobSq(P2) · FrobCube(P3)
-	var P1f, P2f, P3f bn254.E12
-	P1f.Frobenius(&P1)
-	P2f.FrobeniusSquare(&P2)
-	P3f.FrobeniusCube(&P3)
-
-	var result bn254.E12
-	result.Mul(&P0, &P1f)
-	result.Mul(&result, &P2f)
-	result.Mul(&result, &P3f)
-
-	// Compare to gnark's standard final exponentiation.
-	gnarkFinal := bn254.FinalExponentiation(&fE)
-
-	if !result.Equal(&gnarkFinal) {
-		t.Errorf("hard-part formula output does not match gnark.FinalExponentiation")
-		t.Logf("ours:  %s", result.String())
-		t.Logf("gnark: %s", gnarkFinal.String())
-	}
+	return lam
 }
 
-// TestEmitWAFinalExpA6_ScriptMatchesGnark verifies the "compute a^6"
-// portion of emitWAFinalExp's hard part against gnark by taking a real
-// Fp12 witness a, running the codegen subset that builds a², a⁴, a⁶, and
-// comparing the result component-wise.
-func TestEmitWAFinalExpA6_ScriptMatchesGnark(t *testing.T) {
-	// Produce a real witness a = f2^x from a real f, using the computeFinalExpWitnesses path.
-	_, _, g1Aff, g2Aff := bn254.Generators()
-	fGnark, err := bn254.MillerLoop([]bn254.G1Affine{g1Aff}, []bn254.G2Affine{g2Aff})
-	if err != nil {
-		t.Fatalf("MillerLoop: %v", err)
-	}
-	fFlat := e12ToFlatFp12(&fGnark)
-	_, aFlat, _, _, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
-	}
-
-	// Expected: a⁶ via gnark.
-	var aE bn254.E12
-	if err := flatFp12ToE12(aFlat, &aE); err != nil {
+// residueTestOmega returns ω = w^((p¹²−1)/27) computed from its definition
+// (w the Fp12 generator over Fp6) and checks it equals the codegen constant.
+func residueTestOmega(t *testing.T) bn254.E12 {
+	t.Helper()
+	n := new(big.Int).Exp(fp.Modulus(), big.NewInt(12), nil)
+	n.Sub(n, big.NewInt(1))
+	var w, om, want bn254.E12
+	w.C1.B0.A0.SetOne()
+	om.Exp(w, new(big.Int).Div(n, big.NewInt(27)))
+	if err := flatFp12ToE12(codegen.Bn254ResidueOmega27(), &want); err != nil {
 		t.Fatal(err)
 	}
-	var aSq, a4, a6 bn254.E12
-	aSq.Square(&aE)
-	a4.Square(&aSq)
-	a6.Mul(&a4, &aSq)
-	expectedFlat := e12ToFlatFp12(&a6)
-
-	// Run the script: push a (12 Fp), run EmitWAFinalExpA6Debug, compare.
-	var ops []codegen.StackOp
-	for i := 0; i < 12; i++ {
-		ops = append(ops, codegen.StackOp{
-			Op:    "push",
-			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(aFlat[i])},
-		})
+	if !om.Equal(&want) {
+		t.Fatal("codegen.Bn254ResidueOmega27() != w^((p^12-1)/27)")
 	}
-	codegen.EmitWAFinalExpA6Debug(func(op codegen.StackOp) {
-		ops = append(ops, op)
-	})
-	// Compare top-down.
-	for i := 11; i >= 0; i-- {
-		ops = append(ops, codegen.StackOp{
-			Op:    "push",
-			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(expectedFlat[i])},
-		})
-		ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	}
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
+	return om
+}
 
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("emitWAFinalExp a^6 computation does not match gnark: %v", err)
+// residueHolds reports whether c^λ == f·ω^s and c·c⁻¹ == 1 (pure Go).
+func residueHolds(t *testing.T, f, c, cInv [12]*big.Int, s int) bool {
+	t.Helper()
+	lam := residueTestLambda(t)
+	om := residueTestOmega(t)
+	var fE, cE, ciE bn254.E12
+	for _, z := range []struct {
+		flat [12]*big.Int
+		e    *bn254.E12
+	}{{f, &fE}, {c, &cE}, {cInv, &ciE}} {
+		if err := flatFp12ToE12(z.flat, z.e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var prod bn254.E12
+	prod.Mul(&cE, &ciE)
+	if !prod.IsOne() {
+		return false
+	}
+	var lhs, rhs, oms bn254.E12
+	lhs.Exp(cE, lam)
+	oms.Exp(om, big.NewInt(int64(s)))
+	rhs.Mul(&fE, &oms)
+	return lhs.Equal(&rhs)
+}
+
+// residueTestProducts returns Fp12 values whose final exponentiation is 1
+// (valid) and is not (invalid), from gnark-crypto's own Miller loop — an
+// implementation independent of this package's.
+func residueTestProducts(t *testing.T) (valid, invalid map[string][12]*big.Int) {
+	t.Helper()
+	_, _, g1, g2 := bn254.Generators()
+	mul1 := func(k int64) bn254.G1Affine {
+		var p bn254.G1Affine
+		p.ScalarMultiplication(&g1, big.NewInt(k))
+		return p
+	}
+	mul2 := func(k int64) bn254.G2Affine {
+		var p bn254.G2Affine
+		p.ScalarMultiplication(&g2, big.NewInt(k))
+		return p
+	}
+	ml := func(ps []bn254.G1Affine, qs []bn254.G2Affine) [12]*big.Int {
+		f, err := bn254.MillerLoop(ps, qs)
+		if err != nil {
+			t.Fatalf("MillerLoop: %v", err)
+		}
+		return e12ToFlatFp12(&f)
+	}
+	var negG1, neg13 bn254.G1Affine
+	negG1.Neg(&g1)
+	a13 := mul1(13)
+	neg13.Neg(&a13)
+	valid = map[string][12]*big.Int{
+		// e(G1, G2) · e(-G1, G2) = 1
+		"e(P,Q)e(-P,Q)": ml([]bn254.G1Affine{g1, negG1}, []bn254.G2Affine{g2, g2}),
+		// the D0 Groth16 instance: e(-13G1, G2) e(3G1, 2G2) e(2G1, 3G2) e(G1, G2) = 1
+		"D0-groth16": ml([]bn254.G1Affine{neg13, mul1(3), mul1(2), g1}, []bn254.G2Affine{g2, mul2(2), mul2(3), g2}),
+	}
+	invalid = map[string][12]*big.Int{
+		"e(G1,G2)":   ml([]bn254.G1Affine{g1}, []bn254.G2Affine{g2}),
+		"e(2G1,3G2)": ml([]bn254.G1Affine{mul1(2)}, []bn254.G2Affine{mul2(3)}),
+	}
+	for name, f := range valid {
+		var fE bn254.E12
+		if err := flatFp12ToE12(f, &fE); err != nil {
+			t.Fatal(err)
+		}
+		if fin := bn254.FinalExponentiation(&fE); !fin.IsOne() {
+			t.Fatalf("premise: %s does not have final exponentiation 1", name)
+		}
+	}
+	for name, f := range invalid {
+		var fE bn254.E12
+		if err := flatFp12ToE12(f, &fE); err != nil {
+			t.Fatal(err)
+		}
+		if fin := bn254.FinalExponentiation(&fE); fin.IsOne() {
+			t.Fatalf("premise: %s unexpectedly has final exponentiation 1", name)
+		}
+	}
+	return valid, invalid
+}
+
+// TestResidueWitness_ExistsExactlyForValidProducts (GK-BUG-005): for an Fp12
+// product whose final exponentiation is 1, computeResidueWitness returns
+// c, c⁻¹, s with c^λ == f·ω^s, and no other s ∈ {0, 1, 2} admits a residue.
+// For a product whose final exponentiation is NOT 1 it reports ok == false
+// and its best-effort c fails the check for EVERY s — the soundness
+// statement the verifier relies on. Checked with gnark's exponentiation, not
+// with the code under test.
+func TestResidueWitness_ExistsExactlyForValidProducts(t *testing.T) {
+	valid, invalid := residueTestProducts(t)
+	for name, f := range valid {
+		c, cInv, s, ok, err := computeResidueWitness(f)
+		if err != nil || !ok {
+			t.Fatalf("%s: computeResidueWitness ok=%v err=%v", name, ok, err)
+		}
+		if s < 0 || s > 2 {
+			t.Fatalf("%s: scaling index %d out of range", name, s)
+		}
+		if !residueHolds(t, f, c, cInv, s) {
+			t.Fatalf("%s: c^lambda != f*omega^%d", name, s)
+		}
+		for other := 0; other < 3; other++ {
+			if other == s {
+				continue
+			}
+			if residueHolds(t, f, c, cInv, other) {
+				t.Fatalf("%s: residue also holds for s=%d (want unique s=%d)", name, other, s)
+			}
+		}
+	}
+	for name, f := range invalid {
+		c, cInv, _, ok, err := computeResidueWitness(f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ok {
+			t.Fatalf("%s: residue reported for a product whose pairing is not 1", name)
+		}
+		for s := 0; s < 3; s++ {
+			if residueHolds(t, f, c, cInv, s) {
+				t.Fatalf("SOUNDNESS: %s: c^lambda == f*omega^%d for a false statement", name, s)
+			}
+		}
 	}
 }
 
@@ -628,208 +595,6 @@ func TestEmitFp12Mul_ScriptMatchesGnark(t *testing.T) {
 	}
 }
 
-// TestEmitWAFinalExpF2_ScriptMatchesGnark verifies the easy-part computation
-// of emitWAFinalExp: f2 = (conj(f)·f^-1) · frob_p2((conj(f)·f^-1)).
-func TestEmitWAFinalExpF2_ScriptMatchesGnark(t *testing.T) {
-	_, _, g1Aff, g2Aff := bn254.Generators()
-	fGnark, err := bn254.MillerLoop([]bn254.G1Affine{g1Aff}, []bn254.G2Affine{g2Aff})
-	if err != nil {
-		t.Fatalf("MillerLoop: %v", err)
-	}
-	fFlat := e12ToFlatFp12(&fGnark)
-	fInvFlat, aFlat, bFlat, cFlat, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
-	}
-
-	var fE, fInvE bn254.E12
-	flatFp12ToE12(fFlat, &fE)
-	flatFp12ToE12(fInvFlat, &fInvE)
-	var fConj, f1, f1Frob, f2 bn254.E12
-	fConj.Conjugate(&fE)
-	f1.Mul(&fConj, &fInvE)
-	f1Frob.FrobeniusSquare(&f1)
-	f2.Mul(&f1, &f1Frob)
-	expectedFlat := e12ToFlatFp12(&f2)
-
-	var ops []codegen.StackOp
-	push := func(flat [12]*big.Int) {
-		for i := 0; i < 12; i++ {
-			ops = append(ops, codegen.StackOp{
-				Op:    "push",
-				Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(flat[i])},
-			})
-		}
-	}
-	push(fFlat)
-	push(fInvFlat)
-	push(aFlat)
-	push(bFlat)
-	push(cFlat)
-	codegen.EmitWAFinalExpF2Debug(func(op codegen.StackOp) { ops = append(ops, op) })
-	for i := 11; i >= 0; i-- {
-		ops = append(ops, codegen.StackOp{
-			Op:    "push",
-			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(expectedFlat[i])},
-		})
-		ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	}
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
-
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("easy-part f2 script does not match gnark: %v", err)
-	}
-}
-
-// TestEmitWAFinalExpP0_ScriptMatchesGnark verifies that the codegen
-// computes P0 = f2 · a^6 · b^12 · c^12 correctly, where f2 is the easy
-// part output. If this fails, the bug is in either f2 (easy part) or one
-// of the per-witness power ladders (a^6, b^12, c^12), or the assembly of
-// P0 via chained Fp12Mul.
-func TestEmitWAFinalExpP0_ScriptMatchesGnark(t *testing.T) {
-	_, _, g1Aff, g2Aff := bn254.Generators()
-	fGnark, err := bn254.MillerLoop([]bn254.G1Affine{g1Aff}, []bn254.G2Affine{g2Aff})
-	if err != nil {
-		t.Fatalf("MillerLoop: %v", err)
-	}
-	fFlat := e12ToFlatFp12(&fGnark)
-	fInvFlat, aFlat, bFlat, cFlat, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
-	}
-
-	// Expected P0: compute easy-part f2, then f2 · a^6 · b^12 · c^12.
-	var fE, fInvE, aE, bE, cE bn254.E12
-	flatFp12ToE12(fFlat, &fE)
-	flatFp12ToE12(fInvFlat, &fInvE)
-	flatFp12ToE12(aFlat, &aE)
-	flatFp12ToE12(bFlat, &bE)
-	flatFp12ToE12(cFlat, &cE)
-	// Easy part: f2 = conj(f) · f^-1 · frob_p2(f1)
-	var fConj, f1, f1Frob, f2 bn254.E12
-	fConj.Conjugate(&fE)
-	f1.Mul(&fConj, &fInvE)
-	f1Frob.FrobeniusSquare(&f1)
-	f2.Mul(&f1, &f1Frob)
-	// Powers
-	var aSq, a4, a6 bn254.E12
-	aSq.Square(&aE)
-	a4.Square(&aSq)
-	a6.Mul(&a4, &aSq)
-	var bSq, b4, b6, b12 bn254.E12
-	bSq.Square(&bE)
-	b4.Square(&bSq)
-	b6.Mul(&b4, &bSq)
-	b12.Square(&b6)
-	var cSq, c4, c6, c12 bn254.E12
-	cSq.Square(&cE)
-	c4.Square(&cSq)
-	c6.Mul(&c4, &cSq)
-	c12.Square(&c6)
-	// P0 = f2 · a^6 · b^12 · c^12
-	var P0 bn254.E12
-	P0.Mul(&f2, &a6)
-	P0.Mul(&P0, &b12)
-	P0.Mul(&P0, &c12)
-	expectedFlat := e12ToFlatFp12(&P0)
-
-	// Build the script.
-	var ops []codegen.StackOp
-	push := func(flat [12]*big.Int) {
-		for i := 0; i < 12; i++ {
-			ops = append(ops, codegen.StackOp{
-				Op:    "push",
-				Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(flat[i])},
-			})
-		}
-	}
-	push(fFlat)
-	push(fInvFlat)
-	push(aFlat)
-	push(bFlat)
-	push(cFlat)
-
-	codegen.EmitWAFinalExpP0Debug(func(op codegen.StackOp) {
-		ops = append(ops, op)
-	})
-
-	for i := 11; i >= 0; i-- {
-		ops = append(ops, codegen.StackOp{
-			Op:    "push",
-			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(expectedFlat[i])},
-		})
-		ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	}
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
-
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("P0 script does not match gnark: %v", err)
-	}
-}
-
-// TestEmitWAFinalExp_ResultMatchesGnark is the component-wise version of
-// TestEmitWAFinalExp_ScriptMatchesGnark: it captures the 12 Fp slots of
-// the emitWAFinalExp output and compares them against gnark's
-// FinalExponentiation result slot by slot. This gives a much more
-// informative failure message if the result is wrong — we see exactly
-// which component mismatches.
-func TestEmitWAFinalExp_ResultMatchesGnark(t *testing.T) {
-	// Use a real non-trivial Fp12 (NOT one that satisfies FinalExp==1 —
-	// we want to see the actual raw result, not just an IsOne check).
-	_, _, g1Aff, g2Aff := bn254.Generators()
-	fGnark, err := bn254.MillerLoop([]bn254.G1Affine{g1Aff}, []bn254.G2Affine{g2Aff})
-	if err != nil {
-		t.Fatalf("MillerLoop: %v", err)
-	}
-	fFlat := e12ToFlatFp12(&fGnark)
-
-	// Compute witnesses from f.
-	fInvFlat, aFlat, bFlat, cFlat, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
-	}
-
-	// Expected = gnark's FinalExponentiation(f).
-	expected := bn254.FinalExponentiation(&fGnark)
-	expectedFlat := e12ToFlatFp12(&expected)
-
-	// Build the script: push 60 Fp values, run EmitWAFinalExpResultDebug,
-	// compare the 12 output slots top-down.
-	var ops []codegen.StackOp
-	push := func(flat [12]*big.Int) {
-		for i := 0; i < 12; i++ {
-			ops = append(ops, codegen.StackOp{
-				Op:    "push",
-				Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(flat[i])},
-			})
-		}
-	}
-	push(fFlat)
-	push(fInvFlat)
-	push(aFlat)
-	push(bFlat)
-	push(cFlat)
-
-	codegen.EmitWAFinalExpResultDebug(func(op codegen.StackOp) {
-		ops = append(ops, op)
-	})
-
-	// Compare slots top-down: the script leaves the 12 result slots on top
-	// in order _a_0_0 (deepest of the 12), ..., _b_2_1 (top).
-	for i := 11; i >= 0; i-- {
-		ops = append(ops, codegen.StackOp{
-			Op:    "push",
-			Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(expectedFlat[i])},
-		})
-		ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	}
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
-
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("emitWAFinalExp script result does not match gnark.FinalExponentiation: %v", err)
-	}
-}
-
 // TestTripleMillerLoopFinalExpMatchesOne verifies that the witness
 // generator's tripleMillerLoopWithGradients output, when multiplied by
 // MillerLoop(α, -β) and fed through gnark's FinalExponentiation, equals
@@ -977,15 +742,32 @@ func TestTripleMillerLoopMatchesGnark(t *testing.T) {
 	}
 }
 
-// TestEmitWAFinalExp_D0FThroughScript_IsOne runs emitWAFinalExp on the
-// EXACT f value the D0 test's witness generator produces (after the triple
-// Miller loop × e(α,β)). If D0 is a valid Groth16 instance (and it is —
-// sanityCheckGroth16Instance verifies this via gnark.Pair), then the
-// final exp result must be 1, and the script's IsOne check must pass.
-func TestEmitWAFinalExp_D0FThroughScript_IsOne(t *testing.T) {
-	// Reconstruct the D0 instance exactly as trivialGroth16Instance does.
-	_, _, g1Aff, g2Aff := bn254.Generators()
+// residueStandalone runs codegen.EmitWAResidueCheckStandalone (with the Fp12
+// identity standing in for MillerLoop(α, −β)) on f, c, c⁻¹, s.
+func residueStandalone(f, c, cInv [12]*big.Int, s int64) error {
+	var ops []codegen.StackOp
+	push := func(v *big.Int) {
+		ops = append(ops, codegen.StackOp{Op: "push", Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
+	}
+	for _, flat := range [][12]*big.Int{f, c, cInv} {
+		for i := 0; i < 12; i++ {
+			push(flat[i])
+		}
+	}
+	push(big.NewInt(s))
+	var one [12]*big.Int
+	for i := range one {
+		one[i] = big.NewInt(0)
+	}
+	one[0] = big.NewInt(1)
+	codegen.EmitWAResidueCheckStandalone(func(op codegen.StackOp) { ops = append(ops, op) }, one)
+	return codegen.BuildAndExecuteOps(ops)
+}
 
+// d0Instance is the synthetic Groth16 instance used across this file
+// (trivialGroth16Instance): 13 - 3*2 - 2*3 - 1 = 0.
+func d0Instance() (VerifyingKey, Proof, []*big.Int, Proof) {
+	_, _, g1Aff, g2Aff := bn254.Generators()
 	scaleG1 := func(k int64) bn254.G1Affine {
 		var p bn254.G1Affine
 		p.ScalarMultiplication(&g1Aff, big.NewInt(k))
@@ -996,192 +778,104 @@ func TestEmitWAFinalExp_D0FThroughScript_IsOne(t *testing.T) {
 		p.ScalarMultiplication(&g2Aff, big.NewInt(k))
 		return p
 	}
-
-	alpha := scaleG1(1)
-	beta := scaleG2(1)
-	gamma := scaleG2(2)
-	delta := scaleG2(3)
-	ic0 := scaleG1(1)
-	ic1 := scaleG1(2)
-	publicInput := big.NewInt(1)
-
-	// VK stores β, γ, δ PRE-NEGATED (SP1 convention).
 	vk := NewVerifyingKeyFromPositive(
-		alpha, beta, gamma, delta,
-		[]bn254.G1Affine{ic0, ic1},
+		scaleG1(1), scaleG2(1), scaleG2(2), scaleG2(3),
+		[]bn254.G1Affine{scaleG1(1), scaleG1(2)},
 	)
-	proof := Proof{
-		A: G1AffineToBig(scaleG1(13)),
-		B: G2AffineToBig(beta),
-		C: G1AffineToBig(scaleG1(2)),
-	}
+	proof := Proof{A: G1AffineToBig(scaleG1(13)), B: G2AffineToBig(scaleG2(1)), C: G1AffineToBig(scaleG1(2))}
+	// A = 14·G1 breaks the equation (14 - 6 - 6 - 1 != 0).
+	bad := Proof{A: G1AffineToBig(scaleG1(14)), B: proof.B, C: proof.C}
+	return vk, proof, []*big.Int{big.NewInt(1)}, bad
+}
 
-	w, err := GenerateWitness(vk, proof, []*big.Int{publicInput})
-	if err != nil {
-		t.Fatalf("GenerateWitness: %v", err)
-	}
-
-	// Reconstruct f after the Miller loop × MillerLoop(α,-β) — the value
-	// the verifier script feeds into emitWAFinalExp. GenerateWitness
-	// doesn't expose this directly, but we can reproduce it using the
-	// same steps.
-	alphaNegBetaFp12, _ := PrecomputeAlphaNegBeta(vk.AlphaG1, vk.BetaNegG2)
-
-	// Re-run the Miller loop in pure Go to get fAfterLoop (same pair
-	// order as GenerateWitness: (A,B), (prep,-γ), (C,-δ)).
-	preparedInputs := [2]*big.Int{
-		new(big.Int).Set(G1AffineToBig(scaleG1(3))[0]),
-		new(big.Int).Set(G1AffineToBig(scaleG1(3))[1]),
-	}
-	_, fAfterLoop, err := tripleMillerLoopWithGradients(
-		proof.A, proof.B,
-		preparedInputs, vk.GammaNegG2,
-		proof.C, vk.DeltaNegG2,
-	)
-	if err != nil {
-		t.Fatalf("tripleMillerLoopWithGradients: %v", err)
-	}
-	fAfterAB, err := fp12Mul12(fAfterLoop, alphaNegBetaFp12)
-	if err != nil {
-		t.Fatalf("fp12Mul12: %v", err)
-	}
-
-	// Sanity: the final exp of fAfterAB should be 1 (the synthetic instance is valid).
-	var fE bn254.E12
-	if err := flatFp12ToE12(fAfterAB, &fE); err != nil {
-		t.Fatal(err)
-	}
-	finalGo := bn254.FinalExponentiation(&fE)
-	var one bn254.E12
-	one.SetOne()
-	if !finalGo.Equal(&one) {
-		t.Fatalf("pure-Go FinalExp(fAfterAB) != 1: %s", finalGo.String())
-	}
-
-	// Build the script: push f (12), fInv (12), a (12), b (12), c (12),
-	// run emitWAFinalExp, and OP_VERIFY the IsOne bool.
-	var ops []codegen.StackOp
-	push := func(flat [12]*big.Int) {
-		for i := 0; i < 12; i++ {
-			ops = append(ops, codegen.StackOp{
-				Op:    "push",
-				Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(flat[i])},
-			})
+// TestEmitWAResidueCheck_D0ThroughScript runs the on-chain residue check on
+// the EXACT product the verifier's Miller loop computes for the D0 instance
+// (MillerLoopProduct) with the witness GenerateWitness supplies: accepted.
+// The same instance with proof.A = 14·G1 (a false statement) yields a
+// witness the script rejects.
+func TestEmitWAResidueCheck_D0ThroughScript(t *testing.T) {
+	vk, proof, pubs, bad := d0Instance()
+	for _, tc := range []struct {
+		name   string
+		proof  Proof
+		accept bool
+	}{{"valid", proof, true}, {"false_statement", bad, false}} {
+		f, err := MillerLoopProduct(vk, tc.proof, pubs)
+		if err != nil {
+			t.Fatalf("%s: MillerLoopProduct: %v", tc.name, err)
 		}
-	}
-	push(fAfterAB)
-	push(w.FinalExpFInv)
-	push(w.FinalExpA)
-	push(w.FinalExpB)
-	push(w.FinalExpC)
-
-	codegen.EmitWAFinalExpStandalone(func(op codegen.StackOp) { ops = append(ops, op) })
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
-
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("emitWAFinalExp on D0 f did not produce IsOne==true: %v", err)
+		w, err := GenerateWitness(vk, tc.proof, pubs)
+		if err != nil {
+			t.Fatalf("%s: GenerateWitness: %v", tc.name, err)
+		}
+		if got := residueHolds(t, f, w.ResidueC, w.ResidueCInv, w.ResidueScaling); got != tc.accept {
+			t.Fatalf("%s: pure-Go residue check = %v, want %v", tc.name, got, tc.accept)
+		}
+		err = residueStandalone(f, w.ResidueC, w.ResidueCInv, int64(w.ResidueScaling))
+		if tc.accept && err != nil {
+			t.Fatalf("%s: residue check rejected an honest witness: %v", tc.name, err)
+		}
+		if !tc.accept && err == nil {
+			t.Fatalf("%s: residue check ACCEPTED the witness of a false statement", tc.name)
+		}
 	}
 }
 
-// TestEmitWAFinalExp_ScriptMatchesGnark is the script-level integration test
-// for the witness-assisted final exponentiation codegen. It feeds a real
-// Fp12 input (the one the verifier would see after MillerLoop × e(α,β) on
-// the D0 synthetic instance — that value satisfies FinalExponentiation == 1)
-// through codegen.EmitWAFinalExpStandalone and asserts that the final
-// bn254Fp12IsOne check on top of stack is true.
-//
-// This isolates whether emitWAFinalExp's codegen translation of the
-// hard-part formula is correct, independent of the Miller loop, MSM, or
-// the rest of the verifier pipeline.
-func TestEmitWAFinalExp_ScriptMatchesGnark(t *testing.T) {
-	// Reconstruct the D0 synthetic Groth16 instance to obtain an f value
-	// that satisfies FinalExponentiation(f) == 1.
-	_, _, g1Aff, g2Aff := bn254.Generators()
-
-	scaleG1 := func(k int64) bn254.G1Affine {
-		var p bn254.G1Affine
-		p.ScalarMultiplication(&g1Aff, big.NewInt(k))
-		return p
+// TestEmitWAResidueCheck_GnarkProductsThroughScript feeds products computed by
+// gnark-crypto's Miller loop (different line normalisation from the script's,
+// same final exponentiation) through the on-chain check: accepted for every
+// valid product, rejected for every invalid one under every s.
+func TestEmitWAResidueCheck_GnarkProductsThroughScript(t *testing.T) {
+	valid, invalid := residueTestProducts(t)
+	for name, f := range valid {
+		c, cInv, s, ok, err := computeResidueWitness(f)
+		if err != nil || !ok {
+			t.Fatalf("%s: computeResidueWitness ok=%v err=%v", name, ok, err)
+		}
+		if err := residueStandalone(f, c, cInv, int64(s)); err != nil {
+			t.Fatalf("%s: residue check rejected a valid product: %v", name, err)
+		}
 	}
-	scaleG2 := func(k int64) bn254.G2Affine {
-		var p bn254.G2Affine
-		p.ScalarMultiplication(&g2Aff, big.NewInt(k))
-		return p
+	for name, f := range invalid {
+		c, cInv, _, _, err := computeResidueWitness(f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for s := int64(0); s < 3; s++ {
+			if err := residueStandalone(f, c, cInv, s); err == nil {
+				t.Fatalf("SOUNDNESS: %s: residue check ACCEPTED an invalid product with s=%d", name, s)
+			}
+		}
 	}
+}
 
-	alpha := scaleG1(1)
-	beta := scaleG2(1)
-	gamma := scaleG2(2)
-	delta := scaleG2(3)
-
-	// prepared_inputs = G1 + 1*(2*G1) = 3*G1
-	prepared := scaleG1(3)
-	// C = 2*G1, A = 13*G1, B = G2
-	proofC := scaleG1(2)
-	proofA := scaleG1(13)
-	proofB := beta
-
-	var negA bn254.G1Affine
-	negA.Neg(&proofA)
-
-	// f = e(-A,B) · e(prepared,γ) · e(C,δ) · e(α,β), computed via
-	// MillerLoop × multiplication. We must use MillerLoop (not Pair) because
-	// Pair applies FinalExponentiation internally — we want the pre-final-exp
-	// value that the verifier script feeds into emitWAFinalExp.
-	fGnark, err := bn254.MillerLoop(
-		[]bn254.G1Affine{negA, prepared, proofC, alpha},
-		[]bn254.G2Affine{proofB, gamma, delta, beta},
-	)
+// TestEmitWAResidueCheck_ScalingIndexMustBeInSet: the verifier accepts the
+// scaling factor only as an index s ∈ {0, 1, 2} into {1, ω, ω²}. For a VALID
+// product whose honest index is 2 — e(5·G1, G2)·e(−5·G1, G2) — the honest
+// witness passes and every s outside the set aborts. These are exactly the
+// values a selector without the range check would map to ω² (any s ∉ {0, 1})
+// and so ACCEPT: the range check is what makes s unique.
+func TestEmitWAResidueCheck_ScalingIndexMustBeInSet(t *testing.T) {
+	_, _, g1, g2 := bn254.Generators()
+	var p5, n5 bn254.G1Affine
+	p5.ScalarMultiplication(&g1, big.NewInt(5))
+	n5.Neg(&p5)
+	fE, err := bn254.MillerLoop([]bn254.G1Affine{p5, n5}, []bn254.G2Affine{g2, g2})
 	if err != nil {
 		t.Fatalf("MillerLoop: %v", err)
 	}
-
-	// Sanity: FinalExponentiation(f) should equal 1 (since the instance is valid).
-	var one bn254.E12
-	one.SetOne()
-	gnarkFinal := bn254.FinalExponentiation(&fGnark)
-	if !gnarkFinal.Equal(&one) {
-		t.Fatalf("synthetic instance doesn't satisfy Groth16 check: gnark final = %s", gnarkFinal.String())
+	f := e12ToFlatFp12(&fE)
+	c, cInv, s, ok, err := computeResidueWitness(f)
+	if err != nil || !ok || s != 2 {
+		t.Fatalf("premise: want a valid product with honest s = 2, got s=%d ok=%v err=%v", s, ok, err)
 	}
-
-	// Compute witnesses for this f.
-	fFlat := e12ToFlatFp12(&fGnark)
-	fInvFlat, aFlat, bFlat, cFlat, err := computeFinalExpWitnesses(fFlat)
-	if err != nil {
-		t.Fatalf("computeFinalExpWitnesses: %v", err)
+	if err := residueStandalone(f, c, cInv, 2); err != nil {
+		t.Fatalf("honest witness (s = 2) rejected: %v", err)
 	}
-
-	// Build the script:
-	// 1. Push f (12 Fp), fInv (12), a (12), b (12), c (12) = 60 pushes.
-	// 2. Emit EmitWAFinalExpStandalone, which runs emitWAFinalExp and leaves
-	//    the IsOne boolean on top.
-	// 3. OP_VERIFY the boolean. If it's false, the script aborts.
-	// 4. Push OP_1 as the final stack item so the interpreter returns success.
-	var ops []codegen.StackOp
-	pushFp12 := func(flat [12]*big.Int) {
-		for i := 0; i < 12; i++ {
-			ops = append(ops, codegen.StackOp{
-				Op:    "push",
-				Value: codegen.PushValue{Kind: "bigint", BigInt: new(big.Int).Set(flat[i])},
-			})
+	for _, bad := range []int64{3, 4, 5, 27, -1, -2} {
+		if err := residueStandalone(f, c, cInv, bad); err == nil {
+			t.Fatalf("scaling index s = %d outside {0, 1, 2} was ACCEPTED", bad)
 		}
-	}
-	pushFp12(fFlat)
-	pushFp12(fInvFlat)
-	pushFp12(aFlat)
-	pushFp12(bFlat)
-	pushFp12(cFlat)
-
-	codegen.EmitWAFinalExpStandalone(func(op codegen.StackOp) {
-		ops = append(ops, op)
-	})
-
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	ops = append(ops, codegen.StackOp{Op: "opcode", Code: "OP_1"})
-
-	if err := codegen.BuildAndExecuteOps(ops); err != nil {
-		t.Fatalf("emitWAFinalExp script did not produce IsOne==true on a valid f: %v", err)
 	}
 }
 
