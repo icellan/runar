@@ -13,9 +13,9 @@ package compiler
 //   - at least one slot pinned with pinnedPublicInputs in the vk.json, or
 //   - a TOP-LEVEL statement of that method of the exact form
 //     assert(groth16PublicInput(<0..4 literal>) == <fixed>) (either operand
-//     order), where <fixed> is built only from literals, declared contract
+//     order), where <fixed> is built only from literals, readonly contract
 //     properties, operators and built-in calls over those: no method
-//     parameter, no local, no other groth16PublicInput.
+//     parameter, no local, no mutable property, no other groth16PublicInput.
 // `!=`, `<`, a check inside an if / loop, a conjunct of && and a private
 // helper do not count (fail closed).
 //
@@ -281,6 +281,111 @@ func TestR2MSMUnbound_IntegrationContractsCompile(t *testing.T) {
 		_, err := CompileFromSource(contract("RollupGroth16WA"), CompileOptions{Groth16WAVKey: vkPath})
 		if err == nil || !strings.Contains(err.Error(), r2MSMUnboundMsg) || !strings.Contains(err.Error(), "'advanceState'") {
 			t.Fatalf("RollupGroth16WA with an unpinned vk.json must be refused as unbound; got: %v", err)
+		}
+	})
+}
+
+// r2MSMWriteStateful is a stateful contract with one readonly and one
+// mutable property, for the mutable-property shapes below.
+func r2MSMWriteStateful(t *testing.T, name, body string) string {
+	t.Helper()
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type ` + name + ` struct {
+	runar.StatefulSmartContract
+
+	Pinned  runar.Bigint ` + "`" + `runar:"readonly"` + "`" + `
+	Counter runar.Bigint
+}
+
+func (c *` + name + `) Advance(x runar.Bigint) {
+	runar.AssertGroth16WitnessAssistedWithMSM()
+` + body + `
+}
+`
+	p := filepath.Join(t.TempDir(), name+".runar.go")
+	if err := os.WriteFile(p, []byte(source), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	return p
+}
+
+// TestR2MSMUnbound_MutablePropertyIsNotFixed: a mutable property is not a
+// fixed value. `c.Counter = x` followed by an assert against c.Counter lets
+// the spender pick x = pub_0, so it binds nothing; only readonly properties
+// count (fail closed: a mutable state read is refused even unassigned).
+func TestR2MSMUnbound_MutablePropertyIsNotFixed(t *testing.T) {
+	vkPath := sp1VKPath(t)
+	requireAdvance := func(t *testing.T, err error, what string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), r2MSMUnboundMsg) || !strings.Contains(err.Error(), "'advance'") {
+			t.Fatalf("%s: want the unbound-statement diagnostic naming 'advance'; got: %v", what, err)
+		}
+	}
+	bodies := map[string]string{
+		"assigned_from_param": "\tc.Counter = x\n\trunar.Assert(runar.Groth16PublicInput(0) == c.Counter)",
+		"mutable_state_read":  "\trunar.Assert(runar.Groth16PublicInput(0) == c.Counter)\n\tc.Counter = x",
+	}
+	for name, body := range bodies {
+		name, body := name, body
+		t.Run("source/"+name, func(t *testing.T) {
+			_, err := CompileFromSource(r2MSMWriteStateful(t, "Mut", body), CompileOptions{Groth16WAVKey: vkPath})
+			requireAdvance(t, err, "--source "+name)
+		})
+	}
+	t.Run("readonly_control_compiles", func(t *testing.T) {
+		src := r2MSMWriteStateful(t, "MutCtl", "\trunar.Assert(runar.Groth16PublicInput(0) == c.Pinned)\n\tc.Counter = x")
+		if _, err := CompileFromSource(src, CompileOptions{Groth16WAVKey: vkPath}); err != nil {
+			t.Fatalf("readonly-bound stateful method must compile: %v", err)
+		}
+	})
+	// --ir: lower the readonly control, then retarget its load_prop to the
+	// mutable property (the frontend never sees this program).
+	t.Run("ir/load_prop_retargeted_to_mutable", func(t *testing.T) {
+		prog, err := CompileSourceToIR(r2MSMWriteStateful(t, "MutIR", "\trunar.Assert(runar.Groth16PublicInput(0) == c.Pinned)\n\tc.Counter = x"))
+		if err != nil {
+			t.Fatalf("CompileSourceToIR: %v", err)
+		}
+		n := 0
+		for mi := range prog.Methods {
+			for bi, b := range prog.Methods[mi].Body {
+				if b.Value.Kind == "load_prop" && b.Value.Name == "pinned" {
+					prog.Methods[mi].Body[bi].Value.Name = "counter"
+					n++
+				}
+			}
+		}
+		if n == 0 {
+			t.Fatal("premise: no load_prop pinned in the lowered program")
+		}
+		_, err = CompileFromProgram(prog, CompileOptions{Groth16WAVKey: vkPath})
+		requireAdvance(t, err, "--ir assert against a mutable property")
+	})
+	// --ir: a readonly property the IR writes. The IR validator already
+	// refuses the write itself, before the binding rule is consulted.
+	t.Run("ir/readonly_property_written", func(t *testing.T) {
+		prog, err := CompileSourceToIR(r2MSMWriteStateful(t, "MutIRW", "\trunar.Assert(runar.Groth16PublicInput(0) == c.Pinned)\n\tc.Counter = x"))
+		if err != nil {
+			t.Fatalf("CompileSourceToIR: %v", err)
+		}
+		n := 0
+		for mi := range prog.Methods {
+			for bi, b := range prog.Methods[mi].Body {
+				if b.Value.Kind == "update_prop" && b.Value.Name == "counter" {
+					prog.Methods[mi].Body[bi].Value.Name = "pinned"
+					n++
+				}
+			}
+		}
+		if n == 0 {
+			t.Fatal("premise: no update_prop counter in the lowered program")
+		}
+		_, err = CompileFromProgram(prog, CompileOptions{Groth16WAVKey: vkPath})
+		if err == nil || !strings.Contains(err.Error(), "cannot assign to readonly property 'pinned'") {
+			t.Fatalf("--ir write to the readonly binding property must be refused; got: %v", err)
 		}
 	})
 }

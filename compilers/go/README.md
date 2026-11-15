@@ -260,8 +260,8 @@ A method that calls `AssertGroth16WitnessAssistedWithMSM` must bind the
 statement (R2-MSM-UNBOUND), or the compile fails: either the vk.json pins at
 least one slot, or the method has a top-level
 `assert(groth16PublicInput(i) == <value>)` whose `<value>` is built from
-literals and contract properties only (no method parameter, local or other
-`groth16PublicInput`). `!=`, `<`, a conjunct of `&&`, a check inside an `if`
+literals and readonly contract properties only (no method parameter, local,
+mutable property or other `groth16PublicInput`). `!=`, `<`, a conjunct of `&&`, a check inside an `if`
 or loop and a check in a private helper do not count. The typecheck enforces
 this for `--source` (and `runar.CompileCheck`, which has no vk.json, so a
 method bound only by pins fails there), and stack lowering enforces it again

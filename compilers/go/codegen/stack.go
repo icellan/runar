@@ -6180,15 +6180,15 @@ func groth16WAUnboundStatementMessage(method string) string {
 	return fmt.Sprintf("method '%s' calls assertGroth16WitnessAssistedWithMSM() but does not bind the proved statement: "+
 		"the five public inputs are the spender's choice, so the verifier would accept an honest proof of any statement. "+
 		"Pin at least one slot with pinnedPublicInputs in the --groth16-wa-vk vk.json, or add a top-level "+
-		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and contract "+
-		"properties only (no method parameter, local or other groth16PublicInput)", method)
+		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and readonly "+
+		"contract properties only (no method parameter, local, mutable property or other groth16PublicInput)", method)
 }
 
 // groth16WAStatementBoundInBody is the ANF form of the R2-MSM-UNBOUND body
 // rule (frontend/groth16_wa_binding.go): some TOP-LEVEL binding is an assert
 // whose value is a bin_op === / == with one operand a groth16PublicInput call
 // on a load_const in [0, 4] and the other fixed. Fixed: load_const (an
-// @ref: alias is followed), load_prop of a declared property, unary_op /
+// @ref: alias is followed), load_prop of a readonly property, unary_op /
 // bin_op over fixed refs, and a call (not groth16PublicInput) with at least
 // one argument, all fixed. A ref that is not an earlier top-level binding of
 // this method (a parameter named directly, a branch-local) is not fixed.
@@ -6196,7 +6196,9 @@ func groth16WAUnboundStatementMessage(method string) string {
 func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProperty) bool {
 	props := make(map[string]bool, len(properties))
 	for _, p := range properties {
-		props[p.Name] = true
+		if p.Readonly { // a mutable property can be assigned from a parameter
+			props[p.Name] = true
+		}
 	}
 	defs := make(map[string]ir.ANFValue, len(body))
 	var fixed func(ref string, depth int) bool

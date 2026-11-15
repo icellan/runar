@@ -23,8 +23,9 @@ var bigFour = big.NewInt(4)
 //     assert(groth16PublicInput(K) == F)   or   assert(F == groth16PublicInput(K))
 //
 //     with K an integer literal in [0, 4] and F a fixed expression: integer,
-//     boolean and byte-string literals, reads of declared contract
-//     properties (this.x), unary / binary operators over fixed operands and
+//     boolean and byte-string literals, reads of READONLY contract
+//     properties (this.x; a mutable property can be assigned from a
+//     parameter first), unary / binary operators over fixed operands and
 //     built-in function calls with at least one argument, all fixed. A method
 //     parameter, a local, another groth16PublicInput, `this.method()` and
 //     anything else make F not fixed.
@@ -44,8 +45,8 @@ func Groth16WAUnboundStatementMessage(method string) string {
 	return fmt.Sprintf("method '%s' calls assertGroth16WitnessAssistedWithMSM() but does not bind the proved statement: "+
 		"the five public inputs are the spender's choice, so the verifier would accept an honest proof of any statement. "+
 		"Pin at least one slot with pinnedPublicInputs in the --groth16-wa-vk vk.json, or add a top-level "+
-		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and contract "+
-		"properties only (no method parameter, local or other groth16PublicInput)", method)
+		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and readonly "+
+		"contract properties only (no method parameter, local, mutable property or other groth16PublicInput)", method)
 }
 
 // checkGroth16WAStatementBound returns one diagnostic per method that calls
@@ -57,7 +58,12 @@ func checkGroth16WAStatementBound(contract *ContractNode, pinned bool) []Diagnos
 	}
 	props := make(map[string]bool, len(contract.Properties))
 	for _, p := range contract.Properties {
-		props[p.Name] = true
+		// Only readonly properties are fixed: a mutable one can be assigned
+		// from a parameter before the assert (fail closed: even an
+		// unassigned state read does not count).
+		if p.Readonly {
+			props[p.Name] = true
+		}
 	}
 	var out []Diagnostic
 	for _, m := range contract.Methods {
