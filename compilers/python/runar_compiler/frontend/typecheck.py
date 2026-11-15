@@ -109,12 +109,28 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
       - a ternary checks it only if both arms do;
       - the right operand of ``&&`` / ``||`` checks nothing (short-circuit);
       - a ``for`` loop body checks nothing (the bound may be zero).
+    A name that is assigned anywhere in the method body (the parameter
+    itself or a local) never stands for a parameter: after ``a = other`` the
+    name no longer holds the parameter's value on every path.
     """
     privates = {m.name: m for m in contract.methods if m.visibility != "public"}
     memo: dict[str, set[int]] = {}
 
+    reassigned: set[str] = set()
+
+    def collect_reassigned(stmts: list[Statement]) -> set[str]:
+        out: set[str] = set()
+        for st in stmts or []:
+            if isinstance(st, AssignmentStmt) and isinstance(st.target, Identifier):
+                out.add(st.target.name)
+            elif isinstance(st, IfStmt):
+                out |= collect_reassigned(st.then) | collect_reassigned(st.else_ or [])
+            elif isinstance(st, ForStmt):
+                out |= collect_reassigned(st.body)
+        return out
+
     def resolve(expr: Expression, aliases: dict[str, str]) -> str | None:
-        if isinstance(expr, Identifier):
+        if isinstance(expr, Identifier) and expr.name not in reassigned:
             return aliases.get(expr.name)
         return None
 
@@ -130,8 +146,11 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
             return memo[m.name]
         if m.name in stack:
             return set()
+        nonlocal reassigned
         aliases = {p.name: p.name for p in m.params if _is_preimage_type(p.type)}
+        outer, reassigned = reassigned, collect_reassigned(m.body)
         done = walk(m.body, set(), dict(aliases), stack | {m.name})
+        reassigned = outer
         result = {i for i, p in enumerate(m.params) if p.name in aliases and p.name in done}
         memo[m.name] = result
         return result
@@ -210,6 +229,7 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
         tracked = [p.name for p in m.params if _is_preimage_type(p.type)]
         if not tracked:
             continue
+        reassigned = collect_reassigned(m.body)
         done = walk(m.body, set(), {n: n for n in tracked}, frozenset({m.name}))
         for name in tracked:
             if name not in done:

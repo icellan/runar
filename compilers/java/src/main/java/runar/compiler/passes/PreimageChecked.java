@@ -47,7 +47,9 @@ import runar.compiler.ir.ast.Visibility;
  * parameter on every path) at a point every execution of the list reaches:
  * an {@code if} checks it only if both arms do (a missing else checks
  * nothing), a ternary only if both arms do; the right operand of
- * {@code &&} / {@code ||} and a {@code for} loop body check nothing.
+ * {@code &&} / {@code ||} and a {@code for} loop body check nothing. A
+ * name assigned anywhere in the method body (the parameter itself or a
+ * local) never stands for a parameter.
  */
 final class PreimageChecked {
 
@@ -61,6 +63,19 @@ final class PreimageChecked {
 
     private final Map<String, MethodNode> privates = new HashMap<>();
     private final Map<String, Set<Integer>> memo = new HashMap<>();
+    private Set<String> reassigned = new HashSet<>();
+
+    private static Set<String> collectReassigned(List<Statement> stmts, Set<String> out) {
+        if (stmts == null) return out;
+        for (Statement s : stmts) {
+            if (s instanceof AssignmentStatement a && a.target() instanceof Identifier id) out.add(id.name());
+            else if (s instanceof IfStatement i) {
+                collectReassigned(i.thenBody(), out);
+                collectReassigned(i.elseBody(), out);
+            } else if (s instanceof runar.compiler.ir.ast.ForStatement f) collectReassigned(f.body(), out);
+        }
+        return out;
+    }
 
     private PreimageChecked(ContractNode contract) {
         for (MethodNode m : contract.methods()) {
@@ -82,6 +97,7 @@ final class PreimageChecked {
                 }
             }
             if (tracked.isEmpty()) continue;
+            pc.reassigned = collectReassigned(m.body(), new HashSet<>());
             Set<String> done = pc.walk(m.body(), new HashSet<>(), aliases, Set.of(m.name()));
             for (String name : tracked) {
                 if (!done.contains(name)) out.add(new Finding(message(m.name(), name), m.sourceLocation()));
@@ -94,8 +110,8 @@ final class PreimageChecked {
         return t instanceof PrimitiveType pt && pt.name() == PrimitiveTypeName.SIG_HASH_PREIMAGE;
     }
 
-    private static String resolve(Expression e, Map<String, String> aliases) {
-        return e instanceof Identifier id ? aliases.get(id.name()) : null;
+    private String resolve(Expression e, Map<String, String> aliases) {
+        return e instanceof Identifier id && !reassigned.contains(id.name()) ? aliases.get(id.name()) : null;
     }
 
     private MethodNode privateTarget(Expression callee) {
@@ -115,7 +131,10 @@ final class PreimageChecked {
         }
         Set<String> inner = new HashSet<>(stack);
         inner.add(m.name());
+        Set<String> outer = reassigned;
+        reassigned = collectReassigned(m.body(), new HashSet<>());
         Set<String> done = walk(m.body(), new HashSet<>(), new HashMap<>(aliases), inner);
+        reassigned = outer;
         Set<Integer> result = new HashSet<>();
         for (int i = 0; i < m.params().size(); i++) {
             String n = m.params().get(i).name();

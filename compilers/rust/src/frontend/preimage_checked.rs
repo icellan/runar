@@ -14,6 +14,10 @@
 //!   - a ternary checks it only if both arms do;
 //!   - the right operand of `&&` / `||` checks nothing (short-circuit);
 //!   - a `for` loop body checks nothing (the bound may be zero).
+//!
+//! A name assigned anywhere in the method body (the parameter itself or a
+//! local) never stands for a parameter: after `a = other` it no longer holds
+//! the parameter's value on every path.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,12 +42,31 @@ fn is_preimage(t: &TypeNode) -> bool {
 struct Checker<'a> {
     privates: HashMap<&'a str, &'a MethodNode>,
     memo: HashMap<String, HashSet<usize>>,
+    reassigned: HashSet<String>,
+}
+
+fn collect_reassigned(stmts: &[Statement], out: &mut HashSet<String>) {
+    for st in stmts {
+        match st {
+            Statement::Assignment { target: Expression::Identifier { name, .. }, .. } => {
+                out.insert(name.clone());
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                collect_reassigned(then_branch, out);
+                if let Some(e) = else_branch {
+                    collect_reassigned(e, out);
+                }
+            }
+            Statement::ForStatement { body, .. } => collect_reassigned(body, out),
+            _ => {}
+        }
+    }
 }
 
 impl<'a> Checker<'a> {
-    fn resolve(e: &Expression, aliases: &Aliases) -> Option<String> {
+    fn resolve(&self, e: &Expression, aliases: &Aliases) -> Option<String> {
         match e {
-            Expression::Identifier { name, .. } => aliases.get(name).cloned(),
+            Expression::Identifier { name, .. } if !self.reassigned.contains(name) => aliases.get(name).cloned(),
             _ => None,
         }
     }
@@ -73,7 +96,11 @@ impl<'a> Checker<'a> {
         }
         let mut inner = stack.clone();
         inner.insert(m.name.clone());
+        let mut fresh = HashSet::new();
+        collect_reassigned(&m.body, &mut fresh);
+        let outer = std::mem::replace(&mut self.reassigned, fresh);
         let done = self.walk(&m.body, &Origins::new(), &mut aliases.clone(), &inner);
+        self.reassigned = outer;
         let result: HashSet<usize> = m
             .params
             .iter()
@@ -97,7 +124,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Expression::Identifier { name, .. } = callee.as_ref() {
                     if name == "checkPreimage" {
-                        if let Some(o) = args.first().and_then(|a| Self::resolve(a, aliases)) {
+                        if let Some(o) = args.first().and_then(|a| self.resolve(a, aliases)) {
                             out.insert(o);
                         }
                         return out;
@@ -105,7 +132,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(target) = self.private_target(callee) {
                     for i in self.must_params(target, stack) {
-                        if let Some(o) = args.get(i).and_then(|a| Self::resolve(a, aliases)) {
+                        if let Some(o) = args.get(i).and_then(|a| self.resolve(a, aliases)) {
                             out.insert(o);
                         }
                     }
@@ -156,7 +183,7 @@ impl<'a> Checker<'a> {
             match st {
                 Statement::VariableDecl { name, init, .. } => {
                     done.extend(self.expr_must(init, aliases, stack));
-                    match Self::resolve(init, aliases) {
+                    match self.resolve(init, aliases) {
                         Some(o) => {
                             aliases.insert(name.clone(), o);
                         }
@@ -186,7 +213,7 @@ impl<'a> Checker<'a> {
 }
 
 pub fn check_preimage_checked_on_every_path(contract: &ContractNode) -> Vec<Diagnostic> {
-    let mut checker = Checker { privates: HashMap::new(), memo: HashMap::new() };
+    let mut checker = Checker { privates: HashMap::new(), memo: HashMap::new(), reassigned: HashSet::new() };
     for m in &contract.methods {
         if m.visibility != Visibility::Public {
             checker.privates.insert(m.name.as_str(), m);
@@ -205,6 +232,9 @@ pub fn check_preimage_checked_on_every_path(contract: &ContractNode) -> Vec<Diag
         let mut aliases: Aliases = tracked.iter().map(|n| (n.to_string(), n.to_string())).collect();
         let mut stack = HashSet::new();
         stack.insert(m.name.clone());
+        let mut fresh = HashSet::new();
+        collect_reassigned(&m.body, &mut fresh);
+        checker.reassigned = fresh;
         let done = checker.walk(&m.body, &Origins::new(), &mut aliases, &stack);
         for name in tracked {
             if !done.contains(name) {

@@ -24,8 +24,10 @@ import { isCiEnv } from '../env.js';
  *   at compile time (the lowerer backstop itself is pinned by each tier's unit
  *   tests, since no CLI reaches the lowerer without typecheck). Corpus:
  *   intent-shape-cases.json.
- * - GK-GAP-005/006: an upper-case `.RUNAR.TS` / `.RUNAR.PY` file compiles to
- *   the same hex as its lower-case twin, and a valid TypeScript contract saved
+ * - GK-GAP-005/006: an upper-case `.RUNAR.{TS,PY,ZIG,RS}` file (including a
+ *   TS contract carrying a `@sighash` comment directive) compiles to the same
+ *   hex as its lower-case twin, a comment directive on an upper-case
+ *   `.RUNAR.SOL` file is still refused, and a valid TypeScript contract saved
  *   as `.runar.xyz` is refused with the shared unsupported-extension
  *   diagnostic. Each file gets its own directory (macOS is case-insensitive).
  *
@@ -133,10 +135,20 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
   describe('GK-GAP-005/006: file-extension dispatch', () => {
     const ts = readFileSync(join(REPO, 'examples/ts/p2pkh/P2PKH.runar.ts'), 'utf8');
     const py = readFileSync(join(REPO, 'examples/python/p2pkh/P2PKH.runar.py'), 'utf8');
+    const read = (p: string): string => readFileSync(join(REPO, p), 'utf8');
     const pairs: Array<[string, string, string]> = [
       [ts, 'P2PKH.runar.ts', 'P2PKH.RUNAR.TS'],
       [py, 'P2PKH.runar.py', 'P2PKH.RUNAR.PY'],
+      // .runar.zig selects the Zig surface's relaxed validator (no super())
+      // and, like .runar.rs, the immutable-local check: the upper-case name
+      // must reach the same surface-specific passes.
+      [read('examples/zig/p2pkh/P2PKH.runar.zig'), 'P2PKH.runar.zig', 'P2PKH.RUNAR.ZIG'],
+      [read('examples/rust/p2pkh/P2PKH.runar.rs'), 'P2PKH.runar.rs', 'P2PKH.RUNAR.RS'],
+      // The TS surface honours the @sighash comment directive: the upper-case
+      // name must not lose it.
+      [read('conformance/ir-roundtrip/SighashSingle.runar.ts'), 'SighashSingle.runar.ts', 'SighashSingle.RUNAR.TS'],
     ];
+    const sol = `// @sighash SINGLE|FORKID\n${read('examples/sol/p2pkh/P2PKH.runar.sol')}`;
     for (const tier of TIERS) {
       for (const [src, lower, upper] of pairs) {
         it(`${tier.id}: ${upper} compiles to the same hex as ${lower}`, () => {
@@ -144,6 +156,11 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
           expect(compileHex(tier, writeFile(upper, src))).toBe(want);
         });
       }
+      it(`${tier.id}: a comment @sighash directive on an upper-case .RUNAR.SOL is still refused`, () => {
+        const { status, out, diag } = run(tier, writeFile('P2PKH.RUNAR.SOL', sol));
+        expect(status, `${tier.id} accepted the directive (emitted "${out}")`).not.toBe(0);
+        expect(diag).toContain('@sighash directive (issue #123) is not supported as a comment by the Solidity surface parser');
+      });
       it(`${tier.id}: a valid TypeScript contract named .runar.xyz is refused`, () => {
         const { status, out, diag } = run(tier, writeFile('P2PKH.runar.xyz', ts));
         expect(status, `${tier.id} accepted .runar.xyz (emitted "${out}")`).not.toBe(0);

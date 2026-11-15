@@ -173,13 +173,13 @@ fn checkDuplicateMethods(
     contract: ContractNode,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
-    for (contract.methods, 0..) |m, i| {
-        for (contract.methods[0..i]) |prev| {
-            if (!std.mem.eql(u8, prev.name, m.name)) continue;
-            const msg = try std.fmt.allocPrint(allocator, "method '{s}' is already declared in this contract and cannot be re-declared", .{m.name});
-            try errors.append(allocator, .{ .message = msg, .location = m.source_loc, .severity = .@"error", .owned_message = true });
-            break;
-        }
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (contract.methods) |m| {
+        const gop = try seen.getOrPut(allocator, m.name);
+        if (!gop.found_existing) continue;
+        const msg = try std.fmt.allocPrint(allocator, "method '{s}' is already declared in this contract and cannot be re-declared", .{m.name});
+        try errors.append(allocator, .{ .message = msg, .location = m.source_loc, .severity = .@"error", .owned_message = true });
     }
 }
 

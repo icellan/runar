@@ -38,6 +38,12 @@
       "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
     },
     {
+      "name": "alias-reassigned",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcAliasReassigned extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean, other: SigHashPreimage) {\n    let a: SigHashPreimage = txPreimage;\n    a = other;\n    assert(checkPreimage(a));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
       "name": "py-extract-only",
       "file": "Pc.runar.py",
       "src": "from runar import SmartContract, SigHashPreimage, public, assert_, extract_amount\n\nclass PcPyExtractOnly(SmartContract):\n    min_amount: int\n\n    def __init__(self, min_amount: int):\n        super().__init__(min_amount)\n        self.min_amount = min_amount\n\n    @public\n    def spend(self, tx_preimage: SigHashPreimage, flag: bool):\n        assert_(extract_amount(tx_preimage) >= self.min_amount)\n",

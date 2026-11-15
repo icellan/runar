@@ -88,6 +88,9 @@ const isPreimageType = (t: TypeNode): boolean =>
  *   - a ternary checks it only if both arms do;
  *   - the right operand of `&&` / `||` checks nothing (short-circuit);
  *   - a `for` loop body checks nothing (the bound may be zero).
+ * A name assigned anywhere in the method body (the parameter itself or a
+ * local) never stands for a parameter: after `a = other` it no longer holds
+ * the parameter's value on every path.
  */
 function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagnostic[] {
   type Aliases = Map<string, string>;
@@ -95,8 +98,19 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
   for (const m of contract.methods) if (m.visibility !== 'public') privates.set(m.name, m);
   const memo = new Map<string, Set<number>>();
 
+  let reassigned = new Set<string>();
+  const collectReassigned = (stmts: readonly Statement[], out: Set<string> = new Set()): Set<string> => {
+    for (const st of stmts) {
+      if (st.kind === 'assignment' && st.target.kind === 'identifier') out.add(st.target.name);
+      else if (st.kind === 'if_statement') {
+        collectReassigned(st.then, out);
+        collectReassigned(st.else ?? [], out);
+      } else if (st.kind === 'for_statement') collectReassigned(st.body, out);
+    }
+    return out;
+  };
   const resolve = (e: Expression, aliases: Aliases): string | undefined =>
-    e.kind === 'identifier' ? aliases.get(e.name) : undefined;
+    e.kind === 'identifier' && !reassigned.has(e.name) ? aliases.get(e.name) : undefined;
   const union = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a, ...b]);
   const intersect = (a: Set<string>, b: Set<string>): Set<string> => new Set([...a].filter((x) => b.has(x)));
 
@@ -112,7 +126,10 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     if (stack.has(m.name)) return new Set();
     const aliases: Aliases = new Map();
     for (const p of m.params) if (isPreimageType(p.type)) aliases.set(p.name, p.name);
+    const outer = reassigned;
+    reassigned = collectReassigned(m.body);
     const done = walk(m.body, new Set(), new Map(aliases), new Set([...stack, m.name]));
+    reassigned = outer;
     const result = new Set<number>();
     m.params.forEach((p, i) => {
       if (aliases.has(p.name) && done.has(p.name)) result.add(i);
@@ -204,6 +221,7 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     if (m.visibility !== 'public') continue;
     const tracked = m.params.filter((p) => isPreimageType(p.type)).map((p) => p.name);
     if (tracked.length === 0) continue;
+    reassigned = collectReassigned(m.body);
     const done = walk(m.body, new Set(), new Map(tracked.map((n) => [n, n])), new Set([m.name]));
     for (const name of tracked) {
       if (!done.has(name)) {

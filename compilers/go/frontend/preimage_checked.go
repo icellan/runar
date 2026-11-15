@@ -18,6 +18,10 @@ import "fmt"
 //   - a ternary checks it only if both arms do;
 //   - the right operand of && / || checks nothing (short-circuit);
 //   - a for-loop body checks nothing (the bound may be zero).
+//
+// A name assigned anywhere in the method body (the parameter itself or a
+// local) never stands for a parameter: after `a = other` it no longer holds
+// the parameter's value on every path.
 
 // PreimageNotCheckedMessage is the diagnostic every tier shares.
 func PreimageNotCheckedMessage(method, param string) string {
@@ -58,8 +62,26 @@ func isPreimageType(t TypeNode) bool {
 }
 
 type preimageChecker struct {
-	privates map[string]MethodNode
-	memo     map[string]map[int]bool
+	privates   map[string]MethodNode
+	memo       map[string]map[int]bool
+	reassigned map[string]bool
+}
+
+func collectReassigned(stmts []Statement, out map[string]bool) map[string]bool {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case AssignmentStmt:
+			if id, ok := st.Target.(Identifier); ok {
+				out[id.Name] = true
+			}
+		case IfStmt:
+			collectReassigned(st.Then, out)
+			collectReassigned(st.Else, out)
+		case ForStmt:
+			collectReassigned(st.Body, out)
+		}
+	}
+	return out
 }
 
 func copyAliases(a map[string]string) map[string]string {
@@ -71,11 +93,11 @@ func copyAliases(a map[string]string) map[string]string {
 }
 
 func (pc *preimageChecker) resolve(e Expression, aliases map[string]string) (string, bool) {
-	if id, ok := e.(Identifier); ok {
+	if id, ok := e.(Identifier); ok && !pc.reassigned[id.Name] {
 		o, found := aliases[id.Name]
 		return o, found
 	}
-	if id, ok := e.(*Identifier); ok && id != nil {
+	if id, ok := e.(*Identifier); ok && id != nil && !pc.reassigned[id.Name] {
 		o, found := aliases[id.Name]
 		return o, found
 	}
@@ -115,7 +137,10 @@ func (pc *preimageChecker) mustParams(m MethodNode, stack map[string]bool) map[i
 	for k := range stack {
 		inner[k] = true
 	}
+	outer := pc.reassigned
+	pc.reassigned = collectReassigned(m.Body, map[string]bool{})
 	done := pc.walk(m.Body, originSet{}, copyAliases(aliases), inner)
+	pc.reassigned = outer
 	result := map[int]bool{}
 	for i, p := range m.Params {
 		if _, tracked := aliases[p.Name]; tracked && done[p.Name] {
@@ -228,6 +253,7 @@ func checkPreimageCheckedOnEveryPath(contract *ContractNode) []Diagnostic {
 		if len(tracked) == 0 {
 			continue
 		}
+		pc.reassigned = collectReassigned(m.Body, map[string]bool{})
 		done := pc.walk(m.Body, originSet{}, aliases, map[string]bool{m.Name: true})
 		for _, name := range tracked {
 			if !done[name] {

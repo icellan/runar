@@ -109,7 +109,10 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
 /// only if both arms do (a missing else checks nothing), a ternary only if both
 /// arms do; the right operand of `&&` / `||` and a `for` loop body check
 /// nothing. Origins are parameter indices of the method being walked (a bit
-/// each; parameters past the 64th are not tracked).
+/// each; parameters past the 64th are not tracked). A name assigned anywhere
+/// in the method body (the parameter itself or a local) never stands for a
+/// parameter: after `a = other` it no longer holds the parameter's value on
+/// every path.
 pub const PREIMAGE_NOT_CHECKED_FMT = "public method '{s}' must pass its SigHashPreimage parameter '{s}' to checkPreimage() on every path";
 
 const PreimageCheck = struct {
@@ -122,11 +125,40 @@ const PreimageCheck = struct {
     base: usize = 0,
     memo: std.StringHashMapUnmanaged(u64) = .empty,
     in_progress: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Names assigned anywhere in the body being walked.
+    reassigned: std.StringHashMapUnmanaged(void) = .empty,
 
     fn deinit(self: *PreimageCheck) void {
         self.aliases.deinit(self.allocator);
         self.memo.deinit(self.allocator);
         self.in_progress.deinit(self.allocator);
+        self.reassigned.deinit(self.allocator);
+    }
+
+    fn collectReassigned(a: Allocator, stmts: []const Statement, out: *std.StringHashMapUnmanaged(void)) Allocator.Error!void {
+        for (stmts) |st| switch (st) {
+            .assign => |asg| if (!asg.target_is_property and asg.index_target == null) try out.put(a, asg.target, {}),
+            .if_stmt => |ifs| {
+                try collectReassigned(a, ifs.then_body, out);
+                if (ifs.else_body) |eb| try collectReassigned(a, eb, out);
+            },
+            .for_stmt => |f| try collectReassigned(a, f.body, out),
+            else => {},
+        };
+    }
+
+    /// Swap in the reassigned set of `body`; returns the previous set.
+    fn enterBody(self: *PreimageCheck, body: []const Statement) Allocator.Error!std.StringHashMapUnmanaged(void) {
+        var fresh: std.StringHashMapUnmanaged(void) = .empty;
+        try collectReassigned(self.allocator, body, &fresh);
+        const outer = self.reassigned;
+        self.reassigned = fresh;
+        return outer;
+    }
+
+    fn leaveBody(self: *PreimageCheck, outer: std.StringHashMapUnmanaged(void)) void {
+        self.reassigned.deinit(self.allocator);
+        self.reassigned = outer;
     }
 
     fn resolve(self: *PreimageCheck, e: Expression) ?u6 {
@@ -134,6 +166,7 @@ const PreimageCheck = struct {
             .identifier => |n| n,
             else => return null,
         };
+        if (self.reassigned.contains(name)) return null;
         var i = self.aliases.items.len;
         while (i > self.base) {
             i -= 1;
@@ -174,6 +207,8 @@ const PreimageCheck = struct {
             self.base = saved_base;
         }
         try self.pushParams(m);
+        const outer = try self.enterBody(m.body);
+        defer self.leaveBody(outer);
         const done = try self.walk(m.body, 0);
         try self.memo.put(self.allocator, m.name, done);
         return done;
@@ -269,6 +304,8 @@ fn checkPreimageCheckedOnEveryPath(checker: *TypeChecker, allocator: Allocator, 
         pc.aliases.clearRetainingCapacity();
         pc.base = 0;
         try pc.pushParams(m);
+        const outer = try pc.enterBody(m.body);
+        defer pc.leaveBody(outer);
         const done = try pc.walk(m.body, 0);
         for (m.params, 0..) |p, i| {
             if (p.type_info != .sig_hash_preimage or i >= 64) continue;

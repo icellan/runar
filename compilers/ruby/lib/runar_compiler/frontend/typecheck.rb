@@ -300,7 +300,8 @@ module RunarCompiler
     # local alias, or through a private method that checks that parameter on
     # every path) at a point every execution reaches. An if checks it only if
     # both arms do (a missing else checks nothing), a ternary only if both arms
-    # do; the right operand of && / || and a for-loop body check nothing.
+    # do; the right operand of && / || and a for-loop body check nothing. A
+    # name assigned anywhere in the method body never stands for a parameter.
     def self.check_preimage_checked_on_every_path(contract)
       preimage = ->(t) { t.is_a?(PrimitiveType) && t.name == "SigHashPreimage" }
       privates = {}
@@ -309,7 +310,18 @@ module RunarCompiler
       walk = nil
       expr_must = nil
 
-      resolve = ->(e, aliases) { e.is_a?(Identifier) ? aliases[e.name] : nil }
+      reassigned = Set.new
+      collect_reassigned = nil
+      collect_reassigned = lambda do |stmts|
+        (stmts || []).each_with_object(Set.new) do |st, out|
+          case st
+          when AssignmentStmt then out << st.target.name if st.target.is_a?(Identifier)
+          when IfStmt then out.merge(collect_reassigned.call(st.then)).merge(collect_reassigned.call(st.else_))
+          when ForStmt then out.merge(collect_reassigned.call(st.body))
+          end
+        end
+      end
+      resolve = ->(e, aliases) { e.is_a?(Identifier) && !reassigned.include?(e.name) ? aliases[e.name] : nil }
       private_target = lambda do |callee|
         case callee
         when PropertyAccessExpr, MemberExpr then privates[callee.property]
@@ -322,7 +334,10 @@ module RunarCompiler
 
         aliases = {}
         (m.params || []).each { |p| aliases[p.name] = p.name if preimage.call(p.type) }
+        outer = reassigned
+        reassigned = collect_reassigned.call(m.body)
         done = walk.call(m.body, Set.new, aliases.dup, stack | [m.name])
+        reassigned = outer
         result = Set.new
         (m.params || []).each_with_index do |p, i|
           result << i if aliases.key?(p.name) && done.include?(p.name)
@@ -404,6 +419,7 @@ module RunarCompiler
         tracked = (m.params || []).select { |p| preimage.call(p.type) }.map(&:name)
         next if tracked.empty?
 
+        reassigned = collect_reassigned.call(m.body)
         done = walk.call(m.body, Set.new, tracked.to_h { |n| [n, n] }, [m.name])
         tracked.each do |name|
           next if done.include?(name)
