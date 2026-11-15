@@ -456,6 +456,28 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 
 
+class _RejectedJsonError(ValueError):
+    """Payload text json.loads would accept but the wire protocol does not:
+    a duplicate key (R2-DUPKEY)."""
+
+
+def _object_without_duplicate_keys(pairs: list) -> dict:
+    """``json.loads`` object hook: refuse a repeated key in ONE object.
+
+    R2-DUPKEY. json.loads keeps the LAST of two equal keys, so a payload
+    ``{"nonce":1,"nonce":<outer>}`` verified ok here while a keep-first tier
+    said envelope-mismatch. Keys arrive already unescaped, so ``"a"`` and
+    ``"\\u0061"`` collide as they must. The hook runs once per object, so the
+    key set is per object: the same key in sibling or nested objects is fine.
+    """
+    out: dict = {}
+    for k, v in pairs:
+        if k in out:
+            raise _RejectedJsonError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
 def _is_i64_int(v: object) -> bool:
     """GK-BUG-009: a parsed JSON integer token inside the signed 64-bit range."""
     return type(v) is int and _I64_MIN <= v <= _I64_MAX
@@ -515,8 +537,13 @@ def verify_envelope(
     if _payload_exceeds_max_depth(envelope.payload):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     try:
-        parsed = json.loads(envelope.payload)
-    except json.JSONDecodeError:
+        # R2-DUPKEY: a duplicate key is bad-json, decided here with every
+        # other parse failure (after expired, before envelope-mismatch).
+        parsed = json.loads(
+            envelope.payload,
+            object_pairs_hook=_object_without_duplicate_keys,
+        )
+    except (json.JSONDecodeError, _RejectedJsonError):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     if not isinstance(parsed, dict):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)

@@ -649,6 +649,229 @@
       }
     }
   ],
+  "duplicate_key_vectors_notes": "R2-DUPKEY. verifyEnvelope REJECTS a payload in which any JSON object, at any nesting depth, has two members with the same key, compared after JSON string unescaping (\"a\", \"\\u0061\" and a surrogate-pair spelling of the same code point are all one key). Reason bad-json, decided in the parse step: after too-large / missing-fields / expired, before envelope-mismatch / bad-sig / pubkey-not-allowed -- exactly where a malformed payload is decided. Before the fix TS/Go/Rust/Python/Ruby/Java kept one of the values (most the last) and verified ok; only Zig's std.json refused. Uniqueness is PER OBJECT: the dkc* controls are accepted. Replay each envelope at verify_now_ms. Every dk*/dkc* signature verifies for its exact payload text except dk11 (deliberately carries valid_envelope's signature to pin bad-json ahead of bad-sig). The OUTER envelope object is not covered here: no SDK tier parses an envelope from wire text -- verifyEnvelope takes an already-decoded structure.",
+  "duplicate_key_vectors": [
+    {
+      "_vector_id": "dk1-top-level-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Top-level key `kind` appears twice. JSON.parse / encoding/json / serde_json / json.loads / Ruby JSON.parse keep the LAST value, so before the fix this verified ok in those tiers while the signer and the verifier can disagree on what `kind` says.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"kind\":\"bye\",\"nonce\":1700000000000}",
+        "sig": "3045022100b8b354d8781e4ed755fe2c7a81e4ec247546e8e0188da27ae22ef7084e478c6d02204557892a415f465ff947fca4710a61655540a95f734d13d1e6468d24181f5447",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk2-nested-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Duplicate key one level down (m.a).",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"m\":{\"a\":1,\"a\":2},\"nonce\":1700000000000}",
+        "sig": "304402201676d817084b7468e74f16fbe24e70c495faeba7ca72240ccd9e6455804352eb02206310af9b8739045ff5c73d6bb50210da13e7f2e00ae58dfed447746fd95bd6cf",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk3-duplicate-inside-array-element",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Duplicate key in an object that is an array element; the two values are identical, which is still a duplicate.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"l\":[{\"a\":1},{\"b\":1,\"b\":1}],\"nonce\":1700000000000}",
+        "sig": "3045022100faca5b196c7552b47ca136364bd295d4bdec419c9ec8ee577fb60b34b1b1dd4102202c4f914c3d2a4539de0feed58275f4285551ff83b976cba4b53fc2ef0a586af5",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk4-escaped-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "\"\\u0061\" and \"a\" are the same key after JSON string unescaping.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"\\u0061\":1,\"a\":2,\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "30440220373a1dc9ca0e9870741cd8840b39f6550af78ac8cf061677d8ddbbce851cd52902200f3d438b6bbccd572257b66664fb240fdfb3f0b17ce20b2c48c845dc0eaed4e7",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk5-escaped-solidus-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "\"a/b\" and \"a\\/b\" are the same key after unescaping.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"a/b\":1,\"a\\/b\":2,\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "30450221008fa585767df47bbcbdcadcf5a7e8717b535a6d67a3c38852821815006f2dfe8b022038c43fde0c5fbbab972fc820855aec1916604fb111a7d7085a836397829c1fa1",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk6-surrogate-pair-escape-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "A raw U+1F600 key and its escaped surrogate-pair spelling are the same key. Byte-oriented tiers must combine the pair before comparing.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"😀\":1,\"\\ud83d\\ude00\":2,\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "304402200b757da8f07d32354b6d98d3a454c8bd7bad00a8b92e04fdb0ea72075662e7f2022010805ba8c80716bd71d64ec7f45e5d3fbd11a74b876c1cb3d4756a551d673458",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk7-duplicate-nonce-last-matches",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Duplicate inner nonce; the LAST value equals the outer nonce. A keep-last parser saw a matching nonce and returned ok. Must be bad-json, never envelope-mismatch or ok.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"nonce\":1,\"nonce\":1700000000000}",
+        "sig": "3045022100c34c45b2a1f41b66cad4a10091a945a53eb4e4c77ee29a265ba6c42a0b9a912b022029bd275db3e91d5f3624a4eadbcdd384b113d7c5f0cf751b25cf080ad0ab40b6",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk8-duplicate-nonce-first-matches",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Duplicate inner nonce; the FIRST value equals the outer nonce. A keep-first parser would return ok, a keep-last one envelope-mismatch. Must be bad-json.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"nonce\":1700000000000,\"nonce\":1}",
+        "sig": "30440220112aa32eab2a8a5aa734e6c709497d050f572d2b603b34f25cd6373616b52d0d02207ec7b3beb99e847cf41957ab29110eed90e9a0e3f66fddb0e220cca465e198d5",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk9-escaped-duplicate-nonce",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "\"n\\u006fnce\" is `nonce`; both carry the outer value, so only duplicate detection after unescaping rejects it.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"n\\u006fnce\":1700000000000,\"nonce\":1700000000000}",
+        "sig": "3045022100b67720307be14981a92c20bc3b76ea9690bd18169c361b3b28db10465990171102200c867dcf38228315054bc7c9fb4892bc3381520e31e9d10683724a93bdb78be2",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk10-deep-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "Duplicate key seven containers deep (well inside the R-260 depth bound).",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"d\":[[[[{\"x\":{\"k\":1,\"k\":2}}]]]],\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "304402200849cca6f4cc250ff3f59c87a294dd4d8592d44680be37f28e9989c37651721802200de99a153269a6486536725398f80c0fd39f44243ce347a0c0a08d0e3af0655f",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk11-duplicate-precedes-bad-sig",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "PRECEDENCE: dk2's payload under valid_envelope's signature, which does not verify for this text. bad-json is decided at parse time, before ECDSA, so the reason is bad-json, not bad-sig.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"m\":{\"a\":1,\"a\":2},\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dk12-expiry-precedes-duplicate",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "PRECEDENCE: expired is decided before the payload is parsed, so an expired envelope with a duplicate key is expired, not bad-json. Outer nonce/expiresAt 1000000000000/1000000000001.",
+      "expect_ok": false,
+      "reason": "expired",
+      "envelope": {
+        "payload": "{\"a\":1,\"a\":2,\"expiresAt\":1000000000001,\"nonce\":1000000000000}",
+        "sig": "30450221008084cbab63c9c98c9e58dee9099c3e1a1b07caed864e6efcfdbb66f43678e9d102207cc5506c519fe783d8ca58883fe2628756d03df9b4b0cd775a0606401b4a316b",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1000000000000,
+        "expiresAt": 1000000000001
+      }
+    },
+    {
+      "_vector_id": "dkc1-same-key-in-separate-objects-accepted",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "CONTROL: `a` appears in four DIFFERENT objects (top level, two array elements, m). Uniqueness is per object; a scanner with one global key set reddens here.",
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"a\":4,\"expiresAt\":1700000030000,\"l\":[{\"a\":1},{\"a\":2}],\"m\":{\"a\":3},\"nonce\":1700000000000}",
+        "sig": "3045022100bc99a42705c07752d7b079b0982310a7c736742e96627adbe4defd16fbbb905b022054de46b620628a3e3c04578e2a7391ddab5c8f1dd0c2b26b7c5127465146ba89",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dkc2-same-key-parent-and-child-accepted",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "CONTROL: `a` in a parent and in its child objects is not a duplicate.",
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"a\":{\"a\":{\"a\":1}},\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "304402202d8afc785c88ac4b21a3bae804bbcedaa0b179bf55f3af0298389ceedae8630302203eec0d07a9cbd7306e50f347aff8d7b00c391e228a1586413ba68a6089fc66c0",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dkc3-key-spelled-as-string-value-accepted",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "CONTROL: string VALUES that spell a key (including repeated array strings) are not keys.",
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"a\":\"b\",\"b\":\"a\",\"expiresAt\":1700000030000,\"l\":[\"a\",\"a\"],\"nonce\":1700000000000}",
+        "sig": "304502210099f880ebf97b0889e8d4f13ea8ef156f3eff181a7cc09cef570dcd0e128193ce02206f81c7881da9c58e5564d93b9537970b9fcc4918f494298ef1a0e6fc7099bdd6",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dkc4-case-distinct-escaped-keys-accepted",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "CONTROL: \"\\u0041\" is `A`, distinct from `a`.",
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"\\u0041\":1,\"a\":2,\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "3044022074f97cae2eee4babed2525e5899bc34cb2137c65a340c16cec571ba5e200235a02206c97696995ed6c0d46e67f9b504adb0e37597ce9ba9dac9239dfbe03cfbad590",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    }
+  ],
   "malleability_vectors_notes": "F-138 (CL-BUG-159 / CL-BUG-241). ECDSA signatures are malleable: if (r, s) verifies for a digest under a key, so does (r, N - s). BIP-62's low-S rule is a Bitcoin SCRIPT policy (SCRIPT_VERIFY_LOW_S) for transaction signatures; it is not part of the envelope protocol. The TS reference verifyEnvelope delegates to @bsv/sdk's raw ECDSA verify, which has no low-S check, so the reference ACCEPTS a high-S envelope signature. Measured on mv1 before the fix: ts / go / python / zig / java ok:true; ruby bad-sig (an explicit BIP-62 check in Runar::ECDSA.ecdsa_verify, now skipped for envelopes via low_s: false) and rust bad-sig (k256's verify_prehash rejects high-S outright; envelope.rs now normalizes s before verifying). Every signer in every tier still EMITS low-S; this section only pins what a VERIFIER must accept, which is the case an overlay backend meets when a client signs with a non-normalizing library or a relay malleates s. Every signature in the rest of this file is low-S, so without this vector the split was invisible. Replay each envelope at verify_now_ms with no allowlist; the vector's signature is valid for its payload, so a tier that rejects it can only do so on the low-S rule.",
   "malleability_vectors": [
     {

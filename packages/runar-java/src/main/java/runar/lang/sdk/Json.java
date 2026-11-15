@@ -27,7 +27,21 @@ public final class Json {
     private Json() {}
 
     public static Object parse(String input) {
-        Parser p = new Parser(input);
+        return parse(input, false);
+    }
+
+    /**
+     * {@link #parse}, but an object that carries the same key twice (compared
+     * after unescaping) throws instead of keeping the last value. R2-DUPKEY:
+     * the signed-envelope payload parser. Artifact loading keeps
+     * {@link #parse}'s keep-last behaviour.
+     */
+    static Object parseRejectingDuplicateKeys(String input) {
+        return parse(input, true);
+    }
+
+    private static Object parse(String input, boolean rejectDuplicateKeys) {
+        Parser p = new Parser(input, rejectDuplicateKeys);
         p.skipWs();
         Object result = p.readValue();
         p.skipWs();
@@ -85,9 +99,13 @@ public final class Json {
 
     private static final class Parser {
         private final String s;
+        private final boolean rejectDuplicateKeys;
         int pos = 0;
 
-        Parser(String s) { this.s = s; }
+        Parser(String s, boolean rejectDuplicateKeys) {
+            this.s = s;
+            this.rejectDuplicateKeys = rejectDuplicateKeys;
+        }
 
         void skipWs() {
             while (pos < s.length()) {
@@ -118,7 +136,11 @@ public final class Json {
             if (peek() == '}') { pos++; return out; }
             while (true) {
                 skipWs();
+                int keyAt = pos;
                 String key = readString();
+                if (rejectDuplicateKeys && out.containsKey(key)) {
+                    throw new IllegalArgumentException("Json: duplicate key \"" + key + "\" at " + keyAt);
+                }
                 skipWs();
                 expect(':');
                 Object val = readValue();

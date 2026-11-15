@@ -285,6 +285,34 @@ class EnvelopeInteropTest {
     }
 
     /**
+     * R2-DUPKEY. A payload object with two members of the same key (compared
+     * after unescaping, at any depth) is bad-json, decided in the parse step:
+     * after expired, before envelope-mismatch / bad-sig. {@link Json}'s
+     * readObject put() kept the LAST value, so the dk* vectors verified ok
+     * here before the fix; the dkc* controls (same key in DIFFERENT objects)
+     * must stay ok.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void duplicateKeyVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("duplicate_key_vectors");
+        assertFalse(vectors.isEmpty(), "duplicate_key_vectors missing or empty");
+        List<String> failures = new java.util.ArrayList<>();
+        for (Map<String, Object> v : vectors) {
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) v.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            String want = Boolean.TRUE.equals(v.get("expect_ok")) ? "ok" : (String) v.get("reason");
+            String got = r.ok ? "ok" : r.reason.wire;
+            if (!want.equals(got)) failures.add(v.get("_vector_id") + ": got " + got + ", want " + want);
+        }
+        assertEquals(List.of(), failures);
+    }
+
+    /**
      * F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
      * signature, and the TS reference accepts it: BIP-62's low-S rule is
      * transaction-script policy, not part of the envelope protocol. Ruby used

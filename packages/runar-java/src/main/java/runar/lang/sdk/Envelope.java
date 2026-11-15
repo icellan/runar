@@ -624,7 +624,9 @@ public final class Envelope {
         }
         Map<String, Object> parsed;
         try {
-            Object raw = Json.parse(env.payload);
+            // R2-DUPKEY: a duplicate key is bad-json, decided here with every
+            // other parse failure (after expired, before envelope-mismatch).
+            Object raw = Json.parseRejectingDuplicateKeys(env.payload);
             if (!(raw instanceof Map)) {
                 return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_JSON, null);
             }

@@ -287,7 +287,128 @@ function main(): void {
     fail('allowlist_vectors must carry a null (not supplied) control that is accepted');
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors validate against the TS reference.`);
+  // 9. R2-DUPKEY duplicate-key vectors. Each payload must be well-formed JSON
+  //    (JSON.parse accepts it) within the depth bound, so a duplicate key is
+  //    the ONLY thing wrong with it; a duplicate must really be present in
+  //    every rejected vector and absent from every dkc* control; and every
+  //    signature must verify for the exact payload text, except the
+  //    *-precedes-bad-sig vector that pins bad-json ahead of bad-sig (its
+  //    signature must NOT verify).
+  const verifiesFor = (e: { payload: string; sig: string; pubkey: string }): boolean => {
+    try {
+      return ecdsaVerifyRaw(
+        new BigNumber(Hash.sha256(Utils.toArray(e.payload, 'utf8'))),
+        Signature.fromDER(Utils.toArray(e.sig, 'hex')),
+        PublicKey.fromDER(Utils.toArray(e.pubkey, 'hex')),
+      );
+    } catch {
+      return false;
+    }
+  };
+  // Independent duplicate-key oracle: a small recursive-descent reader over
+  // text JSON.parse has already accepted (so no error paths), keys decoded
+  // with JSON.parse, one key set per object.
+  const hasDuplicateKey = (text: string): boolean => {
+    let i = 0;
+    let dup = false;
+    const ws = (): void => {
+      while (' \t\n\r'.includes(text[i] ?? 'x')) i++;
+    };
+    const str = (): string => {
+      const start = i++;
+      while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      i++;
+      return JSON.parse(text.slice(start, i)) as string;
+    };
+    const value = (): void => {
+      ws();
+      const c = text[i];
+      if (c === '{') {
+        i++;
+        const keys = new Set<string>();
+        ws();
+        if (text[i] === '}') {
+          i++;
+          return;
+        }
+        for (;;) {
+          ws();
+          const k = str();
+          if (keys.has(k)) dup = true;
+          keys.add(k);
+          ws();
+          i++; // ':'
+          value();
+          ws();
+          if (text[i++] === '}') return;
+        }
+      } else if (c === '[') {
+        i++;
+        ws();
+        if (text[i] === ']') {
+          i++;
+          return;
+        }
+        for (;;) {
+          value();
+          ws();
+          if (text[i++] === ']') return;
+        }
+      } else if (c === '"') {
+        str();
+      } else {
+        while (i < text.length && !',]} \t\n\r'.includes(text[i]!)) i++;
+      }
+    };
+    value();
+    return dup;
+  };
+  const dupVectors = fixture.duplicate_key_vectors as Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: string;
+    envelope: { payload: string; sig: string; pubkey: string; nonce: number; expiresAt: number };
+  }>;
+  if (!Array.isArray(dupVectors) || dupVectors.length === 0) fail('duplicate_key_vectors missing or empty');
+  const verifyNowMs = fixture.verify_now_ms as number;
+  let sawDupControl = false;
+  let sawDupBeforeBadSig = false;
+  let sawExpiryBeforeDup = false;
+  for (const v of dupVectors) {
+    const id = v._vector_id;
+    try {
+      JSON.parse(v.envelope.payload);
+    } catch {
+      fail(`${id}: payload is not well-formed JSON, so it would be bad-json for a reason other than the duplicate`);
+    }
+    if (measureDepth(v.envelope.payload) > depthLimit) fail(`${id}: payload deeper than payload_depth_limit`);
+    if (hasDuplicateKey(v.envelope.payload) !== !v.expect_ok) {
+      fail(`${id}: expect_ok=${v.expect_ok} but the payload ${v.expect_ok ? 'HAS' : 'has NO'} duplicate key`);
+    }
+    if (v.envelope.pubkey !== ALICE_PUB_HEX) fail(`${id}: pubkey is not the documented signer`);
+    const sigOk = verifiesFor(v.envelope);
+    const expired = v.envelope.expiresAt < verifyNowMs - 5_000;
+    if (v.expect_ok) {
+      if (!sigOk) fail(`${id}: control signature does not verify`);
+      sawDupControl = true;
+    } else if (expired) {
+      if (v.reason !== 'expired') fail(`${id}: expired envelope must carry reason expired`);
+      sawExpiryBeforeDup = true;
+    } else if (id.includes('precedes-bad-sig')) {
+      if (sigOk) fail(`${id}: the bad-json-before-bad-sig vector must carry a signature that does NOT verify`);
+      if (v.reason !== 'bad-json') fail(`${id}: unverifiable duplicate must still be bad-json (precedes bad-sig)`);
+      sawDupBeforeBadSig = true;
+    } else if (!sigOk) {
+      fail(`${id}: signature does not verify for its exact payload text`);
+    } else if (v.reason !== 'bad-json') {
+      fail(`${id}: reason must be bad-json`);
+    }
+  }
+  if (!sawDupControl) fail('duplicate_key_vectors carries no accepted (dkc*) control');
+  if (!sawDupBeforeBadSig) fail('duplicate_key_vectors carries no bad-json-before-bad-sig precedence vector');
+  if (!sawExpiryBeforeDup) fail('duplicate_key_vectors carries no expired-before-bad-json precedence vector');
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors validate against the TS reference.`);
 }
 
 main();
