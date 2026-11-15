@@ -690,10 +690,12 @@ other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
 | `verifyWOTS` | `(msg, sig, pubkey) => boolean` | WOTS+ verification (w=16, SHA-256). One-time use per keypair. Sig: 2,144 B. |
 | `verifySLHDSA_SHA2_128s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-128s (FIPS 205). Stateless, multi-use. Sig: 7,856 B. |
 | `verifySLHDSA_SHA2_128f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-128f. Fast variant. Sig: 17,088 B. |
-| `verifySLHDSA_SHA2_192s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192s. 192-bit security. Sig: 16,224 B. |
-| `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192f. Fast variant. Sig: 35,664 B. |
-| `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256s. 256-bit security. Sig: 29,792 B. |
-| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 49,856 B. |
+| `verifySLHDSA_SHA2_192s` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-192s shapes; not FIPS 205 (see note). Sig: 16,224 B. |
+| `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-192f shapes (fast); not FIPS 205 (see note). Sig: 35,664 B. |
+| `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256s shapes; not FIPS 205 (see note). Sig: 29,792 B. |
+| `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256f shapes (fast); not FIPS 205 (see note). Sig: 49,856 B. |
+
+> **The 192/256 SLH-DSA functions are SHA-256-only, not FIPS 205.** FIPS 205 hashes these four parameter sets with SHA-512, and SHA-512's 64-bit word arithmetic is not expressible in Bitcoin Script (no `OP_SHA512`, issue #137). These four functions use SHA-256 throughout, at the FIPS 205 parameter shapes, in all seven compilers and SDKs. They verify signatures made by the repo's own SDK signers, but a standard `SLH-DSA-SHA2-192s/192f/256s/256f` signature from a FIPS 205 implementation will not verify. The 128s/128f functions are SHA-256 in FIPS 205 too and are standard.
 
 ### Elliptic Curve (secp256k1)
 

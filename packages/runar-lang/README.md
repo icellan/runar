@@ -310,12 +310,14 @@ Stateless hash-based signatures supporting multiple signings per keypair. Six pa
 |---|---|---|---|
 | `verifySLHDSA_SHA2_128s` | 128-bit | small | 7,856 bytes |
 | `verifySLHDSA_SHA2_128f` | 128-bit | fast | 17,088 bytes |
-| `verifySLHDSA_SHA2_192s` | 192-bit | small | 16,224 bytes |
-| `verifySLHDSA_SHA2_192f` | 192-bit | fast | 35,664 bytes |
-| `verifySLHDSA_SHA2_256s` | 256-bit | small | 29,792 bytes |
-| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
+| `verifySLHDSA_SHA2_192s` | SHA-256-only, not FIPS 205 | small | 16,224 bytes |
+| `verifySLHDSA_SHA2_192f` | SHA-256-only, not FIPS 205 | fast | 35,664 bytes |
+| `verifySLHDSA_SHA2_256s` | SHA-256-only, not FIPS 205 | small | 29,792 bytes |
+| `verifySLHDSA_SHA2_256f` | SHA-256-only, not FIPS 205 | fast | 49,856 bytes |
 
 All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
+
+The 192/256 functions are **not FIPS 205 conformant**: FIPS 205 hashes those parameter sets with SHA-512, which Bitcoin Script cannot express (no `OP_SHA512`, #137), so they use SHA-256 throughout at the FIPS 205 parameter shapes. A standard SLH-DSA-SHA2-192/256 signature will not verify. The 128-bit functions are standard FIPS 205.
 
 ---
 
