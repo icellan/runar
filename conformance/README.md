@@ -48,7 +48,7 @@ exit 0.
 
 ## Purpose
 
-Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
+Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce the same ANF IR, compared after normalisation (sorted keys, `sourceLoc` stripped, one bigint spelling; see "How the Test Runner Works"). The conformance suite verifies this property.
 
 Additionally, the compiled Bitcoin Script output must be identical across compilers. The script is the final artifact deployed on-chain, so even a single-byte difference could mean a different locking script hash and a non-functional contract.
 
@@ -218,9 +218,11 @@ The allowlist is currently **empty** (`"skip": []`): there are no fold-ON exempt
 
 | File | Purpose |
 |---|---|
-| `*.runar.ts` | The source contract. Input to the compiler. |
-| `expected-ir.json` | The expected ANF IR output. Canonical JSON (RFC 8785, no whitespace, sorted keys). The SHA-256 of this file is the conformance check. |
-| `expected-script.hex` | The expected compiled Bitcoin Script as a hex string. If present, the compiler's script output must match exactly. |
+| `source.json` | Declares the fixture's sources: a `sources` map from each of the nine extensions to a contract under `examples/<lang>/`, plus optional `compilers`, `parserSkip` / `parserSkipReason` and `foldOnMatchesGolden`. A case directory never holds its own `*.runar.*` file. |
+| `expected-ir.json` | The expected ANF IR (fold-OFF). The runner normalises both sides (keys sorted, `sourceLoc` stripped, bigints in one spelling, 2-space JSON) and compares the resulting strings. No hash is taken. |
+| `expected-script.hex` | The expected compiled Bitcoin Script as a hex string (fold-OFF). Both sides are lowercased and whitespace-stripped, then compared exactly. |
+
+A golden's sha256 matters only to the separate provenance gate, `conformance/scripts/check-golden-provenance.mjs`, which refuses a changed golden that carries no independent justification (see "Golden-regeneration integrity gate" below). The runner never hashes anything.
 
 ---
 
@@ -230,14 +232,18 @@ The runner (in `runner/`) performs these steps for each test case:
 
 ```
 For each test directory:
-  1. Read the .runar.ts source file.
-  2. Invoke the compiler under test to produce ANF IR.
-  3. Serialize the compiler's ANF IR using canonical JSON (RFC 8785).
-  4. Compare SHA-256(compiler_output) with SHA-256(expected-ir.json).
-  5. If expected-script.hex exists:
-     a. Invoke the compiler to produce the final script.
-     b. Compare the script hex with expected-script.hex.
-  6. Report pass/fail.
+  1. Resolve the sources declared in source.json (an orphan *.runar.* file in
+     the directory, a missing extension without parserSkip, or parserSkip
+     without parserSkipReason is a hard error).
+  2. Invoke each compiler under test (fold-OFF unless
+     RUNAR_DISABLE_CONSTANT_FOLDING=0) to produce ANF IR and script hex.
+  3. Normalise the ANF IR: parse it, strip sourceLoc, sort keys, normalise
+     bigints, and re-serialise as 2-space JSON. Do the same to expected-ir.json.
+  4. Compare the two normalised strings. Compare the lowercased,
+     whitespace-stripped script hex with expected-script.hex.
+     (Under fold-ON the golden comparison is skipped unless the fixture sets
+     foldOnMatchesGolden; cross-tier parity is still compared.)
+  5. Report pass/fail/skipped/vacuous.
 ```
 
 ### Running the Conformance Suite
@@ -386,37 +392,64 @@ lines for the five fixtures it covers.
 
 ## How to Add New Test Cases
 
-1. Create a new directory under `tests/` with a descriptive name:
+A fixture is a directory under `tests/` holding `source.json` and the goldens. The contracts themselves live under `examples/`, one per format.
 
-```bash
-mkdir conformance/tests/my-new-test
+1. Write the contract in all nine formats, each in its own example directory:
+
+```
+examples/ts/my-new-test/MyNewTest.runar.ts
+examples/sol/my-new-test/MyNewTest.runar.sol
+examples/move/my-new-test/MyNewTest.runar.move
+examples/go/my-new-test/MyNewTest.runar.go
+examples/rust/my-new-test/MyNewTest.runar.rs
+examples/python/my-new-test/MyNewTest.runar.py
+examples/zig/my-new-test/MyNewTest.runar.zig
+examples/ruby/my-new-test/MyNewTest.runar.rb
+examples/java/src/main/java/runar/examples/my-new-test/MyNewTest.runar.java
 ```
 
-2. Write the source contract:
+2. Create `conformance/tests/my-new-test/source.json` with a `sources` map only (never both `path` and `sources`). Paths are relative to the fixture directory:
 
-```bash
-# conformance/tests/my-new-test/my-new-test.runar.ts
+```json
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/my-new-test/MyNewTest.runar.ts",
+    ".runar.sol": "../../../examples/sol/my-new-test/MyNewTest.runar.sol",
+    ".runar.move": "../../../examples/move/my-new-test/MyNewTest.runar.move",
+    ".runar.go": "../../../examples/go/my-new-test/MyNewTest.runar.go",
+    ".runar.rs": "../../../examples/rust/my-new-test/MyNewTest.runar.rs",
+    ".runar.py": "../../../examples/python/my-new-test/MyNewTest.runar.py",
+    ".runar.zig": "../../../examples/zig/my-new-test/MyNewTest.runar.zig",
+    ".runar.rb": "../../../examples/ruby/my-new-test/MyNewTest.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/my-new-test/MyNewTest.runar.java"
+  }
+}
 ```
 
-3. Generate the expected IR using the reference compiler:
+   If a format genuinely cannot express the contract (today only `FixedArray` on the Java surface), leave it out of `sources` and add `"parserSkip": [".runar.java"]` with a non-empty `"parserSkipReason"`. Do not put a `*.runar.*` file in the fixture directory; the runner rejects it as an orphan.
+
+3. Generate the goldens fold-OFF from the TypeScript compiler (`--update-golden` runs fold-OFF unless `RUNAR_DISABLE_CONSTANT_FOLDING=0` is set):
 
 ```bash
-runar compile conformance/tests/my-new-test/my-new-test.runar.ts --ir
-# Canonical JSON serialization (RFC 8785) is applied automatically.
-# Copy the ANF IR output to expected-ir.json
+cd conformance && npm run update-golden
 ```
 
-4. Optionally generate the expected script:
+   This writes `expected-ir.json` and `expected-script.hex` for every fixture, so commit only the new fixture's files. A fixture whose `compilers` allowlist excludes `ts` cannot be stamped this way; regenerate it from an allowlisted tier.
+
+4. Admit the new goldens through the provenance gate: add an entry to `conformance/golden-provenance-allowlist.json` (or pin them in a witness), using the hashes printed by
 
 ```bash
-runar compile conformance/tests/my-new-test/my-new-test.runar.ts
-# Copy the script hex to expected-script.hex
+node conformance/scripts/check-golden-provenance.mjs --print-hashes
 ```
 
-5. Run the conformance suite to verify the new test passes:
+5. Add the fixture's row to `conformance/script-size-baseline.json` and update the fixture count stated in this README (both are checked).
+
+6. Run what CI runs, in both fold modes:
 
 ```bash
-pnpm test
+conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+RUNAR_DISABLE_CONSTANT_FOLDING=0 conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
 ```
 
 ---
