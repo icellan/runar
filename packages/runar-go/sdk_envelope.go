@@ -717,6 +717,13 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	if err := dec.Decode(&parsed); err != nil || parsed == nil {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
+	// The payload must be exactly ONE JSON value. Decode reads the first and
+	// leaves the rest unread, so "{...}{}" or "{...} 1" verified ok in this
+	// tier alone (fixture vectors tj1..tj3); every other tier's parser
+	// refuses text after the value.
+	if _, err := dec.Token(); err != io.EOF {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
 	// R2-DUPKEY: a duplicate key is bad-json, decided here with every other
 	// parse failure (after expired, before envelope-mismatch).
 	if payloadHasDuplicateKey(env.Payload) {

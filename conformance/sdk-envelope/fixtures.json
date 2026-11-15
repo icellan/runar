@@ -680,6 +680,45 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "tj1-trailing-object-after-payload",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "A second JSON value after the payload object. Go's json.Decoder.Decode read the first value and ignored the rest, so this verified ok in the Go tier alone; every other tier's parser requires the text to be exactly one value.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1700000000000}{}",
+        "sig": "304402207febf943fa0a57a028bdff7dc7e45a759b8e394f9cb16fc286c0f9f1f81ec3460220421e74342e2d76d7d0855e335aaa780d80de4fcdb67ffe8c52819c5c32215d7b",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "tj2-trailing-number-after-payload",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "A trailing number after the payload object; same rule as tj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1700000000000} 1",
+        "sig": "3045022100a173fe45f6a9f45667d3d3b13cbccdf98a34239c8f87575463f7d96aca87f6a102206aa2ec91a85afd847a9fa5cba9caee2d33e135d9143258ee8a664caee19d4779",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "tj3-trailing-garbage-after-payload",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "Trailing non-JSON text after the payload object; same rule as tj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1700000000000}xyz",
+        "sig": "304402200740b33881671fa5305ac4babe86ee3845f697a3baa0d5fb3ef14d6359cf35ed022015d46d9d867347404933519d0cc73b5a0e5968996b011a6c418df29e4b4aaa21",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",
