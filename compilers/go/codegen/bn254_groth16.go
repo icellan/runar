@@ -1822,7 +1822,7 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 // at the end of the preamble so the method body can reference them via the
 // Groth16PublicInput(i) DSL intrinsic (see the _pub_* altstack dance at
 // the end of this function). Callers that rely on this arity:
-//   - compilers/go/codegen/stack.go: emitGroth16WAPreamble (useMSM=true)
+//   - compilers/go/codegen/stack.go: emitGroth16WAPreamble
 //   - packages/runar-go/bn254witness/witness.go (witness-stack layout)
 //   - packages/runar-go/bn254.go (Groth16Config.IC documentation)
 // Generalising to an arbitrary number of public inputs would require
