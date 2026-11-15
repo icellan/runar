@@ -176,6 +176,32 @@ pub fn skip_if_no_node() {
             std::env::var("RPC_URL").unwrap_or_else(|_| "http://localhost:18332".to_string()),
         );
     }
+    require_regtest();
+}
+
+/// Refuse anything but a regtest node, given a `getblockchaininfo` result
+/// (GK-BUG-001). Mirrors Go `EnsureRegtest` / Java `ensureRegtest`.
+pub fn check_regtest_chain(info: &serde_json::Value) -> Result<(), String> {
+    match info.get("chain").and_then(|c| c.as_str()) {
+        Some("regtest") => Ok(()),
+        Some(other) => Err(format!(
+            "SAFETY: connected to {:?} network, not regtest! Refusing to fund or mine.",
+            other
+        )),
+        None => Err(
+            "SAFETY: getblockchaininfo has no 'chain' field, not regtest! Refusing to fund or mine."
+                .to_string(),
+        ),
+    }
+}
+
+/// Panic unless the configured node reports chain == "regtest".
+pub fn require_regtest() {
+    let info = rpc_call("getblockchaininfo", &[])
+        .unwrap_or_else(|e| panic!("SAFETY: cannot query getblockchaininfo: {}", e));
+    if let Err(e) = check_regtest_chain(&info) {
+        panic!("{}", e);
+    }
 }
 
 /// Returns true if the regtest node responds to `getblockcount`.
@@ -279,6 +305,8 @@ pub fn mine(blocks: usize) {
 
 /// Fund an address with the given BTC amount on regtest.
 pub fn fund_address(address: &str, amount: f64) {
+    // Never spend from a non-regtest node's wallet, whoever calls this.
+    require_regtest();
     // Import address so listunspent can find it
     let _ = rpc_call(
         "importaddress",
@@ -518,4 +546,37 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
                 .map_err(|_| format!("invalid hex at position {}", i))
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// GK-BUG-001: chain guard unit tests (offline — no node needed)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod regtest_guard_tests {
+    use super::check_regtest_chain;
+    use serde_json::json;
+
+    #[test]
+    fn regtest_chain_is_accepted() {
+        assert!(check_regtest_chain(&json!({"chain": "regtest", "blocks": 101})).is_ok());
+    }
+
+    #[test]
+    fn mainnet_is_refused() {
+        let err = check_regtest_chain(&json!({"chain": "main"})).unwrap_err();
+        assert!(err.contains("SAFETY") && err.contains("main"), "{}", err);
+    }
+
+    #[test]
+    fn testnet_is_refused() {
+        let err = check_regtest_chain(&json!({"chain": "test"})).unwrap_err();
+        assert!(err.contains("SAFETY") && err.contains("not regtest"), "{}", err);
+    }
+
+    #[test]
+    fn missing_chain_field_is_refused() {
+        let err = check_regtest_chain(&json!({"blocks": 5})).unwrap_err();
+        assert!(err.contains("SAFETY"), "{}", err);
+    }
 }

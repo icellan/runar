@@ -1,8 +1,8 @@
 # Java integration tests
 
-End-to-end regtest / Teranode tests for the `runar-java` SDK. Ported from
-`integration/python/` and `integration/go/` — same contracts, same node
-backends, same invariants.
+End-to-end regtest tests for the `runar-java` SDK, against an SV Node
+regtest node. Ported from `integration/python/` and `integration/go/` — same
+contracts, same invariants.
 
 ## Status (M13)
 
@@ -36,14 +36,13 @@ cd java
 ./gradlew test -Drunar.integration=true
 ```
 
-### Teranode
+### Teranode — not supported (Go-only)
 
-```bash
-cd integration
-./teranode.sh start        # ~5 min on first boot (pre-mines 10,101 blocks)
-cd java
-BSV_BACKEND=teranode ./gradlew test -Drunar.integration=true
-```
+Teranode integration is covered by the Go suite only (`integration/go` with
+`NODE_TYPE=teranode`; see `integration/README.md`). Teranode has no node
+wallet, and this suite has no coinbase-funding path, so
+`IntegrationWallet.createFunded` throws `IllegalStateException` on
+`BSV_BACKEND=teranode` instead of handing a test an unfunded wallet.
 
 ### Full matrix
 
@@ -55,7 +54,7 @@ BSV_BACKEND=teranode ./gradlew test -Drunar.integration=true
 
 | Variable       | Default      | Description                                |
 |----------------|--------------|--------------------------------------------|
-| `BSV_BACKEND`  | `svnode`     | `svnode` or `teranode`                     |
+| `BSV_BACKEND`  | `svnode`     | `svnode` (`teranode` fails closed, see above) |
 | `NODE_TYPE`    | `svnode`     | Legacy alias for `BSV_BACKEND`             |
 | `RPC_URL`      | auto         | Override the default RPC endpoint URL      |
 | `RPC_USER`     | `bitcoin`    | JSON-RPC basic-auth user                   |

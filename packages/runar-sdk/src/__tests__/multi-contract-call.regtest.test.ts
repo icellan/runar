@@ -99,6 +99,17 @@ const varintHex = (n: number): string => {
   return 'fd' + b.toString('hex');
 };
 
+/**
+ * GK-BUG-001: refuse anything but a regtest node before spending from its
+ * wallet (mirrors integration/ts/setup.ts and Go/Java EnsureRegtest).
+ */
+function assertRegtestChain(info: unknown): void {
+  const chain = (info as { chain?: unknown } | null)?.chain;
+  if (chain !== 'regtest') {
+    throw new Error(`SAFETY: connected to ${JSON.stringify(chain)} network, not regtest! Refusing to fund.`);
+  }
+}
+
 interface TestWallet { pubKeyHex: string; local: LocalSigner; signer: ExternalSigner }
 
 async function createFundedWallet(btcAmount = 0.05): Promise<TestWallet> {
@@ -107,6 +118,7 @@ async function createFundedWallet(btcAmount = 0.05): Promise<TestWallet> {
   );
   const pubKeyHex = await local.getPublicKey();
   const address = regtestAddress(hash160hex(pubKeyHex));
+  assertRegtestChain(await rpcCall('getblockchaininfo'));
   await rpcCall('importaddress', address, '', false);
   try {
     await rpcCall('sendtoaddress', address, btcAmount);
@@ -229,6 +241,24 @@ async function deployPairAndAssemble(wallet: TestWallet, sigWallet: TestWallet) 
   );
   return { assembled, token, binder };
 }
+
+// ---------------------------------------------------------------------------
+// GK-BUG-001: chain guard (offline — runs with or without a node)
+// ---------------------------------------------------------------------------
+
+describe('regtest funding guard', () => {
+  it('accepts a regtest getblockchaininfo', () => {
+    expect(() => assertRegtestChain({ chain: 'regtest', blocks: 101 })).not.toThrow();
+  });
+  it.each([
+    [{ chain: 'main' }],
+    [{ chain: 'test' }],
+    [{ blocks: 5 }],
+    [null],
+  ])('refuses %j', (info) => {
+    expect(() => assertRegtestChain(info)).toThrow(/SAFETY/);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // The suite

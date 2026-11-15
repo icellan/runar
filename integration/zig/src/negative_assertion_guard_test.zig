@@ -1,6 +1,12 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+// The node-free helper guards (GK-BUG-001 chain check, GK-BUG-004 mine
+// propagation) ride the same `zig build test-guard` step.
+comptime {
+    _ = @import("node_safety_guard_test.zig");
+}
+
 // ---------------------------------------------------------------------------
 // Guard: the negative tests must MEASURE the broadcast, not merely find the
 // counter non-zero.

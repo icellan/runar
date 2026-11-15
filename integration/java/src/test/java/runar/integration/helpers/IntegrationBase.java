@@ -49,8 +49,8 @@ public abstract class IntegrationBase {
         if (!rpc.isAvailable()) {
             throw new IllegalStateException(
                 "Regtest node not reachable at " + rpc.url() + " (backend=" + rpc.backend()
-                    + "). Start it with `./integration/regtest.sh start` (svnode) or "
-                    + "`./integration/teranode.sh start` (teranode)."
+                    + "). Start it with `./integration/regtest.sh start`. (Teranode is not "
+                    + "supported by the Java suite; Teranode integration is Go-only.)"
             );
         }
         rpc.ensureRegtest();
