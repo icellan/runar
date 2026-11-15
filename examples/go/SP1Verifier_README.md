@@ -13,19 +13,27 @@ This directory contains a ready-to-use BN254 Groth16 verifying key for the
 go run ./compilers/go groth16-wa \
   --vk examples/go/SP1Verifier.groth16.vk.json \
   --out examples/go/SP1Verifier.runar.json \
-  --name SP1Verifier
+  --name SP1Verifier \
+  --pub 66357586313644860799771794752501372267945898538662503063451090361394363786 \
+  --pub 847835036251654310728024989634801415315612733526607753937102182742950003855 \
+  --pub 0 \
+  --pub 248831628400185611740479071450564250193912070693925013182243127282342200944 \
+  --pub 0
 ```
 
-The command prints the emitted script size (~718 KB with the default
-`--modulo-threshold 0`) and the SHA-256 digest of the source VK JSON, and
-writes a standard Rúnar artifact with the verifier pre-baked for this VK.
+The `--pub` values pin the five public inputs the verifier accepts (the
+command refuses to emit an unbound verifier). It prints the emitted script
+size (~1.5 MB with the default `--modulo-threshold 0`) and the SHA-256
+digest of the source VK JSON, and writes a standard Rúnar artifact with the
+verifier pre-baked for this VK and statement.
 
 The resulting `*.runar.json` file can be loaded by any Rúnar SDK (TS, Go,
 Rust, Python) as a stateless contract. Spending a UTXO that is locked with
 the verifier script requires an unlock that matches the stack layout
-produced by `bn254witness.Witness.ToStackOps()` — proof, gradients, and
-witness-assisted final exponentiation outputs — i.e. a real Groth16 proof
-from SP1.
+produced by `bn254witness.BuildFromProofWithInputs(...).ToStackOps()` —
+gradients, the residue witness (c, c⁻¹, s) that replaces the final
+exponentiation, the public inputs and the proof — followed by the owner's
+signature, i.e. a real Groth16 proof from SP1.
 
 See `spec/groth16_wa_vk.schema.json` for the full input JSON schema.
 
