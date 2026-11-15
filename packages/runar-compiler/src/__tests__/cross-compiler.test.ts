@@ -299,9 +299,11 @@ if (!javaJarPath) {
 // Set RUNAR_REQUIRE_ALL_COMPILERS=1 on jobs whose contract IS "all 7
 // toolchains present" (e.g. the dedicated cross-compiler matrix job, if
 // added) to upgrade the FATAL log lines above to a hard suite failure.
-// Without that env var, missing toolchains still log FATAL but per-suite
-// describe.skipIf below handles the actual skipping — the FATAL is
-// grep-able for runner-setup audits but does not abort collection.
+// Without that env var, missing toolchains still log FATAL and the per-suite
+// describe.skipIf blocks and per-tier it.skipIf cases below skip them — the
+// FATAL is grep-able for runner-setup audits but does not abort collection.
+// No comparison may drop a missing tier inside a case that still passes
+// (GK-GAP-011; pinned by gk-gap-011-no-silent-tier-skip.test.ts).
 if (
   IS_CI &&
   MISSING_COMPILERS_IN_CI.length > 0 &&
@@ -1567,31 +1569,41 @@ describe('Cross-compiler: mutable Rabin state is a fixed 8-byte word in all 7 ti
     }
   });
 
-  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. Memoised by name. */
+  const lowered = new Map<string, { irPath: string; tsHex: string }>();
   function lowerToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const hit = lowered.get(name);
+    if (hit) return hit;
     const tsResult = compile(source);
     if (!tsResult.success) {
       throw new Error(tsCompileErrors(name, tsResult.diagnostics));
     }
     const irPath = join(tempDir, `${name}.anf.json`);
     writeFileSync(irPath, anfToJson(tsResult.anf!));
-    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+    const out = { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+    lowered.set(name, out);
+    return out;
   }
 
+  // GK-GAP-011: one case per tier, so an absent tier reports SKIPPED instead
+  // of being dropped inside a case that still reports PASSED.
   for (const { label, build, file } of RABIN_STATE_SHAPES) {
     for (const propType of ['RabinSig', 'RabinPubKey'] as const) {
-      it(`${label}: a mutable ${propType} field lowers to the bigint bytes in every tier`, () => {
-        const controlName = `${file}-bigint`;
-        const rabinName = `${file}-${propType}`;
+      const controlName = `${file}-bigint`;
+      const rabinName = `${file}-${propType}`;
+
+      it(`${label}: a mutable ${propType} field lowers to the bigint bytes in TS (reference)`, () => {
         const control = lowerToIr(build('bigint'), controlName);
         const rabin = lowerToIr(build(propType), rabinName);
-
         // TS is the reference. Its writer and reader were widened together in
         // 31276a06, so its Rabin bytes ARE its bigint bytes.
         expect(rabin.tsHex).toBe(control.tsHex);
+      });
 
-        for (const tier of RABIN_STATE_TIERS) {
-          if (tier.skip) continue;
+      for (const tier of RABIN_STATE_TIERS) {
+        it.skipIf(tier.skip)(`${label}: a mutable ${propType} field lowers to the bigint bytes in ${tier.name}`, () => {
+          const control = lowerToIr(build('bigint'), controlName);
+          const rabin = lowerToIr(build(propType), rabinName);
           const controlHex = requireHex(tier.run(control.irPath), tier.name, controlName)
             .toLowerCase();
           const rabinHex = requireHex(tier.run(rabin.irPath), tier.name, rabinName)
@@ -1608,8 +1620,8 @@ describe('Cross-compiler: mutable Rabin state is a fixed 8-byte word in all 7 ti
 
           // And against TS, so the seven stay byte-identical.
           expect(rabinHex, `${tier.name} diverges from the TS reference`).toBe(rabin.tsHex);
-        }
-      }, 180_000);
+        }, 180_000);
+      }
     }
   }
 });
@@ -1696,28 +1708,37 @@ describe('Cross-compiler: a terminal read sees live state despite a var-length s
     }
   });
 
-  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. Memoised by name. */
+  const lowered = new Map<string, { irPath: string; tsHex: string }>();
   function lowerProbeToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const hit = lowered.get(name);
+    if (hit) return hit;
     const tsResult = compile(source);
     if (!tsResult.success) {
       throw new Error(tsCompileErrors(name, tsResult.diagnostics));
     }
     const irPath = join(tempDir, `${name}.anf.json`);
     writeFileSync(irPath, anfToJson(tsResult.anf!));
-    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+    const out = { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+    lowered.set(name, out);
+    return out;
   }
+  const varlen = () => lowerProbeToIr(staleStateProbeSource('ByteString'), 'StaleStateProbe-varlen');
+  const control = () => lowerProbeToIr(staleStateProbeSource('bigint'), 'StaleStateProbe-control');
 
-  it('every tier reads the live state section, not the deploy-time placeholder', () => {
-    const probe = lowerProbeToIr(staleStateProbeSource('ByteString'), 'StaleStateProbe-varlen');
-
+  // GK-GAP-011: one case per tier, so an absent tier reports SKIPPED instead
+  // of being dropped inside a case that still reports PASSED.
+  it('TS reads the live state section, not the deploy-time placeholder (reference)', () => {
     expect(
-      probe.tsHex,
+      varlen().tsHex,
       'TS: the terminal read of `count` skipped state deserialization entirely and ' +
         'compiled to the deploy-time constructor placeholder',
     ).toContain(LIVE_STATE_MARKER_HEX);
+  });
 
-    for (const tier of STALE_STATE_TIERS) {
-      if (tier.skip) continue;
+  for (const tier of STALE_STATE_TIERS) {
+    it.skipIf(tier.skip)(`${tier.name} reads the live state section, not the deploy-time placeholder`, () => {
+      const probe = varlen();
       const hex = requireHex(tier.run(probe.irPath), tier.name, 'StaleStateProbe-varlen')
         .toLowerCase();
       expect(
@@ -1726,25 +1747,25 @@ describe('Cross-compiler: a terminal read sees live state despite a var-length s
           'and compiled to the deploy-time constructor placeholder',
       ).toContain(LIVE_STATE_MARKER_HEX);
       expect(hex, `${tier.name} diverges from the TS reference`).toBe(probe.tsHex);
-    }
-  }, 180_000);
+    }, 180_000);
+  }
 
-  it('the control without a var-length sibling is byte-identical in all 7 tiers', () => {
-    const control = lowerProbeToIr(staleStateProbeSource('bigint'), 'StaleStateProbe-control');
-
+  it('TS: the control without a var-length sibling does not provision _codePart (reference)', () => {
     // No variable-length property, so the fixed-width split path applies and
     // `_codePart` is genuinely not needed. The marker must stay absent — the
     // fix must not provision `_codePart` unconditionally.
-    expect(control.tsHex).not.toContain(LIVE_STATE_MARKER_HEX);
+    expect(control().tsHex).not.toContain(LIVE_STATE_MARKER_HEX);
+  });
 
-    for (const tier of STALE_STATE_TIERS) {
-      if (tier.skip) continue;
-      const hex = requireHex(tier.run(control.irPath), tier.name, 'StaleStateProbe-control')
+  for (const tier of STALE_STATE_TIERS) {
+    it.skipIf(tier.skip)(`${tier.name}: the control without a var-length sibling is byte-identical to TS`, () => {
+      const c = control();
+      const hex = requireHex(tier.run(c.irPath), tier.name, 'StaleStateProbe-control')
         .toLowerCase();
-      expect(hex, `${tier.name} diverges from the TS reference`).toBe(control.tsHex);
+      expect(hex, `${tier.name} diverges from the TS reference`).toBe(c.tsHex);
       expect(hex).not.toContain(LIVE_STATE_MARKER_HEX);
-    }
-  }, 180_000);
+    }, 180_000);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1809,26 +1830,40 @@ describe('Cross-compiler: a mixed add/sub constant chain is byte-identical in al
     }
   });
 
+  /** TS-lower one shape and write its IR. Memoised by name. */
+  const lowered = new Map<string, { irPath: string; tsHex: string }>();
+  function lowerShape(expr: string, foldOff: boolean, name: string): { irPath: string; tsHex: string } {
+    const hit = lowered.get(name);
+    if (hit) return hit;
+    const tsResult = compile(reassocProbeSource(expr), { disableConstantFolding: foldOff });
+    if (!tsResult.success) {
+      throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+    }
+    const irPath = join(tempDir, `${name}.anf.json`);
+    writeFileSync(irPath, anfToJson(tsResult.anf!));
+    const out = { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+    lowered.set(name, out);
+    return out;
+  }
+
+  // GK-GAP-011: one case per tier, so an absent tier reports SKIPPED instead
+  // of being dropped inside a case that still reports PASSED.
   for (const { label, expr, hex } of REASSOC_SHAPES) {
     for (const foldOff of [true, false]) {
       const mode = foldOff ? 'fold OFF' : 'fold ON';
-      it(`${label} (\`${expr}\`, ${mode}) matches the TS reference in every tier`, () => {
-        const name = `Reassoc-${label.replace(/[^a-z]+/gi, '-')}-${foldOff ? 'off' : 'on'}`;
-        const tsResult = compile(reassocProbeSource(expr), { disableConstantFolding: foldOff });
-        if (!tsResult.success) {
-          throw new Error(tsCompileErrors(name, tsResult.diagnostics));
-        }
-        const tsHex = (tsResult.scriptHex as string).toLowerCase();
-        expect(tsHex, 'TS reference bytes moved').toBe(hex);
+      const name = `Reassoc-${label.replace(/[^a-z]+/gi, '-')}-${foldOff ? 'off' : 'on'}`;
 
-        const irPath = join(tempDir, `${name}.anf.json`);
-        writeFileSync(irPath, anfToJson(tsResult.anf!));
-        for (const tier of REASSOC_TIERS) {
-          if (tier.skip) continue;
+      it(`${label} (\`${expr}\`, ${mode}): TS reference bytes`, () => {
+        expect(lowerShape(expr, foldOff, name).tsHex, 'TS reference bytes moved').toBe(hex);
+      });
+
+      for (const tier of REASSOC_TIERS) {
+        it.skipIf(tier.skip)(`${label} (\`${expr}\`, ${mode}) matches the TS reference in ${tier.name}`, () => {
+          const { irPath, tsHex } = lowerShape(expr, foldOff, name);
           const tierHex = requireHex(tier.run(irPath), tier.name, name).toLowerCase();
           expect(tierHex, `${tier.name} diverges from the TS reference`).toBe(tsHex);
-        }
-      }, 180_000);
+        }, 180_000);
+      }
     }
   }
 });
