@@ -179,14 +179,35 @@ public final class Json {
             throw new IllegalArgumentException("Json: unterminated string");
         }
 
+        // GK-BUG-009: exactly the RFC 8259 grammar
+        //   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+        // The old loop took any run of [0-9.eE+-], so 01 became Long 1 and 1.
+        // became 1.0; every peer tier rejects both as bad JSON, so a signed
+        // envelope with "nonce":01 verified ok in this tier alone.
         Object readNumber() {
             int start = pos;
             if (peek() == '-') pos++;
-            while (pos < s.length()) {
-                char c = s.charAt(pos);
-                if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
-                    pos++;
-                } else break;
+            if (peek() == '0') {
+                pos++;
+            } else if (peek() >= '1' && peek() <= '9') {
+                skipDigits();
+            } else {
+                throw new IllegalArgumentException("Json: bad number at " + start);
+            }
+            if (peek() == '.') {
+                pos++;
+                if (!(peek() >= '0' && peek() <= '9')) {
+                    throw new IllegalArgumentException("Json: bad number fraction at " + start);
+                }
+                skipDigits();
+            }
+            if (peek() == 'e' || peek() == 'E') {
+                pos++;
+                if (peek() == '+' || peek() == '-') pos++;
+                if (!(peek() >= '0' && peek() <= '9')) {
+                    throw new IllegalArgumentException("Json: bad number exponent at " + start);
+                }
+                skipDigits();
             }
             String tok = s.substring(start, pos);
             if (tok.contains(".") || tok.contains("e") || tok.contains("E")) {
@@ -197,6 +218,10 @@ public final class Json {
             } catch (NumberFormatException nfe) {
                 return new java.math.BigInteger(tok);
             }
+        }
+
+        void skipDigits() {
+            while (pos < s.length() && s.charAt(pos) >= '0' && s.charAt(pos) <= '9') pos++;
         }
 
         char peek() {

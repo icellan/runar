@@ -524,6 +524,32 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "nt1-nonce-leading-zero-01",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "01 is not a JSON number token at all (RFC 8259 forbids a leading zero), so the payload is bad-json, decided at parse time before the integer-token check. The signature is VALID for this exact payload text, so a tier whose parser accepts 01 as 1 returns ok:true instead of falling through to bad-sig. Inner nonce 01, outer 1. Before the fix Java's Json.readNumber handed 01 to Long.parseLong and accepted; the other six rejected it as bad-json.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":01}",
+        "sig": "3045022100e6dcd638360ea900207c50377bfbfec9610356b8148f9c5c29eefb503b3f186c022050d595f9d3362fa28b1b59aedd4eb51b8b2ea463088aac00bdb510656eefabe0",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "nt2-nonce-trailing-dot-1.",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "1. is not a JSON number token (a '.' must be followed by a digit), so the payload is bad-json. Signature VALID for this exact payload text. Inner nonce 1., outer 1. Before the fix Java's Json.readNumber handed 1. to Double.parseDouble and answered envelope-mismatch; the other six said bad-json.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1.}",
+        "sig": "3045022100c3428d764f9f0ade2caa673078e48da5fd4aa17eddfe8fc064249ab67d049d3d0220487344904c8fe1db810d09b8e4972f1853b8711321720edfb382eaf4427ebac5",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",

@@ -254,10 +254,14 @@ function main(): void {
     _vector_id?: string;
     reason: string;
     envelope: { payload: string; sig: string; pubkey: string };
-  }>).filter((v) => /^it\d/.test(v._vector_id ?? ''));
-  if (intTokenVectors.length === 0) fail('rejection_vectors carries no it* (GK-BUG-009) vectors');
+  }>).filter((v) => /^(it|nt)\d/.test(v._vector_id ?? ''));
+  if (!intTokenVectors.some((v) => /^it\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no it* (GK-BUG-009) vectors');
+  if (!intTokenVectors.some((v) => /^nt\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no nt* (GK-BUG-009 number grammar) vectors');
   for (const v of intTokenVectors) {
-    if (v.reason !== 'envelope-mismatch') fail(`${v._vector_id}: reason must be envelope-mismatch`);
+    // it*: a valid JSON number that is not an integer token -> envelope-mismatch.
+    // nt*: not a JSON number token at all (01, 1.) -> bad-json at parse time.
+    const want = v._vector_id!.startsWith('nt') ? 'bad-json' : 'envelope-mismatch';
+    if (v.reason !== want) fail(`${v._vector_id}: reason must be ${want}`);
     const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
     const ok = ecdsaVerifyRaw(
       new BigNumber(d),
