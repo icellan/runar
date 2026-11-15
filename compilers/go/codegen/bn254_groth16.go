@@ -2375,7 +2375,24 @@ func emitG1ScalarMulNamed(t *BN254Tracker, bxName, byName, scalarName, resultXNa
 // Wraps bn254G1AffineAdd (which expects the names "px, py, qx, qy" and
 // writes to "rx, ry") with rename plumbing so the caller can use arbitrary
 // names for inputs and outputs.
+//
+// GK-BUG-007: the unified slope (px² + px·qx + qx²) / (py + qy) has a zero
+// denominator for P == -Q and for the omega partners (w·px, -py),
+// (w²·px, -py); Fermat inverts 0 to 0 and the adder returns
+// (-(px+qx), -py), which is not P + Q (and, for an omega partner, is still
+// on the curve). Abort unless py + qy != 0 mod p. Doubling (P == Q) keeps
+// working: BN254 G1 has no point with y = 0, so 2·py != 0.
 func emitG1AffineAddNamed(t *BN254Tracker, p1x, p1y, p2x, p2y, resultX, resultY string) {
+	t.copyToTop(p1y, "_g1an_py")
+	t.copyToTop(p2y, "_g1an_qy")
+	t.rawBlock([]string{"_g1an_py", "_g1an_qy"}, "_g1an_ysum", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	bn254FieldMod(t, "_g1an_ysum", "_g1an_ysum_r")
+	t.rawBlock([]string{"_g1an_ysum_r"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+
 	t.toTop(p1x)
 	t.rename("px")
 	t.toTop(p1y)
