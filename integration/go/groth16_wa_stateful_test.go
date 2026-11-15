@@ -108,7 +108,9 @@ func writePinnedSP1V6VK(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read vk.json: %v", err)
 	}
-	var vk map[string]interface{}
+	// json.RawMessage keeps every existing field byte-for-byte (no float64
+	// round trip of numeric fields).
+	var vk map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &vk); err != nil {
 		t.Fatalf("parse vk.json: %v", err)
 	}
@@ -120,7 +122,11 @@ func writePinnedSP1V6VK(t *testing.T) string {
 	for _, i := range []int{0, 2, 3} {
 		pins[strconv.Itoa(i)] = pubs[i].String()
 	}
-	vk["pinnedPublicInputs"] = pins
+	pinsJSON, err := json.Marshal(pins)
+	if err != nil {
+		t.Fatalf("encode pins: %v", err)
+	}
+	vk["pinnedPublicInputs"] = pinsJSON
 	out, err := json.Marshal(vk)
 	if err != nil {
 		t.Fatalf("encode pinned vk.json: %v", err)
