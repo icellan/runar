@@ -94,6 +94,7 @@ const negative_test_sources = [_]struct { name: []const u8, src: []const u8 }{
 test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
     var absolute_sites: usize = 0;
     var delta_sites: usize = 0;
+    var verdict_sites: usize = 0;
 
     for (negative_test_sources) |f| {
         var it = std.mem.splitScalar(u8, f.src, '\n');
@@ -109,17 +110,28 @@ test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
                     .{ f.name, line_no },
                 );
             }
+            // R2-NEGATIVES: a bare delta is vacuous since GK-BUG-004 (an
+            // accepted tx whose confirming mine fails also moves the counter
+            // and errors), so it counts as a defect now.
             if (std.mem.indexOf(u8, line, "broadcast_attempts > broadcasts_before") != null) {
                 delta_sites += 1;
+                std.log.err(
+                    "{s}:{d}: bare broadcast delta — it also holds for an ACCEPTED tx whose mine failed. Use expectNodeRejected.",
+                    .{ f.name, line_no },
+                );
+            }
+            if (std.mem.indexOf(u8, line, ".expectNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED)") != null) {
+                verdict_sites += 1;
             }
         }
     }
 
     try std.testing.expectEqual(@as(usize, 0), absolute_sites);
+    try std.testing.expectEqual(@as(usize, 0), delta_sites);
     // Falsification anchor: if the assertions are simply deleted rather than
-    // converted, this reddens too. 23: MathDemo_RejectDivideByZero now asserts
-    // the SDK's fail-closed refusal (no SDK path builds that spend).
-    try std.testing.expectEqual(@as(usize, 23), delta_sites);
+    // converted, this reddens too. 23: MathDemo_RejectDivideByZero asserts the
+    // SDK's fail-closed refusal (no SDK path builds that spend).
+    try std.testing.expectEqual(@as(usize, 23), verdict_sites);
 }
 
 // ---------------------------------------------------------------------------

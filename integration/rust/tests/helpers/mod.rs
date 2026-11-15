@@ -23,12 +23,117 @@ pub struct LoggingRPCProvider {
     /// the DELTA around the attacking call: an error with no new attempt is
     /// an SDK-side failure, not a consensus rejection.
     pub broadcast_attempts: usize,
+    /// What each of those broadcasts came to, in order (one entry per
+    /// attempt). `assert_node_rejected` reads the entries a call added.
+    pub broadcast_log: Vec<BroadcastOutcome>,
 }
 
 impl LoggingRPCProvider {
     pub fn new(inner: RPCProvider) -> Self {
-        Self { inner, broadcast_attempts: 0 }
+        Self { inner, broadcast_attempts: 0, broadcast_log: Vec::new() }
     }
+
+    /// Snapshot to take immediately before the attacking call.
+    pub fn rejection_probe(&self) -> RejectionProbe {
+        RejectionProbe { attempts: self.broadcast_attempts }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Negative tests: proving the NODE rejected the spend
+// ---------------------------------------------------------------------------
+
+/// The reason SV Node gives for a spend whose unlocking script fails (a false
+/// assert, a failed checkSig, a script error such as OP_SPLIT out of range).
+pub const SCRIPT_VERIFY_FAILED: &str = "mandatory-script-verify-flag-failed";
+
+/// The outcome of one `Provider::broadcast` through `RPCProvider`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastOutcome {
+    /// sendrawtransaction returned a txid and the confirming mine succeeded.
+    Accepted,
+    /// sendrawtransaction ACCEPTED the tx, then the auto-mine failed
+    /// (GK-BUG-004). An error, but not a rejection: the node took the spend.
+    AcceptedMineFailed(String),
+    /// The node refused the tx at sendrawtransaction; the node's own message.
+    NodeRejected(String),
+    /// Anything else (encoding, transport). The node never ruled on it.
+    Other(String),
+}
+
+/// Classify `RPCProvider::broadcast`'s result by the messages it produces:
+/// `RPC sendrawtransaction: <node message>` when the node refuses the tx,
+/// `broadcast succeeded (txid X) but auto-mine failed: ...` when it accepted
+/// it and the confirming block did not come.
+pub fn classify_broadcast(result: &Result<String, String>) -> BroadcastOutcome {
+    match result {
+        Ok(_) => BroadcastOutcome::Accepted,
+        Err(e) if e.starts_with("broadcast succeeded") => BroadcastOutcome::AcceptedMineFailed(e.clone()),
+        Err(e) => match e.strip_prefix("RPC sendrawtransaction: ") {
+            Some(msg) => BroadcastOutcome::NodeRejected(msg.to_string()),
+            None => BroadcastOutcome::Other(e.clone()),
+        },
+    }
+}
+
+/// `LoggingRPCProvider` state sampled before the attacking call.
+#[derive(Debug, Clone, Copy)]
+pub struct RejectionProbe {
+    attempts: usize,
+}
+
+/// The pure check behind `assert_node_rejected`. `added` is what the call
+/// under test broadcast; `call_err` its error. Ok(()) only when:
+///  1. the call broadcast at least once (an error with no broadcast is an
+///     SDK-side refusal, not consensus),
+///  2. none of those broadcasts was ACCEPTED by the node -- including an
+///     accepted tx whose confirming mine then failed, which since GK-BUG-004
+///     is an error too and used to satisfy a bare `is_err()`,
+///  3. the last one was refused by the node at sendrawtransaction, with a
+///     message containing `reason`.
+pub fn check_node_rejected(added: &[BroadcastOutcome], call_err: &str, reason: &str) -> Result<(), String> {
+    if added.is_empty() {
+        return Err(format!(
+            "the call never handed a transaction to the node, so this error is an SDK-side \
+             failure, not a consensus rejection: {call_err}"
+        ));
+    }
+    if let Some(accepted) = added.iter().find(|o| {
+        matches!(o, BroadcastOutcome::Accepted | BroadcastOutcome::AcceptedMineFailed(_))
+    }) {
+        return Err(format!("the node ACCEPTED a transaction from this call ({accepted:?}); call error: {call_err}"));
+    }
+    match added.last() {
+        Some(BroadcastOutcome::NodeRejected(msg)) if msg.contains(reason) => Ok(()),
+        Some(BroadcastOutcome::NodeRejected(msg)) => Err(format!(
+            "the node rejected the spend, but for the wrong reason: expected `{reason}`, got `{msg}`"
+        )),
+        other => Err(format!(
+            "the node never ruled on the spend (last broadcast: {other:?}); call error: {call_err}"
+        )),
+    }
+}
+
+/// Assert that `result` -- the attacking call -- was refused BY THE NODE with
+/// `reason`. Take `probe` with `provider.rejection_probe()` immediately before
+/// the call. Returns the call's error text.
+pub fn assert_node_rejected<T>(
+    provider: &LoggingRPCProvider,
+    probe: RejectionProbe,
+    result: Result<T, String>,
+    reason: &str,
+) -> String {
+    let err = match result {
+        Ok(_) => panic!(
+            "the spend was ACCEPTED, so nothing was rejected (broadcasts {} -> {})",
+            probe.attempts, provider.broadcast_attempts
+        ),
+        Err(e) => e,
+    };
+    if let Err(why) = check_node_rejected(&provider.broadcast_log[probe.attempts..], &err, reason) {
+        panic!("not a node rejection: {why}");
+    }
+    err
 }
 
 impl Provider for LoggingRPCProvider {
@@ -43,7 +148,9 @@ impl Provider for LoggingRPCProvider {
         };
         eprintln!("[runar-integration] tx broadcast: {} bytes", size_bytes);
         self.broadcast_attempts += 1;
-        self.inner.broadcast(tx)
+        let result = self.inner.broadcast(tx);
+        self.broadcast_log.push(classify_broadcast(&result));
+        result
     }
 
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String> {
@@ -583,5 +690,69 @@ mod regtest_guard_tests {
     fn missing_chain_field_is_refused() {
         let err = check_regtest_chain(&json!({"blocks": 5})).unwrap_err();
         assert!(err.contains("SAFETY"), "{}", err);
+    }
+}
+
+// Node-free: the classification and the rejection check run in every test
+// binary that includes this module, with no node and no `regtest` feature.
+#[cfg(test)]
+mod node_rejection_tests {
+    use super::{check_node_rejected, classify_broadcast, BroadcastOutcome, SCRIPT_VERIFY_FAILED};
+
+    const NODE_MSG: &str =
+        "mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)";
+
+    #[test]
+    fn classifies_the_rpc_provider_messages() {
+        assert_eq!(classify_broadcast(&Ok("ab".repeat(32))), BroadcastOutcome::Accepted);
+        assert_eq!(
+            classify_broadcast(&Err(format!("RPC sendrawtransaction: {NODE_MSG}"))),
+            BroadcastOutcome::NodeRejected(NODE_MSG.to_string())
+        );
+        let mined = "broadcast succeeded (txid ab) but auto-mine failed: RPC generate: Method not found";
+        assert_eq!(
+            classify_broadcast(&Err(mined.to_string())),
+            BroadcastOutcome::AcceptedMineFailed(mined.to_string())
+        );
+        let transport = "RPC connect to localhost:18332: Connection refused";
+        assert_eq!(classify_broadcast(&Err(transport.to_string())), BroadcastOutcome::Other(transport.to_string()));
+    }
+
+    // R2-NEGATIVES: the case a bare `is_err()` let through. The node ACCEPTED
+    // the attack, the confirming mine failed, and the call returned Err.
+    #[test]
+    fn an_accepted_tx_whose_mine_failed_is_not_a_rejection() {
+        let added = [BroadcastOutcome::AcceptedMineFailed(
+            "broadcast succeeded (txid ab) but auto-mine failed: x".into(),
+        )];
+        let why = check_node_rejected(&added, "broadcast succeeded (txid ab) but auto-mine failed: x", SCRIPT_VERIFY_FAILED)
+            .unwrap_err();
+        assert!(why.contains("ACCEPTED"), "{why}");
+    }
+
+    #[test]
+    fn an_sdk_side_failure_is_not_a_rejection() {
+        let why = check_node_rejected(&[], "fetching utxos: RPC listunspent: boom", SCRIPT_VERIFY_FAILED).unwrap_err();
+        assert!(why.contains("never handed a transaction"), "{why}");
+    }
+
+    #[test]
+    fn a_transport_failure_is_not_a_rejection() {
+        let added = [BroadcastOutcome::Other("RPC connect to x: refused".into())];
+        let why = check_node_rejected(&added, "RPC connect to x: refused", SCRIPT_VERIFY_FAILED).unwrap_err();
+        assert!(why.contains("never ruled"), "{why}");
+    }
+
+    #[test]
+    fn a_rejection_for_another_reason_is_refused() {
+        let added = [BroadcastOutcome::NodeRejected("Missing inputs".into())];
+        let why = check_node_rejected(&added, "Missing inputs", SCRIPT_VERIFY_FAILED).unwrap_err();
+        assert!(why.contains("wrong reason"), "{why}");
+    }
+
+    #[test]
+    fn a_genuine_script_rejection_passes() {
+        let added = [BroadcastOutcome::NodeRejected(NODE_MSG.into())];
+        check_node_rejected(&added, NODE_MSG, SCRIPT_VERIFY_FAILED).unwrap();
     }
 }

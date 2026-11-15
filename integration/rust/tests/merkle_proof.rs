@@ -199,11 +199,12 @@ fn test_merkle_sha256_wrong_leaf_rejected() {
         .expect("deploy failed");
     assert!(!deploy_txid.is_empty());
 
+    let probe = provider.rejection_probe();
     let result = contract
         .call("verify", &[
             SdkValue::Bytes(wrong_leaf),
             SdkValue::Bytes(proof),
             SdkValue::Int(0),
         ], &mut provider, &*signer, None);
-    assert!(result.is_err(), "expected wrong leaf to be rejected on-chain");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

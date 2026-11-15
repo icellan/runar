@@ -166,7 +166,8 @@ class BBAddReject extends SmartContract {
         .expect("deploy failed");
     assert!(!deploy_txid.is_empty());
 
+    let probe = provider.rejection_probe();
     let result = contract
         .call("verify", &[SdkValue::Int(3), SdkValue::Int(7)], &mut provider, &*signer, None);
-    assert!(result.is_err(), "expected wrong add result to be rejected on-chain");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

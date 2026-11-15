@@ -19,6 +19,10 @@ const helpers = @import("helpers.zig");
 const Stub = struct {
     chain_json: []const u8 = "{\"chain\":\"regtest\",\"blocks\":200}",
     mine_fails: bool = false,
+    /// When set, sendrawtransaction fails with this error; for
+    /// error.RpcFailed the node's message is `send_message`.
+    send_error: ?anyerror = null,
+    send_message: []const u8 = "",
     sent: usize = 0,
     imported: usize = 0,
     mined: usize = 0,
@@ -37,7 +41,12 @@ const Stub = struct {
         return allocator.dupe(u8, "aa" ** 32);
     }
     fn sendRawTransaction(ctx: ?*anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]u8 {
-        self(ctx).sent += 1;
+        const s = self(ctx);
+        s.sent += 1;
+        if (s.send_error) |e| {
+            if (e == error.RpcFailed) helpers.setLastRpcError(s.send_message);
+            return e;
+        }
         return allocator.dupe(u8, "bb" ** 32);
     }
     fn mine(ctx: ?*anyopaque, _: std.mem.Allocator, _: i64) anyerror!void {
@@ -120,4 +129,89 @@ test "GK-BUG-004: broadcastAndMine returns the txid when the mine succeeds" {
     defer std.testing.allocator.free(txid);
     try std.testing.expectEqualStrings("bb" ** 32, txid);
     try std.testing.expectEqual(@as(usize, 1), stub.mined);
+}
+
+// ---------------------------------------------------------------------------
+// R2-NEGATIVES: after GK-BUG-004 an ACCEPTED transaction whose confirming mine
+// fails is an error AFTER a broadcast attempt, so the old negative shape --
+// `error.CallFailed` plus `broadcast_attempts > broadcasts_before` -- passed on
+// an accepted spend. These drive the real RPCProvider.broadcast through a stub
+// node and hold `checkNodeRejected` / `assertTxRejectedWith` to the node's
+// actual verdict.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_FAILURE = "mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)";
+
+fn broadcastThrough(p: *helpers.RPCProvider) void {
+    if (p.provider().broadcast(std.testing.allocator, "00")) |txid| {
+        std.testing.allocator.free(txid);
+    } else |_| {}
+}
+
+test "R2-NEGATIVES: an accepted tx whose mine failed passes the old delta but is not a node rejection" {
+    var stub: Stub = .{ .mine_fails = true };
+    var p = helpers.RPCProvider.init(std.testing.allocator);
+    p.ops = stub.ops();
+    const before = p.broadcast_attempts;
+    const probe = p.rejectionProbe();
+    const result = p.provider().broadcast(std.testing.allocator, "00");
+    if (result) |txid| {
+        std.testing.allocator.free(txid);
+        return error.TestUnexpectedResult; // mine failure swallowed
+    } else |err| {
+        try std.testing.expectEqual(error.BroadcastFailed, err);
+    }
+    // The old shape is satisfied by an ACCEPTED spend...
+    try std.testing.expect(p.broadcast_attempts > before);
+    // ...the node-verdict check is not.
+    try std.testing.expectError(error.NodeAccepted, p.checkNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED));
+}
+
+test "R2-NEGATIVES: a genuine script-verify rejection passes" {
+    var stub: Stub = .{ .send_error = error.RpcFailed, .send_message = SCRIPT_FAILURE };
+    var p = helpers.RPCProvider.init(std.testing.allocator);
+    p.ops = stub.ops();
+    broadcastThrough(&p); // the fixture's deploy, refused here too: irrelevant to the probe below
+    const probe = p.rejectionProbe();
+    broadcastThrough(&p);
+    try p.checkNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED);
+    try std.testing.expectEqualStrings(SCRIPT_FAILURE, p.lastRejection());
+}
+
+test "R2-NEGATIVES: a node rejection for another reason is refused" {
+    var stub: Stub = .{ .send_error = error.RpcFailed, .send_message = "Missing inputs" };
+    var p = helpers.RPCProvider.init(std.testing.allocator);
+    p.ops = stub.ops();
+    const probe = p.rejectionProbe();
+    broadcastThrough(&p);
+    try std.testing.expectError(error.WrongReason, p.checkNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED));
+}
+
+test "R2-NEGATIVES: a transport failure is not a node rejection" {
+    var stub: Stub = .{ .send_error = error.ConnectionFailed };
+    var p = helpers.RPCProvider.init(std.testing.allocator);
+    p.ops = stub.ops();
+    const probe = p.rejectionProbe();
+    broadcastThrough(&p);
+    try std.testing.expectError(error.NeverRuled, p.checkNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED));
+}
+
+test "R2-NEGATIVES: no broadcast at all is not a node rejection" {
+    var stub: Stub = .{};
+    var p = helpers.RPCProvider.init(std.testing.allocator);
+    p.ops = stub.ops();
+    const probe = p.rejectionProbe();
+    try std.testing.expectError(error.NeverBroadcast, p.checkNodeRejected(probe, helpers.SCRIPT_VERIFY_FAILED));
+}
+
+test "R2-NEGATIVES: assertTxRejected requires the node's refusal and reason" {
+    const a = std.testing.allocator;
+    var accepted: Stub = .{};
+    try std.testing.expectError(error.NodeAccepted, helpers.assertTxRejectedWith(accepted.ops(), a, "00", helpers.SCRIPT_VERIFY_FAILED));
+    var transport: Stub = .{ .send_error = error.ConnectionFailed };
+    try std.testing.expectError(error.NeverRuled, helpers.assertTxRejectedWith(transport.ops(), a, "00", helpers.SCRIPT_VERIFY_FAILED));
+    var wrong: Stub = .{ .send_error = error.RpcFailed, .send_message = "Missing inputs" };
+    try std.testing.expectError(error.WrongReason, helpers.assertTxRejectedWith(wrong.ops(), a, "00", helpers.SCRIPT_VERIFY_FAILED));
+    var genuine: Stub = .{ .send_error = error.RpcFailed, .send_message = SCRIPT_FAILURE };
+    try helpers.assertTxRejectedWith(genuine.ops(), a, "00", helpers.SCRIPT_VERIFY_FAILED);
 }

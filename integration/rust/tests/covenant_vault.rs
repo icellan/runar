@@ -184,6 +184,7 @@ fn test_covenant_vault_wrong_signer_rejected() {
 
     // Call spend with walletB — checkSig will fail on-chain
     let (wrong_signer, _) = create_funded_wallet(&mut provider);
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "spend",
         &[SdkValue::Auto, SdkValue::Auto],
@@ -191,5 +192,5 @@ fn test_covenant_vault_wrong_signer_rejected() {
         &*wrong_signer,
         None,
     );
-    assert!(result.is_err(), "spend with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }

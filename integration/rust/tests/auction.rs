@@ -183,6 +183,7 @@ fn test_auction_wrong_signer_rejected() {
     // missing-locktime failure.
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
     let close_opts = CallOptions { locktime: Some(1), ..Default::default() };
+    let probe = provider.rejection_probe();
     let result = contract.call(
         "close",
         &[SdkValue::Auto],
@@ -190,5 +191,5 @@ fn test_auction_wrong_signer_rejected() {
         &*signer_b,
         Some(&close_opts),
     );
-    assert!(result.is_err(), "close with wrong signer should be rejected");
+    assert_node_rejected(&provider, probe, result, SCRIPT_VERIFY_FAILED);
 }
