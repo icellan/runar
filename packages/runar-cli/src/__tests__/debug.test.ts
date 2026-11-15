@@ -171,3 +171,86 @@ describe('debug exit status (F-221)', () => {
     expect(status).toBe(0);
   }, 150_000);
 });
+
+// ---------------------------------------------------------------------------
+// GK-BUG-014: source mapping counted unlocking-script opcodes.
+//
+// `debug` incremented one counter on every vm.step(), unlocking steps
+// included, and resolved it against the source map, whose `opcodeIndex` is a
+// LOCKING-script opcode index. Any non-empty unlock (the default whenever a
+// method has args or a selector) shifted every printed source line, every
+// file:line breakpoint, `next` and `info` by the number of unlocking opcodes.
+//
+// Proves: with a one-opcode unlock, the unlocking step prints no source line,
+// the first locking step prints the line mapped to locking opcode 0, and a
+// file:line breakpoint fires on the opcode that line maps to.
+// Does not prove: anything about the ScriptVM itself or source-map emission.
+// ---------------------------------------------------------------------------
+describe('debug source mapping is locking-indexed (GK-BUG-014)', () => {
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const ROOT = path.resolve(HERE, '../../../..');
+  const CLI = path.join(ROOT, 'packages/runar-cli/src/bin.ts');
+
+  function loader(): string {
+    for (const p of [
+      path.join(ROOT, 'conformance/node_modules/tsx/dist/loader.mjs'),
+      path.join(ROOT, 'node_modules/tsx/dist/loader.mjs'),
+    ]) {
+      if (fs.existsSync(p)) return pathToFileURL(p).href;
+    }
+    throw new Error('no tsx loader');
+  }
+
+  // Locking: OP_2 OP_3 OP_ADD OP_5 OP_EQUAL; opcode i maps to source line i+1.
+  const LOCKING = '5253935587';
+  const SOURCE = ['L1 push two', 'L2 push three', 'L3 add', 'L4 push five', 'L5 equal'].join('\n');
+
+  function run(input: string, extra: string[] = []): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runar-debug-map-'));
+    fs.writeFileSync(path.join(dir, 'c.ts'), SOURCE);
+    const artifact = path.join(dir, 'a.json');
+    fs.writeFileSync(artifact, JSON.stringify({
+      contractName: 'T',
+      script: LOCKING,
+      asm: '',
+      abi: { constructor: { params: [] }, methods: [] },
+      sourceMap: {
+        mappings: [0, 1, 2, 3, 4].map((i) => ({ opcodeIndex: i, sourceFile: 'c.ts', line: i + 1, column: 0 })),
+      },
+    }));
+    try {
+      const res = spawnSync(
+        process.execPath,
+        ['--import', loader(), CLI, 'debug', artifact, '--unlock', '51', ...extra],
+        { cwd: ROOT, input, encoding: 'utf-8', timeout: 120_000 },
+      );
+      return `${res.stdout ?? ''}${res.stderr ?? ''}`;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The source line printed right after the step line for `opcode`, or null. */
+  function lineAfter(out: string, opcode: RegExp): string | null {
+    const lines = out.split('\n');
+    const i = lines.findIndex((l) => opcode.test(l));
+    if (i < 0) throw new Error(`no step line matching ${opcode} in:\n${out}`);
+    const next = lines[i + 1] ?? '';
+    return /c\.ts:\d+/.test(next) ? next.trim() : null;
+  }
+
+  it('the unlocking step has no source line; locking opcode 0 maps to line 1', () => {
+    const out = run('s\ns\nq\n');
+    expect(lineAfter(out, /UNL \[0000\] (OP_1|OP_TRUE)\b/), out).toBeNull();
+    expect(lineAfter(out, /\[0000\] OP_2\b/), out).toMatch(/^c\.ts:1\s+L1 push two$/);
+  }, 150_000);
+
+  it('a file:line breakpoint stops on the opcode that line maps to', () => {
+    const out = run('c\nq\n', ['--break', 'c.ts:3']);
+    const lines = out.split('\n');
+    const hit = lines.findIndex((l) => l.includes('Hit breakpoint 1'));
+    expect(hit, out).toBeGreaterThan(-1);
+    expect(lines[hit + 1], out).toMatch(/OP_ADD/);
+    expect(lines[hit + 2]?.trim(), out).toMatch(/^c\.ts:3\s+L3 add$/);
+  }, 150_000);
+});

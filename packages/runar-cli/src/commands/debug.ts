@@ -140,6 +140,17 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
   // Execution history for backtrace
   const history: Array<{ offset: number; opcode: string; stackDepth: number }> = [];
   let opcodeCounter = 0;
+  // GK-BUG-014: the source map's `opcodeIndex` counts LOCKING-script opcodes
+  // only, but the VM also steps the unlocking script. `lockingIndex` is the
+  // number of locking opcodes executed so far (so, between steps, the index of
+  // the next one); source lines and breakpoints resolve against it, never
+  // against `opcodeCounter`, which counts both scripts.
+  let lockingIndex = 0;
+
+  /** Locking-script opcode index of the step just taken, or null for an unlocking step. */
+  function takeLockingIndex(context: string): number | null {
+    return context === 'locking' ? lockingIndex++ : null;
+  }
 
   // Step and print current position
   function stepAndPrint(): boolean {
@@ -153,9 +164,10 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
       return false;
     }
     opcodeCounter++;
+    const lockIdx = takeLockingIndex(result.context);
     history.push({ offset: result.offset, opcode: result.opcode, stackDepth: result.mainStack.length });
 
-    printStep(result.offset, result.opcode, result.mainStack, result.context, result.error);
+    printStep(result.offset, result.opcode, result.mainStack, result.context, lockIdx, result.error);
 
     if (result.error) {
       console.log(`\nScript failed: ${result.error}`);
@@ -164,15 +176,23 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
     return true;
   }
 
-  function printStep(offset: number, opcode: string, stack: Uint8Array[], context: string, error?: string) {
+  function printStep(
+    offset: number,
+    opcode: string,
+    stack: Uint8Array[],
+    context: string,
+    lockIdx: number | null,
+    error?: string,
+  ) {
     const offsetStr = offset.toString(16).padStart(4, '0');
     const stackSummary = stack.length === 0 ? '[]' : `[${stack.map(s => formatStackItem(s, bytesToHex)).join(', ')}]`;
     const prefix = error ? 'ERR' : context === 'unlocking' ? 'UNL' : '   ';
     console.log(`${prefix} [${offsetStr}] ${opcode.padEnd(20)} stack: ${stackSummary}`);
 
-    // Source location
-    if (resolver) {
-      const loc = resolver.resolve(opcodeCounter - 1);
+    // Source location (locking-script opcodes only; the source map has no
+    // entries for the unlocking script)
+    if (resolver && lockIdx !== null) {
+      const loc = resolver.resolve(lockIdx);
       if (loc) {
         const lines = sourceLines.get(loc.file);
         const lineText = lines ? lines[loc.line - 1]?.trimEnd() : '';
@@ -236,13 +256,13 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
       case 'n':
       case 'next': {
         // Step until source line changes
-        const startLoc = resolver?.resolve(opcodeCounter);
+        const startLoc = resolver?.resolve(lockingIndex);
         const startLine = startLoc?.line ?? -1;
         let stepped = false;
         while (!vm.isComplete) {
           if (!stepAndPrint()) break;
           stepped = true;
-          const curLoc = resolver?.resolve(opcodeCounter);
+          const curLoc = resolver?.resolve(lockingIndex);
           if (curLoc && curLoc.line !== startLine) break;
           if (!resolver) break; // No source map — behave like step
         }
@@ -256,13 +276,14 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
           const result = vm.step();
           if (!result) { printCompletion(); break; }
           opcodeCounter++;
+          const lockIdx = takeLockingIndex(result.context);
           history.push({ offset: result.offset, opcode: result.opcode, stackDepth: result.mainStack.length });
 
-          // Check breakpoints
-          const hitBp = breakpoints.find(bp => {
-            if (bp.opcodeIndex !== undefined && bp.opcodeIndex === opcodeCounter - 1) return true;
+          // Check breakpoints (locking-script opcode indices only)
+          const hitBp = lockIdx === null ? undefined : breakpoints.find(bp => {
+            if (bp.opcodeIndex !== undefined && bp.opcodeIndex === lockIdx) return true;
             if (bp.file && bp.line && resolver) {
-              const loc = resolver.resolve(opcodeCounter - 1);
+              const loc = resolver.resolve(lockIdx);
               return loc?.file === bp.file && loc?.line === bp.line;
             }
             return false;
@@ -270,12 +291,12 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
 
           if (hitBp) {
             console.log(`Hit breakpoint ${hitBp.id} — ${hitBp.description}`);
-            printStep(result.offset, result.opcode, result.mainStack, result.context, result.error);
+            printStep(result.offset, result.opcode, result.mainStack, result.context, lockIdx, result.error);
             break;
           }
 
           if (result.error) {
-            printStep(result.offset, result.opcode, result.mainStack, result.context, result.error);
+            printStep(result.offset, result.opcode, result.mainStack, result.context, lockIdx, result.error);
             console.log(`\nScript failed: ${result.error}`);
             break;
           }
@@ -319,7 +340,7 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
       case 'i':
       case 'info': {
         console.log(`PC: ${vm.pc} (byte offset in ${vm.context} script)`);
-        console.log(`Opcodes executed: ${opcodeCounter}`);
+        console.log(`Opcodes executed: ${opcodeCounter} (${lockingIndex} in the locking script)`);
         console.log(`Complete: ${vm.isComplete}`);
         if (vm.isComplete) console.log(`Success: ${vm.isSuccess}`);
         if (breakpoints.length > 0) {
@@ -329,7 +350,7 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
           }
         }
         if (resolver) {
-          const loc = resolver.resolve(opcodeCounter);
+          const loc = resolver.resolve(lockingIndex);
           if (loc) {
             const lines = sourceLines.get(loc.file);
             const lineText = lines ? lines[loc.line - 1]?.trimEnd() : '';
@@ -355,6 +376,7 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
       case 'run':
         vm.loadHex(unlockingHex, lockingHex);
         opcodeCounter = 0;
+        lockingIndex = 0;
         history.length = 0;
         console.log('Restarted.');
         break;
@@ -542,7 +564,7 @@ Commands:
   continue (c)  Run until breakpoint or completion
   stack   (st)  Print main stack
   altstack (as) Print alt stack
-  break   (b)   Set breakpoint: b <opcode#> or b <file>:<line>
+  break   (b)   Set breakpoint: b <locking-script opcode#> or b <file>:<line>
   delete  (d)   Delete breakpoint: d <id>
   info    (i)   Show current position and breakpoints
   backtrace (bt) Show last N executed opcodes (default 10)
