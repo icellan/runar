@@ -13,7 +13,10 @@
 //!   - an `if` checks it only if both arms do (a missing else checks nothing);
 //!   - a ternary checks it only if both arms do;
 //!   - the right operand of `&&` / `||` checks nothing (short-circuit);
-//!   - a `for` loop body checks nothing (the bound may be zero).
+//!   - a `for` loop body checks nothing (the bound may be zero);
+//!   - a `return` ends its path: a private method checks a parameter only if
+//!     every `return` (and the fall-through end) is reached after the check,
+//!     and an arm that returns drops out of the join after its `if`.
 //!
 //! A name assigned anywhere in the method body (the parameter itself or a
 //! local) never stands for a parameter: after `a = other` it no longer holds
@@ -99,7 +102,7 @@ impl<'a> Checker<'a> {
         let mut fresh = HashSet::new();
         collect_reassigned(&m.body, &mut fresh);
         let outer = std::mem::replace(&mut self.reassigned, fresh);
-        let done = self.walk(&m.body, &Origins::new(), &mut aliases.clone(), &inner);
+        let done = self.walk_method(&m.body, &mut aliases.clone(), &inner);
         self.reassigned = outer;
         let result: HashSet<usize> = m
             .params
@@ -171,13 +174,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Intersects the checked sets of every `return` and of the fall-through
+    /// end of a method body.
+    fn walk_method(&mut self, body: &[Statement], aliases: &mut Aliases, stack: &HashSet<String>) -> Origins {
+        let mut exits: Vec<Origins> = Vec::new();
+        if let Some(fall) = self.walk(body, &Origins::new(), aliases, stack, &mut exits) {
+            exits.push(fall);
+        }
+        let mut it = exits.into_iter();
+        let first = it.next().unwrap_or_default();
+        it.fold(first, |acc, e| acc.intersection(&e).cloned().collect())
+    }
+
+    /// The parameters checked at the end of `stmts`, or `None` when every path
+    /// through `stmts` returns first. Each `return` records its own checked
+    /// set in `exits`.
     fn walk(
         &mut self,
         stmts: &[Statement],
         done_in: &Origins,
         aliases: &mut Aliases,
         stack: &HashSet<String>,
-    ) -> Origins {
+        exits: &mut Vec<Origins>,
+    ) -> Option<Origins> {
         let mut done = done_in.clone();
         for st in stmts {
             match st {
@@ -196,19 +215,36 @@ impl<'a> Checker<'a> {
                 Statement::ExpressionStatement { expression, .. } => {
                     done.extend(self.expr_must(expression, aliases, stack))
                 }
-                Statement::ReturnStatement { value: Some(v), .. } => done.extend(self.expr_must(v, aliases, stack)),
+                Statement::ReturnStatement { value, .. } => {
+                    let mut at_exit = done.clone();
+                    if let Some(v) = value {
+                        at_exit.extend(self.expr_must(v, aliases, stack));
+                    }
+                    exits.push(at_exit);
+                    return None;
+                }
                 Statement::IfStatement { condition, then_branch, else_branch, .. } => {
                     done.extend(self.expr_must(condition, aliases, stack));
-                    let then_done = self.walk(then_branch, &done, &mut aliases.clone(), stack);
+                    let then_done = self.walk(then_branch, &done, &mut aliases.clone(), stack, exits);
                     let empty: Vec<Statement> = Vec::new();
                     let else_stmts = else_branch.as_ref().unwrap_or(&empty);
-                    let else_done = self.walk(else_stmts, &done, &mut aliases.clone(), stack);
-                    done = then_done.intersection(&else_done).cloned().collect();
+                    let else_done = self.walk(else_stmts, &done, &mut aliases.clone(), stack, exits);
+                    done = match (then_done, else_done) {
+                        (None, None) => return None,
+                        (None, Some(e)) => e,
+                        (Some(t), None) => t,
+                        (Some(t), Some(e)) => t.intersection(&e).cloned().collect(),
+                    };
+                }
+                Statement::ForStatement { body, .. } => {
+                    // The body checks nothing for the code after the loop, but
+                    // a `return` inside it still ends a path.
+                    self.walk(body, &done, &mut aliases.clone(), stack, exits);
                 }
                 _ => {}
             }
         }
-        done
+        Some(done)
     }
 }
 
@@ -235,7 +271,7 @@ pub fn check_preimage_checked_on_every_path(contract: &ContractNode) -> Vec<Diag
         let mut fresh = HashSet::new();
         collect_reassigned(&m.body, &mut fresh);
         checker.reassigned = fresh;
-        let done = checker.walk(&m.body, &Origins::new(), &mut aliases, &stack);
+        let done = checker.walk_method(&m.body, &mut aliases, &stack);
         for name in tracked {
             if !done.contains(name) {
                 errors.push(Diagnostic::error(

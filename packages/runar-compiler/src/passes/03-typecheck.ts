@@ -87,7 +87,10 @@ const isPreimageType = (t: TypeNode): boolean =>
  *   - an `if` checks it only if both arms do (a missing else checks nothing);
  *   - a ternary checks it only if both arms do;
  *   - the right operand of `&&` / `||` checks nothing (short-circuit);
- *   - a `for` loop body checks nothing (the bound may be zero).
+ *   - a `for` loop body checks nothing (the bound may be zero);
+ *   - a `return` ends its path: a private method checks a parameter only if
+ *     every `return` (and the fall-through end) is reached after the check,
+ *     and an arm that returns drops out of the join after its `if`.
  * A name assigned anywhere in the method body (the parameter itself or a
  * local) never stands for a parameter: after `a = other` it no longer holds
  * the parameter's value on every path.
@@ -128,7 +131,10 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     for (const p of m.params) if (isPreimageType(p.type)) aliases.set(p.name, p.name);
     const outer = reassigned;
     reassigned = collectReassigned(m.body);
-    const done = walk(m.body, new Set(), new Map(aliases), new Set([...stack, m.name]));
+    const exits: Set<string>[] = [];
+    const fall = walk(m.body, new Set(), new Map(aliases), new Set([...stack, m.name]), exits);
+    if (fall !== null) exits.push(fall);
+    const done = exits.reduce(intersect);
     reassigned = outer;
     const result = new Set<number>();
     m.params.forEach((p, i) => {
@@ -182,7 +188,18 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     }
   };
 
-  function walk(stmts: readonly Statement[], doneIn: Set<string>, aliases: Aliases, stack: ReadonlySet<string>): Set<string> {
+  /**
+   * The parameters checked at the end of `stmts`, or `null` when every path
+   * through `stmts` returns first. Each `return` records its own checked set
+   * in `exits`.
+   */
+  function walk(
+    stmts: readonly Statement[],
+    doneIn: Set<string>,
+    aliases: Aliases,
+    stack: ReadonlySet<string>,
+    exits: Set<string>[],
+  ): Set<string> | null {
     let done = new Set(doneIn);
     for (const st of stmts) {
       switch (st.kind) {
@@ -200,15 +217,21 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
           done = union(done, exprMust(st.expression, aliases, stack));
           break;
         case 'return_statement':
-          if (st.value) done = union(done, exprMust(st.value, aliases, stack));
-          break;
+          exits.push(st.value ? union(done, exprMust(st.value, aliases, stack)) : done);
+          return null;
         case 'if_statement': {
           done = union(done, exprMust(st.condition, aliases, stack));
-          const thenDone = walk(st.then, done, new Map(aliases), stack);
-          const elseDone = walk(st.else ?? [], done, new Map(aliases), stack);
-          done = intersect(thenDone, elseDone);
+          const thenDone = walk(st.then, done, new Map(aliases), stack, exits);
+          const elseDone = walk(st.else ?? [], done, new Map(aliases), stack, exits);
+          if (thenDone === null && elseDone === null) return null;
+          done = thenDone === null ? elseDone! : elseDone === null ? thenDone : intersect(thenDone, elseDone);
           break;
         }
+        case 'for_statement':
+          // The body checks nothing for the code after the loop, but a
+          // `return` inside it still ends a path.
+          walk(st.body, done, new Map(aliases), stack, exits);
+          break;
         default:
           break;
       }
@@ -222,7 +245,10 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
     const tracked = m.params.filter((p) => isPreimageType(p.type)).map((p) => p.name);
     if (tracked.length === 0) continue;
     reassigned = collectReassigned(m.body);
-    const done = walk(m.body, new Set(), new Map(tracked.map((n) => [n, n])), new Set([m.name]));
+    const exits: Set<string>[] = [];
+    const fall = walk(m.body, new Set(), new Map(tracked.map((n) => [n, n])), new Set([m.name]), exits);
+    if (fall !== null) exits.push(fall);
+    const done = exits.reduce(intersect);
     for (const name of tracked) {
       if (!done.has(name)) {
         errors.push(makeDiagnostic(preimageNotCheckedMessage(m.name, name), 'error', m.sourceLocation));

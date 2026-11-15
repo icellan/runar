@@ -352,7 +352,11 @@ execution of it does:
 - an `if` checks `p` only if both arms do; an `if` without `else` checks nothing;
 - a ternary `c ? a : b` checks `p` only if both `a` and `b` do;
 - the right operand of `&&` / `||` checks nothing (it may be short-circuited);
-- a `for` loop body checks nothing (the bound may be zero).
+- a `for` loop body checks nothing (the bound may be zero);
+- a `return` ends its path: a private method checks `p` only if every
+  `return` in it (including one inside a loop or a nested `if`) and its
+  fall-through end are each reached after the check. An `if` arm that returns
+  drops out of the join after that `if`.
 
 The rule applies to every parameter of type `SigHashPreimage` on a public
 method, stateless or stateful. The implicit `txPreimage` of a

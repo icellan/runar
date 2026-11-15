@@ -17,7 +17,10 @@ import "fmt"
 //   - an if checks it only if both arms do (a missing else checks nothing);
 //   - a ternary checks it only if both arms do;
 //   - the right operand of && / || checks nothing (short-circuit);
-//   - a for-loop body checks nothing (the bound may be zero).
+//   - a for-loop body checks nothing (the bound may be zero);
+//   - a return ends its path: a private method checks a parameter only if
+//     every return (and the fall-through end) is reached after the check, and
+//     an arm that returns drops out of the join after its if.
 //
 // A name assigned anywhere in the method body (the parameter itself or a
 // local) never stands for a parameter: after `a = other` it no longer holds
@@ -139,7 +142,7 @@ func (pc *preimageChecker) mustParams(m MethodNode, stack map[string]bool) map[i
 	}
 	outer := pc.reassigned
 	pc.reassigned = collectReassigned(m.Body, map[string]bool{})
-	done := pc.walk(m.Body, originSet{}, copyAliases(aliases), inner)
+	done := pc.walkMethod(m.Body, copyAliases(aliases), inner)
 	pc.reassigned = outer
 	result := map[int]bool{}
 	for i, p := range m.Params {
@@ -203,7 +206,24 @@ func (pc *preimageChecker) exprMust(e Expression, aliases map[string]string, sta
 	return originSet{}
 }
 
-func (pc *preimageChecker) walk(stmts []Statement, doneIn originSet, aliases map[string]string, stack map[string]bool) originSet {
+// walkMethod intersects the checked sets of every return and of the
+// fall-through end of a method body.
+func (pc *preimageChecker) walkMethod(body []Statement, aliases map[string]string, stack map[string]bool) originSet {
+	var exits []originSet
+	if fall, ok := pc.walk(body, originSet{}, aliases, stack, &exits); ok {
+		exits = append(exits, fall)
+	}
+	done := exits[0]
+	for _, e := range exits[1:] {
+		done = done.intersect(e)
+	}
+	return done
+}
+
+// walk returns the parameters checked at the end of stmts, and false when
+// every path through stmts returns first. Each return records its own
+// checked set in exits.
+func (pc *preimageChecker) walk(stmts []Statement, doneIn originSet, aliases map[string]string, stack map[string]bool, exits *[]originSet) (originSet, bool) {
 	done := doneIn.union(nil)
 	for _, s := range stmts {
 		switch st := s.(type) {
@@ -219,15 +239,29 @@ func (pc *preimageChecker) walk(stmts []Statement, doneIn originSet, aliases map
 		case ExpressionStmt:
 			done = done.union(pc.exprMust(st.Expr, aliases, stack))
 		case ReturnStmt:
-			done = done.union(pc.exprMust(st.Value, aliases, stack))
+			*exits = append(*exits, done.union(pc.exprMust(st.Value, aliases, stack)))
+			return nil, false
 		case IfStmt:
 			done = done.union(pc.exprMust(st.Condition, aliases, stack))
-			thenDone := pc.walk(st.Then, done, copyAliases(aliases), stack)
-			elseDone := pc.walk(st.Else, done, copyAliases(aliases), stack)
-			done = thenDone.intersect(elseDone)
+			thenDone, thenFalls := pc.walk(st.Then, done, copyAliases(aliases), stack, exits)
+			elseDone, elseFalls := pc.walk(st.Else, done, copyAliases(aliases), stack, exits)
+			switch {
+			case !thenFalls && !elseFalls:
+				return nil, false
+			case !thenFalls:
+				done = elseDone
+			case !elseFalls:
+				done = thenDone
+			default:
+				done = thenDone.intersect(elseDone)
+			}
+		case ForStmt:
+			// The body checks nothing for the code after the loop, but a
+			// return inside it still ends a path.
+			pc.walk(st.Body, done, copyAliases(aliases), stack, exits)
 		}
 	}
-	return done
+	return done, true
 }
 
 func checkPreimageCheckedOnEveryPath(contract *ContractNode) []Diagnostic {
@@ -254,7 +288,7 @@ func checkPreimageCheckedOnEveryPath(contract *ContractNode) []Diagnostic {
 			continue
 		}
 		pc.reassigned = collectReassigned(m.Body, map[string]bool{})
-		done := pc.walk(m.Body, originSet{}, aliases, map[string]bool{m.Name: true})
+		done := pc.walkMethod(m.Body, aliases, map[string]bool{m.Name: true})
 		for _, name := range tracked {
 			if !done[name] {
 				loc := m.SourceLocation

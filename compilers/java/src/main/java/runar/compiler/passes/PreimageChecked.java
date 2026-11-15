@@ -48,7 +48,10 @@ import runar.compiler.ir.ast.Visibility;
  * an {@code if} checks it only if both arms do (a missing else checks
  * nothing), a ternary only if both arms do; the right operand of
  * {@code &&} / {@code ||} and a {@code for} loop body check nothing. A
- * name assigned anywhere in the method body (the parameter itself or a
+ * {@code return} ends its path: a private method checks a parameter only if
+ * every {@code return} (and the fall-through end) is reached after the
+ * check, and an arm that returns drops out of the join after its {@code if}.
+ * A name assigned anywhere in the method body (the parameter itself or a
  * local) never stands for a parameter.
  */
 final class PreimageChecked {
@@ -98,7 +101,7 @@ final class PreimageChecked {
             }
             if (tracked.isEmpty()) continue;
             pc.reassigned = collectReassigned(m.body(), new HashSet<>());
-            Set<String> done = pc.walk(m.body(), new HashSet<>(), aliases, Set.of(m.name()));
+            Set<String> done = pc.walkMethod(m.body(), aliases, Set.of(m.name()));
             for (String name : tracked) {
                 if (!done.contains(name)) out.add(new Finding(message(m.name(), name), m.sourceLocation()));
             }
@@ -133,7 +136,7 @@ final class PreimageChecked {
         inner.add(m.name());
         Set<String> outer = reassigned;
         reassigned = collectReassigned(m.body(), new HashSet<>());
-        Set<String> done = walk(m.body(), new HashSet<>(), new HashMap<>(aliases), inner);
+        Set<String> done = walkMethod(m.body(), new HashMap<>(aliases), inner);
         reassigned = outer;
         Set<Integer> result = new HashSet<>();
         for (int i = 0; i < m.params().size(); i++) {
@@ -187,7 +190,24 @@ final class PreimageChecked {
         return out;
     }
 
-    private Set<String> walk(List<Statement> stmts, Set<String> doneIn, Map<String, String> aliases, Set<String> stack) {
+    /** Intersects the checked sets of every return and of the fall-through end of a method body. */
+    private Set<String> walkMethod(List<Statement> body, Map<String, String> aliases, Set<String> stack) {
+        List<Set<String>> exits = new ArrayList<>();
+        Set<String> fall = walk(body, new HashSet<>(), aliases, stack, exits);
+        if (fall != null) exits.add(fall);
+        Set<String> done = exits.isEmpty() ? new HashSet<>() : new HashSet<>(exits.get(0));
+        for (Set<String> e : exits) done.retainAll(e);
+        return done;
+    }
+
+    /**
+     * The parameters checked at the end of {@code stmts}, or {@code null} when
+     * every path through {@code stmts} returns first. Each return records its
+     * own checked set in {@code exits}.
+     */
+    private Set<String> walk(
+            List<Statement> stmts, Set<String> doneIn, Map<String, String> aliases, Set<String> stack,
+            List<Set<String>> exits) {
         Set<String> done = new HashSet<>(doneIn);
         if (stmts == null) return done;
         for (Statement s : stmts) {
@@ -202,12 +222,25 @@ final class PreimageChecked {
                 done.addAll(exprMust(es.expression(), aliases, stack));
             } else if (s instanceof ReturnStatement r) {
                 done.addAll(exprMust(r.value(), aliases, stack));
+                exits.add(done);
+                return null;
             } else if (s instanceof IfStatement i) {
                 done.addAll(exprMust(i.condition(), aliases, stack));
-                Set<String> thenDone = walk(i.thenBody(), done, new HashMap<>(aliases), stack);
-                Set<String> elseDone = walk(i.elseBody(), done, new HashMap<>(aliases), stack);
-                thenDone.retainAll(elseDone);
-                done = thenDone;
+                Set<String> thenDone = walk(i.thenBody(), done, new HashMap<>(aliases), stack, exits);
+                Set<String> elseDone = walk(i.elseBody(), done, new HashMap<>(aliases), stack, exits);
+                if (thenDone == null && elseDone == null) return null;
+                if (thenDone == null) {
+                    done = elseDone;
+                } else if (elseDone == null) {
+                    done = thenDone;
+                } else {
+                    thenDone.retainAll(elseDone);
+                    done = thenDone;
+                }
+            } else if (s instanceof runar.compiler.ir.ast.ForStatement f) {
+                // The body checks nothing for the code after the loop, but a
+                // return inside it still ends a path.
+                walk(f.body(), done, new HashMap<>(aliases), stack, exits);
             }
         }
         return done;

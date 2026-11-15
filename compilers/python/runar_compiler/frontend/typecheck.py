@@ -108,7 +108,10 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
       - an ``if`` checks it only if both arms do (a missing else checks nothing);
       - a ternary checks it only if both arms do;
       - the right operand of ``&&`` / ``||`` checks nothing (short-circuit);
-      - a ``for`` loop body checks nothing (the bound may be zero).
+      - a ``for`` loop body checks nothing (the bound may be zero);
+      - a ``return`` ends its path: a private method checks a parameter only
+        if every ``return`` (and the fall-through end) is reached after the
+        check, and an arm that returns drops out of the join after its ``if``.
     A name that is assigned anywhere in the method body (the parameter
     itself or a local) never stands for a parameter: after ``a = other`` the
     name no longer holds the parameter's value on every path.
@@ -149,7 +152,7 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
         nonlocal reassigned
         aliases = {p.name: p.name for p in m.params if _is_preimage_type(p.type)}
         outer, reassigned = reassigned, collect_reassigned(m.body)
-        done = walk(m.body, set(), dict(aliases), stack | {m.name})
+        done = walk_method(m.body, dict(aliases), stack | {m.name})
         reassigned = outer
         result = {i for i, p in enumerate(m.params) if p.name in aliases and p.name in done}
         memo[m.name] = result
@@ -199,7 +202,25 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
             return out
         return set()
 
-    def walk(stmts: list[Statement], done: set[str], aliases: dict[str, str], stack: frozenset[str]) -> set[str]:
+    def walk_method(body: list[Statement], aliases: dict[str, str], stack: frozenset[str]) -> set[str]:
+        """Intersect the checked sets of every ``return`` and of the
+        fall-through end of a method body."""
+        exits: list[set[str]] = []
+        fall = walk(body, set(), aliases, stack, exits)
+        if fall is not None:
+            exits.append(fall)
+        return set.intersection(*exits) if exits else set()
+
+    def walk(
+        stmts: list[Statement],
+        done: set[str],
+        aliases: dict[str, str],
+        stack: frozenset[str],
+        exits: list[set[str]],
+    ) -> set[str] | None:
+        """The parameters checked at the end of ``stmts``, or ``None`` when
+        every path through ``stmts`` returns first. Each ``return`` records its
+        own checked set in ``exits``."""
         done = set(done)
         for st in stmts or []:
             if isinstance(st, VariableDeclStmt):
@@ -214,12 +235,24 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
             elif isinstance(st, (ExpressionStmt,)):
                 done |= expr_must(st.expr, aliases, stack)
             elif isinstance(st, ReturnStmt):
-                done |= expr_must(st.value, aliases, stack)
+                exits.append(done | expr_must(st.value, aliases, stack))
+                return None
             elif isinstance(st, IfStmt):
                 done |= expr_must(st.condition, aliases, stack)
-                then_done = walk(st.then, done, dict(aliases), stack)
-                else_done = walk(st.else_ or [], done, dict(aliases), stack)
-                done = then_done & else_done
+                then_done = walk(st.then, done, dict(aliases), stack, exits)
+                else_done = walk(st.else_ or [], done, dict(aliases), stack, exits)
+                if then_done is None and else_done is None:
+                    return None
+                if then_done is None:
+                    done = else_done
+                elif else_done is None:
+                    done = then_done
+                else:
+                    done = then_done & else_done
+            elif isinstance(st, ForStmt):
+                # The body checks nothing for the code after the loop, but a
+                # ``return`` inside it still ends a path.
+                walk(st.body, done, dict(aliases), stack, exits)
         return done
 
     errors: list[Diagnostic] = []
@@ -230,7 +263,7 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
         if not tracked:
             continue
         reassigned = collect_reassigned(m.body)
-        done = walk(m.body, set(), {n: n for n in tracked}, frozenset({m.name}))
+        done = walk_method(m.body, {n: n for n in tracked}, frozenset({m.name}))
         for name in tracked:
             if name not in done:
                 errors.append(Diagnostic(

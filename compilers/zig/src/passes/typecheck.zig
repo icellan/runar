@@ -108,8 +108,13 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
 /// path) at a point every execution of the list reaches: an `if` checks it
 /// only if both arms do (a missing else checks nothing), a ternary only if both
 /// arms do; the right operand of `&&` / `||` and a `for` loop body check
-/// nothing. Origins are parameter indices of the method being walked (a bit
-/// each; parameters past the 64th are not tracked). A name assigned anywhere
+/// nothing. A `return` ends its path: a private method checks a parameter only
+/// if every `return` (and the fall-through end) is reached after the check, and
+/// an arm that returns drops out of the join after its `if`. Origins are the
+/// ordinals of the method's SigHashPreimage parameters among themselves (a bit
+/// each, so a SigHashPreimage parameter is tracked wherever it sits in a long
+/// list; a public method with more than 64 of them is refused outright rather
+/// than left unchecked). A name assigned anywhere
 /// in the method body (the parameter itself or a local) never stands for a
 /// parameter: after `a = other` it no longer holds the parameter's value on
 /// every path.
@@ -187,10 +192,20 @@ const PreimageCheck = struct {
         return @as(u64, 1) << @as(u6, @intCast(i));
     }
 
+    /// The origin bit of `params[i]`: its ordinal among the SigHashPreimage
+    /// parameters, or null for any other type (or past the 64th).
+    fn preimageOrdinal(params: []const types.ParamNode, i: usize) ?u6 {
+        if (params[i].type_info != .sig_hash_preimage) return null;
+        var k: usize = 0;
+        for (params[0..i]) |q| {
+            if (q.type_info == .sig_hash_preimage) k += 1;
+        }
+        return if (k < 64) @intCast(k) else null;
+    }
+
     fn pushParams(self: *PreimageCheck, m: MethodNode) Allocator.Error!void {
         for (m.params, 0..) |p, i| {
-            const bit: ?u6 = if (p.type_info == .sig_hash_preimage and i < 64) @intCast(i) else null;
-            try self.aliases.append(self.allocator, .{ .name = p.name, .bit = bit });
+            try self.aliases.append(self.allocator, .{ .name = p.name, .bit = preimageOrdinal(m.params, i) });
         }
     }
 
@@ -209,9 +224,17 @@ const PreimageCheck = struct {
         try self.pushParams(m);
         const outer = try self.enterBody(m.body);
         defer self.leaveBody(outer);
-        const done = try self.walk(m.body, 0);
+        const done = try self.walkMethod(m.body);
         try self.memo.put(self.allocator, m.name, done);
         return done;
+    }
+
+    /// Intersects the checked sets of every `return` and of the fall-through
+    /// end of a method body.
+    fn walkMethod(self: *PreimageCheck, body: []const Statement) Allocator.Error!u64 {
+        var exits: u64 = std.math.maxInt(u64);
+        if (try self.walk(body, 0, &exits)) |fall| exits &= fall;
+        return exits;
     }
 
     fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression) Allocator.Error!u64 {
@@ -226,7 +249,9 @@ const PreimageCheck = struct {
         if (self.privateMethod(name)) |target| {
             const consumed = try self.mustParams(target);
             for (args, 0..) |a, i| {
-                if (i >= 64 or consumed & bitOf(i) == 0) continue;
+                if (i >= target.params.len) break;
+                const k = preimageOrdinal(target.params, i) orelse continue;
+                if (consumed & bitOf(k) == 0) continue;
                 if (self.resolve(a)) |b| out |= bitOf(b);
             }
         }
@@ -259,7 +284,10 @@ const PreimageCheck = struct {
         try self.aliases.append(self.allocator, .{ .name = name, .bit = bit });
     }
 
-    fn walk(self: *PreimageCheck, stmts: []const Statement, done_in: u64) Allocator.Error!u64 {
+    /// The parameters checked at the end of `stmts`, or null when every path
+    /// through `stmts` returns first. Each `return` intersects its own checked
+    /// set into `exits`.
+    fn walk(self: *PreimageCheck, stmts: []const Statement, done_in: u64, exits: *u64) Allocator.Error!?u64 {
         var done = done_in;
         for (stmts) |st| {
             switch (st) {
@@ -276,17 +304,26 @@ const PreimageCheck = struct {
                 .assert_stmt => |ast| done |= try self.exprMust(ast.condition),
                 .return_stmt => |r| {
                     if (r.value) |v| done |= try self.exprMust(v);
+                    exits.* &= done;
+                    return null;
                 },
                 .if_stmt => |ifs| {
                     done |= try self.exprMust(ifs.condition);
                     const len = self.aliases.items.len;
-                    const then_done = try self.walk(ifs.then_body, done);
+                    const then_done = try self.walk(ifs.then_body, done, exits);
                     self.aliases.shrinkRetainingCapacity(len);
-                    const else_done = if (ifs.else_body) |eb| try self.walk(eb, done) else done;
+                    const else_done: ?u64 = if (ifs.else_body) |eb| try self.walk(eb, done, exits) else done;
                     self.aliases.shrinkRetainingCapacity(len);
-                    done = then_done & else_done;
+                    if (then_done == null and else_done == null) return null;
+                    done = if (then_done == null) else_done.? else if (else_done == null) then_done.? else then_done.? & else_done.?;
                 },
-                .for_stmt => {},
+                .for_stmt => |f| {
+                    // The body checks nothing for the code after the loop, but
+                    // a `return` inside it still ends a path.
+                    const len = self.aliases.items.len;
+                    _ = try self.walk(f.body, done, exits);
+                    self.aliases.shrinkRetainingCapacity(len);
+                },
             }
         }
         return done;
@@ -306,10 +343,12 @@ fn checkPreimageCheckedOnEveryPath(checker: *TypeChecker, allocator: Allocator, 
         try pc.pushParams(m);
         const outer = try pc.enterBody(m.body);
         defer pc.leaveBody(outer);
-        const done = try pc.walk(m.body, 0);
+        const done = try pc.walkMethod(m.body);
         for (m.params, 0..) |p, i| {
-            if (p.type_info != .sig_hash_preimage or i >= 64) continue;
-            if (done & PreimageCheck.bitOf(i) != 0) continue;
+            if (p.type_info != .sig_hash_preimage) continue;
+            if (PreimageCheck.preimageOrdinal(m.params, i)) |k| {
+                if (done & PreimageCheck.bitOf(k) != 0) continue;
+            }
             checker.addErrorAt(m.source_loc, PREIMAGE_NOT_CHECKED_FMT, .{ m.name, p.name });
         }
     }

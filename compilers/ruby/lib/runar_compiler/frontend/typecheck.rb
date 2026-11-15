@@ -301,13 +301,17 @@ module RunarCompiler
     # every path) at a point every execution reaches. An if checks it only if
     # both arms do (a missing else checks nothing), a ternary only if both arms
     # do; the right operand of && / || and a for-loop body check nothing. A
-    # name assigned anywhere in the method body never stands for a parameter.
+    # return ends its path: a private method checks a parameter only if every
+    # return (and the fall-through end) is reached after the check, and an arm
+    # that returns drops out of the join after its if. A name assigned
+    # anywhere in the method body never stands for a parameter.
     def self.check_preimage_checked_on_every_path(contract)
       preimage = ->(t) { t.is_a?(PrimitiveType) && t.name == "SigHashPreimage" }
       privates = {}
       contract.methods.each { |m| privates[m.name] = m unless m.visibility == "public" }
       memo = {}
       walk = nil
+      walk_method = nil
       expr_must = nil
 
       reassigned = Set.new
@@ -336,7 +340,7 @@ module RunarCompiler
         (m.params || []).each { |p| aliases[p.name] = p.name if preimage.call(p.type) }
         outer = reassigned
         reassigned = collect_reassigned.call(m.body)
-        done = walk.call(m.body, Set.new, aliases.dup, stack | [m.name])
+        done = walk_method.call(m.body, aliases.dup, stack | [m.name])
         reassigned = outer
         result = Set.new
         (m.params || []).each_with_index do |p, i|
@@ -386,7 +390,18 @@ module RunarCompiler
         else Set.new
         end
       end
-      walk = lambda do |stmts, done_in, aliases, stack|
+      # Intersects the checked sets of every return and of the fall-through end
+      # of a method body.
+      walk_method = lambda do |body, aliases, stack|
+        exits = []
+        fall = walk.call(body, Set.new, aliases, stack, exits)
+        exits << fall unless fall.nil?
+        exits.reduce { |acc, e| acc & e } || Set.new
+      end
+      # The parameters checked at the end of stmts, or nil when every path
+      # through stmts returns first. Each return records its own checked set
+      # in exits.
+      walk = lambda do |stmts, done_in, aliases, stack, exits|
         done = done_in.dup
         (stmts || []).each do |st|
           case st
@@ -400,13 +415,24 @@ module RunarCompiler
             end
           when AssignmentStmt then done |= expr_must.call(st.value, aliases, stack)
           when ExpressionStmt then done |= expr_must.call(st.expr, aliases, stack)
-          when ReturnStmt then done |= expr_must.call(st.value, aliases, stack)
+          when ReturnStmt
+            exits << (done | expr_must.call(st.value, aliases, stack))
+            return nil
           when AssertStmt then done |= expr_must.call(st.condition, aliases, stack)
           when IfStmt
             done |= expr_must.call(st.condition, aliases, stack)
-            then_done = walk.call(st.then, done, aliases.dup, stack)
-            else_done = walk.call(st.else_, done, aliases.dup, stack)
-            done = then_done & else_done
+            then_done = walk.call(st.then, done, aliases.dup, stack, exits)
+            else_done = walk.call(st.else_, done, aliases.dup, stack, exits)
+            return nil if then_done.nil? && else_done.nil?
+
+            done = if then_done.nil? then else_done
+                   elsif else_done.nil? then then_done
+                   else then_done & else_done
+                   end
+          when ForStmt
+            # The body checks nothing for the code after the loop, but a
+            # return inside it still ends a path.
+            walk.call(st.body, done, aliases.dup, stack, exits)
           end
         end
         done
@@ -420,7 +446,7 @@ module RunarCompiler
         next if tracked.empty?
 
         reassigned = collect_reassigned.call(m.body)
-        done = walk.call(m.body, Set.new, tracked.to_h { |n| [n, n] }, [m.name])
+        done = walk_method.call(m.body, tracked.to_h { |n| [n, n] }, [m.name])
         tracked.each do |name|
           next if done.include?(name)
 
