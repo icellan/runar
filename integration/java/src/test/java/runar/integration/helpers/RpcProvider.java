@@ -9,7 +9,7 @@ import runar.lang.sdk.UTXO;
 
 /**
  * {@link Provider} implementation backed by a Bitcoin SV regtest node
- * (SV Node or Teranode). Used only by the integration tests — parity
+ * (SV Node; the Java suite does not run on Teranode). Used only by the integration tests — parity
  * with the Python {@code RPCProvider}, Rust {@code RpcProvider}, and Go
  * {@code BatchRPCProvider}.
  *
@@ -18,9 +18,8 @@ import runar.lang.sdk.UTXO;
  * this test-only helper fills the gap until the SDK adds one natively.
  *
  * <p>Auto-mining: calling {@link #broadcastRaw} triggers a single-block
- * mine so subsequent UTXO lookups see the broadcast tx. On Teranode
- * this also nudges the validator/blockassembly services to pick up the
- * tx promptly.
+ * mine so subsequent UTXO lookups see the broadcast tx. A failed mine is
+ * an error carrying the broadcast txid, never a silent success.
  */
 public final class RpcProvider implements Provider {
 
@@ -55,17 +54,12 @@ public final class RpcProvider implements Provider {
 
     @Override
     public List<UTXO> listUtxos(String address) {
-        // Use listunspent — works on SV Node with a wallet-imported address.
-        // On Teranode (no wallet) this call returns an empty list; tests
-        // funding Teranode addresses must use the raw-coinbase path in
-        // integration/teranode-compose instead.
-        String result;
-        try {
-            result = rpc.call("listunspent", 0L, 9_999_999L, List.of(address));
-        } catch (Exception e) {
-            // Teranode / wallet-less node: no unspent list available.
-            return List.of();
-        }
+        // listunspent — SV Node with a wallet-imported address. A failure here
+        // (unreachable node, RPC error) propagates: reporting "no UTXOs" for a
+        // node we could not ask turns every transport fault into a misleading
+        // "insufficient funds" downstream (GK-BUG-003). The Java suite does
+        // not run on Teranode (wallet-less); Teranode integration is Go-only.
+        String result = rpc.call("listunspent", 0L, 9_999_999L, List.of(address));
         Object parsed = new JsonReader(result).readValue();
         if (!(parsed instanceof List<?> arr)) return List.of();
         List<UTXO> out = new ArrayList<>();
@@ -99,7 +93,13 @@ public final class RpcProvider implements Provider {
         if (autoMine) {
             try {
                 rpc.mine(1);
-            } catch (Exception ignored) { /* best effort */ }
+            } catch (RuntimeException e) {
+                // GK-BUG-004: the tx is in the mempool but the confirming block
+                // never came; returning the txid would report a confirmation
+                // that did not happen. Same message as the Java SDK RPCProvider.
+                throw new RpcClient.RpcException(
+                    "broadcast succeeded (txid " + txid + ") but auto-mine failed: " + e.getMessage(), e);
+            }
         }
         return txid;
     }

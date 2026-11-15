@@ -3,7 +3,7 @@ import java.time.Duration
 // Rúnar Java integration tests (M13).
 //
 // End-to-end tests that deploy compiled contracts to a running Bitcoin SV
-// regtest node (or Teranode) and exercise the runar-java SDK's deploy /
+// regtest node and exercise the runar-java SDK's deploy /
 // call / broadcast path with real ECDSA signatures.
 //
 // Tests are gated behind the -Drunar.integration=true system property so
@@ -20,7 +20,10 @@ import java.time.Duration
 // Backend selection:
 //
 //     BSV_BACKEND=svnode    gradle test    # default (bitcoind regtest, port 18332)
-//     BSV_BACKEND=teranode  gradle test    # Teranode Docker Compose stack (port 19292)
+//
+// Teranode is NOT supported here (no node wallet, no coinbase-funding path):
+// IntegrationWallet.createFunded throws on BSV_BACKEND=teranode. Teranode
+// integration is Go-only (integration/go, NODE_TYPE=teranode).
 
 plugins {
     java

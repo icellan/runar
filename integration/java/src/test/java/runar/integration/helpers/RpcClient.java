@@ -28,8 +28,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * env var. Credentials and URL can be overridden with {@code RPC_URL},
  * {@code RPC_USER}, {@code RPC_PASS}.
  *
- * <p>The client uses a 30-minute timeout because mining 10,101 blocks
- * for Teranode Genesis activation or broadcasting a ~200 KB SLH-DSA
+ * <p>The client uses a 30-minute timeout because mining 15,101 blocks
+ * on Teranode or broadcasting a ~200 KB SLH-DSA
  * spending tx can easily take minutes.
  */
 public final class RpcClient {
@@ -45,10 +45,18 @@ public final class RpcClient {
     private final String backend;
 
     public RpcClient() {
-        this.backend = detectBackend();
-        this.url = System.getenv().getOrDefault("RPC_URL", defaultUrl(backend));
-        String user = System.getenv().getOrDefault("RPC_USER", "bitcoin");
-        String pass = System.getenv().getOrDefault("RPC_PASS", "bitcoin");
+        this(
+            System.getenv().getOrDefault("RPC_URL", defaultUrl(detectBackend())),
+            System.getenv().getOrDefault("RPC_USER", "bitcoin"),
+            System.getenv().getOrDefault("RPC_PASS", "bitcoin"),
+            detectBackend()
+        );
+    }
+
+    /** Explicit endpoint + backend (node-free helper tests drive a stub node through this). */
+    public RpcClient(String url, String user, String pass, String backend) {
+        this.backend = backend;
+        this.url = url;
         this.authHeader = "Basic " + Base64.getEncoder()
             .encodeToString((user + ":" + pass).getBytes(StandardCharsets.UTF_8));
     }
@@ -179,13 +187,14 @@ public final class RpcClient {
     }
 
     /**
-     * Ensures enough blocks exist for coinbase maturity. On Teranode we
-     * need height &gt;= 10101 (regtest Genesis activation at 10000 + 101
-     * for maturity). On SV node we target 501 (Genesis height 1 + 500
-     * headroom for parallel tests).
+     * Ensures enough blocks exist for coinbase maturity. On Teranode the
+     * target is 15,101 — Chronicle activates at 15,000 on Teranode regtest,
+     * plus 101 for maturity — matching {@code integration/teranode.sh}
+     * (TARGET_HEIGHT=15101). On SV node we target 501 (Genesis height 1 +
+     * 500 headroom for parallel tests).
      */
     public void ensureMatureCoinbase() {
-        int target = isTeranode() ? 10_101 : 501;
+        int target = isTeranode() ? 15_101 : 501;
         int current = getBlockCount();
         if (current < target) {
             mine(target - current);

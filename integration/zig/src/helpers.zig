@@ -138,6 +138,30 @@ pub fn requireNodeAvailable(allocator: std.mem.Allocator) void {
             "Start with: cd integration && ./regtest.sh start",
         );
     }
+    // GK-BUG-001: reachable is not enough — refuse a mainnet/testnet node, as
+    // the Go (EnsureRegtest) and Java (ensureRegtest) suites do.
+    ensureRegtestWith(real_node, allocator) catch {
+        @panic("SAFETY: the configured node is not on regtest! Refusing to run integration tests.");
+    };
+}
+
+pub const RegtestGuardError = error{NotRegtest};
+
+/// Pure chain guard (GK-BUG-001): accept only a `getblockchaininfo` result
+/// whose `chain` is "regtest".
+pub fn checkRegtestChain(allocator: std.mem.Allocator, info_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, info_json, .{}) catch return RegtestGuardError.NotRegtest;
+    defer parsed.deinit();
+    if (parsed.value != .object) return RegtestGuardError.NotRegtest;
+    const chain = parsed.value.object.get("chain") orelse return RegtestGuardError.NotRegtest;
+    if (chain != .string or !std.mem.eql(u8, chain.string, "regtest")) return RegtestGuardError.NotRegtest;
+}
+
+/// Ask the node behind `ops` for its chain and refuse anything but regtest.
+pub fn ensureRegtestWith(ops: NodeOps, allocator: std.mem.Allocator) !void {
+    const info = try ops.getBlockchainInfo(ops.ctx, allocator);
+    defer allocator.free(info);
+    try checkRegtestChain(allocator, info);
 }
 
 /// Get the current block height.
@@ -210,11 +234,59 @@ pub fn getRawTransactionVerbose(allocator: std.mem.Allocator, txid: []const u8) 
     return rpcCall(allocator, "getrawtransaction", params);
 }
 
+// ---------------------------------------------------------------------------
+// Node-operation seam (GK-BUG-001 / GK-BUG-004)
+//
+// The funding and broadcast-and-mine helpers take their node calls through
+// this table so the node-free guard suite can drive them against a stub node.
+// `real_node` is the curl-backed implementation every integration test uses.
+// ---------------------------------------------------------------------------
+
+pub const NodeOps = struct {
+    ctx: ?*anyopaque = null,
+    getBlockchainInfo: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]u8,
+    importAddress: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8) anyerror!void,
+    sendToAddress: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) anyerror![]u8,
+    sendRawTransaction: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) anyerror![]u8,
+    mine: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, n: i64) anyerror!void,
+};
+
+fn realGetBlockchainInfo(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+    return rpcCall(allocator, "getblockchaininfo", "[]");
+}
+fn realImportAddress(_: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8) anyerror!void {
+    return importAddress(allocator, address);
+}
+fn realSendToAddress(_: ?*anyopaque, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) anyerror![]u8 {
+    return sendToAddress(allocator, address, btc_amount);
+}
+fn realSendRawTransaction(_: ?*anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) anyerror![]u8 {
+    return sendRawTransaction(allocator, tx_hex);
+}
+fn realMine(_: ?*anyopaque, allocator: std.mem.Allocator, n: i64) anyerror!void {
+    return mine(allocator, n);
+}
+
+pub const real_node: NodeOps = .{
+    .getBlockchainInfo = realGetBlockchainInfo,
+    .importAddress = realImportAddress,
+    .sendToAddress = realSendToAddress,
+    .sendRawTransaction = realSendRawTransaction,
+    .mine = realMine,
+};
+
+/// Broadcast and auto-mine 1 block through `ops`. Returns txid.
+pub fn broadcastAndMineWith(ops: NodeOps, allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
+    const txid = try ops.sendRawTransaction(ops.ctx, allocator, tx_hex);
+    errdefer allocator.free(txid);
+    // GK-BUG-004: a failed confirming mine is an error, not a success.
+    try ops.mine(ops.ctx, allocator, 1);
+    return txid;
+}
+
 /// Broadcast and auto-mine 1 block. Returns txid.
 pub fn broadcastAndMine(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
-    const txid = try sendRawTransaction(allocator, tx_hex);
-    mine(allocator, 1) catch {};
-    return txid;
+    return broadcastAndMineWith(real_node, allocator, tx_hex);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,12 +372,21 @@ pub fn newWallet(allocator: std.mem.Allocator) !Wallet {
     };
 }
 
+/// Fund an address through `ops`: import it, send BTC, mine a block.
+pub fn fundAddressWith(ops: NodeOps, allocator: std.mem.Allocator, address: []const u8, btc_amount: f64) ![]u8 {
+    // GK-BUG-001: never spend from a non-regtest node's wallet.
+    try ensureRegtestWith(ops, allocator);
+    try ops.importAddress(ops.ctx, allocator, address);
+    const txid = try ops.sendToAddress(ops.ctx, allocator, address, btc_amount);
+    errdefer allocator.free(txid);
+    // GK-BUG-004: an unconfirmed funding tx must not be reported as funded.
+    try ops.mine(ops.ctx, allocator, 1);
+    return txid;
+}
+
 /// Fund a wallet: import address, send BTC, mine a block.
 pub fn fundWallet(allocator: std.mem.Allocator, wallet: *const Wallet, btc_amount: f64) ![]u8 {
-    try importAddress(allocator, wallet.address);
-    const txid = try sendToAddress(allocator, wallet.address, btc_amount);
-    mine(allocator, 1) catch {};
-    return txid;
+    return fundAddressWith(real_node, allocator, wallet.address, btc_amount);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,13 +584,6 @@ pub fn assertTxRejected(allocator: std.mem.Allocator, tx_hex: []const u8) !void 
     return error.RpcFailed; // Should have been rejected
 }
 
-/// Mine a block and verify the transaction has confirmations.
-pub fn assertTxInBlock(allocator: std.mem.Allocator, txid: []const u8) !void {
-    mine(allocator, 1) catch {};
-    const result = getRawTransactionVerbose(allocator, txid) catch return;
-    defer allocator.free(result);
-    // If we can fetch it, it's in a block
-}
 
 // ---------------------------------------------------------------------------
 // JSON utility helpers

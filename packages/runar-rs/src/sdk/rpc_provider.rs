@@ -150,7 +150,12 @@ impl Provider for RPCProvider {
             .ok_or_else(|| "RPC sendrawtransaction: expected string txid".to_string())?
             .to_string();
         if self.auto_mine {
-            let _ = self.mine(1);
+            // GK-BUG-004: the tx is already in the mempool, but the caller asked
+            // for it to be confirmed; reporting success here would hand back a
+            // txid for a block that never came. Mirrors Go / Java / TS.
+            self.mine(1).map_err(|e| {
+                format!("broadcast succeeded (txid {}) but auto-mine failed: {}", txid_str, e)
+            })?;
         }
         Ok(txid_str)
     }
@@ -363,5 +368,96 @@ mod tests {
         let input = "5\r\nhello\r\n0\r\n";
         let result = decode_chunked(input).unwrap();
         assert_eq!(result, "hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // GK-BUG-004: auto-mine failure must not be swallowed
+    // -----------------------------------------------------------------------
+
+    /// One-shot-per-connection JSON-RPC stub: answers each request by method
+    /// name and records the methods it saw.
+    fn spawn_stub_node(
+        answer: fn(&str) -> String,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream { Ok(s) => s, Err(_) => return };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Read headers + Content-Length body.
+                loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 { break; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = text.find("\r\n\r\n") {
+                        let len = text[..h]
+                            .lines()
+                            .find_map(|l| l.strip_prefix("Content-Length: "))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len { break; }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let body = &text[text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0)..];
+                let method = serde_json::from_str::<Value>(body)
+                    .ok()
+                    .and_then(|v| v["method"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                seen2.lock().unwrap().push(method.clone());
+                let resp_body = answer(&method);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(), resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{}", addr), seen)
+    }
+
+    fn one_input_tx() -> BsvTransaction {
+        let hex = [
+            "01000000", "01", &"11".repeat(32), "00000000", "0151", "ffffffff",
+            "01", "e803000000000000", "0151", "00000000",
+        ]
+        .concat();
+        BsvTransaction::from_hex(&hex).unwrap()
+    }
+
+    const STUB_TXID: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn broadcast_reports_auto_mine_failure_with_txid() {
+        let (url, seen) = spawn_stub_node(|method| match method {
+            "sendrawtransaction" => format!(r#"{{"result":"{}","error":null,"id":"runar"}}"#, STUB_TXID),
+            _ => r#"{"result":null,"error":{"code":-32601,"message":"Method not found"},"id":"runar"}"#.to_string(),
+        });
+        let mut p = RPCProvider::new_regtest(&url, "u", "p");
+        let err = p.broadcast(&one_input_tx()).expect_err(
+            "broadcast returned Ok although the auto-mine after it failed",
+        );
+        assert!(err.contains(STUB_TXID), "error must carry the broadcast txid: {}", err);
+        assert!(err.contains("auto-mine failed"), "error must name the failing step: {}", err);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.first().map(String::as_str), Some("sendrawtransaction"));
+        assert!(seen.iter().any(|m| m == "generate"), "auto-mine was never attempted: {:?}", *seen);
+    }
+
+    #[test]
+    fn broadcast_succeeds_when_auto_mine_succeeds() {
+        let (url, _seen) = spawn_stub_node(|method| match method {
+            "sendrawtransaction" => format!(r#"{{"result":"{}","error":null,"id":"runar"}}"#, STUB_TXID),
+            "generate" => r#"{"result":["bb"],"error":null,"id":"runar"}"#.to_string(),
+            _ => r#"{"result":null,"error":{"code":-1,"message":"unexpected"},"id":"runar"}"#.to_string(),
+        });
+        let mut p = RPCProvider::new_regtest(&url, "u", "p");
+        assert_eq!(p.broadcast(&one_input_tx()).unwrap(), STUB_TXID);
     }
 }

@@ -1,9 +1,19 @@
 package runar.lang.sdk;
 
+import java.util.List;
+
 /**
- * Minimal adapter interface for a BRC-100 compatible wallet. Parity with
- * the Go SDK's {@code WalletClient}; trimmed down to the subset the
- * {@link WalletProvider} needs to drive a deploy/call flow.
+ * Adapter interface for a BRC-100 compatible wallet. Mirrors the Go SDK's
+ * {@code WalletClient}: signing ({@link #sign}, {@link #pubKey},
+ * {@link #address} — Go's {@code CreateSignature} / {@code GetPublicKey}) plus
+ * the action surface ({@link #createAction}, {@link #listOutputs}) that
+ * {@link WalletProvider#ensureFunding} and
+ * {@link RunarContract#deployWithWallet} drive.
+ *
+ * <p>The two action methods are {@code default}s that throw
+ * {@link UnsupportedOperationException}, so a signing-only wallet (all a
+ * {@link WalletSigner} needs) still compiles; any funding or wallet-deploy
+ * call against it fails closed rather than pretending to have no outputs.
  *
  * <p>The Rúnar SDK never hands the wallet a raw unsigned transaction.
  * Instead, it computes the BIP-143 sighash locally (see
@@ -42,4 +52,30 @@ public interface BRC100Wallet {
 
     /** Returns the BSV P2PKH address at the given derivation path. */
     String address(String derivationPath);
+
+    /**
+     * BRC-100 {@code createAction}: the wallet funds, signs and broadcasts a
+     * transaction carrying {@code outputs}. Parity with Go
+     * {@code WalletClient.CreateAction}.
+     *
+     * @throws UnsupportedOperationException if the wallet has no action surface
+     */
+    default WalletActionResult createAction(String description, List<WalletActionOutput> outputs) {
+        throw new UnsupportedOperationException(
+            getClass().getName() + " does not implement BRC-100 createAction"
+        );
+    }
+
+    /**
+     * BRC-100 {@code listOutputs}: outputs in {@code basket} carrying any of
+     * {@code tags}, at most {@code limit}. Parity with Go
+     * {@code WalletClient.ListOutputs}.
+     *
+     * @throws UnsupportedOperationException if the wallet has no action surface
+     */
+    default List<WalletOutput> listOutputs(String basket, List<String> tags, int limit) {
+        throw new UnsupportedOperationException(
+            getClass().getName() + " does not implement BRC-100 listOutputs"
+        );
+    }
 }

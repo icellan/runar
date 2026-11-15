@@ -98,8 +98,32 @@ def mine(blocks: int) -> None:
         rpc_call("generatetoaddress", blocks, addr)
 
 
+_REGTEST_CONFIRMED = False
+
+
+def require_regtest() -> None:
+    """Raise unless the connected node reports chain == "regtest" (GK-BUG-001).
+
+    Called by every helper that spends from the node's wallet, so funding can
+    never reach a mainnet/testnet node whatever order the fixtures ran in.
+    Only a confirmed regtest answer is cached.
+    """
+    global _REGTEST_CONFIRMED
+    if _REGTEST_CONFIRMED:
+        return
+    info = rpc_call("getblockchaininfo")
+    chain = info.get("chain") if isinstance(info, dict) else None
+    if chain != "regtest":
+        raise RuntimeError(
+            f"SAFETY: connected to {chain!r} network, not regtest! "
+            "Refusing to fund or mine."
+        )
+    _REGTEST_CONFIRMED = True
+
+
 def fund_address(address: str, btc_amount: float = 1.0) -> None:
     """Import an address and send coins to it, then mine a block."""
+    require_regtest()
     rpc_call("importaddress", address, "", False)
     rpc_call("sendtoaddress", address, btc_amount)
     mine(1)
@@ -181,6 +205,7 @@ def create_funded_wallet(provider: RPCProvider, btc_amount: float = 1.0) -> dict
     address = _regtest_address(wallet["pubKeyHash"])
 
     # Import and fund
+    require_regtest()
     rpc_call("importaddress", address, "", False)
     rpc_call("sendtoaddress", address, btc_amount)
     mine(1)
@@ -517,6 +542,10 @@ def _crt(a1: int, m1: int, a2: int, m2: int) -> int:
 @pytest.fixture(scope="session", autouse=True)
 def ensure_blocks():
     """Ensure at least 101 blocks exist for coinbase maturity."""
+    # Chain check first and OUTSIDE the swallow below: this fixture is
+    # registered before ensure_regtest, so it runs first (GK-BUG-001).
+    if is_node_available():
+        require_regtest()
     try:
         count = rpc_call('getblockcount')
         if count < 101:
@@ -530,8 +559,7 @@ def ensure_regtest():
     """Verify the connected node is on regtest before running any tests."""
     if not is_node_available():
         return  # skip_if_no_node will handle per-test skipping
-    info = rpc_call('getblockchaininfo')
-    assert info['chain'] == 'regtest', f"SAFETY: Connected to {info['chain']}, not regtest!"
+    require_regtest()
 
 
 @pytest.fixture(autouse=True)

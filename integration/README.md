@@ -5,7 +5,7 @@ End-to-end integration tests that deploy and spend Runar contracts on a real Bit
 Two node backends are supported:
 
 - **SV Node** — Bitcoin SV node with built-in wallet (default)
-- **Teranode** — BSV's microservices-based node implementation
+- **Teranode** — BSV's microservices-based node implementation. Exercised by the Go suite (`pnpm integration:teranode`); the Java suite does not support it and fails closed (`IntegrationWallet.createFunded` throws) on `BSV_BACKEND=teranode`
 
 ## Quick Start
 
