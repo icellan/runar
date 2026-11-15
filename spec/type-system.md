@@ -308,7 +308,7 @@ The following types are treated as **affine**:
 
 | Type | Rule |
 |---|---|
-| `SigHashPreimage` | A `SigHashPreimage` parameter of a public method must be passed to `checkPreimage()` **exactly once**: at most once (affine), and on every path through the method (see 4.3) |
+| `SigHashPreimage` | A `SigHashPreimage` parameter of a public method must be passed to `checkPreimage()` **exactly once**: at most once (affine), and on every path through the method as an asserted condition, `assert(checkPreimage(p))` (see 4.3) |
 | `Sig` | May be consumed at most once; should be verified, not duplicated |
 
 An unchecked preimage is a byte string the spender chose: every field an
@@ -337,21 +337,38 @@ at-most-once half keeps a second `checkPreimage` from being emitted.
 
                     Preimage Checked On Every Path
     p : SigHashPreimage, a parameter of a public method m
-    some path through m does not reach checkPreimage(p)
+    some path through m does not assert checkPreimage(p)
     ─────────────────────────────────────────────────────
     ERROR: public method 'm' must pass its SigHashPreimage
            parameter 'p' to checkPreimage() on every path
 ```
 
-"Reaches `checkPreimage(p)`" is a must-analysis over the method body. `p` is
-checked when it is passed to `checkPreimage` directly, through a local alias
-(`const q = p; checkPreimage(q)`), or through a private method that itself
-checks that parameter on every path. A construct checks `p` only when every
-execution of it does:
+"Asserts `checkPreimage(p)`" is a must-analysis over the method body. A call
+`checkPreimage(x)` checks `p` only when it is the asserted condition of an
+`assert(...)`: the whole condition, or any conjunct of the top-level `&&`
+chain inside it (`assert(checkPreimage(p))`,
+`assert(flag && checkPreimage(p) && other)`), with `x` either `p` or a local
+alias of it (`const q = p; assert(checkPreimage(q))`). `p` is also checked by
+a call to a private method that itself checks that parameter on every path.
+Nothing else checks `p`, because nothing else makes the spend fail when the
+preimage is not the transaction's:
+
+- a discarded call (`checkPreimage(p);`) or one bound to a local
+  (`const ok = checkPreimage(p); assert(ok);`);
+- a negated, compared, `||`-ed or ternary-wrapped call
+  (`assert(!checkPreimage(p))`, `assert(checkPreimage(p) === true)`,
+  `assert(checkPreimage(p) || flag)`, `assert(c ? checkPreimage(p) : true)`);
+- a call used as an `if` or ternary condition;
+- a call returned from a helper (`return checkPreimage(p);`), even when the
+  caller asserts the helper's result.
+
+A construct checks `p` only when every execution of it does:
 
 - an `if` checks `p` only if both arms do; an `if` without `else` checks nothing;
 - a ternary `c ? a : b` checks `p` only if both `a` and `b` do;
-- the right operand of `&&` / `||` checks nothing (it may be short-circuited);
+- outside the asserted `&&` chain above, the right operand of `&&` / `||`
+  checks nothing (it may be short-circuited); inside it every conjunct
+  counts, since a short-circuited conjunct fails the assert anyway;
 - a `for` loop body checks nothing (the bound may be zero);
 - a `return` ends its path: a private method checks `p` only if every
   `return` in it (including one inside a loop or a nested `if`) and its

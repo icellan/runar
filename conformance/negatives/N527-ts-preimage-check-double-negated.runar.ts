@@ -1,0 +1,20 @@
+// R2-GK010-ASSERT (GK-GAP-010) -- assert(!!checkPreimage(txPreimage)): a wrapped call is not the asserted
+// call itself (fail closed).
+// Every tier refuses:
+//   public method 'spend' must pass its SigHashPreimage parameter 'txPreimage'
+//   to checkPreimage() on every path
+import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';
+
+class N527 extends SmartContract {
+  readonly minAmount: bigint;
+
+  constructor(minAmount: bigint) {
+    super(minAmount);
+    this.minAmount = minAmount;
+  }
+
+  public spend(txPreimage: SigHashPreimage, flag: boolean) {
+    assert(!!checkPreimage(txPreimage));
+    assert(extractAmount(txPreimage) >= this.minAmount);
+  }
+}

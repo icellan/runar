@@ -42,9 +42,14 @@ import runar.compiler.ir.ast.Visibility;
  * preimage is chosen by the spender.
  *
  * <p>A must-analysis over the AST. A parameter counts as checked by a
- * statement list when it is passed to {@code checkPreimage} (directly,
- * through a local alias, or through a private method that itself checks that
- * parameter on every path) at a point every execution of the list reaches:
+ * statement list when {@code checkPreimage(p)} is the asserted condition of
+ * {@code assert(...)} (the whole condition or any conjunct of its top-level
+ * {@code &&} chain) with {@code p} the parameter or a local alias of it, or
+ * when it is passed to a private method that itself checks that parameter on
+ * every path, at a point every execution of the list reaches
+ * (R2-GK010-ASSERT: a discarded, bound, negated, {@code ||}-ed, compared or
+ * ternary-wrapped call, or one used as an {@code if} / ternary condition or
+ * returned from a helper, checks nothing):
  * an {@code if} checks it only if both arms do (a missing else checks
  * nothing), a ternary only if both arms do; the right operand of
  * {@code &&} / {@code ||} and a {@code for} loop body check nothing. A
@@ -147,15 +152,37 @@ final class PreimageChecked {
         return result;
     }
 
+    /** The operands of a top-level {@code &&} chain ({@code e} itself if it is not one). */
+    private static void conjuncts(Expression e, List<Expression> out) {
+        if (e instanceof BinaryExpr b && b.op() == Expression.BinaryOp.AND) {
+            conjuncts(b.left(), out);
+            conjuncts(b.right(), out);
+        } else {
+            out.add(e);
+        }
+    }
+
     private Set<String> exprMust(Expression e, Map<String, String> aliases, Set<String> stack) {
         Set<String> out = new LinkedHashSet<>();
         if (e == null) return out;
         if (e instanceof CallExpr c) {
             for (Expression a : c.args()) out.addAll(exprMust(a, aliases, stack));
             if (c.callee() instanceof MemberExpr me) out.addAll(exprMust(me.object(), aliases, stack));
+            // R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+            // conjunct does (the assert branch below).
             if (c.callee() instanceof Identifier id && "checkPreimage".equals(id.name())) {
-                String o = c.args().isEmpty() ? null : resolve(c.args().get(0), aliases);
-                if (o != null) out.add(o);
+                return out;
+            }
+            if (c.callee() instanceof Identifier id && "assert".equals(id.name())) {
+                List<Expression> cs = new ArrayList<>();
+                if (!c.args().isEmpty()) conjuncts(c.args().get(0), cs);
+                for (Expression x : cs) {
+                    if (x instanceof CallExpr cc && cc.callee() instanceof Identifier cid
+                            && "checkPreimage".equals(cid.name()) && !cc.args().isEmpty()) {
+                        String o = resolve(cc.args().get(0), aliases);
+                        if (o != null) out.add(o);
+                    }
+                }
                 return out;
             }
             MethodNode target = privateTarget(c.callee());

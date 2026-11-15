@@ -1,5 +1,5 @@
 {
-  "_comment": "GK-GAP-010: a public method's SigHashPreimage parameter must reach checkPreimage() on every path (spec/type-system.md 4.2). Refused cases carry the shared diagnostic; accepted cases must compile in every tier. A `return` ends its path: a private helper's check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage).",
+  "_comment": "GK-GAP-010 (tightened by R2-GK010-ASSERT): a public method's SigHashPreimage parameter counts as checked only where checkPreimage(p) is the asserted condition of assert(...), directly or as any conjunct of the top-level && chain inside it, on every path (spec/type-system.md 4.2-4.3). A discarded call, a call bound to a local, a negated, ||-ed, compared or ternary-wrapped call, a call used as an if / ternary condition and a helper that returns checkPreimage(p) check nothing. Refused cases carry the shared diagnostic; accepted cases must compile to the same bytes in every tier. A `return` ends its path: a private helper's asserted check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage).",
   "refuse": [
     {
       "name": "extract-only",
@@ -17,12 +17,6 @@
       "name": "or-right-operand",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcOrRight extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(flag || checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
-      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
-    },
-    {
-      "name": "and-right-operand",
-      "file": "Pc.runar.ts",
-      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcAndRight extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(flag && checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
       "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
     },
     {
@@ -78,6 +72,66 @@
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, assert, SigHashPreimage, extractAmount } from 'runar-lang';\n\nclass PcShadow extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    assert(this.checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n\n  private checkPreimage(p: SigHashPreimage): boolean {\n    return true;\n  }\n}\n",
       "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "discarded",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcDiscarded extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    checkPreimage(txPreimage);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "bound-to-local",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcBoundToLocal extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    const ok: boolean = checkPreimage(txPreimage);\n    assert(ok);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "negated",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcNegated extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(!checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "double-negated",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcDoubleNegated extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(!!checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "or-left-operand",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcOrLeft extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(checkPreimage(txPreimage) || flag);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "eq-true",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcEqTrue extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(checkPreimage(txPreimage) === true);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "if-condition",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcIfCondition extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    if (checkPreimage(txPreimage)) {\n      assert(flag);\n    } else {\n      assert(!flag);\n    }\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "ternary-condition",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcTernaryCondition extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(checkPreimage(txPreimage) ? flag : !flag);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "helper-returns-check",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcHelperReturnsCheck extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(this.check(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n\n  private check(p: SigHashPreimage): boolean {\n    return checkPreimage(p);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "py-discarded",
+      "file": "Pc.runar.py",
+      "src": "from runar import SmartContract, SigHashPreimage, public, assert_, check_preimage, extract_amount\n\nclass PcPyDiscarded(SmartContract):\n    min_amount: int\n\n    def __init__(self, min_amount: int):\n        super().__init__(min_amount)\n        self.min_amount = min_amount\n\n    @public\n    def spend(self, tx_preimage: SigHashPreimage, flag: bool):\n        check_preimage(tx_preimage)\n        assert_(extract_amount(tx_preimage) >= self.min_amount)\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
     }
   ],
   "accept": [
@@ -120,6 +174,31 @@
       "name": "wide-params-helper",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcWideHelper extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(a0: bigint, a1: bigint, a2: bigint, a3: bigint, a4: bigint, a5: bigint, a6: bigint, a7: bigint, a8: bigint, a9: bigint, a10: bigint, a11: bigint, a12: bigint, a13: bigint, a14: bigint, a15: bigint, a16: bigint, a17: bigint, a18: bigint, a19: bigint, a20: bigint, a21: bigint, a22: bigint, a23: bigint, a24: bigint, a25: bigint, a26: bigint, a27: bigint, a28: bigint, a29: bigint, a30: bigint, a31: bigint, a32: bigint, a33: bigint, a34: bigint, a35: bigint, a36: bigint, a37: bigint, a38: bigint, a39: bigint, a40: bigint, a41: bigint, a42: bigint, a43: bigint, a44: bigint, a45: bigint, a46: bigint, a47: bigint, a48: bigint, a49: bigint, a50: bigint, a51: bigint, a52: bigint, a53: bigint, a54: bigint, a55: bigint, a56: bigint, a57: bigint, a58: bigint, a59: bigint, a60: bigint, a61: bigint, a62: bigint, a63: bigint, txPreimage: SigHashPreimage) {\n    this.check(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37, a38, a39, a40, a41, a42, a43, a44, a45, a46, a47, a48, a49, a50, a51, a52, a53, a54, a55, a56, a57, a58, a59, a60, a61, a62, a63, txPreimage);\n    assert(extractAmount(txPreimage) >= this.minAmount + a63);\n  }\n\n  private check(a0: bigint, a1: bigint, a2: bigint, a3: bigint, a4: bigint, a5: bigint, a6: bigint, a7: bigint, a8: bigint, a9: bigint, a10: bigint, a11: bigint, a12: bigint, a13: bigint, a14: bigint, a15: bigint, a16: bigint, a17: bigint, a18: bigint, a19: bigint, a20: bigint, a21: bigint, a22: bigint, a23: bigint, a24: bigint, a25: bigint, a26: bigint, a27: bigint, a28: bigint, a29: bigint, a30: bigint, a31: bigint, a32: bigint, a33: bigint, a34: bigint, a35: bigint, a36: bigint, a37: bigint, a38: bigint, a39: bigint, a40: bigint, a41: bigint, a42: bigint, a43: bigint, a44: bigint, a45: bigint, a46: bigint, a47: bigint, a48: bigint, a49: bigint, a50: bigint, a51: bigint, a52: bigint, a53: bigint, a54: bigint, a55: bigint, a56: bigint, a57: bigint, a58: bigint, a59: bigint, a60: bigint, a61: bigint, a62: bigint, a63: bigint, p: SigHashPreimage): void {\n    assert(checkPreimage(p));\n    assert(a0 >= 0n);\n  }\n}\n"
+    },
+    {
+      "name": "and-right-operand",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcAndRight extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(flag && checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n"
+    },
+    {
+      "name": "and-chain-middle",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcAndChainMiddle extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(flag && checkPreimage(txPreimage) && this.minAmount > 0n);\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n"
+    },
+    {
+      "name": "and-chain-nested",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcAndChainNested extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage, flag: boolean) {\n    assert(flag && (this.minAmount > 0n && checkPreimage(txPreimage)));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n}\n"
+    },
+    {
+      "name": "py-assert-keyword",
+      "file": "Pc.runar.py",
+      "src": "from runar import SmartContract, SigHashPreimage, public, assert_, check_preimage, extract_amount\n\nclass PcPyAssertKeyword(SmartContract):\n    min_amount: int\n\n    def __init__(self, min_amount: int):\n        super().__init__(min_amount)\n        self.min_amount = min_amount\n\n    @public\n    def spend(self, tx_preimage: SigHashPreimage, flag: bool):\n        assert check_preimage(tx_preimage)\n        assert_(extract_amount(tx_preimage) >= self.min_amount)\n"
+    },
+    {
+      "name": "py-assert-call",
+      "file": "Pc.runar.py",
+      "src": "from runar import SmartContract, SigHashPreimage, public, assert_, check_preimage, extract_amount\n\nclass PcPyAssertCall(SmartContract):\n    min_amount: int\n\n    def __init__(self, min_amount: int):\n        super().__init__(min_amount)\n        self.min_amount = min_amount\n\n    @public\n    def spend(self, tx_preimage: SigHashPreimage, flag: bool):\n        assert_(check_preimage(tx_preimage))\n        assert_(extract_amount(tx_preimage) >= self.min_amount)\n"
     }
   ]
 }

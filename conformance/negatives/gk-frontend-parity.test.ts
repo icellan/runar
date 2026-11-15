@@ -16,10 +16,13 @@ import { isCiEnv } from '../env.js';
  *   made several tiers' affine-consumption fixpoint spin); each renamed twin
  *   compiles to the same bytes in every tier. Corpus:
  *   duplicate-method-cases.json.
- * - GK-GAP-010: a public method whose SigHashPreimage parameter does not reach
- *   checkPreimage() on every path is refused by every tier with the shared
+ * - GK-GAP-010: a public method whose SigHashPreimage parameter is not
+ *   checked on every path is refused by every tier with the shared
  *   diagnostic; every accepted shape compiles to the same bytes in every tier.
- *   Corpus: preimage-checked-cases.json.
+ *   R2-GK010-ASSERT: only `checkPreimage(p)` as the asserted condition of
+ *   assert(...) (or a conjunct of its top-level && chain) counts; discarded,
+ *   bound, negated, ||-ed, compared, condition-position and helper-returned
+ *   calls are refused. Corpus: preimage-checked-cases.json.
  * - GK-GAP-013: every tier still refuses each malformed intent-intrinsic shape
  *   at compile time (the lowerer backstop itself is pinned by each tier's unit
  *   tests, since no CLI reaches the lowerer without typecheck). Corpus:

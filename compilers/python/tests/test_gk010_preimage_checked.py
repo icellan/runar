@@ -6,10 +6,16 @@ affine checker only refused a SECOND use. A stateless method that read fields
 out of an unchecked preimage typechecked, and every field it read was chosen by
 the spender. Corpus: conformance/negatives/preimage-checked-cases.json.
 
-Proves: each refused shape (extract-only, one if-arm, right operand of ||/&&,
-a helper that checks on one arm, a loop body, a .runar.py extract-only) fails
-the compile with the shared diagnostic; each accepted shape (direct, both arms,
-local alias, helper, left operand of &&) compiles.
+R2-GK010-ASSERT: only checkPreimage(p) as the asserted condition of assert(...),
+or a conjunct of its top-level && chain, counts.
+
+Proves: each refused shape in the corpus (extract-only, one if-arm, right
+operand of ||, a helper that checks on one arm, a loop body, a discarded /
+bound / negated / ||-ed / compared call, a call used as an if or ternary
+condition, a helper returning the call, .runar.py shapes) fails the compile
+with the shared diagnostic; each accepted shape (direct, both arms, local
+alias, helper, any conjunct of an asserted && chain, Python assert forms)
+compiles.
 Does not prove: the other six tiers (conformance/negatives covers them).
 """
 

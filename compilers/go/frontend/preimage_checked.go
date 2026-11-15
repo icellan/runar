@@ -11,9 +11,13 @@ import "fmt"
 // chosen by the spender.
 //
 // A must-analysis over the AST. A parameter counts as checked by a statement
-// list when it is passed to checkPreimage (directly, through a local alias, or
-// through a private method that itself checks that parameter on every path)
-// at a point every execution of the list reaches:
+// list when checkPreimage(p) is the asserted condition of assert(...) (the
+// whole condition or any conjunct of its top-level && chain) with p the
+// parameter or a local alias of it, or when it is passed to a private method
+// that itself checks that parameter on every path, at a point every execution
+// of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, ||-ed,
+// compared or ternary-wrapped call, or one used as an if / ternary condition
+// or returned from a helper, checks nothing):
 //   - an if checks it only if both arms do (a missing else checks nothing);
 //   - a ternary checks it only if both arms do;
 //   - the right operand of && / || checks nothing (short-circuit);
@@ -25,6 +29,15 @@ import "fmt"
 // A name assigned anywhere in the method body (the parameter itself or a
 // local) never stands for a parameter: after `a = other` it no longer holds
 // the parameter's value on every path.
+
+// conjuncts returns the operands of a top-level && chain (e itself if it is
+// not one).
+func conjuncts(e Expression) []Expression {
+	if b, ok := e.(BinaryExpr); ok && b.Op == "&&" {
+		return append(conjuncts(b.Left), conjuncts(b.Right)...)
+	}
+	return []Expression{e}
+}
 
 // PreimageNotCheckedMessage is the diagnostic every tier shares.
 func PreimageNotCheckedMessage(method, param string) string {
@@ -164,10 +177,23 @@ func (pc *preimageChecker) exprMust(e Expression, aliases map[string]string, sta
 		if me, ok := x.Callee.(MemberExpr); ok {
 			out = out.union(pc.exprMust(me.Object, aliases, stack))
 		}
+		// R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+		// conjunct does (the assert branch below).
 		if id, ok := x.Callee.(Identifier); ok && id.Name == "checkPreimage" {
+			return out
+		}
+		if id, ok := x.Callee.(Identifier); ok && id.Name == "assert" {
 			if len(x.Args) > 0 {
-				if o, ok := pc.resolve(x.Args[0], aliases); ok {
-					out[o] = true
+				for _, c := range conjuncts(x.Args[0]) {
+					call, ok := c.(CallExpr)
+					if !ok || len(call.Args) == 0 {
+						continue
+					}
+					if cid, ok := call.Callee.(Identifier); ok && cid.Name == "checkPreimage" {
+						if o, ok := pc.resolve(call.Args[0], aliases); ok {
+							out[o] = true
+						}
+					}
 				}
 			}
 			return out
