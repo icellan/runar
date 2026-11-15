@@ -527,6 +527,69 @@ public final class RunarContract {
 
     public record DeployOutcome(String txid, String rawTxHex, UTXO deployedUtxo) {}
 
+    /** Result of {@link #deployWithWallet}: the wallet's txid and raw tx (may be {@code null}). */
+    public record DeployWithWalletResult(String txid, String rawTx) {}
+
+    /**
+     * Deploys the contract by asking the wallet behind {@code provider} to
+     * create a BRC-100 action whose single output is this contract's locking
+     * script; the wallet funds, signs and broadcasts it. Parity with Go
+     * {@code RunarContract.DeployWithWallet}.
+     *
+     * <p>Like {@link #deploy}, refuses an oversized script and an artifact with
+     * unacknowledged unsound primitives (R-062) BEFORE the wallet is asked for
+     * any coins. On success the deployed UTXO is tracked as output 0 of the
+     * wallet's transaction (as in Go).
+     *
+     * @param options may be {@code null} (1 satoshi, default description,
+     *                the provider's basket, no tags)
+     */
+    public DeployWithWalletResult deployWithWallet(WalletProvider provider, DeployWithWalletOptions options) {
+        if (provider == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.deployWithWallet: a WalletProvider is required");
+        }
+        DeployWithWalletOptions opts = options == null
+            ? new DeployWithWalletOptions(null, null, null, null, null)
+            : options;
+        String lockingScript = lockingScript();
+        if (lockingScript == null || lockingScript.isEmpty()) {
+            throw new IllegalStateException("RunarContract.deployWithWallet: empty locking script");
+        }
+        ScriptSizeExceededError.assertScriptHexUnderLimit(
+            lockingScript, InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".deployWithWallet"
+        );
+        UnsoundPrimitives.assertAcknowledged(
+            artifact, opts.acknowledgeUnsound(), artifact.contractName() + ".deployWithWallet"
+        );
+
+        long satoshis = (opts.satoshis() == null || opts.satoshis() <= 0) ? 1L : opts.satoshis();
+        String description = (opts.description() == null || opts.description().isEmpty())
+            ? "deploy " + artifact.contractName()
+            : opts.description();
+        String basket = (opts.basket() == null || opts.basket().isEmpty())
+            ? provider.basket()
+            : opts.basket();
+
+        WalletActionResult result;
+        try {
+            result = provider.wallet().createAction(description, List.of(new WalletActionOutput(
+                lockingScript, satoshis, "contract output", basket, opts.tags()
+            )));
+        } catch (UnsupportedOperationException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new ProviderException(
+                "RunarContract.deployWithWallet: creating action: " + e.getMessage(), e);
+        }
+        if (result == null || result.txid() == null || result.txid().isEmpty()) {
+            throw new ProviderException("RunarContract.deployWithWallet: wallet returned no txid");
+        }
+        this.currentUtxo = new UTXO(result.txid(), 0, satoshis, lockingScript);
+        return new DeployWithWalletResult(result.txid(), result.rawTx());
+    }
+
     /**
      * Calls {@code method} with {@code args}. Stateless contracts are
      * fully consumed; stateful contracts produce a continuation output
