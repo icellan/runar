@@ -476,6 +476,16 @@ module Runar
           n = coerce_to_integer(value, label, field_type)
           encode_num2bin(n, 8, label)
         when 'bool', 'boolean'
+          # GK-BUG-010: only true / false. Ruby truthiness wrote 01 for 0, ''
+          # and 'false'; each peer tier had its own coercion rule, so one input
+          # gave different on-chain bytes per tier. Refused in all seven, as
+          # coerce_to_integer refuses a non-integer (N-084).
+          unless [true, false].include?(value)
+            got = value.nil? ? 'nil' : value.class.to_s
+            raise ArgumentError,
+                  "serialize_state: state field '#{label}' (#{field_type}) must be a boolean, got #{got}. " \
+                  'Coercing anything else would write a flag the caller never supplied into the state section'
+          end
           value ? '01' : '00'
         else
           if TYPE_WIDTHS.key?(field_type)

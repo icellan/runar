@@ -703,10 +703,16 @@ public final class Envelope {
         return n;
     }
 
+    /**
+     * GK-BUG-009: the inner nonce / expiresAt must be a JSON INTEGER TOKEN in
+     * i64 range. {@link Json#parse} returns a Long for exactly that, a Double
+     * for any '.' / exponent token and a BigInteger past i64 — so only Long
+     * (and Integer) qualify. The old {@code ((Number) o).longValue()} fallback
+     * truncated 1.5 to 1 and wrapped 2^64+1 to 1, and accepted both.
+     */
     private static Long readLong(Object o) {
         if (o instanceof Long) return (Long) o;
         if (o instanceof Integer) return ((Integer) o).longValue();
-        if (o instanceof Number) return ((Number) o).longValue();
         return null;
     }
 

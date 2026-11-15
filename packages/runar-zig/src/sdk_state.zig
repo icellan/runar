@@ -224,10 +224,14 @@ fn encodeStateValue(
         // .bytes and became the empty string, i.e. a constant "00": the deploy
         // always said false whatever the caller passed, and the first call that
         // set the flag built a continuation the covenant rejects.
+        //
+        // GK-BUG-010: only `.boolean`. `.int` encoded as `i != 0` and `.bytes`
+        // / `.big_int` / `.empty_sig` silently as false, while each peer tier
+        // had its own coercion rule: one input, different on-chain bytes per
+        // tier. Refused in all seven, as the num2bin arm refuses a non-integer.
         const b: bool = switch (value) {
             .boolean => |bv| bv,
-            .int => |i| i != 0,
-            .bytes, .big_int, .empty_sig => false,
+            .int, .bytes, .big_int, .empty_sig => return error.NotABoolean,
             .array_value => return error.ArrayValueInScalarField,
         };
         return allocator.dupe(u8, if (b) "01" else "00");

@@ -245,7 +245,49 @@ function main(): void {
     if (!ok) fail(`${v._vector_id}: _canonical_sig does not verify for the payload`);
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls validate against the TS reference.`);
+  // 7. GK-BUG-009 integer-token vectors (it*). Each must carry a signature
+  //    that verifies for its EXACT payload text (not a canonicalized copy,
+  //    which would normalise the token away), so a tier that accepts the
+  //    non-integer token returns ok:true instead of falling through to
+  //    bad-sig — the assertion cannot pass by accident.
+  const intTokenVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => /^(it|nt)\d/.test(v._vector_id ?? ''));
+  if (!intTokenVectors.some((v) => /^it\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no it* (GK-BUG-009) vectors');
+  if (!intTokenVectors.some((v) => /^nt\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no nt* (GK-BUG-009 number grammar) vectors');
+  for (const v of intTokenVectors) {
+    // it*: a valid JSON number that is not an integer token -> envelope-mismatch.
+    // nt*: not a JSON number token at all (01, 1.) -> bad-json at parse time.
+    const want = v._vector_id!.startsWith('nt') ? 'bad-json' : 'envelope-mismatch';
+    if (v.reason !== want) fail(`${v._vector_id}: reason must be ${want}`);
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    const ok = ecdsaVerifyRaw(
+      new BigNumber(d),
+      Signature.fromDER(Utils.toArray(v.envelope.sig, 'hex')),
+      PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')),
+    );
+    if (!ok) fail(`${v._vector_id}: signature does not verify for its payload text`);
+  }
+
+  // 8. GK-BUG-008 allowlist vectors. Must carry the row Go failed (an EMPTY
+  //    list -> pubkey-not-allowed) and the null control (no allowlist -> ok).
+  const allowlistVectors = fixture.allowlist_vectors as Array<{
+    _vector_id?: string;
+    expected_keys: string[] | null;
+    expect_ok: boolean;
+    reason?: string;
+  }>;
+  if (!Array.isArray(allowlistVectors) || allowlistVectors.length === 0) fail('allowlist_vectors missing or empty');
+  if (!allowlistVectors.some((v) => Array.isArray(v.expected_keys) && v.expected_keys.length === 0 && !v.expect_ok && v.reason === 'pubkey-not-allowed')) {
+    fail('allowlist_vectors must carry an empty-list vector rejected as pubkey-not-allowed');
+  }
+  if (!allowlistVectors.some((v) => v.expected_keys === null && v.expect_ok)) {
+    fail('allowlist_vectors must carry a null (not supplied) control that is accepted');
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors validate against the TS reference.`);
 }
 
 main();

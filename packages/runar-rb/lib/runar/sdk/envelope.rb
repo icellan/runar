@@ -345,6 +345,15 @@ module Runar
         SignedEnvelope.new(payload, sig_bytes.unpack1('H*'), pubkey, nonce, expires_at)
       end
 
+      I64_MIN = -(2**63)
+      I64_MAX = (2**63) - 1
+
+      # GK-BUG-009: a parsed JSON integer token inside the signed 64-bit range.
+      def self.i64_integer?(value)
+        value.is_a?(Integer) && value >= I64_MIN && value <= I64_MAX
+      end
+      private_class_method :i64_integer?
+
       # Verify a signed envelope. Returns a Hash with :ok (bool),
       # :reason (one of VERIFY_REASONS or nil), and :data (parsed payload
       # or nil).
@@ -396,8 +405,13 @@ module Runar
         end
         return { ok: false, reason: 'bad-json', data: nil } unless parsed.is_a?(Hash)
 
-        # 4. Inner nonce / expiresAt must match outer fields.
-        if parsed['nonce'] != envelope.nonce || parsed['expiresAt'] != envelope.expiresAt
+        # 4. Inner nonce / expiresAt must match outer fields. GK-BUG-009: and
+        #    each must be a JSON integer token in i64 range. JSON.parse gives
+        #    an Integer only for an integer token (1.0 / 1e3 are Floats that
+        #    compare == to the Integer), and Ruby Integers are unbounded, so
+        #    both the type and the i64 range are checked explicitly.
+        if !i64_integer?(parsed['nonce']) || !i64_integer?(parsed['expiresAt']) ||
+           parsed['nonce'] != envelope.nonce || parsed['expiresAt'] != envelope.expiresAt
           return { ok: false, reason: 'envelope-mismatch', data: parsed }
         end
 

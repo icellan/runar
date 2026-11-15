@@ -49,10 +49,31 @@ def test_verify_rejection_vectors(fixture: dict) -> None:
     for v in fixture["rejection_vectors"]:
         env = SignedEnvelope.from_dict(v["envelope"])
         r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
-        assert not r.ok, f"rejection {v['reason']!r} should not be OK"
+        vid = v.get("_vector_id", v["reason"])
+        assert not r.ok, f"rejection {v['reason']!r} ({vid}) should not be OK"
         assert r.reason == VerifyEnvelopeReason(v["reason"]), (
-            f"rejection {v['reason']!r}: got reason={r.reason}"
+            f"rejection {v['reason']!r} ({vid}): got reason={r.reason}"
         )
+
+
+def test_allowlist_vectors(fixture: dict) -> None:
+    """GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list
+    allows nobody; ``None`` (not supplied) skips the check. al2 is the control
+    that reddens if a fix treats an absent allowlist like an empty one.
+    """
+    env = SignedEnvelope.from_dict(fixture["valid_envelope"])
+    vectors = fixture["allowlist_vectors"]
+    assert vectors, "allowlist_vectors missing or empty"
+    for v in vectors:
+        vid = v["_vector_id"]
+        r = verify_envelope(env, expected_keys=v["expected_keys"], now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
 
 
 def test_signing_vectors(fixture: dict) -> None:

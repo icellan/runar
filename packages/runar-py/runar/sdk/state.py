@@ -569,6 +569,18 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
         # became the empty string, i.e. a constant '00' — the deploy always
         # said False whatever the caller passed, and the first call that set
         # the flag built a continuation the covenant rejects.
+        #
+        # GK-BUG-010: only a real bool. Truthiness wrote 01 for 1 / 'false' /
+        # '00', and each peer tier had its own coercion rule, so one input gave
+        # different on-chain bytes per tier. Refused in all seven, as the
+        # num2bin arm above refuses a non-integer.
+        if not isinstance(value, bool):
+            got = 'None' if value is None else type(value).__name__
+            raise ValueError(
+                f'serialize_state: state field {label!r} ({field_type}) must be a boolean, '
+                f'got {got}. Coercing anything else would write a flag the caller never '
+                'supplied into the state section'
+            )
         return '01' if value else '00'
     elif field_type in _TYPE_WIDTHS:
         # Fixed-size byte types: raw hex, no framing needed.

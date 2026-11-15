@@ -420,9 +420,172 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "it1-nonce-fraction-1.5",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce 1.5, outer 1. Before the fix Java's readLong and Zig's readI64 (@intFromFloat) truncated 1.5 to 1 and accepted.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1.5}",
+        "sig": "30440220351d030f503843ed907e6d21a6e465fcccdff2b03c1e0c9dfa669226362c2a1602205246361174664abbd93139ca67173bc6a02b97ccd0ccea16ddcb50f343c35f1a",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it2-nonce-integral-float-1.0",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce 1.0, outer 1. Before the fix ts/python/ruby/java/zig compared numeric value and accepted; go/rust refused.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1.0}",
+        "sig": "30440220538b7299fb9639f95da54246e348dd75b55838cb00a284c59335053e563c9af602203ef5d3be8e3868fbf7b07397f5c2aa7fcb7bdf4effec1a251e588a982e90168f",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it3-nonce-exponent-1e3",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce 1e3, outer 1000. Same split as it2: a value-equality tier accepted the exponent spelling.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1e3}",
+        "sig": "304402200b496622a3491d6b737eca6a84040608d43a98b1a9629da7449b57e7022db9ca0220610878a724e388bb36488d39944b961b8a94c812fb11fe0267080e127d9ab03a",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it4-nonce-exponent-out-of-i64-1e20",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce 1e20, outer 1. Before the fix Zig's readI64 ran @intFromFloat on a float outside i64, which PANICS (ReleaseSafe) or is UB (ReleaseFast) on an envelope whose signature had not been checked yet.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1e20}",
+        "sig": "3045022100b8be29dba66747f99feda299f44300892f9dce8bd070d91d4dddc6d64f449d0502207f3840839540439a3d4e2be3677a4b77edc178314d5934e4e0676165cdaf94db",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it5-nonce-integer-beyond-i64-2^64+1",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce 2^64+1, outer 1. An integer token, but outside i64. Before the fix Java parsed it to BigInteger and longValue() wrapped it to 1, so it accepted.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":18446744073709551617}",
+        "sig": "30440220630dd5a04ab869b32235d1b0b698f5f4a2b50173ff9eaa6eecaf33275e58181602202e7307527b8200ca7bd254417944a559d8dd6ec1b79a980dd9d563eefeb42275",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it6-nonce-boolean-true",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner nonce true, outer 1. Before the fix Python accepted it (True == 1, bool is an int subclass).",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":true}",
+        "sig": "304402201de548ba0f0d6017c3e60724a9cc3504e8c09a6aa04ad758d66c3b986c6d86bb02207d040aaec99286ec9ffd34516ed38541bbd444b158e134b2452de8ecf1c06f36",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it7-expiresAt-integral-float",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner expiresAt 1700000030000.0, outer 1700000030000. The expiresAt half of it2.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000.0,\"kind\":\"hello\",\"nonce\":1700000000000}",
+        "sig": "304402206fb8ebe1dc177fbff1e3c433f363e85b0690a5f917f04d628905f06b07fb411402201a92591cb2871a80747865e5210b7f87c6b9766a85475e9933c2fa60c58d2eb4",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "it8-expiresAt-exponent",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "The inner nonce/expiresAt MUST be a JSON integer token: optional '-', then 0 or a non-zero digit followed by digits; no '.', no exponent, inside the signed 64-bit range, and not a boolean. Anything else is envelope-mismatch in every tier, decided before ECDSA. The signature is VALID for this exact payload text, so a tier that accepts the token returns ok:true instead of falling through to bad-sig. Inner expiresAt 1.70000003e12, outer 1700000030000. The expiresAt half of it3.",
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1.70000003e12,\"kind\":\"hello\",\"nonce\":1700000000000}",
+        "sig": "30450221008656dc8adfb21dd98b8af277ca92d91a6b5c182bb3d81036eb83bc2c6991a5cb0220341a2442e69a555a2d8af397438a50b5d498213210b5d1abb6fff9908cbb2510",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "nt1-nonce-leading-zero-01",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "01 is not a JSON number token at all (RFC 8259 forbids a leading zero), so the payload is bad-json, decided at parse time before the integer-token check. The signature is VALID for this exact payload text, so a tier whose parser accepts 01 as 1 returns ok:true instead of falling through to bad-sig. Inner nonce 01, outer 1. Before the fix Java's Json.readNumber handed 01 to Long.parseLong and accepted; the other six rejected it as bad-json.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":01}",
+        "sig": "3045022100e6dcd638360ea900207c50377bfbfec9610356b8148f9c5c29eefb503b3f186c022050d595f9d3362fa28b1b59aedd4eb51b8b2ea463088aac00bdb510656eefabe0",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "nt2-nonce-trailing-dot-1.",
+      "_audit_ref": "GK-BUG-009",
+      "_notes": "1. is not a JSON number token (a '.' must be followed by a digit), so the payload is bad-json. Signature VALID for this exact payload text. Inner nonce 1., outer 1. Before the fix Java's Json.readNumber handed 1. to Double.parseDouble and answered envelope-mismatch; the other six said bad-json.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"nonce\":1.}",
+        "sig": "3045022100c3428d764f9f0ade2caa673078e48da5fd4aa17eddfe8fc064249ab67d049d3d0220487344904c8fe1db810d09b8e4972f1853b8711321720edfb382eaf4427ebac5",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1,
+        "expiresAt": 1700000030000
+      }
     }
   ],
-  "note_on_pubkey_not_allowed": "pubkey-not-allowed cannot be expressed in a tier-agnostic fixture: it depends on caller-supplied expected_keys. Each tier verifies this reason in its own unit tests by passing a non-matching allowlist; the wire bytes are independent.",
+  "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",
+  "allowlist_vectors": [
+    {
+      "_vector_id": "al1-empty-allowlist-denies",
+      "_notes": "The row Go failed.",
+      "expected_keys": [],
+      "expect_ok": false,
+      "reason": "pubkey-not-allowed"
+    },
+    {
+      "_vector_id": "al2-no-allowlist-allows",
+      "_notes": "CONTROL. A fix that treated an absent allowlist like an empty one reddens here.",
+      "expected_keys": null,
+      "expect_ok": true
+    },
+    {
+      "_vector_id": "al3-signer-in-allowlist-allows",
+      "_notes": "CONTROL. The signer's own key is listed.",
+      "expected_keys": [
+        "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "expect_ok": true
+    },
+    {
+      "_vector_id": "al4-signer-not-in-allowlist-denies",
+      "_notes": "Only priv=2's key is listed.",
+      "expected_keys": [
+        "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      ],
+      "expect_ok": false,
+      "reason": "pubkey-not-allowed"
+    }
+  ],
   "clock_skew_vectors_notes": "R-261. Every tier's verifyEnvelope takes an optional clock skew and an optional \"now\" override, and six of the seven distinguish an EXPLICIT ZERO from NOT SUPPLIED: TS `?? 5_000`, Rust `Option::unwrap_or`, Python default arg, Ruby kwarg (0 is truthy in Ruby), Zig struct default, Java's clockSkewMs field default. Go conflated the two -- `ClockSkewMs int64 // defaults to 5_000 when zero` -- so a caller asking for STRICT expiry silently got a five-second replay window. Measured on the valid envelope, 2000 ms past expiry with clockSkewMs explicitly 0: go ok:true, while rust/python/ruby/zig/java all said expired. The same zero-value-sentinel sat on Go's NowMs AND on Java's nowMs: with now explicitly 0 (the epoch, i.e. nothing can have expired yet) python and ruby returned ok:true while java returned expired, because 0 was read as \"not supplied\" and replaced with the wall clock. Both are now genuinely optional in both tiers. Each vector below names the OPTIONS a caller supplies: a null means the caller does NOT supply that option and the tier's own default applies -- that is the control with teeth, because a fix that made 0 strict by dropping the default would redden cs2. TS's verify reads Date.now() directly rather than taking an injectable clock, so it covers the skew half in its own unit tests against a live clock.",
   "clock_skew_vectors": [
     {

@@ -81,7 +81,8 @@ fn rejection_vectors() {
             clock_skew_ms: None,
             now_ms: Some(now_ms),
         });
-        assert!(!r.ok, "rejection {} should be ok=false", rv["reason"]);
+        let id = rv["_vector_id"].as_str().unwrap_or("-");
+        assert!(!r.ok, "rejection {} ({id}) should be ok=false", rv["reason"]);
         let expected = match rv["reason"].as_str().unwrap() {
             "missing-fields" => VerifyEnvelopeReason::MissingFields,
             "expired" => VerifyEnvelopeReason::Expired,
@@ -91,7 +92,43 @@ fn rejection_vectors() {
             "pubkey-not-allowed" => VerifyEnvelopeReason::PubkeyNotAllowed,
             other => panic!("unknown reason {other}"),
         };
-        assert_eq!(r.reason, Some(expected), "rejection {}", rv["reason"]);
+        assert_eq!(r.reason, Some(expected), "rejection {} ({id})", rv["reason"]);
+    }
+}
+
+/// GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+/// nobody; `null` (not supplied) skips the check. al2 is the control that
+/// reddens if a fix treats an absent allowlist like an empty one.
+#[test]
+fn allowlist_vectors() {
+    let fixture = load_fixture();
+    let env = envelope_from_value(&fixture["valid_envelope"]);
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["allowlist_vectors"]
+        .as_array()
+        .expect("allowlist_vectors missing");
+    assert!(!vectors.is_empty(), "allowlist_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let keys: Option<Vec<String>> = v["expected_keys"].as_array().map(|a| {
+            a.iter().map(|k| k.as_str().unwrap().to_string()).collect()
+        });
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: keys.as_deref(),
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "pubkey-not-allowed" => VerifyEnvelopeReason::PubkeyNotAllowed,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
     }
 }
 

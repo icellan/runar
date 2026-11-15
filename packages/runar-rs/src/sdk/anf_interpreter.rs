@@ -2188,7 +2188,9 @@ fn eval_call(
         }
         "bool" => {
             let truthy = args.first().map(|a| a.is_truthy()).unwrap_or(false);
-            Val::Int(if truthy { 1 } else { 0 })
+            // GK-BUG-010: `bool(x): boolean` in runar-lang, so Val::Bool --
+            // a boolean state field assigned from it must serialize as one.
+            Val::Bool(truthy)
         }
         "mulDiv" => {
             let a = args.first().map(|v| v.to_i64()).unwrap_or(0) as i128;

@@ -1639,7 +1639,9 @@ public final class AnfInterpreter {
                 if (v.signum() <= 0) throw new InterpreterException("log2: non-positive input");
                 return BigInteger.valueOf(v.bitLength() - 1);
             }
-            case "bool":       return isTruthy(args.get(0)) ? BigInteger.ONE : BigInteger.ZERO;
+            // GK-BUG-010: `bool(x): boolean` in runar-lang, so a Boolean --
+            // a boolean state field assigned from it must serialize as one.
+            case "bool":       return isTruthy(args.get(0));
             case "mulDiv": {
                 BigInteger c = toBigInt(args.get(2));
                 if (c.signum() == 0) throw new InterpreterException("mulDiv: division by zero");

@@ -1863,7 +1863,9 @@ fn evalCall(
         return .{ .int = bits };
     }
     if (std.mem.eql(u8, func, "bool")) {
-        return .{ .int = if (isTruthy(getArg(arg_names, 0, env))) 1 else 0 };
+        // GK-BUG-010: `bool(x): boolean` in runar-lang, so `.boolean` --
+        // a boolean state field assigned from it must serialize as one.
+        return .{ .boolean = isTruthy(getArg(arg_names, 0, env)) };
     }
     if (std.mem.eql(u8, func, "mulDiv")) {
         const a = toInt(getArg(arg_names, 0, env));

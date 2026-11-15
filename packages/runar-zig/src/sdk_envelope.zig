@@ -657,10 +657,15 @@ pub fn verifyEnvelope(allocator: std.mem.Allocator, opts: VerifyEnvelopeOpts) !V
     return .{ .ok = true, .parsed = parsed };
 }
 
+/// GK-BUG-009: the inner nonce / expiresAt must be a JSON INTEGER TOKEN in
+/// i64 range. std.json gives `.integer` for exactly that, `.float` for any
+/// '.' / exponent token and `.number_string` past i64 — so only `.integer`
+/// qualifies. The old `.float => @intFromFloat(f)` arm accepted 1.0 / 1.5 as 1
+/// and, for a float outside i64 (1e20), PANICKED (UB in ReleaseFast) on an
+/// envelope whose signature had not been checked yet.
 fn readI64(value: ?std.json.Value) ?i64 {
     if (value) |v| switch (v) {
         .integer => |i| return i,
-        .float => |f| return @intFromFloat(f),
         else => return null,
     };
     return null;

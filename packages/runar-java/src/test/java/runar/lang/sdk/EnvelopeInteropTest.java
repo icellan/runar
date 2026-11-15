@@ -90,8 +90,38 @@ class EnvelopeInteropTest {
             vo.envelope = env;
             vo.nowMs = verifyNowMs;
             Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
-            assertFalse(r.ok, "rejection " + reasonWire + " should be ok=false");
-            assertEquals(reasonWire, r.reason.wire, "rejection " + reasonWire);
+            Object vid = rv.getOrDefault("_vector_id", reasonWire);
+            assertFalse(r.ok, "rejection " + reasonWire + " (" + vid + ") should be ok=false");
+            assertEquals(reasonWire, r.reason.wire, "rejection " + reasonWire + " (" + vid + ")");
+        }
+    }
+
+    /**
+     * GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list
+     * allows nobody; null (not supplied) skips the check. al2 is the control
+     * that reddens if a fix treats an absent allowlist like an empty one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void allowlistVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Envelope.SignedEnvelope env = envelopeFromMap((Map<String, Object>) fixture.get("valid_envelope"));
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("allowlist_vectors");
+        assertFalse(vectors == null || vectors.isEmpty(), "allowlist_vectors missing or empty");
+        for (Map<String, Object> av : vectors) {
+            String vid = (String) av.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = env;
+            vo.nowMs = verifyNowMs;
+            vo.expectedKeys = (List<String>) av.get("expected_keys");
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(av.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(av.get("reason"), r.reason.wire, vid);
+            }
         }
     }
 

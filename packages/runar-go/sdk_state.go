@@ -432,8 +432,23 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 	// `02 74727565`: 3 bytes longer than the continuation the script's own
 	// reader rebuilds, so hash256(outputs) never matched and the first spend
 	// was impossible.
+	//
+	// GK-BUG-010: only a real bool. `b, _ := value.(bool)` silently wrote 00
+	// for 1, "true" and every other non-bool, while other tiers used
+	// truthiness: one input, different on-chain bytes per tier. Refused in all
+	// seven, as stateFieldInt64 refuses a non-integer (N-084).
 	case "bool", "boolean":
-		b, _ := value.(bool)
+		b, ok := value.(bool)
+		if !ok {
+			got := "nil"
+			if value != nil {
+				got = fmt.Sprintf("%T", value)
+			}
+			panic(fmt.Sprintf(
+				"runar: SerializeState: state field %q (%s) must be a boolean, got %s. "+
+					"Coercing anything else would write a flag the caller never supplied into the state section",
+				label, fieldType, got))
+		}
 		if b {
 			return "01"
 		}
