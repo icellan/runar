@@ -80,8 +80,9 @@ type Groth16Config struct {
 
 	// Precomputed MillerLoop(α, -β) as 12 Fp values in gnark flat order.
 	// This is a PRE-final-exponentiation value. The verifier multiplies
-	// the triple Miller loop accumulator by this, then applies a single
-	// final exponentiation at the end.
+	// the triple Miller loop accumulator by this (times ω^s) and then runs
+	// the residue check that stands in for the single final
+	// exponentiation (GK-BUG-005).
 	//
 	// Coefficient order matches Gnark's flat Fp12 layout:
 	//   [C0.B0.A0, C0.B0.A1, C0.B1.A0, C0.B1.A1, C0.B2.A0, C0.B2.A1,
@@ -1710,8 +1711,10 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	// where β, γ, δ are stored pre-negated in the config, and α, A, B,
 	// L, C are used positive. The triple Miller loop handles the first
 	// three pairs on-chain; e(α, -β) is baked into config.AlphaNegBetaFp12
-	// as a precomputed MillerLoop constant that the verifier multiplies
-	// into the accumulator before the single final exponentiation.
+	// as a precomputed MillerLoop constant (scaled by ω^s, see
+	// emitWASelectScaledAlphaNegBeta) that the verifier multiplies into the
+	// accumulator before the residue check that replaces the final
+	// exponentiation.
 
 	// P1 = proof_A (positive)
 	t.toTop("proof_ax")

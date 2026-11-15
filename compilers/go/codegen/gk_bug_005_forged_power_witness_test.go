@@ -507,3 +507,85 @@ func TestGKBUG005_ScriptSize(t *testing.T) {
 	}
 	t.Logf("WithMSM verifier, ModuloThreshold=0, optimized (compiler path): %d bytes", len(vores.ScriptHex)/2)
 }
+
+// TestGKBUG005_HonestNonZeroScalingAccepted: the SP1 v6 proof has scaling
+// index s = 0, so on the full verifiers the AB·ω and AB·ω² branches of the
+// scaling selector had only ever REJECTED. About two thirds of honest proofs
+// take them, and a wrong constant there would lock funds. This builds
+// synthetic Groth16 instances (α = G1, β = G2, γ = 2·G2, δ = 3·G2,
+// IC = [G1 .. 6·G1], public inputs [1, 0, 0, 0, 0], B = G2, C = c·G1,
+// A = (7 + 3c)·G1, so a·b = 1 + γ·l + δ·c with l = 3), searches c for
+// honest s = 1 and s = 2, and requires each to be ACCEPTED by the raw,
+// WithMSM and peephole-optimised WithMSM verifiers.
+func TestGKBUG005_HonestNonZeroScalingAccepted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("minutes-long interpreter runs")
+	}
+	_, _, g1, g2 := bn254.Generators()
+	mul1 := func(k int64) bn254.G1Affine {
+		var p bn254.G1Affine
+		p.ScalarMultiplication(&g1, big.NewInt(k))
+		return p
+	}
+	mul2 := func(k int64) bn254.G2Affine {
+		var p bn254.G2Affine
+		p.ScalarMultiplication(&g2, big.NewInt(k))
+		return p
+	}
+	var ic []bn254.G1Affine
+	for k := int64(1); k <= 6; k++ {
+		ic = append(ic, mul1(k))
+	}
+	vk := bn254witness.NewVerifyingKeyFromPositive(mul1(1), mul2(1), mul2(2), mul2(3), ic)
+	zero := big.NewInt(0)
+	pubs := []*big.Int{big.NewInt(1), zero, zero, zero, zero}
+	cfg := gk005MSMConfig(t, vk)
+	raw := gk005Verifier(false, cfg)
+	msm := gk005Verifier(true, cfg)
+	opt := gk005OptimizedVerifier(cfg)
+
+	found := map[int]bool{}
+	for c := int64(1); c <= 40 && len(found) < 2; c++ {
+		proof := bn254witness.Proof{
+			A: bn254witness.G1AffineToBig(mul1(7 + 3*c)),
+			B: bn254witness.G2AffineToBig(mul2(1)),
+			C: bn254witness.G1AffineToBig(mul1(c)),
+		}
+		wm, err := bn254witness.BuildFromProofWithInputs(vk, proof, pubs)
+		if err != nil {
+			t.Fatalf("BuildFromProofWithInputs: %v", err)
+		}
+		s := wm.ResidueScaling
+		if s == 0 || found[s] {
+			continue
+		}
+		f, err := bn254witness.MillerLoopProduct(vk, proof, pubs)
+		if err != nil {
+			t.Fatalf("MillerLoopProduct: %v", err)
+		}
+		fe := gk005FlatToE12(f)
+		if fin := bn254.FinalExponentiation(&fe); !fin.IsOne() {
+			t.Fatalf("premise broken: synthetic instance c=%d does not verify off-chain", c)
+		}
+		found[s] = true
+		wr, err := bn254witness.GenerateWitness(vk, proof, pubs)
+		if err != nil {
+			t.Fatalf("GenerateWitness: %v", err)
+		}
+		t.Run("s="+string(rune('0'+s)), func(t *testing.T) {
+			t.Logf("c = %d gives honest scaling index %d", c, s)
+			for _, v := range []struct {
+				name string
+				ops  []codegen.StackOp
+				w    *bn254witness.Witness
+			}{{"raw", raw, wr}, {"WithMSM", msm, wm}, {"WithMSMOptimized", opt, wm}} {
+				if err := gk005Run(v.ops, v.w); err != nil {
+					t.Fatalf("%s verifier REJECTED an honest proof with scaling index %d: %v", v.name, s, err)
+				}
+			}
+		})
+	}
+	if !found[1] || !found[2] {
+		t.Fatalf("no synthetic instance with scaling index 1 and 2 found (got %v)", found)
+	}
+}

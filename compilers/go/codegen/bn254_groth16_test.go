@@ -200,8 +200,10 @@ func TestGroth16WA_ScriptSize(t *testing.T) {
 	t.Logf("Groth16 WA verifier script size: %d bytes (%.1f KB)", scriptBytes, float64(scriptBytes)/1024)
 
 	// The nChain paper achieves ~466 KB for a fully witness-assisted Groth16 verifier.
-	// Our implementation uses witness-assisted gradients in the Miller loop AND
-	// witness-assisted final exponentiation (prover supplies f_inv, a, b, c).
+	// Our implementation uses witness-assisted gradients in the Miller loop and,
+	// since GK-BUG-005, a residue witness (c, c⁻¹, s) instead of any final
+	// exponentiation; until then the prover supplied f_inv, a, b, c, and a, b, c
+	// were never checked.
 	//
 	// Optimization history:
 	//   1.5 MB  - initial witness-assisted implementation
@@ -222,6 +224,11 @@ func TestGroth16WA_ScriptSize(t *testing.T) {
 	//             historic subgroup-check gap at a per-proof cost of ~60 KB
 	//             of script; the earlier defense-in-depth on-curve check on
 	//             its own left a narrow non-G2 forgery vector.
+	//    563 KB - residue witness replaces the witness-assisted final
+	//             exponentiation (GK-BUG-005; +21 Fp12 muls folded into the
+	//             Miller loop, the old easy part and hard-part products gone),
+	//             plus the [0, p) coordinate range checks (GK-GAP-009):
+	//             575,710 -> 576,625 bytes at this threshold.
 	// With witness-assisted public input accumulation (on-curve check + point
 	// addition per public input), the script grows by ~1-2 KB per public input.
 	maxBytes := 600 * 1024 // 600 KB headroom for the correct hard-part formula + subgroup check
