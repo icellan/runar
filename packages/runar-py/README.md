@@ -1818,8 +1818,16 @@ change — already pinned by the xfail in
 `tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend`,
 whose control shows a plain stateful `Counter` with no raw outputs failing
 identically. Such an input is counted as **`unvalidatable`**, never as
-validated, so it can never satisfy the non-vacuity requirement on its own; the
-call's funding input still executes for real.
+validated; the call's funding input still executes for real.
+
+The carve-out is narrow (GK-GAP-008). It applies only when the failing opcode
+is an `OP_CHECKSIGVERIFY` in the locking script whose preceding chunk pushes
+one of the fixed OP_PUSH_TX verification keys (the Any-S C=1 key or compressed
+G). A wrong signature at any other `OP_CHECKSIGVERIFY` (a user `checkSig`, in
+a stateless or stateful contract) is a rejection. And when `bsv-sdk` is
+installed, a transaction in which no known input actually executed (every one
+unvalidatable) is rejected as validating nothing; value conservation alone
+does not count. `tests/test_gk_gap_008_covenant_carveout.py` pins both rules.
 `tests/test_mock_broadcast_validation.py` asserts the carve-out fires exactly
 once for a real deploy+call, so it goes RED the moment the incompatibility is
 fixed and the carve-out can be deleted.

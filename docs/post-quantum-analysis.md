@@ -108,10 +108,12 @@ Six SHA-256 parameter sets (pre-implementation projections):
 |--------------|----------|-------------|-------------|-----------------|----------|
 | SLH-DSA-SHA2-128s | 7,856 B | ~2,100 | ~25 KB | 203 KB | 128-bit |
 | SLH-DSA-SHA2-128f | 17,088 B | ~1,400 | ~40 KB | 612 KB | 128-bit |
-| SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | 306 KB | 192-bit |
-| SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | 905 KB | 192-bit |
-| SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | 417 KB | 256-bit |
-| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
+| SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | SHA-256-only, not FIPS 205 (#137) |
+| SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | SHA-256-only, not FIPS 205 (#137) |
+| SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | SHA-256-only, not FIPS 205 (#137) |
+| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | SHA-256-only, not FIPS 205 (#137) |
+
+> **192/256 are not FIPS 205.** FIPS 205 hashes the 192s/192f/256s/256f sets with SHA-512, which Bitcoin Script cannot express (no `OP_SHA512`, issue #137). Rúnar implements those four with SHA-256 throughout at the FIPS 205 parameter shapes. They are self-consistent across all seven tiers but reject standard FIPS 205 signatures, so no 192-bit or 256-bit FIPS 205 security claim applies to them.
 
 > **Note:** The "Script est." column contains pre-implementation projections that significantly underestimated the actual script sizes. The "Measured script" column shows the real sizes after implementation. The 4-10x difference is due to the overhead of tweakable hashing (each SHA-256 call requires constructing a 22-byte ADRS for domain separation, adding ~7 opcodes per hash) and the stack management code needed to track named positions across thousands of operations. See the Implementation Status section below for exact byte counts.
 

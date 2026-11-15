@@ -539,7 +539,9 @@ Elliptic curve operations on secp256k1 points are available:
 | `verifyWOTS` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | WOTS+ verification (w=16, SHA-256). One-time use per keypair. |
 | `verifySLHDSA_SHA2_128s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-128s (FIPS 205). Stateless, multi-use. |
 | `verifySLHDSA_SHA2_128f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-128f. Fast variant. |
-| `verifySLHDSA_SHA2_192s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-192s. 192-bit security. |
-| `verifySLHDSA_SHA2_192f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-192f. Fast variant. |
-| `verifySLHDSA_SHA2_256s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-256s. 256-bit security. |
-| `verifySLHDSA_SHA2_256f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-256f. Fast variant. |
+| `verifySLHDSA_SHA2_192s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SHA-256-only variant with SLH-DSA-SHA2-192s shapes; not FIPS 205 (see note). |
+| `verifySLHDSA_SHA2_192f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SHA-256-only variant with SLH-DSA-SHA2-192f shapes (fast); not FIPS 205 (see note). |
+| `verifySLHDSA_SHA2_256s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SHA-256-only variant with SLH-DSA-SHA2-256s shapes; not FIPS 205 (see note). |
+| `verifySLHDSA_SHA2_256f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SHA-256-only variant with SLH-DSA-SHA2-256f shapes (fast); not FIPS 205 (see note). |
+
+> **The 192/256 SLH-DSA functions are SHA-256-only, not FIPS 205.** FIPS 205 needs SHA-512 for those parameter sets, which Bitcoin Script cannot express (issue #137). A standard SLH-DSA-SHA2-192/256 signature will not verify; see [language-reference.md](../language-reference.md).

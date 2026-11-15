@@ -96,11 +96,55 @@ _EMPTY_VALIDATION_REPORT = {
 # ``tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend``
 # (its control shows a plain stateful Counter with no raw outputs fails
 # identically). Such an input is recorded as UNVALIDATABLE — never as
-# validated — so it can never satisfy the non-vacuity requirement on its own.
+# validated.
+#
+# GK-GAP-008: the carve-out used to match ANY Spend error mentioning
+# OP_CHECKSIGVERIFY, so a wrong-key checkSig in any contract (stateless
+# included) was waved through whenever it compiled to OP_CHECKSIGVERIFY. It
+# is now confined to the covenant check itself: the failing opcode must be an
+# OP_CHECKSIGVERIFY in the LOCKING script whose immediately preceding chunk
+# pushes one of the fixed OP_PUSH_TX verification keys below. And an input
+# that is unvalidatable no longer counts toward non-vacuity: a transaction
+# whose every known input is unvalidatable is rejected (see
+# ``_validate_broadcast``), so value conservation alone never stands in for a
+# script check when the script layer is available.
 #
 # ``tests/test_mock_broadcast_validation.py`` pins the incompatibility so this
 # carve-out goes RED the moment it is fixed and can then be deleted.
+# ``tests/test_gk_gap_008_covenant_carveout.py`` pins its scope.
 _COVENANT_PUSHTX_MARKER = 'OP_CHECKSIGVERIFY'
+
+# The keys an OP_PUSH_TX covenant verifies its synthetic signature against
+# (packages/runar-compiler/src/passes/oppushtx-codegen.ts): the Any-S C=1 key
+# (ANYS_PUBKEY_C1_HEX, the default construction) and compressed G (the legacy
+# and `@bindingVariant all` constructions).
+_PUSHTX_VERIFY_KEYS = frozenset({
+    bytes.fromhex('038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218'),
+    bytes.fromhex('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'),
+})
+
+
+def _is_covenant_pushtx_failure(message: str, locking_script) -> bool:
+    """True only when a Spend error is the OP_PUSH_TX covenant's CHECKSIGVERIFY.
+
+    bsv-sdk's ``script_evaluation_error`` reports ``Context`` and ``Program
+    counter`` (the index of the failing chunk). The failure qualifies only if
+    it happened in the locking script, at an OP_CHECKSIGVERIFY chunk, right
+    after a push of one of ``_PUSHTX_VERIFY_KEYS``.
+    """
+    import re
+
+    if _COVENANT_PUSHTX_MARKER not in message:
+        return False
+    ctx = re.search(r'Context: (\w+)', message)
+    pc = re.search(r'Program counter: (\d+)', message)
+    if ctx is None or pc is None or ctx.group(1) != 'LockingScript':
+        return False
+    i = int(pc.group(1))
+    chunks = locking_script.chunks
+    if i < 1 or i >= len(chunks) or chunks[i].op != b'\xad':
+        return False
+    return chunks[i - 1].data in _PUSHTX_VERIFY_KEYS
 
 
 class MockProvider(Provider):
@@ -311,12 +355,13 @@ class MockProvider(Provider):
                     continue
                 known = self._known_outpoints[key]
                 other_inputs = [v for j, v in enumerate(parsed.inputs) if j != i]
+                locking = _BsvScript(known['script'])
                 try:
                     spend = _BsvSpend({
                         'sourceTXID': inp.source_txid,
                         'sourceOutputIndex': inp.source_output_index,
                         'sourceSatoshis': known['satoshis'],
-                        'lockingScript': _BsvScript(known['script']),
+                        'lockingScript': locking,
                         'transactionVersion': parsed.version,
                         'otherInputs': other_inputs,
                         'outputs': parsed.outputs,
@@ -327,7 +372,7 @@ class MockProvider(Provider):
                     })
                     ok = spend.validate()
                 except Exception as exc:
-                    if _COVENANT_PUSHTX_MARKER in str(exc):
+                    if _is_covenant_pushtx_failure(str(exc), locking):
                         unvalidatable += 1
                         continue
                     raise BroadcastRejected(
@@ -362,6 +407,18 @@ class MockProvider(Provider):
                 'the spent outpoints via add_utxo/add_contract_utxo/add_transaction, '
                 'or use MockProvider.always_ack() (allowlisted) if this test '
                 'genuinely needs always-ack'
+            )
+
+        # GK-GAP-008: with the script layer available, at least one known input
+        # must actually have executed. Unvalidatable inputs are not checks, and
+        # value conservation is not a substitute for one: a lone covenant input
+        # used to pass here on `outputs <= inputs` alone.
+        if script_vm and validated == 0:
+            raise BroadcastRejected(
+                'MockProvider: refusing to broadcast — no input was validated: '
+                f'{unvalidatable} known input(s) are unvalidatable OP_PUSH_TX '
+                'covenant inputs (see _COVENANT_PUSHTX_MARKER) and none executed '
+                'for real, so script validation would pass vacuously'
             )
 
         if all_inputs_known:

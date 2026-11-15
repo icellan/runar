@@ -45,13 +45,17 @@ module RubyLsp
         'verify_slh_dsa_sha2_128f' => '`verify_slh_dsa_sha2_128f(msg, sig, pub_key) -> Boolean`' \
           ' — Verify an SLH-DSA-SHA2-128f signature (FIPS 205). Experimental post-quantum.',
         'verify_slh_dsa_sha2_192s' => '`verify_slh_dsa_sha2_192s(msg, sig, pub_key) -> Boolean`' \
-          ' — Verify an SLH-DSA-SHA2-192s signature (FIPS 205). Experimental post-quantum.',
+          ' — Verify an SLH-DSA-SHA2-192s-shaped signature, SHA-256 only: not FIPS 205 ' \
+          '(needs SHA-512, #137). Experimental post-quantum.',
         'verify_slh_dsa_sha2_192f' => '`verify_slh_dsa_sha2_192f(msg, sig, pub_key) -> Boolean`' \
-          ' — Verify an SLH-DSA-SHA2-192f signature (FIPS 205). Experimental post-quantum.',
+          ' — Verify an SLH-DSA-SHA2-192f-shaped signature, SHA-256 only: not FIPS 205 ' \
+          '(needs SHA-512, #137). Experimental post-quantum.',
         'verify_slh_dsa_sha2_256s' => '`verify_slh_dsa_sha2_256s(msg, sig, pub_key) -> Boolean`' \
-          ' — Verify an SLH-DSA-SHA2-256s signature (FIPS 205). Experimental post-quantum.',
+          ' — Verify an SLH-DSA-SHA2-256s-shaped signature, SHA-256 only: not FIPS 205 ' \
+          '(needs SHA-512, #137). Experimental post-quantum.',
         'verify_slh_dsa_sha2_256f' => '`verify_slh_dsa_sha2_256f(msg, sig, pub_key) -> Boolean`' \
-          ' — Verify an SLH-DSA-SHA2-256f signature (FIPS 205). Experimental post-quantum.',
+          ' — Verify an SLH-DSA-SHA2-256f-shaped signature, SHA-256 only: not FIPS 205 ' \
+          '(needs SHA-512, #137). Experimental post-quantum.',
 
         # SHA-256 compression
         'sha256_compress' => '`sha256_compress(state, block) -> ByteString` — SHA-256 ' \

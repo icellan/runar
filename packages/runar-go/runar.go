@@ -348,7 +348,10 @@ func VerifyWOTS(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return wotsVerifyImpl([]byte(msg), []byte(sig), []byte(pubkey))
 }
 
-// SLH-DSA (SPHINCS+) SHA-256 variants — real FIPS 205 verification.
+// SLH-DSA (SPHINCS+) verification. 128s/128f are FIPS 205 (which specifies
+// SHA-256 for them). 192s/192f/256s/256f are a SHA-256-only variant at the
+// FIPS 205 parameter shapes, NOT FIPS 205: FIPS 205 needs SHA-512 there, which
+// Bitcoin Script cannot express (#137), so a standard signature will not verify.
 
 func VerifySLHDSA_SHA2_128s(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_128s, []byte(msg), []byte(sig), []byte(pubkey))
@@ -356,15 +359,27 @@ func VerifySLHDSA_SHA2_128s(msg ByteString, sig ByteString, pubkey ByteString) b
 func VerifySLHDSA_SHA2_128f(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_128f, []byte(msg), []byte(sig), []byte(pubkey))
 }
+
+// VerifySLHDSA_SHA2_192s: SHA-256-only variant at the SLH-DSA-SHA2-192s shapes;
+// not FIPS 205 (#137). Matches the on-chain verifier.
 func VerifySLHDSA_SHA2_192s(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_192s, []byte(msg), []byte(sig), []byte(pubkey))
 }
+
+// VerifySLHDSA_SHA2_192f: SHA-256-only variant at the SLH-DSA-SHA2-192f shapes;
+// not FIPS 205 (#137). Matches the on-chain verifier.
 func VerifySLHDSA_SHA2_192f(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_192f, []byte(msg), []byte(sig), []byte(pubkey))
 }
+
+// VerifySLHDSA_SHA2_256s: SHA-256-only variant at the SLH-DSA-SHA2-256s shapes;
+// not FIPS 205 (#137). Matches the on-chain verifier.
 func VerifySLHDSA_SHA2_256s(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_256s, []byte(msg), []byte(sig), []byte(pubkey))
 }
+
+// VerifySLHDSA_SHA2_256f: SHA-256-only variant at the SLH-DSA-SHA2-256f shapes;
+// not FIPS 205 (#137). Matches the on-chain verifier.
 func VerifySLHDSA_SHA2_256f(msg ByteString, sig ByteString, pubkey ByteString) bool {
 	return SLHVerify(SLH_SHA2_256f, []byte(msg), []byte(sig), []byte(pubkey))
 }

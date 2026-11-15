@@ -34,7 +34,7 @@ import (
 // What this test proves: the misleading comments are gone from dce.go,
 // constant_fold.go and constant_fold_test.go; the anyChanged gate still
 // precedes the only production DCE call; and CompileFromProgram's exact
-// two-call composition (FoldConstants then OptimizeEC, reproduced here via
+// two-call composition (FoldConstantsAndPrune then OptimizeEC, reproduced here via
 // f303RunProductionPipeline) leaves a non-EC program's dead pure binding in
 // place while removing it from an EC-rewritten program.
 //
@@ -71,6 +71,21 @@ func TestF303_DceHeaderNamesItsOnlyCaller(t *testing.T) {
 	if !strings.Contains(src, "optimizeMethodEC") {
 		t.Fatal("dce.go's header should name optimizeMethodEC as the only caller, " +
 			"so a reader does not have to grep for it")
+	}
+}
+
+// GK-DOC-007: FoldConstantsAndPrune (N-138) is the second production caller
+// of the candidate-restricted EliminateDeadBindingsAmong, so the header must
+// name it next to optimizeMethodEC.
+func TestGKDOC007_DceHeaderNamesTheFoldPruneCaller(t *testing.T) {
+	fold := f303ReadSource(t, "constant_fold.go")
+	if !strings.Contains(fold, "EliminateDeadBindingsAmong(&result.Methods[i], candidates)") {
+		t.Fatal("FoldConstantsAndPrune no longer calls EliminateDeadBindingsAmong; update dce.go's header")
+	}
+	src := f303ReadSource(t, "dce.go")
+	header := src[:strings.Index(src, "import (")]
+	if !strings.Contains(header, "FoldConstantsAndPrune") {
+		t.Fatal("dce.go's header names only the EC caller; FoldConstantsAndPrune also calls EliminateDeadBindingsAmong")
 	}
 }
 
@@ -122,8 +137,9 @@ func TestF303_AnyChangedGateStillPrecedesTheDceDelegationCall(t *testing.T) {
 // -----------------------------------------------------------------
 // Part C: behavioural pin — documents the TRUE current behaviour of the
 // production entry point's pass composition (CompileFromProgram in
-// compilers/go/compiler/compiler.go calls frontend.FoldConstants then
-// frontend.OptimizeEC, in that order, with default options). Reproduced
+// compilers/go/compiler/compiler.go calls frontend.FoldConstantsAndPrune
+// then frontend.OptimizeEC, in that order, with default options; it called
+// FoldConstants when this pin was written, see GK-DOC-007). Reproduced
 // here at the frontend-package level since compiler.go cannot be imported
 // from this package without a cycle. Passes both before and after the
 // comment fix; it is not the red test, it is what makes the corrected
@@ -131,10 +147,10 @@ func TestF303_AnyChangedGateStillPrecedesTheDceDelegationCall(t *testing.T) {
 // -----------------------------------------------------------------
 
 // f303RunProductionPipeline reproduces CompileFromProgram's exact two-call
-// composition (compiler.go: FoldConstants then OptimizeEC, both enabled by
-// default) without requiring the compiler package.
+// composition (compiler.go: FoldConstantsAndPrune then OptimizeEC, both
+// enabled by default) without requiring the compiler package.
 func f303RunProductionPipeline(program *ir.ANFProgram) *ir.ANFProgram {
-	program = FoldConstants(program)
+	program = FoldConstantsAndPrune(program)
 	program = OptimizeEC(program)
 	return program
 }

@@ -20,12 +20,19 @@ package frontend
 // This module is the canonical DEFINITION of DCE for the Go compiler — one
 // extracted implementation, mirroring the Zig reference in
 // `compilers/zig/src/passes/dce.zig` — but it is NOT a standalone pipeline
-// pass (F-303). Its only caller is anf_optimize.go's OptimizeEC, which runs
-// it over every method once optimizeMethodEC has rewritten them, and only
-// behind the `anyChanged` gate (N-097: the TS reference gate), so a program no
-// method of which triggers an EC rewrite is never DCE'd through any public
-// compile entrypoint. The earlier inline implementation in `anf_optimize.go`
-// has been surgically extracted here.
+// pass (F-303). Full DCE (EliminateDeadBindings) has one pipeline caller,
+// anf_optimize.go's OptimizeEC, which runs it over every method once
+// optimizeMethodEC has rewritten them, and only behind the `anyChanged` gate
+// (N-097: the TS reference gate), so a program no method of which triggers an
+// EC rewrite is never fully DCE'd through any public compile entrypoint.
+// embed_always_dce.go also runs it on a shallow copy, as a non-mutating probe
+// for the @embedAlways warning. The earlier inline implementation in
+// `anf_optimize.go` has been surgically extracted here.
+//
+// The candidate-restricted EliminateDeadBindingsAmong has a second production
+// caller (GK-DOC-007): constant_fold.go's FoldConstantsAndPrune (N-138), which
+// removes only the operand bindings the fold itself orphaned. OptimizeEC uses
+// it too, after full DCE, for orphans inside if arms and loop bodies.
 //
 // Behaviour: byte-for-byte identical, at the time of that extraction, to the
 // previous inline DCE in anf_optimize.go. Verified by the conformance suite

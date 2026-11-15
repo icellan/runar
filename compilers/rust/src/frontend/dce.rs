@@ -17,11 +17,16 @@
 //! values. See `conformance/dce/live-if.test.ts`.
 //!
 //! This module is the canonical DEFINITION of DCE for the Rust compiler, but
-//! it is not a standalone pipeline pass (F-219). Its only production caller is
-//! `anf_optimize::optimize_ec`, and only after that function's `any_changed`
-//! early exit, so a program in which no EC rewrite fires is never DCE'd. (The
-//! `lib.rs` issue-#109 probe runs `eliminate_dead_code` on a copy, for a
-//! warning only; it does not change what is compiled.) Running it on every
+//! it is not a standalone pipeline pass (F-219). Full DCE has one production
+//! caller, `anf_optimize::optimize_ec`, and only after that function's
+//! `any_changed` early exit, so a program in which no EC rewrite fires is
+//! never fully DCE'd. (The `lib.rs` issue-#109 probe runs `eliminate_dead_code`
+//! on a copy, for a warning only; it does not change what is compiled.) The
+//! candidate-restricted `eliminate_dead_bindings_among` has a second
+//! production caller (GK-DOC-007): `constant_fold::fold_constants_and_prune`
+//! (N-138), which removes only the operand bindings the fold itself orphaned;
+//! `optimize_ec` also uses it, after full DCE, for orphans inside if arms and
+//! loop bodies. Running it on every
 //! program breaks conformance fixtures until N-140's liveness work lands
 //! (R-194). It mirrors the Zig reference implementation in
 //! `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in

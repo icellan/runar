@@ -262,15 +262,20 @@ assert(extractLocktime(this.txPreimage) >= this.deadline);
 
 ---
 
-## Token Base Contracts
+## Token Contracts
 
-Import from `runar-lang/tokens`:
+`runar-lang/tokens` ships two complete, compilable `StatefulSmartContract` contracts:
 
 ```typescript
 import { FungibleToken, NonFungibleToken } from 'runar-lang/tokens';
 ```
 
-`FungibleToken` provides `transfer`, `merge`, and `split` methods. `NonFungibleToken` provides `transfer` and `burn` methods. Your contract extends the appropriate base and adds custom logic.
+- `FungibleToken(owner, balance, mergeBalance, tokenId)`: `transfer` (split into recipient + change), `send` (whole balance to a new owner) and `merge` (two token UTXOs into one; the companion input is authenticated through its parent transaction). Same contract, and same script bytes, as `examples/ts/token-ft`.
+- `NonFungibleToken(owner, tokenId, metadata)`: `transfer` (new owner) and `burn` (no continuation output). Same contract, and same script bytes, as `examples/ts/token-nft`.
+
+These are **not base classes**. No compiler treats a class that extends them as a contract: every tier accepts only `SmartContract`, `StatefulSmartContract` and `UnsafeSmartContract` as a base, so `class MyToken extends FungibleToken` fails to compile. Compile the source file as it is, or copy it into your own `.runar.ts` file and change it there. The npm package ships only `dist/` (compiled JS and `.d.ts`), so take the source from the repository: `packages/runar-lang/src/tokens/fungible.ts` / `nft.ts`, or the identical `examples/ts/token-ft` / `examples/ts/token-nft` contracts. Keep the property order and types if you need `merge`: it reads the companion's balances from the last 49 bytes of its locking script (`owner` 33 + `balance` 8 + `mergeBalance` 8).
+
+Pinned by `tests/gk-doc-009-runar-lang-tokens-compile.test.ts`.
 
 ---
 
@@ -310,12 +315,14 @@ Stateless hash-based signatures supporting multiple signings per keypair. Six pa
 |---|---|---|---|
 | `verifySLHDSA_SHA2_128s` | 128-bit | small | 7,856 bytes |
 | `verifySLHDSA_SHA2_128f` | 128-bit | fast | 17,088 bytes |
-| `verifySLHDSA_SHA2_192s` | 192-bit | small | 16,224 bytes |
-| `verifySLHDSA_SHA2_192f` | 192-bit | fast | 35,664 bytes |
-| `verifySLHDSA_SHA2_256s` | 256-bit | small | 29,792 bytes |
-| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
+| `verifySLHDSA_SHA2_192s` | SHA-256-only, not FIPS 205 | small | 16,224 bytes |
+| `verifySLHDSA_SHA2_192f` | SHA-256-only, not FIPS 205 | fast | 35,664 bytes |
+| `verifySLHDSA_SHA2_256s` | SHA-256-only, not FIPS 205 | small | 29,792 bytes |
+| `verifySLHDSA_SHA2_256f` | SHA-256-only, not FIPS 205 | fast | 49,856 bytes |
 
 All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
+
+The 192/256 functions are **not FIPS 205 conformant**: FIPS 205 hashes those parameter sets with SHA-512, which Bitcoin Script cannot express (no `OP_SHA512`, #137), so they use SHA-256 throughout at the FIPS 205 parameter shapes. A standard SLH-DSA-SHA2-192/256 signature will not verify. FIPS 205 itself specifies SHA-256 for the 128s/128f sets, so this limit does not apply to them.
 
 ---
 

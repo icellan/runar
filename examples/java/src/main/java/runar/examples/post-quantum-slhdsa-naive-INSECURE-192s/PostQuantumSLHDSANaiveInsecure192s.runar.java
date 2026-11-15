@@ -45,7 +45,7 @@ import static runar.lang.Builtins.verifySLHDSA_SHA2_192s;
 
 /**
  * PostQuantumSLHDSANaiveInsecure192s -- INSECURE pedagogical fixture exercising
- * the FIPS 205 SLH-DSA (SHA2-128s) signature verification primitive without
+ * the SHA-256-only SLH-DSA-SHA2-192s-shaped verifier (not FIPS 205, #137) without
  * any transaction binding. See the file header for the full security
  * analysis.
  */

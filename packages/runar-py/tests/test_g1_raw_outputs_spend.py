@@ -149,7 +149,10 @@ def test_send_to_script_outputs_are_raw_state_change_in_order():
         "strongest-available ScriptVM attempt and will XPASS if the OP_PUSH_TX "
         "incompatibility is ever resolved."
     ),
-    strict=False,
+    # GK-GAP-008: strict, so an XPASS fails the run instead of passing quietly;
+    # when the incompatibility is fixed, delete this marker and the
+    # provider.py carve-out together.
+    strict=True,
 )
 def test_send_to_script_covenant_input0_validates_through_spend():
     """Strongest attempted proof: replay input 0 through bsv-sdk's Spend
