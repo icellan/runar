@@ -95,7 +95,7 @@ SKIP_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ".py",
         re.compile(
             r"@pytest\.mark\.skip\b|pytest\.mark\.skipif\b|pytest\.skip\(|@unittest\.skip\b"
-            r"|pytest\.importorskip\("
+            r"|pytest\.importorskip\(|@pytest\.mark\.xfail\b|pytest\.xfail\("
         ),
     ),
     # Rust — `#[ignore]` and `#[ignore = "..."]` (with reason).
@@ -1116,6 +1116,13 @@ def self_test() -> int:
     # orphan-skip failure to catch it.
     python_pat = next(p for label, p in SKIP_PATTERNS if ".py" in label.split())
     for probe in ('pytest.importorskip("bsv")', 'pytest.importorskip("bsv", reason="x")'):
+        if not python_pat.search(probe):
+            failures.append(f"Python skip pattern does not match {probe!r}")
+
+    # GK-GAP-008: `@pytest.mark.xfail` was invisible too, so an xfail could
+    # hide a fund-path gap with no inventory row. It is a skip surface: a
+    # non-strict xfail passes whether or not the test does.
+    for probe in ('@pytest.mark.xfail(', '@pytest.mark.xfail', '    pytest.xfail("x")'):
         if not python_pat.search(probe):
             failures.append(f"Python skip pattern does not match {probe!r}")
 
