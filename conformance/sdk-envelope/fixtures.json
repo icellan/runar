@@ -641,6 +641,45 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "pj1-nan-literal",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "NaN is not a JSON token. Python's json.loads accepts NaN / Infinity / -Infinity by default (parse_constant), so this verified ok in the Python tier alone; the other six tiers rejected the payload.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":NaN,\"nonce\":1700000000000}",
+        "sig": "30450221008faa40ad23f9b9e624007d44d5307b9a91bc015a5e7321595b37a9297866e3e6022008f2d94382268ee89fab5c5dc192763a57863b9b2003828572e1a9a64d07c329",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "pj2-infinity-literal",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "Infinity: same rule as pj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":Infinity,\"nonce\":1700000000000}",
+        "sig": "3045022100f5ebe2c712acbaeea925c37f96cd31d23cf3ed6a0457b64365341cd4f17f2e7902203ee4d0b4bc37db00106a51f4bac9fc1e80885edf63b0e919bad5608e16c9784d",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "pj3-negative-infinity-literal",
+      "_audit_ref": "R2-JSON-GRAMMAR",
+      "_notes": "-Infinity: same rule as pj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":-Infinity,\"nonce\":1700000000000}",
+        "sig": "3044022043a289475a06c10a806faeccc4bfe2a1538a809f809c4b1fe4a5d3ab1caf95b302204e21adb125e69b4899ac6bcac200a0cba59cb4b27f39aba7224e4ce18de03ca3",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",

@@ -458,7 +458,7 @@ _I64_MAX = 2**63 - 1
 
 class _RejectedJsonError(ValueError):
     """Payload text json.loads would accept but the wire protocol does not:
-    a duplicate key (R2-DUPKEY)."""
+    a duplicate key (R2-DUPKEY) or a NaN / Infinity literal."""
 
 
 def _object_without_duplicate_keys(pairs: list) -> dict:
@@ -476,6 +476,13 @@ def _object_without_duplicate_keys(pairs: list) -> dict:
             raise _RejectedJsonError(f"duplicate key {k!r}")
         out[k] = v
     return out
+
+
+def _reject_non_json_constant(name: str) -> Any:
+    """``json.loads`` parse_constant hook. NaN / Infinity / -Infinity are not
+    JSON tokens, but json.loads accepts them by default, so a payload carrying
+    one verified ok in this tier alone (fixture vectors pj1..pj3)."""
+    raise _RejectedJsonError(f"non-JSON constant {name}")
 
 
 def _is_i64_int(v: object) -> bool:
@@ -542,6 +549,7 @@ def verify_envelope(
         parsed = json.loads(
             envelope.payload,
             object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_json_constant,
         )
     except (json.JSONDecodeError, _RejectedJsonError):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
