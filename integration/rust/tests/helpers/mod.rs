@@ -19,11 +19,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// every method.
 pub struct LoggingRPCProvider {
     inner: RPCProvider,
+    /// Number of transactions handed to the node. Negative tests assert on
+    /// the DELTA around the attacking call: an error with no new attempt is
+    /// an SDK-side failure, not a consensus rejection.
+    pub broadcast_attempts: usize,
 }
 
 impl LoggingRPCProvider {
     pub fn new(inner: RPCProvider) -> Self {
-        Self { inner }
+        Self { inner, broadcast_attempts: 0 }
     }
 }
 
@@ -38,6 +42,7 @@ impl Provider for LoggingRPCProvider {
             Err(_) => 0,
         };
         eprintln!("[runar-integration] tx broadcast: {} bytes", size_bytes);
+        self.broadcast_attempts += 1;
         self.inner.broadcast(tx)
     }
 
