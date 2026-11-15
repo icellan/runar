@@ -60,6 +60,35 @@ describe('GK-DOC-008: SLH-DSA 192/256 is documented as SHA-256-only, not FIPS 20
     }
   });
 
+  // Review follow-up: the Go and Rust SDK section headers called all six sets
+  // "real FIPS 205 verification", and the 192/256 example comments repeated it
+  // (Go tests) or named the wrong set (Java: "FIPS 205 SLH-DSA (SHA2-128s)").
+  it('Go/Rust SDK SLH-DSA headers do not call every set real FIPS 205', () => {
+    for (const p of ['packages/runar-go/runar.go', 'packages/runar-rs/src/prelude.rs']) {
+      const text = read(p);
+      expect(text, p).not.toMatch(/SHA-256 variants — real FIPS 205 verification/);
+      expect(text, p).toMatch(/#137/);
+    }
+    const go = read('packages/runar-go/runar.go');
+    for (const fn of ['192s', '192f', '256s', '256f']) {
+      const at = go.indexOf(`func VerifySLHDSA_SHA2_${fn}(`);
+      expect(at, fn).toBeGreaterThan(-1);
+      const prev = go.slice(go.lastIndexOf('\n}\n', at), at);
+      expect(prev, `runar.go VerifySLHDSA_SHA2_${fn} doc`).toMatch(/not FIPS 205/);
+    }
+  });
+
+  for (const fn of ['192s', '192f', '256s', '256f']) {
+    it(`post-quantum-slhdsa-naive-INSECURE-${fn}: Go and Java comments do not claim FIPS 205 or name 128s`, () => {
+      const dir = `post-quantum-slhdsa-naive-INSECURE-${fn}`;
+      const goTest = read(`examples/go/${dir}/PostQuantumSLHDSANaiveInsecure${fn}_test.go`);
+      expect(goTest).not.toMatch(/is real FIPS 205 verification/);
+      const java = read(`examples/java/src/main/java/runar/examples/${dir}/PostQuantumSLHDSANaiveInsecure${fn}.runar.java`);
+      expect(java).not.toMatch(/FIPS 205 SLH-DSA \(SHA2-128s\)/);
+      expect(java).toMatch(/not FIPS 205/);
+    });
+  }
+
   it('README.md: the post-quantum bullet carries the 192/256 caveat', () => {
     const bullet = read('README.md').split('\n').find((l) => l.startsWith('- **Post-quantum'));
     expect(bullet).toBeDefined();
