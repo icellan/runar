@@ -262,15 +262,20 @@ assert(extractLocktime(this.txPreimage) >= this.deadline);
 
 ---
 
-## Token Base Contracts
+## Token Contracts
 
-Import from `runar-lang/tokens`:
+`runar-lang/tokens` ships two complete, compilable `StatefulSmartContract` contracts:
 
 ```typescript
 import { FungibleToken, NonFungibleToken } from 'runar-lang/tokens';
 ```
 
-`FungibleToken` provides `transfer`, `merge`, and `split` methods. `NonFungibleToken` provides `transfer` and `burn` methods. Your contract extends the appropriate base and adds custom logic.
+- `FungibleToken(owner, balance, mergeBalance, tokenId)`: `transfer` (split into recipient + change), `send` (whole balance to a new owner) and `merge` (two token UTXOs into one; the companion input is authenticated through its parent transaction). Same contract, and same script bytes, as `examples/ts/token-ft`.
+- `NonFungibleToken(owner, tokenId, metadata)`: `transfer` (new owner) and `burn` (no continuation output). Same contract, and same script bytes, as `examples/ts/token-nft`.
+
+These are **not base classes**. No compiler treats a class that extends them as a contract: every tier accepts only `SmartContract`, `StatefulSmartContract` and `UnsafeSmartContract` as a base, so `class MyToken extends FungibleToken` fails to compile. Compile the source file as it is (`packages/runar-lang/src/tokens/fungible.ts` / `nft.ts`), or copy it into your own `.runar.ts` file and change it there. Keep the property order and types if you need `merge`: it reads the companion's balances from the last 49 bytes of its locking script (`owner` 33 + `balance` 8 + `mergeBalance` 8).
+
+Pinned by `tests/gk-doc-009-runar-lang-tokens-compile.test.ts`.
 
 ---
 
