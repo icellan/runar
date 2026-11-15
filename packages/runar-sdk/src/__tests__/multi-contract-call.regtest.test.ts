@@ -14,7 +14,7 @@
  * env overrides supported).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { compile } from 'runar-compiler';
 import { RunarContract } from '../contract.js';
@@ -257,6 +257,24 @@ describe('regtest funding guard', () => {
     [null],
   ])('refuses %j', (info) => {
     expect(() => assertRegtestChain(info)).toThrow(/SAFETY/);
+  });
+
+  // The predicate alone is not the fix: createFundedWallet must ask the node
+  // for its chain and stop before importaddress/sendtoaddress. Stub node.
+  it('createFundedWallet refuses a mainnet node before funding', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', async (_url: unknown, init: { body: string }) => {
+      const { method } = JSON.parse(init.body) as { method: string };
+      seen.push(method);
+      const result = method === 'getblockchaininfo' ? { chain: 'main', blocks: 900_000 } : 'aa'.repeat(32);
+      return new Response(JSON.stringify({ result, error: null, id: 'stub' }));
+    });
+    try {
+      await expect(createFundedWallet()).rejects.toThrow(/SAFETY/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen).toEqual(['getblockchaininfo']);
   });
 });
 
