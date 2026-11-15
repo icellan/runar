@@ -47,9 +47,10 @@ export interface ANFProperty {
    * synthetic siblings back into a single FixedArray state/ABI entry, so this
    * is load-bearing wire data: an ANF that drops it still compiles to the same
    * script bytes but degrades the SDK's `state.grid` accessor into N raw
-   * scalars. The TS frontend reads the chain off the AST
-   * (`PropertyNode.__syntheticArrayChain`) instead and has no ANF-input mode,
-   * so it is the one tier that need not emit it.
+   * scalars. TS pass 4 emits it too (for ANF parity with the other tiers),
+   * and `compileFromANF` consumes it for the artifact regroup after the IR
+   * loader validates it (N-096). On the source path the TS assembler reads
+   * the chain off the AST (`PropertyNode.__syntheticArrayChain`).
    */
   syntheticArrayChain?: ANFSyntheticArrayLevel[];
 }

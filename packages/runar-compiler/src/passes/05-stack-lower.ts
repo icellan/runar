@@ -4997,11 +4997,11 @@ class LoweringContext {
     // P2PKH to their own key, or a bare OP_RETURN — and redirect the whole
     // contract balance while the script still verified.
     //
-    // The separator is now emitted ONCE, as the first byte of the locking
-    // script (see `emit()` in 06-emit.ts). `scriptCode` is then the entire
-    // locking script minus that leading byte, which makes every byte of
-    // `_codePart` observable on-chain and lets `emitCodePartAuthentication`
-    // below pin it exactly. The cost is a larger preimage for methods that
+    // The separator is now emitted ONCE, at offset 1 behind a single OP_NOP
+    // (see `emit()` in 06-emit.ts for why not offset 0). `scriptCode` is then
+    // `lockingScript[2:]`, the whole script after that prologue, which makes
+    // every byte of `_codePart` observable on-chain and lets
+    // `emitCodePartAuthentication` below pin it exactly. The cost is a larger preimage for methods that
     // are not the first in the dispatch table; the benefit is that the
     // continuation output can no longer be forged.
 
