@@ -173,7 +173,9 @@ final class PreimageChecked {
             if (c.callee() instanceof Identifier id && "checkPreimage".equals(id.name())) {
                 return out;
             }
-            if (c.callee() instanceof Identifier id && "assert".equals(id.name())) {
+            // The Java tier keeps the Java surface's assertThat(...) as its own
+            // callee name (Typecheck / Validate / AnfLower treat it as assert).
+            if (c.callee() instanceof Identifier id && ("assert".equals(id.name()) || "assertThat".equals(id.name()))) {
                 List<Expression> cs = new ArrayList<>();
                 if (!c.args().isEmpty()) conjuncts(c.args().get(0), cs);
                 for (Expression x : cs) {
