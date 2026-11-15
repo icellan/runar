@@ -165,3 +165,90 @@ func TestGKBUG006_RawMarkerRefused_IR(t *testing.T) {
 		})
 	}
 }
+
+// gk006PrivateHelperSource is a contract whose public method reaches the
+// marker only through a private helper, which the preamble scan does not
+// walk. Inlining the helper is where the refusal has to fire.
+func gk006PrivateHelperSource(t *testing.T, name, marker string) string {
+	t.Helper()
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type ` + name + ` struct {
+	runar.SmartContract
+}
+
+func (c *` + name + `) helper() {
+	runar.` + marker + `()
+}
+
+func (c *` + name + `) Verify() {
+	c.helper()
+	runar.Assert(true)
+}
+`
+	p := filepath.Join(t.TempDir(), name+".runar.go")
+	if err := os.WriteFile(p, []byte(source), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	return p
+}
+
+// TestGKBUG006_RawMarkerInPrivateMethodRefused covers the private-method path
+// on both entry points: --source (typecheck) and --ir (stack lowering, where
+// the helper is inlined into the public method).
+func TestGKBUG006_RawMarkerInPrivateMethodRefused(t *testing.T) {
+	vkPath := sp1VKPath(t)
+
+	t.Run("source", func(t *testing.T) {
+		src := gk006PrivateHelperSource(t, "RawInHelper", "AssertGroth16WitnessAssisted")
+		_, err := CompileFromSource(src, CompileOptions{Groth16WAVKey: vkPath})
+		gk006RequireRefusal(t, err, "a --source private helper calling AssertGroth16WitnessAssisted")
+	})
+
+	t.Run("ir", func(t *testing.T) {
+		// Lower a helper that calls the MSM marker (the frontend accepts it),
+		// then rename that call to the raw marker in the private method only.
+		prog, err := CompileSourceToIR(gk006PrivateHelperSource(t, "IRHelper", "AssertGroth16WitnessAssistedWithMSM"))
+		if err != nil {
+			t.Fatalf("CompileSourceToIR: %v", err)
+		}
+		renamed := false
+		for mi := range prog.Methods {
+			if prog.Methods[mi].IsPublic {
+				continue
+			}
+			for bi, b := range prog.Methods[mi].Body {
+				if b.Value.Kind == "call" && b.Value.Func == "assertGroth16WitnessAssistedWithMSM" {
+					prog.Methods[mi].Body[bi].Value.Func = "assertGroth16WitnessAssisted"
+					renamed = true
+				}
+			}
+		}
+		if !renamed {
+			t.Fatal("premise: no marker call found in a private method of the lowered program")
+		}
+		_, err = CompileFromProgram(prog, CompileOptions{Groth16WAVKey: vkPath})
+		gk006RequireRefusal(t, err, "an --ir private helper calling assertGroth16WitnessAssisted")
+	})
+}
+
+// TestGKBUG006_RawMarkerRefusedByFrontend pins the typecheck refusal on its
+// own. Every other --source test also reaches stack lowering, which refuses
+// the marker too, so they stay green with the typecheck refusal removed. The
+// frontend-only path (CompileSourceToIR here; runar.CompileCheck uses the
+// same parse/validate/typecheck) never lowers, so only typecheck can catch it.
+func TestGKBUG006_RawMarkerRefusedByFrontend(t *testing.T) {
+	for name, path := range map[string]string{
+		"public_method":  gk006WriteContract(t, "RawFrontend", "\trunar.AssertGroth16WitnessAssisted()\n\trunar.Assert(true)"),
+		"private_helper": gk006PrivateHelperSource(t, "RawFrontendHelper", "AssertGroth16WitnessAssisted"),
+	} {
+		name, path := name, path
+		t.Run(name, func(t *testing.T) {
+			_, err := CompileSourceToIR(path)
+			gk006RequireRefusal(t, err, "the frontend (parse/validate/typecheck) on a "+name+" calling AssertGroth16WitnessAssisted")
+		})
+	}
+}
