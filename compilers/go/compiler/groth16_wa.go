@@ -280,8 +280,8 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 //
 // The artifact's ABI intentionally exposes a single public method `verify`
 // with no parameters. The Groth16 unlock is a raw witness bundle (gradients
-// + final-exp witnesses + public-input scalars + proof + prepared inputs)
-// pushed directly by the caller via `bn254witness.Witness.ToStackOps()` —
+// + residue witness c, c⁻¹, s + public-input scalars + prepared inputs +
+// proof) pushed directly by the caller via `bn254witness.Witness.ToStackOps()` —
 // build it with `bn254witness.BuildFromProofWithInputs`, which emits the
 // MSM layout. It does not fit the standard Rúnar ABI-param model, which is
 // why Params is empty.
@@ -374,7 +374,7 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 	//     the witness layout the verifier expects untouched. It is prepended
 	//     AFTER the optimizers so the verifier body is byte-identical to the
 	//     unbound one, and it runs first so an unsigned spend is refused
-	//     before the ~700 KB verifier executes.
+	//     before the ~1.5 MB verifier executes.
 	ops = append([]codegen.StackOp{
 		{Op: "placeholder", ParamIndex: 0, ParamName: groth16WAOwnerParam},
 		{Op: "opcode", Code: "OP_CHECKSIGVERIFY"},

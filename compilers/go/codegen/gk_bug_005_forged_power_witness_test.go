@@ -290,6 +290,13 @@ func gk005Verifier(msm bool, cfg codegen.Groth16Config) []codegen.StackOp {
 	return ops
 }
 
+// gk005OptimizedVerifier is the WithMSM verifier after the same peephole
+// passes CompileGroth16WA runs (OptimizeStackOps then OptimizeBN254Ops): the
+// bytes that are actually deployed.
+func gk005OptimizedVerifier(cfg codegen.Groth16Config) []codegen.StackOp {
+	return codegen.OptimizeBN254Ops(codegen.OptimizeStackOps(gk005Verifier(true, cfg)))
+}
+
 func gk005Witness(t *testing.T, msm bool, vk bn254witness.VerifyingKey, proof bn254witness.Proof, pubs []*big.Int) *bn254witness.Witness {
 	t.Helper()
 	var (
@@ -317,13 +324,16 @@ func gk005RandomE12(seed string) bn254.E12 {
 	return gk005FlatToE12(flat)
 }
 
-func gk005Case(t *testing.T, msm bool) {
+func gk005Case(t *testing.T, msm, optimized bool) {
 	if testing.Short() {
 		t.Skip("minutes-long interpreter runs")
 	}
 	P := gk005Derive(t)
 	vk, proof, honestPubs := gk005LoadSP1(t)
 	verifier := gk005Verifier(msm, gk005MSMConfig(t, vk))
+	if optimized {
+		verifier = gk005OptimizedVerifier(gk005MSMConfig(t, vk))
+	}
 	attacker := gk005AttackerPubs(honestPubs)
 
 	fTrueFlat, err := bn254witness.MillerLoopProduct(vk, proof, honestPubs)
@@ -471,8 +481,13 @@ func gk005Case(t *testing.T, msm bool) {
 	}
 }
 
-func TestGKBUG005_WithMSM(t *testing.T) { gk005Case(t, true) }
-func TestGKBUG005_Raw(t *testing.T)     { gk005Case(t, false) }
+func TestGKBUG005_WithMSM(t *testing.T) { gk005Case(t, true, false) }
+func TestGKBUG005_Raw(t *testing.T)     { gk005Case(t, false, false) }
+
+// TestGKBUG005_WithMSMOptimized runs every forgery against the peephole-
+// optimised WithMSM verifier, so no optimiser rewrite can have weakened a
+// check the unoptimised ops perform.
+func TestGKBUG005_WithMSMOptimized(t *testing.T) { gk005Case(t, true, true) }
 
 // TestGKBUG005_ScriptSize logs the WithMSM verifier size at the production
 // threshold (0, as in compiler.loadGroth16WAConfig) on the real SP1 VK, before

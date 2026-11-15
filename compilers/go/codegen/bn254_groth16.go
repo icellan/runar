@@ -1278,7 +1278,9 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 //
 //	λ = 6x + 2 + p − p² + p³
 //
-// Facts (recomputed from p, r, x by TestGKBUG005_ResidueAlgebra):
+// Facts (each re-derived from p, r, x by bn254witness.buildResidueParams,
+// which refuses to build witnesses if one fails, and by the GK-BUG-005
+// tests):
 //
 //	(1) λ ≡ 0 (mod r), and λ = 3·m'·r with gcd(m', n) = 1.
 //	(2) gcd(λ, n) = 3r; 27 ∥ n, hence 27 | h; r² ∤ n.
@@ -1343,8 +1345,9 @@ const (
 
 // bn254Omega27 is ω = w^((p¹²−1)/27) in gnark flat Fp12 order: a primitive
 // 27th root of unity whose only non-zero coefficient is C0.B1 (an Fp2
-// element times v). TestGKBUG005_ResidueAlgebra recomputes it from the
-// definition and checks ω^27 = 1, ω^9 ≠ 1.
+// element times v). gk_bug_005_forged_power_witness_test.go and the
+// bn254witness residue tests recompute it from that definition, and
+// bn254witness.buildResidueParams checks ω^27 = 1, ω^9 ≠ 1.
 var bn254Omega27 [12]*big.Int
 
 func init() {
