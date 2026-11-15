@@ -46,3 +46,36 @@ class GK010PreimageCheckedTest < Minitest::Test
     end
   end
 end
+
+# R2-GK010-ASSERT: no Ruby surface parser builds an AssertStmt today (every
+# assert is a CallExpr), but the checker walks the node. A hand-built
+# `AssertStmt(checkPreimage(p))` must count as a check, and a bare
+# `checkPreimage(p);` must not.
+class GK010AssertStmtNodeTest < Minitest::Test
+  include RunarCompiler::Frontend
+
+  def method_with(stmt)
+    MethodNode.new(
+      name: 'spend', visibility: 'public', body: [stmt],
+      params: [ParamNode.new(name: 'p', type: PrimitiveType.new(name: 'SigHashPreimage'))]
+    )
+  end
+
+  def contract_with(stmt)
+    ContractNode.new(name: 'C', parent_class: 'SmartContract', properties: [], methods: [method_with(stmt)])
+  end
+
+  def check_call
+    CallExpr.new(callee: Identifier.new(name: 'checkPreimage'), args: [Identifier.new(name: 'p')])
+  end
+
+  def test_assert_stmt_node_counts
+    diags = RunarCompiler::Frontend.check_preimage_checked_on_every_path(contract_with(AssertStmt.new(condition: check_call)))
+    assert_empty diags
+  end
+
+  def test_bare_call_does_not_count
+    diags = RunarCompiler::Frontend.check_preimage_checked_on_every_path(contract_with(ExpressionStmt.new(expr: check_call)))
+    assert_equal 1, diags.length
+  end
+end

@@ -356,6 +356,19 @@ module RunarCompiler
       conjuncts = lambda do |e|
         e.is_a?(BinaryExpr) && e.op == "&&" ? conjuncts.call(e.left) + conjuncts.call(e.right) : [e]
       end
+      # The parameters an asserted condition checks: each conjunct of its
+      # top-level && chain that is a direct checkPreimage(p) call.
+      asserted_must = lambda do |cond, aliases|
+        out = Set.new
+        conjuncts.call(cond).each do |c|
+          next unless c.is_a?(CallExpr) && c.callee.is_a?(Identifier) && c.callee.name == "checkPreimage"
+          next if (c.args || []).empty?
+
+          origin = resolve.call(c.args[0], aliases)
+          out << origin unless origin.nil?
+        end
+        out
+      end
       expr_must = lambda do |e, aliases, stack|
         case e
         when CallExpr
@@ -366,13 +379,7 @@ module RunarCompiler
           # conjunct does (the assert branch below).
           return out if e.callee.is_a?(Identifier) && e.callee.name == "checkPreimage"
           if e.callee.is_a?(Identifier) && e.callee.name == "assert"
-            ((e.args || []).empty? ? [] : conjuncts.call(e.args[0])).each do |c|
-              next unless c.is_a?(CallExpr) && c.callee.is_a?(Identifier) && c.callee.name == "checkPreimage"
-              next if (c.args || []).empty?
-
-              origin = resolve.call(c.args[0], aliases)
-              out << origin unless origin.nil?
-            end
+            out |= asserted_must.call(e.args[0], aliases) unless (e.args || []).empty?
             return out
           end
           target = private_target.call(e.callee)
@@ -434,7 +441,8 @@ module RunarCompiler
           when ReturnStmt
             exits << (done | expr_must.call(st.value, aliases, stack))
             return nil
-          when AssertStmt then done |= expr_must.call(st.condition, aliases, stack)
+          when AssertStmt
+            done |= expr_must.call(st.condition, aliases, stack) | asserted_must.call(st.condition, aliases)
           when IfStmt
             done |= expr_must.call(st.condition, aliases, stack)
             then_done = walk.call(st.then, done, aliases.dup, stack, exits)
