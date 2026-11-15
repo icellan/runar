@@ -106,6 +106,7 @@ public final class Validate {
         boolean callDepthExceeded = ctx.checkNoRecursion();
         ctx.checkReservedNames();
         ctx.checkRedeclarations();
+        ctx.checkDuplicateMethods();
         ctx.warnStrippedReadonlyFields();
         // N-180: the Rabin-provenance and sighash passes walk the private-method
         // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
@@ -1873,6 +1874,23 @@ public final class Validate {
         // --------------------------------------------------------------
         // Recursion detection
         // --------------------------------------------------------------
+
+        /**
+         * GK-BUG-015: a contract cannot declare two methods with the same
+         * name. Every name-keyed later pass (side-effect summary, private
+         * method lookup, the affine consumption fixpoint, stack lowering)
+         * assumes one body per name; with two they disagree. Anchored on each
+         * repeat.
+         */
+        void checkDuplicateMethods() {
+            Set<String> seen = new HashSet<>();
+            for (MethodNode m : contract.methods()) {
+                if (!seen.add(m.name())) {
+                    error("method '" + m.name() + "' is already declared in this contract and cannot be re-declared",
+                        m.sourceLocation());
+                }
+            }
+        }
 
         /**
          * N-509: a local cannot be re-declared in the same scope

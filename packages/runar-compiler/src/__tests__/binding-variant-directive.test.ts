@@ -156,16 +156,27 @@ describe('@bindingVariant through ANF and codegen', () => {
     expect(r.artifact!.script).toContain(CHECK_PREIMAGE_BINDING_ALL_HEX.replace(/0141(7e21[0-9a-f]{66}ad)$/, '01c1$1'));
   });
 
+  // The preimages are properties: a public SigHashPreimage PARAMETER must be
+  // checked on every path (GK-GAP-010), which a loop body or one ternary arm
+  // is not.
   it('nested loop and ternary arms inherit the method variant', () => {
     const src = `
       class G extends SmartContract {
-        constructor() { super(); }
+        readonly a: SigHashPreimage;
+        readonly b: SigHashPreimage;
+        readonly c: SigHashPreimage;
+        constructor(a: SigHashPreimage, b: SigHashPreimage, c: SigHashPreimage) {
+          super(a, b, c);
+          this.a = a;
+          this.b = b;
+          this.c = c;
+        }
         /** @bindingVariant all */
-        public unlock(a: SigHashPreimage, b: SigHashPreimage, c: SigHashPreimage, d: boolean) {
+        public unlock(d: boolean) {
           for (let i = 0n; i < 1n; i++) {
-            assert(checkPreimage(a));
+            assert(checkPreimage(this.a));
           }
-          const ok = d ? checkPreimage(b) : checkPreimage(c);
+          const ok = d ? checkPreimage(this.b) : checkPreimage(this.c);
           assert(ok);
         }
       }`;

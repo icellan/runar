@@ -73,25 +73,34 @@ pub const CompileResult = struct {
     }
 };
 
-const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, unknown };
+pub const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, unknown };
 
 /// F-230: comptime-known text for `parseSource`'s `.unknown` branch, used
 /// when the per-call `allocPrint`/`dupe` of the file-name-carrying message
 /// fails under memory pressure. See the `.unknown` arm below.
-const UNSUPPORTED_FORMAT_FALLBACK = "unsupported format for this file";
+const UNSUPPORTED_FORMAT_FALLBACK = "unsupported file extension (expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)";
 
-fn detectFormat(path: []const u8) FileFormat {
-    if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
-    if (std.mem.endsWith(u8, path, ".runar.ts")) return .runar_ts;
-    if (std.mem.endsWith(u8, path, ".runar.sol")) return .runar_sol;
-    if (std.mem.endsWith(u8, path, ".runar.move")) return .runar_move;
-    if (std.mem.endsWith(u8, path, ".runar.go")) return .runar_go;
-    if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
-    if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
-    if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
-    if (std.mem.endsWith(u8, path, ".runar.java")) return .runar_java;
+/// GK-GAP-005 / GK-GAP-006: the nine `.runar.*` suffixes match ignoring ASCII
+/// case, and no file name (`""`) means the TypeScript surface; anything else is
+/// `.unknown`, which `parseSource` refuses. The CLI (`main.zig`) routes through
+/// this same function, adding only its `.json` IR branch.
+pub fn detectFormat(path: []const u8) FileFormat {
+    if (path.len == 0) return .runar_ts;
+    const eic = std.ascii.endsWithIgnoreCase;
+    if (eic(path, ".runar.zig")) return .runar_zig;
+    if (eic(path, ".runar.ts")) return .runar_ts;
+    if (eic(path, ".runar.sol")) return .runar_sol;
+    if (eic(path, ".runar.move")) return .runar_move;
+    if (eic(path, ".runar.go")) return .runar_go;
+    if (eic(path, ".runar.rs")) return .runar_rs;
+    if (eic(path, ".runar.py")) return .runar_py;
+    if (eic(path, ".runar.rb")) return .runar_rb;
+    if (eic(path, ".runar.java")) return .runar_java;
     return .unknown;
 }
+
+/// The diagnostic every tier gives an unrecognised suffix (GK-GAP-005).
+pub const UNSUPPORTED_EXTENSION_FMT = "unsupported file extension: {s} (expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)";
 
 /// Validate `contract` with the validator its surface calls for: the `.runar.zig`
 /// surface relaxes the `super()` constructor requirement, every other surface
@@ -188,7 +197,7 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
     // `UnsupportedFormat` from another — the same shape of divergence this
     // item exists to close, just one guard later.
     if (format == .unknown) {
-        const msg = std.fmt.allocPrint(work, "unsupported format for {s}", .{file_name}) catch UNSUPPORTED_FORMAT_FALLBACK;
+        const msg = std.fmt.allocPrint(work, UNSUPPORTED_EXTENSION_FMT, .{file_name}) catch UNSUPPORTED_FORMAT_FALLBACK;
         const errs: []const []const u8 = work.dupe([]const u8, &.{msg}) catch &.{UNSUPPORTED_FORMAT_FALLBACK};
         return .{ .contract = null, .errors = errs };
     }

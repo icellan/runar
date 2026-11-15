@@ -36,6 +36,7 @@ func TypeCheck(contract *ContractNode) *TypeCheckResult {
 	for _, method := range contract.Methods {
 		checker.checkMethod(method)
 	}
+	checker.errors = append(checker.errors, checkPreimageCheckedOnEveryPath(contract)...)
 
 	return &TypeCheckResult{
 		Contract: contract,

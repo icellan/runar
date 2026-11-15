@@ -68,8 +68,8 @@ class BindingVariantTest {
     @Test
     void nestedArmInherits() throws Exception {
         String src = "class G extends SmartContract {\n  constructor() { super(); }\n  /** @bindingVariant all */\n"
-            + "  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {\n"
-            + "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }\n  }\n}\n";
+            + "  public unlock(a: SigHashPreimage, c: boolean) {\n"
+            + "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }\n  }\n}\n";
         String s = PipelineTestSupport.hex(src, "G.runar.ts");
         assertEquals(2, count(s, ALL_HEX));
         assertFalse(s.contains(LOWS_HEX));

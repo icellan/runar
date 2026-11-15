@@ -71,8 +71,8 @@ def test_nested_arm_inherits():
         "class G extends SmartContract {\n"
         "  constructor() { super(); }\n"
         "  /** @bindingVariant all */\n"
-        "  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {\n"
-        "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }\n"
+        "  public unlock(a: SigHashPreimage, c: boolean) {\n"
+        "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }\n"
         "  }\n"
         "}\n"
     )

@@ -76,6 +76,7 @@ fn validateWithMode(
     const call_depth_exceeded = try checkNoRecursion(allocator, contract, &errors);
     try checkReservedNames(allocator, contract, &errors);
     try checkRedeclarations(allocator, contract, &errors);
+    try checkDuplicateMethods(allocator, contract, &errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -159,6 +160,26 @@ fn checkReservedNames(
         if (!std.mem.eql(u8, m.name, "constructor")) try c.check(m.name, m.source_loc);
         for (m.params) |p| try c.check(p.name, m.source_loc);
         try c.walk(m.body, m.source_loc);
+    }
+}
+
+/// GK-BUG-015: a contract cannot declare two methods with the same name. Every
+/// name-keyed later pass (side-effect summary, private-method lookup, the
+/// affine consumption fixpoint, stack lowering) assumes one body per name; with
+/// two they disagree, and the consumption fixpoint can oscillate. Anchored on
+/// each repeat.
+fn checkDuplicateMethods(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    for (contract.methods, 0..) |m, i| {
+        for (contract.methods[0..i]) |prev| {
+            if (!std.mem.eql(u8, prev.name, m.name)) continue;
+            const msg = try std.fmt.allocPrint(allocator, "method '{s}' is already declared in this contract and cannot be re-declared", .{m.name});
+            try errors.append(allocator, .{ .message = msg, .location = m.source_loc, .severity = .@"error", .owned_message = true });
+            break;
+        }
     }
 }
 

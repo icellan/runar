@@ -488,6 +488,10 @@ public final class Typecheck {
             for (MethodNode m : contract.methods()) {
                 checkMethod(m);
             }
+            // GK-GAP-010: see PreimageChecked.
+            for (PreimageChecked.Finding f : PreimageChecked.check(contract)) {
+                errors.add(format(f.message(), f.loc()));
+            }
         }
 
         /**

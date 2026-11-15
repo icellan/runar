@@ -19,6 +19,7 @@ pub mod int_literal;
 pub mod const_reassign;
 pub mod loop_condition;
 pub mod parser;
+pub mod preimage_checked;
 pub mod reserved_names;
 pub mod parser_gocontract;
 pub mod parser_java;

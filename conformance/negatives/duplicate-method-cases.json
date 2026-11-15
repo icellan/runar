@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "ts-duplicate-public",
+      "file": "DupPublic.runar.ts",
+      "src": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupPublic extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public withdraw(sig: Sig) {\n    assert(checkSig(sig, this.pk));\n  }\n\n  public withdraw(x: bigint) {\n    assert(x == x);\n  }\n}\n",
+      "twin": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupPublic extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public withdraw(sig: Sig) {\n    assert(checkSig(sig, this.pk));\n  }\n\n  public withdraw2(x: bigint) {\n    assert(x == x);\n  }\n}\n",
+      "error": "method 'withdraw' is already declared in this contract and cannot be re-declared"
+    },
+    {
+      "name": "ts-duplicate-private-sig",
+      "file": "DupPrivateSig.runar.ts",
+      "src": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupPrivateSig extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public unlock(sig: Sig) {\n    assert(this.verify(sig));\n  }\n\n  private verify(sig: Sig): boolean {\n    return checkSig(sig, this.pk);\n  }\n\n  private verify(sig: Sig): boolean {\n    return true;\n  }\n}\n",
+      "twin": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupPrivateSig extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public unlock(sig: Sig) {\n    assert(this.verify(sig));\n  }\n\n  private verify(sig: Sig): boolean {\n    return checkSig(sig, this.pk);\n  }\n\n  private verify2(sig: Sig): boolean {\n    return true;\n  }\n}\n",
+      "error": "method 'verify' is already declared in this contract and cannot be re-declared"
+    },
+    {
+      "name": "ts-public-private-clash",
+      "file": "DupClash.runar.ts",
+      "src": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupClash extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public unlock(sig: Sig) {\n    assert(checkSig(sig, this.pk));\n  }\n\n  private unlock(sig: Sig): boolean {\n    return true;\n  }\n}\n",
+      "twin": "import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';\n\nclass DupClash extends SmartContract {\n  readonly pk: PubKey;\n\n  constructor(pk: PubKey) {\n    super(pk);\n    this.pk = pk;\n  }\n\n  public unlock(sig: Sig) {\n    assert(checkSig(sig, this.pk));\n  }\n\n  private helper(sig: Sig): boolean {\n    return true;\n  }\n}\n",
+      "error": "method 'unlock' is already declared in this contract and cannot be re-declared"
+    },
+    {
+      "name": "py-duplicate-public",
+      "file": "DupPy.runar.py",
+      "src": "from runar import SmartContract, PubKey, Sig, public, assert_, check_sig\n\nclass DupPy(SmartContract):\n    pk: PubKey\n\n    def __init__(self, pk: PubKey):\n        super().__init__(pk)\n        self.pk = pk\n\n    @public\n    def withdraw(self, sig: Sig):\n        assert_(check_sig(sig, self.pk))\n\n    @public\n    def withdraw(self, x: int):\n        assert_(x == x)\n",
+      "twin": "from runar import SmartContract, PubKey, Sig, public, assert_, check_sig\n\nclass DupPy(SmartContract):\n    pk: PubKey\n\n    def __init__(self, pk: PubKey):\n        super().__init__(pk)\n        self.pk = pk\n\n    @public\n    def withdraw(self, sig: Sig):\n        assert_(check_sig(sig, self.pk))\n\n    @public\n    def withdraw2(self, x: int):\n        assert_(x == x)\n",
+      "error": "method 'withdraw' is already declared in this contract and cannot be re-declared"
+    }
+  ]
+}

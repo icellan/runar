@@ -2571,12 +2571,15 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	//   matching use case where each successor intent UTXO has a unique
 	//   tail (BSVM Mode 3 permissionless step-in).
 	if id, ok := callee.(Identifier); ok && id.Name == "extractPrevOutputScript" {
+		// GK-GAP-013: typecheck refuses these shapes first; LowerToANF is a
+		// public entry point, so refuse here too rather than emit an empty
+		// constant in place of the hash assertion.
 		if len(e.Args) != 2 && len(e.Args) != 3 {
-			return ctx.emit(makeLoadConstString(""))
+			panic(fmt.Sprintf("extractPrevOutputScript: expected 2 or 3 arguments, got %d", len(e.Args)))
 		}
 		idxLit, ok := e.Args[0].(BigIntLiteral)
 		if !ok || idxLit.Value == nil {
-			return ctx.emit(makeLoadConstString(""))
+			panic("extractPrevOutputScript: inputIndex must be a bigint literal")
 		}
 		idx := ir.MustIntValueExact(idxLit.Value, "extractPrevOutputScript: input index")
 		paramName := fmt.Sprintf("_prevOutScript_%d", idx)
@@ -2592,7 +2595,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		if len(e.Args) == 3 {
 			prefixLenLit, ok := e.Args[2].(BigIntLiteral)
 			if !ok || prefixLenLit.Value == nil {
-				return ctx.emit(makeLoadConstString(""))
+				panic("extractPrevOutputScript: prefixLen must be a bigint literal")
 			}
 			zeroRef := ctx.emit(makeLoadConstInt(big.NewInt(0)))
 			prefixLenRef := ctx.emit(makeLoadConstInt(new(big.Int).Set(prefixLenLit.Value)))
@@ -2628,12 +2631,13 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// the assumption breaks (variable-length OP_RETURN) — typecheck
 	// rejects that mix; see checkMethod in typecheck.go (Crit-3).
 	if id, ok := callee.(Identifier); ok && id.Name == "requireOutputP2PKH" {
+		// GK-GAP-013: refuse, never emit an empty constant in place of the pin.
 		if len(e.Args) != 3 {
-			return ctx.emit(makeLoadConstString(""))
+			panic(fmt.Sprintf("requireOutputP2PKH: expected 3 arguments, got %d", len(e.Args)))
 		}
 		idxLit, ok := e.Args[0].(BigIntLiteral)
 		if !ok || idxLit.Value == nil {
-			return ctx.emit(makeLoadConstString(""))
+			panic("requireOutputP2PKH: outputIndex must be a bigint literal")
 		}
 		idx := ir.MustIntValueExact(idxLit.Value, "requireOutputP2PKH: output index")
 		// W2 backstop. The user-facing refusal lives in the typechecker, where a

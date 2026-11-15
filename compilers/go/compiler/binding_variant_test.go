@@ -59,8 +59,8 @@ func TestBindingVariant_NestedArmInherits(t *testing.T) {
 class G extends SmartContract {
   constructor() { super(); }
   /** @bindingVariant all */
-  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {
-    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }
+  public unlock(a: SigHashPreimage, c: boolean) {
+    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }
   }
 }
 `

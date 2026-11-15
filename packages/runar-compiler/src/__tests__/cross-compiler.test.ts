@@ -668,8 +668,10 @@ class PreimageStateWrite extends StatefulSmartContract {
     this.tag = tag;
   }
 
-  public update(next: SigHashPreimage) {
-    this.tag = next;
+  // Rewritten from itself: a public SigHashPreimage parameter must reach
+  // checkPreimage() on every path (GK-GAP-010).
+  public update() {
+    this.tag = this.tag;
   }
 }
 `;

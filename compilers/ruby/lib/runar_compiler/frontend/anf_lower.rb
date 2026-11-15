@@ -1946,12 +1946,15 @@ module RunarCompiler
         #   matching use case where each successor intent UTXO has a unique
         #   tail (BSVM Mode 3 permissionless step-in, Crit-2).
         if callee.is_a?(Identifier) && callee.name == "extractPrevOutputScript"
+          # GK-GAP-013: typecheck refuses these shapes first; lowering is a
+          # public entry point, so refuse here too rather than emit an empty
+          # constant in place of the hash assertion.
           if e.args.length != 2 && e.args.length != 3
-            return emit(Frontend._make_load_const_string(""))
+            raise "extractPrevOutputScript: expected 2 or 3 arguments, got #{e.args.length}"
           end
           idx_lit = e.args[0]
           unless idx_lit.is_a?(BigIntLiteral) && !idx_lit.value.nil?
-            return emit(Frontend._make_load_const_string(""))
+            raise "extractPrevOutputScript: inputIndex must be a bigint literal"
           end
           idx = idx_lit.value.to_i
           param_name = "_prevOutScript_#{idx}"
@@ -1967,7 +1970,7 @@ module RunarCompiler
           if e.args.length == 3
             prefix_len_lit = e.args[2]
             unless prefix_len_lit.is_a?(BigIntLiteral) && !prefix_len_lit.value.nil?
-              return emit(Frontend._make_load_const_string(""))
+              raise "extractPrevOutputScript: prefixLen must be a bigint literal"
             end
             zero_ref = emit(Frontend._make_load_const_int(0))
             prefix_len_ref = emit(Frontend._make_load_const_int(prefix_len_lit.value.to_i))
@@ -2002,10 +2005,11 @@ module RunarCompiler
         # (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte
         # offset of output i is i*34.
         if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
-          return emit(Frontend._make_load_const_string("")) if e.args.length != 3
+          # GK-GAP-013: refuse, never emit an empty constant in place of the pin.
+          raise "requireOutputP2PKH: expected 3 arguments, got #{e.args.length}" if e.args.length != 3
           idx_lit = e.args[0]
           unless idx_lit.is_a?(BigIntLiteral) && !idx_lit.value.nil?
-            return emit(Frontend._make_load_const_string(""))
+            raise "requireOutputP2PKH: outputIndex must be a bigint literal"
           end
           idx = idx_lit.value.to_i
           # W2 backstop. The user-facing refusal lives in the typechecker, where a

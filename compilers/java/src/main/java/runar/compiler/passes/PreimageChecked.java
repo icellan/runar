@@ -1,0 +1,196 @@
+package runar.compiler.passes;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
+import runar.compiler.ir.ast.AssignmentStatement;
+import runar.compiler.ir.ast.BinaryExpr;
+import runar.compiler.ir.ast.CallExpr;
+import runar.compiler.ir.ast.ContractNode;
+import runar.compiler.ir.ast.Expression;
+import runar.compiler.ir.ast.ExpressionStatement;
+import runar.compiler.ir.ast.Identifier;
+import runar.compiler.ir.ast.IfStatement;
+import runar.compiler.ir.ast.IndexAccessExpr;
+import runar.compiler.ir.ast.MemberExpr;
+import runar.compiler.ir.ast.MethodNode;
+import runar.compiler.ir.ast.ParamNode;
+import runar.compiler.ir.ast.PrimitiveType;
+import runar.compiler.ir.ast.PrimitiveTypeName;
+import runar.compiler.ir.ast.PropertyAccessExpr;
+import runar.compiler.ir.ast.ReturnStatement;
+import runar.compiler.ir.ast.SourceLocation;
+import runar.compiler.ir.ast.Statement;
+import runar.compiler.ir.ast.TernaryExpr;
+import runar.compiler.ir.ast.TypeNode;
+import runar.compiler.ir.ast.UnaryExpr;
+import runar.compiler.ir.ast.VariableDeclStatement;
+import runar.compiler.ir.ast.Visibility;
+
+/**
+ * GK-GAP-010: a public method's SigHashPreimage parameter must reach
+ * {@code checkPreimage} on every path.
+ *
+ * <p>spec/type-system.md 4.2: a SigHashPreimage parameter of a public method
+ * is checked exactly once. The affine checker refuses a second consumption;
+ * this refuses none. Every field an extractor reads from an unchecked
+ * preimage is chosen by the spender.
+ *
+ * <p>A must-analysis over the AST. A parameter counts as checked by a
+ * statement list when it is passed to {@code checkPreimage} (directly,
+ * through a local alias, or through a private method that itself checks that
+ * parameter on every path) at a point every execution of the list reaches:
+ * an {@code if} checks it only if both arms do (a missing else checks
+ * nothing), a ternary only if both arms do; the right operand of
+ * {@code &&} / {@code ||} and a {@code for} loop body check nothing.
+ */
+final class PreimageChecked {
+
+    record Finding(String message, SourceLocation loc) {}
+
+    /** The diagnostic every tier shares. */
+    static String message(String method, String param) {
+        return "public method '" + method + "' must pass its SigHashPreimage parameter '" + param
+            + "' to checkPreimage() on every path";
+    }
+
+    private final Map<String, MethodNode> privates = new HashMap<>();
+    private final Map<String, Set<Integer>> memo = new HashMap<>();
+
+    private PreimageChecked(ContractNode contract) {
+        for (MethodNode m : contract.methods()) {
+            if (m.visibility() != Visibility.PUBLIC) privates.put(m.name(), m);
+        }
+    }
+
+    static List<Finding> check(ContractNode contract) {
+        PreimageChecked pc = new PreimageChecked(contract);
+        List<Finding> out = new ArrayList<>();
+        for (MethodNode m : contract.methods()) {
+            if (m.visibility() != Visibility.PUBLIC) continue;
+            Map<String, String> aliases = new HashMap<>();
+            List<String> tracked = new ArrayList<>();
+            for (ParamNode p : m.params()) {
+                if (isPreimage(p.type())) {
+                    aliases.put(p.name(), p.name());
+                    tracked.add(p.name());
+                }
+            }
+            if (tracked.isEmpty()) continue;
+            Set<String> done = pc.walk(m.body(), new HashSet<>(), aliases, Set.of(m.name()));
+            for (String name : tracked) {
+                if (!done.contains(name)) out.add(new Finding(message(m.name(), name), m.sourceLocation()));
+            }
+        }
+        return out;
+    }
+
+    private static boolean isPreimage(TypeNode t) {
+        return t instanceof PrimitiveType pt && pt.name() == PrimitiveTypeName.SIG_HASH_PREIMAGE;
+    }
+
+    private static String resolve(Expression e, Map<String, String> aliases) {
+        return e instanceof Identifier id ? aliases.get(id.name()) : null;
+    }
+
+    private MethodNode privateTarget(Expression callee) {
+        if (callee instanceof PropertyAccessExpr pa) return privates.get(pa.property());
+        if (callee instanceof MemberExpr me) return privates.get(me.property());
+        if (callee instanceof Identifier id) return privates.get(id.name());
+        return null;
+    }
+
+    private Set<Integer> mustParams(MethodNode m, Set<String> stack) {
+        Set<Integer> cached = memo.get(m.name());
+        if (cached != null) return cached;
+        if (stack.contains(m.name())) return Set.of();
+        Map<String, String> aliases = new HashMap<>();
+        for (ParamNode p : m.params()) {
+            if (isPreimage(p.type())) aliases.put(p.name(), p.name());
+        }
+        Set<String> inner = new HashSet<>(stack);
+        inner.add(m.name());
+        Set<String> done = walk(m.body(), new HashSet<>(), new HashMap<>(aliases), inner);
+        Set<Integer> result = new HashSet<>();
+        for (int i = 0; i < m.params().size(); i++) {
+            String n = m.params().get(i).name();
+            if (aliases.containsKey(n) && done.contains(n)) result.add(i);
+        }
+        memo.put(m.name(), result);
+        return result;
+    }
+
+    private Set<String> exprMust(Expression e, Map<String, String> aliases, Set<String> stack) {
+        Set<String> out = new LinkedHashSet<>();
+        if (e == null) return out;
+        if (e instanceof CallExpr c) {
+            for (Expression a : c.args()) out.addAll(exprMust(a, aliases, stack));
+            if (c.callee() instanceof MemberExpr me) out.addAll(exprMust(me.object(), aliases, stack));
+            if (c.callee() instanceof Identifier id && "checkPreimage".equals(id.name())) {
+                String o = c.args().isEmpty() ? null : resolve(c.args().get(0), aliases);
+                if (o != null) out.add(o);
+                return out;
+            }
+            MethodNode target = privateTarget(c.callee());
+            if (target != null) {
+                for (int i : mustParams(target, stack)) {
+                    if (i < c.args().size()) {
+                        String o = resolve(c.args().get(i), aliases);
+                        if (o != null) out.add(o);
+                    }
+                }
+            }
+        } else if (e instanceof BinaryExpr b) {
+            out.addAll(exprMust(b.left(), aliases, stack));
+            if (b.op() != Expression.BinaryOp.AND && b.op() != Expression.BinaryOp.OR) {
+                out.addAll(exprMust(b.right(), aliases, stack));
+            }
+        } else if (e instanceof TernaryExpr t) {
+            out.addAll(exprMust(t.condition(), aliases, stack));
+            Set<String> arms = exprMust(t.consequent(), aliases, stack);
+            arms.retainAll(exprMust(t.alternate(), aliases, stack));
+            out.addAll(arms);
+        } else if (e instanceof UnaryExpr u) {
+            out.addAll(exprMust(u.operand(), aliases, stack));
+        } else if (e instanceof IndexAccessExpr ia) {
+            out.addAll(exprMust(ia.object(), aliases, stack));
+            out.addAll(exprMust(ia.index(), aliases, stack));
+        } else if (e instanceof MemberExpr me) {
+            out.addAll(exprMust(me.object(), aliases, stack));
+        } else if (e instanceof ArrayLiteralExpr al) {
+            for (Expression el : al.elements()) out.addAll(exprMust(el, aliases, stack));
+        }
+        return out;
+    }
+
+    private Set<String> walk(List<Statement> stmts, Set<String> doneIn, Map<String, String> aliases, Set<String> stack) {
+        Set<String> done = new HashSet<>(doneIn);
+        if (stmts == null) return done;
+        for (Statement s : stmts) {
+            if (s instanceof VariableDeclStatement v) {
+                done.addAll(exprMust(v.init(), aliases, stack));
+                String o = v.init() == null ? null : resolve(v.init(), aliases);
+                if (o != null) aliases.put(v.name(), o);
+                else aliases.remove(v.name());
+            } else if (s instanceof AssignmentStatement a) {
+                done.addAll(exprMust(a.value(), aliases, stack));
+            } else if (s instanceof ExpressionStatement es) {
+                done.addAll(exprMust(es.expression(), aliases, stack));
+            } else if (s instanceof ReturnStatement r) {
+                done.addAll(exprMust(r.value(), aliases, stack));
+            } else if (s instanceof IfStatement i) {
+                done.addAll(exprMust(i.condition(), aliases, stack));
+                Set<String> thenDone = walk(i.thenBody(), done, new HashMap<>(aliases), stack);
+                Set<String> elseDone = walk(i.elseBody(), done, new HashMap<>(aliases), stack);
+                thenDone.retainAll(elseDone);
+                done = thenDone;
+            }
+        }
+        return done;
+    }
+}

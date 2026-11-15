@@ -82,6 +82,7 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     for (contract.methods) |method| {
         checker.checkMethod(method);
     }
+    try checkPreimageCheckedOnEveryPath(&checker, allocator, contract);
 
     const errors = try checker.errors.toOwnedSlice(allocator);
     const error_locations: []const ?types.SourceLocation = if (checker.error_locs.items.len == errors.len)
@@ -89,6 +90,192 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
     else
         &.{};
     return .{ .contract = contract, .errors = errors, .error_locations = error_locations };
+}
+
+// ============================================================================
+// GK-GAP-010: a public method's SigHashPreimage parameter must reach
+// checkPreimage on every path
+// ============================================================================
+
+/// spec/type-system.md 4.2: a SigHashPreimage parameter of a public method is
+/// checked exactly once. The affine checker refuses a second consumption; this
+/// refuses none. Every field an extractor reads from an unchecked preimage is
+/// chosen by the spender.
+///
+/// A must-analysis over the AST. A parameter counts as checked by a statement
+/// list when it is passed to `checkPreimage` (directly, through a local alias,
+/// or through a private method that itself checks that parameter on every
+/// path) at a point every execution of the list reaches: an `if` checks it
+/// only if both arms do (a missing else checks nothing), a ternary only if both
+/// arms do; the right operand of `&&` / `||` and a `for` loop body check
+/// nothing. Origins are parameter indices of the method being walked (a bit
+/// each; parameters past the 64th are not tracked).
+pub const PREIMAGE_NOT_CHECKED_FMT = "public method '{s}' must pass its SigHashPreimage parameter '{s}' to checkPreimage() on every path";
+
+const PreimageCheck = struct {
+    allocator: Allocator,
+    contract: ContractNode,
+    /// Name -> origin bit (null = a local that shadows without aliasing).
+    /// Searched from the end down to `base`, so a branch or helper body can
+    /// truncate back to where it started.
+    aliases: std.ArrayListUnmanaged(struct { name: []const u8, bit: ?u6 }) = .empty,
+    base: usize = 0,
+    memo: std.StringHashMapUnmanaged(u64) = .empty,
+    in_progress: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn deinit(self: *PreimageCheck) void {
+        self.aliases.deinit(self.allocator);
+        self.memo.deinit(self.allocator);
+        self.in_progress.deinit(self.allocator);
+    }
+
+    fn resolve(self: *PreimageCheck, e: Expression) ?u6 {
+        const name = switch (e) {
+            .identifier => |n| n,
+            else => return null,
+        };
+        var i = self.aliases.items.len;
+        while (i > self.base) {
+            i -= 1;
+            const a = self.aliases.items[i];
+            if (std.mem.eql(u8, a.name, name)) return a.bit;
+        }
+        return null;
+    }
+
+    fn privateMethod(self: *PreimageCheck, name: []const u8) ?MethodNode {
+        for (self.contract.methods) |m| {
+            if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+        }
+        return null;
+    }
+
+    fn bitOf(i: usize) u64 {
+        return @as(u64, 1) << @as(u6, @intCast(i));
+    }
+
+    fn pushParams(self: *PreimageCheck, m: MethodNode) Allocator.Error!void {
+        for (m.params, 0..) |p, i| {
+            const bit: ?u6 = if (p.type_info == .sig_hash_preimage and i < 64) @intCast(i) else null;
+            try self.aliases.append(self.allocator, .{ .name = p.name, .bit = bit });
+        }
+    }
+
+    fn mustParams(self: *PreimageCheck, m: MethodNode) Allocator.Error!u64 {
+        if (self.memo.get(m.name)) |r| return r;
+        for (self.in_progress.items) |n| if (std.mem.eql(u8, n, m.name)) return 0;
+        try self.in_progress.append(self.allocator, m.name);
+        defer _ = self.in_progress.pop();
+        const saved_len = self.aliases.items.len;
+        const saved_base = self.base;
+        self.base = saved_len;
+        defer {
+            self.aliases.shrinkRetainingCapacity(saved_len);
+            self.base = saved_base;
+        }
+        try self.pushParams(m);
+        const done = try self.walk(m.body, 0);
+        try self.memo.put(self.allocator, m.name, done);
+        return done;
+    }
+
+    fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression) Allocator.Error!u64 {
+        var out: u64 = 0;
+        for (args) |a| out |= try self.exprMust(a);
+        if (std.mem.eql(u8, name, "checkPreimage")) {
+            if (args.len > 0) {
+                if (self.resolve(args[0])) |b| out |= bitOf(b);
+            }
+            return out;
+        }
+        if (self.privateMethod(name)) |target| {
+            const consumed = try self.mustParams(target);
+            for (args, 0..) |a, i| {
+                if (i >= 64 or consumed & bitOf(i) == 0) continue;
+                if (self.resolve(a)) |b| out |= bitOf(b);
+            }
+        }
+        return out;
+    }
+
+    fn exprMust(self: *PreimageCheck, e: Expression) Allocator.Error!u64 {
+        return switch (e) {
+            .call => |c| try self.callMust(c.callee, c.args),
+            .method_call => |mc| try self.callMust(mc.method, mc.args),
+            .binary_op => |b| if (b.op == .and_op or b.op == .or_op)
+                try self.exprMust(b.left)
+            else
+                (try self.exprMust(b.left)) | (try self.exprMust(b.right)),
+            .ternary => |t| (try self.exprMust(t.condition)) |
+                ((try self.exprMust(t.then_expr)) & (try self.exprMust(t.else_expr))),
+            .unary_op => |u| try self.exprMust(u.operand),
+            .index_access => |ia| (try self.exprMust(ia.object)) | (try self.exprMust(ia.index)),
+            .array_literal => |els| blk: {
+                var out: u64 = 0;
+                for (els) |el| out |= try self.exprMust(el);
+                break :blk out;
+            },
+            else => 0,
+        };
+    }
+
+    fn declare(self: *PreimageCheck, name: []const u8, value: ?Expression) Allocator.Error!void {
+        const bit: ?u6 = if (value) |v| self.resolve(v) else null;
+        try self.aliases.append(self.allocator, .{ .name = name, .bit = bit });
+    }
+
+    fn walk(self: *PreimageCheck, stmts: []const Statement, done_in: u64) Allocator.Error!u64 {
+        var done = done_in;
+        for (stmts) |st| {
+            switch (st) {
+                .const_decl => |d| {
+                    done |= try self.exprMust(d.value);
+                    try self.declare(d.name, d.value);
+                },
+                .let_decl => |d| {
+                    if (d.value) |v| done |= try self.exprMust(v);
+                    try self.declare(d.name, d.value);
+                },
+                .assign => |a| done |= try self.exprMust(a.value),
+                .expr_stmt => |es| done |= try self.exprMust(es.expr),
+                .assert_stmt => |ast| done |= try self.exprMust(ast.condition),
+                .return_stmt => |r| {
+                    if (r.value) |v| done |= try self.exprMust(v);
+                },
+                .if_stmt => |ifs| {
+                    done |= try self.exprMust(ifs.condition);
+                    const len = self.aliases.items.len;
+                    const then_done = try self.walk(ifs.then_body, done);
+                    self.aliases.shrinkRetainingCapacity(len);
+                    const else_done = if (ifs.else_body) |eb| try self.walk(eb, done) else done;
+                    self.aliases.shrinkRetainingCapacity(len);
+                    done = then_done & else_done;
+                },
+                .for_stmt => {},
+            }
+        }
+        return done;
+    }
+};
+
+fn checkPreimageCheckedOnEveryPath(checker: *TypeChecker, allocator: Allocator, contract: ContractNode) !void {
+    var pc: PreimageCheck = .{ .allocator = allocator, .contract = contract };
+    defer pc.deinit();
+    for (contract.methods) |m| {
+        if (!m.is_public) continue;
+        var any = false;
+        for (m.params) |p| any = any or p.type_info == .sig_hash_preimage;
+        if (!any) continue;
+        pc.aliases.clearRetainingCapacity();
+        pc.base = 0;
+        try pc.pushParams(m);
+        const done = try pc.walk(m.body, 0);
+        for (m.params, 0..) |p, i| {
+            if (p.type_info != .sig_hash_preimage or i >= 64) continue;
+            if (done & PreimageCheck.bitOf(i) != 0) continue;
+            checker.addErrorAt(m.source_loc, PREIMAGE_NOT_CHECKED_FMT, .{ m.name, p.name });
+        }
+    }
 }
 
 // ============================================================================

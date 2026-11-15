@@ -75,7 +75,12 @@ public final class ParserDispatch {
         // subclass) on rejection. BUG-008 follow-up.
         InputLimits.assertSourceBytesUnderLimit(source);
 
-        String lower = filename == null ? "" : filename.toLowerCase();
+        // GK-GAP-005: no file name (null or "") means the TypeScript surface;
+        // the nine suffixes match ignoring ASCII case (Locale.ROOT, so a
+        // Turkish default locale cannot fold "I" to a dotless i); any other
+        // suffix is refused.
+        if (filename == null || filename.isEmpty()) filename = "contract.runar.ts";
+        String lower = filename.toLowerCase(java.util.Locale.ROOT);
 
         // Fail-closed guard on the 8 non-TypeScript surface formats: a
         // {@code @sighash} (#123) / {@code @embedAlways} (#109) COMMENT
@@ -150,9 +155,13 @@ public final class ParserDispatch {
         } catch (RuntimeException e) {
             throw new ParseException(e.getMessage(), e);
         }
-        throw new ParseException(
-            "ParserDispatch: unrecognised file extension for " + filename
-            + " (expected .runar.{ts,sol,move,py,go,rs,zig,rb,java})");
+        throw new ParseException(unsupportedExtensionMessage(filename));
+    }
+
+    /** GK-GAP-005: the diagnostic every tier gives an unrecognised suffix. */
+    public static String unsupportedExtensionMessage(String filename) {
+        return "unsupported file extension: " + filename + " (expected .runar.ts, .runar.sol, .runar.move, "
+            + ".runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)";
     }
 
     /** Unified parse-error type that adapts the per-parser exceptions.

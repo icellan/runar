@@ -82,6 +82,7 @@ module RunarCompiler
       call_depth_exceeded = ctx.check_no_recursion
       ctx.check_reserved_names
       ctx.check_redeclarations
+      ctx.check_duplicate_methods
       # N-180: the Rabin-provenance and sighash passes walk the private-method
       # call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
       # refuses, so stop here.
@@ -664,6 +665,21 @@ module RunarCompiler
           next if !w[:value].nil? && rabin_trusted?(w[:value], w[:scope], Set.new, property_names, trusted_params)
 
           add_error(self.class.rabin_key_write_message(w[:prop]), loc: w[:loc])
+        end
+      end
+
+      # GK-BUG-015: a contract cannot declare two methods with the same name.
+      # Every name-keyed later pass (side-effect summary, private-method
+      # lookup, the affine consumption fixpoint, stack lowering) assumes one
+      # body per name; with two they disagree. Anchored on each repeat.
+      def check_duplicate_methods
+        seen = {}
+        (@contract.methods || []).each do |m|
+          if seen.key?(m.name)
+            add_error("method '#{m.name}' is already declared in this contract and cannot be re-declared",
+                      loc: m.source_location)
+          end
+          seen[m.name] = true
         end
       end
 

@@ -163,6 +163,7 @@ test {
     _ = @import("tests/f024_continuation_amount.zig");
     _ = @import("tests/r189_private_call_arity.zig");
     _ = @import("tests/r290_void_sentinel.zig");
+    _ = @import("tests/gk_frontend.zig");
     _ = @import("tests/n006_loop_output_lowering_backstop.zig");
     _ = @import("tests/n049_ternary_output_intrinsic.zig");
     _ = @import("tests/n056_go_ambiguous_precedence.zig");
