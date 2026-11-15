@@ -51,6 +51,18 @@ def test_no_module_claims_a_standalone_dce_pass():
     )
 
 
+def test_gk_doc_007_dce_docstring_names_the_fold_prune_caller():
+    fold = (PKG / "frontend" / "constant_fold.py").read_text()
+    assert "eliminate_dead_bindings(after, candidates)" in fold, (
+        "fold_constants_and_prune no longer prunes through dce; update dce.py's docstring"
+    )
+    import runar_compiler.frontend.dce as dce
+    assert "fold_constants_and_prune" in (dce.__doc__ or ""), (
+        "dce.py's docstring names only optimize_ec; fold_constants_and_prune also "
+        "calls eliminate_dead_bindings with a candidate set"
+    )
+
+
 def test_the_unreachable_pass_475_wrapper_is_gone():
     src = (PKG / "compiler.py").read_text()
     assert "def _eliminate_dead_code(" not in src, (

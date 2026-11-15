@@ -18,12 +18,19 @@ merged locals kept their pre-branch values. See
 
 R-240: this used to say "the canonical, standalone DCE pass for the
 Python compiler". It is canonical — every dead-binding sweep in this
-tier comes from here — but it is NOT standalone. Its only pipeline
-caller is ``anf_optimize.optimize_ec``, which runs it after the
+tier comes from here — but it is NOT standalone. The full sweep has one
+pipeline caller, ``anf_optimize.optimize_ec``, which runs it after the
 ``if not any_changed: return program`` gate, so a program containing no
-EC calls is never swept. ``eliminate_dead_code`` has one other caller,
-``compiler._collect_referenced_props``, and that one runs on a
+EC calls is never fully swept. ``eliminate_dead_code`` has one other
+caller, ``compiler._collect_referenced_props``, and that one runs on a
 deep-copied probe purely to compute the @embedAlways warning.
+
+GK-DOC-007: ``eliminate_dead_bindings`` called WITH a candidate set (the
+restricted sweep) has a second production caller,
+``constant_fold.fold_constants_and_prune`` (N-138), which removes only the
+operand bindings the fold itself orphaned. ``optimize_ec`` also uses the
+restricted form, after the full sweep, for orphans inside if arms and loop
+bodies.
 
 The gate is load-bearing. Moving the sweep ahead of it makes this tier
 fail to compile 11 of the 78 conformance fixtures (the same 11 the TS

@@ -53,4 +53,13 @@ describe('R-194 the DCE header describes where DCE actually runs', () => {
     const dce = readFileSync(resolve(SRC, 'dce.ts'), 'utf8');
     expect(dce.slice(0, dce.indexOf('*/'))).toMatch(/anf-ec\.ts/);
   });
+
+  it('GK-DOC-007: the header also names the fold-prune caller of the candidate-restricted variant', () => {
+    const dce = readFileSync(resolve(SRC, 'dce.ts'), 'utf8');
+    const fold = readFileSync(resolve(SRC, 'constant-fold.ts'), 'utf8');
+    expect(fold, 'foldConstantsAndPrune no longer calls eliminateDeadBindingsAmong').toMatch(
+      /return eliminateDeadBindingsAmong\(foldConstants\(program\), candidates\)/,
+    );
+    expect(dce.slice(0, dce.indexOf('*/'))).toMatch(/foldConstantsAndPrune/);
+  });
 });

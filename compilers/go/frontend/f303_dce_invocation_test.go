@@ -74,6 +74,21 @@ func TestF303_DceHeaderNamesItsOnlyCaller(t *testing.T) {
 	}
 }
 
+// GK-DOC-007: FoldConstantsAndPrune (N-138) is the second production caller
+// of the candidate-restricted EliminateDeadBindingsAmong, so the header must
+// name it next to optimizeMethodEC.
+func TestGKDOC007_DceHeaderNamesTheFoldPruneCaller(t *testing.T) {
+	fold := f303ReadSource(t, "constant_fold.go")
+	if !strings.Contains(fold, "EliminateDeadBindingsAmong(&result.Methods[i], candidates)") {
+		t.Fatal("FoldConstantsAndPrune no longer calls EliminateDeadBindingsAmong; update dce.go's header")
+	}
+	src := f303ReadSource(t, "dce.go")
+	header := src[:strings.Index(src, "import (")]
+	if !strings.Contains(header, "FoldConstantsAndPrune") {
+		t.Fatal("dce.go's header names only the EC caller; FoldConstantsAndPrune also calls EliminateDeadBindingsAmong")
+	}
+}
+
 func TestF303_FoldConstantsNoLongerClaimsItRunsDce(t *testing.T) {
 	src := f303ReadSource(t, "constant_fold.go")
 	if strings.Contains(src, "Also runs dead binding elimination afterward") {

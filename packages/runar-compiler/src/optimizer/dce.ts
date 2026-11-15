@@ -26,11 +26,20 @@
  * module's public API.
  *
  * It is NOT a standalone pipeline pass, and the header used to say it was
- * (R-194). The only caller is `optimizer/anf-ec.ts`, at the end of `optimizeEC`
- * and AFTER its `if (!anyChanged) return program;` early exit — so a program
- * the EC optimizer does not touch is never DCE'd. Go's `anf_optimize.go` does
- * the same thing, so there is no cross-tier divergence; the claim was simply
- * false.
+ * (R-194). Full DCE (`eliminateDeadBindings`) has one pipeline caller,
+ * `optimizer/anf-ec.ts`, at the end of `optimizeEC` and AFTER its
+ * `if (!anyChanged) return program;` early exit — so a program the EC
+ * optimizer does not touch is never fully DCE'd. `index.ts`
+ * (`collectReferencedProps`) also runs it on a copy, as a non-mutating probe
+ * for a diagnostic; that does not change what is compiled. Go's
+ * `anf_optimize.go` does the same thing, so there is no cross-tier
+ * divergence; the claim was simply false.
+ *
+ * The candidate-restricted variant, `eliminateDeadBindingsAmong`, has a
+ * second production caller (GK-DOC-007): `foldConstantsAndPrune` in
+ * `constant-fold.ts` (N-138), which removes only the operand bindings the
+ * fold itself orphaned. `optimizeEC` uses it too, after full DCE, for orphans
+ * inside if arms and loop bodies. Neither use widens what full DCE sees.
  *
  * That gate is load-bearing, not an oversight. Measured by moving the call
  * ahead of the early exit so DCE runs on every program: the TypeScript tier

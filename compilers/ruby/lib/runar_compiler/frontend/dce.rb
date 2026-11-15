@@ -29,6 +29,13 @@
 # +Frontend::EmbedAlwaysDCE.collect_warnings+, each running on a
 # deep-copied probe purely to compute the @embedAlways warning.
 #
+# GK-DOC-007: +eliminate_dead_bindings+ called WITH a candidate set (the
+# restricted sweep) has a second production caller,
+# +ConstantFold.fold_constants_and_prune+ (N-138), which removes only the
+# operand bindings the fold itself orphaned. +optimize_ec+ also uses the
+# restricted form, after the full sweep, for orphans inside if arms and
+# loop bodies.
+#
 # The gate is load-bearing, measured rather than assumed: forcing the
 # sweep to run unconditionally (bypassing +any_changed+) makes this
 # tier diverge from the golden/cross-tier IR and script hex for
