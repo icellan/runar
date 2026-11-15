@@ -24,8 +24,11 @@ final exponentiation whose witnesses `f2^x, f2^(x²), f2^(x³)` were never
 checked, so a forged one made a false statement verify.)
 
 The residue witness is not unique: `c·κ` for any `κ` with `κ^λ = 1` verifies
-too, so the unlocking script is malleable in `c` (this does not affect
-soundness). `s` is unique. The prepared
+too, and the Miller-loop gradients and other Fp limbs are only checked
+through arithmetic reduced mod p, so another encoding of the same residue
+verifies as well. The unlocking script, and so the txid of an unconfirmed
+spend, is therefore third-party malleable (this does not affect soundness:
+the proof and public inputs are the same). `s` is unique. The prepared
 public-input accumulator (`IC[0] + Σ pubⱼ · IC[j+1]`) is also computed
 off-chain, so the script never has to run variable-base G1 scalar
 multiplication either.

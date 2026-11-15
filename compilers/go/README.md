@@ -265,6 +265,22 @@ Spenders must build the unlocking witness with
 `bn254witness.BuildFromProofWithInputs` (not `GenerateWitness`) — the
 verifier reads the five public-input scalars off the witness stack.
 
+#### Witness malleability
+
+The unlocking witness is not unique. The residue witness `c` can be replaced
+by any `c·κ` with `κ^λ = 1` (`κ` in the order-3r subgroup of Fp12*), and the
+Miller-loop gradients and other prover-supplied Fp limbs are only checked
+through arithmetic reduced mod p, so a different encoding of the same residue
+passes as well. Anyone who sees an unconfirmed spend can therefore rewrite its
+unlocking script and rebroadcast it under a different txid. Soundness is not
+affected: every accepted witness proves the same proof against the same
+public inputs, and the MSM binding plus any pins or `Groth16PublicInput`
+assertions fix the statement. Do not rely on the txid of an unconfirmed
+`groth16-wa` / `AssertGroth16WitnessAssistedWithMSM` spend (for example, to
+chain further unconfirmed transactions off it). Details are in the
+`EmitGroth16VerifierWitnessAssistedWithMSM` doc comment in
+`codegen/bn254_groth16.go`.
+
 ---
 
 ## Conformance Testing
