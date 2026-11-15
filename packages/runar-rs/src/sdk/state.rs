@@ -497,13 +497,31 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
         // fell through to the `_` arm below, whose `value.as_bytes()` PANICS
         // on `SdkValue::Bool`: this tier could not serialize a boolean state
         // field at all.
-        "bool" | "boolean" => {
-            if value.as_bool() {
-                "01".to_string()
-            } else {
-                "00".to_string()
+        //
+        // GK-BUG-010: only `SdkValue::Bool`. This tier already refused other
+        // variants, but through `as_bool`'s unnamed panic; the peer tiers
+        // coerced them instead (truthiness, or "anything but true is 00"), so
+        // one input gave different on-chain bytes per tier. Every tier now
+        // refuses with the same named error, as `state_field_i64` does for a
+        // non-integer (N-084).
+        "bool" | "boolean" => match value {
+            SdkValue::Bool(true) => "01".to_string(),
+            SdkValue::Bool(false) => "00".to_string(),
+            other => {
+                let got = match other {
+                    SdkValue::Int(_) | SdkValue::BigInt(_) => "an integer",
+                    SdkValue::Bytes(_) => "a string",
+                    SdkValue::Auto => "Auto",
+                    SdkValue::EmptySig => "EmptySig",
+                    _ => "a non-boolean value",
+                };
+                panic!(
+                    "serialize_state: state field \"{}\" ({}) must be a boolean, got {}. \
+                     Coercing anything else would write a flag the caller never supplied into the state section",
+                    label, field_type, got
+                )
             }
-        }
+        },
         "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" | "P256Point" | "P384Point" => {
             // Fixed-size byte types: raw hex, no framing needed.
             // P256Point (64) and P384Point (96) belong here because runar-lang's
