@@ -1,7 +1,9 @@
 package runar
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 )
@@ -46,6 +48,50 @@ func TestGKBug010BoolStateValidBoolsUnchanged(t *testing.T) {
 			if msg != "" || out != want {
 				t.Errorf("%s/%v: want %q, got %q (panic %q)", typ, v, want, out, msg)
 			}
+		}
+	}
+}
+
+// The refusal above must not reject a boolean the SDK computed itself. The
+// language declares `bool(x): boolean`, but the ANF interpreter returned
+// big.NewInt(1) / big.NewInt(0), so a contract doing
+// `this.flag = bool(this.count)` produced a post-state the serializer now
+// refuses (and, before the refusal, silently encoded as 00 for any count).
+const gkBug010BoolProbeANF = `{
+  "contractName": "BoolProbe",
+  "properties": [
+    {"name": "count", "type": "bigint", "readonly": false},
+    {"name": "flag", "type": "bool", "readonly": false}
+  ],
+  "methods": [{
+    "name": "step", "params": [], "isPublic": true,
+    "body": [
+      {"name": "c", "value": {"kind": "load_prop", "name": "count"}},
+      {"name": "b", "value": {"kind": "call", "func": "bool", "args": ["c"]}},
+      {"name": "u", "value": {"kind": "update_prop", "name": "flag", "value": "b"}}
+    ]
+  }]
+}`
+
+func TestGKBug010InterpreterComputedBoolSerializes(t *testing.T) {
+	var anf ANFProgram
+	if err := json.Unmarshal([]byte(gkBug010BoolProbeANF), &anf); err != nil {
+		t.Fatalf("probe ANF: %v", err)
+	}
+	for count, want := range map[int64]string{5: "01", 0: "00"} {
+		st, err := ComputeNewState(&anf, "step",
+			map[string]interface{}{"count": big.NewInt(count), "flag": count == 0},
+			map[string]interface{}{}, nil)
+		if err != nil {
+			t.Fatalf("count=%d: ComputeNewState: %v", count, err)
+		}
+		if _, ok := st["flag"].(bool); !ok {
+			t.Errorf("count=%d: bool() gave %T, want bool", count, st["flag"])
+			continue
+		}
+		out, msg := n084Serialize(t, "bool", st["flag"])
+		if msg != "" || out != want {
+			t.Errorf("count=%d: want %q, got %q (panic %q)", count, want, out, msg)
 		}
 	}
 }

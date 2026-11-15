@@ -36,3 +36,38 @@ RSpec.describe 'GK-BUG-010 — boolean state fields refuse a non-boolean value' 
     end
   end
 end
+
+# The refusal above must not reject a boolean the SDK computed itself. The
+# language declares `bool(x): boolean`, but the ANF interpreter returned
+# 1 / 0, so a contract doing `this.flag = bool(this.count)` produced a
+# post-state the serializer now refuses.
+# rubocop:disable RSpec/DescribeClass
+RSpec.describe 'GK-BUG-010 — an interpreter-computed boolean state field serializes' do
+  # rubocop:enable RSpec/DescribeClass
+  anf = {
+    'contractName' => 'BoolProbe',
+    'properties' => [
+      { 'name' => 'count', 'type' => 'bigint', 'readonly' => false },
+      { 'name' => 'flag', 'type' => 'bool', 'readonly' => false }
+    ],
+    'methods' => [{
+      'name' => 'step',
+      'params' => [],
+      'isPublic' => true,
+      'body' => [
+        { 'name' => 'c', 'value' => { 'kind' => 'load_prop', 'name' => 'count' } },
+        { 'name' => 'b', 'value' => { 'kind' => 'call', 'func' => 'bool', 'args' => ['c'] } },
+        { 'name' => 'u', 'value' => { 'kind' => 'update_prop', 'name' => 'flag', 'value' => 'b' } }
+      ]
+    }]
+  }
+
+  [[5, '01'], [0, '00']].each do |count, hex|
+    it "bool(#{count}) gives a native boolean that encodes as #{hex}" do
+      st = Runar::SDK::ANFInterpreter.compute_new_state(anf, 'step', { 'count' => count, 'flag' => count.zero? }, {})
+      expect([true, false]).to include(st['flag'])
+      fields = [Runar::SDK::StateField.new(name: 'flag', type: 'bool', index: 0)]
+      expect(Runar::SDK::State.serialize_state(fields, { 'flag' => st['flag'] })).to eq(hex)
+    end
+  end
+end

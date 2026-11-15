@@ -56,4 +56,34 @@ class GkBug010BoolStateTest {
             assertEquals("00", ser(type, Boolean.FALSE));
         }
     }
+
+    /**
+     * The refusal above must not reject a boolean the SDK computed itself. The
+     * language declares {@code bool(x): boolean}, but the ANF interpreter
+     * returned BigInteger.ONE / ZERO, so a contract doing
+     * {@code this.flag = bool(this.count)} produced a post-state the serializer
+     * now refuses (and, before the refusal, silently encoded as 00).
+     */
+    @Test
+    void interpreterComputedBoolSerializes() {
+        String json = "{\"contractName\":\"BoolProbe\",\"properties\":["
+            + "{\"name\":\"count\",\"type\":\"bigint\",\"readonly\":false},"
+            + "{\"name\":\"flag\",\"type\":\"bool\",\"readonly\":false}],"
+            + "\"methods\":[{\"name\":\"step\",\"params\":[],\"isPublic\":true,\"body\":["
+            + "{\"name\":\"c\",\"value\":{\"kind\":\"load_prop\",\"name\":\"count\"}},"
+            + "{\"name\":\"b\",\"value\":{\"kind\":\"call\",\"func\":\"bool\",\"args\":[\"c\"]}},"
+            + "{\"name\":\"u\",\"value\":{\"kind\":\"update_prop\",\"name\":\"flag\",\"value\":\"b\"}}]}]}";
+        @SuppressWarnings("unchecked")
+        Map<String, Object> anf = (Map<String, Object>) Json.parse(json);
+        for (long count : new long[] {5L, 0L}) {
+            Map<String, Object> st = new HashMap<>();
+            st.put("count", java.math.BigInteger.valueOf(count));
+            st.put("flag", count == 0L);
+            Map<String, Object> out = AnfInterpreter.computeNewState(anf, "step", st, new HashMap<>(), List.of());
+            Object flag = out.get("flag");
+            assertTrue(flag instanceof Boolean, "count=" + count + ": bool() gave "
+                + (flag == null ? "null" : flag.getClass().getSimpleName()));
+            assertEquals(count == 0L ? "00" : "01", ser("bool", flag));
+        }
+    }
 }

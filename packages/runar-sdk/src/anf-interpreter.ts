@@ -1298,7 +1298,9 @@ function evalCall(
       if (v <= 0n) throw new Error('log2: non-positive input');
       return BigInt(v.toString(2).length - 1);
     }
-    case 'bool': return isTruthy(args[0]) ? 1n : 0n;
+    // GK-BUG-010: `bool(x): boolean` in runar-lang, so a native boolean --
+    // a boolean state field assigned from it must serialize as one.
+    case 'bool': return isTruthy(args[0]);
     case 'mulDiv': {
       const c = toBigInt(args[2]);
       if (c === 0n) throw new Error('mulDiv: division by zero');

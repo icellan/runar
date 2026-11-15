@@ -49,3 +49,46 @@ test "GK-BUG-010: true / false keep their bytes" {
         }
     }
 }
+
+// The refusal above must not reject a boolean the SDK computed itself. The
+// language declares `bool(x): boolean`, but the ANF interpreter returned
+// `.int = 1` / `.int = 0`, so a contract doing `this.flag = bool(this.count)`
+// produced a post-state `anfToStateValue` maps to `.int`, which
+// `serializeState` now refuses with error.NotABoolean.
+const interp = @import("sdk_anf_interpreter.zig");
+
+test "GK-BUG-010: an interpreter-computed boolean state field is a .boolean" {
+    const allocator = std.testing.allocator;
+    const call_args = [_][]const u8{"c"};
+    var body = [_]interp.ANFBinding{
+        .{ .name = "c", .value = .{ .load_prop = .{ .name = "count" } } },
+        .{ .name = "b", .value = .{ .call = .{ .func = "bool", .args = &call_args } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "flag", .value = "b" } } },
+    };
+    var props = [_]interp.ANFProperty{
+        .{ .name = "count", .type_name = "bigint", .readonly = false },
+        .{ .name = "flag", .type_name = "bool", .readonly = false },
+    };
+    var methods = [_]interp.ANFMethod{
+        .{ .name = "step", .params = &.{}, .body = &body, .is_public = true },
+    };
+    const anf = interp.ANFProgram{ .contract_name = "BoolProbe", .properties = &props, .methods = &methods };
+    for ([_]i64{ 5, 0 }) |count| {
+        var cs = std.StringHashMap(interp.ANFValue).init(allocator);
+        defer cs.deinit();
+        try cs.put("count", .{ .int = count });
+        try cs.put("flag", .{ .boolean = count == 0 });
+        var call_env = std.StringHashMap(interp.ANFValue).init(allocator);
+        defer call_env.deinit();
+        var ns = try interp.computeNewState(allocator, &anf, "step", cs, call_env, &.{});
+        defer ns.deinit();
+        const flag = ns.get("flag").?;
+        try std.testing.expect(flag == .boolean);
+        try std.testing.expectEqual(count != 0, flag.boolean);
+        const fields = [_]types.StateField{.{ .name = "flag", .type_name = "bool", .index = 0 }};
+        const vals = [_]types.StateValue{.{ .boolean = flag.boolean }};
+        const out = try state_mod.serializeState(allocator, &fields, &vals);
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings(if (count != 0) "01" else "00", out);
+    }
+}

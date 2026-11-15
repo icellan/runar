@@ -1154,7 +1154,9 @@ module Runar
           integer_log2(v)
 
         when 'bool'
-          is_truthy(args[0]) ? 1 : 0
+          # GK-BUG-010: `bool(x): boolean` in runar-lang, so true / false --
+          # a boolean state field assigned from it must serialize as one.
+          is_truthy(args[0]) ? true : false
 
         when 'mulDiv'
           abort_div(to_int(args[0]) * to_int(args[1]), to_int(args[2]), 'mulDiv')

@@ -1499,7 +1499,9 @@ def _eval_call(
             raise ValueError('log2: non-positive input')
         return v.bit_length() - 1
     if func == 'bool':
-        return 1 if _is_truthy(args[0]) else 0
+        # GK-BUG-010: `bool(x): boolean` in runar-lang, so a native bool --
+        # a boolean state field assigned from it must serialize as one.
+        return bool(_is_truthy(args[0]))
     if func == 'mulDiv':
         return _abort_div(_to_int(args[0]) * _to_int(args[1]), _to_int(args[2]), 'mulDiv')
     if func == 'percentOf':

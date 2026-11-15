@@ -33,3 +33,35 @@ def test_true_false_unchanged(field_type):
     fields = [StateField(name='flag', type=field_type, index=0)]
     assert serialize_state(fields, {'flag': True}) == '01'
     assert serialize_state(fields, {'flag': False}) == '00'
+
+
+# The refusal above must not reject a boolean the SDK computed itself. The
+# language declares ``bool(x): boolean``, but the ANF interpreter returned
+# 1 / 0, so a contract doing ``self.flag = bool(self.count)`` produced a
+# post-state the serializer now refuses.
+_BOOL_PROBE_ANF = {
+    'contractName': 'BoolProbe',
+    'properties': [
+        {'name': 'count', 'type': 'bigint', 'readonly': False},
+        {'name': 'flag', 'type': 'bool', 'readonly': False},
+    ],
+    'methods': [{
+        'name': 'step',
+        'params': [],
+        'isPublic': True,
+        'body': [
+            {'name': 'c', 'value': {'kind': 'load_prop', 'name': 'count'}},
+            {'name': 'b', 'value': {'kind': 'call', 'func': 'bool', 'args': ['c']}},
+            {'name': 'u', 'value': {'kind': 'update_prop', 'name': 'flag', 'value': 'b'}},
+        ],
+    }],
+}
+
+
+@pytest.mark.parametrize('count,expected', [(5, '01'), (0, '00')])
+def test_interpreter_computed_bool_serializes(count, expected):
+    from runar.sdk.anf_interpreter import compute_new_state
+    st = compute_new_state(_BOOL_PROBE_ANF, 'step', {'count': count, 'flag': count == 0}, {})
+    assert type(st['flag']) is bool
+    fields = [StateField(name='flag', type='bool', index=0)]
+    assert serialize_state(fields, {'flag': st['flag']}) == expected

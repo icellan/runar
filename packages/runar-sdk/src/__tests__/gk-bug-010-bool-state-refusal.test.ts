@@ -17,7 +17,9 @@
 
 import { describe, it, expect } from 'vitest';
 import type { StateField } from 'runar-ir-schema';
+import type { ANFProgram } from 'runar-ir-schema';
 import { serializeState } from '../state.js';
+import { computeNewState } from '../anf-interpreter.js';
 
 const TYPES = ['bool', 'boolean'];
 
@@ -48,6 +50,39 @@ describe('GK-BUG-010: boolean state fields refuse a non-boolean value', () => {
     it(`${type}: true / false keep their bytes`, () => {
       expect(serializeState([field(type)], { flag: true })).toBe('01');
       expect(serializeState([field(type)], { flag: false })).toBe('00');
+    });
+  }
+});
+
+// The refusal above must not reject a boolean the SDK computed itself. The
+// language declares `bool(x): boolean`, but the ANF interpreter returned
+// 1n / 0n, so a contract doing `this.flag = bool(this.count)` produced a
+// post-state the serializer now refuses. Interpreter -> serializeState must
+// round-trip for an interpreter-computed boolean field.
+describe('GK-BUG-010: an interpreter-computed boolean state field serializes', () => {
+  const anf = {
+    contractName: 'BoolProbe',
+    properties: [
+      { name: 'count', type: 'bigint', readonly: false },
+      { name: 'flag', type: 'bool', readonly: false },
+    ],
+    methods: [{
+      name: 'step',
+      params: [],
+      isPublic: true,
+      body: [
+        { name: 'c', value: { kind: 'load_prop', name: 'count' } },
+        { name: 'b', value: { kind: 'call', func: 'bool', args: ['c'] } },
+        { name: 'u', value: { kind: 'update_prop', name: 'flag', value: 'b' } },
+      ],
+    }],
+  } as unknown as ANFProgram;
+
+  for (const [count, hex] of [[5n, '01'], [0n, '00']] as const) {
+    it(`bool(${count}) gives a native boolean that encodes as ${hex}`, () => {
+      const st = computeNewState(anf, 'step', { count, flag: count === 0n }, {});
+      expect(typeof st.flag).toBe('boolean');
+      expect(serializeState([field('bool')], { flag: st.flag })).toBe(hex);
     });
   }
 });
