@@ -128,8 +128,61 @@ test "interop: every rejection vector returns the listed reason" {
         defer env.deinit(allocator);
         var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
         defer r.deinit();
-        try std.testing.expect(!r.ok);
-        try std.testing.expectEqualStrings(reason_wire, r.reason.?.wire());
+        const vid = if (rv.object.get("_vector_id")) |v| v.string else reason_wire;
+        if (r.ok) {
+            std.debug.print("rejection {s} ({s}): expected ok=false\n", .{ reason_wire, vid });
+            return error.TestUnexpectedResult;
+        }
+        if (!std.mem.eql(u8, reason_wire, r.reason.?.wire())) {
+            std.debug.print("rejection {s} ({s}): got {s}\n", .{ reason_wire, vid, r.reason.?.wire() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+// nobody; a JSON null (not supplied) leaves `expected_keys` at its null
+// default and skips the check. al2 is the control that reddens if a fix
+// treats an absent allowlist like an empty one.
+test "interop: allowlist vectors (empty denies, null skips)" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const env = try envelopeFromJson(allocator, parsed.value.object.get("valid_envelope").?.object);
+    defer env.deinit(allocator);
+
+    const avs = parsed.value.object.get("allowlist_vectors").?.array;
+    try std.testing.expect(avs.items.len > 0);
+    for (avs.items) |av| {
+        const obj = av.object;
+        const vid = obj.get("_vector_id").?.string;
+        var opts = envelope.VerifyEnvelopeOpts{ .envelope = &env, .now_ms = now_ms };
+        var keys: std.ArrayList([]const u8) = .empty;
+        defer keys.deinit(allocator);
+        switch (obj.get("expected_keys").?) {
+            .array => |a| {
+                for (a.items) |k| try keys.append(allocator, k.string);
+                opts.expected_keys = keys.items;
+            },
+            else => {},
+        }
+        var r = try envelope.verifyEnvelope(allocator, opts);
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
 }
 
@@ -515,4 +568,31 @@ test "interop: explicit clock skew and now overrides" {
         }
         try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
+}
+
+// GK-BUG-009 (it4). readI64 ran @intFromFloat on a JSON float, which is
+// safety-checked illegal behaviour (a PANIC in Debug/ReleaseSafe, UB in
+// ReleaseFast) for a value outside i64 such as 1e20 — reachable BEFORE the
+// ECDSA check, from any unsigned payload. Replayed on its own so the panic is
+// not masked by an earlier vector failing first in the loop above.
+test "interop: it4 nonce 1e20 is envelope-mismatch, not a panic" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    var found = false;
+    for (parsed.value.object.get("rejection_vectors").?.array.items) |rv| {
+        const vid = if (rv.object.get("_vector_id")) |v| v.string else continue;
+        if (!std.mem.eql(u8, vid, "it4-nonce-exponent-out-of-i64-1e20")) continue;
+        found = true;
+        const env = try envelopeFromJson(allocator, rv.object.get("envelope").?.object);
+        defer env.deinit(allocator);
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        try std.testing.expect(!r.ok);
+        try std.testing.expectEqualStrings("envelope-mismatch", r.reason.?.wire());
+    }
+    try std.testing.expect(found);
 }

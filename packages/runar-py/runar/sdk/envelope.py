@@ -452,6 +452,15 @@ def _payload_has_lone_surrogate(text: str) -> bool:
     return False
 
 
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+
+
+def _is_i64_int(v: object) -> bool:
+    """GK-BUG-009: a parsed JSON integer token inside the signed 64-bit range."""
+    return type(v) is int and _I64_MIN <= v <= _I64_MAX
+
+
 def verify_envelope(
     envelope: SignedEnvelope,
     expected_keys: Optional[List[str]] = None,
@@ -512,10 +521,18 @@ def verify_envelope(
     if not isinstance(parsed, dict):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
 
-    # 4. Inner nonce / expiresAt must match outer fields.
+    # 4. Inner nonce / expiresAt must match outer fields. GK-BUG-009: and
+    # each must be a JSON integer token in i64 range. json.loads gives an
+    # exact int only for an integer token, so `type(v) is int` excludes
+    # 1.0 / 1e3 (float) and True (bool, an int subclass that == 1); Python
+    # ints are unbounded, so the i64 range is checked explicitly.
+    inner_nonce = parsed.get("nonce")
+    inner_expires = parsed.get("expiresAt")
     if (
-        parsed.get("nonce") != envelope.nonce
-        or parsed.get("expiresAt") != envelope.expiresAt
+        not _is_i64_int(inner_nonce)
+        or not _is_i64_int(inner_expires)
+        or inner_nonce != envelope.nonce
+        or inner_expires != envelope.expiresAt
     ):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.ENVELOPE_MISMATCH, parsed)
 

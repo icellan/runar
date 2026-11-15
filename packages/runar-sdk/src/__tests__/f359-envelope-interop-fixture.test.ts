@@ -49,8 +49,8 @@ class TestSigner implements EnvelopeSigner {
 // Does not prove: anything about the six peer tiers (each has its own interop
 // file, listed alongside this one in conformance/wire-primitives.json); the
 // depth / malleability / der-* vectors, which envelope.test.ts still replays
-// via `vi.spyOn(Date, 'now')` rather than `nowMs`; or `pubkey-not-allowed`,
-// which the shared fixture omits by design (note_on_pubkey_not_allowed). The
+// via `vi.spyOn(Date, 'now')` rather than `nowMs`. `pubkey-not-allowed` is
+// covered by `allowlist_vectors` (GK-BUG-008). The
 // signing test uses a deterministic low-S TestSigner, so it pins
 // `signEnvelope`'s clock plumbing and canonicalJson, not a production
 // WalletSigner's output.
@@ -63,7 +63,13 @@ const fixturePath = resolve(
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
   verify_now_ms: number;
   valid_envelope: SignedEnvelope;
-  rejection_vectors: Array<{ reason: VerifyEnvelopeReason; envelope: SignedEnvelope }>;
+  rejection_vectors: Array<{ _vector_id?: string; reason: VerifyEnvelopeReason; envelope: SignedEnvelope }>;
+  allowlist_vectors: Array<{
+    _vector_id: string;
+    expected_keys: string[] | null;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+  }>;
   clock_skew_vectors: Array<{
     _vector_id: string;
     clock_skew_ms: number | null;
@@ -92,8 +98,29 @@ describe('envelope interop fixture replay under the frozen clock (F-359)', () =>
     expect(fixture.rejection_vectors.length).toBeGreaterThan(0);
     for (const v of fixture.rejection_vectors) {
       const r = verifyEnvelope({ envelope: v.envelope, nowMs: fixture.verify_now_ms });
-      expect(r.ok, `expected rejection ${v.reason}`).toBe(false);
-      expect(r.reason, `rejection ${v.reason}`).toBe(v.reason);
+      const id = v._vector_id ?? v.reason;
+      expect(r.ok, `expected rejection ${v.reason} (${id})`).toBe(false);
+      expect(r.reason, `rejection ${v.reason} (${id})`).toBe(v.reason);
+    }
+  });
+
+  // GK-BUG-008: a supplied allowlist is used as given, so an EMPTY list
+  // allows nobody; null (not supplied) skips the check.
+  it('honors the allowlist_vectors empty-denies / not-supplied semantics (GK-BUG-008)', () => {
+    expect(fixture.allowlist_vectors.length).toBeGreaterThan(0);
+    for (const v of fixture.allowlist_vectors) {
+      const opts: { envelope: SignedEnvelope; nowMs: number; expectedKeys?: string[] } = {
+        envelope: fixture.valid_envelope,
+        nowMs: fixture.verify_now_ms,
+      };
+      if (v.expected_keys !== null) opts.expectedKeys = v.expected_keys;
+      const r = verifyEnvelope(opts);
+      if (v.expect_ok) {
+        expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(true);
+      } else {
+        expect(r.ok, `${v._vector_id}: expected ok=false`).toBe(false);
+        expect(r.reason, v._vector_id).toBe(v.reason);
+      }
     }
   });
 

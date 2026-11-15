@@ -28,6 +28,7 @@ type fixtureCanonicalVector struct {
 }
 
 type fixtureRejection struct {
+	VectorID string         `json:"_vector_id"`
 	Reason   string         `json:"reason"`
 	Envelope SignedEnvelope `json:"envelope"`
 }
@@ -45,6 +46,15 @@ type fixtureMalleability struct {
 	ExpectOK bool           `json:"expect_ok"`
 	Reason   string         `json:"reason"`
 	Envelope SignedEnvelope `json:"envelope"`
+}
+
+type fixtureAllowlistVector struct {
+	VectorID string `json:"_vector_id"`
+	// JSON null decodes to a nil slice ("the caller supplies no allowlist"),
+	// and [] to an empty non-nil slice — GK-BUG-008 is the difference.
+	ExpectedKeys []string `json:"expected_keys"`
+	ExpectOK     bool     `json:"expect_ok"`
+	Reason       string   `json:"reason"`
 }
 
 type fixtureClockVector struct {
@@ -67,6 +77,7 @@ type fixture struct {
 	CanonicalJSONVectors []fixtureCanonicalVector `json:"canonical_json_vectors"`
 	ValidEnvelope        SignedEnvelope           `json:"valid_envelope"`
 	RejectionVectors     []fixtureRejection       `json:"rejection_vectors"`
+	AllowlistVectors     []fixtureAllowlistVector `json:"allowlist_vectors"`
 	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
@@ -182,11 +193,43 @@ func TestEnvelopeInterop_RejectionVectors(t *testing.T) {
 			NowMs:    Int64Ptr(f.VerifyNowMs),
 		})
 		if r.OK {
-			t.Errorf("rejection %q: expected ok=false", rv.Reason)
+			t.Errorf("rejection %q %s: expected ok=false", rv.Reason, rv.VectorID)
 			continue
 		}
 		if string(r.Reason) != rv.Reason {
-			t.Errorf("rejection %q: got reason=%s want=%s", rv.Reason, r.Reason, rv.Reason)
+			t.Errorf("rejection %q %s: got reason=%s want=%s", rv.Reason, rv.VectorID, r.Reason, rv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_AllowlistVectors — GK-BUG-008. A caller that supplies
+// an allowlist gets exactly that list, so an EMPTY list allows nobody. This
+// tier read `len(ExpectedKeys) > 0`, so an empty non-nil slice skipped the
+// check and returned OK where the six other tiers said pubkey-not-allowed.
+// al2 (nil) is the control that reddens if a fix treats nil like empty.
+func TestEnvelopeInterop_AllowlistVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.AllowlistVectors) == 0 {
+		t.Fatal("allowlist_vectors missing or empty")
+	}
+	for _, av := range f.AllowlistVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope:     f.ValidEnvelope,
+			ExpectedKeys: av.ExpectedKeys,
+			NowMs:        Int64Ptr(f.VerifyNowMs),
+		})
+		if av.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", av.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", av.VectorID)
+			continue
+		}
+		if string(r.Reason) != av.Reason {
+			t.Errorf("%s: got reason=%s want=%s", av.VectorID, r.Reason, av.Reason)
 		}
 	}
 }

@@ -616,8 +616,16 @@ func payloadExceedsMaxDepth(payload string) bool {
 
 // VerifyEnvelopeOpts captures the input to VerifyEnvelope.
 type VerifyEnvelopeOpts struct {
-	Envelope     SignedEnvelope
-	ExpectedKeys []string // optional pubkey allowlist (66-char hex)
+	Envelope SignedEnvelope
+	// ExpectedKeys is the optional pubkey allowlist (66-char hex). NIL means
+	// the caller supplied no allowlist and the check is skipped; a non-nil
+	// slice is used AS GIVEN, so an EMPTY slice allows nobody and every
+	// envelope is rejected with ReasonPubkeyNotAllowed.
+	//
+	// GK-BUG-008: this used to read `len(ExpectedKeys) > 0`, so an empty
+	// slice silently meant "allow everyone" — the six other tiers treat a
+	// present-but-empty allowlist as deny-all.
+	ExpectedKeys []string
 	// ClockSkewMs is the allowed wall-clock skew in ms when checking
 	// expiresAt. NIL means the caller supplied nothing and the 5_000 ms
 	// default applies; a non-nil pointer is used AS GIVEN, so an explicit
@@ -743,7 +751,7 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	// 6. Allowlist.
-	if len(opts.ExpectedKeys) > 0 {
+	if opts.ExpectedKeys != nil {
 		found := false
 		for _, k := range opts.ExpectedKeys {
 			if k == env.Pubkey {

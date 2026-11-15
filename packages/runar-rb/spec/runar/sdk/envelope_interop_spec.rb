@@ -34,8 +34,29 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     fixture['rejection_vectors'].each do |v|
       env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
       r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
-      expect(r[:ok]).to be(false), "rejection #{v['reason']} should be ok=false"
-      expect(r[:reason]).to eq(v['reason']), "rejection #{v['reason']}: got #{r[:reason]}"
+      vid = v['_vector_id'] || v['reason']
+      expect(r[:ok]).to be(false), "rejection #{v['reason']} (#{vid}) should be ok=false"
+      expect(r[:reason]).to eq(v['reason']), "rejection #{v['reason']} (#{vid}): got #{r[:reason]}"
+    end
+  end
+
+  # GK-BUG-008. A supplied allowlist is used as given, so an EMPTY list allows
+  # nobody; nil (not supplied) skips the check. al2 is the control that
+  # reddens if a fix treats an absent allowlist like an empty one.
+  it 'honours an empty allowlist as deny-all and a nil allowlist as no check' do
+    env = Runar::SDK::Envelope::SignedEnvelope.from_h(fixture['valid_envelope'])
+    vectors = fixture['allowlist_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, expected_keys: v['expected_keys'],
+                                               now_ms: fixture['verify_now_ms'])
+      if v['expect_ok']
+        expect(r[:ok]).to be(true), "#{vid}: expected ok=true, got reason=#{r[:reason]}"
+      else
+        expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+        expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
     end
   end
 
