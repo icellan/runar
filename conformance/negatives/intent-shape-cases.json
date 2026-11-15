@@ -1,0 +1,30 @@
+{
+  "_comment": "GK-GAP-013: intent-intrinsic call shapes that typecheck refuses. ANF lowering (a public entry point every tier exports) used to turn each into `load_const \"\"`, dropping the hash / output pin; it must refuse with lowerError instead. Each source is .runar.ts.",
+  "cases": [
+    {
+      "name": "prev-arity",
+      "src": "import { StatefulSmartContract, ByteString, assert, len, extractPrevOutputScript } from 'runar-lang';\n\nclass BadPrev extends StatefulSmartContract {\n  readonly expectedHash: ByteString;\n  count: bigint;\n\n  constructor(expectedHash: ByteString, count: bigint) {\n    super(expectedHash, count);\n    this.expectedHash = expectedHash;\n    this.count = count;\n  }\n\n  public bind() {\n    const s = extractPrevOutputScript(this.expectedHash);\n    assert(len(s) > 0n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "lowerError": "extractPrevOutputScript: expected 2 or 3 arguments, got 1"
+    },
+    {
+      "name": "prev-nonliteral-index",
+      "src": "import { StatefulSmartContract, ByteString, assert, len, extractPrevOutputScript } from 'runar-lang';\n\nclass BadPrev extends StatefulSmartContract {\n  readonly expectedHash: ByteString;\n  count: bigint;\n\n  constructor(expectedHash: ByteString, count: bigint) {\n    super(expectedHash, count);\n    this.expectedHash = expectedHash;\n    this.count = count;\n  }\n\n  public bind() {\n    const s = extractPrevOutputScript(this.count, this.expectedHash);\n    assert(len(s) > 0n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "lowerError": "extractPrevOutputScript: inputIndex must be a bigint literal"
+    },
+    {
+      "name": "prev-nonliteral-prefixlen",
+      "src": "import { StatefulSmartContract, ByteString, assert, len, extractPrevOutputScript } from 'runar-lang';\n\nclass BadPrev extends StatefulSmartContract {\n  readonly expectedHash: ByteString;\n  count: bigint;\n\n  constructor(expectedHash: ByteString, count: bigint) {\n    super(expectedHash, count);\n    this.expectedHash = expectedHash;\n    this.count = count;\n  }\n\n  public bind() {\n    const s = extractPrevOutputScript(0n, this.expectedHash, this.count);\n    assert(len(s) > 0n);\n    this.count = this.count + 1n;\n  }\n}\n",
+      "lowerError": "extractPrevOutputScript: prefixLen must be a bigint literal"
+    },
+    {
+      "name": "p2pkh-arity",
+      "src": "import { StatefulSmartContract, ByteString, requireOutputP2PKH } from 'runar-lang';\n\nclass BadP2PKH extends StatefulSmartContract {\n  readonly bondPKH: ByteString;\n  readonly bondAmount: bigint;\n  count: bigint;\n\n  constructor(bondPKH: ByteString, bondAmount: bigint, count: bigint) {\n    super(bondPKH, bondAmount, count);\n    this.bondPKH = bondPKH;\n    this.bondAmount = bondAmount;\n    this.count = count;\n  }\n\n  public payBond() {\n    requireOutputP2PKH(0n, this.bondPKH);\n  }\n}\n",
+      "lowerError": "requireOutputP2PKH: expected 3 arguments, got 2"
+    },
+    {
+      "name": "p2pkh-nonliteral-index",
+      "src": "import { StatefulSmartContract, ByteString, requireOutputP2PKH } from 'runar-lang';\n\nclass BadP2PKH extends StatefulSmartContract {\n  readonly bondPKH: ByteString;\n  readonly bondAmount: bigint;\n  count: bigint;\n\n  constructor(bondPKH: ByteString, bondAmount: bigint, count: bigint) {\n    super(bondPKH, bondAmount, count);\n    this.bondPKH = bondPKH;\n    this.bondAmount = bondAmount;\n    this.count = count;\n  }\n\n  public payBond() {\n    requireOutputP2PKH(this.count, this.bondPKH, this.bondAmount);\n  }\n}\n",
+      "lowerError": "requireOutputP2PKH: outputIndex must be a bigint literal"
+    }
+  ]
+}

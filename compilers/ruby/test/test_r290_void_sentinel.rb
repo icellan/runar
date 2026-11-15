@@ -30,6 +30,12 @@
 # future change routes this tier's inline decision through a summary map, the
 # contract starts refusing and the first branch takes over.
 #
+# GK-BUG-015: the validator now refuses a repeated method name, so a SOURCE
+# with two `helper` bodies never reaches pass 4 through the CLI. The lowerer is
+# a public entry point, so the duplicate is built by hand instead: the source
+# declares `helper` and `helper2` and a child process renames the second on
+# the parsed AST before validating and lowering it directly.
+#
 # The compiler is invoked via subprocess for the same reason as
 # test_conformance_goldens.rb: the Ruby compiler's TS and Ruby parsers share a
 # constant namespace, so running them in-process corrupts tokenization.
@@ -59,7 +65,7 @@ class R290VoidSentinelTest < Minitest::Test
       private helper(): void {
       }
 
-      private helper(): void {
+      private helper2(): void {
         this.addOutput(1000n, this.count);
       }
     }
@@ -99,8 +105,45 @@ class R290VoidSentinelTest < Minitest::Test
     end
   end
 
+  # Parse, rename `helper2` to `helper` on the AST, then report what validate
+  # and lower_to_anf say about the hand-built duplicate.
+  HAND_BUILT_DRIVER = <<~'RUBY'
+    require 'json'
+    require_relative ARGV[0]
+    result = RunarCompiler.send(:_parse_source, File.read(ARGV[1]), 'R290Void.runar.ts')
+    contract = result.contract
+    contract.methods.find { |m| m.name == 'helper2' }.name = 'helper'
+    errs = RunarCompiler::Frontend.validate(contract).errors.map(&:message)
+    puts "VALIDATE: #{errs.join(' | ')}"
+    begin
+      program = RunarCompiler::Frontend.lower_to_anf(contract)
+      puts "LOWERED: #{program.methods.flat_map(&:body).map { |b| b.value.inspect }.join(';')}"
+    rescue StandardError => e
+      puts "REFUSED: #{e.message}"
+    end
+  RUBY
+
+  def lower_hand_built
+    Dir.mktmpdir do |dir|
+      src = File.join(dir, 'R290Void.runar.ts')
+      File.write(src, EMPTY_INLINED_BODY)
+      stdout, stderr, _status = Open3.capture3(
+        RbConfig.ruby, '-e', HAND_BUILT_DRIVER,
+        File.join(RUBY_COMPILER_DIR, 'lib/runar_compiler'), src
+      )
+      "#{stdout}\n#{stderr}"
+    end
+  end
+
+  def test_validate_refuses_the_hand_built_duplicate
+    assert_includes lower_hand_built,
+                    "VALIDATE: method 'helper' is already declared in this contract and cannot be re-declared"
+  end
+
   def test_empty_inlined_body_never_yields_a_sentinel
-    ok, ir, out = compile_to_ir(EMPTY_INLINED_BODY, 'R290Void.runar.ts')
+    out = lower_hand_built
+    ok = out.include?('LOWERED:')
+    ir = out
     if ok
       refute_includes ir, '@void',
                       'the empty inlined body produced the @void sentinel instead of a refusal'

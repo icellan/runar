@@ -1810,11 +1810,16 @@ class _LowerCtx:
         #   matching use case where each successor intent UTXO has a unique
         #   tail (BSVM Mode 3 permissionless step-in).
         if isinstance(callee, Identifier) and callee.name == "extractPrevOutputScript":
+            # GK-GAP-013: typecheck refuses these shapes first; lowering is a
+            # public entry point, so refuse here too rather than emit an empty
+            # constant in place of the hash assertion.
             if len(e.args) != 2 and len(e.args) != 3:
-                return self.emit(_make_load_const_string(""))
+                raise ValueError(
+                    f"extractPrevOutputScript: expected 2 or 3 arguments, got {len(e.args)}"
+                )
             idx_lit = e.args[0]
             if not isinstance(idx_lit, BigIntLiteral):
-                return self.emit(_make_load_const_string(""))
+                raise ValueError("extractPrevOutputScript: inputIndex must be a bigint literal")
             idx = idx_lit.value
             param_name = f"_prevOutScript_{idx}"
             self.method_scope.record_auto_injected_param(param_name, "ByteString")
@@ -1829,7 +1834,7 @@ class _LowerCtx:
             if len(e.args) == 3:
                 prefix_len_lit = e.args[2]
                 if not isinstance(prefix_len_lit, BigIntLiteral):
-                    return self.emit(_make_load_const_string(""))
+                    raise ValueError("extractPrevOutputScript: prefixLen must be a bigint literal")
                 zero_ref = self.emit(_make_load_const_int(0))
                 prefix_len_ref = self.emit(_make_load_const_int(prefix_len_lit.value))
                 bytes_to_hash_ref = self.emit(
@@ -1862,11 +1867,12 @@ class _LowerCtx:
         # (8-byte LE amount || 0x19 length || 25-byte P2PKH script). Byte
         # offset of output i is i*34.
         if isinstance(callee, Identifier) and callee.name == "requireOutputP2PKH":
+            # GK-GAP-013: refuse, never emit an empty constant in place of the pin.
             if len(e.args) != 3:
-                return self.emit(_make_load_const_string(""))
+                raise ValueError(f"requireOutputP2PKH: expected 3 arguments, got {len(e.args)}")
             idx_lit = e.args[0]
             if not isinstance(idx_lit, BigIntLiteral):
-                return self.emit(_make_load_const_string(""))
+                raise ValueError("requireOutputP2PKH: outputIndex must be a bigint literal")
             idx = idx_lit.value
             # W2 backstop. The user-facing refusal lives in the typechecker, where a
             # diagnostic carries a source location -- but ANF lowering is reachable from

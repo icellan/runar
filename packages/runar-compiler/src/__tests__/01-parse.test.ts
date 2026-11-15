@@ -61,8 +61,8 @@ describe('Pass 1: Parse', () => {
     });
 
     it('uses a custom fileName when provided', () => {
-      const result = parse(P2PKH_SOURCE, 'p2pkh.ts');
-      expect(result.contract!.sourceFile).toBe('p2pkh.ts');
+      const result = parse(P2PKH_SOURCE, 'p2pkh.runar.ts');
+      expect(result.contract!.sourceFile).toBe('p2pkh.runar.ts');
     });
   });
 

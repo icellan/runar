@@ -159,9 +159,20 @@ export function parse(source: string, fileName?: string): ParseResult {
   return result;
 }
 
+/** GK-GAP-005: the diagnostic every tier gives an unrecognised suffix. */
+export function unsupportedExtensionMessage(fileName: string): string {
+  return (
+    `unsupported file extension: ${fileName} (expected .runar.ts, .runar.sol, .runar.move, ` +
+    '.runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)'
+  );
+}
+
 function parseDispatch(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
-  const file = fileName ?? 'contract.ts';
+  // GK-GAP-005: no file name (undefined or '') means the TypeScript surface;
+  // the nine suffixes match ignoring ASCII case; anything else is refused.
+  const file = fileName || 'contract.ts';
+  const lower = fileName ? file.toLowerCase() : 'contract.runar.ts';
 
   // DoS-bound size guard. Reject oversized source BEFORE any tokenizer /
   // AST builder touches the input — those passes are linear-or-worse in
@@ -181,7 +192,7 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
   // non-TS surface (whose parser ignores comments) before dispatching. The
   // `.runar.ts` / default branch is exempt because it honours the directives.
   for (const [ext, surfaceName, doc, sighashSpelling, embedSpelling] of NON_TS_SURFACES) {
-    if (file.endsWith(ext)) {
+    if (lower.endsWith(ext)) {
       const directiveMsg = unsupportedDirectiveError(source, surfaceName, doc, sighashSpelling, embedSpelling);
       if (directiveMsg) {
         return {
@@ -194,34 +205,41 @@ function parseDispatch(source: string, fileName?: string): ParseResult {
   }
 
   // Multi-format dispatch based on file extension
-  if (file.endsWith('.runar.sol')) {
+  if (lower.endsWith('.runar.sol')) {
     return parseSolSource(source, file);
   }
-  if (file.endsWith('.runar.move')) {
+  if (lower.endsWith('.runar.move')) {
     return parseMoveSource(source, file);
   }
-  if (file.endsWith('.runar.py')) {
+  if (lower.endsWith('.runar.py')) {
     return parsePythonSource(source, file);
   }
-  if (file.endsWith('.runar.go')) {
+  if (lower.endsWith('.runar.go')) {
     return parseGoSource(source, file);
   }
-  if (file.endsWith('.runar.rs')) {
+  if (lower.endsWith('.runar.rs')) {
     // N-344: a `let` without `mut` cannot be reassigned.
     return withConstReassignment(parseRustSource(source, file));
   }
-  if (file.endsWith('.runar.rb')) {
+  if (lower.endsWith('.runar.rb')) {
     return parseRubySource(source, file);
   }
-  if (file.endsWith('.runar.zig')) {
+  if (lower.endsWith('.runar.zig')) {
     // N-344: a `const` local cannot be reassigned.
     return withConstReassignment(parseZigSource(source, file));
   }
-  if (file.endsWith('.runar.java')) {
+  if (lower.endsWith('.runar.java')) {
     return parseJavaSource(source, file);
   }
 
-  // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
+  if (!lower.endsWith('.runar.ts')) {
+    return {
+      contract: null,
+      errors: [makeDiagnostic(unsupportedExtensionMessage(file), 'error', { file, line: 1, column: 0 })],
+    };
+  }
+
+  // TypeScript parser
   const result = withNestingLimit(file, () => parseTsSurface(source, file, errors));
   // N-342: `const` locals cannot be reassigned (`.runar.ts` only).
   if (result.contract) result.errors.push(...checkConstReassignment(result.contract));

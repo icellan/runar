@@ -165,42 +165,53 @@ test "R-069: right() lowers to the peer tiers' end-relative split" {
 // Preimage field extractors.
 // ---------------------------------------------------------------------------
 
-/// Numeric extractor probe: `assert(<fn>(p) > 0n)`.
+/// The preimage is a readonly PROPERTY, not a parameter: a public method's
+/// SigHashPreimage parameter must reach checkPreimage() on every path
+/// (GK-GAP-010), and checkPreimage's OP_PUSH_TX blob would drown the few
+/// extractor bytes these probes pin. The extractor bytes are unchanged; the
+/// prefix gains the property's constructor-slot `00` and the byte-string
+/// probes lose the `7c` that ordered a parameter under `expected`.
+///
+/// Numeric extractor probe: `assert(<fn>(this.p) > 0n)`.
 fn numericExtractorSource(comptime fn_name: []const u8) []const u8 {
     return "import { SmartContract, assert, " ++ fn_name ++ " } from 'runar-lang';\n" ++
         "import type { SigHashPreimage } from 'runar-lang';\n" ++
         "\n" ++
         "class Probe extends SmartContract {\n" ++
         "  readonly seed: bigint;\n" ++
+        "  readonly p: SigHashPreimage;\n" ++
         "\n" ++
-        "  constructor(seed: bigint) {\n" ++
-        "    super(seed);\n" ++
+        "  constructor(seed: bigint, p: SigHashPreimage) {\n" ++
+        "    super(seed, p);\n" ++
         "    this.seed = seed;\n" ++
+        "    this.p = p;\n" ++
         "  }\n" ++
         "\n" ++
-        "  public run(p: SigHashPreimage) {\n" ++
+        "  public run() {\n" ++
         "    assert(this.seed === this.seed);\n" ++
-        "    assert(" ++ fn_name ++ "(p) > 0n);\n" ++
+        "    assert(" ++ fn_name ++ "(this.p) > 0n);\n" ++
         "  }\n" ++
         "}\n";
 }
 
-/// Byte-string extractor probe: `assert(<fn>(p) === expected)`.
+/// Byte-string extractor probe: `assert(<fn>(this.p) === expected)`.
 fn bytesExtractorSource(comptime fn_name: []const u8) []const u8 {
     return "import { SmartContract, assert, " ++ fn_name ++ " } from 'runar-lang';\n" ++
         "import type { SigHashPreimage } from 'runar-lang';\n" ++
         "\n" ++
         "class Probe extends SmartContract {\n" ++
         "  readonly seed: bigint;\n" ++
+        "  readonly p: SigHashPreimage;\n" ++
         "\n" ++
-        "  constructor(seed: bigint) {\n" ++
-        "    super(seed);\n" ++
+        "  constructor(seed: bigint, p: SigHashPreimage) {\n" ++
+        "    super(seed, p);\n" ++
         "    this.seed = seed;\n" ++
+        "    this.p = p;\n" ++
         "  }\n" ++
         "\n" ++
-        "  public run(p: SigHashPreimage, expected: ByteString) {\n" ++
+        "  public run(expected: ByteString) {\n" ++
         "    assert(this.seed === this.seed);\n" ++
-        "    assert(" ++ fn_name ++ "(p) === expected);\n" ++
+        "    assert(" ++ fn_name ++ "(this.p) === expected);\n" ++
         "  }\n" ++
         "}\n";
 }
@@ -208,32 +219,32 @@ fn bytesExtractorSource(comptime fn_name: []const u8) []const u8 {
 test "R-069: extractVersion lowers to <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM" {
     // W1: the trailing `01007e81` is the zero-pad, so the unsigned 32-bit
     // nVersion field is not read as a negative script number.
-    try expectProbeHex(numericExtractorSource("extractVersion"), "00009d547f7501007e8100a0");
+    try expectProbeHex(numericExtractorSource("extractVersion"), "00009d00547f7501007e8100a0");
 }
 
 test "R-069: extractInputIndex lowers to the peer tiers' vout slice" {
-    try expectProbeHex(numericExtractorSource("extractInputIndex"), "00009d01647f77547f758100a0");
+    try expectProbeHex(numericExtractorSource("extractInputIndex"), "00009d0001647f77547f758100a0");
 }
 
 test "R-069: extractAmount lowers to the peer tiers' end-relative 8-byte slice" {
-    try expectProbeHex(numericExtractorSource("extractAmount"), "00009d820134947f77587f758100a0");
+    try expectProbeHex(numericExtractorSource("extractAmount"), "00009d00820134947f77587f758100a0");
 }
 
 test "R-069: extractSequence lowers to the peer tiers' end-relative 4-byte slice" {
     // W1: zero-padded before OP_BIN2NUM — nSequence is unsigned.
-    try expectProbeHex(numericExtractorSource("extractSequence"), "00009d82012c947f77547f7501007e8100a0");
+    try expectProbeHex(numericExtractorSource("extractSequence"), "00009d0082012c947f77547f7501007e8100a0");
 }
 
 test "R-069: extractHashSequence lowers to the peer tiers' 36/32 absolute slice" {
-    try expectProbeHex(bytesExtractorSource("extractHashSequence"), "00009d7c01247f7701207f757c87");
+    try expectProbeHex(bytesExtractorSource("extractHashSequence"), "00009d0001247f7701207f757c87");
 }
 
 test "R-069: extractOutputs lowers to the peer tiers' end-relative 32-byte slice" {
-    try expectProbeHex(bytesExtractorSource("extractOutputs"), "00009d7c820128947f7701207f757c87");
+    try expectProbeHex(bytesExtractorSource("extractOutputs"), "00009d00820128947f7701207f757c87");
 }
 
 test "R-069: extractScriptCode lowers to the peer tiers' variable-length slice" {
-    try expectProbeHex(bytesExtractorSource("extractScriptCode"), "00009d7c01687f77820134947f757c87");
+    try expectProbeHex(bytesExtractorSource("extractScriptCode"), "00009d0001687f77820134947f757c87");
 }
 
 // ---------------------------------------------------------------------------

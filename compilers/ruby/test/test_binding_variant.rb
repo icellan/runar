@@ -68,8 +68,8 @@ class TestBindingVariant < Minitest::Test
 
   def test_nested_arm_inherits
     src = "class G extends SmartContract {\n  constructor() { super(); }\n  /** @bindingVariant all */\n" \
-          "  public unlock(a: SigHashPreimage, b: SigHashPreimage, c: boolean) {\n" \
-          "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(b)); }\n  }\n}\n"
+          "  public unlock(a: SigHashPreimage, c: boolean) {\n" \
+          "    if (c) { assert(checkPreimage(a)); } else { assert(checkPreimage(a)); }\n  }\n}\n"
     s = script(src, "G.runar.ts")
     assert_equal 2, s.scan(ALL_HEX).length
     refute_includes s, LOWS_HEX

@@ -15,6 +15,12 @@ LAST-WINS map and caches the result under that name, while
 BEFORE two same-named privates and the two disagree: the summary describes the
 output-emitting ``helper`` (so ``should_inline_private`` is true) while the
 lowerer inlines the empty one.
+
+GK-BUG-015: the validator now refuses a repeated method name, so a SOURCE with
+two ``helper`` bodies never reaches pass 4 through the pipeline. The backstop
+is still worth pinning because ``lower_to_anf`` is a public entry point: the
+duplicate is built by hand here -- the source declares ``helper`` and
+``helper2`` and the test renames the second one on the parsed AST.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import pytest
 
 from runar_compiler.frontend.anf_lower import lower_to_anf
 from runar_compiler.frontend.parser_dispatch import parse_source
+from runar_compiler.frontend.validator import validate
 
 EMPTY_INLINED_BODY = """
 class R290Void extends StatefulSmartContract {
@@ -41,7 +48,7 @@ class R290Void extends StatefulSmartContract {
   private helper(): void {
   }
 
-  private helper(): void {
+  private helper2(): void {
     this.addOutput(1000n, this.count);
   }
 }
@@ -78,12 +85,24 @@ def _contract(source: str):
     return parsed.contract
 
 
+def _hand_built_duplicate():
+    contract = _contract(EMPTY_INLINED_BODY)
+    second = next(m for m in contract.methods if m.name == "helper2")
+    second.name = "helper"
+    return contract
+
+
+def test_validate_refuses_the_hand_built_duplicate():
+    errors = [e.message for e in validate(_hand_built_duplicate()).errors]
+    assert "method 'helper' is already declared in this contract and cannot be re-declared" in errors
+
+
 def test_empty_inlined_body_is_refused_not_sentinelled():
     with pytest.raises(
         ValueError,
         match=r"private method 'helper' was inlined but produced no bindings",
     ):
-        lower_to_anf(_contract(EMPTY_INLINED_BODY))
+        lower_to_anf(_hand_built_duplicate())
 
 
 def test_no_void_sentinel_remains():

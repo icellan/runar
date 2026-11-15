@@ -40,12 +40,18 @@ VAR_LEN_TYPES = ["Sig", "SigHashPreimage"]
 
 
 def write_src(prop_type: str) -> str:
-    """Mutating method — drives the state-continuation WRITE path."""
+    """Mutating method — drives the state-continuation WRITE path.
+
+    The method rewrites the field from itself rather than from a parameter:
+    a public ``SigHashPreimage`` parameter must reach ``checkPreimage`` on
+    every path (GK-GAP-010), and the ``ByteString`` control could not mirror
+    that call.
+    """
     return f"""
 class VarLenStateWrite extends StatefulSmartContract {{
   tag: {prop_type};
   constructor(tag: {prop_type}) {{ super(tag); this.tag = tag; }}
-  public update(next: {prop_type}) {{ this.tag = next; }}
+  public update() {{ this.tag = this.tag; }}
 }}
 """
 

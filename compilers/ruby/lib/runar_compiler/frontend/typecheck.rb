@@ -278,8 +278,183 @@ module RunarCompiler
       checker.check_property_initializers
       checker.check_constructor
       contract.methods.each { |method| checker.check_method(method) }
+      checker.errors.concat(check_preimage_checked_on_every_path(contract))
 
       TypeCheckResult.new(contract: contract, errors: checker.errors)
+    end
+
+    # -------------------------------------------------------------------
+    # GK-GAP-010: a public method's SigHashPreimage parameter must reach
+    # checkPreimage on every path
+    # -------------------------------------------------------------------
+
+    def self.preimage_not_checked_message(method, param)
+      "public method '#{method}' must pass its SigHashPreimage parameter '#{param}' " \
+        "to checkPreimage() on every path"
+    end
+
+    # spec/type-system.md 4.2: a SigHashPreimage parameter of a public method
+    # is checked exactly once. The affine checker refuses a second
+    # consumption; this refuses none. A must-analysis: a parameter is checked
+    # by a statement list when it reaches checkPreimage (directly, through a
+    # local alias, or through a private method that checks that parameter on
+    # every path) at a point every execution reaches. An if checks it only if
+    # both arms do (a missing else checks nothing), a ternary only if both arms
+    # do; the right operand of && / || and a for-loop body check nothing. A
+    # return ends its path: a private method checks a parameter only if every
+    # return (and the fall-through end) is reached after the check, and an arm
+    # that returns drops out of the join after its if. A name assigned
+    # anywhere in the method body never stands for a parameter.
+    def self.check_preimage_checked_on_every_path(contract)
+      preimage = ->(t) { t.is_a?(PrimitiveType) && t.name == "SigHashPreimage" }
+      privates = {}
+      contract.methods.each { |m| privates[m.name] = m unless m.visibility == "public" }
+      memo = {}
+      walk = nil
+      walk_method = nil
+      expr_must = nil
+
+      reassigned = Set.new
+      collect_reassigned = nil
+      collect_reassigned = lambda do |stmts|
+        (stmts || []).each_with_object(Set.new) do |st, out|
+          case st
+          when AssignmentStmt then out << st.target.name if st.target.is_a?(Identifier)
+          when IfStmt then out.merge(collect_reassigned.call(st.then)).merge(collect_reassigned.call(st.else_))
+          when ForStmt then out.merge(collect_reassigned.call(st.body))
+          end
+        end
+      end
+      resolve = ->(e, aliases) { e.is_a?(Identifier) && !reassigned.include?(e.name) ? aliases[e.name] : nil }
+      private_target = lambda do |callee|
+        case callee
+        when PropertyAccessExpr, MemberExpr then privates[callee.property]
+        when Identifier then privates[callee.name]
+        end
+      end
+      must_params = lambda do |m, stack|
+        return memo[m.name] if memo.key?(m.name)
+        return Set.new if stack.include?(m.name)
+
+        aliases = {}
+        (m.params || []).each { |p| aliases[p.name] = p.name if preimage.call(p.type) }
+        outer = reassigned
+        reassigned = collect_reassigned.call(m.body)
+        done = walk_method.call(m.body, aliases.dup, stack | [m.name])
+        reassigned = outer
+        result = Set.new
+        (m.params || []).each_with_index do |p, i|
+          result << i if aliases.key?(p.name) && done.include?(p.name)
+        end
+        memo[m.name] = result
+      end
+      expr_must = lambda do |e, aliases, stack|
+        case e
+        when CallExpr
+          out = Set.new
+          (e.args || []).each { |a| out |= expr_must.call(a, aliases, stack) }
+          out |= expr_must.call(e.callee.object, aliases, stack) if e.callee.is_a?(MemberExpr)
+          if e.callee.is_a?(Identifier) && e.callee.name == "checkPreimage"
+            origin = (e.args || []).empty? ? nil : resolve.call(e.args[0], aliases)
+            out << origin unless origin.nil?
+            return out
+          end
+          target = private_target.call(e.callee)
+          unless target.nil?
+            must_params.call(target, stack).each do |i|
+              next unless i < (e.args || []).length
+
+              origin = resolve.call(e.args[i], aliases)
+              out << origin unless origin.nil?
+            end
+          end
+          out
+        when MethodCallExpr
+          out = expr_must.call(e.object, aliases, stack)
+          (e.args || []).each { |a| out |= expr_must.call(a, aliases, stack) }
+          out
+        when BinaryExpr
+          if %w[&& ||].include?(e.op)
+            expr_must.call(e.left, aliases, stack)
+          else
+            expr_must.call(e.left, aliases, stack) | expr_must.call(e.right, aliases, stack)
+          end
+        when TernaryExpr
+          expr_must.call(e.condition, aliases, stack) |
+            (expr_must.call(e.consequent, aliases, stack) & expr_must.call(e.alternate, aliases, stack))
+        when UnaryExpr then expr_must.call(e.operand, aliases, stack)
+        when IndexAccessExpr then expr_must.call(e.object, aliases, stack) | expr_must.call(e.index, aliases, stack)
+        when MemberExpr then expr_must.call(e.object, aliases, stack)
+        when ArrayLiteralExpr
+          (e.elements || []).reduce(Set.new) { |acc, el| acc | expr_must.call(el, aliases, stack) }
+        else Set.new
+        end
+      end
+      # Intersects the checked sets of every return and of the fall-through end
+      # of a method body.
+      walk_method = lambda do |body, aliases, stack|
+        exits = []
+        fall = walk.call(body, Set.new, aliases, stack, exits)
+        exits << fall unless fall.nil?
+        exits.reduce { |acc, e| acc & e } || Set.new
+      end
+      # The parameters checked at the end of stmts, or nil when every path
+      # through stmts returns first. Each return records its own checked set
+      # in exits.
+      walk = lambda do |stmts, done_in, aliases, stack, exits|
+        done = done_in.dup
+        (stmts || []).each do |st|
+          case st
+          when VariableDeclStmt
+            done |= expr_must.call(st.init, aliases, stack)
+            origin = st.init.nil? ? nil : resolve.call(st.init, aliases)
+            if origin.nil?
+              aliases.delete(st.name)
+            else
+              aliases[st.name] = origin
+            end
+          when AssignmentStmt then done |= expr_must.call(st.value, aliases, stack)
+          when ExpressionStmt then done |= expr_must.call(st.expr, aliases, stack)
+          when ReturnStmt
+            exits << (done | expr_must.call(st.value, aliases, stack))
+            return nil
+          when AssertStmt then done |= expr_must.call(st.condition, aliases, stack)
+          when IfStmt
+            done |= expr_must.call(st.condition, aliases, stack)
+            then_done = walk.call(st.then, done, aliases.dup, stack, exits)
+            else_done = walk.call(st.else_, done, aliases.dup, stack, exits)
+            return nil if then_done.nil? && else_done.nil?
+
+            done = if then_done.nil? then else_done
+                   elsif else_done.nil? then then_done
+                   else then_done & else_done
+                   end
+          when ForStmt
+            # The body checks nothing for the code after the loop, but a
+            # return inside it still ends a path.
+            walk.call(st.body, done, aliases.dup, stack, exits)
+          end
+        end
+        done
+      end
+
+      errors = []
+      contract.methods.each do |m|
+        next unless m.visibility == "public"
+
+        tracked = (m.params || []).select { |p| preimage.call(p.type) }.map(&:name)
+        next if tracked.empty?
+
+        reassigned = collect_reassigned.call(m.body)
+        done = walk_method.call(m.body, tracked.to_h { |n| [n, n] }, [m.name])
+        tracked.each do |name|
+          next if done.include?(name)
+
+          errors << Diagnostic.new(message: preimage_not_checked_message(m.name, name),
+                                   severity: Severity::ERROR, loc: m.source_location)
+        end
+      end
+      errors
     end
 
     # -------------------------------------------------------------------

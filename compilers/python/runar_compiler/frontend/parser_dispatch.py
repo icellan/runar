@@ -77,6 +77,14 @@ def _unsupported_directive_error(
     return None
 
 
+def unsupported_extension_message(file_name: str) -> str:
+    """GK-GAP-005: the diagnostic every tier gives an unrecognised suffix."""
+    return (
+        f"unsupported file extension: {file_name} (expected .runar.ts, .runar.sol, "
+        ".runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)"
+    )
+
+
 class ParseResult:
     __slots__ = ("contract", "errors")
 
@@ -89,8 +97,13 @@ class ParseResult:
         return [d.format_message() for d in self.errors]
 
 
-def parse_source(source: str, file_name: str) -> ParseResult:
-    """Dispatch to the appropriate parser based on file extension."""
+def parse_source(source: str, file_name: str | None) -> ParseResult:
+    """Dispatch to the appropriate parser based on file extension.
+
+    GK-GAP-005: the nine ``.runar.*`` suffixes match ignoring ASCII case, any
+    other suffix is refused with the shared unsupported-extension diagnostic,
+    and no file name (``None`` or ``""``) means the TypeScript surface.
+    """
     result = _parse_source_dispatch(source, file_name)
     # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
     if result.contract is not None:
@@ -106,6 +119,8 @@ def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
     from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
     assert_source_bytes_under_limit(source)
 
+    if not file_name:
+        file_name = "contract.runar.ts"
     lower = file_name.lower()
 
     # Fail-closed directive guard: reject ``@sighash`` / ``@embedAlways`` on any
@@ -167,6 +182,6 @@ def _parse_source_dispatch(source: str, file_name: str) -> ParseResult:
         return parse_java(source, file_name)
     else:
         return ParseResult(errors=[Diagnostic(
-            message=f"unsupported file extension: {file_name}",
+            message=unsupported_extension_message(file_name),
             severity=Severity.ERROR,
         )])

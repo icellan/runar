@@ -145,7 +145,11 @@ module RunarCompiler
   # Dispatch to the correct parser based on file extension.
   #
   # Returns a ParseResult-like object (from the frontend package).
+  # GK-GAP-005: the nine .runar.* suffixes match ignoring ASCII case, any
+  # other suffix is refused with the shared unsupported-extension diagnostic,
+  # and no file name (nil or "") means the TypeScript surface.
   def self._parse_source(source, file_name)
+    file_name = "contract.runar.ts" if file_name.nil? || file_name.empty?
     result = _parse_source_dispatch(source, file_name)
     # N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
     unless result.contract.nil?
@@ -220,8 +224,8 @@ module RunarCompiler
       Frontend.parse_java(source, file_name)
     else
       raise ArgumentError,
-            "Unsupported source format: #{file_name}. " \
-            "Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
+            "unsupported file extension: #{file_name} (expected .runar.ts, .runar.sol, .runar.move, " \
+            ".runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)"
     end
   end
   private_class_method :_parse_source_dispatch

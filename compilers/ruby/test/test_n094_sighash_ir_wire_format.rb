@@ -42,8 +42,9 @@ class TestN094SighashIRWireFormat < Minitest::Test
 
       /** @sighash SINGLE|FORKID */
       public m(flag: bigint, pre: SigHashPreimage): void {
+        assert(checkPreimage(pre));
         if (flag > 0n) {
-          assert(checkPreimage(pre));
+          assert(flag > 0n);
         } else {
           assert(flag <= 0n);
         }

@@ -58,13 +58,15 @@ class TestN078SingleMethodDefinition < Minitest::Test
   # edit to one form cannot silently change the state section.
   # -------------------------------------------------------------------------
 
+  # The field is rewritten from itself: a public SigHashPreimage parameter must
+  # reach checkPreimage on every path (GK-GAP-010).
   def state_script_src(prop_type)
     <<~TS
       class GetStateScriptShape extends StatefulSmartContract {
         tag: #{prop_type};
         constructor(tag: #{prop_type}) { super(tag); this.tag = tag; }
-        public update(next: #{prop_type}) {
-          this.tag = next;
+        public update() {
+          this.tag = this.tag;
           let s: ByteString = this.getStateScript();
           assert(len(s) > 0n);
         }

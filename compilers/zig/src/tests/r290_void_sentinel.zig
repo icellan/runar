@@ -52,7 +52,7 @@ const empty_inlined_body =
     \\  private helper(): void {
     \\  }
     \\
-    \\  private helper(): void {
+    \\  private helper2(): void {
     \\    this.addOutput(1000n, this.count);
     \\  }
     \\}
@@ -124,12 +124,39 @@ fn programCarriesVoidSentinel(program: types.ANFProgram) bool {
     return false;
 }
 
+/// GK-BUG-015: the validator refuses a repeated method name, so the source
+/// cannot spell the duplicate any more. `lowerToANF` is a public entry point,
+/// so the backstop is pinned on a hand-built duplicate: the source declares
+/// `helper` and `helper2` and the test renames the second on the parsed AST.
+fn handBuiltDuplicate(alloc: std.mem.Allocator) !types.ContractNode {
+    const parsed = parse_ts.parseTs(alloc, empty_inlined_body, "R290.runar.ts");
+    try std.testing.expectEqual(@as(usize, 0), parsed.errors.len);
+    const contract = parsed.contract orelse return error.TestUnexpectedResult;
+    for (contract.methods) |*m| {
+        if (std.mem.eql(u8, m.name, "helper2")) m.name = "helper";
+    }
+    return contract;
+}
+
+test "GK-BUG-015: validate refuses the hand-built duplicate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const val_result = try validate.validate(alloc, try handBuiltDuplicate(alloc));
+    var found = false;
+    for (val_result.errors) |e| {
+        if (std.mem.eql(u8, e.message, "method 'helper' is already declared in this contract and cannot be re-declared")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
 test "an empty inlined body never yields a @void sentinel" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const contract = try frontend(alloc, empty_inlined_body);
+    const contract = try handBuiltDuplicate(alloc);
 
     var diag: anf_lower.LowerDiagnostic = .{};
     const result = anf_lower.lowerToANFWithDiagnostic(alloc, contract, &diag);

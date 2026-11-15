@@ -536,7 +536,7 @@ private helper(x: bigint): bigint {
 | `hash160` | `(data: ByteString) => Ripemd160` | `OP_HASH160` (SHA-256 then RIPEMD-160) |
 | `sha256` | `(data: ByteString) => Sha256` | `OP_SHA256` |
 | `ripemd160` | `(data: ByteString) => Ripemd160` | `OP_RIPEMD160` |
-| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
+| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. A public method's `SigHashPreimage` parameter must be passed to `checkPreimage` exactly once, on every path (spec/type-system.md 4.2), or the method does not compile. |
 | `sha256Compress` | `(state: ByteString, block: ByteString) => ByteString` | One round of SHA-256 compression. Takes a 32-byte intermediate state and a 64-byte message block, returns the updated 32-byte state. Inlines ~3000 opcodes. |
 | `sha256Finalize` | `(state: ByteString, remaining: ByteString, msgBitLen: bigint) => ByteString` | Finalize a partial SHA-256 hash. Applies padding to the remaining bytes (< 64 bytes) and runs 1-2 final compression rounds. Returns the final 32-byte hash. |
 | `blake3Compress` | `(chainingValue: ByteString, block: ByteString) => ByteString` | BLAKE3 single-block compression. Takes a 32-byte chaining value and a 64-byte block, returns the 32-byte hash. Hardcodes blockLen=64, counter=0, flags=11 (CHUNK_START\|CHUNK_END\|ROOT). Inlines ~10,000 opcodes (~11 KB). |

@@ -19,14 +19,19 @@
  * + 1` — one past the `OP_CODESEPARATOR` byte itself; empirically confirmed
  * against this interpreter, see the cross tests below).
  *
- * Proves: for `TwoChecks.go`, the compiler emits exactly two call-site
- * separators (one at statement level, one inside the `if` arm); the spend
- * succeeds when each check's preimage is built against ITS OWN separator's
- * scriptCode; and it fails when either preimage is built against the OTHER
- * call's scriptCode instead — i.e. the two checks are not accidentally
- * sharing or swapping their separator-relative scriptCode. Also covers the
- * untaken-arm path (`flag=false`): the first check alone still binds
- * correctly and the second call's separator is simply never executed.
+ * Proves: for `TwoChecks.go`, the compiler emits exactly three call-site
+ * separators (one at statement level, one in each `if` arm); the spend
+ * succeeds when each executed check's preimage is built against ITS OWN
+ * separator's scriptCode; and it fails when a preimage is built against
+ * another call's scriptCode instead — i.e. the checks are not accidentally
+ * sharing or swapping their separator-relative scriptCode, on either arm.
+ *
+ * GK-GAP-010: `pre2` is a public SigHashPreimage parameter, so it must reach
+ * checkPreimage on EVERY path. The `else` arm used to be `assert(true)`; it
+ * now checks `pre2` too, with its own (third) separator. The two-check shape
+ * this file exists for is unchanged on the `flag=true` path; on `flag=false`
+ * the first check now pairs with the ELSE arm's check instead of running
+ * alone.
  *
  * Does not prove: the `scriptLevelCodeSeparator=true` scheme (stateful
  * contracts using `_codePart`), where every method shares ONE separator at
@@ -59,7 +64,7 @@ class TwoChecks extends SmartContract {
     if (flag) {
       assert(checkPreimage(pre2));
     } else {
-      assert(true);
+      assert(checkPreimage(pre2));
     }
   }
 }
@@ -93,12 +98,13 @@ function preimageHexForSeparator(scriptHex: string, sepByteOffset: number): stri
 }
 
 describe('F-355: multiple checkPreimage calls in one method, run through @bsv/sdk Spend', () => {
-  it('compiles to exactly two call-site OP_CODESEPARATORs, in source order', () => {
+  it('compiles to exactly three call-site OP_CODESEPARATORs, in source order', () => {
     const c = contract();
     const indices = c.artifact.codeSeparatorIndices;
     expect(indices).toBeDefined();
-    expect(indices!.length).toBe(2);
+    expect(indices!.length).toBe(3);
     expect(indices![1]).toBeGreaterThan(indices![0]!);
+    expect(indices![2]).toBeGreaterThan(indices![1]!);
   });
 
   it('flag=true: accepts when each check is paired with its own scriptCode', () => {
@@ -131,21 +137,31 @@ describe('F-355: multiple checkPreimage calls in one method, run through @bsv/sd
     expect(r.success).toBe(false);
   });
 
-  it('flag=false: accepts on the first check alone (the if-arm, and its separator, never execute)', () => {
+  it("flag=false: accepts when the first check and the else arm's check use their own scriptCodes", () => {
     const c = contract();
-    const [sep1] = c.artifact.codeSeparatorIndices!;
+    const [sep1, , sep3] = c.artifact.codeSeparatorIndices!;
     const pre1 = preimageHexForSeparator(c.scriptHex, sep1!);
-    // pre2 is pushed (the method still takes 3 args) but never read on this path.
-    const r = c.execute('go', [pre1, false, '']);
+    const pre2 = preimageHexForSeparator(c.scriptHex, sep3!);
+    const r = c.execute('go', [pre1, false, pre2]);
     expect(r.error, r.error).toBeUndefined();
     expect(r.success).toBe(true);
   });
 
+  it("flag=false: rejects when the else arm's check is paired with the then arm's scriptCode", () => {
+    const c = contract();
+    const [sep1, sep2] = c.artifact.codeSeparatorIndices!;
+    const pre1 = preimageHexForSeparator(c.scriptHex, sep1!);
+    const pre2WrongSep = preimageHexForSeparator(c.scriptHex, sep2!); // should be sep3
+    const r = c.execute('go', [pre1, false, pre2WrongSep]);
+    expect(r.success).toBe(false);
+  });
+
   it("flag=false: rejects when the first check is paired with the second call's scriptCode", () => {
     const c = contract();
-    const [, sep2] = c.artifact.codeSeparatorIndices!;
+    const [, sep2, sep3] = c.artifact.codeSeparatorIndices!;
     const pre1WrongSep = preimageHexForSeparator(c.scriptHex, sep2!);
-    const r = c.execute('go', [pre1WrongSep, false, '']);
+    const pre2 = preimageHexForSeparator(c.scriptHex, sep3!);
+    const r = c.execute('go', [pre1WrongSep, false, pre2]);
     expect(r.success).toBe(false);
   });
 });

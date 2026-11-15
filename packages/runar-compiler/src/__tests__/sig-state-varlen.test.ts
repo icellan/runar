@@ -62,6 +62,24 @@ class VarLenStateWrite extends StatefulSmartContract {
 }`;
 }
 
+/**
+ * The same WRITE path, with the field rewritten from itself instead of from a
+ * parameter. A public `SigHashPreimage` parameter must reach `checkPreimage`
+ * on every path (GK-GAP-010), which the `ByteString` control could not mirror,
+ * so the `SigHashPreimage` rows compare this shape on both sides.
+ */
+function selfMutatingSource(propType: string): string {
+  return `import { StatefulSmartContract } from 'runar-lang';
+class VarLenStateWrite extends StatefulSmartContract {
+  tag: ${propType};
+  constructor(tag: ${propType}) { super(tag); this.tag = tag; }
+  public update() { this.tag = this.tag; }
+}`;
+}
+
+/** The write shape a variable-length type is compared on (see above). */
+const writeSourceFor = (t: string) => (t === 'SigHashPreimage' ? selfMutatingSource : mutatingSource);
+
 /** Terminal method reading the field — drives `computeUsesCodePart` (defect 2). */
 function terminalSource(propType: string): string {
   return `import { StatefulSmartContract, assert, len } from 'runar-lang';
@@ -122,7 +140,7 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
   describe('defect 3: the TypeScript tier lowers them (frontend parity)', () => {
     for (const t of VAR_LEN_TYPES) {
       it(`lowers a mutating method on a ${t} state field`, () => {
-        expect(() => compileToStack(mutatingSource(t))).not.toThrow();
+        expect(() => compileToStack(writeSourceFor(t)(t))).not.toThrow();
       });
 
       it(`lowers a terminal read of a ${t} state field`, () => {
@@ -130,7 +148,7 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       });
 
       it(`compiles a ${t} state field end-to-end to script hex`, () => {
-        expect(() => hexOf(mutatingSource(t), WRITE_FILE)).not.toThrow();
+        expect(() => hexOf(writeSourceFor(t)(t), WRITE_FILE)).not.toThrow();
       });
     }
   });
@@ -142,9 +160,8 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
   describe('defect 1: the continuation write matches the read', () => {
     for (const t of VAR_LEN_TYPES) {
       it(`a mutating method on a ${t} field lowers identically to ByteString`, () => {
-        expect(hexOf(mutatingSource(t), WRITE_FILE)).toBe(
-          hexOf(mutatingSource('ByteString'), WRITE_FILE),
-        );
+        const src = writeSourceFor(t);
+        expect(hexOf(src(t), WRITE_FILE)).toBe(hexOf(src('ByteString'), WRITE_FILE));
       });
     }
   });

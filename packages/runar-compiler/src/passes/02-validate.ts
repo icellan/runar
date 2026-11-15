@@ -48,6 +48,7 @@ export function validate(contract: ContractNode): ValidationResult {
   const callDepthExceeded = checkNoRecursion(ctx);
   checkReservedNames(ctx);
   checkRedeclarations(ctx);
+  checkDuplicateMethods(ctx);
   // N-180: the Rabin-provenance and sighash passes walk the private-method
   // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
   // refuses, so stop here.
@@ -140,6 +141,27 @@ function checkRedeclarations(ctx: ValidationContext): void {
   };
   for (const method of [ctx.contract.constructor, ...ctx.contract.methods]) {
     walk(method.body, new Set(method.params.map((p) => p.name)));
+  }
+}
+
+/**
+ * GK-BUG-015: a contract cannot declare two methods with the same name. Every
+ * name-keyed later pass (side-effect summary, `getPrivateMethod`, the affine
+ * `consumedParamSummary` fixpoint, stack lowering's private map) assumes one
+ * body per name; with two they disagree, and in several tiers the consumption
+ * fixpoint oscillates forever. Anchored on each repeat.
+ */
+function checkDuplicateMethods(ctx: ValidationContext): void {
+  const seen = new Set<string>();
+  for (const method of ctx.contract.methods) {
+    if (seen.has(method.name)) {
+      ctx.errors.push(makeDiagnostic(
+        `method '${method.name}' is already declared in this contract and cannot be re-declared`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
+    seen.add(method.name);
   }
 }
 

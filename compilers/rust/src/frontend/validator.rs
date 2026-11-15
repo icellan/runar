@@ -41,6 +41,7 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     let call_depth_exceeded = check_no_recursion(contract, &mut errors);
     check_reserved_names(contract, &mut errors);
     check_redeclarations(contract, &mut errors);
+    check_duplicate_methods(contract, &mut errors);
     // N-180: the Rabin-provenance and sighash passes walk the private-method
     // call graph; past MAX_CALL_DEPTH that walk is the very depth the limit
     // refuses, so stop here.
@@ -62,6 +63,25 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     }
 
     ValidationResult { errors, warnings }
+}
+
+/// GK-BUG-015: a contract cannot declare two methods with the same name.
+/// Every name-keyed later pass (side-effect summary, private-method lookup,
+/// the affine consumption fixpoint, stack lowering) assumes one body per
+/// name; with two they disagree. Anchored on each repeat.
+fn check_duplicate_methods(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for m in &contract.methods {
+        if !seen.insert(m.name.as_str()) {
+            errors.push(Diagnostic::error(
+                format!(
+                    "method '{}' is already declared in this contract and cannot be re-declared",
+                    m.name
+                ),
+                Some(m.source_location.clone()),
+            ));
+        }
+    }
 }
 
 /// N-509: a local cannot be re-declared in the same scope (spec/grammar.md,

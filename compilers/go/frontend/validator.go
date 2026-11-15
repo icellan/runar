@@ -55,6 +55,7 @@ func Validate(contract *ContractNode) *ValidationResult {
 	callDepthExceeded := ctx.checkNoRecursion()
 	ctx.checkReservedNames()
 	ctx.checkRedeclarations()
+	ctx.checkDuplicateMethods()
 	// N-180: the Rabin-provenance and sighash passes walk the private-method
 	// call graph; past MaxCallDepth that walk is the very depth the limit
 	// refuses, so stop here.
@@ -139,6 +140,22 @@ func (ctx *validationContext) checkRedeclarations() {
 			declared[p.Name] = true
 		}
 		walk(m.Body, declared)
+	}
+}
+
+// checkDuplicateMethods is GK-BUG-015: a contract cannot declare two methods
+// with the same name. Every name-keyed later pass (side-effect summary,
+// getPrivateMethod, the affine consumedParamSummary fixpoint, stack lowering's
+// private map) assumes one body per name; with two they disagree, and the
+// consumption fixpoint can oscillate forever. Anchored on each repeat.
+func (ctx *validationContext) checkDuplicateMethods() {
+	seen := map[string]bool{}
+	for _, m := range ctx.contract.Methods {
+		if seen[m.Name] {
+			l := m.SourceLocation
+			ctx.addErrorWithLoc(fmt.Sprintf("method '%s' is already declared in this contract and cannot be re-declared", m.Name), &l)
+		}
+		seen[m.Name] = true
 	}
 }
 

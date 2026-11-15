@@ -36,6 +36,7 @@ GO_CLI = REPO_ROOT / "compilers" / "go" / "runar-go"
 SIGHASH_SINGLE_FORKID = 0x43
 
 #: Stateless contract with a manual checkPreimage under a non-default mode.
+#: The check is unconditional: GK-GAP-010 requires it on every path.
 SIGHASH_SRC = """\
 import { SmartContract, SigHashPreimage, assert, checkPreimage } from "runar-lang";
 
@@ -46,8 +47,9 @@ class C extends SmartContract {
 
   /** @sighash SINGLE|FORKID */
   public m(flag: bigint, pre: SigHashPreimage): void {
+    assert(checkPreimage(pre));
     if (flag > 0n) {
-      assert(checkPreimage(pre));
+      assert(flag > 0n);
     } else {
       assert(flag <= 0n);
     }

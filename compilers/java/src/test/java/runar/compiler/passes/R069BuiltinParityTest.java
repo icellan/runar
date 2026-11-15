@@ -142,27 +142,36 @@ class R069BuiltinParityTest {
     // extractVersion(preimage)
     // ------------------------------------------------------------------
 
+    /**
+     * The preimage is a readonly PROPERTY, not a parameter: a public method's
+     * SigHashPreimage parameter must reach checkPreimage() on every path
+     * (GK-GAP-010), and checkPreimage's OP_PUSH_TX blob would drown the
+     * extractor bytes pinned here. The extractor bytes are unchanged; the
+     * prefix gains the property's constructor-slot {@code 00}.
+     */
     private static final String SRC_EXTRACT_VERSION = """
         import { SmartContract, assert, extractVersion } from 'runar-lang';
         import type { SigHashPreimage } from 'runar-lang';
 
         class Probe extends SmartContract {
           readonly seed: bigint;
+          readonly p: SigHashPreimage;
 
-          constructor(seed: bigint) {
-            super(seed);
+          constructor(seed: bigint, p: SigHashPreimage) {
+            super(seed, p);
             this.seed = seed;
+            this.p = p;
           }
 
-          public run(p: SigHashPreimage) {
+          public run() {
             assert(this.seed === this.seed);
-            assert(extractVersion(p) > 0n);
+            assert(extractVersion(this.p) > 0n);
           }
         }
         """;
 
     /** OP_4 OP_SPLIT OP_DROP OP_BIN2NUM OP_0 OP_GREATERTHAN. */
-    private static final String EXPECTED_EXTRACT_VERSION = "00009d547f7501007e8100a0";
+    private static final String EXPECTED_EXTRACT_VERSION = "00009d00547f7501007e8100a0";
 
     @Test
     void extractVersionLowersToTheLeadingFourByteSlice() throws Exception {

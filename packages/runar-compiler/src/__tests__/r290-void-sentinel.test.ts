@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
-import { typecheck } from '../passes/03-typecheck.js';
+import { validate } from '../passes/02-validate.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import type { ContractNode } from '../ir/index.js';
 
@@ -22,6 +22,12 @@ import type { ContractNode } from '../ir/index.js';
  * two same-named privates and the two disagree: the summary describes the
  * output-emitting `helper` (so `shouldInlinePrivate` is true) while the
  * lowerer inlines the empty one.
+ *
+ * GK-BUG-015: 02-validate now refuses a repeated method name, so a SOURCE with
+ * two `helper` bodies never reaches pass 4 through `compile()`. `lowerToANF` is
+ * a public export, so the backstop is still pinned on a hand-built duplicate:
+ * the source declares `helper` and `helper2` and the test renames the second
+ * on the parsed AST.
  */
 const EMPTY_INLINED_BODY = `
 class R290Void extends StatefulSmartContract {
@@ -40,7 +46,7 @@ class R290Void extends StatefulSmartContract {
   private helper(): void {
   }
 
-  private helper(): void {
+  private helper2(): void {
     this.addOutput(1000n, this.count);
   }
 }
@@ -80,13 +86,22 @@ function parseContract(source: string): ContractNode {
 }
 
 describe('R-290: the @void sentinel', () => {
-  it('reaches pass 4 — nothing upstream rejects the duplicate declaration', () => {
-    // If this ever starts failing, the refusal test below stops testing pass 4.
-    expect(typecheck(parseContract(EMPTY_INLINED_BODY)).errors).toHaveLength(0);
+  /** The duplicate the source cannot spell any more, built on the parsed AST. */
+  const handBuiltDuplicate = (): ContractNode => {
+    const contract = parseContract(EMPTY_INLINED_BODY);
+    const second = contract.methods.find((m) => m.name === 'helper2')!;
+    second.name = 'helper';
+    return contract;
+  };
+
+  it('validate refuses the hand-built duplicate (GK-BUG-015)', () => {
+    expect(validate(handBuiltDuplicate()).errors.map((e) => e.message)).toContain(
+      "method 'helper' is already declared in this contract and cannot be re-declared",
+    );
   });
 
   it('refuses an empty inlined body instead of emitting a sentinel', () => {
-    expect(() => lowerToANF(parseContract(EMPTY_INLINED_BODY))).toThrow(
+    expect(() => lowerToANF(handBuiltDuplicate())).toThrow(
       /private method 'helper' was inlined but produced no bindings/,
     );
   });

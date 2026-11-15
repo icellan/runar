@@ -53,7 +53,10 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.rb -> ParseRuby
 //   - .runar.zig -> ParseZig
 //   - .runar.java -> ParseJava
-//   - default -> Parse (existing TypeScript parser)
+//   - .runar.ts, or no file name -> Parse (the TypeScript parser)
+//   - anything else -> refused (GK-GAP-005)
+//
+// Suffixes match ignoring ASCII case.
 func ParseSource(source []byte, fileName string) *ParseResult {
 	result := parseSourceDispatch(source, fileName)
 	// N-115: `10 > i` is `i < 10`; every later pass sees the canonical form.
@@ -104,6 +107,12 @@ func parseSourceDispatch(source []byte, fileName string) *ParseResult {
 			return result
 		}
 	}
+	// GK-GAP-005: the nine suffixes match ignoring ASCII case; no file name
+	// means the TypeScript surface; any other suffix is refused rather than
+	// parsed as TypeScript.
+	if fileName != "" && !strings.HasSuffix(lower, ".runar.ts") {
+		return directiveGuardResult(UnsupportedExtensionMessage(fileName))
+	}
 	// TypeScript surface: honours @sighash / @embedAlways directly.
 	result := Parse(source, fileName)
 	// N-342: `const` locals cannot be reassigned (`.runar.ts` only).
@@ -122,6 +131,12 @@ var (
 	sighashDirectiveRE     = regexp.MustCompile(`@sighash`)
 	embedAlwaysDirectiveRE = regexp.MustCompile(`@embedAlways\b`)
 )
+
+// UnsupportedExtensionMessage is the diagnostic every tier gives a file name
+// whose suffix is none of the nine .runar.* formats (GK-GAP-005).
+func UnsupportedExtensionMessage(fileName string) string {
+	return "unsupported file extension: " + fileName + " (expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java)"
+}
 
 func directiveGuardResult(msg string) *ParseResult {
 	return &ParseResult{Errors: []Diagnostic{{Message: msg, Severity: SeverityError}}}

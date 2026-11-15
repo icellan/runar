@@ -36,14 +36,17 @@ use runar_compiler_rust::{compile_from_source_str_with_result, CompileOptions};
 
 const WRITE_FILE: &str = "VarLenStateWrite.runar.ts";
 
-/// Mutating method — drives the state-continuation WRITE path.
+/// Mutating method — drives the state-continuation WRITE path. The field is
+/// rewritten from itself: a public SigHashPreimage parameter must reach
+/// checkPreimage on every path (GK-GAP-010), which the ByteString control
+/// could not mirror.
 fn write_src(prop_type: &str) -> String {
     format!(
         "import {{ StatefulSmartContract }} from 'runar-lang';\n\
          class VarLenStateWrite extends StatefulSmartContract {{\n\
          \x20 tag: {t};\n\
          \x20 constructor(tag: {t}) {{ super(tag); this.tag = tag; }}\n\
-         \x20 public update(next: {t}): void {{ this.tag = next; }}\n\
+         \x20 public update(): void {{ this.tag = this.tag; }}\n\
          }}",
         t = prop_type
     )

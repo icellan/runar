@@ -2436,14 +2436,15 @@ function lowerCallExpr(
   //   matching use case where each successor intent UTXO has a unique
   //   tail (BSVM Mode 3 permissionless step-in).
   if (callee.kind === 'identifier' && callee.name === 'extractPrevOutputScript') {
+    // GK-GAP-013: typecheck refuses these shapes first, but `lowerToANF` is a
+    // public export (R-012), so refuse here too rather than emit an empty
+    // constant in place of the hash assertion.
     if (expr.args.length !== 2 && expr.args.length !== 3) {
-      return ctx.emit({ kind: 'load_const', value: '' });
+      throw new Error(`extractPrevOutputScript: expected 2 or 3 arguments, got ${expr.args.length}`);
     }
     const idxArg = expr.args[0]!;
     if (idxArg.kind !== 'bigint_literal') {
-      // typecheck has already emitted the diagnostic; emit a placeholder
-      // so lowering doesn't crash.
-      return ctx.emit({ kind: 'load_const', value: '' });
+      throw new Error('extractPrevOutputScript: inputIndex must be a bigint literal');
     }
     const idx = idxArg.value;
     const paramName = `_prevOutScript_${idx.toString()}`;
@@ -2459,8 +2460,7 @@ function lowerCallExpr(
     if (expr.args.length === 3) {
       const prefixLenArg = expr.args[2]!;
       if (prefixLenArg.kind !== 'bigint_literal') {
-        // typecheck has already emitted the diagnostic; emit a placeholder.
-        return ctx.emit({ kind: 'load_const', value: '' });
+        throw new Error('extractPrevOutputScript: prefixLen must be a bigint literal');
       }
       const zeroRef = ctx.emit({ kind: 'load_const', value: 0n });
       const prefixLenRef = ctx.emit({ kind: 'load_const', value: prefixLenArg.value });
@@ -2499,12 +2499,13 @@ function lowerCallExpr(
   // see the refusal in 03-typecheck.ts for the full reasoning and the backstop
   // below for why it is stated twice.
   if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
+    // GK-GAP-013: refuse, never emit an empty constant in place of the pin.
     if (expr.args.length !== 3) {
-      return ctx.emit({ kind: 'load_const', value: '' });
+      throw new Error(`requireOutputP2PKH: expected 3 arguments, got ${expr.args.length}`);
     }
     const idxArg = expr.args[0]!;
     if (idxArg.kind !== 'bigint_literal') {
-      return ctx.emit({ kind: 'load_const', value: '' });
+      throw new Error('requireOutputP2PKH: outputIndex must be a bigint literal');
     }
     const idx = idxArg.value;
     // W2 backstop. The user-facing refusal lives in `03-typecheck.ts`, where a

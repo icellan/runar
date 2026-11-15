@@ -101,7 +101,7 @@ test "F-230: CLI `compile` refuses a valid .runar.zig contract saved as contract
         .exited => |code| try std.testing.expect(code != 0),
         else => return error.CompilerAbnormalExit,
     }
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unsupported format") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unsupported file extension: ") != null);
     // `main.zig`'s `compile` subcommand catch block prints `error: {s}` with
     // `@errorName(err)` on top of `compileFromSource`'s own prose line, so
     // the error NAME (not just the prose) is in stderr too. Pinning this is

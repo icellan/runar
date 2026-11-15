@@ -39,7 +39,10 @@ import (
 	"testing"
 )
 
-// Mutating method — drives the state-continuation WRITE path.
+// Mutating method — drives the state-continuation WRITE path. The field is
+// rewritten from itself: a public SigHashPreimage parameter must reach
+// checkPreimage on every path (GK-GAP-010), which the ByteString control
+// could not mirror.
 func varLenWriteSource(propType string) string {
 	return fmt.Sprintf(`import { StatefulSmartContract } from 'runar-lang';
 
@@ -51,11 +54,11 @@ class VarLenStateWrite extends StatefulSmartContract {
     this.tag = tag;
   }
 
-  public update(next: %s) {
-    this.tag = next;
+  public update() {
+    this.tag = this.tag;
   }
 }
-`, propType, propType, propType)
+`, propType, propType)
 }
 
 // Terminal method reading the field — drives computeUsesCodePart.

@@ -304,12 +304,17 @@ In the UTXO model, a coin can only be spent once. If a contract's logic allows a
 
 ### 4.2 Affine Values
 
-The following types are treated as **affine** (may be used at most once):
+The following types are treated as **affine**:
 
-| Type | Reason |
+| Type | Rule |
 |---|---|
-| `SigHashPreimage` | Must be checked exactly once via `checkPreimage()` |
-| `Sig` | Should be verified, not duplicated |
+| `SigHashPreimage` | A `SigHashPreimage` parameter of a public method must be passed to `checkPreimage()` **exactly once**: at most once (affine), and on every path through the method (see 4.3) |
+| `Sig` | May be consumed at most once; should be verified, not duplicated |
+
+An unchecked preimage is a byte string the spender chose: every field an
+extractor (`extractAmount`, `extractOutputHash`, ...) reads from it is
+attacker-controlled. Requiring the check on every path closes that hole; the
+at-most-once half keeps a second `checkPreimage` from being emitted.
 
 ### 4.3 Affine Rules
 
@@ -330,24 +335,51 @@ The following types are treated as **affine** (may be used at most once):
     ──────────────────────────────────────
     OK: x consumed in both branches exactly once
 
-                    Conditional Partial
-    x : T_affine
-    if (cond) { use(x) } else { /* no use */ }
-    ─────────────────────────────────────────────
-    WARNING: x may not be consumed on all paths
+                    Preimage Checked On Every Path
+    p : SigHashPreimage, a parameter of a public method m
+    some path through m does not reach checkPreimage(p)
+    ─────────────────────────────────────────────────────
+    ERROR: public method 'm' must pass its SigHashPreimage
+           parameter 'p' to checkPreimage() on every path
 ```
+
+"Reaches `checkPreimage(p)`" is a must-analysis over the method body. `p` is
+checked when it is passed to `checkPreimage` directly, through a local alias
+(`const q = p; checkPreimage(q)`), or through a private method that itself
+checks that parameter on every path. A construct checks `p` only when every
+execution of it does:
+
+- an `if` checks `p` only if both arms do; an `if` without `else` checks nothing;
+- a ternary `c ? a : b` checks `p` only if both `a` and `b` do;
+- the right operand of `&&` / `||` checks nothing (it may be short-circuited);
+- a `for` loop body checks nothing (the bound may be zero);
+- a `return` ends its path: a private method checks `p` only if every
+  `return` in it (including one inside a loop or a nested `if`) and its
+  fall-through end are each reached after the check. An `if` arm that returns
+  drops out of the join after that `if`.
+
+The rule applies to every parameter of type `SigHashPreimage` on a public
+method, stateless or stateful. The implicit `txPreimage` of a
+`StatefulSmartContract` is not a parameter at this stage; the compiler injects
+its `checkPreimage`. A `Sig` that is never consumed is not an error.
 
 ### 4.4 Practical Impact
 
 ```typescript
 public unlock(sig: Sig, pubKey: PubKey, preimage: SigHashPreimage): void {
-    // preimage must be checked exactly once:
-    assert(this.checkPreimage(preimage));  // consumes preimage
+    // preimage must be checked exactly once, on every path:
+    assert(checkPreimage(preimage));  // consumes preimage
 
     // This would be an error:
-    // assert(this.checkPreimage(preimage));  // ERROR: preimage already consumed
+    // assert(checkPreimage(preimage));  // ERROR: preimage already consumed
 
     assert(checkSig(sig, pubKey));  // consumes sig
+}
+
+public read(preimage: SigHashPreimage): void {
+    // ERROR: public method 'read' must pass its SigHashPreimage parameter
+    // 'preimage' to checkPreimage() on every path
+    assert(extractAmount(preimage) > 0n);
 }
 ```
 

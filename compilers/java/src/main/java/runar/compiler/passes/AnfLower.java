@@ -2235,11 +2235,15 @@ public final class AnfLower {
             //   step-in).
             if (callee instanceof Identifier epoId
                 && "extractPrevOutputScript".equals(epoId.name())) {
+                // GK-GAP-013: typecheck refuses these shapes first; lowering is a
+                // public entry point (R-012), so refuse here too rather than emit
+                // an empty constant in place of the hash assertion.
                 if (e.args().size() != 2 && e.args().size() != 3) {
-                    return emit(makeLoadConstString(""));
+                    throw new IllegalStateException(
+                        "extractPrevOutputScript: expected 2 or 3 arguments, got " + e.args().size());
                 }
                 if (!(e.args().get(0) instanceof BigIntLiteral idxLit)) {
-                    return emit(makeLoadConstString(""));
+                    throw new IllegalStateException("extractPrevOutputScript: inputIndex must be a bigint literal");
                 }
                 long idx = idxLit.value().longValueExact();
                 String paramName = "_prevOutScript_" + idx;
@@ -2255,7 +2259,7 @@ public final class AnfLower {
                 String bytesToHashRef;
                 if (e.args().size() == 3) {
                     if (!(e.args().get(2) instanceof BigIntLiteral prefixLenLit)) {
-                        return emit(makeLoadConstString(""));
+                        throw new IllegalStateException("extractPrevOutputScript: prefixLen must be a bigint literal");
                     }
                     String zeroRef = emit(makeLoadConstInt(BigInteger.ZERO));
                     String prefixLenRef = emit(makeLoadConstInt(prefixLenLit.value()));
@@ -2286,11 +2290,13 @@ public final class AnfLower {
             // bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script).
             if (callee instanceof Identifier ropId
                 && "requireOutputP2PKH".equals(ropId.name())) {
+                // GK-GAP-013: refuse, never emit an empty constant in place of the pin.
                 if (e.args().size() != 3) {
-                    return emit(makeLoadConstString(""));
+                    throw new IllegalStateException(
+                        "requireOutputP2PKH: expected 3 arguments, got " + e.args().size());
                 }
                 if (!(e.args().get(0) instanceof BigIntLiteral idxLit)) {
-                    return emit(makeLoadConstString(""));
+                    throw new IllegalStateException("requireOutputP2PKH: outputIndex must be a bigint literal");
                 }
                 long idx = idxLit.value().longValueExact();
                 // W2 backstop. The user-facing refusal lives in the typechecker, where a

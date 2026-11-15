@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -25,9 +26,11 @@ import (
 // `--emit-ir` exited 0 with "@void" in the IR, `--hex` exited 1 with the
 // hex-decoder message.
 //
-// Nothing in parse, validate or typecheck rejects the duplicate declaration —
-// asserted below, so this test fails loudly rather than silently stopping
-// testing pass 4 if that ever changes.
+// GK-BUG-015: Validate now refuses a repeated method name, so a SOURCE with two
+// `helper` bodies never reaches pass 4 through the pipeline. LowerToANF is a
+// public entry point, so the backstop is still pinned — on a hand-built
+// duplicate: the source declares `helper` and `helper2`, and the test renames
+// the second on the parsed AST.
 const r290EmptyInlinedBody = `
 class R290Void extends StatefulSmartContract {
   count: bigint;
@@ -45,7 +48,7 @@ class R290Void extends StatefulSmartContract {
   private helper(): void {
   }
 
-  private helper(): void {
+  private helper2(): void {
     this.addOutput(1000n, this.count);
   }
 }
@@ -74,12 +77,39 @@ class R290Control extends StatefulSmartContract {
 }
 `
 
-func TestR290EmptyInlinedBodyIsRefusedNotSentinelled(t *testing.T) {
-	tcErrs, msg := r189Frontend(t, r290EmptyInlinedBody)
-	if len(tcErrs) > 0 {
-		t.Fatalf("passes 1-3 refused this contract, so pass 4 never saw it — the "+
-			"test no longer covers the sentinel: %s", strings.Join(tcErrs, "; "))
+func r290HandBuiltDuplicate(t *testing.T) *ContractNode {
+	t.Helper()
+	parsed := ParseSource([]byte(r290EmptyInlinedBody), "test.runar.ts")
+	if parsed.Contract == nil || len(parsed.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(parsed.ErrorStrings(), "; "))
 	}
+	for i := range parsed.Contract.Methods {
+		if parsed.Contract.Methods[i].Name == "helper2" {
+			parsed.Contract.Methods[i].Name = "helper"
+		}
+	}
+	return parsed.Contract
+}
+
+func TestR290HandBuiltDuplicateIsAValidateError(t *testing.T) {
+	val := Validate(r290HandBuiltDuplicate(t))
+	want := "method 'helper' is already declared in this contract and cannot be re-declared"
+	if !strings.Contains(strings.Join(val.ErrorStrings(), "\n"), want) {
+		t.Fatalf("validate did not refuse the duplicate: %v", val.ErrorStrings())
+	}
+}
+
+func TestR290EmptyInlinedBodyIsRefusedNotSentinelled(t *testing.T) {
+	contract := r290HandBuiltDuplicate(t)
+	msg := func() (msg string) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = fmt.Sprint(r)
+			}
+		}()
+		LowerToANF(contract)
+		return ""
+	}()
 	if msg == "" {
 		t.Fatal("the empty inlined body was accepted: ANF lowering produced a program")
 	}

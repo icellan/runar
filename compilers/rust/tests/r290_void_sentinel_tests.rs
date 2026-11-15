@@ -17,7 +17,18 @@
 //! lowerer inlines the empty one. Measured pre-fix on this tier's CLI:
 //! `--emit-ir` exited 0 with `@void` in the IR.
 
+//
+// GK-BUG-015: the validator now refuses a repeated method name, so a SOURCE
+// with two `helper` bodies never reaches pass 4 through the pipeline.
+// `lower_to_anf` is a public entry point, so the backstop is still pinned on a
+// hand-built duplicate: the source declares `helper` and `helper2` and the
+// test renames the second on the parsed AST.
+
 use runar_compiler_rust::compile_source_str_to_ir;
+use runar_compiler_rust::frontend::anf_lower::lower_to_anf;
+use runar_compiler_rust::frontend::ast::ContractNode;
+use runar_compiler_rust::frontend::parser::parse_source;
+use runar_compiler_rust::frontend::validator::validate;
 
 const EMPTY_INLINED_BODY: &str = r#"
 class R290Void extends StatefulSmartContract {
@@ -65,13 +76,40 @@ class R290Control extends StatefulSmartContract {
 }
 "#;
 
+fn hand_built_duplicate() -> ContractNode {
+    let parsed = parse_source(EMPTY_INLINED_BODY, Some("R290Void.runar.ts"));
+    assert!(parsed.errors.is_empty(), "parse errors: {:?}", parsed.errors);
+    let mut contract = parsed.contract.expect("contract");
+    for m in contract.methods.iter_mut() {
+        if m.name == "helper2" {
+            m.name = "helper".to_string();
+        }
+    }
+    contract
+}
+
+#[test]
+fn hand_built_duplicate_is_a_validate_error() {
+    let errs = validate(&hand_built_duplicate()).error_strings().join("\n");
+    assert!(
+        errs.contains("method 'helper' is already declared in this contract and cannot be re-declared"),
+        "validate did not refuse the duplicate: {errs}"
+    );
+}
+
 #[test]
 fn empty_inlined_body_is_refused_not_sentinelled() {
-    let err = compile_source_str_to_ir(EMPTY_INLINED_BODY, Some("R290Void.runar.ts"))
+    let contract = hand_built_duplicate();
+    let err = std::panic::catch_unwind(|| lower_to_anf(&contract))
         .expect_err("the empty inlined body was accepted: ANF lowering produced a program");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
     assert!(
-        err.contains("private method 'helper' was inlined but produced no bindings"),
-        "refusal does not name the method: {err}"
+        msg.contains("private method 'helper' was inlined but produced no bindings"),
+        "refusal does not name the method: {msg}"
     );
 }
 
