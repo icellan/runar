@@ -118,13 +118,23 @@ const DECODE_SRC = `import {
 
 export class W1Decode extends SmartContract {
   readonly tag: bigint;
-  constructor(tag: bigint) { super(tag); this.tag = tag; }
-  public ver(p: SigHashPreimage, n: bigint) { assert(extractVersion(p) === n); }
-  public seq(p: SigHashPreimage, n: bigint) { assert(extractSequence(p) === n); }
-  public lock(p: SigHashPreimage, n: bigint) { assert(extractLocktime(p) === n); }
-  public sht(p: SigHashPreimage, n: bigint) { assert(extractSigHashType(p) === n); }
+  readonly p: SigHashPreimage;
+  constructor(tag: bigint, p: SigHashPreimage) { super(tag, p); this.tag = tag; this.p = p; }
+  public ver(n: bigint) { assert(extractVersion(this.p) === n); }
+  public seq(n: bigint) { assert(extractSequence(this.p) === n); }
+  public lock(n: bigint) { assert(extractLocktime(this.p) === n); }
+  public sht(n: bigint) { assert(extractSigHashType(this.p) === n); }
 }
 `;
+
+/**
+ * The preimage is a readonly PROPERTY baked in per probe: a public method's
+ * SigHashPreimage parameter must reach checkPreimage() on every path
+ * (GK-GAP-010), which a synthetic preimage cannot pass. The extractors under
+ * test lower the same either way.
+ */
+const decodeContractFor = (p: string) =>
+  ScriptExecutionContract.fromSource(DECODE_SRC, { tag: 1n, p }, 'W1Decode.runar.ts');
 
 /** The four boundary values: last signed-positive, first signed-negative, the
  *  SDK non-final default, and the finality sentinel. */
@@ -134,8 +144,6 @@ type Field = 'ver' | 'seq' | 'lock' | 'sht';
 const FIELDS: Field[] = ['ver', 'seq', 'lock', 'sht'];
 
 describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
-  const contract = ScriptExecutionContract.fromSource(DECODE_SRC, { tag: 1n }, 'W1Decode.runar.ts');
-
   /** Build a preimage whose `field` carries `v` and whose other three fields
    *  carry a benign value, so only the field under test can move the verdict. */
   function preimageFor(field: Field, v: number): Uint8Array {
@@ -153,7 +161,7 @@ describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
 
       it(`${field}: ${label} decodes to ${v >>> 0}`, () => {
         const p = bytesToHex(preimageFor(field, v));
-        const r = contract.execute(field, [p, BigInt(v >>> 0)]);
+        const r = decodeContractFor(p).execute(field, [BigInt(v >>> 0)]);
         expect(r.error, r.error).toBeUndefined();
         expect(r.success).toBe(true);
       });
@@ -162,7 +170,7 @@ describe('W1 — the four 32-bit preimage fields decode UNSIGNED', () => {
       if (signed !== BigInt(v >>> 0)) {
         it(`${field}: ${label} does NOT decode to the sign-magnitude misread ${signed}`, () => {
           const p = bytesToHex(preimageFor(field, v));
-          const r = contract.execute(field, [p, signed]);
+          const r = decodeContractFor(p).execute(field, [signed]);
           expect(r.success).toBe(false);
         });
       }
