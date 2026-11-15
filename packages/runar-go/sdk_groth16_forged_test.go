@@ -29,14 +29,17 @@ package runar
 // valid. The script-VM replay step is what makes this an honest end-to-
 // end rejection test.
 //
-// The three forgery axes mirror the codegen-level test classification:
+// The four forgery axes mirror the codegen-level test classification:
 //
 //   - Off-curve proof.A      (defeats the G1 on-curve check)
 //   - Bad Miller-loop slope  (defeats the witness-assisted gradient check)
 //   - Inconsistent subgroup  (defeats the G2 prime-order subgroup check)
+//   - Bad residue witness    (defeats the final-exponentiation replacement,
+//                             GK-BUG-005: c·c⁻¹ == 1, s ∈ {0,1,2},
+//                             f·ω^s == c^λ)
 //
 // Together they cover every layer of the witness-assisted verifier's
-// soundness preamble.
+// soundness checks.
 
 import (
 	"math/big"
@@ -146,7 +149,16 @@ func buildForgedTestFixtureUncached() (*forgedTestFixture, error) {
 		GammaNegG2:       vk.GammaNegG2,
 		DeltaNegG2:       vk.DeltaNegG2,
 	}
-	var verifierOps []codegen.StackOp
+	// CallWithWitness pushes the owner's signature ON TOP of the witness
+	// (F-233); a deployed groth16-wa artifact consumes it with a leading
+	// <ownerPubKey> OP_CHECKSIGVERIFY. This fixture is the bare verifier and
+	// MockSigner's signature cannot be checked without a transaction
+	// context, so the leading OP_DROP stands in for that check (owner
+	// binding itself is tested in compiler/groth16_wa_replay_test.go).
+	// Without it the verifier read every witness slot one position off and
+	// rejected EVERY spend — honest included — so each forgery below
+	// "passed" for the wrong reason (TestGroth16WASDK_HonestProofAcceptedOnChain).
+	verifierOps := []codegen.StackOp{{Op: "opcode", Code: "OP_DROP"}}
 	codegen.EmitGroth16VerifierWitnessAssisted(func(op codegen.StackOp) {
 		verifierOps = append(verifierOps, op)
 	}, config)
@@ -266,6 +278,57 @@ func assertForgedSpendRejectedOnChain(
 	t.Logf("[%s] forged spend correctly rejected on-chain: %v", tamperName, execErr)
 }
 
+// replaySpendOnChain drives w through CallWithWitness exactly like
+// assertForgedSpendRejectedOnChain and returns the interpreter's verdict.
+func replaySpendOnChain(t *testing.T, fix *forgedTestFixture, w *bn254witness.Witness, label string) error {
+	t.Helper()
+	g := NewGroth16WAContract(fix.artifact)
+	g.SetCurrentUTXO(&UTXO{
+		Txid:        strings.Repeat("cc", 32),
+		OutputIndex: 0,
+		Satoshis:    1_000_000,
+		Script:      fix.lockingScript,
+	})
+	provider := NewAlwaysAckMockProvider("mocknet")
+	provider.SetFeeRate(1)
+	destScript := "76a914" + strings.Repeat("00", 20) + "88ac"
+	_, txData, err := g.CallWithWitness(provider, NewMockSigner("", ""), w, "", destScript)
+	if err != nil {
+		t.Fatalf("[%s] SDK CallWithWitness errored: %v", label, err)
+	}
+	unlockScript, err := bsvscript.NewFromHex(txData.Inputs[0].Script)
+	if err != nil {
+		t.Fatalf("[%s] parse unlocking hex: %v", label, err)
+	}
+	lockScript, err := bsvscript.NewFromHex(fix.lockingScript)
+	if err != nil {
+		t.Fatalf("[%s] parse locking hex: %v", label, err)
+	}
+	return interpreter.NewEngine().Execute(
+		interpreter.WithScripts(lockScript, unlockScript),
+		interpreter.WithAfterGenesis(),
+		interpreter.WithAfterChronicle(),
+		interpreter.WithForkID(),
+	)
+}
+
+// TestGroth16WASDK_HonestProofAcceptedOnChain is the positive control the
+// forgery tests below depend on: the UNTAMPERED witness, through the same
+// CallWithWitness path and the same interpreter replay, must be accepted.
+// Without it every "forged spend rejected" result is vacuous — a spend that
+// fails for an unrelated reason (a misaligned stack, say) looks exactly like
+// a caught forgery.
+func TestGroth16WASDK_HonestProofAcceptedOnChain(t *testing.T) {
+	fix := buildForgedTestFixture(t)
+	w, err := bn254witness.GenerateWitness(fix.vk, fix.proof, fix.publicInputs)
+	if err != nil {
+		t.Fatalf("GenerateWitness: %v", err)
+	}
+	if err := replaySpendOnChain(t, fix, w, "honest"); err != nil {
+		t.Fatalf("honest witness REJECTED through the SDK call path: %v — the forgery tests in this file prove nothing until this passes", err)
+	}
+}
+
 // -----------------------------------------------------------------------
 // Forgery #1: off-curve proof.A
 // -----------------------------------------------------------------------
@@ -365,4 +428,48 @@ func TestGroth16WASDK_ForgedProof_BadSubgroupGradient(t *testing.T) {
 	)
 
 	assertForgedSpendRejectedOnChain(t, fix, w, "bad subgroup gradient")
+}
+
+// -----------------------------------------------------------------------
+// Forgery #4: bad residue witness (the final-exponentiation replacement)
+// -----------------------------------------------------------------------
+
+// TestGroth16WASDK_ForgedProof_BadResidueWitness verifies the SDK call path
+// rejects a spend whose residue witness — c, c⁻¹, s with f·ω^s == c^λ, the
+// check that replaced the final exponentiation (GK-BUG-005) — has been
+// tampered, on every one of its three axes: c no longer the inverse of c⁻¹,
+// c and c⁻¹ replaced by another inverse pair (so only f·ω^s == c^λ can
+// catch it), and the scaling index moved to another value in {0, 1, 2}.
+func TestGroth16WASDK_ForgedProof_BadResidueWitness(t *testing.T) {
+	fix := buildForgedTestFixture(t)
+	honest := func() *bn254witness.Witness {
+		w, err := bn254witness.GenerateWitness(fix.vk, fix.proof, fix.publicInputs)
+		if err != nil {
+			t.Fatalf("GenerateWitness: %v", err)
+		}
+		return w
+	}
+	q := codegen.Bn254FieldPrime()
+	bump := func(v *big.Int) *big.Int {
+		return new(big.Int).Mod(new(big.Int).Add(v, big.NewInt(1)), q)
+	}
+
+	w := honest()
+	w.ResidueC[0] = bump(w.ResidueC[0])
+	assertForgedSpendRejectedOnChain(t, fix, w, "residue c not the inverse of c^-1")
+
+	w = honest()
+	var c, cInv bn254.E12
+	c.C0.B0.A0.SetBigInt(big.NewInt(2)) // c = 2 ∈ Fp ⊂ Fp12: 2^λ != f·ω^s
+	cInv.Inverse(&c)
+	for i := range w.ResidueC {
+		w.ResidueC[i], w.ResidueCInv[i] = big.NewInt(0), big.NewInt(0)
+	}
+	w.ResidueC[0] = big.NewInt(2)
+	cInv.C0.B0.A0.BigInt(w.ResidueCInv[0])
+	assertForgedSpendRejectedOnChain(t, fix, w, "residue c replaced by another inverse pair")
+
+	w = honest()
+	w.ResidueScaling = (w.ResidueScaling + 1) % 3
+	assertForgedSpendRejectedOnChain(t, fix, w, "residue scaling index moved")
 }

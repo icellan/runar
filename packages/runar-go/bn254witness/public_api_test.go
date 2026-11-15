@@ -121,17 +121,14 @@ func TestPublicAPI_SP1HappyPath_ExternalConsumer(t *testing.T) {
 
 	// Sanity-check the shape of the witness. Sizes are fixed by the Fp12
 	// layout and the number of pairs — they are not fixture-dependent.
-	if got := len(w.FinalExpFInv); got != 12 {
-		t.Errorf("FinalExpFInv len = %d, want 12", got)
+	if got := len(w.ResidueC); got != 12 {
+		t.Errorf("ResidueC len = %d, want 12", got)
 	}
-	if got := len(w.FinalExpA); got != 12 {
-		t.Errorf("FinalExpA len = %d, want 12", got)
+	if got := len(w.ResidueCInv); got != 12 {
+		t.Errorf("ResidueCInv len = %d, want 12", got)
 	}
-	if got := len(w.FinalExpB); got != 12 {
-		t.Errorf("FinalExpB len = %d, want 12", got)
-	}
-	if got := len(w.FinalExpC); got != 12 {
-		t.Errorf("FinalExpC len = %d, want 12", got)
+	if w.ResidueScaling < 0 || w.ResidueScaling > 2 {
+		t.Errorf("ResidueScaling = %d, want 0, 1 or 2", w.ResidueScaling)
 	}
 	if got := len(w.ProofB); got != 4 {
 		t.Errorf("ProofB len = %d, want 4 (x0, x1, y0, y1)", got)

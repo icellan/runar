@@ -28,9 +28,11 @@ import (
 //     OP_CHECKSIGVERIFY` opens the script). Without it a valid spend's
 //     witness, once public, could be replayed into a tx paying anyone.
 //   - No standard ABI-encoded method args — the "verify" method's unlock is
-//     a RAW witness bundle: gradients, final-exp witnesses, proof points,
-//     prepared inputs, all pushed in the order EmitGroth16VerifierWitnessAssisted
-//     consumes them. This does not fit the runar.CallOptions model.
+//     a RAW witness bundle: gradients, the residue witness (c, c^-1, s) that
+//     replaces the final exponentiation, public inputs, prepared inputs and
+//     proof points, all pushed in the order
+//     EmitGroth16VerifierWitnessAssistedWithMSM consumes them. This does not
+//     fit the runar.CallOptions model.
 //
 // This wrapper reuses RunarContract internally for deploy + UTXO tracking,
 // but intercepts the spend path: callers pass a `*bn254witness.Witness`
@@ -181,9 +183,11 @@ func (g *Groth16WAContract) Connect(provider Provider, signer Signer) {
 // transaction of their own.
 //
 // If the witness is valid for the baked-in VK the node accepts the
-// spend. Any tampering — flipping a proof byte, corrupting a gradient,
-// mangling a final-exp witness — causes an on-chain OP_VERIFY /
-// OP_EQUALVERIFY to fail and the node rejects the spend.
+// spend. Tampering that breaks the proof — flipping a proof byte,
+// corrupting a gradient, a residue witness that no longer satisfies
+// c^λ == f·ω^s — causes an on-chain OP_VERIFY / OP_EQUALVERIFY to fail and
+// the node rejects the spend. (The residue witness is not unique: c·κ with
+// κ^λ = 1 still verifies, so the unlocking bytes are malleable.)
 //
 // After a successful broadcast the contract's current UTXO is cleared
 // (the verifier is stateless: once verified there is nothing to

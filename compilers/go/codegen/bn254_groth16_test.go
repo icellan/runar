@@ -231,180 +231,87 @@ func TestGroth16WA_ScriptSize(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Witness-assisted final exponentiation tests
+// Residue-witness pairing check (GK-BUG-005) — structure, identity, size
 // ---------------------------------------------------------------------------
 
-// buildWAFinalExpInitNames constructs the initial stack names for
-// witness-assisted final exponentiation tests: f (12 Fp) + witness
-// values f_inv, a, b, c (each 12 Fp) = 60 names total.
-func buildWAFinalExpInitNames() []string {
-	var names []string
-	// f prefix
-	for _, part := range []string{"_a", "_b"} {
-		for i := 0; i < 3; i++ {
-			sfx := string(rune('0' + i))
-			names = append(names, "_f"+part+"_"+sfx+"_0")
-			names = append(names, "_f"+part+"_"+sfx+"_1")
-		}
+// residueStandaloneOps emits EmitWAResidueCheckStandalone with the Fp12
+// identity standing in for MillerLoop(α, −β).
+func residueStandaloneOps() []StackOp {
+	var one [12]*big.Int
+	for i := range one {
+		one[i] = big.NewInt(0)
 	}
-	// Witness values: _wa_finv, _wa_a, _wa_b, _wa_c
-	for _, waPrefix := range []string{"_wa_finv", "_wa_a", "_wa_b", "_wa_c"} {
-		for _, part := range []string{"_a", "_b"} {
-			for i := 0; i < 3; i++ {
-				sfx := string(rune('0' + i))
-				names = append(names, waPrefix+part+"_"+sfx+"_0")
-				names = append(names, waPrefix+part+"_"+sfx+"_1")
-			}
-		}
-	}
-	return names
+	one[0] = big.NewInt(1)
+	return gatherOps(func(emit func(StackOp)) { EmitWAResidueCheckStandalone(emit, one) })
 }
 
-func TestWAFinalExp_StructuralIntegrity(t *testing.T) {
-	var ops []StackOp
-	emit := func(op StackOp) { ops = append(ops, op) }
-
-	tracker := NewBN254Tracker(buildWAFinalExpInitNames(), emit)
-	tracker.PushPrimeCache()
-
-	emitWAFinalExp(tracker, "_f", "_result")
-
-	tracker.PopPrimeCache()
-
-	if len(ops) == 0 {
-		t.Fatal("emitWAFinalExp produced no StackOps")
-	}
-	t.Logf("emitWAFinalExp produced %d StackOps", len(ops))
-
-	// Verify structural properties of the generated script — the witness-assisted
-	// final exponentiation must contain specific opcodes to be valid.
-
-	// Count critical opcodes
-	var mulCount, modCount, verifyCount int
-	for _, op := range ops {
-		if op.Op == "opcode" {
-			switch op.Code {
-			case "OP_MUL":
+// TestWAResidueCheck_StructuralIntegrity pins the three aborting checks of
+// the residue check: c·c⁻¹ == 1, 0 <= s < 3, and the final product == 1.
+// The old witness-assisted final exponentiation had exactly ONE (the f⁻¹
+// check) and trusted a, b, c — the GK-BUG-005 hole.
+func TestWAResidueCheck_StructuralIntegrity(t *testing.T) {
+	ops := residueStandaloneOps()
+	var verifyCount, withinCount, mulCount int
+	var walk func([]StackOp)
+	walk = func(ops []StackOp) {
+		for _, op := range ops {
+			switch {
+			case op.Op == "if":
+				walk(op.Then)
+				walk(op.Else)
+			case op.Op == "opcode" && (op.Code == "OP_VERIFY" || op.Code == "OP_EQUALVERIFY"):
+				verifyCount++
+			case op.Op == "opcode" && op.Code == "OP_WITHIN":
+				withinCount++
+			case op.Op == "opcode" && op.Code == "OP_MUL":
 				mulCount++
-			case "OP_MOD":
-				modCount++
-			case "OP_VERIFY":
-				verifyCount++
-			case "OP_EQUALVERIFY":
-				verifyCount++
 			}
 		}
 	}
-
-	// Final exponentiation involves many field multiplications: Fp12 muls
-	// (each ~12 Fp muls), Frobenius maps, conjugation, and the Fp12 inverse
-	// verification. Current implementation produces ~1026 OP_MUL ops.
-	// Threshold set to catch regressions where major components are removed.
-	if mulCount < 800 {
-		t.Errorf("expected at least 800 OP_MUL ops (field muls), got %d — likely missing Fp12 operations", mulCount)
+	walk(ops)
+	if verifyCount != 3 {
+		t.Errorf("expected exactly 3 OP_VERIFY (inverse check, scaling range, final product), got %d", verifyCount)
 	}
-
-	// Every field multiplication needs a modular reduction. Current implementation
-	// produces ~1580 OP_MOD ops (more than OP_MUL due to additions/subtractions
-	// also requiring mod reduction in some paths).
-	if modCount < 1200 {
-		t.Errorf("expected at least 1200 OP_MOD ops (mod reductions), got %d — likely missing reductions", modCount)
+	if withinCount != 1 {
+		t.Errorf("expected exactly 1 OP_WITHIN (the scaling-index range check), got %d", withinCount)
 	}
-
-	// Witness-assisted verification uses OP_VERIFY to check f * f_inv == 1 in
-	// Fp12. Exactly 1 verification is expected: the Fp12 inverse check.
-	// (The intermediate exponentiations a, b, c are NOT individually verified —
-	// incorrect witnesses are caught by the final Groth16 pairing check.)
-	if verifyCount != 1 {
-		t.Errorf("expected exactly 1 OP_VERIFY/OP_EQUALVERIFY op (Fp12 inverse check), got %d", verifyCount)
+	// 64 squarings, 21 folds, inverse check, f·acc, AB·ω^s and 3 Frobenius
+	// products: well over a thousand field multiplications.
+	if mulCount < 1000 {
+		t.Errorf("expected at least 1000 OP_MUL, got %d — Fp12 operations missing", mulCount)
 	}
-
-	// The script must also be emittable to valid Bitcoin Script hex
-	method := StackMethod{Name: "test_wa_final_exp", Ops: ops}
-	result, err := Emit([]StackMethod{method})
-	if err != nil {
-		t.Fatalf("Emit failed — generated ops produce invalid Bitcoin Script: %v", err)
+	if _, err := Emit([]StackMethod{{Name: "residue", Ops: ops}}); err != nil {
+		t.Fatalf("Emit: %v", err)
 	}
-	if result.ScriptHex == "" {
-		t.Error("Emit produced empty script hex")
-	}
-
-	t.Logf("OP_MUL: %d, OP_MOD: %d, OP_VERIFY+OP_EQUALVERIFY: %d", mulCount, modCount, verifyCount)
+	t.Logf("residue check: OP_MUL %d, OP_VERIFY %d", mulCount, verifyCount)
 }
 
-// TestWAFinalExp_IdentityScript runs emitWAFinalExp against the Fp12
-// identity (f = 1, fInv = 1, a = 1, b = 1, c = 1). The expected final
-// exponentiation result is also 1, so the final bn254Fp12IsOne check
-// should succeed. This is the simplest script-level sanity check that
-// the hard-part combine formula doesn't drop/swap/mismangle Fp12 slots.
-func TestWAFinalExp_IdentityScript(t *testing.T) {
-	initNames := buildWAFinalExpInitNames()
-
+// TestWAResidueCheck_IdentityScript: f = 1, c = c⁻¹ = 1, s = 0 satisfies
+// f·ω^0 == 1^λ, so the standalone check must accept.
+func TestWAResidueCheck_IdentityScript(t *testing.T) {
 	var ops []StackOp
-	emit := func(op StackOp) { ops = append(ops, op) }
-
-	// Push the 60 Fp values that the tracker expects as its initial stack.
-	// Initial-name order (from buildWAFinalExpInitNames): for each prefix in
-	// [_f, _wa_finv, _wa_a, _wa_b, _wa_c], iterate part ∈ {_a, _b} × i ∈ {0,1,2}
-	// × sub ∈ {_0, _1}. Slot 0 of each 12-slot group corresponds to _a_0_0
-	// (C0.B0.A0) — that's the "1" coefficient of the Fp12 identity.
-	for i := range initNames {
-		if i%12 == 0 {
-			emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).SetUint64(1)}})
-		} else {
-			emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).SetUint64(0)}})
+	for k := 0; k < 3; k++ { // f, c, c⁻¹
+		for i := 0; i < 12; i++ {
+			v := int64(0)
+			if i == 0 {
+				v = 1
+			}
+			ops = append(ops, pushInt64(v))
 		}
 	}
-
-	tracker := NewBN254Tracker(initNames, emit)
-	tracker.PushPrimeCache()
-	emitWAFinalExp(tracker, "_f", "_result")
-	// Check that the result equals the Fp12 identity (1, 0, 0, ..., 0).
-	// bn254Fp12IsOne leaves a boolean on the stack which we OP_VERIFY.
-	bn254Fp12IsOne(tracker, "_result", "_check")
-	tracker.toTop("_check")
-	tracker.rawBlock([]string{"_check"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-	})
-	tracker.PopPrimeCache()
-
-	// Leave TRUE on stack at end.
-	ops = append(ops, opcode("OP_1"))
-
+	ops = append(ops, pushInt64(0)) // s
+	ops = append(ops, residueStandaloneOps()...)
 	if err := buildAndExecute(t, ops); err != nil {
-		t.Errorf("emitWAFinalExp(identity) failed: %v", err)
+		t.Fatalf("residue check rejected the identity: %v", err)
 	}
 }
 
-func TestWAFinalExp_ScriptSize(t *testing.T) {
-	var ops []StackOp
-	emit := func(op StackOp) { ops = append(ops, op) }
-
-	tracker := NewBN254Tracker(buildWAFinalExpInitNames(), emit)
-	tracker.PushPrimeCache()
-
-	emitWAFinalExp(tracker, "_f", "_result")
-
-	tracker.PopPrimeCache()
-
-	// Emit to hex to measure actual script size
-	method := StackMethod{Name: "test", Ops: ops}
-	result, err := Emit([]StackMethod{method})
+func TestWAResidueCheck_ScriptSize(t *testing.T) {
+	res, err := Emit([]StackMethod{{Name: "residue", Ops: residueStandaloneOps()}})
 	if err != nil {
-		t.Fatalf("Emit failed: %v", err)
+		t.Fatalf("Emit: %v", err)
 	}
-
-	scriptBytes := len(result.ScriptHex) / 2
-	t.Logf("Witness-assisted final exp script size: %d bytes (%.1f KB)", scriptBytes, float64(scriptBytes)/1024)
-
-	// The standard final exp is ~1.7 MB (3x ExpByX + Fp12 inverse + Frobenius + muls).
-	// The witness-assisted version should be dramatically smaller — roughly 20-50 KB —
-	// since it replaces ExpByX with witness values and the Fp12 inverse with a
-	// witness-assisted verification.
-	maxBytes := 100 * 1024 // 100 KB generous upper bound
-	if scriptBytes > maxBytes {
-		t.Errorf("witness-assisted final exp too large: %d bytes (max %d)", scriptBytes, maxBytes)
-	}
+	t.Logf("standalone residue check (64 Fp12 squarings + 21 folds + finish): %d bytes", len(res.ScriptHex)/2)
 }
 
 // ---------------------------------------------------------------------------

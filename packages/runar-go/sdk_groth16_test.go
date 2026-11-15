@@ -8,6 +8,7 @@ import (
 	sdkscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 
+	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/packages/runar-go/bn254witness"
 )
 
@@ -60,13 +61,13 @@ func buildFakeWitness() *bn254witness.Witness {
 	}
 	// Miller gradients: one loop iteration worth = 6 values.
 	w.MillerGradients = []*big.Int{mk(1), mk(2), mk(3), mk(4), mk(5), mk(6)}
-	// Final exp witnesses: 4 × 12 Fp values.
+	// Residue witness (GK-BUG-005): c, c^-1 (12 Fp values each) and the
+	// scaling index s.
 	for i := 0; i < 12; i++ {
-		w.FinalExpFInv[i] = mk(int64(i + 100))
-		w.FinalExpA[i] = mk(int64(i + 200))
-		w.FinalExpB[i] = mk(int64(i + 300))
-		w.FinalExpC[i] = mk(int64(i + 400))
+		w.ResidueC[i] = mk(int64(i + 100))
+		w.ResidueCInv[i] = mk(int64(i + 200))
 	}
+	w.ResidueScaling = 2
 	w.PreparedInputs = [2]*big.Int{mk(11), mk(22)}
 	w.ProofA = [2]*big.Int{mk(1001), mk(1002)}
 	w.ProofB = [4]*big.Int{mk(2001), mk(2002), mk(2003), mk(2004)}
@@ -137,17 +138,53 @@ func TestGroth16WASDK_SerializeWitnessToUnlock_NonEmpty(t *testing.T) {
 	if hex == "" {
 		t.Fatalf("serializeWitnessToUnlock returned empty string")
 	}
-	// Each of the 1 (Q) + 6 (gradients) + 48 (final exp) + 2 (prepared) +
-	// 8 (proof) = 65 values is pushed. Small values 1..16 encode as a
-	// single byte (OP_1..OP_16). Larger values encode as pushdata
-	// opcode + payload. Just sanity-check the length is in a sensible
-	// range (at least 65 bytes, at most ~200 bytes for this fake input).
+	// Each of the 1 (Q) + 6 (gradients) + 25 (residue c, c^-1, s) +
+	// 2 (prepared) + 8 (proof) = 42 values is pushed. Small values 1..16
+	// encode as a single byte (OP_1..OP_16). Larger values encode as
+	// pushdata opcode + payload. Just sanity-check the length is in a
+	// sensible range.
 	byteLen := len(hex) / 2
-	if byteLen < 65 {
+	if byteLen < 42 {
 		t.Errorf("serialized unlock too short: %d bytes", byteLen)
 	}
 	if byteLen > 400 {
 		t.Errorf("serialized unlock suspiciously long: %d bytes", byteLen)
+	}
+}
+
+// TestGroth16WASDK_SerializeWitnessToUnlock_ResidueLayout pins the unlock's
+// push ORDER for the residue-witness layout (GK-BUG-005) against a sequence
+// written out here field by field, not derived from ToStackOps: q, Miller
+// gradients, c (12), c^-1 (12), s, prepared_inputs, proof A, B, C. The
+// verifier's initNames read the stack in exactly this order; a reordering
+// would make every honest spend fail.
+func TestGroth16WASDK_SerializeWitnessToUnlock_ResidueLayout(t *testing.T) {
+	w := buildFakeWitness()
+	var want []*big.Int
+	want = append(want, w.Q)
+	want = append(want, w.MillerGradients...)
+	want = append(want, w.ResidueC[:]...)
+	want = append(want, w.ResidueCInv[:]...)
+	want = append(want, big.NewInt(int64(w.ResidueScaling)))
+	want = append(want, w.PreparedInputs[:]...)
+	want = append(want, w.ProofA[:]...)
+	want = append(want, w.ProofB[:]...)
+	want = append(want, w.ProofC[:]...)
+	var sb strings.Builder
+	for _, v := range want {
+		h, _ := codegen.EncodePushBigInt(v)
+		sb.WriteString(h)
+	}
+	got, err := serializeWitnessToUnlock(w)
+	if err != nil {
+		t.Fatalf("serializeWitnessToUnlock: %v", err)
+	}
+	if got != sb.String() {
+		t.Fatalf("unlock push order changed:\n got  %s\n want %s", got, sb.String())
+	}
+	// s = 2 is the single byte OP_2 (0x52), right after c^-1's last push.
+	if !strings.Contains(got, "52") {
+		t.Fatalf("scaling index push OP_2 missing from %s", got)
 	}
 }
 

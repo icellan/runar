@@ -61,8 +61,9 @@ func toAffineG1(p [2]*big.Int) (affineG1, error) {
 //     for i from msbIdx-1 down to 0.
 //   - fAfterLoop: the Fp12 accumulator after the main loop AND the BN254
 //     Frobenius corrections (Q1 = pi(Q), Q2 = -pi^2(Q)) for all 3 pairs.
-//     This is the value the verifier's _f holds when emitWAFinalExp is called
-//     (before multiplication with the precomputed e(alpha, beta)).
+//     This is the pairing part of the verifier's _f when the Miller loop
+//     ends, before the precomputed e(alpha, beta) multiplication (the
+//     script's _f additionally carries the residue witness's c^-(6x+2)).
 func tripleMillerLoopWithGradients(
 	p1Big [2]*big.Int, q1Big [4]*big.Int,
 	p2Big [2]*big.Int, q2Big [4]*big.Int,
