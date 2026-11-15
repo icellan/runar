@@ -11,14 +11,22 @@ no other validated input needed.
 The carve-out exists for one thing only: the OP_PUSH_TX covenant check, whose
 ``OP_CHECKSIGVERIFY`` verifies against a fixed public key (compressed G, or the
 Any-S C=1 key) pushed immediately before it. bsv-sdk recomputes a different
-sighash than runar-py signs (pre-existing; see the strict xfail in
+sighash than runar-py signs (see the strict xfail in
 ``test_g1_raw_outputs_spend.py``), so those inputs cannot be validated here.
+The cause is an upstream bsv-sdk defect, pinned by the R2-GAP008 tests at the
+end of this module.
 
 Proves: a wrong signature at a CHECKSIGVERIFY against any other key is a
 rejection, alone or next to a valid input; a covenant-shaped failure is still
 recorded as unvalidatable next to a validated input; and a transaction whose
 every known input is unvalidatable is rejected as validating nothing.
-Does not prove: why runar-py's preimage differs from bsv-sdk's (open).
+R2-GAP008 pins prove: bsv-sdk's Spend sighashes a scriptCode whose OP_RETURN
+was re-encoded as a push (rejecting a signature over the real bytes, on every
+VM path available); and for a real Counter.inc call runar-py's preimage equals
+bsv-sdk's in every field but that one byte, with runar-py's scriptCode being
+the locking script's real bytes after OP_CODESEPARATOR.
+Does not prove: that a node accepts runar-py's preimage (that is the regtest
+integration suite's job), or anything about the other six SDKs.
 """
 
 import pytest
@@ -111,3 +119,170 @@ def test_a_tx_whose_every_known_input_is_unvalidatable_is_rejected():
     _seed(p, 'b3' * 32, 10_000, _checksigverify_script(ANYS_C1_PK))
     with pytest.raises(BroadcastRejected, match='no input was validated'):
         p.broadcast(_tx([('b3' * 32, _push(WRONG_SIG))], [(9_000, ANYONE_CAN_SPEND)]))
+
+
+# --- R2-GAP008: root cause of the incompatibility the carve-out tolerates ------
+#
+# bsv-sdk (2.4.0, the latest release) parses a top-level OP_RETURN as ONE chunk
+# whose ``data`` is every byte after it, and ``Script.from_chunks`` re-encodes
+# any chunk that has ``data`` as a data PUSH, dropping the 0x6a opcode.
+# ``Spend.subscript_after_code_separator`` builds the BIP-143 scriptCode with
+# ``from_chunks``, so for a script carrying ``OP_RETURN <state>`` (every
+# stateful Rúnar contract) bsv-sdk sighashes ``... <len> <state>`` instead of
+# the locking script's real bytes ``... 6a <state>``. The node, and runar-py,
+# use the real bytes. These two tests pin that, and fail once bsv-sdk is fixed:
+# then delete the strict xfail in test_g1_raw_outputs_spend.py, the
+# carve-out in runar/sdk/provider.py, and these pins.
+
+COUNTER_SRC = '''from runar import StatefulSmartContract, Bigint, public
+
+
+class Counter(StatefulSmartContract):
+    count: Bigint
+
+    def __init__(self, count: Bigint):
+        super().__init__(count)
+        self.count = count
+
+    @public
+    def inc(self):
+        self.count = self.count + 1
+'''
+
+
+def test_bsv_sdk_spend_sighashes_a_reencoded_script_code_after_op_return():
+    """Upstream defect, no Rúnar code involved: ``<pk> OP_CHECKSIG OP_RETURN <8 bytes>``.
+
+    A signature over the TRUE scriptCode (the raw locking-script bytes) is
+    rejected; one over the ``from_chunks``-re-encoded scriptCode is accepted,
+    under every bsv-sdk VM path available here.
+    """
+    import importlib
+
+    from bsv.constants import SIGHASH
+    from bsv.keys import PrivateKey
+    from bsv.native import NATIVE_AVAILABLE
+    from bsv.script.script import Script
+    from bsv.transaction_input import TransactionInput
+    from bsv.transaction_output import TransactionOutput
+    from bsv.transaction_preimage import tx_preimage
+
+    spend_mod = importlib.import_module('bsv.script.spend')
+    key = PrivateKey(7)
+    pk = key.public_key().serialize()
+    state = bytes.fromhex('0500000000000000')
+    raw = bytes([len(pk)]) + pk + b'\xac' + b'\x6a' + state
+
+    reencoded = Script.from_chunks(Script(raw).chunks).serialize()
+    # The opcode byte 0x6a is replaced by a push length (8): same size, one byte off.
+    assert reencoded == raw[:-len(state) - 1] + bytes([len(state)]) + state
+
+    src_txid = 'aa' * 32
+    outputs = [TransactionOutput(locking_script=Script('51'), satoshis=900)]
+
+    def sig_over(script_code: bytes) -> bytes:
+        inp = TransactionInput(source_txid=src_txid, source_output_index=0,
+                               sequence=0xFFFFFFFF, sighash=SIGHASH.ALL_FORKID)
+        inp.locking_script = Script(script_code)
+        inp.satoshis = 1000
+        return key.sign(tx_preimage(0, [inp], outputs, 1, 0)) + bytes([SIGHASH.ALL_FORKID])
+
+    def spend(sig: bytes):
+        return spend_mod.Spend({
+            'sourceTXID': src_txid, 'sourceOutputIndex': 0, 'sourceSatoshis': 1000,
+            'lockingScript': Script(raw), 'transactionVersion': 1, 'otherInputs': [],
+            'outputs': outputs, 'inputIndex': 0,
+            'unlockingScript': Script(bytes([len(sig)]) + sig),
+            'inputSequence': 0xFFFFFFFF, 'lockTime': 0,
+        })
+
+    true_sig, reencoded_sig = sig_over(raw), sig_over(reencoded)
+    vms = [False, True] if NATIVE_AVAILABLE else [False]
+    for native in vms:
+        original = spend_mod._USE_NATIVE_VM
+        spend_mod._USE_NATIVE_VM = native
+        try:
+            with pytest.raises(RuntimeError, match='OP_CHECKSIG failed to verify the signature'):
+                spend(true_sig).validate()
+            assert spend(reencoded_sig).validate() is True
+        finally:
+            spend_mod._USE_NATIVE_VM = original
+
+
+def test_runar_py_covenant_preimage_differs_from_bsv_sdk_only_at_the_op_return_byte(monkeypatch):
+    """The real Counter.inc call: runar-py's OP_PUSH_TX preimage and the one
+    bsv-sdk's Spend recomputes for the same input agree on every BIP-143 field
+    except ONE byte of scriptCode, the OP_RETURN before the state. runar-py's
+    scriptCode is the locking script's real bytes after OP_CODESEPARATOR (what
+    the node signs); bsv-sdk's has the state's push length there instead.
+    """
+    import importlib
+    import json
+
+    from runar_compiler import compiler
+
+    import runar.sdk.contract as contract_mod
+    from runar.sdk.contract import RunarContract
+    from runar.sdk.deployment import build_p2pkh_script
+    from runar.sdk.local_signer import LocalSigner
+    from runar.sdk.types import DeployOptions, RunarArtifact
+
+    result = compiler.compile_from_source_str_with_result(COUNTER_SRC, 'Counter.runar.py')
+    assert result.artifact is not None, [d.message for d in result.diagnostics]
+    artifact = RunarArtifact.from_dict(json.loads(compiler.artifact_to_json(result.artifact)))
+
+    signer = LocalSigner('00' * 31 + '03')
+    p = MockProvider()
+    p.add_utxo(signer.get_address(), Utxo(
+        txid='cc' * 32, output_index=0, satoshis=500_000,
+        script=build_p2pkh_script(signer.get_public_key()),
+    ))
+    c = RunarContract(artifact, [5])
+    c.deploy(p, signer, DeployOptions(satoshis=1_000))
+    contract_script = bytes.fromhex(c._current_utxo.script)
+
+    ours: list[tuple[bytes, int]] = []
+    real_compute = contract_mod.compute_op_push_tx_preimage
+
+    def capture_ours(tx, idx, subscript, sats, code_sep_idx=-1, *rest):
+        pre = real_compute(tx, idx, subscript, sats, code_sep_idx, *rest)
+        ours.append((bytes.fromhex(pre), code_sep_idx))
+        return pre
+
+    spend_mod = importlib.import_module('bsv.script.spend')
+    theirs: list[bytes] = []
+    real_tx_preimage = spend_mod.tx_preimage
+
+    def capture_theirs(*args):
+        pre = bytes(real_tx_preimage(*args))
+        theirs.append(pre)
+        return pre
+
+    monkeypatch.setattr(contract_mod, 'compute_op_push_tx_preimage', capture_ours)
+    monkeypatch.setattr(spend_mod, 'tx_preimage', capture_theirs)
+    # Only the pure-Python VM exposes the preimage it computes.
+    monkeypatch.setattr(spend_mod, '_USE_NATIVE_VM', False)
+
+    c.call('inc', [], p, signer)
+    assert p.last_validation_report['unvalidatable'] == 1, p.last_validation_report
+
+    final, code_sep_idx = ours[-1]
+    # bsv-sdk's preimage for the SAME input: same outpoint (bytes 68..104).
+    same_input = [t for t in theirs if t[68:104] == final[68:104]]
+    assert len(same_input) == 1, f'{len(theirs)} bsv-sdk preimages, {len(same_input)} for the covenant input'
+    theirs_final = same_input[0]
+
+    # runar-py's scriptCode is exactly the node's: the real bytes after OP_CODESEPARATOR.
+    script_code = contract_script[code_sep_idx + 1:]
+    assert code_sep_idx >= 0
+    assert final[104:104 + 3] == b'\xfd' + len(script_code).to_bytes(2, 'little')
+    assert final[107:107 + len(script_code)] == script_code
+
+    assert len(theirs_final) == len(final)
+    diff = [i for i in range(len(final)) if final[i] != theirs_final[i]]
+    assert len(diff) == 1, f'expected one differing byte, got {len(diff)} at {diff[:8]}'
+    i = diff[0]
+    state_len = (len(final) - 52) - (i + 1)  # 52 = amount..sighashType trailer
+    assert final[i] == 0x6A
+    assert theirs_final[i] == state_len
+    assert contract_script.endswith(b'\x6a' + final[i + 1:len(final) - 52])
