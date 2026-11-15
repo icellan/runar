@@ -205,17 +205,18 @@ describe('debug source mapping is locking-indexed (GK-BUG-014)', () => {
   const LOCKING = '5253935587';
   const SOURCE = ['L1 push two', 'L2 push three', 'L3 add', 'L4 push five', 'L5 equal'].join('\n');
 
-  function run(input: string, extra: string[] = []): string {
+  function run(input: string, extra: string[] = [], locking = LOCKING, source = SOURCE): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runar-debug-map-'));
-    fs.writeFileSync(path.join(dir, 'c.ts'), SOURCE);
+    fs.writeFileSync(path.join(dir, 'c.ts'), source);
     const artifact = path.join(dir, 'a.json');
+    const n = source.split('\n').length;
     fs.writeFileSync(artifact, JSON.stringify({
       contractName: 'T',
-      script: LOCKING,
+      script: locking,
       asm: '',
       abi: { constructor: { params: [] }, methods: [] },
       sourceMap: {
-        mappings: [0, 1, 2, 3, 4].map((i) => ({ opcodeIndex: i, sourceFile: 'c.ts', line: i + 1, column: 0 })),
+        mappings: Array.from({ length: n }, (_, i) => ({ opcodeIndex: i, sourceFile: 'c.ts', line: i + 1, column: 0 })),
       },
     }));
     try {
@@ -252,5 +253,17 @@ describe('debug source mapping is locking-indexed (GK-BUG-014)', () => {
     expect(hit, out).toBeGreaterThan(-1);
     expect(lines[hit + 1], out).toMatch(/OP_ADD/);
     expect(lines[hit + 2]?.trim(), out).toMatch(/^c\.ts:3\s+L3 add$/);
+  }, 150_000);
+
+  it('opcodes in an untaken branch still advance the locking index', () => {
+    // OP_0 OP_IF OP_2 OP_ELSE OP_3 OP_ENDIF: OP_2 is never executed, but the
+    // source map still counts it, so OP_3 is locking opcode 4 (line 5).
+    const src = ['B1 push zero', 'B2 if', 'B3 push two', 'B4 else', 'B5 push three', 'B6 endif'].join('\n');
+    const out = run('c\nq\n', ['--break', 'c.ts:5'], '006352675368', src);
+    const lines = out.split('\n');
+    const hit = lines.findIndex((l) => l.includes('Hit breakpoint 1'));
+    expect(hit, out).toBeGreaterThan(-1);
+    expect(lines[hit + 1], out).toMatch(/OP_3/);
+    expect(lines[hit + 2]?.trim(), out).toMatch(/^c\.ts:5\s+B5 push three$/);
   }, 150_000);
 });

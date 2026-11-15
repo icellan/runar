@@ -29,6 +29,7 @@ const DOCS = [
   'packages/runar-lang/README.md',
   'packages/runar-rs/src/prelude.rs',
   'packages/runar-rb/lib/ruby_lsp/runar/hover.rb',
+  'packages/runar-testing/README.md',
 ];
 
 describe('GK-DOC-008: SLH-DSA 192/256 is documented as SHA-256-only, not FIPS 205', () => {

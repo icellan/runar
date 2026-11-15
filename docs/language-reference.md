@@ -695,7 +695,7 @@ other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
 | `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256s shapes; not FIPS 205 (see note). Sig: 29,792 B. |
 | `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SHA-256-only variant with SLH-DSA-SHA2-256f shapes (fast); not FIPS 205 (see note). Sig: 49,856 B. |
 
-> **The 192/256 SLH-DSA functions are SHA-256-only, not FIPS 205.** FIPS 205 hashes these four parameter sets with SHA-512, and SHA-512's 64-bit word arithmetic is not expressible in Bitcoin Script (no `OP_SHA512`, issue #137). These four functions use SHA-256 throughout, at the FIPS 205 parameter shapes, in all seven compilers and SDKs. They verify signatures made by the repo's own SDK signers, but a standard `SLH-DSA-SHA2-192s/192f/256s/256f` signature from a FIPS 205 implementation will not verify. The 128s/128f functions are SHA-256 in FIPS 205 too and are standard.
+> **The 192/256 SLH-DSA functions are SHA-256-only, not FIPS 205.** FIPS 205 hashes these four parameter sets with SHA-512, and SHA-512's 64-bit word arithmetic is not expressible in Bitcoin Script (no `OP_SHA512`, issue #137). These four functions use SHA-256 throughout, at the FIPS 205 parameter shapes, in all seven compilers and SDKs. They verify signatures made by the repo's own SDK signers, but a standard `SLH-DSA-SHA2-192s/192f/256s/256f` signature from a FIPS 205 implementation will not verify. FIPS 205 itself specifies SHA-256 for the 128s/128f sets, so this limit does not apply to them (the 128s set is checked against a NIST ACVP vector; see `docs/test-skips.md`).
 
 ### Elliptic Curve (secp256k1)
 

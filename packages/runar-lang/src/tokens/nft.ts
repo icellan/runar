@@ -9,8 +9,10 @@
 // This is NOT a base class. No compiler treats a class that extends
 // NonFungibleToken as a contract: every tier accepts only SmartContract,
 // StatefulSmartContract and UnsafeSmartContract as a contract's base class.
-// Compile this file directly, or copy it into your own `.runar.ts` file and
-// change it there.
+// Compile this source file as it is, or copy it into your own `.runar.ts`
+// file and change it there. The npm package ships only the compiled JS and
+// .d.ts, so take the source from the repository (this file, or
+// examples/ts/token-nft).
 // ---------------------------------------------------------------------------
 
 import { StatefulSmartContract, assert, checkSig } from '../index.js';

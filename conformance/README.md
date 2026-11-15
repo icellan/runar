@@ -442,7 +442,10 @@ cd conformance && npm run update-golden
 node conformance/scripts/check-golden-provenance.mjs --print-hashes
 ```
 
-5. Add the fixture's row to `conformance/script-size-baseline.json` and update the fixture count stated in this README (both are checked).
+5. Register the fixture everywhere the corpus is enumerated (each is checked):
+   - a row in `conformance/script-size-baseline.json`, and the fixture count stated in this README;
+   - a witness (`conformance/witnesses/<name>.json` or `witnesses/real-crypto/<name>.json`) or a `coverage-ledger.json` entry (`witnesses/completeness.test.ts`);
+   - an sdk-output mirror under `conformance/sdk-output/tests/<name>/` or an approved omission in `conformance/sdk-output/coverage-allowlist.json` (`sdk-output/runner/sdk-output-coverage-audit.test.ts`).
 
 6. Run what CI runs, in both fold modes:
 

@@ -342,7 +342,7 @@ The package includes reference implementations of post-quantum signature schemes
 | `wotsKeygen`, `wotsSign`, `wotsVerify`, `WOTS_PARAMS` | WOTS+ (Winternitz One-Time Signature) keygen, sign, verify |
 | `WOTSKeyPair` | Type for WOTS+ key pairs |
 | `slhKeygen`, `slhSign`, `slhVerify`, `slhVerifyVerbose` | SLH-DSA (SPHINCS+, FIPS 205) keygen, sign, verify |
-| `SLH_SHA2_128s`, `SLH_SHA2_128f`, `SLH_SHA2_192s`, `SLH_SHA2_192f`, `SLH_SHA2_256s`, `SLH_SHA2_256f` | Parameter sets for all 6 FIPS 205 SHA-2 variants |
+| `SLH_SHA2_128s`, `SLH_SHA2_128f`, `SLH_SHA2_192s`, `SLH_SHA2_192f`, `SLH_SHA2_256s`, `SLH_SHA2_256f` | Parameter sets at the 6 FIPS 205 SHA-2 shapes. The 192/256 sets are SHA-256-only, not FIPS 205: FIPS 205 needs SHA-512 there, which Bitcoin Script lacks (#137) |
 | `ALL_SHA2_PARAMS` | Array of all SHA-2 parameter sets |
 | `SLHParams`, `SLHKeyPair` | Types for SLH-DSA parameters and key pairs |
 

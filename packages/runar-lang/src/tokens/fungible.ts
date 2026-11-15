@@ -7,12 +7,12 @@
 //
 // This is NOT a base class. No compiler treats a class that extends
 // FungibleToken as a contract: every tier accepts only SmartContract,
-// StatefulSmartContract and UnsafeSmartContract as a contract's base class. Compile this file
-// directly (e.g. `runar compile fungible.ts`), or copy it into your own
-// `.runar.ts` file and change it there. Importing the class at runtime gives
-// you its TypeScript types and lets TestContract-style tooling read the
-// source; the on-chain logic is whatever the compiler emits for the methods
-// below, nothing more.
+// StatefulSmartContract and UnsafeSmartContract as a contract's base class.
+// Compile this source file as it is, or copy it into your own `.runar.ts`
+// file and change it there. The npm package ships only the compiled JS and
+// .d.ts, so take the source from the repository (this file, or
+// examples/ts/token-ft). Importing the class gives you its TypeScript types;
+// the on-chain logic is whatever the compiler emits for the methods below.
 // ---------------------------------------------------------------------------
 
 import {

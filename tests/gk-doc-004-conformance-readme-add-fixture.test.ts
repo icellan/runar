@@ -46,6 +46,8 @@ describe('GK-DOC-004: the add-a-fixture guide produces a fixture the runner acce
     expect(s).toMatch(/fold-OFF/);
     expect(s).toMatch(/check-golden-provenance\.mjs/);
     expect(s).toMatch(/script-size-baseline\.json/);
+    expect(s).toMatch(/coverage-ledger\.json/);
+    expect(s).toMatch(/coverage-allowlist\.json/);
     expect(s).toMatch(/--multi-format/);
   });
 });
