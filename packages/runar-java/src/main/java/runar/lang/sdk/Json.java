@@ -19,9 +19,10 @@ import java.util.Map;
  * </ul>
  *
  * <p>Deliberately stdlib-only — no Jackson, no Gson. Sufficient for
- * loading {@link RunarArtifact} fixtures. Not RFC 8259 complete
- * (does not support scientific notation or surrogate pairs in
- * escapes), which is all the artifact shape needs.
+ * loading {@link RunarArtifact} fixtures and the signed-envelope payload.
+ * Strings follow the RFC 8259 grammar (raw U+0000..U+001F and malformed
+ * escapes are rejected, R2-JAVA-JSON); a surrogate-pair escape is kept as
+ * its two UTF-16 units, which is the same Java string as the raw code point.
  */
 public final class Json {
     private Json() {}
@@ -185,15 +186,31 @@ public final class Json {
                         case 'r' -> sb.append('\r');
                         case 't' -> sb.append('\t');
                         case 'u' -> {
+                            // R2-JAVA-JSON: exactly four ASCII hex digits.
+                            // Integer.parseInt(_, 16) also took a sign
+                            // (backslash-u+041 = 'A') and non-ASCII Unicode
+                            // digits; every peer tier rejects both.
                             if (pos + 4 > s.length()) {
-                                throw new IllegalArgumentException("Json: bad \\u escape");
+                                throw new IllegalArgumentException("Json: bad \\u escape at " + (pos - 2));
                             }
-                            int cp = Integer.parseInt(s.substring(pos, pos + 4), 16);
+                            int cp = 0;
+                            for (int k = 0; k < 4; k++) {
+                                int d = hexDigit(s.charAt(pos + k));
+                                if (d < 0) {
+                                    throw new IllegalArgumentException("Json: bad \\u escape at " + (pos - 2));
+                                }
+                                cp = (cp << 4) | d;
+                            }
                             pos += 4;
                             sb.append((char) cp);
                         }
                         default -> throw new IllegalArgumentException("Json: unknown escape \\" + esc);
                     }
+                } else if (c < 0x20) {
+                    // R2-JAVA-JSON: RFC 8259 requires U+0000..U+001F to be
+                    // escaped inside a string; every peer tier rejects them raw.
+                    throw new IllegalArgumentException(String.format(
+                        "Json: unescaped control character U+%04X in string at %d", (int) c, pos - 1));
                 } else {
                     sb.append(c);
                 }
@@ -240,6 +257,13 @@ public final class Json {
             } catch (NumberFormatException nfe) {
                 return new java.math.BigInteger(tok);
             }
+        }
+
+        private static int hexDigit(char c) {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
         }
 
         void skipDigits() {

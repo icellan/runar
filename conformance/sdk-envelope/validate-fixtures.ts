@@ -408,7 +408,29 @@ function main(): void {
   if (!sawDupBeforeBadSig) fail('duplicate_key_vectors carries no bad-json-before-bad-sig precedence vector');
   if (!sawExpiryBeforeDup) fail('duplicate_key_vectors carries no expired-before-bad-json precedence vector');
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors validate against the TS reference.`);
+  // 10. R2-JAVA-JSON string-grammar vectors (jj*). Each payload must be
+  //     rejected by JSON.parse (raw control character or a malformed \u
+  //     escape) and carry a signature that verifies for its exact text, so a
+  //     tier that accepts the string returns ok:true rather than bad-sig.
+  const jjVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => /^jj\d/.test(v._vector_id ?? ''));
+  if (jjVectors.length === 0) fail('rejection_vectors carries no jj* (R2-JAVA-JSON) vectors');
+  for (const v of jjVectors) {
+    if (v.reason !== 'bad-json') fail(`${v._vector_id}: reason must be bad-json`);
+    let parsedOk = true;
+    try {
+      JSON.parse(v.envelope.payload);
+    } catch {
+      parsedOk = false;
+    }
+    if (parsedOk) fail(`${v._vector_id}: JSON.parse ACCEPTS the payload, so it pins nothing`);
+    if (!verifiesFor(v.envelope)) fail(`${v._vector_id}: signature does not verify for its payload text`);
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors + ${jjVectors.length} string-grammar vectors validate against the TS reference.`);
 }
 
 main();

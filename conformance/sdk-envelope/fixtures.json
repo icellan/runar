@@ -550,6 +550,97 @@
         "nonce": 1,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "jj1-raw-control-char-u0001-in-string",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "A raw U+0001 inside a string. RFC 8259 requires U+0000..U+001F to be escaped. Java's Json.readString appended it; the other six tiers rejected the payload.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"a\u0001b\",\"nonce\":1700000000000}",
+        "sig": "30450221009ced5b65906d8dc79a436cf992bbc6578e546dd299ba0ea041cb840ff627e99402205758bbf14110fca29cfb3f0201dc4b1511f046c6a4ec01d24f1894839fb5fb83",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj2-raw-tab-in-string",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "A raw TAB (U+0009) inside a string; same rule as jj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"a\tb\",\"nonce\":1700000000000}",
+        "sig": "304502210084a49b0c27e6b7c219506729baa114aa55509267159ef9146dc8f7859a57f50702203c13b355f40fa4bb025423c05bd7fe8652b0a7c9c3b76d85110cb7af0278d4d0",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj3-raw-control-char-u001f-in-key",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "A raw U+001F inside an object KEY.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"k\u001f\":1,\"nonce\":1700000000000}",
+        "sig": "30440220097b614b8074114806847f6cf253307bd2cebb6adcc44e65a5102b8a242c37e80220260f308be8a47e96131fa2d0455921868a01261a70d061cb687b51d2f9132262",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj4-unicode-escape-plus-sign",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "\\u+041 is not four hex digits. Java's Json.readString handed \"+041\" to Integer.parseInt(_, 16), which accepts a sign and returned 'A'.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"\\u+041\",\"nonce\":1700000000000}",
+        "sig": "3045022100cec46d51734d58a334d1eb879bffea27a3099369f35c3cff6000b0aa08ae7148022074159cfc9c5f0830b1c9a9faf56ba447e3d6a415c25b62e57e47ac9cd51fc4d7",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj5-unicode-escape-minus-sign",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "\\u-041: Integer.parseInt accepts the sign and returns -65, which Java cast to a char.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"\\u-041\",\"nonce\":1700000000000}",
+        "sig": "304402200e485ed0c8ee161a7413cdaf8a05cdc80b753511b12712a4f80636ce5ab85be602203a92304eb7cc08b02ec00d3b25604e743037f09e4e24bb474f1486df4566c62e",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj6-unicode-escape-fullwidth-digits",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "\\u followed by two FULLWIDTH DIGIT ZERO (U+FF10) and 41: Integer.parseInt accepts non-ASCII Unicode digits. Only ASCII 0-9a-fA-F are JSON hex digits.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"\\u００41\",\"nonce\":1700000000000}",
+        "sig": "3045022100affe8c0156bb1a501d67a325db864f8444e1601c9a17a4b3a63959fa161798b5022037b5595c3bdce03d771775f22c09c6081f976ea0c7ce951a0ba2da609a13937e",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "jj7-unicode-escape-three-hex-digits",
+      "_audit_ref": "R2-JAVA-JSON",
+      "_notes": "\\u041 followed by the closing quote: three hex digits.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"\\u041\",\"nonce\":1700000000000}",
+        "sig": "3044022006787f418585e4ffe194f40458da335115580bc171a28b2d5b4829ffc483fcd70220069d3c7cdc891fd708f9b84054c5cfd3d8c20a98e0c81cacfd68075dcb42567e",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",
