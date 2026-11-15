@@ -70,9 +70,13 @@ if [ "$CMD" == "start" ]; then
 
   mkdir -p $DIR/regtest-data/$DATA_SUBDIR
 
-  if [ ! -f "$DIR/regtest-data/$DATA_SUBDIR/bitcoin.conf" ]; then
-    echo "Creating bitcoin.conf for $CONTAINER_NAME (rpc=$RPC_PORT)..."
-    cat << EOL > $DIR/regtest-data/$DATA_SUBDIR/bitcoin.conf
+  # Rewritten on every start (GK-BUG-002): a conf left over from an older
+  # version of this script, or placed by hand, must not decide how the node
+  # runs. rpcbind/rpcallowip stay open INSIDE the container because Docker's
+  # port forwarding arrives from the bridge network; exposure is limited on the
+  # host side instead, by publishing on 127.0.0.1 only (docker run below).
+  echo "Writing bitcoin.conf for $CONTAINER_NAME (rpc=$RPC_PORT)..."
+  cat << EOL > $DIR/regtest-data/$DATA_SUBDIR/bitcoin.conf
 port=$P2P_PORT
 rpcbind=0.0.0.0
 rpcport=$RPC_PORT
@@ -112,17 +116,16 @@ zmqpubremovedfrommempoolblock=tcp://*:$ZMQ_PORT
 zmqpubinvalidtx=tcp://*:$ZMQ_PORT
 invalidtxsink=ZMQ
 EOL
-  fi
 
   mkdir -p $DIR/regtest-data/$DATA_SUBDIR/regtest
 
   docker rm -f $CONTAINER_NAME 2>/dev/null
 
   docker run --platform linux/amd64 --name $CONTAINER_NAME \
-    -p $RPC_PORT:$RPC_PORT -p $P2P_PORT:$P2P_PORT -p $ZMQ_PORT:$ZMQ_PORT \
+    -p 127.0.0.1:$RPC_PORT:$RPC_PORT -p 127.0.0.1:$P2P_PORT:$P2P_PORT -p 127.0.0.1:$ZMQ_PORT:$ZMQ_PORT \
     --volume $DIR/regtest-data/$DATA_SUBDIR:/data \
     -d bitcoinsv/bitcoin-sv:latest \
-    bitcoind -conf=/data/bitcoin.conf -printtoconsole
+    bitcoind -regtest -conf=/data/bitcoin.conf -printtoconsole
 
   echo "Waiting for node to start (RPC=$RPC_PORT, container=$CONTAINER_NAME)..."
   for i in $(seq 1 60); do
