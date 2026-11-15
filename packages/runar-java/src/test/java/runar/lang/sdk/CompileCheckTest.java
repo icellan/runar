@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -292,10 +293,10 @@ class CompileCheckTest {
             "p2pkh",
             "P2PKH.runar.java"
         ).normalize();
+        // GK-GAP-012: a missing example used to `return` here, so the test
+        // passed while checking nothing. Fail closed instead.
         if (!Files.exists(example)) {
-            // Examples module not available from this working dir; skip
-            // gracefully but record that we tried.
-            return;
+            fail("missing fixture: " + example);
         }
         assertDoesNotThrow(() -> CompileCheck.run(example));
     }

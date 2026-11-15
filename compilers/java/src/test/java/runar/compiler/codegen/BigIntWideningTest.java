@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.math.BigInteger;
 import java.nio.file.Files;
@@ -168,9 +169,13 @@ class BigIntWideningTest {
             "examples/ts/schnorr-zkp/SchnorrZKP.runar.ts");
         Path expectedHex = repoRoot.resolve(
             "conformance/tests/schnorr-zkp/expected-script.hex");
-        if (!Files.exists(source) || !Files.exists(expectedHex)) {
-            // Skip silently when the test is run outside the repo tree.
-            return;
+        // GK-GAP-012: a missing fixture used to `return` here, so the test
+        // passed while comparing nothing. Fail closed instead.
+        if (!Files.exists(source)) {
+            fail("missing fixture: " + source);
+        }
+        if (!Files.exists(expectedHex)) {
+            fail("missing fixture: " + expectedHex);
         }
         String expected = Files.readString(expectedHex).strip();
         // Drive the full Java pipeline programmatically so we don't need
