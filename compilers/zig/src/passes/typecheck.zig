@@ -237,10 +237,13 @@ const PreimageCheck = struct {
         return exits;
     }
 
-    fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression) Allocator.Error!u64 {
+    /// `builtin` is false for `this.name(...)`: a contract method that happens
+    /// to be called `checkPreimage` is not the built-in and checks nothing by
+    /// its name.
+    fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression, builtin: bool) Allocator.Error!u64 {
         var out: u64 = 0;
         for (args) |a| out |= try self.exprMust(a);
-        if (std.mem.eql(u8, name, "checkPreimage")) {
+        if (builtin and std.mem.eql(u8, name, "checkPreimage")) {
             if (args.len > 0) {
                 if (self.resolve(args[0])) |b| out |= bitOf(b);
             }
@@ -260,8 +263,8 @@ const PreimageCheck = struct {
 
     fn exprMust(self: *PreimageCheck, e: Expression) Allocator.Error!u64 {
         return switch (e) {
-            .call => |c| try self.callMust(c.callee, c.args),
-            .method_call => |mc| try self.callMust(mc.method, mc.args),
+            .call => |c| try self.callMust(c.callee, c.args, true),
+            .method_call => |mc| try self.callMust(mc.method, mc.args, false),
             .binary_op => |b| if (b.op == .and_op or b.op == .or_op)
                 try self.exprMust(b.left)
             else

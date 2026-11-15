@@ -1,5 +1,5 @@
 {
-  "_comment": "GK-GAP-010: a public method's SigHashPreimage parameter must reach checkPreimage() on every path (spec/type-system.md 4.2). Refused cases carry the shared diagnostic; accepted cases must compile in every tier. A `return` ends its path: a private helper's check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it).",
+  "_comment": "GK-GAP-010: a public method's SigHashPreimage parameter must reach checkPreimage() on every path (spec/type-system.md 4.2). Refused cases carry the shared diagnostic; accepted cases must compile in every tier. A `return` ends its path: a private helper's check counts only if it precedes every return (helper-*-return cases). A SigHashPreimage parameter is tracked wherever it sits in the parameter list (wide-params-* cases: 64 parameters precede it). A contract method named checkPreimage is not the built-in (method-named-checkpreimage).",
   "refuse": [
     {
       "name": "extract-only",
@@ -71,6 +71,12 @@
       "name": "wide-params-unchecked",
       "file": "Pc.runar.ts",
       "src": "import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';\n\nclass PcWideUnchecked extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(a0: bigint, a1: bigint, a2: bigint, a3: bigint, a4: bigint, a5: bigint, a6: bigint, a7: bigint, a8: bigint, a9: bigint, a10: bigint, a11: bigint, a12: bigint, a13: bigint, a14: bigint, a15: bigint, a16: bigint, a17: bigint, a18: bigint, a19: bigint, a20: bigint, a21: bigint, a22: bigint, a23: bigint, a24: bigint, a25: bigint, a26: bigint, a27: bigint, a28: bigint, a29: bigint, a30: bigint, a31: bigint, a32: bigint, a33: bigint, a34: bigint, a35: bigint, a36: bigint, a37: bigint, a38: bigint, a39: bigint, a40: bigint, a41: bigint, a42: bigint, a43: bigint, a44: bigint, a45: bigint, a46: bigint, a47: bigint, a48: bigint, a49: bigint, a50: bigint, a51: bigint, a52: bigint, a53: bigint, a54: bigint, a55: bigint, a56: bigint, a57: bigint, a58: bigint, a59: bigint, a60: bigint, a61: bigint, a62: bigint, a63: bigint, txPreimage: SigHashPreimage) {\n    assert(extractAmount(txPreimage) >= this.minAmount + a63);\n  }\n}\n",
+      "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
+    },
+    {
+      "name": "method-named-checkpreimage",
+      "file": "Pc.runar.ts",
+      "src": "import { SmartContract, assert, SigHashPreimage, extractAmount } from 'runar-lang';\n\nclass PcShadow extends SmartContract {\n  readonly minAmount: bigint;\n\n  constructor(minAmount: bigint) {\n    super(minAmount);\n    this.minAmount = minAmount;\n  }\n\n  public spend(txPreimage: SigHashPreimage) {\n    assert(this.checkPreimage(txPreimage));\n    assert(extractAmount(txPreimage) >= this.minAmount);\n  }\n\n  private checkPreimage(p: SigHashPreimage): boolean {\n    return true;\n  }\n}\n",
       "error": "public method 'spend' must pass its SigHashPreimage parameter 'txPreimage' to checkPreimage() on every path"
     }
   ],
