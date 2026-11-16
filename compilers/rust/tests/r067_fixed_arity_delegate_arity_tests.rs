@@ -356,7 +356,10 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // OP_SWAP on its state). A mis-sized operand used to be truncated or
     // zero-extended into a second preimage of the committed digest.
     ("sha256Compress", 2, 21302, 0x3e4a7f32cd8d603e),
-    ("sha256Finalize", 3, 63952, 0x47efde1184960a59),
+    // GK-BUG-013: sha256Finalize 63952 -> 63953; the dropped 9th OP_NUM2BIN
+    // byte (the msgBitLen sign / 2^64 byte) became <00> OP_EQUALVERIFY, so the
+    // fingerprint moved too (was 0x47efde1184960a59).
+    ("sha256Finalize", 3, 63953, 0x3c5b5e955d67c2fe),
     ("blake3Compress", 2, 10383, 0x66c78065fba52101),
     ("blake3Hash", 1, 10387, 0x1b9842224c29f196),
     ("__array_access", 2, 10, 0x9fd1122314782f6a),
