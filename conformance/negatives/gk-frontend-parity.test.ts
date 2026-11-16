@@ -121,6 +121,44 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
         expect([...hexes]).toHaveLength(1);
       });
     }
+
+    // R3-GK010-WORDING: only an ASSERTED checkPreimage(p) counts
+    // (R2-GK010-ASSERT), so the diagnostic says so. The text is pinned here
+    // literally, not only read back from the corpus, and checked on the
+    // checked-in rejection fixtures too (rejection-parity.test.ts grades
+    // their verdict only, never the text).
+    const GK010_SPEND_TXPREIMAGE = "public method 'spend' must assert checkPreimage(txPreimage) on every path";
+    it('every GK-010 corpus refusal carries the pinned diagnostic', () => {
+      const gk010 = data.refuse.filter((c) => c.error.startsWith('public method '));
+      expect(gk010.length).toBeGreaterThan(20);
+      for (const c of gk010) expect(c.error, c.name).toBe(GK010_SPEND_TXPREIMAGE);
+    });
+    const fixtures = [
+      'N511-ts-unchecked-preimage.runar.ts',
+      'N520-ts-preimage-check-discarded.runar.ts',
+      'N521-ts-preimage-check-bound-to-local.runar.ts',
+      'N522-ts-preimage-check-negated.runar.ts',
+      'N523-ts-preimage-check-or-ed.runar.ts',
+      'N524-ts-preimage-check-if-condition.runar.ts',
+      'N525-ts-preimage-check-ternary-condition.runar.ts',
+      'N526-ts-preimage-check-eq-true.runar.ts',
+      'N527-ts-preimage-check-double-negated.runar.ts',
+      'N528-ts-preimage-check-helper-returns.runar.ts',
+      'N529-py-preimage-check-discarded.runar.py',
+    ];
+    for (const f of fixtures) {
+      const header = readFileSync(join(__dirname, f), 'utf8');
+      it(`${f} documents the pinned diagnostic`, () => {
+        expect(header.replace(/\n(\/\/|#) +/g, ' ')).toContain(GK010_SPEND_TXPREIMAGE);
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${f} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(f, header));
+          expect(status, `${tier.id} accepted ${f} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(GK010_SPEND_TXPREIMAGE);
+        });
+      }
+    }
   });
 
   describe('GK-GAP-013: malformed intent intrinsics are still refused', () => {

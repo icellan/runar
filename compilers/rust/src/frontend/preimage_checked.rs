@@ -34,7 +34,7 @@ use super::diagnostic::Diagnostic;
 /// The diagnostic every tier shares.
 pub fn preimage_not_checked_message(method: &str, param: &str) -> String {
     format!(
-        "public method '{}' must pass its SigHashPreimage parameter '{}' to checkPreimage() on every path",
+        "public method '{}' must assert checkPreimage({}) on every path",
         method, param
     )
 }

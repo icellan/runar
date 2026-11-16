@@ -339,8 +339,7 @@ at-most-once half keeps a second `checkPreimage` from being emitted.
     p : SigHashPreimage, a parameter of a public method m
     some path through m does not assert checkPreimage(p)
     ─────────────────────────────────────────────────────
-    ERROR: public method 'm' must pass its SigHashPreimage
-           parameter 'p' to checkPreimage() on every path
+    ERROR: public method 'm' must assert checkPreimage(p) on every path
 ```
 
 "Asserts `checkPreimage(p)`" is a must-analysis over the method body. A call
@@ -394,8 +393,8 @@ public unlock(sig: Sig, pubKey: PubKey, preimage: SigHashPreimage): void {
 }
 
 public read(preimage: SigHashPreimage): void {
-    // ERROR: public method 'read' must pass its SigHashPreimage parameter
-    // 'preimage' to checkPreimage() on every path
+    // ERROR: public method 'read' must assert checkPreimage(preimage) on
+    // every path
     assert(extractAmount(preimage) > 0n);
 }
 ```

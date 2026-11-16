@@ -1,8 +1,7 @@
 // R2-GK010-ASSERT (GK-GAP-010) -- assert(checkPreimage(txPreimage) === true): a comparison is not the
 // asserted call itself (fail closed).
 // Every tier refuses:
-//   public method 'spend' must pass its SigHashPreimage parameter 'txPreimage'
-//   to checkPreimage() on every path
+//   public method 'spend' must assert checkPreimage(txPreimage) on every path
 import { SmartContract, assert, ByteString, SigHashPreimage, checkPreimage, extractAmount } from 'runar-lang';
 
 class N526 extends SmartContract {

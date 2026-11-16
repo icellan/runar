@@ -66,8 +66,7 @@ export function typecheck(contract: ContractNode): TypeCheckResult {
 /** The diagnostic every tier shares. */
 export function preimageNotCheckedMessage(method: string, param: string): string {
   return (
-    `public method '${method}' must pass its SigHashPreimage parameter '${param}' ` +
-    'to checkPreimage() on every path'
+    `public method '${method}' must assert checkPreimage(${param}) on every path`
   );
 }
 

@@ -65,8 +65,7 @@ final class PreimageChecked {
 
     /** The diagnostic every tier shares. */
     static String message(String method, String param) {
-        return "public method '" + method + "' must pass its SigHashPreimage parameter '" + param
-            + "' to checkPreimage() on every path";
+        return "public method '" + method + "' must assert checkPreimage(" + param + ") on every path";
     }
 
     private final Map<String, MethodNode> privates = new HashMap<>();
