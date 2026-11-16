@@ -1821,7 +1821,9 @@ the locking script's real bytes, as the node does; the two preimages differ in
 that one byte only. The R2-GAP008 tests in
 `tests/test_gk_gap_008_covenant_carveout.py` pin this, and the strict xfail in
 `tests/test_g1_raw_outputs_spend.py::test_send_to_script_covenant_input0_validates_through_spend`
-tracks it. Such an input is counted as **`unvalidatable`**, never as
+tracks it. The defect is filed upstream as
+[bsv-blockchain/py-sdk#247](https://github.com/bsv-blockchain/py-sdk/issues/247).
+Such an input is counted as **`unvalidatable`**, never as
 validated; the call's funding input still executes for real.
 
 The carve-out is narrow (GK-GAP-008). It applies only when the failing opcode

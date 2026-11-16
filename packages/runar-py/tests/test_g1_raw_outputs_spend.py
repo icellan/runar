@@ -136,7 +136,8 @@ def test_send_to_script_outputs_are_raw_state_change_in_order():
 
 @pytest.mark.xfail(
     reason=(
-        "bsv-sdk upstream defect (2.4.0, latest release), not a runar-py bug and "
+        "bsv-sdk upstream defect (2.4.0, latest release; filed as "
+        "https://github.com/bsv-blockchain/py-sdk/issues/247), not a runar-py bug and "
         "independent of finding G1: Script.from_chunks re-encodes the top-level "
         "OP_RETURN chunk (opcode 0x6a + trailing state) as a data push, and "
         "Spend.subscript_after_code_separator builds the BIP-143 scriptCode with "
