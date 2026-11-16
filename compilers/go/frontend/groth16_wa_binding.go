@@ -27,8 +27,10 @@ var bigFour = big.NewInt(4)
 //     properties (this.x; a mutable property can be assigned from a
 //     parameter first), unary / binary operators over fixed operands and
 //     built-in function calls with at least one argument, all fixed. A method
-//     parameter, a local, another groth16PublicInput, `this.method()` and
-//     anything else make F not fixed.
+//     parameter, a local, another groth16PublicInput, an intent intrinsic
+//     (extractPrevOutputScript / requireOutputP2PKH, which read an
+//     auto-injected unlocking parameter), `this.method()` and anything else
+//     make F not fixed.
 //
 // Everything else is refused (fail closed): `!=`, `<`, a conjunct of `&&`,
 // a comparison bound to a local first, a check on one branch. The rule is
@@ -133,6 +135,13 @@ func isFixedExpr(e Expression, props map[string]bool) bool {
 	case CallExpr:
 		id, ok := v.Callee.(Identifier)
 		if !ok || len(v.Args) == 0 || id.Name == "groth16PublicInput" {
+			return false
+		}
+		// Intent intrinsics lower to an auto-injected unlocking parameter
+		// (extractPrevOutputScript reads _prevOutScript_<i>, the script of an
+		// input the spender picks); the ANF copy sees that load_param and
+		// refuses, so the frontend must too.
+		if id.Name == "extractPrevOutputScript" || id.Name == "requireOutputP2PKH" {
 			return false
 		}
 		if _, builtin := builtinFunctions[id.Name]; !builtin {

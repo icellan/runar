@@ -389,3 +389,47 @@ func TestR2MSMUnbound_MutablePropertyIsNotFixed(t *testing.T) {
 		}
 	})
 }
+
+// TestR2MSMUnbound_PrevOutScriptIsNotFixed: extractPrevOutputScript(i, h[, n])
+// reads an auto-injected unlocking parameter (_prevOutScript_<i>), the script
+// of an input the spender picks. Its arguments being literals / readonly
+// properties does not make its result fixed: with a prefix hash the suffix is
+// free. The frontend counted it as a fixed built-in call while the ANF copy
+// (which sees a load_param) refused it, so runar.CompileCheck accepted a
+// method the compiler then refused (review of R2-MSM-UNBOUND).
+func TestR2MSMUnbound_PrevOutScriptIsNotFixed(t *testing.T) {
+	vkPath := sp1VKPath(t)
+	for name, call := range map[string]string{
+		"full_hash":   "extractPrevOutputScript(0, this.h)",
+		"prefix_hash": "extractPrevOutputScript(0, this.h, 40n)",
+	} {
+		name, call := name, call
+		t.Run(name, func(t *testing.T) {
+			src := `import { SmartContract, assert, ByteString, groth16PublicInput, assertGroth16WitnessAssistedWithMSM, bin2num, extractPrevOutputScript } from 'runar-lang';
+
+class PrevOut extends SmartContract {
+  readonly h: ByteString;
+
+  constructor(h: ByteString) {
+    super(h);
+    this.h = h;
+  }
+
+  public verify(x: bigint) {
+    assertGroth16WitnessAssistedWithMSM();
+    assert(groth16PublicInput(0) == bin2num(` + call + `));
+    assert(x == 1n);
+  }
+}
+`
+			p := filepath.Join(t.TempDir(), "PrevOut.runar.ts")
+			if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := CompileSourceToIR(p)
+			r2MSMRequireUnbound(t, err, "frontend "+name)
+			_, err = CompileFromSource(p, CompileOptions{Groth16WAVKey: vkPath})
+			r2MSMRequireUnbound(t, err, "--source "+name)
+		})
+	}
+}
