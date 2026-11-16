@@ -75,7 +75,7 @@ describe('GK-DOC-009: runar-lang/tokens are compilable token contracts', () => {
 
   it('FungibleToken: transfer splits and send moves the full balance (TestContract)', () => {
     const make = () =>
-      TestContract.fromSource(read(FT), { owner: ALICE.pubKey, balance: 100n, mergeBalance: 0n, tokenId: 'deadbeef' }, 'FungibleToken.ts');
+      TestContract.fromSource(read(FT), { owner: ALICE.pubKey, balance: 100n, mergeBalance: 0n, tokenId: 'deadbeef' }, 'FungibleToken.runar.ts');
     const sig = signTestMessage(ALICE.privKey);
 
     const split = make().call('transfer', { sig, to: BOB.pubKey, amount: 30n, outputSatoshis: 1000n });
@@ -88,7 +88,7 @@ describe('GK-DOC-009: runar-lang/tokens are compilable token contracts', () => {
   });
 
   it('FungibleToken: transferring more than the balance is rejected by an assert', () => {
-    const token = TestContract.fromSource(read(FT), { owner: ALICE.pubKey, balance: 100n, mergeBalance: 0n, tokenId: 'deadbeef' }, 'FungibleToken.ts');
+    const token = TestContract.fromSource(read(FT), { owner: ALICE.pubKey, balance: 100n, mergeBalance: 0n, tokenId: 'deadbeef' }, 'FungibleToken.runar.ts');
     const r = token.call('transfer', { sig: signTestMessage(ALICE.privKey), to: BOB.pubKey, amount: 101n, outputSatoshis: 1000n });
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/assert/i);
@@ -96,7 +96,7 @@ describe('GK-DOC-009: runar-lang/tokens are compilable token contracts', () => {
 
   it('NonFungibleToken: transfer re-owns and burn leaves no output (TestContract)', () => {
     const make = () =>
-      TestContract.fromSource(read(NFT), { owner: ALICE.pubKey, tokenId: 'deadbeef01', metadata: 'cafebabe' }, 'NonFungibleToken.ts');
+      TestContract.fromSource(read(NFT), { owner: ALICE.pubKey, tokenId: 'deadbeef01', metadata: 'cafebabe' }, 'NonFungibleToken.runar.ts');
     const sig = signTestMessage(ALICE.privKey);
 
     const t = make().call('transfer', { sig, newOwner: BOB.pubKey, outputSatoshis: 1000n });

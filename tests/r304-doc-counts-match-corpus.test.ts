@@ -157,7 +157,7 @@ const CLAIMS: Claim[] = [
   {
     file: 'README.md',
     measure: 'fixtures with a compilers allowlist',
-    pattern: /the (\d+) conformance fixtures that use them carry an explicit/,
+    pattern: /[Tt]he (\d+) conformance fixtures that use them carry an explicit/,
   },
   {
     file: 'README.md',
