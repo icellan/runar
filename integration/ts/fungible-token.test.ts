@@ -19,7 +19,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 /**
  * Build allPrevouts hex from a list of outpoints (txid + outputIndex).
@@ -156,11 +156,11 @@ describe('FungibleToken', () => {
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
     // Auto-compute state, but wrong signer → checkSig fails on-chain
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'send', [null, recipient.pubKeyHex, 1n], provider, wrongSigner,
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should transfer tokens (split into 2 outputs)', async () => {
@@ -239,7 +239,7 @@ describe('FungibleToken', () => {
     const utxo2 = contract2.getUtxo()!;
     const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
     const parent2 = await provider.getRawTransaction(utxo2.txid);
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract1.call(
         'merge', [null, 1600n, null, parent2, 1n], provider, signer,
         {
@@ -250,7 +250,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject merge with deflated otherBalance', async () => {
@@ -269,7 +269,7 @@ describe('FungibleToken', () => {
     const utxo2 = contract2.getUtxo()!;
     const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
     const parent2 = await provider.getRawTransaction(utxo2.txid);
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract1.call(
         'merge', [null, 100n, null, parent2, 1n], provider, signer,
         {
@@ -280,7 +280,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should merge with one zero-balance UTXO', async () => {
@@ -328,7 +328,7 @@ describe('FungibleToken', () => {
     const utxo2 = contract2.getUtxo()!;
     const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
     const parent2 = await provider.getRawTransaction(utxo2.txid);
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract1.call(
         'merge', [null, 600n, null, parent2, 1n], provider, wrongSigner,
         {
@@ -339,7 +339,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should transfer exact balance (single output, no change)', async () => {
@@ -376,7 +376,7 @@ describe('FungibleToken', () => {
     await contract.deploy(provider, signer, {});
 
     // Attacker claims bob gets 800 and alice keeps 500 = 1300 total (inflated from 1000)
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'transfer', [null, recipient.pubKeyHex, 800n, 1n], provider, signer,
         {
@@ -386,7 +386,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject transfer with deflated balance', async () => {
@@ -400,7 +400,7 @@ describe('FungibleToken', () => {
     await contract.deploy(provider, signer, {});
 
     // Attacker claims bob gets 300 and alice keeps 200 = 500 total (deflated from 1000)
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'transfer', [null, recipient.pubKeyHex, 300n, 1n], provider, signer,
         {
@@ -410,7 +410,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject transfer of zero amount', async () => {
@@ -424,7 +424,7 @@ describe('FungibleToken', () => {
     await contract.deploy(provider, signer, {});
 
     // Zero amount should fail assert(amount > 0)
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'transfer', [null, recipient.pubKeyHex, 0n, 1n], provider, signer,
         {
@@ -434,7 +434,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject transfer exceeding balance', async () => {
@@ -448,7 +448,7 @@ describe('FungibleToken', () => {
     await contract.deploy(provider, signer, {});
 
     // Amount exceeds balance — should fail assert(amount <= totalBalance)
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'transfer', [null, recipient.pubKeyHex, 2000n, 1n], provider, signer,
         {
@@ -457,7 +457,7 @@ describe('FungibleToken', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject transfer with wrong signer', async () => {
@@ -471,13 +471,13 @@ describe('FungibleToken', () => {
     const contract = new RunarContract(artifact, [ownerPubKey, 1000n, 0n, tokenIdHex]);
     await contract.deploy(provider, ownerSigner, {});
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('transfer', [null, recipient.pubKeyHex, 300n, 1n], provider, wrongSigner, {
         outputs: [
           { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 300n, mergeBalance: 0n } },
           { satoshis: 1, state: { owner: ownerPubKey, balance: 700n, mergeBalance: 0n } },
         ],
       }),
-    ).rejects.toThrow();
+    );
   });
 });

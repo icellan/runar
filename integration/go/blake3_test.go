@@ -307,8 +307,13 @@ func TestBlake3_Compress_RejectsWrongDigest(t *testing.T) {
 	if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 500000}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if _, _, err := contract.Call("verify", []interface{}{blake3IVHex(), block}, provider, signer, nil); err == nil {
+	before := provider.BroadcastAttempts
+	_, _, callErr := contract.Call("verify", []interface{}{blake3IVHex(), block}, provider, signer, nil)
+	if callErr == nil {
 		t.Fatalf("expected wrong-digest verify call to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, callErr, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 }
 
@@ -358,7 +363,12 @@ func TestBlake3_Hash_RejectsWrongDigest(t *testing.T) {
 	if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 500000}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if _, _, err := contract.Call("verify", []interface{}{"616263"}, provider, signer, nil); err == nil {
+	before := provider.BroadcastAttempts
+	_, _, callErr := contract.Call("verify", []interface{}{"616263"}, provider, signer, nil)
+	if callErr == nil {
 		t.Fatalf("expected wrong-digest hash verify call to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, callErr, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 }

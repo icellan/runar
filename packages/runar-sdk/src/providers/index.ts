@@ -8,7 +8,7 @@ export { WhatsOnChainProvider } from './woc.js';
 // re-exported here — see the comment above the providers export in
 // `src/index.ts`.
 export { MockProvider } from './mock.js';
-export { RPCProvider } from './rpc-provider.js';
+export { RPCProvider, RPCNodeError } from './rpc-provider.js';
 export type { RPCProviderOptions } from './rpc-provider.js';
 export { WalletProvider } from './wallet-provider.js';
 export type { WalletProviderOptions } from './wallet-provider.js';

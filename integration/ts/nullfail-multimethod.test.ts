@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { compileSource } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 // A minimal multi-method stateful contract:
 // - Method 0 (advanceState): no checkSig, just updates state
@@ -270,8 +270,8 @@ describe('NULLFAIL multi-method reproduction', () => {
 
     // advanceState should fail because frozen=1
     const newRoot = 'bb'.repeat(32);
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('advanceState', [newRoot, 1n], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

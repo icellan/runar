@@ -128,8 +128,10 @@ pub const CurlHttpTransport = struct {
         const self: *CurlHttpTransport = @ptrCast(@alignCast(ctx));
         const userpass = std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass }) catch return rpc_mod.RPCError.OutOfMemory;
         defer allocator.free(userpass);
+        // No "-f": a node answers a JSON-RPC error (a refused tx) with HTTP
+        // 500 and the error in the body, which RPCProvider must read.
         const argv = [_][]const u8{
-            "curl",              "-sS", "-f",
+            "curl",              "-sS",
             "--connect-timeout", "10",  "--max-time",   "60",
             "-X",                "POST",
             "-u",                userpass,
@@ -186,6 +188,7 @@ pub const StdHttpTransport = struct {
         url: []const u8,
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
+        allow_server_error: bool,
     ) ![]u8 {
         var buf: std.Io.Writer.Allocating = .init(allocator);
         defer buf.deinit();
@@ -197,7 +200,9 @@ pub const StdHttpTransport = struct {
             .response_writer = &buf.writer,
         });
         const code: u16 = @intFromEnum(res.status);
-        if (code < 200 or code >= 300) return error.NetworkError;
+        // A JSON-RPC node answers an error (a refused tx) with HTTP 500 and
+        // the error in the body; the RPC caller reads it.
+        if ((code < 200 or code >= 300) and !(allow_server_error and code == 500)) return error.NetworkError;
         return buf.toOwnedSlice();
     }
 
@@ -207,7 +212,7 @@ pub const StdHttpTransport = struct {
         url: []const u8,
     ) provider_mod.ProviderError![]u8 {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ctx));
-        return self.doFetch(allocator, .GET, url, null, &.{}) catch |err| switch (err) {
+        return self.doFetch(allocator, .GET, url, null, &.{}, false) catch |err| switch (err) {
             error.OutOfMemory => provider_mod.ProviderError.OutOfMemory,
             else => provider_mod.ProviderError.NetworkError,
         };
@@ -222,7 +227,7 @@ pub const StdHttpTransport = struct {
     ) provider_mod.ProviderError![]u8 {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ctx));
         const headers = [_]std.http.Header{.{ .name = "Content-Type", .value = content_type }};
-        return self.doFetch(allocator, .POST, url, body, &headers) catch |err| switch (err) {
+        return self.doFetch(allocator, .POST, url, body, &headers, false) catch |err| switch (err) {
             error.OutOfMemory => provider_mod.ProviderError.OutOfMemory,
             else => provider_mod.ProviderError.NetworkError,
         };
@@ -257,7 +262,7 @@ pub const StdHttpTransport = struct {
             .{ .name = "Content-Type", .value = "application/json" },
             .{ .name = "Authorization", .value = auth_header },
         };
-        return self.doFetch(allocator, .POST, url, body, &headers) catch |err| switch (err) {
+        return self.doFetch(allocator, .POST, url, body, &headers, true) catch |err| switch (err) {
             error.OutOfMemory => rpc_mod.RPCError.OutOfMemory,
             else => rpc_mod.RPCError.TransportError,
         };

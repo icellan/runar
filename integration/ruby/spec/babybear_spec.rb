@@ -146,8 +146,8 @@ RSpec.describe 'Baby Bear field arithmetic' do # rubocop:disable RSpec/DescribeC
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call('verify', [3, 7], provider, wallet[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

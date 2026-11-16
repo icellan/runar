@@ -31,6 +31,7 @@ Spending Limitation
 import pytest
 
 from conftest import (
+    assert_node_rejected,
     compile_contract, create_provider, create_funded_wallet, create_wallet,
 )
 from runar.sdk import RunarContract, DeployOptions
@@ -139,17 +140,10 @@ class TestCovenantVault:
         contract.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
         # Call spend with walletB -- checkSig will fail on-chain
-        # A negative test must prove the NODE rejected this spend.
-        # pytest.raises(Exception) catches anything at all, including the
-        # SDK declining to build the transaction, so record the broadcast
-        # count and assert the failing call actually reached consensus.
-        broadcasts_before_0 = provider.broadcast_attempts
-        with pytest.raises(Exception):
+        # A negative test must prove the NODE refused this spend, and why:
+        # an accepted tx whose confirming mine fails also raises after a
+        # broadcast (GK-BUG-004). See conftest.assert_node_rejected.
+        with assert_node_rejected(provider):
             contract.call(
                 "spend", [None, None], provider, wrong_wallet["signer"],
             )
-
-        assert provider.broadcast_attempts > broadcasts_before_0, (
-            "the rejected call must have been broadcast to the node, "
-            "not refused by the SDK before a transaction was built"
-        )

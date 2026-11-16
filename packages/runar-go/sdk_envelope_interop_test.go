@@ -83,11 +83,33 @@ type fixture struct {
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
 	DuplicateKeyVectors  []fixtureMalleability    `json:"duplicate_key_vectors"`
+	InvalidUTF8Vectors   []fixtureUTF8Vector      `json:"invalid_utf8_vectors"`
+	OuterDupKeyVectors   []fixtureOuterVector     `json:"outer_duplicate_key_vectors"`
 	SizeLimits           struct {
 		MaxPayloadBytes int `json:"max_payload_bytes"`
 		MaxFieldBytes   int `json:"max_field_bytes"`
 	} `json:"size_limits"`
 	SizeVectors []fixtureSizeVector `json:"size_vectors"`
+}
+
+// fixtureUTF8Vector carries its payload as hex: the bytes are not UTF-8, so
+// they cannot ride in a JSON string (R3-GO-UTF8).
+type fixtureUTF8Vector struct {
+	VectorID   string `json:"_vector_id"`
+	ExpectOK   bool   `json:"expect_ok"`
+	Reason     string `json:"reason"`
+	PayloadHex string `json:"payload_hex"`
+	Sig        string `json:"sig"`
+	Pubkey     string `json:"pubkey"`
+	Nonce      int64  `json:"nonce"`
+	ExpiresAt  int64  `json:"expiresAt"`
+}
+
+// fixtureOuterVector is a whole envelope as wire text (R3-OUTER-DUPKEY).
+type fixtureOuterVector struct {
+	VectorID       string `json:"_vector_id"`
+	ExpectDecodeOK bool   `json:"expect_decode_ok"`
+	WireText       string `json:"wire_text"`
 }
 
 type fixtureSizeVector struct {
@@ -543,6 +565,76 @@ func TestEnvelopeInterop_ClockSkewVectors(t *testing.T) {
 		}
 		if string(r.Reason) != cv.Reason {
 			t.Errorf("%s: got reason=%s want=%s", cv.VectorID, r.Reason, cv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_InvalidUTF8Vectors — R3-GO-UTF8. A payload that is not
+// well-formed UTF-8 is bad-json. encoding/json folds every invalid sequence to
+// U+FFFD, so this tier verified ok a payload Zig's std.json refuses (and its
+// duplicate-key walk called two keys differing only in invalid bytes equal).
+// juc1 is the control: well-formed multi-byte UTF-8 must still verify.
+func TestEnvelopeInterop_InvalidUTF8Vectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.InvalidUTF8Vectors) == 0 {
+		t.Fatal("fixture carries no invalid_utf8_vectors")
+	}
+	for _, v := range f.InvalidUTF8Vectors {
+		payload, err := hex.DecodeString(v.PayloadHex)
+		if err != nil {
+			t.Fatalf("%s: payload_hex: %v", v.VectorID, err)
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope: SignedEnvelope{
+				Payload:   string(payload),
+				Sig:       v.Sig,
+				Pubkey:    v.Pubkey,
+				Nonce:     v.Nonce,
+				ExpiresAt: v.ExpiresAt,
+			},
+			NowMs: Int64Ptr(f.VerifyNowMs),
+		})
+		if r.OK != v.ExpectOK {
+			t.Errorf("%s: ok=%v want %v (reason=%s)", v.VectorID, r.OK, v.ExpectOK, r.Reason)
+			continue
+		}
+		if !v.ExpectOK && string(r.Reason) != v.Reason {
+			t.Errorf("%s: reason=%s want %s", v.VectorID, r.Reason, v.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_OuterDuplicateKeyVectors — R3-OUTER-DUPKEY. SignedEnvelope
+// carries json tags, so json.Unmarshal is this tier's wire-text decode path.
+// encoding/json keeps the LAST of two equal keys and matches field names
+// case-insensitively; a duplicate member must be refused, and a case-variant
+// member ("Payload") must not overwrite payload.
+func TestEnvelopeInterop_OuterDuplicateKeyVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.OuterDupKeyVectors) == 0 {
+		t.Fatal("fixture carries no outer_duplicate_key_vectors")
+	}
+	for _, v := range f.OuterDupKeyVectors {
+		var env SignedEnvelope
+		err := json.Unmarshal([]byte(v.WireText), &env)
+		if !v.ExpectDecodeOK {
+			if err == nil {
+				r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+				t.Errorf("%s: duplicate member decoded (verify ok=%v reason=%s)", v.VectorID, r.OK, r.Reason)
+				continue
+			}
+			if !strings.Contains(err.Error(), "duplicate key") || !strings.Contains(err.Error(), string(ReasonBadJSON)) {
+				t.Errorf("%s: refused, but not as a duplicate key (bad-json): %v", v.VectorID, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: control failed to decode: %v", v.VectorID, err)
+			continue
+		}
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if !r.OK {
+			t.Errorf("%s: control decoded but does not verify: reason=%s payload=%q", v.VectorID, r.Reason, env.Payload)
 		}
 	}
 }

@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('MathDemo', () => {
   it('should deploy with initial value 1000', async () => {
@@ -163,10 +163,17 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    // divideBy(0) → safediv returns 0 on-chain, but assert(value > 0) may fail
+    // This spend never reaches the node: the SDK's ANF interpreter aborts on a
+    // zero divisor exactly as OP_DIV does on chain, and the SDK refuses to
+    // broadcast a transaction whose method body it cannot evaluate (NEW-006)
+    // -- as in the Rust, Zig, Go and Python suites. Assert THAT refusal and
+    // that nothing was broadcast; a bare `.rejects.toThrow()` also passed on
+    // an accepted tx whose confirming mine failed (GK-BUG-004).
+    const before = provider.broadcastLog.length;
     await expect(
       contract.call('divideBy', [0n], provider, signer),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/the ANF interpreter could not evaluate[\s\S]*division by zero/);
+    expect(provider.broadcastLog.length).toBe(before);
   });
 
   it('should reject wrong state after divideBy (manual override)', async () => {
@@ -179,10 +186,10 @@ describe('MathDemo', () => {
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
     // Claim value=999 instead of 100 — hashOutputs mismatch
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('divideBy', [10n], provider, signer, {
         newState: { value: 999n },
       }),
-    ).rejects.toThrow();
+    );
   });
 });

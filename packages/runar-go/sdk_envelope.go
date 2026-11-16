@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 )
@@ -377,7 +378,7 @@ func appendJSONString(out []byte, s string) ([]byte, error) {
 }
 
 // decodeRune is a minimal UTF-8 decoder that preserves illegal-sequence
-// signalling — we deliberately do not import "unicode/utf8" so that the
+// signalling — deliberately not utf8.DecodeRuneInString, so that the
 // CESU-8 / WTF-8 surrogate range above can be caught before falling back
 // here. Returns (rune, byteSize). For invalid sequences returns
 // (0xFFFD, 1) so the caller can advance and report.
@@ -452,6 +453,43 @@ type SignedEnvelope struct {
 	Nonce int64 `json:"nonce"`
 	// ExpiresAt is Nonce + TtlMs.
 	ExpiresAt int64 `json:"expiresAt"`
+}
+
+// UnmarshalJSON decodes an envelope from wire text. R3-OUTER-DUPKEY: the
+// default struct decode kept the LAST of two equal members and matched member
+// names case-insensitively, so {"sig":<bogus>,...,"sig":<valid>} or a trailing
+// "Payload" member decided which bytes were verified, in this tier alone. A
+// duplicate member (compared after unescaping, as in the payload) is refused
+// as bad-json, and only the exact lower-camel member names are fields; any
+// other member is ignored, as Rust's serde decode does.
+func (e *SignedEnvelope) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	// The text is well-formed JSON here, so the token walk can only report a
+	// genuine duplicate.
+	if payloadHasDuplicateKey(string(data)) {
+		return fmt.Errorf("SignedEnvelope: duplicate key in envelope object (%s)", ReasonBadJSON)
+	}
+	var out SignedEnvelope
+	for name, dst := range map[string]any{
+		"payload":   &out.Payload,
+		"sig":       &out.Sig,
+		"pubkey":    &out.Pubkey,
+		"nonce":     &out.Nonce,
+		"expiresAt": &out.ExpiresAt,
+	} {
+		raw, ok := members[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			return fmt.Errorf("SignedEnvelope: %s: %w", name, err)
+		}
+	}
+	*e = out
+	return nil
 }
 
 // EnvelopeSigner is the minimal surface needed by SignEnvelope. Implementers
@@ -703,6 +741,14 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	// post-parse check in this tier can never see it. See
 	// sdk_envelope_lone_surrogate.go.
 	if payloadHasLoneSurrogate(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// R3-GO-UTF8: the payload must be well-formed UTF-8. encoding/json folds
+	// every invalid sequence to U+FFFD, so a signed payload carrying 0xFF, an
+	// overlong or a truncated sequence verified ok here while Zig's std.json
+	// refuses it, and two keys differing only in invalid bytes collided in the
+	// duplicate-key walk below. Fixture invalid_utf8_vectors.
+	if !utf8.ValidString(env.Payload) {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
 	// R-260: bound nesting on the TEXT, before the stock parser, so the answer

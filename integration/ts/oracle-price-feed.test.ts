@@ -36,7 +36,7 @@ import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
 import { generateRabinKeyPair, rabinSign } from './helpers/crypto.js';
 import { createHash } from 'crypto';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 /**
  * Encode a number as little-endian bytes (num2bin format).
@@ -161,14 +161,14 @@ describe('OraclePriceFeed', () => {
     const { sig: rabinSig, padding } = rabinSign(msgBytes, rabinKP);
 
     // settle(price, rabinSig, padding, sig) — Rabin sig is valid but price < 50000
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'settle',
         [price, rabinSig, padding, null],
         provider,
         receiverWallet.signer,
       ),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject settle with wrong receiver signature', async () => {
@@ -194,13 +194,13 @@ describe('OraclePriceFeed', () => {
     // Call settle with walletB — ECDSA checkSig will fail
     const walletB = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'settle',
         [price, rabinSig, padding, null],
         provider,
         walletB.signer,
       ),
-    ).rejects.toThrow();
+    );
   });
 });

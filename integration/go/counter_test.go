@@ -200,11 +200,15 @@ func TestCounter_WrongStateHash_Rejected(t *testing.T) {
 	}
 
 	// Call increment but claim count=99 instead of 1 — hashOutputs mismatch should cause rejection
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("increment", []interface{}{}, provider, signer, &runar.CallOptions{
 		NewState: map[string]interface{}{"count": int64(99)},
 	})
 	if err == nil {
 		t.Fatalf("expected call with wrong state to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }
@@ -234,11 +238,15 @@ func TestCounter_DecrementFromZero_Rejected(t *testing.T) {
 	}
 
 	// Decrement from 0 — assert(count > 0) in the contract should fail
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("decrement", []interface{}{}, provider, signer, &runar.CallOptions{
 		NewState: map[string]interface{}{"count": int64(-1)},
 	})
 	if err == nil {
 		t.Fatalf("expected decrement from zero to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }

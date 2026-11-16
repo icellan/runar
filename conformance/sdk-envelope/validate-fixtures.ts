@@ -434,7 +434,85 @@ function main(): void {
     if (!verifiesFor(v.envelope)) fail(`${v._vector_id}: signature does not verify for its payload text`);
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors + ${jjVectors.length} JSON-grammar vectors validate against the TS reference.`);
+  // 11. R3-GO-UTF8 invalid-UTF-8 vectors (ju*) + the multi-byte control
+  //     (juc1). The payload rides as payload_hex. Each ju* payload must be
+  //     refused by a strict UTF-8 decode, juc1 accepted; every signature must
+  //     verify over sha256 of exactly those bytes, so a tier that accepts a ju*
+  //     payload returns ok:true rather than bad-sig.
+  const utf8Vectors = fixture.invalid_utf8_vectors as Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: string;
+    payload_hex: string;
+    sig: string;
+    pubkey: string;
+    nonce: number;
+    expiresAt: number;
+  }>;
+  if (!Array.isArray(utf8Vectors) || utf8Vectors.length === 0) fail('invalid_utf8_vectors missing or empty');
+  if (!utf8Vectors.some((v) => v.expect_ok)) fail('invalid_utf8_vectors carries no accepted (juc*) control');
+  const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+  for (const v of utf8Vectors) {
+    const id = v._vector_id;
+    const bytes = Utils.toArray(v.payload_hex, 'hex');
+    let decoded: string | null = null;
+    try {
+      decoded = strictUtf8.decode(Uint8Array.from(bytes));
+    } catch {
+      decoded = null;
+    }
+    if (v.expect_ok && decoded === null) fail(`${id}: control payload is not well-formed UTF-8`);
+    if (!v.expect_ok && decoded !== null) fail(`${id}: payload IS well-formed UTF-8, so it pins nothing`);
+    if (!v.expect_ok && v.reason !== 'bad-json') fail(`${id}: reason must be bad-json`);
+    if (v.pubkey !== ALICE_PUB_HEX) fail(`${id}: pubkey is not the documented signer`);
+    if (v.nonce !== fixture.nonce || v.expiresAt !== fixture.expires_at) fail(`${id}: nonce/expiresAt are not the fixture's`);
+    let sigOk = false;
+    try {
+      sigOk = ecdsaVerifyRaw(
+        new BigNumber(Hash.sha256(bytes)),
+        Signature.fromDER(Utils.toArray(v.sig, 'hex')),
+        PublicKey.fromDER(Utils.toArray(v.pubkey, 'hex')),
+      );
+    } catch {
+      sigOk = false;
+    }
+    if (!sigOk) fail(`${id}: signature does not verify over sha256(payload bytes)`);
+  }
+
+  // 12. R3-OUTER-DUPKEY outer-envelope wire texts. Each od* must carry a
+  //     duplicate member, and a keep-LAST decode (JSON.parse) of it must yield
+  //     an envelope whose inner nonce/expiresAt match and whose signature
+  //     verifies -- so a tier that silently keeps the last member accepts it.
+  //     odc1 carries no duplicate and its exact-case members are valid_envelope.
+  const outerVectors = fixture.outer_duplicate_key_vectors as Array<{
+    _vector_id: string;
+    expect_decode_ok: boolean;
+    wire_text: string;
+  }>;
+  if (!Array.isArray(outerVectors) || outerVectors.length === 0) fail('outer_duplicate_key_vectors missing or empty');
+  if (!outerVectors.some((v) => v.expect_decode_ok)) fail('outer_duplicate_key_vectors carries no decodable (odc*) control');
+  for (const v of outerVectors) {
+    const id = v._vector_id;
+    let lastWins: { payload: string; sig: string; pubkey: string; nonce: number; expiresAt: number };
+    try {
+      lastWins = JSON.parse(v.wire_text);
+    } catch {
+      fail(`${id}: wire_text is not well-formed JSON`);
+    }
+    if (hasDuplicateKey(v.wire_text) !== !v.expect_decode_ok) {
+      fail(`${id}: expect_decode_ok=${v.expect_decode_ok} but the wire text ${v.expect_decode_ok ? 'HAS' : 'has NO'} duplicate member`);
+    }
+    const inner = JSON.parse(lastWins.payload) as { nonce: number; expiresAt: number };
+    if (inner.nonce !== lastWins.nonce || inner.expiresAt !== lastWins.expiresAt) {
+      fail(`${id}: keep-last decode is envelope-mismatch, so the vector has no teeth`);
+    }
+    if (!verifiesFor(lastWins)) fail(`${id}: keep-last decode does not verify, so the vector has no teeth`);
+    if (v.expect_decode_ok && lastWins.payload !== fixture.valid_envelope.payload) {
+      fail(`${id}: control's exact-case payload is not valid_envelope's`);
+    }
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls + ${intTokenVectors.length} integer-token vectors + ${allowlistVectors.length} allowlist vectors + ${dupVectors.length} duplicate-key vectors + ${jjVectors.length} JSON-grammar vectors + ${utf8Vectors.length} invalid-UTF-8 vectors + ${outerVectors.length} outer-envelope duplicate-key vectors validate against the TS reference.`);
 }
 
 main();

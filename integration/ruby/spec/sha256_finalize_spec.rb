@@ -88,8 +88,8 @@ RSpec.describe 'sha256Finalize' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 500_000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call('verify', [SHA256_FINALIZE_IV_HEX, '', 0], provider, wallet[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

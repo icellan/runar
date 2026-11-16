@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('Escrow', () => {
   it('should compile the Escrow contract', () => {
@@ -142,9 +142,9 @@ describe('Escrow', () => {
     // Call with wrong signer — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('release', [null, null], provider, wrongSigner),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject refund with wrong signer', async () => {
@@ -167,8 +167,8 @@ describe('Escrow', () => {
     // Call refund with wrong signer — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('refund', [null, null], provider, wrongSigner),
-    ).rejects.toThrow();
+    );
   });
 });

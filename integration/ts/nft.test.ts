@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('SimpleNFT', () => {
   it('should compile the SimpleNFT contract', () => {
@@ -179,10 +179,10 @@ describe('SimpleNFT', () => {
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
     // Auto-compute state, but wrong signer → checkSig fails on-chain
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'transfer', [null, newOwner.pubKeyHex, 1n], provider, wrongSigner,
       ),
-    ).rejects.toThrow();
+    );
   });
 });

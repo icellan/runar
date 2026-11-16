@@ -108,8 +108,13 @@ func TestStateByteString1B_RejectWrongLength(t *testing.T) {
 	if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 10_000}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if _, _, err := contract.Call("setTag", []interface{}{"abcd"}, provider, signer, nil); err == nil {
+	before := provider.BroadcastAttempts
+	_, _, callErr := contract.Call("setTag", []interface{}{"abcd"}, provider, signer, nil)
+	if callErr == nil {
 		t.Fatal("expected reject for 2-byte tag")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, callErr, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 }
 

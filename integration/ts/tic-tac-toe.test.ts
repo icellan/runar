@@ -23,7 +23,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('TicTacToe', () => {
   it('should compile the TicTacToe contract', () => {
@@ -159,9 +159,9 @@ describe('TicTacToe', () => {
     // Player O tries to move when it's X's turn
     // checkSig(sig, playerO.pubKey) passes, but assertCorrectPlayer fails
     // because turn=1 expects playerX's pubkey
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('move', [4n, playerO.pubKeyHex, null], provider, playerO.signer),
-    ).rejects.toThrow();
+    );
   });
 
   it('should reject join when game is already playing', async () => {
@@ -180,9 +180,9 @@ describe('TicTacToe', () => {
 
     // Second join attempt — assert(status == 0) fails on-chain
     const anotherPlayer = await createFundedWallet(provider);
-    await expect(
+    await expectNodeRejected(provider, () =>
       // Paid (N-027), so only the status guard can reject it.
       contract.call('join', [anotherPlayer.pubKeyHex, null], provider, anotherPlayer.signer, { satoshis: 15000 }),
-    ).rejects.toThrow();
+    );
   });
 });

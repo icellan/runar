@@ -20,6 +20,7 @@ require 'uri'
 
 require 'runar/sdk'
 require 'runar/sdk/local_signer'
+require_relative 'node_rejection'
 
 PROJECT_ROOT = File.expand_path('../../..', __dir__).freeze
 
@@ -298,7 +299,7 @@ module IntegrationHelpers
       username: RPC_USER,
       password: RPC_PASS
     )
-    instrument_broadcast(provider)
+    NodeRejection.instrument(instrument_broadcast(provider))
   end
 
   # ---------------------------------------------------------------------------
@@ -552,6 +553,7 @@ end
 
 RSpec.configure do |config|
   config.include IntegrationHelpers
+  config.include NodeRejection
 
   config.before(:suite) do
     unless IntegrationHelpers.node_available?

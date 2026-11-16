@@ -11,6 +11,7 @@ Requires:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ import sys
 
 from runar_compiler.compiler import compile_from_source, artifact_to_json
 from runar.sdk import RunarArtifact, RPCProvider, ExternalSigner
+from runar.sdk.rpc_provider import RPCNodeError
 from runar.sdk.local_signer import LocalSigner
 from runar._ripemd160 import ripemd160_digest
 
@@ -285,14 +287,97 @@ def compile_contract_ts(rel_path: str) -> RunarArtifact:
 # Provider helper
 # ---------------------------------------------------------------------------
 
+#: The reason SV Node gives for a spend whose unlocking script fails (a false
+#: assert, a failed checkSig, a script error such as OP_SPLIT out of range).
+#: The Rust, Java, Zig and Go suites pin the same text.
+SCRIPT_VERIFY_FAILED = "mandatory-script-verify-flag-failed"
+
+#: BroadcastOutcome kinds recorded in ``provider.broadcast_log``.
+ACCEPTED = "accepted"
+ACCEPTED_MINE_FAILED = "accepted-then-mine-failed"
+NODE_REJECTED = "node-rejected"
+OTHER = "other"
+
+
+def check_node_rejected(added: list, reason: str) -> str | None:
+    """The pure check behind :func:`assert_node_rejected`.
+
+    ``added`` is the ``(kind, detail)`` broadcast-log entries the call under
+    test produced. Returns None when, and only when: the call broadcast at
+    least once (an exception with no broadcast is an SDK-side refusal, not
+    consensus); the node accepted none of those broadcasts -- including an
+    accepted tx whose confirming mine then failed (GK-BUG-004); and the last
+    one was refused by the node at sendrawtransaction with a message
+    containing ``reason``. Otherwise returns why not.
+    """
+    if not reason:
+        return "no rejection reason given"
+    if not added:
+        return "the call never handed a transaction to the node (SDK-side failure)"
+    for kind, detail in added:
+        if kind in (ACCEPTED, ACCEPTED_MINE_FAILED):
+            return f"the node ACCEPTED a transaction from this call ({kind}: {detail})"
+    kind, detail = added[-1]
+    if kind != NODE_REJECTED:
+        return f"the node never ruled on the spend ({kind}: {detail})"
+    if reason not in detail:
+        return f"the node rejected the spend for the wrong reason: expected {reason!r}, got {detail!r}"
+    return None
+
+
+@contextlib.contextmanager
+def assert_node_rejected(provider: RPCProvider, reason: str = SCRIPT_VERIFY_FAILED):
+    """``with assert_node_rejected(provider): <call>`` -- the call must raise,
+    and what it broadcast must show the NODE refused the spend for ``reason``.
+
+    ``pytest.raises(Exception)`` plus a moved ``broadcast_attempts`` counter
+    used to be the pattern, and since GK-BUG-004 it is vacuous: an ACCEPTED
+    transaction whose confirming mine fails also raises after an attempt.
+    """
+    before = len(provider.broadcast_log)
+    try:
+        yield
+    except Exception as err:  # noqa: BLE001 -- classified below, not swallowed
+        why = check_node_rejected(provider.broadcast_log[before:], reason)
+        if why is not None:
+            pytest.fail(f"not a node rejection: {why}; call error: {err!r}")
+        return
+    pytest.fail("the spend was ACCEPTED (the call raised nothing), so nothing was rejected")
+
+
 def _instrument_broadcast(provider: RPCProvider) -> RPCProvider:
     """Patch ``provider.broadcast`` so each call logs the raw tx size in
     bytes to stderr before delegating to the SDK implementation. The SDK
     itself is left untouched — this wrapper lives only in the integration
     suite to give CI logs a uniform per-broadcast tx-size line.
+
+    It also records what each broadcast came to in ``provider.broadcast_log``
+    (``(kind, detail)``, one entry per attempt), classified by WHICH RPC
+    failed and by the SDK's typed ``RPCNodeError``, never by message text:
+    accepted / accepted-then-mine-failed / node-rejected (the node's message)
+    / other (transport failure, malformed reply).
     """
     original = provider.broadcast
+    original_rpc = provider._rpc_call
     provider.broadcast_attempts = 0
+    provider.broadcast_log = []
+    send_outcome: list = []
+
+    def rpc_call(method, *params):
+        if method != "sendrawtransaction":
+            return original_rpc(method, *params)
+        try:
+            result = original_rpc(method, *params)
+        except RPCNodeError as e:
+            send_outcome.append((NODE_REJECTED, e.message))
+            raise
+        except Exception as e:
+            send_outcome.append((OTHER, repr(e)))
+            raise
+        send_outcome.append((ACCEPTED, result))
+        return result
+
+    provider._rpc_call = rpc_call  # type: ignore[method-assign]
 
     def broadcast(tx, *args, **kwargs):
         # Count the ATTEMPT, before the node can reject it. Negative tests
@@ -311,7 +396,20 @@ def _instrument_broadcast(provider: RPCProvider) -> RPCProvider:
             tx_hex = tx if isinstance(tx, str) else ""
         size_bytes = len(tx_hex) // 2
         print(f"[runar-integration] tx broadcast: {size_bytes} bytes", file=sys.stderr, flush=True)
-        return original(tx, *args, **kwargs)
+        send_outcome.clear()
+        try:
+            txid = original(tx, *args, **kwargs)
+        except Exception as e:
+            sent = send_outcome[-1] if send_outcome else (OTHER, repr(e))
+            if sent[0] == ACCEPTED:
+                # sendrawtransaction accepted it; the failure came after
+                # (the confirming mine, or the reply's shape).
+                provider.broadcast_log.append((ACCEPTED_MINE_FAILED, repr(e)))
+            else:
+                provider.broadcast_log.append(sent)
+            raise
+        provider.broadcast_log.append((ACCEPTED, txid))
+        return txid
 
     provider.broadcast = broadcast  # type: ignore[method-assign]
     return provider

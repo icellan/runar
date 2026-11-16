@@ -188,6 +188,7 @@ func TestFungibleToken_WrongOwner_Rejected(t *testing.T) {
 
 	// Call send with attacker's signer -- checkSig should fail because
 	// the attacker's key doesn't match the contract owner
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("send",
 		[]interface{}{nil, receiver.PubKeyHex(), outputSatoshis},
 		provider, attackerSigner,
@@ -196,6 +197,9 @@ func TestFungibleToken_WrongOwner_Rejected(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected send with wrong owner to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("send correctly rejected with wrong owner: %v", err)
 }
@@ -286,6 +290,7 @@ func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
 
 	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
+	before := provider.BroadcastAttempts
 	_, _, err := contract1.Call("merge",
 		[]interface{}{nil, int64(1600), nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -301,6 +306,9 @@ func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected merge with inflated otherBalance to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("merge correctly rejected with inflated otherBalance: %v", err)
 }
@@ -320,6 +328,7 @@ func TestFungibleToken_MergeNegativeOtherBalance(t *testing.T) {
 
 	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
+	before := provider.BroadcastAttempts
 	_, _, err := contract1.Call("merge",
 		[]interface{}{nil, int64(100), nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -335,6 +344,9 @@ func TestFungibleToken_MergeNegativeOtherBalance(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected merge with negative otherBalance to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("merge correctly rejected with negative otherBalance: %v", err)
 }
@@ -400,6 +412,7 @@ func TestFungibleToken_MergeWrongSigner(t *testing.T) {
 		t.Fatalf("attacker signer: %v", err)
 	}
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract1.Call("merge",
 		[]interface{}{nil, balance2, nil, parent2, outputSatoshis},
 		provider, attackerSigner, &runar.CallOptions{
@@ -415,6 +428,9 @@ func TestFungibleToken_MergeWrongSigner(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected merge with wrong signer to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("merge correctly rejected with wrong signer: %v", err)
 }
@@ -458,6 +474,7 @@ func TestFungibleToken_TransferInflatedBalance(t *testing.T) {
 	contract, _, aliceSigner := deployFungibleToken(t, alice, initialBalance, provider)
 
 	// Attacker claims bob gets 800 and alice keeps 500 = 1300 total (inflated from 1000)
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("transfer",
 		[]interface{}{nil, bob.PubKeyHex(), int64(800), outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -468,6 +485,9 @@ func TestFungibleToken_TransferInflatedBalance(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected transfer with inflated balance to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("transfer correctly rejected inflated balance: %v", err)
 }
@@ -487,6 +507,7 @@ func TestFungibleToken_TransferDeflatedBalance(t *testing.T) {
 	contract, _, aliceSigner := deployFungibleToken(t, alice, initialBalance, provider)
 
 	// Attacker claims bob gets 300 and alice keeps 200 = 500 total (deflated from 1000)
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("transfer",
 		[]interface{}{nil, bob.PubKeyHex(), int64(300), outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -497,6 +518,9 @@ func TestFungibleToken_TransferDeflatedBalance(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected transfer with deflated balance to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("transfer correctly rejected deflated balance: %v", err)
 }
@@ -513,6 +537,7 @@ func TestFungibleToken_TransferZeroAmountRejected(t *testing.T) {
 
 	contract, _, aliceSigner := deployFungibleToken(t, alice, initialBalance, provider)
 
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("transfer",
 		[]interface{}{nil, bob.PubKeyHex(), int64(0), outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -523,6 +548,9 @@ func TestFungibleToken_TransferZeroAmountRejected(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected transfer of zero amount to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("transfer correctly rejected zero amount: %v", err)
 }
@@ -539,6 +567,7 @@ func TestFungibleToken_TransferExceedsBalanceRejected(t *testing.T) {
 
 	contract, _, aliceSigner := deployFungibleToken(t, alice, initialBalance, provider)
 
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("transfer",
 		[]interface{}{nil, bob.PubKeyHex(), int64(2000), outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
@@ -548,6 +577,9 @@ func TestFungibleToken_TransferExceedsBalanceRejected(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected transfer exceeding balance to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("transfer correctly rejected amount exceeding balance: %v", err)
 }
@@ -578,6 +610,7 @@ func TestFungibleToken_TransferWrongSigner(t *testing.T) {
 		t.Fatalf("attacker signer: %v", err)
 	}
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("transfer",
 		[]interface{}{nil, bob.PubKeyHex(), amount, outputSatoshis},
 		provider, attackerSigner, &runar.CallOptions{
@@ -588,6 +621,9 @@ func TestFungibleToken_TransferWrongSigner(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatalf("expected transfer with wrong signer to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("transfer correctly rejected with wrong signer: %v", err)
 }

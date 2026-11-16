@@ -226,9 +226,13 @@ func TestStateCovenant_WrongPreStateRoot_Rejected(t *testing.T) {
 	// Replace preStateRoot (index 3) with a wrong value
 	args[3] = "ff" + hexZeros32()[2:]
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("advanceState", args, provider, signer, nil)
 	if err == nil {
 		t.Fatal("expected rejection for wrong pre-state root")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }
@@ -255,9 +259,13 @@ func TestStateCovenant_InvalidBlockNumber_Rejected(t *testing.T) {
 	args2 := buildCallArgs(pre, 0)
 	args2[1] = int64(0) // force block number 0
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("advanceState", args2, provider, signer, nil)
 	if err == nil {
 		t.Fatal("expected rejection for non-increasing block number")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }
@@ -275,9 +283,13 @@ func TestStateCovenant_InvalidBabyBearProof_Rejected(t *testing.T) {
 	args := buildCallArgs(hexZeros32(), 1)
 	args[6] = int64(99999) // wrong proofFieldC
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("advanceState", args, provider, signer, nil)
 	if err == nil {
 		t.Fatal("expected rejection for invalid Baby Bear proof")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }
@@ -295,9 +307,13 @@ func TestStateCovenant_InvalidMerkleProof_Rejected(t *testing.T) {
 	args := buildCallArgs(hexZeros32(), 1)
 	args[7] = "aa" + hexZeros32()[2:] // wrong merkleLeaf
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("advanceState", args, provider, signer, nil)
 	if err == nil {
 		t.Fatal("expected rejection for invalid Merkle proof")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }

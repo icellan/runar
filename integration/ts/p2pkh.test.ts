@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 describe('P2PKH', () => {
   it('should compile and deploy with a valid pubKeyHash', async () => {
@@ -72,8 +72,8 @@ describe('P2PKH', () => {
     // Call unlock with walletB — auto-computed sig+pubkey won't match the hash
     const walletB = await createFundedWallet(provider);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('unlock', [null, null], provider, walletB.signer),
-    ).rejects.toThrow();
+    );
   });
 });

@@ -126,8 +126,8 @@ RSpec.describe 'CovenantVault' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     # Call spend with wrong_wallet -- checkSig will fail on-chain
-    expect do
+    expect_node_rejected(provider) do
       contract.call('spend', [nil, nil], provider, wrong_wallet[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

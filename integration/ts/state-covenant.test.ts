@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import { createHash } from 'crypto';
 
 function sha256(hex: string): string {
@@ -133,13 +133,13 @@ describe('StateCovenant', () => {
     await contract.deploy(provider, signer, { satoshis: 100000 });
 
     // Block number 3 is NOT greater than 5 — should fail
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call(
         'advanceState',
         [newStateRoot, 3n, batchDataHash, preStateRoot, 6n, 7n, 42n, leaf, proof, 3n],
         provider,
         signer,
       ),
-    ).rejects.toThrow();
+    );
   });
 });

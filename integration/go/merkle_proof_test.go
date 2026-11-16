@@ -208,9 +208,13 @@ func TestMerkle_Sha256_WrongLeaf_Rejected(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
+	before := provider.BroadcastAttempts
 	_, _, err = contract.Call("verify", []interface{}{wrongLeaf, proof, big.NewInt(0)}, provider, signer, nil)
 	if err == nil {
 		t.Fatalf("expected call with wrong leaf to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }

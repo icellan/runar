@@ -447,3 +447,85 @@ fn clock_skew_vectors() {
         assert_eq!(r.reason, Some(want), "{id}");
     }
 }
+
+fn hex_to_bytes(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. This
+/// tier's payload is a `String`, which cannot hold such bytes, so no ju*
+/// vector can reach `verify_envelope`: the replay asserts that the strict
+/// decode a caller must make (`String::from_utf8`) refuses every ju* payload,
+/// and that juc1 (well-formed multi-byte UTF-8) decodes and verifies ok.
+#[test]
+fn invalid_utf8_vectors_cannot_become_a_payload() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["invalid_utf8_vectors"].as_array().unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let vid = v["_vector_id"].as_str().unwrap();
+        let raw = hex_to_bytes(v["payload_hex"].as_str().unwrap());
+        match String::from_utf8(raw) {
+            Err(_) => assert!(
+                !v["expect_ok"].as_bool().unwrap(),
+                "{vid}: the control's payload is not UTF-8"
+            ),
+            Ok(payload) => {
+                assert!(v["expect_ok"].as_bool().unwrap(), "{vid}: invalid UTF-8 decoded to a String");
+                let env = SignedEnvelope {
+                    payload,
+                    sig: v["sig"].as_str().unwrap().to_string(),
+                    pubkey: v["pubkey"].as_str().unwrap().to_string(),
+                    nonce: v["nonce"].as_i64().unwrap(),
+                    expires_at: v["expiresAt"].as_i64().unwrap(),
+                };
+                let r = verify_envelope(VerifyEnvelopeOpts {
+                    envelope: &env,
+                    expected_keys: None,
+                    clock_skew_ms: None,
+                    now_ms: Some(now_ms),
+                });
+                assert!(r.ok, "{vid}: control should verify ok, got {:?}", r.reason);
+            }
+        }
+    }
+}
+
+/// R3-OUTER-DUPKEY. `SignedEnvelope` derives `Deserialize`, so
+/// `serde_json::from_str` is this tier's wire-text decode. serde's derived
+/// visitor refuses a repeated field (including an escaped spelling of the
+/// same key); a case-variant member ("Payload") is an unknown field and is
+/// ignored, so odc1 decodes to valid_envelope and verifies ok.
+#[test]
+fn outer_duplicate_key_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["outer_duplicate_key_vectors"].as_array().unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let vid = v["_vector_id"].as_str().unwrap();
+        let decoded = serde_json::from_str::<SignedEnvelope>(v["wire_text"].as_str().unwrap());
+        if v["expect_decode_ok"].as_bool().unwrap() {
+            let env = decoded.unwrap_or_else(|e| panic!("{vid}: control failed to decode: {e}"));
+            let r = verify_envelope(VerifyEnvelopeOpts {
+                envelope: &env,
+                expected_keys: None,
+                clock_skew_ms: None,
+                now_ms: Some(now_ms),
+            });
+            assert!(r.ok, "{vid}: control should verify ok, got {:?}", r.reason);
+        } else {
+            match decoded {
+                Ok(env) => panic!("{vid}: duplicate member decoded to {env:?}"),
+                Err(e) => assert!(
+                    e.to_string().contains("duplicate field"),
+                    "{vid}: refused, but not as a duplicate field: {e}"
+                ),
+            }
+        }
+    }
+}

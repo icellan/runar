@@ -2582,7 +2582,13 @@ pub fn parseANFFromJson(allocator: std.mem.Allocator, json_text: []const u8) !AN
     return parseANFFromJsonValue(allocator, parsed.value);
 }
 
-fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value) error{OutOfMemory}!ANFProgram {
+/// Errors the ANF JSON reader returns. InvalidANFNumber: a JSON number the
+/// interpreter cannot hold as an i64 (R3-ZIG-ANF-FLOAT) -- a float outside
+/// i64, a fraction, a number std.json could only keep as text (an integer
+/// past i64, 1e400), or a negative loop count.
+pub const ANFParseError = error{ OutOfMemory, InvalidANFNumber };
+
+fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value) ANFParseError!ANFProgram {
     if (root_val != .object) return ANFProgram{};
     const root = root_val.object;
 
@@ -2619,7 +2625,7 @@ fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value)
     return program;
 }
 
-fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFProperty {
+fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) ANFParseError!ANFProperty {
     if (val != .object) return ANFProperty{};
     const obj = val.object;
     var prop = ANFProperty{};
@@ -2638,7 +2644,7 @@ fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) error{Out
     return prop;
 }
 
-fn parseANFMethod(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFMethod {
+fn parseANFMethod(allocator: std.mem.Allocator, val: std.json.Value) ANFParseError!ANFMethod {
     if (val != .object) return ANFMethod{};
     const obj = val.object;
     var meth = ANFMethod{};
@@ -2684,7 +2690,7 @@ fn parseANFParam(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfM
     return param;
 }
 
-fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFBinding {
+fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) ANFParseError!ANFBinding {
     if (val != .object) return ANFBinding{};
     const obj = val.object;
     var binding = ANFBinding{};
@@ -2697,7 +2703,7 @@ fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) error{OutO
     return binding;
 }
 
-fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFNode {
+fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) ANFParseError!ANFNode {
     if (val != .object) return .{ .unknown = {} };
     const obj = val.object;
 
@@ -2836,7 +2842,9 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
         } };
     }
     if (std.mem.eql(u8, kind, "loop")) {
-        const count: usize = if (obj.get("count")) |v| (if (v == .integer) @as(usize, @intCast(v.integer)) else 0) else 0;
+        // A negative count reached @intCast unchecked: a panic on artifact
+        // JSON, the same defect class as the float arm below.
+        const count: usize = if (obj.get("count")) |v| (if (v == .integer) (std.math.cast(usize, v.integer) orelse return error.InvalidANFNumber) else 0) else 0;
         const iter_var = if (obj.get("iterVar")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
         // Issue #121: iterator start value (bare number or decimal `Nn` string)
         // and step direction. Absent fields default to a zero-start counting-up
@@ -2872,7 +2880,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     return .{ .unknown = {} };
 }
 
-fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFValue {
+fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) ANFParseError!ANFValue {
     return switch (val) {
         .integer => |n| .{ .int = n },
         .bool => |b| .{ .boolean = b },
@@ -2897,7 +2905,24 @@ fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{
             // caller, so we can't hold a slice into its arena.
             break :blk .{ .bytes = try allocator.dupe(u8, s) };
         },
-        .float => |f| .{ .int = @intFromFloat(f) },
+        // R3-ZIG-ANF-FLOAT: @intFromFloat on a float outside i64 or a
+        // non-finite one panics (UB in ReleaseFast). Only an integral float
+        // inside i64 is a value this interpreter can hold; anything else is an
+        // error, and a fraction is refused rather than silently truncated.
+        // -2^63 is exact in f64; 2^63 is the first value past i64.
+        .float => |f| blk: {
+            if (!std.math.isFinite(f) or @trunc(f) != f or
+                f < -9223372036854775808.0 or f >= 9223372036854775808.0)
+            {
+                return error.InvalidANFNumber;
+            }
+            break :blk .{ .int = @intFromFloat(f) };
+        },
+        // std.json hands back a number it cannot hold as an i64 or a finite
+        // f64 (an integer past i64, 1e400) as its text. That used to fall to
+        // `.none` below -- the value silently vanished. An integer outside
+        // i64 travels as a "<digits>n" string (the `.wide` arm above).
+        .number_string => return error.InvalidANFNumber,
         else => .{ .none = {} },
     };
 }
@@ -2905,6 +2930,33 @@ fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// R3-ZIG-ANF-FLOAT: a JSON number that std.json reads as a float (an exponent
+// or a fraction) reached `@intFromFloat` unchecked, which PANICS (UB in
+// ReleaseFast) for anything outside i64 or non-finite, on artifact JSON. It
+// must come back as an error instead. A fraction is refused too rather than
+// silently truncated; an integral float inside i64 still loads as that integer.
+test "parseANFFromJson refuses an out-of-range or fractional float instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bad = [_][]const u8{
+        "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":1e20}]}",
+        "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":-1e20}]}",
+        "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":1e400}]}",
+        "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":18446744073709551617}]}",
+        "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":1.5}]}",
+        "{\"methods\":[{\"name\":\"m\",\"body\":[{\"name\":\"t0\",\"value\":{\"kind\":\"load_const\",\"value\":9.3e18}}]}]}",
+        "{\"methods\":[{\"name\":\"m\",\"body\":[{\"name\":\"t0\",\"value\":{\"kind\":\"loop\",\"count\":-1,\"body\":[]}}]}]}",
+    };
+    for (bad) |text| {
+        try std.testing.expectError(error.InvalidANFNumber, parseANFFromJson(a, text));
+    }
+    // Controls: an integral float inside i64 and a plain integer still load.
+    const ok = try parseANFFromJson(a, "{\"properties\":[{\"name\":\"x\",\"type\":\"bigint\",\"initialValue\":1e3},{\"name\":\"y\",\"type\":\"bigint\",\"initialValue\":-42}]}");
+    try std.testing.expectEqual(@as(i64, 1000), ok.properties[0].initial_value.?.int);
+    try std.testing.expectEqual(@as(i64, -42), ok.properties[1].initial_value.?.int);
+}
 
 test "computeNewState with simple increment" {
     const allocator = std.testing.allocator;

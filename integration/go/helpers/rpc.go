@@ -75,6 +75,19 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// RPCNodeError is the node's own JSON-RPC error reply. RPCCall returns it (so
+// errors.As can tell "the node answered no" from "the node never answered")
+// and its text is the historical "RPC error <code>: <message>".
+type RPCNodeError struct {
+	Method  string
+	Code    int
+	Message string
+}
+
+func (e *RPCNodeError) Error() string {
+	return fmt.Sprintf("RPC error %d: %s", e.Code, e.Message)
+}
+
 // RPCCall makes a JSON-RPC 1.0 call to the Bitcoin node.
 func RPCCall(method string, params ...interface{}) (json.RawMessage, error) {
 	if params == nil {
@@ -106,7 +119,7 @@ func RPCCall(method string, params ...interface{}) (json.RawMessage, error) {
 		return nil, fmt.Errorf("RPC response parse error: %w (body: %s)", err, string(body))
 	}
 	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return nil, &RPCNodeError{Method: method, Code: rpcResp.Error.Code, Message: rpcResp.Error.Message}
 	}
 	return rpcResp.Result, nil
 }

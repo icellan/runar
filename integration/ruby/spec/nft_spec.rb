@@ -155,13 +155,13 @@ RSpec.describe 'SimpleNFT' do # rubocop:disable RSpec/DescribeClass
 
     contract.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'transfer',
         [nil, new_owner[:pub_key_hex], 5000],
         provider, wrong_wallet[:signer],
         Runar::SDK::CallOptions.new(new_state: { 'owner' => new_owner[:pub_key_hex] })
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

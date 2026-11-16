@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"strings"
 	"testing"
 
 	"runar-integration/helpers"
@@ -10,7 +11,7 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
-func setupMathDemo(t *testing.T, initialResult int64) (*runar.RunarContract, runar.Provider, runar.Signer) {
+func setupMathDemo(t *testing.T, initialResult int64) (*runar.RunarContract, *helpers.BatchRPCProvider, runar.Signer) {
 	t.Helper()
 	artifact, err := helpers.CompileToSDKArtifact(
 		"examples/ts/math-demo/MathDemo.runar.ts",
@@ -58,24 +59,43 @@ func TestMathDemo_Deploy(t *testing.T) {
 func TestMathDemo_DivideByZero_Rejected(t *testing.T) {
 	contract, provider, signer := setupMathDemo(t, 100)
 
+	// This spend never reaches the node: the SDK's ANF interpreter aborts on a
+	// zero divisor exactly as OP_DIV does on chain, and the SDK refuses to
+	// build a transaction whose method body it cannot evaluate (NEW-006) -- as
+	// in the Rust and Zig suites. Assert THAT refusal and that nothing was
+	// broadcast; a bare `err == nil` check also passed on an accepted tx whose
+	// confirming mine failed (GK-BUG-004).
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("divideBy", []interface{}{int64(0)}, provider, signer, &runar.CallOptions{
 		NewState: map[string]interface{}{"value": int64(0)},
 	})
 	if err == nil {
 		t.Fatalf("expected divide by zero to be rejected, but it succeeded")
 	}
-	t.Logf("correctly rejected: %v", err)
+	if provider.BroadcastAttempts != before {
+		t.Fatalf("divide by zero reached the node (broadcasts %d -> %d); expected the SDK to refuse it: %v",
+			before, provider.BroadcastAttempts, err)
+	}
+	if !strings.Contains(err.Error(), "the ANF interpreter could not evaluate") ||
+		!strings.Contains(err.Error(), "division by zero") {
+		t.Fatalf("divide by zero refused for another reason: %v", err)
+	}
+	t.Logf("correctly refused by the SDK: %v", err)
 }
 
 func TestMathDemo_WrongState_Rejected(t *testing.T) {
 	contract, provider, signer := setupMathDemo(t, 1000)
 
 	// divideBy(10) should give 100, but we claim 999
+	before := provider.BroadcastAttempts
 	_, _, err := contract.Call("divideBy", []interface{}{int64(10)}, provider, signer, &runar.CallOptions{
 		NewState: map[string]interface{}{"value": int64(999)},
 	})
 	if err == nil {
 		t.Fatalf("expected wrong state to be rejected, but it succeeded")
+	}
+	if bad := helpers.CheckNodeRejected(provider, before, err, helpers.ScriptVerifyFailed); bad != nil {
+		t.Fatalf("not a node rejection: %v", bad)
 	}
 	t.Logf("correctly rejected: %v", err)
 }
