@@ -189,11 +189,20 @@ describe('conformance allowlist audit', () => {
   // F-352 added the fourth, `state-array-set`, for the same reason: it is the
   // second witness for the mutable-state shape FixedArray<bigint, 4>, and no
   // Java spelling of a FixedArray property exists.
+  //
+  // GK-GAP-003 added `ternary-expression`, which pins the conditional
+  // EXPRESSION `c ? a : b`. User decision: only the surfaces that have ternary
+  // syntax carry it (.ts/.sol/.rb/.java `c ? a : b`, .py `a if c else b`; the
+  // N491 paren-ternary negatives confirm all five parse it on every tier). The
+  // Move, Go, Rust-DSL and Zig surfaces have no conditional expression -- `if`
+  // is a statement there -- so there is nothing for them to spell. All seven
+  // compilers stay full hex/ANF parity targets for the five surfaces.
   const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
     'embed-always-fixed-array': ['.runar.java'],
     'fixed-array-index': ['.runar.java'],
     'fixed-array-write': ['.runar.java'],
     'state-array-set': ['.runar.java'],
+    'ternary-expression': ['.runar.go', '.runar.move', '.runar.rs', '.runar.zig'],
   };
   it('no fixture opts a format out of parser coverage unless approved (parserSkip stays governed)', () => {
     const offenders: string[] = [];

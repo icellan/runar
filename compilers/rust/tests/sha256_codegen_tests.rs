@@ -93,14 +93,26 @@ fn test_sha256_finalize_emits_nontrivial_program() {
 // ops.len() > 50 threshold above — see test_sha256_compress_op_count_golden
 // for why a flat count is an exact gate here (zero StackOp::If branches).
 //
-// Cross-tier check: this tier's measured count (63946) matches the
+// Cross-tier check: this tier's measured count (63947) matches the
 // independently pinned Go golden exactly, compilers/go/codegen/
-// crypto_codegen_test.go's `{"Sha256Finalize", EmitSha256Finalize, 63946}`.
-// No disagreement to report.
+// crypto_codegen_test.go's `{"Sha256Finalize", EmitSha256Finalize, 63947}`.
+// No disagreement to report. GK-BUG-013 moved both from 63946: the 9th
+// OP_NUM2BIN byte is checked with <00> OP_EQUALVERIFY instead of dropped.
 #[test]
 fn test_sha256_finalize_op_count_golden() {
     let ops = collect_emit(|sink| emit_sha256_finalize(sink));
-    assert_eq!(ops.len(), 63946, "sha256_finalize op count drift");
+    assert_eq!(ops.len(), 63947, "sha256_finalize op count drift");
+}
+
+// GK-BUG-013: `<9> OP_NUM2BIN <8> OP_SPLIT` leaves the msgBitLen sign byte
+// (or the 2^64 byte) on top. It must be required to equal 0x00, not dropped.
+#[test]
+fn test_sha256_finalize_checks_the_ninth_byte_is_zero() {
+    let ops = collect_emit(|sink| emit_sha256_finalize(sink));
+    assert!(matches!(&ops[3], StackOp::Opcode(c) if c == "OP_SPLIT"), "op[3] = {:?}", ops[3]);
+    assert!(matches!(&ops[4], StackOp::Push(PushValue::Bytes(b)) if b == &vec![0x00u8]), "op[4] = {:?}", ops[4]);
+    assert!(matches!(&ops[5], StackOp::Opcode(c) if c == "OP_EQUALVERIFY"), "op[5] = {:?}", ops[5]);
+    assert!(!ops[..6].iter().any(|op| matches!(op, StackOp::Drop)), "the 9th byte is still dropped");
 }
 
 #[test]

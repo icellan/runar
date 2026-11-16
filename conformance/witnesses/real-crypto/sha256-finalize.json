@@ -1,9 +1,9 @@
 {
   "fixture": "sha256-finalize",
   "kind": "stateless-signed",
-  "note": "sha256Finalize on a real @bsv/sdk Spend. No signature: the witness is (state, remaining, msgBitLen). Honest digest: sha256Finalize(IV, 'abc', 24) = node SHA-256('abc'). F-114: the compiled sha256Finalize aborts unless the state is 32 bytes; remaining stays variable-length (0..119, past which the negative OP_NUM2BIN pad aborts). The interpreter verdict is asserted equal to the Spend verdict on every row.",
+  "note": "sha256Finalize on a real @bsv/sdk Spend. No signature: the witness is (state, remaining, msgBitLen). Honest digest: sha256Finalize(IV, 'abc', 24) = node SHA-256('abc'). F-114: the compiled sha256Finalize aborts unless the state is 32 bytes; remaining stays variable-length (0..119, past which the negative OP_NUM2BIN pad aborts). GK-BUG-013: msgBitLen must lie in [0, 2^64); the 9th byte of its 9-byte OP_NUM2BIN form is checked to be 0x00 instead of dropped. The interpreter verdict is asserted equal to the Spend verdict on every row.",
   "goldenHashes": {
-    "expected-script.hex": "e448d8b6eeb958946f072292ef55ce8cd369e7aefddaa94d554b0c59ab85e582",
+    "expected-script.hex": "eacb32a21bab3d615c1fc08a5ddbd3c82f30def4a8c1c6ea830f86ecef31c04a",
     "expected-ir.json": "56875eedade5e14af57f6f1da8d6a919d6bdec03f781ff26612cc11703dfb1f3"
   },
   "constructorArgs": {
@@ -29,6 +29,28 @@
       ],
       "expect": "reject",
       "note": "Wrong bit length (32 instead of 24): different padded block, digest mismatch."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "616263",
+        "-24n"
+      ],
+      "expect": "reject",
+      "vmErrorPattern": "OP_EQUALVERIFY requires the top two stack items to be equal",
+      "note": "GK-BUG-013 alias: -24 with the honest digest SHA-256('abc'). OP_NUM2BIN 9 gives 18 00..00 | 80; the old OP_DROP threw the sign byte away and hashed length 24, so this ACCEPTED. The sign-byte check (<00> OP_EQUALVERIFY) refuses it; the interpreter refuses it with the msgBitLen domain diagnostic."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+        "616263",
+        "18446744073709551640n"
+      ],
+      "expect": "reject",
+      "vmErrorPattern": "OP_EQUALVERIFY requires the top two stack items to be equal",
+      "note": "GK-BUG-013 alias: 2^64 + 24 with the honest digest SHA-256('abc'). OP_NUM2BIN 9 gives 18 00..00 | 01; the old OP_DROP kept length 24, so this ACCEPTED. Refused by the sign-byte check; the interpreter refuses it with the msgBitLen domain diagnostic."
     },
     {
       "method": "verify",

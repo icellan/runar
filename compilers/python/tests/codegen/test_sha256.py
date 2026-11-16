@@ -32,7 +32,8 @@ def test_compress_op_count():
 def test_finalize_op_count():
     ops: list[StackOp] = []
     emit_sha256_finalize(ops.append)
-    assert len(ops) == 63946
+    # GK-BUG-013: 63946 -> 63947 (the dropped 9th byte became <00> OP_EQUALVERIFY).
+    assert len(ops) == 63947
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,18 @@ def test_finalize_starts_with_push9_num2bin_push8_split():
     assert ops[2].value is not None and ops[2].value.big_int == 8
 
 
+def test_finalize_checks_the_ninth_byte_is_zero():
+    # GK-BUG-013: the 9th NUM2BIN byte is the script-number sign (or the 2^64
+    # byte). It must be 0x00 -- msgBitLen in [0, 2^64) -- not dropped.
+    ops: list[StackOp] = []
+    emit_sha256_finalize(ops.append)
+    assert ops[3].op == "opcode" and ops[3].code == "OP_SPLIT"
+    assert ops[4].op == "push" and ops[4].value is not None
+    assert ops[4].value.kind == "bytes" and ops[4].value.bytes_val == b"\x00"
+    assert ops[5].op == "opcode" and ops[5].code == "OP_EQUALVERIFY"
+    assert all(op.op != "drop" for op in ops[:6])
+
+
 # ---------------------------------------------------------------------------
 # End-to-end emit through the public Emit API
 # ---------------------------------------------------------------------------
@@ -89,6 +102,17 @@ def test_compress_emits_to_hex_with_known_prefix():
     # F-114 guards (SIZE <64> EQUALVERIFY, SWAP, SIZE <32> EQUALVERIFY) then
     # DUP, OP_TOALTSTACK, OP_TOALTSTACK = 82 0140 88 7c 82 0120 88 76 6b 6b.
     assert res.script_hex[:24] == "820140887c82012088766b6b"
+
+
+def test_finalize_emits_the_sign_byte_check_as_a_one_byte_push():
+    # GK-BUG-013: <9> NUM2BIN <8> SPLIT <00> EQUALVERIFY <4> SPLIT. The 0x00
+    # must be the one-byte push 01 00 -- OP_0 would push the EMPTY string and
+    # the equality would refuse every honest length.
+    ops: list[StackOp] = []
+    emit_sha256_finalize(ops.append)
+    method = StackMethod(name="run", ops=ops, max_stack_depth=0)
+    res = emit_method(method)
+    assert res.script_hex[:18] == "5980587f010088547f"
 
 
 # ---------------------------------------------------------------------------

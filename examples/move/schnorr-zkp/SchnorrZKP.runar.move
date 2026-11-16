@@ -14,6 +14,9 @@ module SchnorrZKP {
         // Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
         assert!(within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337), 0);
         assert!(ecOnCurve(r_point), 0);
+        // P must be on the curve: the identity O (all-zero) would make
+        // R + e*P collapse to R (GK-BUG-011).
+        assert!(ecOnCurve(contract.pub_key), 0);
         let e: bigint = bin2num(hash256(cat(r_point, contract.pub_key)));
         let s_g: Point = ecMulGen(s);
         let e_p: Point = ecMul(contract.pub_key, e);

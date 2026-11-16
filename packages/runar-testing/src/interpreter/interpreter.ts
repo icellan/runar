@@ -1001,6 +1001,14 @@ export class RunarInterpreter {
             `sha256Finalize: remaining must be 0-119 bytes, got ${remaining.length}`,
           );
         }
+        if (bitLenVal.value < 0n || bitLenVal.value >= 1n << 64n) {
+          // GK-BUG-013: the compiled script refuses a msgBitLen outside
+          // [0, 2^64) (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00).
+          // setBigUint64 below would wrap it modulo 2^64 instead.
+          throw new Error(
+            `sha256Finalize: msgBitLen must be in [0, 2^64), got ${bitLenVal.value}`,
+          );
+        }
         return {
           kind: 'bytes',
           value: sha256Finalize(state, remaining, bitLenVal.value),

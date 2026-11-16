@@ -426,7 +426,7 @@ examples/java/src/main/java/runar/examples/my-new-test/MyNewTest.runar.java
 }
 ```
 
-   If a format genuinely cannot express the contract (today only `FixedArray` on the Java surface), leave it out of `sources` and add `"parserSkip": [".runar.java"]` with a non-empty `"parserSkipReason"`. Do not put a `*.runar.*` file in the fixture directory; the runner rejects it as an orphan.
+   If a format genuinely cannot express the contract, leave it out of `sources`, list it in `"parserSkip"` and give a non-empty `"parserSkipReason"`. Today that covers `FixedArray` on the Java surface (`"parserSkip": [".runar.java"]`) and, in `ternary-expression`, the conditional expression `c ? a : b` on the four surfaces that have none (`.runar.move`, `.runar.go`, `.runar.rs`, `.runar.zig`). Each skipped format must also be approved in `runner/__tests__/allowlist-audit.test.ts`. Do not put a `*.runar.*` file in the fixture directory; the runner rejects it as an orphan.
 
 3. Generate the goldens fold-OFF from the TypeScript compiler (`--update-golden` runs fold-OFF unless `RUNAR_DISABLE_CONSTANT_FOLDING=0` is set):
 
@@ -857,7 +857,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **99 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **100 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|

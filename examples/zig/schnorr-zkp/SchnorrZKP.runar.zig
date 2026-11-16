@@ -19,6 +19,10 @@ pub const SchnorrZKP = struct {
         // Verify R is on the curve.
         runar.assert(runar.ecOnCurve(rPoint));
 
+        // Verify P is on the curve: the identity O (all-zero) would make
+        // R + e*P collapse to R (GK-BUG-011).
+        runar.assert(runar.ecOnCurve(self.pubKey));
+
         // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P)).
         const e = runar.bin2num(runar.hash256(runar.cat(rPoint, self.pubKey)));
 

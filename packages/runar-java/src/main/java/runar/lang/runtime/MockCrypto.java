@@ -1262,7 +1262,14 @@ public final class MockCrypto {
         if (rem.length > 119) {
             throw new IllegalArgumentException("sha256Finalize: remaining must be 0..119 bytes, got " + rem.length);
         }
-        long bitLen = msgBitLen.longValueExact();
+        // GK-BUG-013: the compiled script refuses a msgBitLen outside [0, 2^64)
+        // (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00) and accepts
+        // all of it. longValueExact() used to wrap a negative and throw an
+        // unrelated ArithmeticException for every length in [2^63, 2^64).
+        if (msgBitLen.signum() < 0 || msgBitLen.bitLength() > 64) {
+            throw new IllegalArgumentException("sha256Finalize: msgBitLen must be in [0, 2^64), got " + msgBitLen);
+        }
+        long bitLen = msgBitLen.longValue(); // low 64 bits; written unsigned below
 
         // remaining || 0x80 || zero-pad || bitLen(8 bytes BE)
         int padded1Len = rem.length + 1;

@@ -1364,9 +1364,17 @@ function makePointHex(x: bigint, y: bigint): string {
   return x.toString(16).padStart(64, '0').toUpperCase()
        + y.toString(16).padStart(64, '0').toUpperCase();
 }
+
+// The contract's Fiat-Shamir challenge: e = bin2num(hash256(R || P))
+function deriveChallenge(rHex: string, pubKeyHex: string): bigint { /* ... */ }
 ```
 
 ### Example: Testing a Schnorr ZKP Contract
+
+The contract (`examples/ts/schnorr-zkp/SchnorrZKP.runar.ts`) derives the
+challenge `e` on-chain, so the test computes it the same way and passes only
+`(rPoint, s)`. A verifier that took `e` from the spender would be forgeable for
+any public key (see `docs/contract-patterns.md`).
 
 ```typescript
 describe('SchnorrZKP contract', () => {
@@ -1379,17 +1387,17 @@ describe('SchnorrZKP contract', () => {
     const [rX, rY] = scalarMul(GX, GY, r);
     const rHex = makePointHex(rX, rY);
 
-    const e = 7n;
+    const e = deriveChallenge(rHex, pubKeyHex);
     const s = mod(r + e * privKey, EC_N);
 
     const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
-    const result = c.call('verify', { rPoint: rHex, s, e });
+    const result = c.call('verify', { rPoint: rHex, s });
     expect(result.success).toBe(true);
   });
 
   it('rejects a proof with wrong s value', () => {
     // ... same setup but pass s + 1n ...
-    const result = c.call('verify', { rPoint: rHex, s: s + 1n, e });
+    const result = c.call('verify', { rPoint: rHex, s: s + 1n });
     expect(result.success).toBe(false);
   });
 });

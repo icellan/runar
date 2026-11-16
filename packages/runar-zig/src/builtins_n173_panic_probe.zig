@@ -12,6 +12,7 @@
 // argv[1] selects the case:
 //   sha256Compress-state      sha256Compress-block
 //   sha256Finalize-state      sha256Finalize-remaining
+//   sha256Finalize-bitlen     (GK-BUG-013: msgBitLen -24, outside [0, 2^64))
 //   blake3Compress-chaining   blake3Compress-block
 //   blake3Hash-message
 //   ecPointX                  ecPointY
@@ -51,6 +52,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, case, "sha256Finalize-remaining")) {
         const remaining_120 = [_]u8{0} ** 120;
         _ = builtins.sha256Finalize(&state32, &remaining_120, 0);
+    } else if (std.mem.eql(u8, case, "sha256Finalize-bitlen")) {
+        _ = builtins.sha256Finalize(&state32, "abc", -24);
     } else if (std.mem.eql(u8, case, "blake3Compress-chaining")) {
         _ = builtins.blake3Compress(state32[0..31], &block64);
     } else if (std.mem.eql(u8, case, "blake3Compress-block")) {

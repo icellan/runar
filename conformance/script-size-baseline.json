@@ -78,10 +78,10 @@
     "property-initializers": 1396,
     "property-shadow": 703,
     "r1-k1-wallet": 956217,
-    "schnorr-zkp": 874166,
+    "schnorr-zkp": 874974,
     "selector": 747,
     "sha256-compress": 23153,
-    "sha256-finalize": 69507,
+    "sha256-finalize": 69509,
     "shift-ops": 13,
     "sighash-single-stateful": 1345,
     "sphincs-wallet": 188591,
@@ -100,6 +100,7 @@
     "stateful-counter": 1393,
     "stateful-wots-gate": 20281,
     "terminal-varlen-read": 1502,
+    "ternary-expression": 48,
     "token-ft": 3044,
     "token-nft": 1151
   }

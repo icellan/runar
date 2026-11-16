@@ -517,7 +517,16 @@ def sha256_finalize(state: bytes, remaining: bytes, msg_bit_len: int) -> bytes:
 
     Returns:
         Final 32-byte SHA-256 digest.
+
+    Raises:
+        ValueError: if msg_bit_len is outside [0, 2^64), which the compiled
+            script refuses (GK-BUG-013).
     """
+    # GK-BUG-013: the compiled script requires the 9th byte of msgBitLen's
+    # 9-byte OP_NUM2BIN form to be 0x00, i.e. 0 <= msg_bit_len < 2^64.
+    if not 0 <= msg_bit_len < 1 << 64:
+        raise ValueError(f"sha256Finalize: msgBitLen must be in [0, 2^64), got {msg_bit_len}")
+
     # Append the 0x80 byte
     padded = remaining + b'\x80'
 

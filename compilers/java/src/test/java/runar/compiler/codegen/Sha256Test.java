@@ -49,7 +49,8 @@ class Sha256Test {
     void finalizeOpCount() {
         List<StackOp> ops = new ArrayList<>();
         Sha256.emitSha256Finalize(ops::add);
-        assertEquals(63946, ops.size(), "sha256Finalize op count drift");
+        // GK-BUG-013: 63946 -> 63947 (the dropped 9th byte became <00> OP_EQUALVERIFY).
+        assertEquals(63947, ops.size(), "sha256Finalize op count drift");
     }
 
     @Test
@@ -129,6 +130,30 @@ class Sha256Test {
         assertTrue(ops.get(2) instanceof PushOp);
         assertEquals(BigInteger.valueOf(8),
             ((BigIntPushValue) ((PushOp) ops.get(2)).value()).value());
+    }
+
+    @Test
+    void finalizeChecksTheNinthByteIsZero() {
+        // GK-BUG-013: <9> OP_NUM2BIN <8> OP_SPLIT leaves the msgBitLen sign byte
+        // (or the 2^64 byte) on top. It must be required to equal 0x00, not dropped.
+        List<StackOp> ops = new ArrayList<>();
+        Sha256.emitSha256Finalize(ops::add);
+        assertEquals("op(OP_SPLIT)", opRepr(ops.get(3)));
+        assertEquals("push_bs(00)", opRepr(ops.get(4)));
+        assertEquals("op(OP_EQUALVERIFY)", opRepr(ops.get(5)));
+        for (int i = 0; i < 6; i++) {
+            assertFalse(ops.get(i) instanceof DropOp, "op[" + i + "] drops the 9th byte");
+        }
+    }
+
+    @Test
+    void finalizeEmitsTheSignByteCheckAsAOneBytePush() {
+        // 01 00, not OP_0: OP_0 pushes the EMPTY string and the equality would
+        // refuse every honest length.
+        List<StackOp> ops = new ArrayList<>();
+        Sha256.emitSha256Finalize(ops::add);
+        String hex = Emit.run(new StackProgram("Test", List.of(new StackMethod("run", ops, 0L))));
+        assertEquals("5980587f010088547f", hex.substring(0, 18));
     }
 
     @Test

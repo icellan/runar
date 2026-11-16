@@ -114,8 +114,9 @@ interface SpendSpec {
   artifactReadback?: ArtifactReadback;
   // both
   cryptoNearMiss?: boolean;
-  /** precompiled-hex reject: the engine error must match this (case-insensitive)
-   *  regex, pinning the FAILURE CLASS and not just the verdict. */
+  /** precompiled-hex or stateless-signed reject: the engine error must match
+   *  this (case-insensitive) regex, pinning the FAILURE CLASS and not just the
+   *  verdict. */
   vmErrorPattern?: string;
   /** Stateful accept only: the slot layout and slot-excised template hash of
    *  the EXECUTED deployment (see `checkTemplateHash`). */
@@ -440,6 +441,10 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError} unlocking=${r.unlockingHex}`).toBe(
               s.expect === 'accept',
             );
+            if (s.expect === 'reject' && s.vmErrorPattern !== undefined) {
+              expect(r.reachedEngine, `harness error before the engine ran: ${r.vmError}`).toBe(true);
+              expect(r.vmError ?? '').toMatch(new RegExp(s.vmErrorPattern, 'i'));
+            }
             // Source-vs-script agreement where the interpreter is meaningful.
             if (r.interpreterAccepted !== undefined && !s.cryptoNearMiss) {
               expect(

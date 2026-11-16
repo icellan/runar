@@ -539,7 +539,11 @@ module RunarCompiler
         em.bin_op("OP_NUM2BIN")    # 9-byte LE
         em.push_i(8)
         em.split                    # [8-byte LE, sign byte]
-        em.drop                     # [8-byte LE]
+        # GK-BUG-013: msgBitLen must be in [0, 2^64). The 9th byte is the
+        # script-number sign (0x80 for a negative) or the 2^64 byte; dropping it
+        # let -L and 2^64 + L alias L. Require it to be 0x00 (a 1-byte push, not OP_0).
+        em.push_b("\x00".b)
+        em.oc("OP_EQUALVERIFY"); em.depth -= 2 # [8-byte LE]
         # Reverse 8 bytes to BE: split(4), reverse each half, cat
         em.push_i(4); em.split     # [lo4_LE, hi4_LE]
         em.reverse_bytes4           # [lo4_LE, hi4_rev]

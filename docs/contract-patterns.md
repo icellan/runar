@@ -413,13 +413,13 @@ until the auctioneer closes.
 
 ## Schnorr Zero-Knowledge Proof
 
-A stateless contract that verifies a Schnorr ZKP proof on-chain, demonstrating the EC (elliptic curve) builtins. The prover proves knowledge of a private key `k` such that `P = k*G` without revealing `k`.
+A stateless contract that verifies a Schnorr ZKP proof on-chain, demonstrating the EC (elliptic curve) builtins. The prover proves knowledge of a private key `k` such that `P = k*G` without revealing `k`. This is the contract shipped as `examples/ts/schnorr-zkp/SchnorrZKP.runar.ts` (with its comments trimmed); `tests/gk-bug-011-contract-patterns-schnorr.test.ts` compiles both and requires the same script.
 
 ```typescript
 import {
-  SmartContract, assert,
-  ecAdd, ecMul, ecMulGen, ecPointX, ecPointY, ecOnCurve, ecModReduce,
-  EC_N,
+  SmartContract, assert, within,
+  ecAdd, ecMul, ecMulGen, ecPointX, ecPointY, ecOnCurve,
+  hash256, cat, bin2num,
 } from 'runar-lang';
 import type { Point } from 'runar-lang';
 
@@ -431,9 +431,21 @@ class SchnorrZKP extends SmartContract {
     this.pubKey = pubKey;
   }
 
-  public verify(rPoint: Point, s: bigint, e: bigint) {
-    // Verify R is on the curve
+  public verify(rPoint: Point, s: bigint) {
+    // s must be in [1, n), n = the secp256k1 group order (malleability gate)
+    assert(within(
+      s,
+      1n,
+      115792089237316195423570985008687907852837564279074904382605163141518161494337n,
+    ));
+
+    // Both points must be on the curve. The identity O (the all-zero blob)
+    // is not, and with pubKey = O the check below would collapse to s*G == R.
     assert(ecOnCurve(rPoint));
+    assert(ecOnCurve(this.pubKey));
+
+    // Fiat-Shamir: the challenge is derived on-chain, never chosen by the spender
+    const e = bin2num(hash256(cat(rPoint, this.pubKey)));
 
     // Left side: s*G
     const sG = ecMulGen(s);
@@ -451,18 +463,24 @@ class SchnorrZKP extends SmartContract {
 
 **How it works:**
 
-The Schnorr identification protocol:
+The Schnorr identification protocol, made non-interactive with the Fiat-Shamir heuristic:
 
-1. **Prover** picks a random nonce `r`, computes `R = r*G`, and sends `R` to the verifier.
-2. **Verifier** sends a random challenge `e`.
-3. **Prover** computes `s = r + e*k (mod n)` and sends `s`.
-4. **Verifier** checks that `s*G === R + e*P`.
+1. **Prover** picks a random nonce `r` and computes the commitment `R = r*G`.
+2. **Challenge** `e = bin2num(hash256(R || P))` is a hash of the commitment and the public key, so the prover cannot pick a convenient `e`.
+3. **Prover** computes `s = r + e*k (mod n)`.
+4. **Verifier** (the locking script) recomputes `e` and checks that `s*G === R + e*P`.
 
-In the Bitcoin contract context, the prover provides `(R, s, e)` in the unlocking script (scriptSig). The locking script contains the public key `P` and verifies the proof equation using on-chain EC arithmetic.
+In the Bitcoin contract context, the spender provides only `(R, s)` in the unlocking script (scriptSig). The locking script contains the public key `P`, derives `e` itself, and verifies the proof equation using on-chain EC arithmetic.
+
+> **Never take `e` from the unlocking script.** A verifier that accepts a spender-chosen `e` is forgeable for any public key: pick any `s` and `e`, set `R = s*G - e*P`, and the equation holds with no knowledge of `k`. The `within` bound on `s` closes a separate malleability: EC scalars are not reduced mod `n`, so `s` and `s + n` would otherwise both verify.
+
+> **Still a proof of knowledge, not a spend authorization.** `e` binds `R` and `P` but not the spending transaction, so a published `(R, s)` replays against any UTXO locked to the same `pubKey`, and reusing a nonce `r` across two proofs reveals `k`. See the warnings in the shipped contract's header.
 
 **Key EC builtins used:**
 
-- `ecOnCurve(rPoint)` -- validates the commitment point is on the secp256k1 curve
+- `within(s, 1n, n)` -- bounds the response to the canonical scalar range
+- `ecOnCurve(rPoint)` / `ecOnCurve(this.pubKey)` -- validate that both points are on the secp256k1 curve (which rejects the identity)
+- `hash256(cat(rPoint, this.pubKey))` + `bin2num` -- the Fiat-Shamir challenge `e`
 - `ecMulGen(s)` -- computes `s*G` using the hardcoded generator point
 - `ecMul(this.pubKey, e)` -- computes `e*P` (scalar multiplication of the public key)
 - `ecAdd(rPoint, eP)` -- computes `R + e*P` (point addition)

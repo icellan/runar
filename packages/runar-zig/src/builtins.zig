@@ -848,6 +848,13 @@ fn lengthPanic(comptime prefix: []const u8, got: usize) noreturn {
     @panic(msg);
 }
 
+fn bitLenPanic(got: base.Bigint) noreturn {
+    const prefix = "sha256Finalize: msgBitLen must be in [0, 2^64)";
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, prefix ++ ", got {d}", .{got}) catch prefix;
+    @panic(msg);
+}
+
 pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: length invariants of the in-contract SHA-256 builtin.
     if (chaining_value.len != 32) lengthPanic("sha256Compress: state must be 32 bytes", chaining_value.len);
@@ -864,8 +871,11 @@ pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteStrin
     // N-173: "0-119 bytes" (not "<= 119 bytes") matches the shared diagnostic
     // text (interpreter.ts, runar.go, builtins.rb) for this bound.
     if (remaining.len > 119) lengthPanic("sha256Finalize: remaining must be 0-119 bytes", remaining.len);
-    // No shared counterpart checks this; wording is Zig-specific by design.
-    if (total_len < 0) @panic("sha256Finalize: total bit length must be non-negative");
+    // GK-BUG-013: the compiled script refuses a msgBitLen outside [0, 2^64)
+    // (the 9th byte of its 9-byte OP_NUM2BIN form must be 0x00), and every
+    // tier's off-chain sha256Finalize refuses the same range with this text.
+    // Bigint is i64 here, so a negative is the only out-of-domain value.
+    if (total_len < 0) bitLenPanic(total_len);
 
     const blocks: usize = if (remaining.len + 1 + 8 <= 64) 1 else 2;
     const total_bytes = blocks * 64;

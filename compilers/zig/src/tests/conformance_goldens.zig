@@ -168,6 +168,34 @@ fn fixtureAllowlistedForZig(allocator: std.mem.Allocator, io: std.Io, test_dir: 
     }
 }
 
+/// GK-GAP-003: true when the fixture's `source.json` lists `ext` in its
+/// `parserSkip` array -- a documented per-surface opt-out (the runner demands
+/// a non-empty `parserSkipReason`, and allowlist-audit.test.ts pins every
+/// one). Absent file / no `parserSkip` -> false. Mirrors
+/// ConformanceGoldensTest.java's `isJavaParserSkipped`.
+fn fixtureParserSkips(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8, ext: []const u8) !bool {
+    const parsed = (try parseSourceJson(allocator, io, test_dir)) orelse return false;
+    defer parsed.deinit();
+    switch (parsed.value) {
+        .object => |root| {
+            const skip_val = root.get("parserSkip") orelse return false;
+            switch (skip_val) {
+                .array => |arr| {
+                    for (arr.items) |item| {
+                        switch (item) {
+                            .string => |s| if (std.mem.eql(u8, s, ext)) return true,
+                            else => {},
+                        }
+                    }
+                    return false;
+                },
+                else => return false,
+            }
+        },
+        else => return false,
+    }
+}
+
 /// Independent (raw source.json) check that the allowlist excludes zig.
 /// Deliberately does not go through `fixtureAllowlistedForZig`.
 fn excludesZigRaw(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !bool {
@@ -182,6 +210,26 @@ fn excludesZigRaw(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8
         if (std.mem.eql(u8, item.string, "zig")) return false;
     }
     return true;
+}
+
+/// GK-GAP-003: independent (raw source.json) check that the fixture
+/// parserSkips `.runar.zig`. Deliberately does not go through
+/// `fixtureParserSkips`, so a bug there cannot widen the skip set unseen.
+fn parserSkipsZigRaw(allocator: std.mem.Allocator, io: std.Io, test_dir: []const u8) !bool {
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/source.json", .{test_dir});
+    defer allocator.free(config_path);
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const list = parsed.value.object.get("parserSkip") orelse return false;
+    for (list.array.items) |item| {
+        if (std.mem.eql(u8, item.string, ".runar.zig")) return true;
+    }
+    return false;
 }
 
 /// Run the Zig compiler binary with the given flags.
@@ -435,6 +483,12 @@ fn classifyFixture(
         return .{ .failure = .{ .name = name, .kind = .stale_expected_not_compilable, .detail = detail } };
     }
 
+    // GK-GAP-003: a fixture that parserSkips the Zig surface ships no
+    // .runar.zig source by design; this harness compiles that surface only,
+    // so there is nothing to compile. The Zig compiler is still held to the
+    // fixture's golden by the multi-format runner.
+    if (try fixtureParserSkips(allocator, io, test_dir, ".runar.zig")) return .{ .skipped = true };
+
     const source_opt = try findZigSource(allocator, io, test_dir);
     if (source_opt == null) {
         const detail = try std.fmt.allocPrint(allocator, "no .runar.zig source found for fixture '{s}'", .{name});
@@ -674,7 +728,7 @@ test "conformance-goldens: zig compiler produces byte-identical output for all f
 
     const total = fixture_names.items.len;
     std.debug.print(
-        "\n=== Zig conformance-goldens summary: {d} pass / {d} fail / {d} skipped (compilers allowlist excludes zig) (of {d} fixtures) ===\n",
+        "\n=== Zig conformance-goldens summary: {d} pass / {d} fail / {d} skipped (compilers allowlist excludes zig, or parserSkip excludes .runar.zig) (of {d} fixtures) ===\n",
         .{ passed.items.len, failures.items.len, skipped.items.len, total },
     );
     if (skipped.items.len > 0) {
@@ -716,11 +770,23 @@ test "conformance-goldens: zig compiler produces byte-identical output for all f
         return error.ConformanceGoldensFailed;
     }
 
-    // N-389: the skipped set must be exactly the named set (names are in
-    // sorted order on both sides), and passed + skipped must account for
-    // every fixture.
-    try std.testing.expectEqual(EXPECTED_NOT_ZIG_COMPILABLE.len, skipped.items.len);
-    for (EXPECTED_NOT_ZIG_COMPILABLE, 0..) |n, k| {
+    // N-389: the skipped set must be exactly the named set plus
+    // (GK-GAP-003) every fixture whose raw source.json parserSkips
+    // `.runar.zig` (names are in sorted fixture order on both sides), and
+    // passed + skipped must account for every fixture.
+    var expected_skips: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer expected_skips.deinit(allocator);
+    for (fixture_names.items) |f| {
+        var named = false;
+        for (EXPECTED_NOT_ZIG_COMPILABLE) |n| {
+            if (std.mem.eql(u8, f, n)) named = true;
+        }
+        const f_dir = try std.fmt.allocPrint(allocator, "{s}{s}", .{ conformance_base, f });
+        defer allocator.free(f_dir);
+        if (named or try parserSkipsZigRaw(allocator, io, f_dir)) try expected_skips.append(allocator, f);
+    }
+    try std.testing.expectEqual(expected_skips.items.len, skipped.items.len);
+    for (expected_skips.items, 0..) |n, k| {
         try std.testing.expectEqualStrings(n, skipped.items[k]);
     }
     try std.testing.expectEqual(total, passed.items.len + skipped.items.len);
@@ -863,6 +929,54 @@ test "conformance-goldens: classifyFixture skips an allowlist-excluded fixture w
     if (!outcome.skipped) {
         std.debug.print("expected outcome.skipped=true, got {any}\n", .{outcome});
         return error.AllowlistExcludedFixtureNotSkipped;
+    }
+}
+
+// GK-GAP-003: `ternary-expression` is the first fixture whose source.json
+// lists `.runar.zig` in `parserSkip` (the Zig surface has no conditional
+// expression), so it ships no `.runar.zig` source. This harness compiles the
+// Zig SURFACE only, so it must skip such a fixture -- as the Java harness
+// skips a fixture that parserSkips `.runar.java` -- instead of failing it as
+// missing_source. The Zig COMPILER is still held to that fixture's golden by
+// the multi-format runner (every declared surface x every tier).
+//
+// What this proves: classifyFixture skips a fixture that parserSkips
+// `.runar.zig`, and still fails one that parserSkips a different surface while
+// having no `.runar.zig` source.
+// What this does not prove: anything about the real corpus beyond the
+// aggregate sweep above.
+test "conformance-goldens: classifyFixture skips a fixture that parserSkips the Zig surface" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const binary = try resolveZigBinary(allocator);
+    defer allocator.free(binary);
+
+    const skips_zig = try n124ScratchDir(allocator, io, "parser-skip-zig");
+    defer allocator.free(skips_zig);
+    try n124WriteFile(io, skips_zig, "source.json",
+        \\{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.go",".runar.zig"],"parserSkipReason":"no conditional expression"}
+    );
+    defer n124DeleteFile(io, skips_zig, "source.json");
+
+    const outcome = try classifyFixture(allocator, io, binary, skips_zig, "gk-gap-003-parser-skip-zig", &.{});
+    defer freeOutcome(allocator, outcome);
+    if (outcome.failure != null or !outcome.skipped) {
+        std.debug.print("a fixture that parserSkips .runar.zig must be skipped, got {any}\n", .{outcome});
+        return error.ParserSkippedFixtureNotSkipped;
+    }
+
+    const skips_other = try n124ScratchDir(allocator, io, "parser-skip-java");
+    defer allocator.free(skips_other);
+    try n124WriteFile(io, skips_other, "source.json",
+        \\{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.java"],"parserSkipReason":"FixedArray"}
+    );
+    defer n124DeleteFile(io, skips_other, "source.json");
+
+    const other = try classifyFixture(allocator, io, binary, skips_other, "gk-gap-003-parser-skip-java", &.{});
+    defer freeOutcome(allocator, other);
+    if (other.failure == null or other.failure.?.kind != .missing_source) {
+        std.debug.print("a fixture that parserSkips only .runar.java but has no .runar.zig must fail missing_source, got {any}\n", .{other});
+        return error.WrongOutcomeForOtherSurfaceSkip;
     }
 }
 

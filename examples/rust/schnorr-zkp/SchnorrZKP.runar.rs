@@ -43,6 +43,10 @@ impl SchnorrZKP {
         // Verify R is on the curve
         assert!(ec_on_curve(r_point));
 
+        // Verify P is on the curve: the identity O (all-zero) would make
+        // R + e*P collapse to R (GK-BUG-011).
+        assert!(ec_on_curve(&self.pub_key));
+
         // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P))
         let e = bin2num(&hash256(&cat(r_point, &self.pub_key)));
 

@@ -1,0 +1,11 @@
+{
+  "sources": {
+    ".runar.ts": "./TernaryExpression.runar.ts",
+    ".runar.sol": "./TernaryExpression.runar.sol",
+    ".runar.py": "./TernaryExpression.runar.py",
+    ".runar.rb": "./TernaryExpression.runar.rb",
+    ".runar.java": "./TernaryExpression.runar.java"
+  },
+  "parserSkip": [".runar.move", ".runar.go", ".runar.rs", ".runar.zig"],
+  "parserSkipReason": "This fixture pins the conditional EXPRESSION `c ? a : b` (GK-GAP-003, user decision: only the surfaces that have ternary syntax carry it). .runar.ts, .runar.sol, .runar.rb and .runar.java spell it `c ? a : b` and .runar.py spells it `a if c else b`; the N491 paren-ternary negatives show each of those five surfaces parses it on every tier. The Move, Go, Rust-DSL and Zig surfaces have no conditional expression -- their parsers turn `if` only into a statement -- so there is nothing for those four surfaces to pin here; their if/else statement form is covered by if-else, if-without-else and the branch fixtures. All seven COMPILERS remain full hex/ANF parity targets for the five surfaces (no compilers allowlist)."
+}
