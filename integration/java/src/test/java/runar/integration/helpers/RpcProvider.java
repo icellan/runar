@@ -80,6 +80,9 @@ public final class RpcProvider implements Provider {
 
     private static final String NODE_REFUSAL_PREFIX = "RPC sendrawtransaction: ";
 
+    /** RPC_INVALID_ADDRESS_OR_KEY: "No such mempool or blockchain transaction". */
+    private static final int RPC_NOT_FOUND = -5;
+
     @Override
     public List<UTXO> listUtxos(String address) {
         // listunspent — SV Node with a wallet-imported address. A failure here
@@ -147,29 +150,39 @@ public final class RpcProvider implements Provider {
 
     @Override
     public UTXO getUtxo(String txid, int vout) {
+        // R3-JAVA-GETUTXO: this caught every exception and returned null, so an
+        // unreachable node, a node-side RPC failure or a malformed reply all
+        // read as "no such outpoint". Only the node's own not-found answer may
+        // be empty; everything else propagates.
         String result;
         try {
             // Verbose mode: SV Node accepts bool `true`, Teranode accepts int `1`.
             Object verboseFlag = rpc.isTeranode() ? Integer.valueOf(1) : Boolean.TRUE;
             result = rpc.call("getrawtransaction", txid, verboseFlag);
-        } catch (Exception e) {
-            return null;
+        } catch (RpcClient.RpcException e) {
+            if (e.rpcCode() != null && e.rpcCode() == RPC_NOT_FOUND) return null;
+            throw e;
         }
         Object parsed = new JsonReader(result).readValue();
-        if (!(parsed instanceof Map<?, ?> m)) return null;
-        Object vouts = m.get("vout");
-        if (!(vouts instanceof List<?> voutList)) return null;
+        if (!(parsed instanceof Map<?, ?> m) || !(m.get("vout") instanceof List<?> voutList)) {
+            throw new RpcClient.RpcException("getrawtransaction " + txid + ": expected a verbose transaction object, got " + result);
+        }
+        // The transaction exists but has no such output: genuinely not found.
         if (vout < 0 || vout >= voutList.size()) return null;
         Object voutItem = voutList.get(vout);
-        if (!(voutItem instanceof Map<?, ?> vm)) return null;
-        long sats = satoshisFromAmount(vm.get("value"));
         String script = null;
-        Object spk = vm.get("scriptPubKey");
-        if (spk instanceof Map<?, ?> spkMap) {
-            Object hex = spkMap.get("hex");
-            if (hex instanceof String s) script = s;
+        Object value = null;
+        if (voutItem instanceof Map<?, ?> vm) {
+            value = vm.get("value");
+            if (vm.get("scriptPubKey") instanceof Map<?, ?> spkMap && spkMap.get("hex") instanceof String s) {
+                script = s;
+            }
         }
-        if (script == null) return null;
+        if (script == null || !(value instanceof Number)) {
+            throw new RpcClient.RpcException("getrawtransaction " + txid + ": output " + vout
+                + " carries no value / scriptPubKey.hex: " + voutItem);
+        }
+        long sats = satoshisFromAmount(value);
         return new UTXO(txid, vout, sats, script);
     }
 

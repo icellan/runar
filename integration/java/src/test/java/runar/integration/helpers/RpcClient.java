@@ -130,7 +130,9 @@ public final class RpcClient {
             } else {
                 msg = String.valueOf(err);
             }
-            throw new RpcException("RPC " + method + ": " + msg);
+            Integer code = err instanceof java.util.Map<?, ?> em2 && em2.get("code") instanceof Number c
+                ? Integer.valueOf(c.intValue()) : null;
+            throw new RpcException("RPC " + method + ": " + msg, code);
         }
         Object result = map.get("result");
         return JsonWriter.write(result);
@@ -245,7 +247,14 @@ public final class RpcClient {
 
     /** Thrown when the RPC returns an error or the connection fails. */
     public static final class RpcException extends RuntimeException {
-        public RpcException(String msg) { super(msg); }
-        public RpcException(String msg, Throwable cause) { super(msg, cause); }
+        /** The node's JSON-RPC error code, or null when the node never answered with one. */
+        private final Integer rpcCode;
+
+        public RpcException(String msg) { this(msg, (Integer) null); }
+        public RpcException(String msg, Throwable cause) { super(msg, cause); this.rpcCode = null; }
+        public RpcException(String msg, Integer rpcCode) { super(msg); this.rpcCode = rpcCode; }
+
+        /** The node's JSON-RPC error code, or null (transport failure, bad response shape). */
+        public Integer rpcCode() { return rpcCode; }
     }
 }
