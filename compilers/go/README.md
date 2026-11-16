@@ -264,8 +264,9 @@ literals and readonly contract properties only (no method parameter, local,
 mutable property or other `groth16PublicInput`). `!=`, `<`, a conjunct of `&&`, a check inside an `if`
 or loop and a check in a private helper do not count. The typecheck enforces
 this for `--source` (and `runar.CompileCheck`, which has no vk.json, so a
-method bound only by pins fails there), and stack lowering enforces it again
-for `--ir`.
+method bound only by pins fails there; `runar.CompileCheckWithGroth16VK(path,
+vkPath)` runs the same frontend check with the vk.json and accepts it, as
+`--groth16-wa-vk` does), and stack lowering enforces it again for `--ir`.
 
 The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
 `groth16WA.publicInputs` fields so downstream consumers can sanity-check

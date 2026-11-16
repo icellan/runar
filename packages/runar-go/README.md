@@ -887,6 +887,16 @@ func CompileCheck(contractFile string) error
 
 Run the Rúnar frontend (parse → validate → typecheck) on a contract source file. Auto-dispatches on extension across all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` formats. Returns `error` on any frontend failure with a colon-joined list of issues. [compile_check.go](compile_check.go).
 
+`CompileCheck` has no vk.json. A method that calls `AssertGroth16WitnessAssistedWithMSM` and binds its statement only through `pinnedPublicInputs` in the vk.json is therefore refused here ("does not bind the proved statement"), even though the compiler accepts it with `--groth16-wa-vk` / `CompileOptions.Groth16WAVKey`. Check such a contract with `CompileCheckWithGroth16VK`.
+
+#### `CompileCheckWithGroth16VK`
+
+```go
+func CompileCheckWithGroth16VK(contractFile, vkPath string) error
+```
+
+`CompileCheck` with the SP1-format Groth16 vk.json the contract will be compiled with. The vk.json is loaded and validated the same way `--groth16-wa-vk` loads it (an unreadable or malformed file is an error), and its `pinnedPublicInputs` count as binding the statement of every `AssertGroth16WitnessAssistedWithMSM` method. A vk.json that pins no slot binds nothing, so a method that also binds nothing in its body is still refused. [compile_check.go](compile_check.go).
+
 #### `ComputeNewState` / `ComputeNewStateAndDataOutputs`
 
 ```go
