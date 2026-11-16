@@ -103,9 +103,13 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
 /// chosen by the spender.
 ///
 /// A must-analysis over the AST. A parameter counts as checked by a statement
-/// list when it is passed to `checkPreimage` (directly, through a local alias,
-/// or through a private method that itself checks that parameter on every
-/// path) at a point every execution of the list reaches: an `if` checks it
+/// list when `checkPreimage(p)` is the asserted condition of `assert(...)` (the
+/// whole condition or any conjunct of its top-level `&&` chain) with `p` the
+/// parameter or a local alias of it, or when it is passed to a private method
+/// that itself checks that parameter on every path, at a point every execution
+/// of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, `||`-ed,
+/// compared or ternary-wrapped call, or one used as an `if` / ternary
+/// condition or returned from a helper, checks nothing): an `if` checks it
 /// only if both arms do (a missing else checks nothing), a ternary only if both
 /// arms do; the right operand of `&&` / `||` and a `for` loop body check
 /// nothing. A `return` ends its path: a private method checks a parameter only
@@ -243,10 +247,11 @@ const PreimageCheck = struct {
     fn callMust(self: *PreimageCheck, name: []const u8, args: []const Expression, builtin: bool) Allocator.Error!u64 {
         var out: u64 = 0;
         for (args) |a| out |= try self.exprMust(a);
-        if (builtin and std.mem.eql(u8, name, "checkPreimage")) {
-            if (args.len > 0) {
-                if (self.resolve(args[0])) |b| out |= bitOf(b);
-            }
+        // R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+        // conjunct does (assertedMust).
+        if (builtin and std.mem.eql(u8, name, "checkPreimage")) return out;
+        if (builtin and std.mem.eql(u8, name, "assert")) {
+            if (args.len > 0) out |= self.assertedMust(args[0]);
             return out;
         }
         if (self.privateMethod(name)) |target| {
@@ -259,6 +264,19 @@ const PreimageCheck = struct {
             }
         }
         return out;
+    }
+
+    /// The parameters an asserted condition checks: each conjunct of its
+    /// top-level `&&` chain that is a direct `checkPreimage(p)` call.
+    fn assertedMust(self: *PreimageCheck, cond: Expression) u64 {
+        return switch (cond) {
+            .binary_op => |b| if (b.op == .and_op) self.assertedMust(b.left) | self.assertedMust(b.right) else 0,
+            .call => |c| blk: {
+                if (!std.mem.eql(u8, c.callee, "checkPreimage") or c.args.len == 0) break :blk 0;
+                break :blk if (self.resolve(c.args[0])) |b| bitOf(b) else 0;
+            },
+            else => 0,
+        };
     }
 
     fn exprMust(self: *PreimageCheck, e: Expression) Allocator.Error!u64 {
@@ -304,7 +322,7 @@ const PreimageCheck = struct {
                 },
                 .assign => |a| done |= try self.exprMust(a.value),
                 .expr_stmt => |es| done |= try self.exprMust(es.expr),
-                .assert_stmt => |ast| done |= try self.exprMust(ast.condition),
+                .assert_stmt => |ast| done |= (try self.exprMust(ast.condition)) | self.assertedMust(ast.condition),
                 .return_stmt => |r| {
                     if (r.value) |v| done |= try self.exprMust(v);
                     exits.* &= done;

@@ -99,6 +99,7 @@ type MSMDynamicIdx struct {
 
 func (c *MSMDynamicIdx) Advance(dynIdx runar.Bigint, nextCounter runar.Bigint) {
 	runar.AssertGroth16WitnessAssistedWithMSM()
+	runar.Assert(runar.Groth16PublicInput(1) == c.Pinned)
 	runar.Assert(runar.Groth16PublicInput(dynIdx) == c.Pinned)
 	c.Counter = nextCounter
 }
@@ -136,6 +137,7 @@ type MSMBadIdx struct {
 
 func (c *MSMBadIdx) Advance(nextCounter runar.Bigint) {
 	runar.AssertGroth16WitnessAssistedWithMSM()
+	runar.Assert(runar.Groth16PublicInput(1) == c.Pinned)
 	runar.Assert(runar.Groth16PublicInput(5) == c.Pinned)
 	c.Counter = nextCounter
 }

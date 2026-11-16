@@ -296,9 +296,13 @@ module RunarCompiler
     # spec/type-system.md 4.2: a SigHashPreimage parameter of a public method
     # is checked exactly once. The affine checker refuses a second
     # consumption; this refuses none. A must-analysis: a parameter is checked
-    # by a statement list when it reaches checkPreimage (directly, through a
-    # local alias, or through a private method that checks that parameter on
-    # every path) at a point every execution reaches. An if checks it only if
+    # by a statement list when checkPreimage(p) is the asserted condition of
+    # assert(...) (the whole condition or any conjunct of its top-level &&
+    # chain) with p the parameter or a local alias of it, or when it is passed
+    # to a private method that checks that parameter on every path, at a point
+    # every execution reaches (R2-GK010-ASSERT: a discarded, bound, negated,
+    # ||-ed, compared or ternary-wrapped call, or one used as an if / ternary
+    # condition or returned from a helper, checks nothing). An if checks it only if
     # both arms do (a missing else checks nothing), a ternary only if both arms
     # do; the right operand of && / || and a for-loop body check nothing. A
     # return ends its path: a private method checks a parameter only if every
@@ -348,15 +352,34 @@ module RunarCompiler
         end
         memo[m.name] = result
       end
+      # The operands of a top-level && chain (e itself if it is not one).
+      conjuncts = lambda do |e|
+        e.is_a?(BinaryExpr) && e.op == "&&" ? conjuncts.call(e.left) + conjuncts.call(e.right) : [e]
+      end
+      # The parameters an asserted condition checks: each conjunct of its
+      # top-level && chain that is a direct checkPreimage(p) call.
+      asserted_must = lambda do |cond, aliases|
+        out = Set.new
+        conjuncts.call(cond).each do |c|
+          next unless c.is_a?(CallExpr) && c.callee.is_a?(Identifier) && c.callee.name == "checkPreimage"
+          next if (c.args || []).empty?
+
+          origin = resolve.call(c.args[0], aliases)
+          out << origin unless origin.nil?
+        end
+        out
+      end
       expr_must = lambda do |e, aliases, stack|
         case e
         when CallExpr
           out = Set.new
           (e.args || []).each { |a| out |= expr_must.call(a, aliases, stack) }
           out |= expr_must.call(e.callee.object, aliases, stack) if e.callee.is_a?(MemberExpr)
-          if e.callee.is_a?(Identifier) && e.callee.name == "checkPreimage"
-            origin = (e.args || []).empty? ? nil : resolve.call(e.args[0], aliases)
-            out << origin unless origin.nil?
+          # R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+          # conjunct does (the assert branch below).
+          return out if e.callee.is_a?(Identifier) && e.callee.name == "checkPreimage"
+          if e.callee.is_a?(Identifier) && e.callee.name == "assert"
+            out |= asserted_must.call(e.args[0], aliases) unless (e.args || []).empty?
             return out
           end
           target = private_target.call(e.callee)
@@ -418,7 +441,8 @@ module RunarCompiler
           when ReturnStmt
             exits << (done | expr_must.call(st.value, aliases, stack))
             return nil
-          when AssertStmt then done |= expr_must.call(st.condition, aliases, stack)
+          when AssertStmt
+            done |= expr_must.call(st.condition, aliases, stack) | asserted_must.call(st.condition, aliases)
           when IfStmt
             done |= expr_must.call(st.condition, aliases, stack)
             then_done = walk.call(st.then, done, aliases.dup, stack, exits)

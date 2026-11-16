@@ -29,6 +29,22 @@ func (r *TypeCheckResult) ErrorStrings() []string {
 
 // TypeCheck type-checks a Rúnar AST. Returns the same AST plus any errors.
 func TypeCheck(contract *ContractNode) *TypeCheckResult {
+	return TypeCheckWithOptions(contract, TypeCheckOptions{})
+}
+
+// TypeCheckOptions carries facts from outside the source that a typecheck
+// rule depends on. The zero value is the fail-closed default.
+type TypeCheckOptions struct {
+	// Groth16WAStatementPinned is true when the vk.json the contract will be
+	// compiled with (CompileOptions.Groth16WAVKey / --groth16-wa-vk) pins at
+	// least one public-input slot with pinnedPublicInputs. A caller with no
+	// vk.json in hand (runar.CompileCheck) leaves it false, so a method whose
+	// statement is bound only by the vk.json is refused there.
+	Groth16WAStatementPinned bool
+}
+
+// TypeCheckWithOptions is TypeCheck with the caller's TypeCheckOptions.
+func TypeCheckWithOptions(contract *ContractNode, opts TypeCheckOptions) *TypeCheckResult {
 	checker := newTypeChecker(contract)
 
 	checker.checkPropertyInitializers()
@@ -37,6 +53,7 @@ func TypeCheck(contract *ContractNode) *TypeCheckResult {
 		checker.checkMethod(method)
 	}
 	checker.errors = append(checker.errors, checkPreimageCheckedOnEveryPath(contract)...)
+	checker.errors = append(checker.errors, checkGroth16WAStatementBound(contract, opts.Groth16WAStatementPinned)...)
 
 	return &TypeCheckResult{
 		Contract: contract,

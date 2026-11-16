@@ -89,7 +89,8 @@ func TestGKBUG006_MixedMarkersRefused_Source(t *testing.T) {
 // to ANF, the shape an --ir file carries.
 func gk006MSMProgram(t *testing.T) *ir.ANFProgram {
 	t.Helper()
-	src := gk006WriteContract(t, "MSMOnly", "\trunar.AssertGroth16WitnessAssistedWithMSM()\n\trunar.Assert(true)")
+	// R2-MSM-UNBOUND: the body binds slot 2 so the frontend accepts it.
+	src := gk006WriteContract(t, "MSMOnly", "\trunar.AssertGroth16WitnessAssistedWithMSM()\n\trunar.Assert(runar.Groth16PublicInput(2) == 0)")
 	prog, err := CompileSourceToIR(src)
 	if err != nil {
 		t.Fatalf("CompileSourceToIR: %v", err)
@@ -182,6 +183,7 @@ type ` + name + ` struct {
 
 func (c *` + name + `) helper() {
 	runar.` + marker + `()
+	runar.Assert(runar.Groth16PublicInput(2) == 0)
 }
 
 func (c *` + name + `) Verify() {

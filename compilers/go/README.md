@@ -256,6 +256,17 @@ than a second time afterwards. The plain `AssertGroth16WitnessAssisted`
 that variant never sees the public-input scalars, so it can neither enforce
 a pin nor tie the proof to any statement.
 
+A method that calls `AssertGroth16WitnessAssistedWithMSM` must bind the
+statement (R2-MSM-UNBOUND), or the compile fails: either the vk.json pins at
+least one slot, or the method has a top-level
+`assert(groth16PublicInput(i) == <value>)` whose `<value>` is built from
+literals and readonly contract properties only (no method parameter, local,
+mutable property or other `groth16PublicInput`). `!=`, `<`, a conjunct of `&&`, a check inside an `if`
+or loop and a check in a private helper do not count. The typecheck enforces
+this for `--source` (and `runar.CompileCheck`, which has no vk.json, so a
+method bound only by pins fails there), and stack lowering enforces it again
+for `--ir`.
+
 The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
 `groth16WA.publicInputs` fields so downstream consumers can sanity-check
 which VK and which statement were baked in without having to re-derive them
@@ -264,6 +275,22 @@ from the script bytes.
 Spenders must build the unlocking witness with
 `bn254witness.BuildFromProofWithInputs` (not `GenerateWitness`) — the
 verifier reads the five public-input scalars off the witness stack.
+
+#### Witness malleability
+
+The unlocking witness is not unique. The residue witness `c` can be replaced
+by any `c·κ` with `κ^λ = 1` (`κ` in the order-3r subgroup of Fp12*), and the
+Miller-loop gradients and other prover-supplied Fp limbs are only checked
+through arithmetic reduced mod p, so a different encoding of the same residue
+passes as well. Anyone who sees an unconfirmed spend can therefore rewrite its
+unlocking script and rebroadcast it under a different txid. Soundness is not
+affected: every accepted witness proves the same proof against the same
+public inputs, and the MSM binding plus any pins or `Groth16PublicInput`
+assertions fix the statement. Do not rely on the txid of an unconfirmed
+`groth16-wa` / `AssertGroth16WitnessAssistedWithMSM` spend (for example, to
+chain further unconfirmed transactions off it). Details are in the
+`EmitGroth16VerifierWitnessAssistedWithMSM` doc comment in
+`codegen/bn254_groth16.go`.
 
 ---
 

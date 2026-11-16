@@ -1317,7 +1317,8 @@ func emitWAMillerLoop3(t *BN254Tracker) {
 // with κ^λ = 1 (κ in the order-3r subgroup of Fp12*) passes too, and so do
 // encodings of c, c⁻¹ outside [0, p). That does not weaken soundness, but
 // the unlocking script stays third-party malleable in c (txid malleability
-// is not closed by this check).
+// is not closed by this check). See "Witness malleability" on
+// EmitGroth16VerifierWitnessAssistedWithMSM for the whole witness.
 //
 // Folding c^λ into the script. λ = s₀ + p − p² + p³ with s₀ = 6x + 2, whose
 // NAF the Miller loop already walks. The accumulator starts at c⁻¹ (the
@@ -1837,6 +1838,25 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 // threading the arity through Groth16Config, the witness-stack layout,
 // and the SP1Verifier contract DSL; that is out of scope for this
 // function.
+//
+// Witness malleability. The unlocking witness is NOT unique, so the
+// unlocking script, and with it the txid, of an unconfirmed spend is
+// third-party malleable: anyone who sees the spend in the mempool can
+// rewrite these items and rebroadcast a different transaction that passes
+// the same locking script.
+//   - The residue witness c: every c·κ with κ^λ = 1 (κ in the order-3r
+//     subgroup of Fp12*) passes the residue check, with c⁻¹ adjusted to
+//     match (see "Final-exponentiation elimination by residue witness").
+//   - The Miller-loop gradients and the other prover-supplied Fp limbs
+//     (c, c⁻¹, the G2 subgroup-check gradients): each is checked only
+//     through a product or comparison reduced mod p, so an encoding outside
+//     [0, p) of the same residue passes too.
+// Soundness is unaffected: every accepted witness still proves the pairing
+// product is 1 for the same proof and the same public inputs, which the MSM
+// binding (and any pinnedPublicInputs / Groth16PublicInput assertions) ties
+// to the statement. Only the transaction's identity moves. A protocol that
+// must chain unconfirmed transactions off this spend, or that keys anything
+// on its txid before confirmation, has to account for that.
 func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth16Config) {
 	// Count Miller loop iterations for gradient allocation (same NAF
 	// structure as the raw variant).

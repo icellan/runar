@@ -81,9 +81,13 @@ const isPreimageType = (t: TypeNode): boolean =>
  * chosen by the spender.
  *
  * A must-analysis over the AST. A parameter counts as checked by a statement
- * list when it is passed to `checkPreimage` (directly, through a local alias,
- * or through a private method that itself checks that parameter on every
- * path) at a point every execution of the list reaches:
+ * list when `checkPreimage(p)` is the asserted condition of `assert(...)` (the
+ * whole condition or any conjunct of its top-level `&&` chain) with `p` the
+ * parameter or a local alias of it, or when it is passed to a private method
+ * that itself checks that parameter on every path, at a point every execution
+ * of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, `||`-ed,
+ * compared or ternary-wrapped call, or one used as an `if` / ternary condition
+ * or returned from a helper, checks nothing):
  *   - an `if` checks it only if both arms do (a missing else checks nothing);
  *   - a ternary checks it only if both arms do;
  *   - the right operand of `&&` / `||` checks nothing (short-circuit);
@@ -95,6 +99,11 @@ const isPreimageType = (t: TypeNode): boolean =>
  * local) never stands for a parameter: after `a = other` it no longer holds
  * the parameter's value on every path.
  */
+/** The operands of a top-level `&&` chain (`e` itself if it is not one). */
+function conjuncts(e: Expression): Expression[] {
+  return e.kind === 'binary_expr' && e.op === '&&' ? [...conjuncts(e.left), ...conjuncts(e.right)] : [e];
+}
+
 function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagnostic[] {
   type Aliases = Map<string, string>;
   const privates = new Map<string, MethodNode>();
@@ -150,9 +159,16 @@ function checkPreimageCheckedOnEveryPath(contract: ContractNode): CompilerDiagno
         let out = new Set<string>();
         for (const a of e.args) out = union(out, exprMust(a, aliases, stack));
         if (e.callee.kind === 'member_expr') out = union(out, exprMust(e.callee.object, aliases, stack));
-        if (e.callee.kind === 'identifier' && e.callee.name === 'checkPreimage') {
-          const origin = e.args[0] ? resolve(e.args[0], aliases) : undefined;
-          if (origin !== undefined) out.add(origin);
+        // R2-GK010-ASSERT: the call alone checks nothing; only an asserted
+        // conjunct does (the `assert` branch below).
+        if (e.callee.kind === 'identifier' && e.callee.name === 'checkPreimage') return out;
+        if (e.callee.kind === 'identifier' && e.callee.name === 'assert') {
+          for (const c of e.args[0] ? conjuncts(e.args[0]) : []) {
+            if (c.kind === 'call_expr' && c.callee.kind === 'identifier' && c.callee.name === 'checkPreimage' && c.args[0]) {
+              const origin = resolve(c.args[0], aliases);
+              if (origin !== undefined) out.add(origin);
+            }
+          }
           return out;
         }
         const target = privateTarget(e.callee);

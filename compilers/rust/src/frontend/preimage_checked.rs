@@ -7,9 +7,13 @@
 //! preimage is chosen by the spender.
 //!
 //! A must-analysis over the AST. A parameter counts as checked by a statement
-//! list when it is passed to `checkPreimage` (directly, through a local alias,
-//! or through a private method that itself checks that parameter on every
-//! path) at a point every execution of the list reaches:
+//! list when `checkPreimage(p)` is the asserted condition of `assert(...)` (the
+//! whole condition or any conjunct of its top-level `&&` chain) with `p` the
+//! parameter or a local alias of it, or when it is passed to a private method
+//! that itself checks that parameter on every path, at a point every execution
+//! of the list reaches (R2-GK010-ASSERT: a discarded, bound, negated, `||`-ed,
+//! compared or ternary-wrapped call, or one used as an `if` / ternary
+//! condition or returned from a helper, checks nothing):
 //!   - an `if` checks it only if both arms do (a missing else checks nothing);
 //!   - a ternary checks it only if both arms do;
 //!   - the right operand of `&&` / `||` checks nothing (short-circuit);
@@ -33,6 +37,16 @@ pub fn preimage_not_checked_message(method: &str, param: &str) -> String {
         "public method '{}' must pass its SigHashPreimage parameter '{}' to checkPreimage() on every path",
         method, param
     )
+}
+
+/// The operands of a top-level `&&` chain (`e` itself if it is not one).
+fn conjuncts<'a>(e: &'a Expression, out: &mut Vec<&'a Expression>) {
+    if let Expression::BinaryExpr { op: BinaryOp::And, left, right, .. } = e {
+        conjuncts(left, out);
+        conjuncts(right, out);
+    } else {
+        out.push(e);
+    }
 }
 
 type Origins = HashSet<String>;
@@ -126,9 +140,24 @@ impl<'a> Checker<'a> {
                     out.extend(self.expr_must(object, aliases, stack));
                 }
                 if let Expression::Identifier { name, .. } = callee.as_ref() {
+                    // R2-GK010-ASSERT: the call alone checks nothing; only an
+                    // asserted conjunct does (the `assert` arm below).
                     if name == "checkPreimage" {
-                        if let Some(o) = args.first().and_then(|a| self.resolve(a, aliases)) {
-                            out.insert(o);
+                        return out;
+                    }
+                    if name == "assert" {
+                        let mut cs = Vec::new();
+                        if let Some(cond) = args.first() {
+                            conjuncts(cond, &mut cs);
+                        }
+                        for c in cs {
+                            if let Expression::CallExpr { callee: cc, args: ca, .. } = c {
+                                if matches!(cc.as_ref(), Expression::Identifier { name, .. } if name == "checkPreimage") {
+                                    if let Some(o) = ca.first().and_then(|a| self.resolve(a, aliases)) {
+                                        out.insert(o);
+                                    }
+                                }
+                            }
                         }
                         return out;
                     }

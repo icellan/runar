@@ -95,6 +95,13 @@ def preimage_not_checked_message(method: str, param: str) -> str:
     )
 
 
+def _conjuncts(e: Expression) -> list[Expression]:
+    """The operands of a top-level ``&&`` chain (``e`` itself if it is not one)."""
+    if isinstance(e, BinaryExpr) and e.op == "&&":
+        return _conjuncts(e.left) + _conjuncts(e.right)
+    return [e]
+
+
 def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnostic]:
     """spec/type-system.md section 4.2: a SigHashPreimage parameter of a public
     method is checked exactly once. The affine checker refuses a second
@@ -102,9 +109,13 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
     unchecked preimage is chosen by the spender.
 
     A must-analysis over the AST. A parameter counts as checked by a statement
-    list when it is passed to ``checkPreimage`` (directly, through a local
-    alias, or through a private method that itself checks that parameter on
-    every path) at a point every execution of the list reaches:
+    list when ``checkPreimage(p)`` is the asserted condition of ``assert(...)``
+    -- the whole condition or any conjunct of its top-level ``&&`` chain -- with
+    ``p`` the parameter or a local alias of it, or when it is passed to a
+    private method that itself checks that parameter on every path, at a point
+    every execution of the list reaches (R2-GK010-ASSERT: a discarded, bound,
+    negated, ``||``-ed, compared or ternary-wrapped call, or one used as an
+    ``if`` / ternary condition or returned from a helper, checks nothing):
       - an ``if`` checks it only if both arms do (a missing else checks nothing);
       - a ternary checks it only if both arms do;
       - the right operand of ``&&`` / ``||`` checks nothing (short-circuit);
@@ -168,10 +179,16 @@ def check_preimage_checked_on_every_path(contract: ContractNode) -> list[Diagnos
             if isinstance(e.callee, MemberExpr):
                 out |= expr_must(e.callee.object, aliases, stack)
             if isinstance(e.callee, Identifier) and e.callee.name == "checkPreimage":
-                if e.args:
-                    origin = resolve(e.args[0], aliases)
-                    if origin is not None:
-                        out.add(origin)
+                # R2-GK010-ASSERT: the call alone checks nothing; only an
+                # asserted conjunct does (the ``assert`` branch below).
+                return out
+            if isinstance(e.callee, Identifier) and e.callee.name == "assert":
+                for c in (_conjuncts(e.args[0]) if e.args else []):
+                    if (isinstance(c, CallExpr) and isinstance(c.callee, Identifier)
+                            and c.callee.name == "checkPreimage" and c.args):
+                        origin = resolve(c.args[0], aliases)
+                        if origin is not None:
+                            out.add(origin)
                 return out
             target = private_target(e.callee)
             if target is not None:

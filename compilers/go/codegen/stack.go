@@ -6174,6 +6174,116 @@ func methodUsesGroth16WAPreambleWithMSM(bindings []ir.ANFBinding) bool {
 	return msm
 }
 
+// groth16WAUnboundStatementMessage is frontend.Groth16WAUnboundStatementMessage
+// (codegen does not import the frontend); the two texts must stay identical.
+func groth16WAUnboundStatementMessage(method string) string {
+	return fmt.Sprintf("method '%s' calls assertGroth16WitnessAssistedWithMSM() but does not bind the proved statement: "+
+		"the five public inputs are the spender's choice, so the verifier would accept an honest proof of any statement. "+
+		"Pin at least one slot with pinnedPublicInputs in the --groth16-wa-vk vk.json, or add a top-level "+
+		"assert(groth16PublicInput(i) == <value>) to the method, where <value> is built from literals and readonly "+
+		"contract properties only (no method parameter, local, mutable property or other groth16PublicInput)", method)
+}
+
+// groth16WAStatementBoundInBody is the ANF form of the R2-MSM-UNBOUND body
+// rule (frontend/groth16_wa_binding.go): some TOP-LEVEL binding is an assert
+// whose value is a bin_op === / == with one operand a groth16PublicInput call
+// on a load_const in [0, 4] and the other fixed. Fixed: load_const (an
+// @ref: alias is followed), load_prop of a readonly property, unary_op /
+// bin_op over fixed refs, and a call (not groth16PublicInput) with at least
+// one argument, all fixed. A ref that is not an earlier top-level binding of
+// this method (a parameter named directly, a branch-local) is not fixed, and
+// neither is a name the method binds more than once or inside an if / loop
+// arm (a reassigned local). Locals are bindings here, so this accepts a superset of the frontend rule.
+func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProperty) bool {
+	props := make(map[string]bool, len(properties))
+	for _, p := range properties {
+		if p.Readonly { // a mutable property can be assigned from a parameter
+			props[p.Name] = true
+		}
+	}
+	// A name bound more than once in the method, or inside an if / loop arm,
+	// does not hold one value: `defs` resolves by name at the assert, so a
+	// later or nested re-binding (a local reassigned from a parameter) would
+	// otherwise pass for the fixed first binding. Such a name is never fixed.
+	seen := make(map[string]int)
+	var count func(bs []ir.ANFBinding, nested bool)
+	count = func(bs []ir.ANFBinding, nested bool) {
+		for _, b := range bs {
+			seen[b.Name]++
+			if nested {
+				seen[b.Name]++
+			}
+			count(b.Value.Then, true)
+			count(b.Value.Else, true)
+			count(b.Value.Body, true)
+		}
+	}
+	count(body, false)
+	defs := make(map[string]ir.ANFValue, len(body))
+	var fixed func(ref string, depth int) bool
+	fixed = func(ref string, depth int) bool {
+		v, ok := defs[ref]
+		if !ok || depth > 64 || seen[ref] > 1 {
+			return false
+		}
+		switch v.Kind {
+		case "load_const":
+			if v.ConstString != nil && strings.HasPrefix(*v.ConstString, "@ref:") {
+				return fixed((*v.ConstString)[5:], depth+1)
+			}
+			return true
+		case "load_prop":
+			return props[v.Name]
+		case "unary_op":
+			return fixed(v.Operand, depth+1)
+		case "bin_op":
+			return fixed(v.Left, depth+1) && fixed(v.Right, depth+1)
+		case "call":
+			if v.Func == "groth16PublicInput" || len(v.Args) == 0 {
+				return false
+			}
+			for _, a := range v.Args {
+				if !fixed(a, depth+1) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	pubRead := func(ref string) bool {
+		v, ok := defs[ref]
+		if !ok || seen[ref] > 1 || v.Kind != "call" || v.Func != "groth16PublicInput" || len(v.Args) != 1 {
+			return false
+		}
+		idx, ok := defs[v.Args[0]]
+		if !ok || seen[v.Args[0]] > 1 || idx.Kind != "load_const" {
+			return false
+		}
+		var n *big.Int
+		switch {
+		case idx.ConstBigInt != nil:
+			n = idx.ConstBigInt
+		case idx.ConstInt != nil:
+			n = big.NewInt(*idx.ConstInt)
+		default:
+			return false
+		}
+		return n.Sign() >= 0 && n.Cmp(big.NewInt(4)) <= 0
+	}
+	for _, b := range body {
+		if b.Value.Kind == "assert" {
+			if eq, ok := defs[b.Value.ValueRef]; ok && seen[b.Value.ValueRef] == 1 && eq.Kind == "bin_op" && (eq.Op == "===" || eq.Op == "==") {
+				if (pubRead(eq.Left) && fixed(eq.Right, 0)) || (pubRead(eq.Right) && fixed(eq.Left, 0)) {
+					return true
+				}
+			}
+		}
+		defs[b.Name] = b.Value
+	}
+	return false
+}
+
 // groth16WAMarkers reports which witness-assisted Groth16 markers a method
 // body calls, walking if/loop arms (R-158: a top-level-only scan silently
 // selected the unsound no-preamble variant when the marker sat inside a
@@ -6458,6 +6568,11 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 				"method %q calls assertGroth16WitnessAssistedWithMSM but no Groth16WAConfig was supplied to the codegen (set CompileOptions.Groth16WAVKey to a SP1 vk.json path)",
 				method.Name,
 			)
+		}
+		// R2-MSM-UNBOUND: the --ir copy of the typecheck rule (see
+		// frontend/groth16_wa_binding.go). --ir input never runs the frontend.
+		if !opts.Groth16WAConfig.HasPinnedPublicInputs() && !groth16WAStatementBoundInBody(method.Body, properties) {
+			return nil, fmt.Errorf("%s", groth16WAUnboundStatementMessage(method.Name))
 		}
 		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig)
 		ctx.skipGroth16WAMarker = true
