@@ -203,9 +203,40 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
 // Property validation
 // ---------------------------------------------------------------------------
 
+/// The diagnostic every tier shares (R3-GK010-GAPS).
+pub fn readonly_preimage_property_message(name: &str) -> String {
+    format!(
+        "readonly property '{}' cannot hold a SigHashPreimage: a preimage fixed in the locking script \
+         can never pass checkPreimage(), so every field an extractor reads from it is unverified",
+        name
+    )
+}
+
+/// `SigHashPreimage`, or a (nested) FixedArray of it.
+fn holds_sig_hash_preimage(t: &TypeNode) -> bool {
+    match t {
+        TypeNode::FixedArray { element, .. } => holds_sig_hash_preimage(element),
+        TypeNode::Primitive(p) => *p == PrimitiveTypeName::SigHashPreimage,
+        TypeNode::Custom(_) => false,
+    }
+}
+
 fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, warnings: &mut Vec<Diagnostic>) {
     for prop in &contract.properties {
         validate_property_type(&prop.prop_type, &prop.source_location, errors);
+
+        // R3-GK010-GAPS: a readonly property is a constant in the locking
+        // script, and a sighash preimage commits to the outpoint of the
+        // transaction that carries that script, so checkPreimage() on it can
+        // never pass and every field an extractor reads from it is
+        // unverified. Refused at the declaration (before FixedArray
+        // expansion, so the name is the user's).
+        if prop.readonly && holds_sig_hash_preimage(&prop.prop_type) {
+            errors.push(Diagnostic::error(
+                readonly_preimage_property_message(&prop.name),
+                Some(prop.source_location.clone()),
+            ));
+        }
 
         // V27: Error when any property is named `txPreimage`
         if prop.name == "txPreimage" {

@@ -122,7 +122,7 @@ pub fn typeCheck(allocator: Allocator, contract: ContractNode) !TypeCheckResult 
 /// in the method body (the parameter itself or a local) never stands for a
 /// parameter: after `a = other` it no longer holds the parameter's value on
 /// every path.
-pub const PREIMAGE_NOT_CHECKED_FMT = "public method '{s}' must pass its SigHashPreimage parameter '{s}' to checkPreimage() on every path";
+pub const PREIMAGE_NOT_CHECKED_FMT = "public method '{s}' must assert checkPreimage({s}) on every path";
 
 const PreimageCheck = struct {
     allocator: Allocator,

@@ -1,8 +1,7 @@
 // GK-GAP-010 — a public method reads a SigHashPreimage parameter that never
 // reaches checkPreimage(), so every extracted field is chosen by the spender.
 // Every tier refuses:
-//   public method 'spend' must pass its SigHashPreimage parameter 'txPreimage'
-//   to checkPreimage() on every path
+//   public method 'spend' must assert checkPreimage(txPreimage) on every path
 import { SmartContract, assert, SigHashPreimage, extractAmount } from 'runar-lang';
 
 class N511 extends SmartContract {

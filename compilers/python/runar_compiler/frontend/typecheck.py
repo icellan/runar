@@ -90,8 +90,7 @@ def _is_preimage_type(t: TypeNode | None) -> bool:
 
 def preimage_not_checked_message(method: str, param: str) -> str:
     return (
-        f"public method '{method}' must pass its SigHashPreimage parameter '{param}' "
-        f"to checkPreimage() on every path"
+        f"public method '{method}' must assert checkPreimage({param}) on every path"
     )
 
 

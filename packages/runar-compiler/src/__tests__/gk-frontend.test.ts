@@ -70,11 +70,19 @@ describe('GK-GAP-010: SigHashPreimage parameter checked on every path', () => {
     refuse: Array<{ name: string; file: string; src: string; error: string }>;
     accept: Array<{ name: string; file: string; src: string }>;
   }>('preimage-checked-cases.json');
+  // The corpus pins only a substring where the tiers word a diagnostic
+  // differently (fixedarray-parameter: "FixedArray"); this tier's exact text.
+  const exactHere: Record<string, string> = {
+    'fixedarray-parameter':
+      "Parameter 'ps' in method 'spend' cannot be a FixedArray. Arrays are only allowed as contract properties.",
+  };
   for (const c of corpusData.refuse) {
     it(`refuses ${c.name}`, () => {
       const r = compile(c.src, { fileName: c.file });
       expect(r.success).toBe(false);
-      expect(messages(r)).toContain(c.error);
+      const want = exactHere[c.name] ?? c.error;
+      expect(want).toContain(c.error);
+      expect(messages(r)).toContain(want);
     });
   }
   for (const c of corpusData.accept) {

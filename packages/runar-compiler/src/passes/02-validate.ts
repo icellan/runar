@@ -185,9 +185,32 @@ const VALID_PRIMITIVE_TYPES = new Set<string>([
   'P256Point', 'P384Point',
 ]);
 
+/** The diagnostic every tier shares (R3-GK010-GAPS). */
+export function readonlyPreimagePropertyMessage(name: string): string {
+  return (
+    `readonly property '${name}' cannot hold a SigHashPreimage: a preimage fixed in the locking script ` +
+    'can never pass checkPreimage(), so every field an extractor reads from it is unverified'
+  );
+}
+
+/** `SigHashPreimage`, or a (nested) FixedArray of it. */
+function holdsSigHashPreimage(t: TypeNode): boolean {
+  if (t.kind === 'fixed_array_type') return holdsSigHashPreimage(t.element);
+  return t.kind === 'primitive_type' && t.name === 'SigHashPreimage';
+}
+
 function validateProperties(ctx: ValidationContext): void {
   for (const prop of ctx.contract.properties) {
     validatePropertyType(prop.type, prop.sourceLocation, ctx);
+
+    // R3-GK010-GAPS: a readonly property is a constant in the locking script,
+    // and a sighash preimage commits to the outpoint of the transaction that
+    // carries that script, so checkPreimage() on it can never pass and every
+    // field an extractor reads from it is unverified. Refused at the
+    // declaration (before FixedArray expansion, so the name is the user's).
+    if (prop.readonly && holdsSigHashPreimage(prop.type)) {
+      ctx.errors.push(makeDiagnostic(readonlyPreimagePropertyMessage(prop.name), 'error', prop.sourceLocation));
+    }
 
     // txPreimage is an implicit property of StatefulSmartContract
     if (ctx.contract.parentClass === 'StatefulSmartContract' && prop.name === 'txPreimage') {

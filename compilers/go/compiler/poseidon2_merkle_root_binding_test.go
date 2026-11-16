@@ -1,4 +1,7 @@
-package compiler
+// External test package: packages/runar-go imports this package
+// (CompileCheckWithGroth16VK), so an in-package test importing runar-go
+// would be an import cycle.
+package compiler_test
 
 import (
 	"encoding/json"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
+	"github.com/icellan/runar/compilers/go/compiler"
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
@@ -199,34 +203,13 @@ func candidateRootEncodings() []rootEncoding {
 // Script execution
 // ---------------------------------------------------------------------------
 
-// scriptNumBytes encodes n in Bitcoin Script number form (little-endian,
-// sign-magnitude).
-func scriptNumBytes(n *big.Int) []byte {
-	if n.Sign() == 0 {
-		return []byte{}
-	}
-	neg := n.Sign() < 0
-	be := new(big.Int).Abs(n).Bytes()
-	le := make([]byte, len(be))
-	for i := range be {
-		le[i] = be[len(be)-1-i]
-	}
-	if le[len(le)-1]&0x80 != 0 {
-		le = append(le, 0)
-	}
-	if neg {
-		le[len(le)-1] |= 0x80
-	}
-	return le
-}
-
 // p2kbSpend runs [arg pushes | locking script] through the go-sdk
 // interpreter. Params are pushed in declaration order (param 0 deepest).
 func p2kbSpend(t *testing.T, lock *script.Script, leaf [8]int64, proof []int64, index int64, expected *big.Int) error {
 	t.Helper()
 	unlock := &script.Script{}
 	push := func(n *big.Int) {
-		if err := unlock.AppendPushData(scriptNumBytes(n)); err != nil {
+		if err := unlock.AppendPushData(compiler.ScriptNumBytesForTest(n)); err != nil {
 			t.Fatalf("append push: %v", err)
 		}
 	}
@@ -249,7 +232,7 @@ func p2kbSpend(t *testing.T, lock *script.Script, leaf [8]int64, proof []int64, 
 
 func compileP2KBRootBinding(t *testing.T, depth int) *script.Script {
 	t.Helper()
-	res := CompileFromSourceStrWithResult(buildP2KBRootBindingSource(depth), "P2KBRootBinding.runar.ts")
+	res := compiler.CompileFromSourceStrWithResult(buildP2KBRootBindingSource(depth), "P2KBRootBinding.runar.ts")
 	if res.Artifact == nil || res.Artifact.Script == "" {
 		var msgs []string
 		for _, d := range res.Diagnostics {

@@ -41,7 +41,7 @@ func conjuncts(e Expression) []Expression {
 
 // PreimageNotCheckedMessage is the diagnostic every tier shares.
 func PreimageNotCheckedMessage(method, param string) string {
-	return fmt.Sprintf("public method '%s' must pass its SigHashPreimage parameter '%s' to checkPreimage() on every path", method, param)
+	return fmt.Sprintf("public method '%s' must assert checkPreimage(%s) on every path", method, param)
 }
 
 type originSet map[string]bool

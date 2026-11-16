@@ -339,8 +339,7 @@ at-most-once half keeps a second `checkPreimage` from being emitted.
     p : SigHashPreimage, a parameter of a public method m
     some path through m does not assert checkPreimage(p)
     ─────────────────────────────────────────────────────
-    ERROR: public method 'm' must pass its SigHashPreimage
-           parameter 'p' to checkPreimage() on every path
+    ERROR: public method 'm' must assert checkPreimage(p) on every path
 ```
 
 "Asserts `checkPreimage(p)`" is a must-analysis over the method body. A call
@@ -380,6 +379,30 @@ method, stateless or stateful. The implicit `txPreimage` of a
 `StatefulSmartContract` is not a parameter at this stage; the compiler injects
 its `checkPreimage`. A `Sig` that is never consumed is not an error.
 
+Two other places a preimage could sit are refused outright, so no unchecked
+preimage reaches an extractor through them:
+
+- **A readonly property holding a `SigHashPreimage`** (scalar, or a
+  `FixedArray` of any nesting depth whose element is `SigHashPreimage`) is a
+  validate error at its declaration, on every surface (in the Rust DSL a plain
+  field of a `SmartContract`, in Python a `SmartContract` annotation, in Go a
+  `runar:"readonly"` field):
+
+  ```
+  readonly property '<name>' cannot hold a SigHashPreimage: a preimage fixed in the locking script can never pass checkPreimage(), so every field an extractor reads from it is unverified
+  ```
+
+  A readonly property is a constant in the locking script, and a sighash
+  preimage commits to the `scriptCode` and outpoint of the very output that
+  carries that script, so no preimage fixed there can ever be the spending
+  transaction's: `checkPreimage(this.p)` is unsatisfiable, and without it
+  every field an extractor reads from `this.p` is unverified. This rule does
+  not cover a mutable `SigHashPreimage` state field of a
+  `StatefulSmartContract`.
+- **A `FixedArray<SigHashPreimage, N>` method parameter** is refused by the
+  validator like every `FixedArray` method parameter (each tier words that
+  diagnostic itself).
+
 ### 4.4 Practical Impact
 
 ```typescript
@@ -394,8 +417,8 @@ public unlock(sig: Sig, pubKey: PubKey, preimage: SigHashPreimage): void {
 }
 
 public read(preimage: SigHashPreimage): void {
-    // ERROR: public method 'read' must pass its SigHashPreimage parameter
-    // 'preimage' to checkPreimage() on every path
+    // ERROR: public method 'read' must assert checkPreimage(preimage) on
+    // every path
     assert(extractAmount(preimage) > 0n);
 }
 ```

@@ -289,8 +289,7 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     def self.preimage_not_checked_message(method, param)
-      "public method '#{method}' must pass its SigHashPreimage parameter '#{param}' " \
-        "to checkPreimage() on every path"
+      "public method '#{method}' must assert checkPreimage(#{param}) on every path"
     end
 
     # spec/type-system.md 4.2: a SigHashPreimage parameter of a public method

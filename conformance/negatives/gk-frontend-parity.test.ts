@@ -121,6 +121,67 @@ describe('Grok v1 frontend findings (all 7 tiers)', () => {
         expect([...hexes]).toHaveLength(1);
       });
     }
+
+    // R3-GK010-WORDING: only an ASSERTED checkPreimage(p) counts
+    // (R2-GK010-ASSERT), so the diagnostic says so. The text is pinned here
+    // literally, not only read back from the corpus, and checked on the
+    // checked-in rejection fixtures too (rejection-parity.test.ts grades
+    // their verdict only, never the text).
+    const GK010_SPEND_TXPREIMAGE = "public method 'spend' must assert checkPreimage(txPreimage) on every path";
+    it('every GK-010 corpus refusal carries the pinned diagnostic', () => {
+      const gk010 = data.refuse.filter((c) => c.error.startsWith('public method '));
+      expect(gk010.length).toBeGreaterThan(20);
+      for (const c of gk010) expect(c.error, c.name).toBe(GK010_SPEND_TXPREIMAGE);
+    });
+    const fixtures = [
+      'N511-ts-unchecked-preimage.runar.ts',
+      'N520-ts-preimage-check-discarded.runar.ts',
+      'N521-ts-preimage-check-bound-to-local.runar.ts',
+      'N522-ts-preimage-check-negated.runar.ts',
+      'N523-ts-preimage-check-or-ed.runar.ts',
+      'N524-ts-preimage-check-if-condition.runar.ts',
+      'N525-ts-preimage-check-ternary-condition.runar.ts',
+      'N526-ts-preimage-check-eq-true.runar.ts',
+      'N527-ts-preimage-check-double-negated.runar.ts',
+      'N528-ts-preimage-check-helper-returns.runar.ts',
+      'N529-py-preimage-check-discarded.runar.py',
+    ];
+    for (const f of fixtures) {
+      const header = readFileSync(join(__dirname, f), 'utf8');
+      it(`${f} documents the pinned diagnostic`, () => {
+        expect(header.replace(/\n(\/\/|#) +/g, ' ')).toContain(GK010_SPEND_TXPREIMAGE);
+      });
+      for (const tier of TIERS) {
+        it(`${tier.id} refuses ${f} with the pinned diagnostic`, () => {
+          const { status, out, diag } = run(tier, writeFile(f, header));
+          expect(status, `${tier.id} accepted ${f} (emitted "${out}")`).not.toBe(0);
+          expect(diag).toContain(GK010_SPEND_TXPREIMAGE);
+        });
+      }
+    }
+
+    // R3-GK010-GAPS: a readonly SigHashPreimage property is refused at its
+    // declaration with its own diagnostic, pinned here literally.
+    const RO_PREIMAGE_PRE =
+      "readonly property 'pre' cannot hold a SigHashPreimage: a preimage fixed in the locking script " +
+      'can never pass checkPreimage(), so every field an extractor reads from it is unverified';
+    it('every readonly-property corpus refusal carries the pinned diagnostic', () => {
+      const ro = data.refuse.filter((c) => c.error.startsWith('readonly property '));
+      expect(ro.length).toBeGreaterThanOrEqual(6);
+      for (const c of ro.filter((x) => x.name !== 'readonly-fixedarray-property')) expect(c.error, c.name).toBe(RO_PREIMAGE_PRE);
+    });
+    const roFixture = 'N530-ts-readonly-preimage-property.runar.ts';
+    const roHeader = readFileSync(join(__dirname, roFixture), 'utf8');
+    it(`${roFixture} documents the pinned diagnostic`, () => {
+      expect(roHeader.replace(/\n(\/\/|#) +/g, ' ')).toContain(RO_PREIMAGE_PRE);
+    });
+    for (const tier of TIERS) {
+      it(`${tier.id} refuses ${roFixture} with the pinned diagnostic`, () => {
+        const { status, out, diag } = run(tier, writeFile(roFixture, roHeader));
+        expect(status, `${tier.id} accepted ${roFixture} (emitted "${out}")`).not.toBe(0);
+        expect(diag).toContain(RO_PREIMAGE_PRE);
+      });
+    }
   });
 
   describe('GK-GAP-013: malformed intent intrinsics are still refused', () => {

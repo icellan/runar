@@ -15,6 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from 'runar-compiler';
 import { ScriptVM } from '../vm/script-vm.js';
+import { afterPreimageChecks } from './helpers/after-preimage-checks.js';
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -36,26 +37,29 @@ describe('GAP-302 sighash-type pinning', () => {
   // extractSigHashType(p) === 0x41. The preimage body is arbitrary — only the
   // trailing 4-byte sighashType field is read.
   //
-  // The preimage is a readonly PROPERTY baked in as a constructor argument:
-  // a public method's SigHashPreimage parameter must reach checkPreimage()
-  // on every path (GK-GAP-010), which a synthetic preimage cannot pass. The
-  // extractor and comparison under test lower the same either way.
+  // The preimage is a parameter the method asserts with checkPreimage() first
+  // (GK-GAP-010; a readonly SigHashPreimage property is refused, R3-GK010-GAPS),
+  // and a synthetic preimage cannot pass that check. So the lock under test is
+  // the code AFTER the check, split off by an exact structural match
+  // (`OP_DUP OP_CODESEPARATOR <blob> OP_VERIFY`, see
+  // helpers/after-preimage-checks.ts), run on the pushed preimage: the
+  // compiled bytes on the stack an accepting checkPreimage leaves.
   const guardSource = `
-import { SmartContract, assert, SigHashPreimage, extractSigHashType } from 'runar-lang';
+import { SmartContract, assert, SigHashPreimage, checkPreimage, extractSigHashType } from 'runar-lang';
 
 class SigGuard extends SmartContract {
-  readonly p: SigHashPreimage;
-  constructor(p: SigHashPreimage) { super(p); this.p = p; }
-  public unlock() {
-    assert(extractSigHashType(this.p) === 0x41n);
+  constructor() { super(); }
+  public unlock(p: SigHashPreimage) {
+    assert(checkPreimage(p));
+    assert(extractSigHashType(p) === 0x41n);
   }
 }
 `;
 
   function runGuard(sighashTailLE: string): boolean {
     const preimage = 'ab'.repeat(120) + sighashTailLE; // body || sighashType(4 LE)
-    const lock = compileHex(guardSource, 'SigGuard.runar.ts', { p: preimage });
-    const unlock = '';
+    const lock = afterPreimageChecks(compileHex(guardSource, 'SigGuard.runar.ts'), ['76ab']);
+    const unlock = `4c${(preimage.length / 2).toString(16)}${preimage}`; // OP_PUSHDATA1 (124 bytes)
     const vm = new ScriptVM();
     return vm.execute(hexToBytes(unlock), hexToBytes(lock)).success;
   }

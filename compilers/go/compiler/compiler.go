@@ -267,6 +267,13 @@ func typeCheckOptions(o CompileOptions) (frontend.TypeCheckOptions, error) {
 	return tco, nil
 }
 
+// TypeCheckOptionsFor returns the frontend TypeCheckOptions a compile with o
+// type-checks under. runar.CompileCheckWithGroth16VK uses it so its frontend
+// check reads the vk.json the same way --groth16-wa-vk does.
+func TypeCheckOptionsFor(o CompileOptions) (frontend.TypeCheckOptions, error) {
+	return typeCheckOptions(o)
+}
+
 // CompileFromProgram compiles a parsed ANF program to a Rúnar artifact.
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
