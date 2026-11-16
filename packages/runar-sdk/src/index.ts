@@ -22,7 +22,7 @@ export type {
 // allowlist.test.ts`) — publishing it on the public barrel would let any
 // downstream consumer import an unvalidated broadcast provider ungated.
 // Tests import it directly from `../providers/mock.js`.
-export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider, GorillaPoolProvider } from './providers/index.js';
+export { WhatsOnChainProvider, MockProvider, RPCProvider, RPCNodeError, WalletProvider, GorillaPoolProvider } from './providers/index.js';
 export type { Provider, RPCProviderOptions, WalletProviderOptions, InscriptionInfo, InscriptionDetail } from './providers/index.js';
 // For custom providers: the TransactionData the built-in providers and
 // deploy()/finalizeCall() derive from a locally held Transaction.

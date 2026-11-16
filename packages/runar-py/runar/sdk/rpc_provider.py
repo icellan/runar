@@ -17,6 +17,21 @@ from runar.sdk.errors import assert_script_hex_under_limit
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 
 
+class RPCNodeError(RuntimeError):
+    """The node's own JSON-RPC error reply (as opposed to a transport failure).
+
+    Carries the RPC ``method``, the node's ``code`` and ``message``. The text
+    is unchanged from the plain RuntimeError it replaces, and it is still a
+    RuntimeError, so existing ``except RuntimeError`` callers are unaffected.
+    """
+
+    def __init__(self, text: str, method: str, code: object, message: str) -> None:
+        super().__init__(text)
+        self.method = method
+        self.code = code
+        self.message = message
+
+
 class RPCProvider(Provider):
     """Implements Provider by making JSON-RPC calls to a Bitcoin node."""
 
@@ -66,7 +81,8 @@ class RPCProvider(Provider):
                 data = json.loads(body)
                 if data.get('error'):
                     msg = data['error'].get('message', str(data['error']))
-                    raise RuntimeError(f'RPC error {data["error"].get("code", "")}: {msg}')
+                    code = data['error'].get('code', '')
+                    raise RPCNodeError(f'RPC error {code}: {msg}', method, code, msg)
             except (json.JSONDecodeError, KeyError):
                 pass
             raise RuntimeError(f'RPC {method}: HTTP {e.code} {e.reason}') from e
@@ -75,7 +91,7 @@ class RPCProvider(Provider):
 
         if data.get('error'):
             msg = data['error'].get('message', str(data['error']))
-            raise RuntimeError(f'RPC {method}: {msg}')
+            raise RPCNodeError(f'RPC {method}: {msg}', method, data['error'].get('code'), msg)
 
         return data['result']
 

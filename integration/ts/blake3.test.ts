@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { compileSource } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 // ---- BLAKE3 reference implementation ----
 
@@ -257,9 +257,9 @@ class Blake3CompressReject extends SmartContract {
 
       await contract.deploy(provider, signer, { satoshis: 500000 });
 
-      await expect(
+      await expectNodeRejected(provider, () =>
         contract.call('verify', [BLAKE3_IV_HEX, block], provider, signer),
-      ).rejects.toThrow();
+      );
     });
   });
 
@@ -339,9 +339,9 @@ class Blake3HashReject extends SmartContract {
 
       await contract.deploy(provider, signer, { satoshis: 500000 });
 
-      await expect(
+      await expectNodeRejected(provider, () =>
         contract.call('verify', ['616263'], provider, signer),
-      ).rejects.toThrow();
+      );
     });
   });
 });

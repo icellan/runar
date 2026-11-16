@@ -66,8 +66,8 @@ RSpec.describe 'MessageBoard' do # rubocop:disable RSpec/DescribeClass
     contract.deploy(provider, owner[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
     # burn() requires the owner's signature — attacker's signer must fail.
-    expect do
+    expect_node_rejected(provider) do
       contract.call('burn', [nil], provider, attacker[:signer])
-    end.to raise_error(StandardError)
+    end
   end
 end

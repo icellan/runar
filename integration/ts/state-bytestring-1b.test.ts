@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 import {
   assertOnChainState,
   assertOnChainByteString1B,
@@ -54,11 +54,11 @@ describe('StateByteString1B (regtest)', () => {
     const { signer } = await createFundedWallet(provider);
 
     await contract.deploy(provider, signer, { satoshis: 10_000 });
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.call('setTag', ['abcd'], provider, signer),
-    ).rejects.toThrow();
-    await expect(
+    );
+    await expectNodeRejected(provider, () =>
       contract.call('setTag', [''], provider, signer),
-    ).rejects.toThrow();
+    );
   });
 });

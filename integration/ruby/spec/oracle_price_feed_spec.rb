@@ -129,13 +129,13 @@ RSpec.describe 'OraclePriceFeed' do # rubocop:disable RSpec/DescribeClass
     msg_bytes = num2bin_le(price, 8)
     result    = rabin_sign(msg_bytes, rabin_kp)
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'settle',
         [price, result[:sig], result[:padding], nil],
         provider, receiver_wallet[:signer]
       )
-    end.to raise_error(StandardError)
+    end
   end
 
   it 'rejects settle with wrong receiver signer' do
@@ -158,12 +158,12 @@ RSpec.describe 'OraclePriceFeed' do # rubocop:disable RSpec/DescribeClass
     result    = rabin_sign(msg_bytes, rabin_kp)
 
     # Try to settle with wrong signer (not the receiver)
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'settle',
         [price, result[:sig], result[:padding], nil],
         provider, wrong_wallet[:signer]
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

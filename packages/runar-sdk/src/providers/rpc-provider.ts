@@ -18,6 +18,22 @@ export interface RPCProviderOptions {
 }
 
 /**
+ * The node's own JSON-RPC error reply, as opposed to a transport failure.
+ * Carries the RPC method, the node's error code and its message; `message`
+ * keeps the historical "RPC <method>: <node message>" text.
+ */
+export class RPCNodeError extends Error {
+  constructor(
+    readonly method: string,
+    readonly code: number | undefined,
+    readonly nodeMessage: string,
+  ) {
+    super(`RPC ${method}: ${nodeMessage}`);
+    this.name = 'RPCNodeError';
+  }
+}
+
+/**
  * RPCProvider implements Provider by making JSON-RPC calls to a Bitcoin node.
  * Suitable for regtest/testnet integration testing.
  */
@@ -59,8 +75,8 @@ export class RPCProvider implements Provider {
 
     const json = (await response.json()) as { result: unknown; error: unknown };
     if (json.error) {
-      const err = json.error as { message?: string };
-      throw new Error(`RPC ${method}: ${err.message ?? JSON.stringify(json.error)}`);
+      const err = json.error as { code?: number; message?: string };
+      throw new RPCNodeError(method, err.code, err.message ?? JSON.stringify(json.error));
     }
     return json.result;
   }

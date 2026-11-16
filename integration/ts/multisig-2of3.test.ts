@@ -10,7 +10,7 @@ import { LocalSigner } from 'runar-sdk';
 import { compileContract } from './helpers/compile.js';
 import { RunarContract } from 'runar-sdk';
 import { createFundedWallet, createWallet } from './helpers/wallet.js';
-import { createProvider } from './helpers/node.js';
+import { createProvider, expectNodeRejected } from './helpers/node.js';
 
 const SOURCE = 'integration/contracts/crypto/MultiSig2of3.runar.ts';
 
@@ -73,9 +73,9 @@ describe('MultiSig2of3 (regtest)', () => {
     const sig0 = await a1.sign(txHex, 0, utxo.script, utxo.satoshis);
     const sig1 = await a2.sign(txHex, 0, utxo.script, utxo.satoshis);
 
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.finalizeCall(prepared, { 0: sig0, 1: sig1 }),
-    ).rejects.toThrow();
+    );
   });
 
   it('rejects swapped signature order (sig2 before sig1 for pk1,pk2)', async () => {
@@ -103,8 +103,8 @@ describe('MultiSig2of3 (regtest)', () => {
     const sigBob = await bobSigner.sign(txHex, 0, utxo.script, utxo.satoshis);
 
     // Wrong order: slot0=bob, slot1=alice — CHECKMULTISIG key walk fails
-    await expect(
+    await expectNodeRejected(provider, () =>
       contract.finalizeCall(prepared, { 0: sigBob, 1: sigAlice }),
-    ).rejects.toThrow();
+    );
   });
 });

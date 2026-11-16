@@ -164,12 +164,12 @@ RSpec.describe 'SchnorrZKP' do # rubocop:disable RSpec/DescribeClass
     # Tamper s by adding 1
     tampered_s = (s + 1) % IntegrationHelpers::EC_N
 
-    expect do
+    expect_node_rejected(provider) do
       contract.call(
         'verify',
         [r_point_hex, tampered_s],
         provider, wallet[:signer]
       )
-    end.to raise_error(StandardError)
+    end
   end
 end

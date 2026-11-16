@@ -159,9 +159,9 @@ RSpec.describe 'BLAKE3' do # rubocop:disable RSpec/DescribeClass
 
       contract.deploy(provider, wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 500_000))
 
-      expect do
+      expect_node_rejected(provider) do
         contract.call('verify', [BLAKE3_IV_HEX, block], provider, wallet[:signer])
-      end.to raise_error(StandardError)
+      end
     end
   end
 
