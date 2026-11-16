@@ -70,6 +70,16 @@ const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
     reason?: VerifyEnvelopeReason;
     envelope: SignedEnvelope;
   }>;
+  invalid_utf8_vectors: Array<{
+    _vector_id: string;
+    expect_ok: boolean;
+    reason?: VerifyEnvelopeReason;
+    payload_hex: string;
+    sig: string;
+    pubkey: string;
+    nonce: number;
+    expiresAt: number;
+  }>;
   allowlist_vectors: Array<{
     _vector_id: string;
     expected_keys: string[] | null;
@@ -191,6 +201,30 @@ describe('envelope interop fixture replay under the frozen clock (F-359)', () =>
       // SAME injectable clock.
       const r = verifyEnvelope({ envelope: env, nowMs: fixture.verify_now_ms });
       expect(r.ok, `${id}: reason=${r.reason}`).toBe(true);
+    }
+  });
+
+  // R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. A JS
+  // string holds UTF-16 code units, so no ju* payload can reach verifyEnvelope
+  // from this tier: the strict decode a caller must make (TextDecoder with
+  // fatal: true) refuses every ju* vector, and juc1 (well-formed multi-byte
+  // UTF-8) decodes and verifies ok. A NON-fatal decode would fold the bytes to
+  // U+FFFD, which no longer matches the signed bytes.
+  it('invalid_utf8_vectors cannot become a payload; the multi-byte control verifies', () => {
+    expect(fixture.invalid_utf8_vectors.length).toBeGreaterThan(0);
+    const strict = new TextDecoder('utf-8', { fatal: true });
+    for (const v of fixture.invalid_utf8_vectors) {
+      const bytes = Uint8Array.from(Utils.toArray(v.payload_hex, 'hex'));
+      if (!v.expect_ok) {
+        expect(() => strict.decode(bytes), v._vector_id).toThrow(TypeError);
+        continue;
+      }
+      const payload = strict.decode(bytes);
+      const r = verifyEnvelope({
+        envelope: { payload, sig: v.sig, pubkey: v.pubkey, nonce: v.nonce, expiresAt: v.expiresAt },
+        nowMs: fixture.verify_now_ms,
+      });
+      expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(true);
     }
   });
 });

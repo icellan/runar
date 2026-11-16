@@ -503,10 +503,14 @@ def verify_envelope(
     #    ECDSA verify -- those operations are linear in input size and a
     #    pathological 100 MB payload would otherwise pin the worker.
     #    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+    #    R3-GO-UTF8: measured with 'surrogatepass' so a payload holding a
+    #    surrogate (a lone one, or the surrogate escape of a byte that is not
+    #    UTF-8) is sized instead of raising UnicodeEncodeError out of verify;
+    #    step 3 then answers bad-json for it.
     if isinstance(envelope, SignedEnvelope):
         if (
             isinstance(envelope.payload, str)
-            and len(envelope.payload.encode("utf-8")) > MAX_ENVELOPE_PAYLOAD_BYTES
+            and len(envelope.payload.encode("utf-8", "surrogatepass")) > MAX_ENVELOPE_PAYLOAD_BYTES
         ):
             return VerifyEnvelopeResult(False, VerifyEnvelopeReason.TOO_LARGE, None)
         if isinstance(envelope.sig, str) and len(envelope.sig) > MAX_ENVELOPE_FIELD_BYTES:

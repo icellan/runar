@@ -244,4 +244,28 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     end
   end
 
+  # R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. JSON.parse
+  # keeps the raw bytes, so this tier verified ok every ju* vector. The bytes
+  # are replayed both UTF-8-tagged and BINARY-tagged: a BINARY string reports
+  # valid_encoding? true whatever it holds, so a check on the string's own tag
+  # would pass these. juc1 (well-formed multi-byte UTF-8) is the control.
+  it 'refuses a payload that is not well-formed UTF-8 as bad-json' do
+    vectors = fixture['invalid_utf8_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      [Encoding::UTF_8, Encoding::BINARY].each do |enc|
+        payload = [v['payload_hex']].pack('H*').force_encoding(enc)
+        env = Runar::SDK::Envelope::SignedEnvelope.new(payload, v['sig'], v['pubkey'], v['nonce'], v['expiresAt'])
+        r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+        if v['expect_ok']
+          expect(r[:ok]).to be(true), "#{vid} (#{enc}): expected ok=true, got reason=#{r[:reason]}"
+        else
+          expect(r[:ok]).to be(false), "#{vid} (#{enc}): expected ok=false"
+          expect(r[:reason]).to eq(v['reason']), "#{vid} (#{enc}): got reason=#{r[:reason]}"
+        end
+      end
+    end
+  end
+
 end

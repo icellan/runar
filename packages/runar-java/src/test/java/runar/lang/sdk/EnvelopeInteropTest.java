@@ -440,4 +440,41 @@ class EnvelopeInteropTest {
         }
     }
 
+    /**
+     * R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. A Java
+     * String holds UTF-16 code units, so no ju* payload can reach
+     * {@link Envelope#verify} from this tier: the strict decode a caller must
+     * make (a UTF-8 CharsetDecoder that REPORTs malformed input) refuses every
+     * ju* vector, and juc1 (well-formed multi-byte UTF-8) decodes and verifies
+     * ok. {@code new String(bytes, UTF_8)} would instead fold the bytes to
+     * U+FFFD, which no longer matches the signed bytes.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void invalidUtf8VectorsCannotBecomeAPayload() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("invalid_utf8_vectors");
+        assertFalse(vectors.isEmpty(), "invalid_utf8_vectors missing or empty");
+        for (Map<String, Object> v : vectors) {
+            String vid = (String) v.get("_vector_id");
+            byte[] raw = java.util.HexFormat.of().parseHex((String) v.get("payload_hex"));
+            java.nio.charset.CharsetDecoder strict = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            if (!Boolean.TRUE.equals(v.get("expect_ok"))) {
+                assertThrows(java.nio.charset.CharacterCodingException.class,
+                    () -> strict.decode(java.nio.ByteBuffer.wrap(raw)), vid);
+                continue;
+            }
+            String payload = strict.decode(java.nio.ByteBuffer.wrap(raw)).toString();
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = new Envelope.SignedEnvelope(payload, (String) v.get("sig"), (String) v.get("pubkey"),
+                ((Number) v.get("nonce")).longValue(), ((Number) v.get("expiresAt")).longValue());
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            assertTrue(r.ok, vid + ": control should verify ok, got " + (r.reason == null ? null : r.reason.wire));
+        }
+    }
+
 }

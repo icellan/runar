@@ -857,7 +857,7 @@
       }
     }
   ],
-  "duplicate_key_vectors_notes": "R2-DUPKEY. verifyEnvelope REJECTS a payload in which any JSON object, at any nesting depth, has two members with the same key, compared after JSON string unescaping (\"a\", \"\\u0061\" and a surrogate-pair spelling of the same code point are all one key). Reason bad-json, decided in the parse step: after too-large / missing-fields / expired, before envelope-mismatch / bad-sig / pubkey-not-allowed -- exactly where a malformed payload is decided. Before the fix TS/Go/Rust/Python/Ruby/Java kept one of the values (most the last) and verified ok; only Zig's std.json refused. Uniqueness is PER OBJECT: the dkc* controls are accepted. Replay each envelope at verify_now_ms. Every dk*/dkc* signature verifies for its exact payload text except dk11 (deliberately carries valid_envelope's signature to pin bad-json ahead of bad-sig). The OUTER envelope object is not covered here: no SDK tier parses an envelope from wire text -- verifyEnvelope takes an already-decoded structure.",
+  "duplicate_key_vectors_notes": "R2-DUPKEY. verifyEnvelope REJECTS a payload in which any JSON object, at any nesting depth, has two members with the same key, compared after JSON string unescaping (\"a\", \"\\u0061\" and a surrogate-pair spelling of the same code point are all one key). Reason bad-json, decided in the parse step: after too-large / missing-fields / expired, before envelope-mismatch / bad-sig / pubkey-not-allowed -- exactly where a malformed payload is decided. Before the fix TS/Go/Rust/Python/Ruby/Java kept one of the values (most the last) and verified ok; only Zig's std.json refused. Uniqueness is PER OBJECT: the dkc* controls are accepted. Replay each envelope at verify_now_ms. Every dk*/dkc* signature verifies for its exact payload text except dk11 (deliberately carries valid_envelope's signature to pin bad-json ahead of bad-sig). The OUTER envelope object is covered by outer_duplicate_key_vectors.",
   "duplicate_key_vectors": [
     {
       "_vector_id": "dk1-top-level-duplicate",
@@ -1078,6 +1078,130 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    }
+  ],
+  "invalid_utf8_vectors_notes": "R3-GO-UTF8. Part of the JSON-grammar group: a payload that is not well-formed UTF-8 is bad-json. The bytes cannot be carried in a JSON string, so each vector gives the exact payload bytes as payload_hex; sig is alice's (priv=1) signature over sha256 of exactly those bytes, so a tier that accepts the payload returns ok:true rather than bad-sig. Measured before the fix (replay at verify_now_ms): zig bad-json (std.json refuses invalid UTF-8); go ok:true on ju1/ju3/ju4/ju6 (encoding/json folds every invalid sequence to U+FFFD, and its token walk then called ju2's two keys duplicates) and bad-json on ju5 (its lone-surrogate scan); ruby ok:true on all six (JSON.parse keeps the raw bytes); python raised UnicodeEncodeError out of verify_envelope for every vector (size guard encoded a str holding surrogate escapes). TS, Rust and Java cannot be handed these payloads at all: their payload is a string type that holds only Unicode (JS/Java UTF-16 strings, Rust String), so their replay asserts that a strict UTF-8 decode of payload_hex refuses each ju* vector and accepts juc1. Python's str can carry them only as surrogate escapes (bytes.decode('utf-8', 'surrogateescape')), which is how its replay feeds them. Go, Zig and Ruby replay the raw bytes.",
+  "invalid_utf8_vectors": [
+    {
+      "_vector_id": "ju1-lone-continuation-byte-ff-in-value",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "0xFF can never appear in UTF-8; encoding/json folds it to U+FFFD.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226b696e64223a2278ff79222c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "3045022100d58893a87a6f009303bce9f73a1eddce1799603930fda9c9b6267f0be403329a02200db8e23d82ddf5225317d2c91c755f39def7149250eed0783b087d1f229baecb",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "ju2-keys-differing-only-in-invalid-bytes",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "Two keys whose only difference is an invalid byte. encoding/json folded both to \"k\\ufffd\", so Go alone called them duplicates.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226bfe223a312c226bff223a322c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "3045022100e15431a5eeb5f5ffb8424240243d19a4b461a73b03cbfc7fb2b5a61d342881e10220192cb1d0dbb56feae0aa811198877d6c3b39341e37310068e0fcc3ddc898bbfc",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "ju3-truncated-two-byte-sequence",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "Lead byte 0xC3 with its continuation byte missing (the closing quote follows).",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226b696e64223a2261c3222c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "304402203994dbedea0cf9f1ae4a681fdefd202b960932231b25a07456181b5bd373221c02202c85066f146b1c842c2ad0096e38a89e60c4c26bb0b8cb6b0d4e16fa95074658",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "ju4-overlong-nul-c0-80",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "Overlong two-byte encoding of U+0000 (modified UTF-8 / CESU style); not UTF-8.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226b696e64223a2261c08062222c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "3045022100d13d67c6a43e52c45d5228d1049f23f1e37b2341a5c6faa496eff53b90179706022017d519ee56e74005b858e024ceb108622be1a1f8df273acbd06864f6049f45ce",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "ju5-encoded-surrogate-ed-a0-80-in-key",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "U+D800 encoded directly as three bytes (WTF-8 / CESU-8). Not UTF-8; Go's lone-surrogate scan already caught this one.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226beda080223a312c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "3045022100e1c898913865b0d40fab0069f45517b28cb273adc2c6cd96be400ccbf6144848022076eacb92a878cd4aa1ddb8f23257306c081a5d4b8e89c9fe7f2b489d3b91b2f1",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "ju6-above-u10ffff-f4-90-80-80",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "Four-byte sequence decoding to U+110000, beyond the Unicode range.",
+      "expect_ok": false,
+      "reason": "bad-json",
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226b696e64223a22f4908080222c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "304402202f4f3ee0348989c94df7e44b5ae11d1c4ec6144191886736aef96c121e85561602204bcd92b29d425c14a6ceb3e90d543d98a39f5ab43d553c961206139400839e03",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    },
+    {
+      "_vector_id": "juc1-valid-multibyte-control",
+      "_audit_ref": "R3-GO-UTF8",
+      "_notes": "Control with teeth: well-formed 2-, 3- and 4-byte UTF-8 (U+00E9, U+20AC, U+1F600) in a string value. Accepted by every tier; a guard that refuses any byte >= 0x80, or miscounts a sequence length, reddens here.",
+      "expect_ok": true,
+      "payload_hex": "7b22657870697265734174223a313730303030303033303030302c226b696e64223a22636166c3a920e282ac20f09f9880222c226e6f6e6365223a313730303030303030303030307d",
+      "sig": "3044022078175f24fccb184f8306076d9876e5beeab7692c65ed9ae3aa2599f3402e40ea0220522502b154b3202e8581b797c5b7e891a01308a58353b0a035106af51d448bb7",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "nonce": 1700000000000,
+      "expiresAt": 1700000030000
+    }
+  ],
+  "outer_duplicate_key_vectors_notes": "R3-OUTER-DUPKEY. Duplicate members in the OUTER envelope object, carried as wire_text because a literal duplicate-key object in this file would be collapsed by every fixture loader. Only two tiers define a text-to-envelope decode for their SignedEnvelope type: Go (json struct tags, so json.Unmarshal) and Rust (#[derive(Deserialize)], so serde_json::from_str). Each must REFUSE to decode every od* vector (Go: SignedEnvelope.UnmarshalJSON returns an error naming bad-json; Rust: serde's derived visitor returns a duplicate-field error) and decode odc1 to an envelope that verifies ok at verify_now_ms. Decode cannot return a VerifyEnvelopeReason, so a refusal is a decode error, not a verify result. TS, Python, Ruby, Java and Zig have no SDK text-to-envelope decoder: an envelope is constructed from fields or from an already-decoded object (fromMap / from_dict / from_h), so the duplicate policy there is the caller's JSON parser's. Every od* vector is built so that a keep-LAST decoder yields an envelope that verifies ok.",
+  "outer_duplicate_key_vectors": [
+    {
+      "_vector_id": "od1-duplicate-sig-last-wins-verifies",
+      "_audit_ref": "R3-OUTER-DUPKEY",
+      "_notes": "`sig` appears twice: first a bogus value, then valid_envelope's signature. A keep-last decoder (encoding/json, JSON.parse, json.loads, Ruby JSON.parse) builds valid_envelope and verifies ok; a keep-first decoder gets bad-sig.",
+      "expect_decode_ok": false,
+      "wire_text": "{\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"hello\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"sig\":\"3006020101020101\",\"pubkey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"nonce\":1700000000000,\"expiresAt\":1700000030000,\"sig\":\"3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31\"}"
+    },
+    {
+      "_vector_id": "od2-duplicate-payload",
+      "_audit_ref": "R3-OUTER-DUPKEY",
+      "_notes": "`payload` appears twice: a different payload first, valid_envelope's payload last. Which text was signed depends on the decoder's duplicate policy.",
+      "expect_decode_ok": false,
+      "wire_text": "{\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"bye\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"hello\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"sig\":\"3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31\",\"pubkey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"nonce\":1700000000000,\"expiresAt\":1700000030000}"
+    },
+    {
+      "_vector_id": "od3-duplicate-payload-escaped-key-spelling",
+      "_audit_ref": "R3-OUTER-DUPKEY",
+      "_notes": "The second `payload` key is spelled \"p\\u0061yload\". Keys are compared after JSON unescaping, so this is the same key.",
+      "expect_decode_ok": false,
+      "wire_text": "{\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"bye\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"sig\":\"3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31\",\"pubkey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"nonce\":1700000000000,\"expiresAt\":1700000030000,\"p\\u0061yload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"hello\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\"}"
+    },
+    {
+      "_vector_id": "od4-duplicate-nonce",
+      "_audit_ref": "R3-OUTER-DUPKEY",
+      "_notes": "`nonce` appears twice: a wrong value first, the genuine one last. Keep-last verifies ok; keep-first is envelope-mismatch.",
+      "expect_decode_ok": false,
+      "wire_text": "{\"nonce\":1,\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"hello\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"sig\":\"3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31\",\"pubkey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"nonce\":1700000000000,\"expiresAt\":1700000030000}"
+    },
+    {
+      "_vector_id": "odc1-case-variant-key-is-not-a-field",
+      "_audit_ref": "R3-OUTER-DUPKEY",
+      "_notes": "Control: valid_envelope plus a member \"Payload\" (capital P) carrying a bogus payload. Wire keys are case-sensitive, so \"Payload\" is an unknown member: it is ignored, not a duplicate, and the envelope decodes to valid_envelope and verifies ok. encoding/json matched struct fields case-insensitively, so Go alone used to overwrite payload with the bogus text.",
+      "expect_decode_ok": true,
+      "wire_text": "{\"payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"hello\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\",\"sig\":\"3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31\",\"pubkey\":\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"nonce\":1700000000000,\"expiresAt\":1700000030000,\"Payload\":\"{\\\"expiresAt\\\":1700000030000,\\\"kind\\\":\\\"bye\\\",\\\"n\\\":7,\\\"nonce\\\":1700000000000}\"}"
     }
   ],
   "malleability_vectors_notes": "F-138 (CL-BUG-159 / CL-BUG-241). ECDSA signatures are malleable: if (r, s) verifies for a digest under a key, so does (r, N - s). BIP-62's low-S rule is a Bitcoin SCRIPT policy (SCRIPT_VERIFY_LOW_S) for transaction signatures; it is not part of the envelope protocol. The TS reference verifyEnvelope delegates to @bsv/sdk's raw ECDSA verify, which has no low-S check, so the reference ACCEPTS a high-S envelope signature. Measured on mv1 before the fix: ts / go / python / zig / java ok:true; ruby bad-sig (an explicit BIP-62 check in Runar::ECDSA.ecdsa_verify, now skipped for envelopes via low_s: false) and rust bad-sig (k256's verify_prehash rejects high-S outright; envelope.rs now normalizes s before verifying). Every signer in every tier still EMITS low-S; this section only pins what a VERIFIER must accept, which is the case an overlay backend meets when a client signs with a non-normalizing library or a relay malleates s. Every signature in the rest of this file is low-S, so without this vector the split was invisible. Replay each envelope at verify_now_ms with no allowlist; the vector's signature is valid for its payload, so a tier that rejects it can only do so on the low-S rule.",

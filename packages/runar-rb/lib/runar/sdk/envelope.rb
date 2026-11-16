@@ -469,6 +469,13 @@ module Runar
         # seven tiers.
         return { ok: false, reason: 'bad-json', data: nil } if payload_exceeds_max_depth?(envelope.payload)
 
+        # R3-GO-UTF8: the payload must be well-formed UTF-8. JSON.parse keeps
+        # invalid bytes as they are, so a signed payload carrying 0xFF, an
+        # overlong or a truncated sequence verified ok here while Zig's
+        # std.json refuses it. Checked on the raw bytes: a BINARY-tagged string
+        # reports valid_encoding? true whatever it holds.
+        return { ok: false, reason: 'bad-json', data: nil } unless envelope.payload.b.force_encoding(Encoding::UTF_8).valid_encoding?
+
         # Ruby's JSON.parse (json >= 2.7) accepts /* */ and // comments by
         # default; RFC 8259 has none and the other six tiers refuse them. A
         # comment can also hide a quote from the duplicate-key scanner below

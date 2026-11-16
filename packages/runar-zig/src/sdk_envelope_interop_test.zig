@@ -637,3 +637,43 @@ test "interop: it4 nonce 1e20 is envelope-mismatch, not a panic" {
     }
     try std.testing.expect(found);
 }
+
+// R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json. The bytes
+// cannot ride in a JSON string, so the fixture carries them as payload_hex and
+// this tier replays them raw. std.json refuses invalid UTF-8, so Zig already
+// answered bad-json; this pins it against a future scanner default. juc1
+// (well-formed multi-byte UTF-8) is the control.
+test "interop: invalid UTF-8 payload vectors" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const vs = parsed.value.object.get("invalid_utf8_vectors").?.array;
+    try std.testing.expect(vs.items.len > 0);
+    var failures: usize = 0;
+    for (vs.items) |v| {
+        const obj = v.object;
+        const vid = obj.get("_vector_id").?.string;
+        const payload = try envelope.hexToBytes(allocator, obj.get("payload_hex").?.string);
+        defer allocator.free(payload);
+        const env = envelope.SignedEnvelope{
+            .payload = payload,
+            .sig = obj.get("sig").?.string,
+            .pubkey = obj.get("pubkey").?.string,
+            .nonce = obj.get("nonce").?.integer,
+            .expiresAt = obj.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        const want: []const u8 = if (obj.get("expect_ok").?.bool) "ok" else obj.get("reason").?.string;
+        const got: []const u8 = if (r.ok) "ok" else r.reason.?.wire();
+        if (!std.mem.eql(u8, want, got)) {
+            std.debug.print("{s}: got {s}, want {s}\n", .{ vid, got, want });
+            failures += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}

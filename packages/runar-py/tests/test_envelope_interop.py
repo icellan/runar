@@ -258,3 +258,32 @@ def test_clock_skew_vectors(fixture: dict) -> None:
             assert r.reason == VerifyEnvelopeReason(v["reason"]), (
                 f"{vid}: got reason={r.reason}, want {v['reason']}"
             )
+
+
+def test_invalid_utf8_vectors(fixture: dict) -> None:
+    """R3-GO-UTF8. A payload that is not well-formed UTF-8 is bad-json.
+
+    A Python ``str`` cannot hold the raw bytes; the only way such a payload
+    reaches ``verify_envelope`` is as surrogate escapes (the
+    ``surrogateescape`` decode of the wire bytes), so that is what this replay
+    feeds. ``verify_envelope`` used to RAISE ``UnicodeEncodeError`` out of its
+    size guard for any str holding a surrogate, instead of answering. juc1
+    (well-formed multi-byte UTF-8) is the control.
+    """
+    vectors = fixture["invalid_utf8_vectors"]
+    assert vectors
+    for v in vectors:
+        raw = bytes.fromhex(v["payload_hex"])
+        payload = raw.decode("utf-8", "surrogateescape")
+        env = SignedEnvelope(
+            payload=payload, sig=v["sig"], pubkey=v["pubkey"],
+            nonce=v["nonce"], expiresAt=v["expiresAt"],
+        )
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{v['_vector_id']}: expected ok, got {r.reason}"
+        else:
+            assert not r.ok, f"{v['_vector_id']}: expected ok=false"
+            assert r.reason is not None and r.reason.value == v["reason"], (
+                f"{v['_vector_id']}: got {r.reason}"
+            )
