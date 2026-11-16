@@ -190,6 +190,22 @@ fn read_compiler_allowlist(test_dir: &Path) -> Option<Vec<String>> {
     }
 }
 
+/// GK-GAP-003: independent (raw `source.json`) check that the fixture
+/// parserSkips `.runar.rs`. Deliberately does not go through
+/// `fixture_parser_skips`, so a bug there cannot widen the skip set unseen.
+fn parser_skips_rust_raw(test_dir: &Path) -> bool {
+    let config_path = test_dir.join("source.json");
+    if !config_path.exists() {
+        return false;
+    }
+    let raw = fs::read_to_string(&config_path).expect("read source.json");
+    let cfg: Value = serde_json::from_str(&raw).expect("parse source.json");
+    match cfg.get("parserSkip").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().any(|v| v.as_str() == Some(".runar.rs")),
+        None => false,
+    }
+}
+
 /// Independent (raw `source.json`) check that the allowlist excludes rust.
 /// Deliberately does not go through `read_compiler_allowlist`.
 fn excludes_rust_raw(test_dir: &Path) -> bool {
@@ -255,7 +271,35 @@ fn scan_fixtures(dirs: &[PathBuf], not_compilable: &[&str]) -> ScanResult {
     res
 }
 
+/// GK-GAP-003: true when the fixture's `source.json` lists `ext` in its
+/// `parserSkip` array -- a documented per-surface opt-out (the runner demands
+/// a non-empty `parserSkipReason`, and allowlist-audit.test.ts pins every
+/// one). A read or parse error panics (N-217, fail loud), like the other
+/// source.json readers here. Mirrors ConformanceGoldensTest.java's
+/// `isJavaParserSkipped`.
+fn fixture_parser_skips(test_dir: &Path, ext: &str) -> bool {
+    let config_path = test_dir.join("source.json");
+    if !config_path.exists() {
+        return false;
+    }
+    let raw = fs::read_to_string(&config_path)
+        .unwrap_or_else(|e| panic!("read {}: {}", config_path.display(), e));
+    let cfg: Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("parse {}: {}", config_path.display(), e));
+    cfg.get("parserSkip")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some(ext)))
+        .unwrap_or(false)
+}
+
 fn run_one_fixture(test_dir: &Path) -> FixtureOutcome {
+    // GK-GAP-003: a fixture that parserSkips the Rust-DSL surface ships no
+    // `.runar.rs` source by design; this harness compiles that surface only,
+    // so there is nothing to compile. The Rust compiler is still held to the
+    // fixture's golden by the multi-format runner and `test_all_conformance_tests`.
+    if fixture_parser_skips(test_dir, ".runar.rs") {
+        return FixtureOutcome::OptedOut;
+    }
     let source_path = match find_rust_source(test_dir) {
         Some(p) => p,
         None => return FixtureOutcome::MissingSource,
@@ -418,7 +462,7 @@ fn test_conformance_goldens_rust() {
     let fail_count = failures.len();
     let opt_count = opted_out.len();
     println!(
-        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source / {} skipped (named in EXPECTED_NOT_RUST_COMPILABLE, allowlist excludes rust) (of {} fixtures) ===",
+        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source / {} skipped (named in EXPECTED_NOT_RUST_COMPILABLE with an allowlist excluding rust, or parserSkip excludes .runar.rs) (of {} fixtures) ===",
         pass_count, fail_count, miss_count, opt_count, total
     );
     if !missing.is_empty() {
@@ -496,9 +540,21 @@ fn test_conformance_goldens_rust() {
         total
     );
 
-    // N-389 (R145): the skipped set must be exactly the named set; every
-    // named entry must exist and really exclude rust in its raw source.json.
-    assert_eq!(opted_out, EXPECTED_NOT_RUST_COMPILABLE.to_vec());
+    // N-389 (R145): the skipped set must be exactly the named set plus
+    // (GK-GAP-003) every fixture whose raw source.json parserSkips
+    // `.runar.rs`; every named entry must exist and really exclude rust in its
+    // raw source.json.
+    let mut expected_skips: Vec<String> =
+        EXPECTED_NOT_RUST_COMPILABLE.iter().map(|s| s.to_string()).collect();
+    for d in &dirs {
+        if parser_skips_rust_raw(d) {
+            expected_skips.push(d.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    expected_skips.sort();
+    let mut got_skips = opted_out.clone();
+    got_skips.sort();
+    assert_eq!(got_skips, expected_skips);
     for n in EXPECTED_NOT_RUST_COMPILABLE {
         let d = tests_dir.join(n);
         assert!(d.is_dir(), "EXPECTED_NOT_RUST_COMPILABLE names unknown fixture {:?}", n);
@@ -656,6 +712,52 @@ fn test_run_one_fixture_reports_missing_source_for_unresolvable_fixture() {
     assert!(is_fixture_failure(&outcome), "MissingSource must be a failure");
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// GK-GAP-003: `ternary-expression` is the first fixture whose source.json
+/// lists `.runar.rs` in `parserSkip` (the Rust-DSL surface has no conditional
+/// expression), so it ships no `.runar.rs` source. This harness compiles the
+/// Rust SURFACE only, so it must opt such a fixture out -- as the Java
+/// harness does for `.runar.java` -- instead of failing it as
+/// `MissingSource`. The Rust COMPILER is still held to the fixture's golden by
+/// the multi-format runner and by `test_all_conformance_tests` (IR path).
+///
+/// What this proves: a fixture that parserSkips `.runar.rs` is `OptedOut`,
+/// while one that parserSkips a different surface and has no `.runar.rs`
+/// source is still `MissingSource`.
+/// What this does not prove: anything about the real corpus beyond the
+/// real-corpus sweep above.
+#[test]
+fn test_run_one_fixture_opts_out_a_fixture_that_parser_skips_the_rust_surface() {
+    let skips_rs = f285_scratch_dir("parser-skip-rs");
+    fs::write(
+        skips_rs.join("source.json"),
+        r#"{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.go",".runar.rs"],"parserSkipReason":"no conditional expression"}"#,
+    )
+    .expect("write source.json");
+    let outcome = run_one_fixture(&skips_rs);
+    assert!(
+        matches!(outcome, FixtureOutcome::OptedOut),
+        "a fixture that parserSkips .runar.rs must be opted out, got {:?}",
+        outcome
+    );
+    assert!(!is_fixture_failure(&outcome));
+
+    let skips_other = f285_scratch_dir("parser-skip-java");
+    fs::write(
+        skips_other.join("source.json"),
+        r#"{"sources":{".runar.ts":"./X.runar.ts"},"parserSkip":[".runar.java"],"parserSkipReason":"FixedArray"}"#,
+    )
+    .expect("write source.json");
+    let outcome = run_one_fixture(&skips_other);
+    assert!(
+        matches!(outcome, FixtureOutcome::MissingSource),
+        "a fixture that parserSkips only .runar.java but has no .runar.rs must still be MissingSource, got {:?}",
+        outcome
+    );
+
+    let _ = fs::remove_dir_all(&skips_rs);
+    let _ = fs::remove_dir_all(&skips_other);
 }
 
 // ----------------------------------------------------------------------

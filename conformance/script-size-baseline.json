@@ -100,6 +100,7 @@
     "stateful-counter": 1393,
     "stateful-wots-gate": 20281,
     "terminal-varlen-read": 1502,
+    "ternary-expression": 48,
     "token-ft": 3044,
     "token-nft": 1151
   }

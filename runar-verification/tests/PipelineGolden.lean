@@ -925,7 +925,11 @@ number. It is pinned from both sides:
 -- (`state-array-set`, `state-digest-log`, `state-leaderboard`, `state-ledger`,
 -- `state-notary`, `state-owner-box`), all byte-exact, all in baselineMatches:
 -- 78 = baselineMatches (75) + (22 - 19).
-def expectedByteExact : Nat := 79
+--
+-- 2026-11-16 (GK-GAP-003): `ternary-expression` (byte-exact, baselineMatches;
+-- the first fixture pinning a surface-level conditional expression):
+-- 80 = baselineMatches (77) + (22 - 19).
+def expectedByteExact : Nat := 80
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -954,8 +958,10 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 compiles to `OP_RUNAR_UNKNOWN_BUILTIN` and is not byte-exact).
 2026-10-31 (N-456): 98 -> 99 for N-456's `multisig-verify-fused` fixture
 (in `baselineMatches`; pins the fused OP_CHECKMULTISIGVERIFY).
+2026-11-16 (GK-GAP-003): 99 -> 100 for `ternary-expression` (in
+`baselineMatches`; bigint, ByteString and nested conditional-expression arms).
 -/
-def expectedFixtureTotal : Nat := 99
+def expectedFixtureTotal : Nat := 100
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -1034,6 +1040,7 @@ def baselineMatches : List String := [
   "stateful-counter",
   "stateful-wots-gate",
   "terminal-varlen-read",
+  "ternary-expression",
   "token-ft",
   "token-nft"
 ]
@@ -1358,7 +1365,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 99 := by rfl
+        + lowerDivergencePending.length = 100 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

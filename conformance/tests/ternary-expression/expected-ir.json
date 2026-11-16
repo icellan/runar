@@ -1,0 +1,453 @@
+{
+  "contractName": "TernaryExpression",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "highTag"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "lowTag"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "threshold",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "highTag"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "highTag",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "lowTag"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "lowTag",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "threshold",
+          "type": "bigint"
+        },
+        {
+          "name": "highTag",
+          "type": "ByteString"
+        },
+        {
+          "name": "lowTag",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "bin_op",
+            "left": "t0",
+            "op": ">",
+            "right": "t1"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "cond": "t2",
+            "else": [
+              {
+                "name": "t6",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "threshold"
+                }
+              },
+              {
+                "name": "t7",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t8",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t6",
+                  "op": "-",
+                  "right": "t7"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "threshold"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t3",
+                  "op": "-",
+                  "right": "t4"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "d",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t9"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "distance"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "d",
+            "op": "===",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "bin_op",
+            "left": "t13",
+            "op": ">",
+            "right": "t14"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "cond": "t15",
+            "else": [
+              {
+                "name": "t17",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "lowTag"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t16",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "highTag"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t18"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "tag"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t19"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "assert",
+            "value": "t20"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "bin_op",
+            "left": "t22",
+            "op": ">",
+            "right": "t23"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "cond": "t24",
+            "else": [
+              {
+                "name": "t26",
+                "value": {
+                  "kind": "load_param",
+                  "name": "x"
+                }
+              },
+              {
+                "name": "t27",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "threshold"
+                }
+              },
+              {
+                "name": "t28",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t26",
+                  "op": "===",
+                  "right": "t27"
+                }
+              },
+              {
+                "name": "t31",
+                "value": {
+                  "cond": "t28",
+                  "else": [
+                    {
+                      "name": "t30",
+                      "value": {
+                        "kind": "load_const",
+                        "value": 0
+                      }
+                    }
+                  ],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t29",
+                      "value": {
+                        "kind": "load_const",
+                        "value": 1
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t25",
+                "value": {
+                  "kind": "load_const",
+                  "value": 2
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "b",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t32"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "load_param",
+            "name": "band"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "kind": "bin_op",
+            "left": "b",
+            "op": "===",
+            "right": "t33"
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "kind": "assert",
+            "value": "t34"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "check",
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        },
+        {
+          "name": "distance",
+          "type": "bigint"
+        },
+        {
+          "name": "tag",
+          "type": "ByteString"
+        },
+        {
+          "name": "band",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "parentClass": "SmartContract",
+  "properties": [
+    {
+      "name": "threshold",
+      "readonly": true,
+      "type": "bigint"
+    },
+    {
+      "name": "highTag",
+      "readonly": true,
+      "type": "ByteString"
+    },
+    {
+      "name": "lowTag",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}
