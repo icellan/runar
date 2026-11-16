@@ -433,3 +433,67 @@ class PrevOut extends SmartContract {
 		})
 	}
 }
+
+// TestR2MSMUnbound_IRRebindingIsNotFixed: the --ir rule resolved a ref
+// through the method's top-level bindings only, by name, at the assert. A
+// local reassigned inside an if or loop arm, or a name re-bound at top level
+// after the comparison read it, kept looking fixed, so these --ir programs
+// compiled with an unpinned vk.json although the compared value is the
+// parameter x (review of R2-MSM-UNBOUND). A name bound more than once in the
+// method, or bound inside a nested arm, is never fixed.
+func TestR2MSMUnbound_IRRebindingIsNotFixed(t *testing.T) {
+	vkPath := sp1VKPath(t)
+	pinnedVK := writePinnedVK(t, vkPath, map[int]*big.Int{2: big.NewInt(0)})
+	for name, body := range map[string]string{
+		"if_arm":   "\tv := c.Pinned\n\tif x > 0 {\n\t\tv = x\n\t}\n\trunar.Assert(runar.Groth16PublicInput(0) == v)",
+		"loop_arm": "\tv := c.Pinned\n\tfor i := 0; i < 2; i++ {\n\t\tv = x\n\t}\n\trunar.Assert(runar.Groth16PublicInput(0) == v)",
+	} {
+		name, body := name, body
+		t.Run(name, func(t *testing.T) {
+			// The frontend refuses a local; lower under a pinned vk.json to
+			// get the IR an --ir file would carry.
+			prog, err := CompileSourceToIR(r2MSMWriteContract(t, "IRRebind", body), CompileOptions{Groth16WAVKey: pinnedVK})
+			if err != nil {
+				t.Fatalf("CompileSourceToIR (pinned vk): %v", err)
+			}
+			_, err = CompileFromProgram(prog, CompileOptions{Groth16WAVKey: vkPath})
+			r2MSMRequireUnbound(t, err, "--ir "+name)
+		})
+	}
+
+	// Top-level shadowing: the comparison reads N while N is a parameter;
+	// N is re-bound to the readonly property afterwards, before the assert.
+	t.Run("shadowed_after_compare", func(t *testing.T) {
+		prog, err := CompileSourceToIR(r2MSMWriteContract(t, "IRShadow", r2MSMBoundBodies["property"]))
+		if err != nil {
+			t.Fatalf("CompileSourceToIR: %v", err)
+		}
+		done := false
+		for mi := range prog.Methods {
+			body := prog.Methods[mi].Body
+			propIdx, assertIdx := -1, -1
+			for bi, b := range body {
+				if b.Value.Kind == "load_prop" && b.Value.Name == "pinned" && propIdx < 0 {
+					propIdx = bi
+				}
+				if b.Value.Kind == "assert" && propIdx >= 0 && assertIdx < 0 {
+					assertIdx = bi
+				}
+			}
+			if propIdx < 0 || assertIdx < 0 {
+				continue
+			}
+			n := body[propIdx].Name
+			shadow := ir.ANFBinding{Name: n, Value: ir.ANFValue{Kind: "load_prop", Name: "pinned"}}
+			body[propIdx].Value = ir.ANFValue{Kind: "load_param", Name: "x"}
+			body = append(body[:assertIdx], append([]ir.ANFBinding{shadow}, body[assertIdx:]...)...)
+			prog.Methods[mi].Body = body
+			done = true
+		}
+		if !done {
+			t.Fatal("premise: no load_prop pinned / assert pair in the lowered program")
+		}
+		_, err = CompileFromProgram(prog, CompileOptions{Groth16WAVKey: vkPath})
+		r2MSMRequireUnbound(t, err, "--ir comparison against a parameter shadowed by a later binding")
+	})
+}

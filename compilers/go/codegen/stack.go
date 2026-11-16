@@ -6191,8 +6191,9 @@ func groth16WAUnboundStatementMessage(method string) string {
 // @ref: alias is followed), load_prop of a readonly property, unary_op /
 // bin_op over fixed refs, and a call (not groth16PublicInput) with at least
 // one argument, all fixed. A ref that is not an earlier top-level binding of
-// this method (a parameter named directly, a branch-local) is not fixed.
-// Locals are bindings here, so this accepts a superset of the frontend rule.
+// this method (a parameter named directly, a branch-local) is not fixed, and
+// neither is a name the method binds more than once or inside an if / loop
+// arm (a reassigned local). Locals are bindings here, so this accepts a superset of the frontend rule.
 func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProperty) bool {
 	props := make(map[string]bool, len(properties))
 	for _, p := range properties {
@@ -6200,11 +6201,29 @@ func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProp
 			props[p.Name] = true
 		}
 	}
+	// A name bound more than once in the method, or inside an if / loop arm,
+	// does not hold one value: `defs` resolves by name at the assert, so a
+	// later or nested re-binding (a local reassigned from a parameter) would
+	// otherwise pass for the fixed first binding. Such a name is never fixed.
+	seen := make(map[string]int)
+	var count func(bs []ir.ANFBinding, nested bool)
+	count = func(bs []ir.ANFBinding, nested bool) {
+		for _, b := range bs {
+			seen[b.Name]++
+			if nested {
+				seen[b.Name]++
+			}
+			count(b.Value.Then, true)
+			count(b.Value.Else, true)
+			count(b.Value.Body, true)
+		}
+	}
+	count(body, false)
 	defs := make(map[string]ir.ANFValue, len(body))
 	var fixed func(ref string, depth int) bool
 	fixed = func(ref string, depth int) bool {
 		v, ok := defs[ref]
-		if !ok || depth > 64 {
+		if !ok || depth > 64 || seen[ref] > 1 {
 			return false
 		}
 		switch v.Kind {
@@ -6234,11 +6253,11 @@ func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProp
 	}
 	pubRead := func(ref string) bool {
 		v, ok := defs[ref]
-		if !ok || v.Kind != "call" || v.Func != "groth16PublicInput" || len(v.Args) != 1 {
+		if !ok || seen[ref] > 1 || v.Kind != "call" || v.Func != "groth16PublicInput" || len(v.Args) != 1 {
 			return false
 		}
 		idx, ok := defs[v.Args[0]]
-		if !ok || idx.Kind != "load_const" {
+		if !ok || seen[v.Args[0]] > 1 || idx.Kind != "load_const" {
 			return false
 		}
 		var n *big.Int
@@ -6254,7 +6273,7 @@ func groth16WAStatementBoundInBody(body []ir.ANFBinding, properties []ir.ANFProp
 	}
 	for _, b := range body {
 		if b.Value.Kind == "assert" {
-			if eq, ok := defs[b.Value.ValueRef]; ok && eq.Kind == "bin_op" && (eq.Op == "===" || eq.Op == "==") {
+			if eq, ok := defs[b.Value.ValueRef]; ok && seen[b.Value.ValueRef] == 1 && eq.Kind == "bin_op" && (eq.Op == "===" || eq.Op == "==") {
 				if (pubRead(eq.Left) && fixed(eq.Right, 0)) || (pubRead(eq.Right) && fixed(eq.Left, 0)) {
 					return true
 				}
