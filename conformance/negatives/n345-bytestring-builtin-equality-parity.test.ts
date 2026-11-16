@@ -76,7 +76,10 @@ const CASES: Case[] = [
     name: 'Sha256FinalizeEq', body: 'assert(sha256Finalize(a, b, x) === sha256Finalize(b, a, x));',
     // N-376 re-stamp: the ROT ROT ROT -> [] peephole rule deletes 6 identity
     // OP_ROTs (opcode-walk checked); was b0eced81d5cb1cc9….
-    sha: '593f2b477176d0755ef9f0d64c459dd3366741339848bf4aaaf54f085194f45e', tail: '757c75688777',
+    // GK-BUG-013 re-stamp: both sha256Finalize prologues check the msgBitLen
+    // sign byte (5980587f75547f -> 5980587f010088547f, 139024 -> 139028 B);
+    // undoing exactly those two substitutions gives back 593f2b477176d075….
+    sha: '068397fbf2fe52570e3ef2e4dc8162a9ca83cc7ae770315a665375ede2885637', tail: '757c75688777',
   },
   // Fold-ON already folds this to false in every tier; fold-OFF TS and Rust
   // compiled OP_NUMEQUAL, which is TRUE on-chain for 0100 vs 01.
