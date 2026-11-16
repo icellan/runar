@@ -719,6 +719,45 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "cj1-block-comment-in-payload",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "A /* */ block comment between members. Comments are not JSON (RFC 8259); Ruby JSON.parse (json >= 2.7) accepts them by default, so the payload verified ok in the Ruby tier alone.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\" /* note */,\"nonce\":1700000000000}",
+        "sig": "304402201126630679dfee53abea87a242e22eef95b22982c3b099cbbed0b66e7134f5b4022072d9f930a3447be5e4dd73d388cf8e6ef7e9b0cfddb98afc576faf5ed34beed5",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "cj2-line-comment-in-payload",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "A // line comment; same rule as cj1.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\", // note\n\"nonce\":1700000000000}",
+        "sig": "304402201b49c81ea26902cad2536ef2acc7a17f3fc85e3c51106867ddb758315d42780c0220784fefdcd70793b5f63315aa225ec07e4029f18197d73d27dbd518be71de6cbf",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "cj3-comment-hides-duplicate-key",
+      "_audit_ref": "R2-DUPKEY",
+      "_notes": "A quote inside a block comment. A byte scanner that does not know comments treats the comment quote as opening a string, desynchronises, and misses the duplicate kind; Ruby JSON.parse skips the comment and keeps the last kind (bye). Must be bad-json in every tier.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\" /* \" */,\"kind\":\"bye\",\"nonce\":1700000000000}",
+        "sig": "304502210083765395e79e3aa532a712bbd63c8db3ff8b128c6afd066dc9ba6b465b02352c02205b4e205b6742cf4cb4402e7dff5adb54c1a0fb4045476b05acebc56c102c609d",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "allowlist_vectors_notes": "GK-BUG-008. verifyEnvelope's optional pubkey allowlist. A caller that supplies NO allowlist (null) gets no allowlist check; a caller that supplies a list gets exactly that list, so an EMPTY list allows nobody. Before the fix Go read `len(ExpectedKeys) > 0`, so an empty (non-nil) slice skipped the check and returned ok:true where ts/rust/python/zig/ruby/java returned pubkey-not-allowed. Replay valid_envelope at verify_now_ms with the vector's expected_keys (null = the caller supplies no allowlist). The allowlist is the LAST check, after ECDSA, and valid_envelope's signature is valid, so a reason other than the one listed means the allowlist itself is wrong.",

@@ -91,6 +91,31 @@ module Runar
         false
       end
 
+      # Is there a '/' (0x2F) outside a JSON string in +payload+? JSON has no
+      # comments, so such a byte means the text is not JSON even when Ruby's
+      # JSON.parse would accept it as a comment.
+      def self.payload_has_slash_outside_string?(payload)
+        in_string = false
+        i = 0
+        n = payload.bytesize
+        while i < n
+          b = payload.getbyte(i)
+          if in_string
+            if b == 0x5c # backslash: skip the escaped byte
+              i += 1
+            elsif b == 0x22
+              in_string = false
+            end
+          elsif b == 0x22
+            in_string = true
+          elsif b == 0x2f
+            return true
+          end
+          i += 1
+        end
+        false
+      end
+
       # R2-DUPKEY. Does any object in +payload+ carry the same key twice?
       #
       # JSON.parse keeps the LAST of two equal keys, so a payload
@@ -443,6 +468,12 @@ module Runar
         # caller or a gem upgrade can move. Same bound and same reason in all
         # seven tiers.
         return { ok: false, reason: 'bad-json', data: nil } if payload_exceeds_max_depth?(envelope.payload)
+
+        # Ruby's JSON.parse (json >= 2.7) accepts /* */ and // comments by
+        # default; RFC 8259 has none and the other six tiers refuse them. A
+        # comment can also hide a quote from the duplicate-key scanner below
+        # (cj3). '/' outside a string is never JSON, so refuse it up front.
+        return { ok: false, reason: 'bad-json', data: nil } if payload_has_slash_outside_string?(envelope.payload)
 
         parsed = nil
         begin

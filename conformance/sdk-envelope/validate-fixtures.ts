@@ -409,18 +409,19 @@ function main(): void {
   if (!sawExpiryBeforeDup) fail('duplicate_key_vectors carries no expired-before-bad-json precedence vector');
 
   // 10. R2-JAVA-JSON string-grammar vectors (jj*), NaN / Infinity literal
-  //     vectors (pj*) and trailing-data vectors (tj*). Each payload must be
-  //     rejected by JSON.parse (raw control character, malformed \u escape,
-  //     non-JSON constant, text after the value) and carry a signature that verifies for its exact text, so a
+  //     vectors (pj*), trailing-data vectors (tj*) and comment vectors (cj*).
+  //     Each payload must be rejected by JSON.parse (raw control character,
+  //     malformed \u escape, non-JSON constant, text after the value, comment) and carry a signature that verifies for its exact text, so a
   //     tier that accepts the string returns ok:true rather than bad-sig.
   const jjVectors = (fixture.rejection_vectors as Array<{
     _vector_id?: string;
     reason: string;
     envelope: { payload: string; sig: string; pubkey: string };
-  }>).filter((v) => /^(jj|pj|tj)\d/.test(v._vector_id ?? ''));
+  }>).filter((v) => /^(jj|pj|tj|cj)\d/.test(v._vector_id ?? ''));
   if (!jjVectors.some((v) => /^jj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no jj* (R2-JAVA-JSON) vectors');
   if (!jjVectors.some((v) => /^pj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no pj* (NaN / Infinity) vectors');
   if (!jjVectors.some((v) => /^tj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no tj* (trailing data) vectors');
+  if (!jjVectors.some((v) => /^cj\d/.test(v._vector_id ?? ''))) fail('rejection_vectors carries no cj* (comment) vectors');
   for (const v of jjVectors) {
     if (v.reason !== 'bad-json') fail(`${v._vector_id}: reason must be bad-json`);
     let parsedOk = true;
